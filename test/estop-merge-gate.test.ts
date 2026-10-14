@@ -1,4 +1,5 @@
 // An emergency stop raised while the combined check runs (it can take minutes) holds the merge.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resumeAll, stopAll } from '../src/slots.js';

@@ -3,6 +3,7 @@
 // A static check over the engine and the setup scripts, and behavioural ones with every such variable pointing
 // elsewhere. (A test or CI job that runs the engine as its own process against a fake GitHub loads
 // scripts/ci/loopback-github.mjs into it; that stand-in is held to this machine below.)
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

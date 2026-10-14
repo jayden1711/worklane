@@ -1,6 +1,7 @@
 // A tier stopped at its own cap (test_run.tiers[].timeout_s): the sandbox's unit ends at its RuntimeMaxSec, and the
 // tier's check says it timed out, after how long, naming the tier, instead of looking like any other failure. Each
 // tier's unit gets that tier's own cap.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

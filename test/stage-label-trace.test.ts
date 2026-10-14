@@ -1,6 +1,7 @@
 // plan and review stage labels: set by code from a run's trace (the issue's events), never by the judge and never
 // guessed. A trace that doesn't show the evidence leaves the label as it was; existing labels and old events read
 // as before; the weekly section shows plan and review with their counts and every evidence line.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

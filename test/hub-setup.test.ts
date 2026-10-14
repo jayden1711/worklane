@@ -2,6 +2,7 @@
 // token. Each guard is checked here: the token only from its 0600 file, only in a form's body (never a URL), once; a
 // lock after ten wrong tries; writes only from the page itself with its CSRF token; nothing past the gate without the
 // session. And it turns itself off once the sign-in secret exists: at start, while running, and after it made the App.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';

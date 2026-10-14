@@ -3,6 +3,7 @@
 // git config carried in it); a custom CA comes only from root's network.json `ca_file`, a root-owned regular file of
 // PEM certificates in a root-owned directory. Nothing can turn verification off. The spawn tests go through the
 // engine's real spawn paths (instanceTokens' gh, CliRunner's claude, projectCommand) to stand-ins that record their env.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

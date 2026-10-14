@@ -2,6 +2,7 @@
 // in discord.owners, naming the number; setup steps' one-time dashboard links by DM; one bot token for several
 // instances on one machine, each in its own server and channels. Discord itself is never called: a fake source, or
 // the real adapter with a fake socket and fetch.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

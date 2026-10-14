@@ -1,4 +1,5 @@
 // docs/previews.md. INVARIANT: the host's API and GitHub are fakes on this machine; the token is a test value.
+import './isolate.js';
 import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

@@ -1,5 +1,6 @@
 // The Board (src/board.ts, GET /api/board): one column per stage from what the coordinator recorded, each card's
 // fields, the actions each role sees, and the server refusing what a role may not do from it.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

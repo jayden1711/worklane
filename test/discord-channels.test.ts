@@ -1,6 +1,7 @@
 // `discord channels` (src/intake/discord-channels.ts) against a fake Discord REST server on 127.0.0.1: one line per
 // text or announcement channel, sorted; GET requests only; the token never in stdout, stderr, a URL or an error,
 // even when the server echoes it back; 401, 429 and a missing token each say what's wrong.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';

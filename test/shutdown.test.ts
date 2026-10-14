@@ -2,6 +2,7 @@
 // returns unless aborted, is signaled as the service manager signals it on a restart or an update. It aborts the
 // run, requeues the task, flushes its log, releases its lock and exits 0 well within SHUTDOWN_MS; a run that ignores
 // the abort can't hold it past the limit, and the exit names what was still pending.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

@@ -1,4 +1,5 @@
 // P0 item 2a: the attempt cap (maxAttempts, 3 here) survives a coordinator restart and an emergency stop's requeue.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

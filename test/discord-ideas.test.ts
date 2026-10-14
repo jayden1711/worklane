@@ -1,6 +1,7 @@
 // Ideas in conversation (src/coordinator/conversation.ts): an idea posted in the chat channel gets a thread,
 // questions (one message per turn), a five-part draft, and is filed ready only on an explicit yes from its poster
 // or an admin; then the thread gets the issue's progress. Discord is a fake; the triage run is a FakeRunner.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

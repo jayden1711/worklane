@@ -5,6 +5,7 @@
 // planted to look like systemd's, then the same summary with values in format_timespan's and format_bytes's
 // multi-unit forms. The "test-run sandbox (real systemd)" CI job prints the real text and checks its shape
 // against probe.stderr.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

@@ -4,6 +4,7 @@
 // coordinator runs it through the helper; the login link is served to a machine owner only, only while `up` waits, only
 // when it is Tailscale's own login page, and is in no event or audit entry; a machine without tailscale, or a screen
 // nobody confirms, changes nothing.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

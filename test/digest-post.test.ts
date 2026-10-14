@@ -1,5 +1,6 @@
 // #121: the coordinator posts the "waiting on you" digest once a day, to one issue, as a comment; each digest's
 // "merged since" starts at the previous post.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

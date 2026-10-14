@@ -1,5 +1,6 @@
 // The test runs on the dashboard: /api/test-runs for each role, the Board's and the Machine page's views of it, and
 // the test-run slot setting. Viewers see each run's tiers' pass or fail only, never a log, summary or holder.
+import './isolate.js';
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';

@@ -1,5 +1,6 @@
 // P1 item 6: four retry loops with no cap or timeout. Each test drives the loop many times and asserts the correct
 // behaviour: at some point it gives up (or decides) and records it, instead of retrying silently for ever.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

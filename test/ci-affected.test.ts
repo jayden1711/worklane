@@ -1,6 +1,7 @@
 // scripts/ci/affected.mjs: on a pull request, the unit test files its change can affect (the import graph of
 // src/testrun/affected.ts); the whole suite when it can't tell, when a shared or config file changes, on a deleted
 // file, and on anything but a pull request.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

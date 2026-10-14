@@ -1,5 +1,6 @@
 // P1 item 7b: light (combined-state) checks are debounced: main moving three times in a few seconds does not
 // start three fast-tier runs for one PR.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';

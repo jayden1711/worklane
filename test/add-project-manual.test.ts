@@ -2,6 +2,7 @@
 // would read its pattern as literal text) and records that in helper-rules.json. The dashboard then never offers a
 // button that could only fail at sudo: it shows the root command, with the name and repo filled in. And when a run
 // does fail at sudo (a machine set up before the record existed), the failure says what to run instead.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

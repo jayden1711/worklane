@@ -2,6 +2,7 @@
 // recorded, after a backup. The coordinator refuses to start while a step is pending or anything is newer than
 // the engine. The real list holds only the no-op version 1; these tests add a version 2 of each kind, the way
 // the next real migration will be written.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';

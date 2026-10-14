@@ -3,6 +3,7 @@
 // API): roles from repo permission, the 5-minute role cache, per-instance
 // visibility, CSRF, sessions, cookies, the audit, the break-glass and the
 // loopback-only listeners. No real network.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request, type Server } from 'node:http';

@@ -1,6 +1,7 @@
 // WHY: a checkout's first-run page must act on the config the checkout has now, not the one its dashboard started
 // with, and merging a Repo config PR from the page must bring that config into the checkout (a fast-forward only),
 // so the person never restarts the dashboard or runs `git pull` between two steps.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

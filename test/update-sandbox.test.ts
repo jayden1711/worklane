@@ -1,6 +1,7 @@
 // The engine updater checks the test sandbox after an install (scripts/machine/<cli>-update.cjs): an instance whose
 // startup sandbox check passed before the update and fails after the restart rolls the update back and holds it; one
 // with no test runs, or already failing, never does; no result in time keeps the install and says so (or holds).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

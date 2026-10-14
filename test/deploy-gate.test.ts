@@ -2,6 +2,7 @@
 // commits green on every gate tier, never forced; refused (with an incident) when it moved off the default branch's
 // line; off by default; and an owner's `deploy <sha>` override from Discord, confirmed first, fast-forward only,
 // audited. Real git (a bare remote and a clone); GitHub and Discord are fakes.
+import './isolate.js';
 import { passGate } from '../src/testrun/gate.js';
 import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';

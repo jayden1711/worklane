@@ -1,5 +1,6 @@
 // An instance's agents billed to an API key: the key file reaches claude only through apiKeyHelper, for runs as
 // the agent user, never through an environment; spend caps are on the command line as before; doctor checks it.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

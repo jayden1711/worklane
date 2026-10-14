@@ -1,4 +1,5 @@
 // P1 item 8a: deploy events carry no issue number, so deploy.verified never marks a task terminal.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agents, BUG, coordinator, fixture, skip } from './harness.js';

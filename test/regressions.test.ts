@@ -1,4 +1,5 @@
 // Day-one regression tests for bugs seen in another harness (docs/design.md §17).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyGitHubCheck, gate, tally } from '../src/checks/outcome.js';

@@ -1,5 +1,6 @@
 // INVARIANT: an outsider's intake-labelled issue is labelled `ready` only when trusted or approved; otherwise it
 // stays in triage with the reason posted (src/intake/github.ts, src/coordinator/intake.ts).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

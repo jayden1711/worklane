@@ -1,6 +1,7 @@
 // WHY: item 38. Codex and Gemini CLI runners: what they may run (and are refused), their command lines and
 // environment, their streams read into a RunResult, budgets from token counts, and the held change. No vendor CLI
 // is installed here; the fixtures are hand-written from each CLI's documented JSON event format.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

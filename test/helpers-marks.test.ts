@@ -1,4 +1,5 @@
 // The cross-instance leak checks' markers (helpers.ts marksOf): a marker number matches only as a whole number.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { marksOf } from './helpers.js';

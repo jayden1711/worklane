@@ -2,6 +2,7 @@
 // refresh or a switch is a machine request with the same gate as any machine change, one switch at a time; the
 // coordinator runs it through the machine helper; the token is taken only while the switch waits for it, from the
 // instance it asked, only a setup token, stored for this user only, and never in a response, an event or the audit.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';

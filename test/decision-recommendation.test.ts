@@ -1,5 +1,6 @@
 // A decision's recommendation is one of its options or nothing (src/decision-ask.ts); prose, from an agent or
 // stored by an older engine, is shown as wrapped text with Show more, never as a one-line pill cut mid-sentence.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

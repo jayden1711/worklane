@@ -3,6 +3,7 @@
 // dashboard's own process never opens the token file; a pasted token to a 0400 file and credentials.yaml; the picks
 // written to intake.yaml through its schema, only as the exact diff an owner confirmed; nothing changed when the
 // step is only looked at; the token in no response, event or audit line.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';

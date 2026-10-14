@@ -1,5 +1,6 @@
 // WHY: the one-command install ends with `dashboard --detach` (scripts/bootstrap.sh): one wizard URL, the same on a
 // rerun that starts nothing, and never the dashboard's key in the URL or the output.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

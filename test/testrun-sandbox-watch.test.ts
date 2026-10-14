@@ -3,6 +3,7 @@
 // the journal; the watchdog's test_sandbox incident is raised (dashboard, ops channel) and resolved; the check is
 // run again with a backoff, never twice at once; and when it passes the running coordinator runs the PRs, each of
 // which had a check saying test runs are off. A sandbox whose check fails still runs nothing.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

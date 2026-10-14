@@ -2,6 +2,7 @@
 // src/test-durations.ts): each figure from fixture events, "not measured yet" (never 0) for a source with nothing yet,
 // the weekly digest's slow-tests list, the GitHub reads (rate-limited, cached in the log), the per-test duration
 // parsers, the dashboard route and the panel.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';

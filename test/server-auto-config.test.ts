@@ -2,6 +2,7 @@
 // instance's App over GitHub's REST API (the fake GitHub, with the repo on its git root), the draft fitted to the
 // instance's policy, and a rerun that reuses what is there (the open PR, or an old setup branch with no PR) instead
 // of failing on it.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

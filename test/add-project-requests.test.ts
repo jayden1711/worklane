@@ -2,6 +2,7 @@
 // on an allowed device (src/machine-owners.ts, the same gate as any machine change); the coordinator runs the machine
 // helper's add-project and relays each progress line as an add_project.step event, the GitHub clicks and the Claude
 // token as setup-console asks; the pasted token goes to the script's stdin once and nowhere else.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';

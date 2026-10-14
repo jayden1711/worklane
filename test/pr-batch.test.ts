@@ -1,5 +1,6 @@
 // PR-mode batching (src/coordinator/pr-batch.ts) over a real git remote and a fake test-run service: green batches,
 // bisection of red ones, heads that change, restarts mid-batch, the batch size and the merge guard.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

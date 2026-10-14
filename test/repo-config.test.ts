@@ -1,6 +1,7 @@
 // WHY: wizard screen 4's Repo config form proposes config changes as a PR. Checked end to end against a real git
 // origin (a bare repo) with a stand-in gh: the change is shown first, refused when the config wouldn't load, pushed
 // only to a branch of its own, and the checkout itself is never touched.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

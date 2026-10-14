@@ -1,4 +1,5 @@
 // P0 item 3b: a landing that ends in error or rejected leaves a comment on the issue, an event, and the claim released.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';

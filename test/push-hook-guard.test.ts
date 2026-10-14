@@ -1,6 +1,7 @@
 // The push gate's first-time-setup hatch (PUSH_GATE_BOOTSTRAP) and git's pre-push hook are a person's, never an
 // agent's: the guardrails refuse every way an agent's tool call sets, passes or stores the hatch or swaps the hook,
 // and no agent or project command starts with the hatch in its environment.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync } from 'node:fs';

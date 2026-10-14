@@ -1,6 +1,7 @@
 // The big-PR limits (the owner's decision): a PR over 800 changed lines or 20 files waits for a human. The
 // engine's defaults agree everywhere they are written: the schema, the coordinator's fallback, the project
 // template and the design doc.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

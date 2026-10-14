@@ -1,4 +1,5 @@
 // P0 item 1: an emergency stop must halt landing and auto-merge, not only agent runs.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { resumeAll, stopAll } from '../../src/slots.js';

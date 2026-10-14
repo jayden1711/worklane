@@ -1,5 +1,6 @@
 // Open-model providers: where code lets each run, the per-run env (no key in it, ever), the fallback checks (opt-in,
 // key, the eval gate, the GPU lock, the server's health), the hosted-change guard, and usage per model.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';

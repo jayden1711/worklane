@@ -1,6 +1,7 @@
 // WHY: wizard screens 6 and 8 change what guards the default branch and the instance's merge policy, so each is
 // checked end to end through the dashboard: the change shown first, owners only, confirmed, audited, and refused
 // whenever it would replace protection, loosen past the machine's limits, or break the repo's config.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

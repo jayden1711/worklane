@@ -2,6 +2,7 @@
 // and postChecks as the coordinator wires them (batchTestRuns), with only the root helper (and sudo) faked at their
 // process boundary. A batch's full run clones the batch commit, runs the tiers, wipes, and posts the full check on
 // each PR head; a red batch is bisected with real runs; the coordinator stopping cancels a batch's run.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

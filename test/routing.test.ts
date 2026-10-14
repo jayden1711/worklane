@@ -1,4 +1,5 @@
 // Item 32: one agents.yaml `routing` section, keyed by task type; model_routing and eval_routing still load as aliases.
+import './isolate.js';
 import { test } from 'node:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

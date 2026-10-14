@@ -1,6 +1,7 @@
 // WHY: wizard screen 2, Sign in to Claude (src/claude-signin.ts). Local mode relays `claude auth login` with nothing
 // pasted and no token through the dashboard; a server's agents get a pasted setup token through the existing
 // paste_secret ask. Each guard here has a test that fails without it.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

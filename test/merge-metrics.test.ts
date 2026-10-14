@@ -1,3 +1,4 @@
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FLAG_MINUTES, mergeMetrics, type MetricEvent } from '../src/merge-metrics.js';

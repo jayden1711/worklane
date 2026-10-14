@@ -1,3 +1,4 @@
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_REQUESTS_PER_TASK, RESEARCH_REQUEST_FIELD, acceptResearchRequest, researchBriefSection, researchRequestHold } from '../src/research-request.js';

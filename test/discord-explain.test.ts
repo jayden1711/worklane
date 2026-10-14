@@ -1,6 +1,7 @@
 // Decision and question threads in plain language (src/intake/explain.ts, src/coordinator/channel.ts): a summary on
 // open that must match the decision record, questions answered in the thread (never an answer), and plain-language
 // picks recorded only on the same person's confirming yes. Discord is a fake source; the model is a FakeRunner.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

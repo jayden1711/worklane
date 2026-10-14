@@ -3,6 +3,7 @@
 // server mode; doctor's copy of the checklist with what the mode can't do; the dashboard's first-run view. Against a
 // world of stand-ins (InitIo), except the end-to-end run at the bottom, which runs the CLI with stand-in claude and
 // gh on its PATH (scripts/ci/stand-ins, as the CI jobs do).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

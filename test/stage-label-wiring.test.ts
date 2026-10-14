@@ -1,6 +1,7 @@
 // Stage labels wired in: before the weekly report the coordinator labels the week's failed worker runs (code first,
 // then capped judge calls that count against the daily budget), records each as run.stage_labeled, and the report
 // groups them by stage and instance.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';

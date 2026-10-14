@@ -2,6 +2,7 @@
 // engine and updater) that reads what happened since its last pass and posts only when a cheap model finds
 // something new or odd, deduped, within its own daily budget. The model and Discord are fakes; the incident store,
 // the event log and the state files are real.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';

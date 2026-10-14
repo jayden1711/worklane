@@ -1,3 +1,4 @@
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_HOTSPOTS, estimateFiles, holdReason, hotspotsIn, pickDispatch } from '../src/hotspots.js';

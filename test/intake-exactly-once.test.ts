@@ -1,5 +1,6 @@
 // Exactly-once intake and chat: a redelivered message is never a second report, each conversation goes in arrival
 // order, and a restart ends a cut-off report, reply or chat turn once, without running anything again.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

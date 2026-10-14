@@ -2,6 +2,7 @@
 // send the key in the Authorization header, like every other call; nothing in web/src builds a URL with the key or
 // opens an EventSource (which can't send headers). A source check, the stream module against a real dashboard and
 // a dropped stream, and the real UI in Chrome with every request it makes recorded.
+import './isolate.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';

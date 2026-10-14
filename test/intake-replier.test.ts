@@ -1,5 +1,6 @@
 // The casual replier (#151): its inputs are the redacted message and the engine's facts only, it has no tools, and
 // code checks every reply: anything that fails gets the engine's fixed reply, with the reason recorded.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

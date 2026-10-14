@@ -1,6 +1,7 @@
 // The engine updater on the main channel: one red tip doesn't block updates. It installs the newest commit on main's
 // first-parent line, newer than the installed one and within max_lookback, whose checks are all green and that isn't
 // held; a pending one is waited for until pending_wait_minutes after it landed (scripts/machine/worklane-update.cjs).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

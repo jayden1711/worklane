@@ -1,6 +1,7 @@
 // The engine updater's stuck alert (scripts/machine/<cli>-update.cjs): one watchdog incident when the machine has
 // stayed on one engine commit for stuck_alert_minutes while main moved on, once per episode, resolved by an install
 // or by main being the installed commit; never while updates are off.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';

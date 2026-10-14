@@ -1,6 +1,7 @@
 // The chat channel (src/coordinator/channel.ts): decisions and asks posted in Discord threads, answered by a reply
 // there through the dashboard's own decide path. Discord itself is never called: a fake source, or the real
 // adapter with a fake socket and fetch.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

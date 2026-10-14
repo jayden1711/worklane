@@ -1,5 +1,6 @@
 // Branch protection as the harness recommends it (src/branch-protection.ts): not strict by default, strict only when
 // config.yaml `protection.strict: true` opts a repo in; a config without the key loads; init's Protection step says it.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

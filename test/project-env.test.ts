@@ -1,3 +1,4 @@
+import './isolate.js';
 import { STDIN_LINE } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

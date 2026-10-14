@@ -1,5 +1,6 @@
 // Review rules for agent PRs (src/pr-rules.ts): the body's intent and risk class, the size limit, the docs-only
 // fast path. The coordinator's wiring of each is in coordinator.test.ts ("review rules").
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

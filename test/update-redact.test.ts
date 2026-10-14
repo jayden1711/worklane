@@ -2,6 +2,7 @@
 // (updates.jsonl), the state file (update-state.json) and the hold file (update-held.json) are all 0644, and their
 // fields carry reasons, clone URLs, build output and migration errors. Everything written to them is redacted first,
 // through the updater's own realDeps writers, and the dedupe and the hold still work on what was written.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';

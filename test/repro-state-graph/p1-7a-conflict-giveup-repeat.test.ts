@@ -1,4 +1,5 @@
 // P1 item 7a: once the conflict fix cap is reached, the owner is asked once, not again on every move of main.
+import '../isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { approveBoth, changeOnMain, conflictOnMain, openPr, resolver, skip, workerWith } from './harness.js';

@@ -1,6 +1,7 @@
 // The Claude usage limit (src/usage-limit.ts): the reset time read from claude's own words; the runner ending a run
 // that hits it at once (no transient retries); and the instance pausing on it: no retry storm, the task requeued
 // (not failed), one notice with the reset time, and resuming on its own at the reset.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

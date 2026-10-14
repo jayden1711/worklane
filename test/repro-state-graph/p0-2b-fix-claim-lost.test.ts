@@ -1,6 +1,7 @@
 // P0 item 2b: a CI fix or conflict fix run that loses its claim must not retry silently for ever, nor give up on a
 // brief collision. It records claim_lost once per PR head, doesn't count it toward the fix cap, and gives up only
 // once the claim has been held elsewhere for an hour.
+import '../isolate.js';
 import { test, type MockTimers } from 'node:test';
 import assert from 'node:assert/strict';
 import { claim, release } from '../../src/claims.js';

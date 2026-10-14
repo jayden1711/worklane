@@ -3,6 +3,7 @@
 // fits the screen's width, every control is a 44 x 44 px tap target, and the navigation is reachable
 // from the page header's menu button, in a drawer that closes on Escape, the overlay, its close button
 // and a change of page, with focus moved into it and back.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

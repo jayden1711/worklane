@@ -2,6 +2,7 @@
 // redirects claude, gh or git; an outbound proxy comes only from root's network.json, validated. The spawn tests go
 // through the engine's real spawn paths (instanceTokens' gh, CliRunner's claude, projectCommand) to stand-ins that
 // record the environment they were given.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

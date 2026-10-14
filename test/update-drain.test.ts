@@ -3,6 +3,7 @@
 // machine, the updater puts up a flag that every start gate honors (test slots, the full-run lock, agent slots); what
 // is running finishes, nothing is stopped; it installs once nothing is in flight and reopens on every way a run ends.
 // A flag past its expiry is ignored, so a crashed updater never leaves the machine drained.
+import './isolate.js';
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';

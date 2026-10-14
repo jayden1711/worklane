@@ -1,6 +1,7 @@
 // A goal's task graph (src/goal-graph.ts, GET /api/goal-graph): a node per child task with its state, an edge per
 // "Depends on" as src/task-graph.ts reads it, cycles flagged without hanging, a cap that says so, and nothing for a
 // viewer that the viewer couldn't see before.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

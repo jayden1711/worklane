@@ -2,6 +2,7 @@
 // (state single use, expiry, machine owners only), the conversion, the key stored 0400 for its one user and never
 // logged, the install link, installation detection, the same check as credentials.sh (app-permissions.mjs, run for
 // real), credentials.yaml, a refusal when the installation reaches another repo, and the sign-in App variant.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';

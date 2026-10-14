@@ -1,6 +1,7 @@
 // .github/workflows/release.yml: what keeps the npm release safe. Every action pinned by commit; no npm token or
 // any secret; the OIDC token only for the publish job, which never runs on a pull request; a real publish (with
 // provenance) only on a v* tag with the repo variable NPM_PUBLISH set, a dry run otherwise.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

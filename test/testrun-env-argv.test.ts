@@ -2,6 +2,7 @@
 // reads a process's argv (ps, /proc/<pid>/cmdline), and systemctl show prints a transient unit's Environment=. The
 // run's DATABASE_URL carries its database password. The coordinator passes the variables on stdin; the helper hands
 // them to systemd in a root-only EnvironmentFile=, and the database password to docker in an --env-file.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';

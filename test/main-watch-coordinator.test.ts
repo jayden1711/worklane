@@ -1,6 +1,7 @@
 // The main watch wired into the coordinator, and people's PRs in the PR batches: an unaccounted commit stops
 // auto-merge, alerts and opens a revert PR the harness can never merge; an admin clears the stop on the dashboard
 // (audited); a writer's PR gets the full run and check on its head, is never auto-merged, and merging it trips nothing.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';

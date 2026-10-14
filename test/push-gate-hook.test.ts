@@ -1,6 +1,7 @@
 // The pre-push hook loads the gate and its rules from origin's default branch, fetched on that push
 // (scripts/push-gate-hook.mjs, installed by scripts/setup-hooks.mjs). Real repos: a bare origin, a seed clone
 // that moves origin on, and a work clone that is stale unless a test fetches.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';

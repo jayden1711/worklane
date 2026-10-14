@@ -1,6 +1,7 @@
 // The evaluator, wired: the model judging a change is picked from its level (cheap for L0, the evaluator role's
 // model above), a cheap verdict that isn't a confident pass goes once to the stronger model, and what the run
 // read comes from its run record, never from the files it says it reviewed (#106).
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';

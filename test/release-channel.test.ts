@@ -1,6 +1,7 @@
 // The updater's release channel: it installs only a newer release tag that verifies against the owner's allowed
 // signers, cut from main with only dist/ added, with green required checks on that main commit. The channel is
 // "release" for a new install and stays "main" for an existing updates.json without one.
+import './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
