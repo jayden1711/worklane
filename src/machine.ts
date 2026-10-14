@@ -3,6 +3,7 @@
 // lets each coordinator user run with exactly these arguments (scripts/setup/machine-helper.sh).
 // The helper validates again and logs every change; this side refuses bad values before asking.
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
 
@@ -66,6 +67,51 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
  */
 export function claudeAccount(action: 'status' | 'switch', exec: Exec = defaultExec): MachineResult {
   return runHelper(['claude-account', action], exec);
+}
+
+/** What the engine updater follows (scripts/machine/, the updater): signed release tags, or main's green commits. */
+export const UPDATE_CHANNELS = ['release', 'main'] as const;
+export type UpdateChannelName = (typeof UPDATE_CHANNELS)[number];
+
+/** Install the engine updater (off) through the helper: the installed engine's scripts/setup/updates.sh, no arguments. */
+export function installUpdater(exec: Exec = defaultExec): MachineResult {
+  return runHelper(['install-updater'], exec);
+}
+
+/**
+ * Put an installed updater on the release channel (signed release tags), through the helper; nothing else in its
+ * config changes. The helper takes no other channel: following main is an admin's, at a root shell.
+ */
+export function followReleases(exec: Exec = defaultExec): MachineResult {
+  return runHelper(['set-update-channel', 'release'], exec);
+}
+
+/**
+ * A staged signer's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a
+ * test keeps the two equal): one principal of an email's shape (never a pattern, a list or an option) and one ed25519
+ * public key in its fixed encoding (the key type's name and 32 bytes: 68 base64 characters).
+ */
+export function signerPrincipalOk(s: unknown): s is string {
+  return typeof s === 'string' && s.length <= 254 && /^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/.test(s);
+}
+const ED25519_HEAD = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from('ssh-ed25519'), Buffer.from([0, 0, 0, 32])]);
+export function signerKeyOk(s: unknown): s is string {
+  if (typeof s !== 'string' || !/^[A-Za-z0-9+/]{68}$/.test(s)) return false;
+  const blob = Buffer.from(s, 'base64');
+  return blob.length === 51 && blob.subarray(0, ED25519_HEAD.length).equals(ED25519_HEAD) && blob.toString('base64') === s;
+}
+/** A public key's fingerprint as `ssh-keygen -l` prints it: what an owner checks the key against. */
+export function signerFingerprint(key: string): string {
+  return `SHA256:${createHash('sha256').update(Buffer.from(key, 'base64')).digest('base64').replace(/=+$/, '')}`;
+}
+
+/**
+ * Stage one release signer through the helper, or take a staged one back out. Staging adds nothing to the keys the
+ * updater trusts: the helper only writes its pending list, and an admin confirms a staged signer at a root shell.
+ */
+export function stagedSigner(action: 'stage' | 'discard', principal: string, key: string, exec: Exec = defaultExec): MachineResult {
+  if (!signerPrincipalOk(principal) || !signerKeyOk(key)) return { ok: false, error: 'a release signer is one principal of an email\'s shape and one ssh-ed25519 public key' };
+  return runHelper([`${action}-update-signer`, principal, 'ssh-ed25519', key], exec);
 }
 
 /**

@@ -8,6 +8,7 @@ import { helperFix } from '../testrun/helper.js';
 import type { StoredEvent } from '../events/types.js';
 import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
+import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
 
@@ -99,6 +100,36 @@ export function updateFindings(log: UpdateEntry[]): Finding[] {
   const why = last.reason ?? (last.migration ? `instance ${last.migration.instance}'s migration failed: ${last.migration.error}` : last.failed?.length ? `failed: ${last.failed.join('; ')}` : 'its checks after the install failed');
   const tried = [`rolled back to ${last.back ? last.back.slice(0, 12) : 'the previous engine'}`, ...(last.held ? [`held ${sha}: the updater skips it until a newer commit`] : [])];
   return [{ kind: 'update_rollback', key: sha, instance: null, detail: `the update to ${sha} was rolled back${last.held ? ' and is held' : ''}: ${why}`, fix: 'Read the rollback on the Machine page (the update log), fix it in a new commit; the hold lifts when a newer one installs', tried }];
+}
+
+/** How long a signer's addition stays an open incident: posted once when seen, resolved (and posted once more) after this. */
+export const SIGNER_NOTICE_MS = 24 * 60 * 60_000;
+const SIGNER_ADDED = /^added ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
+
+/**
+ * Every release signer added to the updater's allowed signers file in the last day, from the machine change log
+ * (scripts/setup/updates-root.cjs writes one line per signer added, by updates.sh --signer or --confirm-signer): one
+ * incident each, keyed by the key's fingerprint, naming the principal, the fingerprint and who ran it. A public key
+ * and a principal are not secrets.
+ */
+export function signerFindings(changes: readonly MachineChange[], now: number): Finding[] {
+  const out = new Map<string, Finding>();
+  for (const c of changes) {
+    if (c.what !== 'updates.allowed_signers' || typeof c.to !== 'string') continue;
+    const m = SIGNER_ADDED.exec(c.to);
+    const age = now - Date.parse(c.at);
+    if (!m || !(age >= 0 && age < SIGNER_NOTICE_MS)) continue;
+    const [, principal, fingerprint] = m as unknown as [string, string, string];
+    out.set(`${principal} ${fingerprint}`, {
+      kind: 'update_signer_added',
+      key: `${principal} ${fingerprint}`,
+      instance: null,
+      detail: `the release signer ${principal}, key fingerprint ${fingerprint}, was added to /etc/${BRAND.cli}/allowed_signers by ${c.by} at ${c.at}: engine releases signed with that key now verify on this machine`,
+      fix: `Nothing, if you added it. If you didn't: turn engine updates off (the Machine page), remove its line from /etc/${BRAND.cli}/allowed_signers at a root shell, and find out who ran it. This notice closes by itself after a day`,
+      tried: [],
+    });
+  }
+  return [...out.values()];
 }
 
 /** The share of a disk in use at or above which the watchdog alerts. */

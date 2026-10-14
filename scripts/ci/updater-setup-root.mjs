@@ -10,6 +10,10 @@
 //     by the installed updater's own check (`git verify-tag`, real ssh signatures), exactly as before it was staged.
 //   - discard-update-signer takes one back out.
 //   - Any other argument list (adding or confirming a signer among them) is refused by sudo itself, and changes nothing.
+//   - Then an admin at a root shell, with the installed engine's updates.sh: --confirm-signer <fingerprint> adds the
+//     staged signer whose fingerprint that is, after the ones there, and clears it; any other fingerprint, and one
+//     staged over 24 hours ago, add nothing. --signer adds one directly; --channel main is set here and nowhere else.
+//     Each signer added is in the machine change log, which the installed engine's watchdog probe reads as an alert.
 //
 //   sudo node updater-setup-root.mjs <coordinator user>
 import assert from 'node:assert/strict';
@@ -18,6 +22,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 assert.equal(process.getuid(), 0, 'run this as root');
 const coordinator = process.argv[2];
@@ -201,14 +206,68 @@ assert.equal(readFileSync(SIGNERS, 'utf8'), first, 'through all of it, the signe
 assert.ok(changes().filter((c) => c.what === 'updates.pending_signer').every((c) => c.by === coordinator));
 assert.deepEqual(changes().filter((c) => c.what === 'updates.allowed_signers'), [], 'no signer was added by anything here');
 
-// Nothing here turned updates on, moved the signers file, left the release channel or dropped a required check.
-assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), cfg);
+// ---- an admin at a root shell: the installed engine's updates.sh, by the path the page prints
+const engine = '/opt/worklane/current';
+const script = `${engine}/scripts/setup/updates.sh`;
+const state = () => [sha(CONFIG), sha(SIGNERS), sha(PENDING), sha(UPDATER), changes().length];
+const untouched = state();
+const refusedAsRoot = (args, where = '/') => {
+  const r = spawnSync('bash', [where === '/' ? script : 'scripts/setup/updates.sh', ...args], { encoding: 'utf8', cwd: where });
+  assert.equal(r.status, 2, `updates.sh ${args.join(' ')}: ${r.stdout}${r.stderr}`);
+  return r.stderr;
+};
+// A fingerprint that isn't the staged signer's (here: a real key's, the admin's own, which nobody staged), or not a fingerprint: nothing.
+assert.match(refusedAsRoot(['--confirm-signer', mine.fingerprint]), /no staged signer has the fingerprint/);
+for (const bad of [['--confirm-signer', 'SHA256:x'], ['--confirm-signer', other.pub], ['--confirm-signer'], ['--signer', '*', 'ssh-ed25519', other.pub], ['--signer', 'third@example.com', 'ssh-rsa', other.pub], ['--signer', 'third@example.com', 'ssh-ed25519'], ['--channel', 'beta']]) refusedAsRoot(bad, engine);
+assert.deepEqual(state(), untouched, 'a refused updates.sh changed something');
+assert.equal(verify('v1.0.2').ok, false);
+// The staged signer's own fingerprint: shown, then added after the admin's line, then cleared.
+const confirmed = sh('bash', [script, '--confirm-signer', other.fingerprint]);
+console.log(confirmed);
+const shown = confirmed.indexOf(`  principal:   other@example.com\n  public key:  ssh-ed25519 ${other.pub}\n  fingerprint: ${other.fingerprint}`);
+assert.ok(shown > 0 && shown < confirmed.indexOf('allowed_signers: added other@example.com'), 'the principal and key are printed before the signer is added');
+const two = `${first}other@example.com ssh-ed25519 ${other.pub}\n`;
+assert.equal(readFileSync(SIGNERS, 'utf8'), two, 'appended: the line that was there is as it was');
+assert.equal(owner(SIGNERS), '0:0 644');
+assert.deepEqual(pending(), [], 'and it is no longer staged');
+assert.equal(verify('v1.0.2').ok, true, 'now its tag verifies');
+assert.equal(verify('v1.0.1').ok, true);
+assert.match(refusedAsRoot(['--confirm-signer', other.fingerprint]), /no staged signer has the fingerprint/, 'the same command again finds nothing');
+assert.equal(readFileSync(SIGNERS, 'utf8'), two);
+// A staged signer left for over 24 hours (root moves its time back): its command adds nothing.
+const late = key('late');
+ok('stage-update-signer', 'late@example.com', 'ssh-ed25519', late.pub);
+writeFileSync(PENDING, `${JSON.stringify({ pending: pending().map((e) => ({ ...e, at: new Date(Date.now() - 25 * 3_600_000).toISOString() })) })}\n`);
+assert.match(refusedAsRoot(['--confirm-signer', late.fingerprint]), /no staged signer has the fingerprint/);
+assert.equal(readFileSync(SIGNERS, 'utf8'), two);
+// --signer, directly, and --channel main: by the relative path from the checkout, the way the docs spell it.
+const third = key('third');
+release('v1.0.3', third.file);
+assert.equal(verify('v1.0.3').ok, false);
+console.log(sh('bash', ['scripts/setup/updates.sh', '--channel', 'main', '--signer', 'third@example.com', 'ssh-ed25519', third.pub], engine));
+assert.equal(readFileSync(SIGNERS, 'utf8'), `${two}third@example.com ssh-ed25519 ${third.pub}\n`, 'added after the two there, which stay as they were');
+assert.equal(owner(SIGNERS), '0:0 644');
+assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), { ...cfg, channel: 'main' }, 'the channel alone');
+assert.equal(owner(CONFIG), '0:0 644');
+assert.equal(verify('v1.0.3').ok, true);
+// Both signers added are in the change log, by the admin and never by the coordinator; and the installed engine's
+// watchdog probe turns each into an alert naming its principal and fingerprint.
+const added = changes().filter((c) => c.what === 'updates.allowed_signers');
+assert.deepEqual(added.map((c) => c.to), [`added other@example.com ssh-ed25519 ${other.pub} (${other.fingerprint})`, `added third@example.com ssh-ed25519 ${third.pub} (${third.fingerprint})`]);
+assert.ok(added.every((c) => c.by !== coordinator));
+const { signerFindings } = await import(pathToFileURL(`${engine}/dist/src/watchdog/probes.js`).href);
+const { machineChanges } = await import(pathToFileURL(`${engine}/dist/src/machine.js`).href);
+const alerts = signerFindings(machineChanges(), Date.now());
+assert.deepEqual(alerts.map((f) => [f.kind, f.key]), [['update_signer_added', `other@example.com ${other.fingerprint}`], ['update_signer_added', `third@example.com ${third.fingerprint}`]]);
+console.log(alerts.map((f) => `alert: ${f.detail}`).join('\n'));
+
+// Nothing here turned updates on, moved the signers file or dropped a required check; main was set by root alone.
+assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), { ...cfg, channel: 'main' });
 // The dashboard viewer gets none of it.
 if (spawnSync('id', ['-u', 'wl-dash']).status === 0) {
   for (const a of [['install-updater'], ['set-update-channel', 'release'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', mine.pub]]) {
     assert.notEqual(spawnSync('sudo', ['-n', '-l', '-U', 'wl-dash', HELPER, ...a]).status, 0, `wl-dash may run ${a.join(' ')}`);
   }
 }
-// Left for the next step of the job: the signers file with the admin's key, and other@example.com staged.
 rmSync(work, { recursive: true, force: true });
-console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused`);
+console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused. As root: updates.sh --confirm-signer added only the staged signer with the matching fingerprint, appended, and cleared it; an expired one and a wrong fingerprint added nothing; --signer and --channel main worked; each signer added reads as a watchdog alert`);

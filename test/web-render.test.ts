@@ -54,6 +54,7 @@ interface Render {
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
+  renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
@@ -668,6 +669,71 @@ test('the Updates panel: the engine installed, the last update, a rollback held 
   // No canary configured: where to read how.
   assert.match(r.renderUpdatesPanel({ ...data, canary: { settings: null, running: null, last: null } }), /not set up: see[\s\S]*docs\/canary\.md/);
   assert.deepEqual([r.duration(42_000), r.duration(17 * 60_000), r.duration(65 * 60_000), r.duration(null)], ['42s', '17 min', '1 h 05 min', '–']);
+});
+
+test('the updater setup: the three steps; signers and staged signers with the root command that confirms each; no way to add a signer or pick main; read-only for anyone else', () => {
+  const key = `AAAAC3NzaC1lZDI1NTE5AAAAI${'A'.repeat(43)}`; // made up: the shape of a public key, no real one
+  const key2 = `AAAAC3NzaC1lZDI1NTE5AAAAI${'B'.repeat(43)}`;
+  const rootCommand = 'sudo bash /opt/harness/current/scripts/setup/updates.sh --confirm-signer SHA256:secondfingerprint';
+  const updater = {
+    installed: true,
+    enabled: false,
+    channel: 'release',
+    channelWhat: 'the newest release tag vX.Y.Z, only when its signature verifies',
+    signersFile: '/etc/harness/allowed_signers',
+    updaterReads: null,
+    signers: [{ principal: 'first@example.com', options: 'namespaces="git"', keyType: 'ssh-ed25519', key, fingerprint: 'SHA256:firstfingerprint' }],
+    pending: [{ principal: 'second@example.com', key: key2, fingerprint: 'SHA256:secondfingerprint', by: 'wl-site', at: new Date(Date.now() - 3_600_000).toISOString(), expiresAt: new Date(Date.now() + 23 * 3_600_000).toISOString(), confirm: rootCommand }],
+    pendingMax: 4,
+    script: { install: 'sudo bash scripts/setup/updates.sh', signer: 'sudo bash scripts/setup/updates.sh --signer <principal> ssh-ed25519 <public key>', confirm: 'sudo bash scripts/setup/updates.sh --confirm-signer <SHA256 fingerprint of a staged signer>', release: 'sudo bash scripts/setup/updates.sh --channel release', main: 'sudo bash scripts/setup/updates.sh --channel main' },
+  };
+  const data = { owner: 'example-owner', user: 'example-owner', canChange: true, helper: '/usr/local/libexec/harness-machine', slots: { cap: 3, running: 1, min: 1, max: 16 }, updates: { configured: true, enabled: false, branch: 'main', requiredChecks: ['test'] }, updater, changes: [], history: [] };
+  const html = r.renderUpdaterSetup(data);
+  for (const id of ['updater-setup', 'updater-nothing-changes', 'updater-step', 'updater-install', 'updater-signers', 'updater-signer', 'updater-stage-only', 'updater-pending', 'updater-pending-fingerprint', 'updater-pending-command', 'updater-pending-discard', 'updater-signer-form', 'updater-signer-principal', 'updater-signer-key', 'updater-signer-review', 'updater-channel', 'updater-main-root-only', 'updater-script']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="updater-nothing-changes"[^>]*>Nothing changes until you review a step and confirm it\. Skip any of them, or all: the machine stays as it is\./);
+  assert.match(html, /data-step="1"[\s\S]*?installed, updates off[\s\S]*?Install again…/);
+  assert.match(html, /data-step="2"[\s\S]*?1 listed, 1 staged/);
+  assert.match(html, /data-testid="updater-signer"[\s\S]*?first@example\.com[\s\S]*?ssh-ed25519[\s\S]*?namespaces=(&quot;|")git(&quot;|")[\s\S]*?SHA256:firstfingerprint/);
+  assert.match(html, /data-testid="updater-stage-only"[^>]*>This page can(&#x27;|')t add a signer, and it can(&#x27;|')t remove or replace one\. It can stage a key; an admin then confirms it with one command at a root shell on the machine\./);
+  // The staged signer: marked as not a signer, its key and fingerprint, and the exact root command that confirms it.
+  assert.match(html, new RegExp(`data-testid="updater-pending" data-fingerprint="SHA256:secondfingerprint"[\\s\\S]*?staged, not a signer[\\s\\S]*?second@example\\.com[\\s\\S]*?by (<!-- -->)?wl-site[\\s\\S]*?${key2}[\\s\\S]*?data-testid="updater-pending-fingerprint"[^>]*>SHA256:secondfingerprint<[\\s\\S]*?data-testid="updater-pending-command"[^>]*>sudo bash /opt/harness/current/scripts/setup/updates\\.sh --confirm-signer SHA256:secondfingerprint<`));
+  // The channel: where it is; no picker, no main to choose; on release there is nothing to press.
+  assert.match(html, /data-testid="updater-channel" data-channel="release"/);
+  assert.doesNotMatch(html, /data-channel="main"|type="radio"|data-testid="updater-release"/, 'no channel picker, and no main');
+  assert.match(html, /data-testid="updater-main-root-only"[^>]*>The page only ever moves a machine to release\. Following main instead is set at a root shell: <span[^>]*>sudo bash scripts\/setup\/updates\.sh --channel main</);
+  assert.match(html, /data-testid="updater-script"[\s\S]*?sudo bash scripts\/setup\/updates\.sh\nsudo bash scripts\/setup\/updates\.sh --signer &lt;principal&gt; ssh-ed25519 &lt;public key&gt;\nsudo bash scripts\/setup\/updates\.sh --confirm-signer &lt;SHA256 fingerprint of a staged signer&gt;\nsudo bash scripts\/setup\/updates\.sh --channel release</);
+  // Nothing is confirmable until a step has been reviewed, and nothing on the page says "add".
+  assert.doesNotMatch(html, /data-testid="updater-(review|confirm)"|Add this signer|Add signer/);
+  // A signer under review to stage: the principal, the whole key, its fingerprint, the root command, and a button that says stage.
+  const key3 = `AAAAC3NzaC1lZDI1NTE5AAAAI${'C'.repeat(43)}`;
+  const plan = { step: 'stage', args: ['stage-update-signer', 'third@example.com', 'ssh-ed25519', key3], command: `/usr/local/libexec/harness-machine stage-update-signer third@example.com ssh-ed25519 ${key3}`, changes: ['stages this principal and key in /var/lib/harness/pending-signers.json, for 24 hours', 'changes nothing in /etc/harness/allowed_signers: a staged key is trusted for nothing'], script: '', signer: { principal: 'third@example.com', key: key3, fingerprint: 'SHA256:thirdfingerprint', line: `third@example.com ssh-ed25519 ${key3}`, confirm: 'sudo bash /opt/harness/current/scripts/setup/updates.sh --confirm-signer SHA256:thirdfingerprint', file: '/etc/harness/allowed_signers' } };
+  const reviewing = r.renderUpdaterSetup(data, { input: { step: 'stage', principal: 'third@example.com', key: key3 }, plan });
+  assert.match(reviewing, new RegExp(`data-testid="updater-review" data-step="stage"[\\s\\S]*?Staging adds nothing to the keys this machine trusts[\\s\\S]*?data-testid="updater-review-principal"[^>]*>third@example\\.com<[\\s\\S]*?data-testid="updater-review-key"[^>]*>${key3}<[\\s\\S]*?data-testid="updater-review-fingerprint"[^>]*>SHA256:thirdfingerprint<[\\s\\S]*?data-testid="updater-review-root-command"[^>]*>sudo bash /opt/harness/current/scripts/setup/updates\\.sh --confirm-signer SHA256:thirdfingerprint<[\\s\\S]*?data-testid="updater-review-command"[^>]*>/usr/local/libexec/harness-machine stage-update-signer [\\s\\S]*?a staged key is trusted for nothing[\\s\\S]*?data-testid="updater-confirm"[^>]*>Stage this signer<`));
+  assert.doesNotMatch(reviewing, /data-testid="updater-signer-form"/, 'the form gives way to what was entered, until confirmed or cancelled');
+  // A discard under review opens in its own staged entry.
+  const discarding = r.renderUpdaterSetup(data, { input: { step: 'discard', principal: 'second@example.com', key: key2 }, plan: { step: 'discard', args: [], command: '/usr/local/libexec/harness-machine discard-update-signer second@example.com ssh-ed25519 x', changes: ['takes it out'], script: '' } });
+  assert.match(discarding, /data-testid="updater-pending"[\s\S]*?data-testid="updater-review" data-step="discard"[\s\S]*?data-testid="updater-confirm"[^>]*>Discard it</);
+  // On main: the one channel change the page offers is back to release.
+  const onMain = r.renderUpdaterSetup({ ...data, updater: { ...updater, channel: 'main', channelWhat: "main's newest commit whose checks are all green. There is no release tag on this channel, so no tag signature is checked" } });
+  assert.match(onMain, /data-testid="updater-channel" data-channel="main"[\s\S]*?no tag signature is checked[\s\S]*?data-testid="updater-release"[^>]*>Follow releases…</);
+  // Four staged: no room for another, so no form.
+  assert.doesNotMatch(r.renderUpdaterSetup({ ...data, updater: { ...updater, pending: Array.from({ length: 4 }, (_, i) => ({ ...updater.pending[0]!, principal: `s${i}@example.com`, key: `${key2.slice(0, -1)}${i}` })) } }), /data-testid="updater-signer-form"/);
+  // Not installed: the channel waits for the install; no signers yet.
+  const bare = r.renderUpdaterSetup({ ...data, updater: { ...updater, installed: false, enabled: null, channel: null, channelWhat: null, signers: null, pending: [] } });
+  assert.match(bare, /data-step="1"[\s\S]*?not installed[\s\S]*?Install the updater…/);
+  assert.match(bare, /data-step="2"[\s\S]*?none listed/);
+  assert.match(bare, /Install the updater first: it starts on release/);
+  assert.doesNotMatch(bare, /data-testid="updater-release"|data-testid="updater-signers"|data-testid="updater-pending"/);
+  // A config that names another signers file: said, in the signers step.
+  assert.match(r.renderUpdaterSetup({ ...data, updater: { ...updater, updaterReads: '/root/signers' } }), /data-testid="updater-reads-elsewhere"[^>]*>[\s\S]*?\/root\/signers/);
+  // Anyone who can't change the machine sees the state, the staged signer and its command, and nothing to press.
+  const theirs = r.renderUpdaterSetup({ ...data, user: 'example-collaborator', canChange: false });
+  assert.match(theirs, /data-testid="updater-signer"[\s\S]*data-testid="updater-pending-command"/);
+  assert.doesNotMatch(theirs, /data-testid="updater-(install|signer-form|signer-review|pending-discard|release|confirm)"/);
+  // An older server sends no updater: the section isn't there, and the machine settings still render.
+  const { updater: _none, ...older } = data;
+  assert.equal(r.renderUpdaterSetup(older), '');
+  assert.match(r.renderMachine(data), /data-testid="updater-setup"[\s\S]*data-testid="machine-setting-row"/, 'above the settings table, on the Machine page');
 });
 
 test('the machine settings: the owner gets the slot cap and engine updates with a review step; the history tables; read-only for anyone else', () => {

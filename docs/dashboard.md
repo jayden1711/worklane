@@ -250,6 +250,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Guardrail fingerprints fetched | local, server | `worklane guardrails refresh` |
 | Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
 | The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
+| Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
 | The coordinator running | local | `worklane up` |
 
@@ -295,6 +296,45 @@ A viewer's board leaves out everything about runs and agents (the run, its resou
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
 
 The Settings page's **Model routing** panel (part of `GET /api/settings`, owners and writers) lists every task type in agents.yaml `routing` (src/routing.ts): the model or value in effect and where it came from: the default in code, a role's model that stands in for it, the agents.yaml key (an older `model_routing` or `eval_routing` key is flagged with its new name), or the instance's policy.yaml. It is read-only: its "Change it" snippet is the `routing:` block to edit in agents.yaml through a pull request.
+
+### Updater setup
+
+At the top of the machine settings, **Updater setup** sets the engine updater up from the page (the first-run page's "Engine updater set up" step opens it). It has three steps, and nothing changes until you review one and confirm it. Skip any of them, or all of them, and the machine stays as it is.
+
+1. **The updater.** Installs `/usr/local/libexec/worklane-update` and its 10-minute timer, with updates off. An existing `updates.json` is kept.
+2. **Release signers.** Lists the keys in `/etc/worklane/allowed_signers` with their fingerprints. On the release channel the updater installs only a release tag whose signature verifies against one of them.
+3. **Channel.** Shows what the updater follows. A new install follows `release` (signed release tags). If the machine is on `main`, the page offers **Follow releases**; it never offers `main`.
+
+The on/off switch is the **Engine updates** row in the table below, as before.
+
+**Adding a signer takes two people's worth of access: the dashboard, then a root shell.** Those keys are the root of trust for engine updates, so a dashboard session alone can't add one, whoever holds it.
+
+1. On the page, type the signer's principal (its email) and paste the public key (`ssh-ed25519 AAAA...`, the line of the `.pub` file). **Review to stage** shows the exact principal, the whole key and its fingerprint; **Stage this signer** records it in `/var/lib/worklane/pending-signers.json`. Staging changes nothing in `allowed_signers`: a staged key is trusted for nothing.
+2. The page then shows the staged signer with the exact command to run **as root on the machine**:
+
+   ```bash
+   sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer SHA256:<the fingerprint the page shows>
+   ```
+
+   Check that fingerprint against your own key first (`ssh-keygen -lf <key>.pub` prints the same). The command applies only a staged signer with exactly that fingerprint, prints its principal and key before adding it, appends one line (the signers already there stay as they are), and clears it from the pending list. A fingerprint that matches nothing staged adds nothing.
+3. A staged signer waits 24 hours, then is dropped; **Discard** takes it out sooner. At most 4 wait at once.
+
+Whenever a signer is added, by this route or by `updates.sh --signer`, the watchdog raises an incident ("A release signer was added for engine updates") with the principal and the key's fingerprint: it shows on the Health page and is posted once to the ops channel. It closes by itself a day later. If you didn't add it, turn engine updates off, remove its line at a root shell, and find out who did.
+
+What the page can change, and as whom: each confirmed step is one command of the root-owned machine helper (`install-updater`, `set-update-channel release`, `stage-update-signer` or `discard-update-signer <principal> ssh-ed25519 <public key>`), recorded by this instance's dashboard and run by its coordinator through `sudo -n`. Only an owner of the instance who is also a machine owner, on an allowed device, can confirm one. The dashboard itself never runs sudo and never writes these files.
+
+What it can never do: add a signer, or remove or replace one (the helper never writes `allowed_signers`; only `updates.sh` does, as root, and only by adding a line); stage a wildcard, a list or an option such as `cert-authority`, or any key type but ed25519; move a machine to the `main` channel; point the updater at another signers file; change the required checks; or turn signature or check verification off.
+
+The same from a terminal, as root, from the engine's checkout:
+
+```bash
+sudo bash scripts/setup/updates.sh                                                    # install (off)
+sudo bash scripts/setup/updates.sh --signer <principal> ssh-ed25519 <public key>      # add one release signer, directly
+sudo bash scripts/setup/updates.sh --confirm-signer SHA256:<fingerprint>              # add the one staged from the page
+sudo bash scripts/setup/updates.sh --channel release                                  # or: main (a root shell only)
+```
+
+Any other kind of key, or removing one, is an edit of `/etc/worklane/allowed_signers` by hand (one line per key: `<principal> <key type> <public key>`, root:root 0644). A machine whose sudo is older than 1.9.10 can't match the staging command's pattern: there, use `--signer`.
 
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 
