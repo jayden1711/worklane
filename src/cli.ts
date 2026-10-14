@@ -204,13 +204,23 @@ usage: ${BRAND.cli} <command> [options]
 options: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;
 
 /** One command's lines of USAGE (its synopsis and description). */
-function commandUsage(name: string, usage = USAGE): string {
+function commandUsage(name: string, usage = USAGE, every = false): string {
   const lines = usage.split('\n');
-  const at = lines.findIndex((l) => l.startsWith(`  ${name} `) || l === `  ${name}`);
-  if (at < 0) return usage;
-  const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
-  return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)].join('\n');
+  const heads = lines.flatMap((l, i) => (l.startsWith(`  ${name} `) || l === `  ${name}` ? [i] : []));
+  if (!heads.length) return usage;
+  return (every ? heads : heads.slice(0, 1))
+    .flatMap((at) => {
+      const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
+      return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)];
+    })
+    .join('\n');
 }
+
+/**
+ * The commands whose `--help` (or `-h`) prints their usage and runs nothing: each would otherwise go on and run
+ * (`dashboard --help` started a dashboard, `doctor --help` ran the checks). The installed-package test runs each.
+ */
+const HELP_COMMANDS = ['init', 'doctor', 'dashboard'] as const;
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -238,6 +248,11 @@ async function main(argv: string[]): Promise<number> {
   const instanceOpt = option(args, '--instance');
   const root = resolve(rootOpt ?? findProjectRoot(process.cwd()) ?? process.cwd());
   const [cmd, sub, ...rest] = args;
+
+  if ((HELP_COMMANDS as readonly (string | undefined)[]).includes(cmd) && (args.includes('--help') || args.includes('-h'))) {
+    console.log(commandUsage(cmd!, USAGE, true));
+    return 0;
+  }
 
   switch (cmd) {
     case undefined:
@@ -328,10 +343,6 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'init': {
-      if (flag(args, '--help') || flag(args, '-h')) {
-        console.log(commandUsage('init'));
-        return 0;
-      }
       const modeOpt = option(args, '--mode');
       if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
         console.error('init: --mode is local or server');
