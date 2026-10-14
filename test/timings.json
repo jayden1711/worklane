@@ -160,6 +160,7 @@
   "test/push-check.test.ts": 1463,
   "test/push-gate.test.ts": 7664,
   "test/push-guard.test.ts": 2790,
+  "test/push-hook-guard.test.ts": 924,
   "test/queue.test.ts": 35480,
   "test/quick-replies.test.ts": 1867,
   "test/receipts.test.ts": 12,
