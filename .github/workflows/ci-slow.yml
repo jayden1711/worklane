@@ -589,7 +589,8 @@ jobs:
           # The CLI whole (it needs every dependency, not only zod) and the example project, world-readable for wl-ci.
           cp -r node_modules/. "$T/node_modules/"
           cp -r examples "$T/"
-          chmod -R a+rX "$T"
+          # WHY: only what this step added: $T/ids and $T/ids.db belong to wl-ci, so a chmod of all of $T fails on them.
+          chmod -R a+rX "$T/node_modules" "$T/examples"
           cat > "$T/measure.sh" <<'EOF'
           set -euo pipefail
           t="$1"
