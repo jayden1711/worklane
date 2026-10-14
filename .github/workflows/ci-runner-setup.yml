@@ -1,0 +1,161 @@
+name: ci-runner setup
+# scripts/setup/ci-runner.sh as root on real systemd, on the Ubuntu it is written for: the install; the sandbox, the
+# firewall and the trusted-jobs-only hook seen from inside jobs; check; a second install that changes nothing; and
+# remove. The registration is faked by a stand-in runner release (scripts/ci/runner-stand-in) seeded where the pinned
+# one goes, so install downloads none; the real release is checked against the pin in its own step, and Docker's
+# pinned release is downloaded and checked by the install itself. Not a check anything requires: it runs on a PR
+# that changes what it tests, and on dispatch.
+on:
+  pull_request:
+    paths:
+      - scripts/setup/ci-runner.sh
+      - scripts/setup/ci-runner/**
+      - scripts/setup/lib.sh
+      - scripts/ci/runner-stand-in/**
+      - .github/workflows/ci-runner-setup.yml
+  workflow_dispatch:
+concurrency:
+  group: ci-runner-setup-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+permissions:
+  contents: read
+jobs:
+  ci-runner:
+    name: ci-runner (real systemd)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      REPO: example-org/example-repo
+      NAME: demo
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: the pinned runner release is the one GitHub publishes (downloaded, sha256 against the pin, its layout)
+        run: |
+          v="$(sed -n 's/^runner_version=//p' scripts/setup/ci-runner.sh)"
+          s="$(sed -n 's/^runner_sha256_x64=//p' scripts/setup/ci-runner.sh)"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/runner.tgz" "https://github.com/actions/runner/releases/download/v$v/actions-runner-linux-x64-$v.tar.gz"
+          echo "$s  $RUNNER_TEMP/runner.tgz" | sha256sum -c -
+          tar -tzf "$RUNNER_TEMP/runner.tgz" > "$RUNNER_TEMP/runner.list"
+          for f in ./config.sh ./run.sh ./bin/Runner.Listener; do grep -qxF "$f" "$RUNNER_TEMP/runner.list" || { echo "the release has no $f" >&2; exit 1; }; done
+          grep -q '^\./externals/' "$RUNNER_TEMP/runner.list" || { echo "the release has no externals/" >&2; exit 1; }
+          rm -f "$RUNNER_TEMP/runner.tgz"
+          echo "RUNNER_VERSION=$v" >> "$GITHUB_ENV"
+      - name: a machine like the one it is for (the full-run lock, an instance user, worklane's directories, a service on every address)
+        run: |
+          sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
+          sudo useradd --create-home --shell /bin/bash wl-shop
+          sudo chmod 0750 "$(getent passwd wl-shop | cut -d: -f6)"
+          sudo install -d -m 0755 /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane
+          # A service on this machine, as nobody, on every address: reachable by others, by the runner user on none.
+          port=18080
+          sudo -u nobody nohup python3 -m http.server "$port" --bind 0.0.0.0 --directory /tmp > /dev/null 2>&1 &
+          for _ in $(seq 40); do curl -fsS -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.5; done
+          host_ip="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+          curl -fsS -o /dev/null "http://127.0.0.1:$port/"
+          curl -fsS -o /dev/null "http://$host_ip:$port/"
+          echo "LISTEN_PORT=$port" >> "$GITHUB_ENV"
+          echo "HOST_IP=$host_ip" >> "$GITHUB_ENV"
+      - name: the stand-in runner release, where the pinned one goes (install finds it and downloads none)
+        run: |
+          d="/opt/worklane-ci/actions-runner-$RUNNER_VERSION"
+          sudo install -d -m 0755 "$d/bin" "$d/externals"
+          sudo install -m 0755 scripts/ci/runner-stand-in/config.sh scripts/ci/runner-stand-in/run.sh scripts/ci/runner-stand-in/job.sh "$d/"
+          printf '#!/bin/sh\n[ "$1" = --version ] && echo %s\n' "$RUNNER_VERSION" | sudo tee "$d/bin/Runner.Listener" > /dev/null
+          sudo chmod 0755 "$d/bin/Runner.Listener"
+      - name: install, with a (fake) registration token on stdin; the token reaches config.sh only in its environment, and is stored, logged and printed nowhere
+        run: |
+          tok="ci$(openssl rand -hex 24)"
+          echo "::add-mask::$tok"
+          n="$(nproc)"
+          printf '%s\n' "$tok" | sudo bash scripts/setup/ci-runner.sh install "$REPO" 1 --name "$NAME" --label box --cpus "$((n - 2))-$((n - 1))" --memory-max 2G 2>&1 | tee "$RUNNER_TEMP/install.log"
+          grep -qx 'OK: all checks passed' "$RUNNER_TEMP/install.log"
+          reg="/var/lib/worklane-ci/$NAME/reg-1/.runner"
+          sudo cat "$reg"
+          sudo grep -qx "token_sha256=$(printf '%s' "$tok" | sha256sum | cut -c1-64)" "$reg"
+          sudo grep -qx "url=https://github.com/$REPO" "$reg"
+          sudo grep -qx 'labels=box' "$reg"
+          sudo grep -qx 'disableupdate=yes' "$reg"
+          if sudo grep -rIlF "$tok" /var/lib/worklane-ci /opt/worklane-ci /etc/worklane-ci /etc/systemd/system /usr/local/libexec/worklane-ci "$RUNNER_TEMP/install.log"; then echo "the token was written there" >&2; exit 1; fi
+          if sudo journalctl --no-pager | grep -qF "$tok"; then echo "the token is in the journal" >&2; exit 1; fi
+          sudo nft list table inet "worklane_ci_$NAME"
+      - name: jobs through the stand-in runner (a trusted one, four untrusted ones refused before their first step, a trusted one again)
+        run: |
+          u="worklane-ci-${NAME}@1.service"
+          w="/var/lib/worklane-ci/$NAME/1/work"
+          log() { sudo journalctl -u "$u" -o cat --no-pager; }
+          idle=0
+          # job <id> [KEY=VALUE...]: once the runner is idle again, one job, with a trusted job's variables unless overridden.
+          job() {
+            local id="$1"; shift
+            idle=$((idle + 1))
+            for _ in $(seq 180); do [ "$(log | grep -c '^STANDIN idle$')" -ge "$idle" ] && break; sleep 1; done
+            [ "$(log | grep -c '^STANDIN idle$')" -ge "$idle" ] || { echo "the runner didn't come back idle" >&2; log | tail -n 80; exit 1; }
+            printf '%s\n' "JOB_ID=$id" GITHUB_JOB=probe "GITHUB_REPOSITORY=$REPO" GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main \
+              "GITHUB_WORKFLOW_REF=$REPO/.github/workflows/ci-slow.yml@refs/heads/main" GITHUB_HEAD_REF= GITHUB_BASE_REF= \
+              "LISTEN_PORT=$LISTEN_PORT" "HOST_IP=$HOST_IP" DEMO_USER=wl-shop "REG_DIR=/var/lib/worklane-ci/$NAME/reg-1" "$@" | sudo tee "$w/.next.env" > /dev/null
+            sudo chown "wl-ci-$NAME:" "$w/.next.env"
+            sudo mv "$w/.next.env" "$w/next.env"
+            for _ in $(seq 300); do log | grep -qE "^STANDIN job $id (ran|refused)" && break; sleep 1; done
+            log | grep -qE "^STANDIN job $id (ran|refused)" || { echo "job $id didn't finish" >&2; log | tail -n 80; exit 1; }
+          }
+          job 1
+          job 2 GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/7/merge "GITHUB_WORKFLOW_REF=$REPO/.github/workflows/ci-slow.yml@refs/pull/7/merge" GITHUB_HEAD_REF=feature GITHUB_BASE_REF=main
+          job 3 GITHUB_REF=refs/heads/feature "GITHUB_WORKFLOW_REF=$REPO/.github/workflows/ci-slow.yml@refs/heads/feature"
+          job 4 GITHUB_EVENT_NAME=push "GITHUB_WORKFLOW_REF=$REPO/.github/workflows/ci-slow.yml@refs/heads/feature"
+          job 5 GITHUB_REPOSITORY=someone/example-repo "GITHUB_WORKFLOW_REF=someone/example-repo/.github/workflows/ci-slow.yml@refs/heads/main"
+          job 6 GITHUB_EVENT_NAME=push
+          log > "$RUNNER_TEMP/runner.log"
+          grep -E '^(STANDIN|PROBE|ci-trust|ci-lock|reset)' "$RUNNER_TEMP/runner.log"
+          if grep -q '^PROBE [0-9]* FAIL' "$RUNNER_TEMP/runner.log"; then echo "a probe failed" >&2; exit 1; fi
+          for i in 1 6; do grep -qx "PROBE $i DONE fail=0" "$RUNNER_TEMP/runner.log" || { echo "job $i's probes didn't all pass" >&2; exit 1; }; done
+          # The second trusted job found nothing of the first: a new HOME, no container (job.sh checks both).
+          grep -qx 'PROBE 6 PASS HOME is new' "$RUNNER_TEMP/runner.log"
+          grep -qx 'PROBE 6 PASS no containers from an earlier job' "$RUNNER_TEMP/runner.log"
+          for i in 2 3 4 5; do
+            grep -qx "STANDIN job $i refused by the started hook" "$RUNNER_TEMP/runner.log" || { echo "job $i wasn't refused" >&2; exit 1; }
+            if grep -q "^PROBE $i " "$RUNNER_TEMP/runner.log"; then echo "job $i's code ran" >&2; exit 1; fi
+          done
+          grep -q '^ci-trust: not running this job here: event pull_request ' "$RUNNER_TEMP/runner.log"
+          grep -q '^ci-trust: not running this job here: ref refs/heads/feature, not refs/heads/main$' "$RUNNER_TEMP/runner.log"
+          grep -q "^ci-trust: not running this job here: workflow $REPO/.github/workflows/ci-slow.yml@refs/heads/feature, " "$RUNNER_TEMP/runner.log"
+          grep -q "^ci-trust: not running this job here: repository someone/example-repo, not $REPO$" "$RUNNER_TEMP/runner.log"
+      - name: check; then a second install changes nothing, asks for no token, and leaves the idle runner running
+        run: |
+          sudo bash scripts/setup/ci-runner.sh check "$REPO" --name "$NAME" | tee "$RUNNER_TEMP/check.log"
+          tail -n 1 "$RUNNER_TEMP/check.log" | grep -qx 'OK: all checks passed'
+          for p in 'is refused 127.0.0.1 9' 'is refused 10.255.255.1 9' 'is refused 100.100.100.100 80' 'reaches github.com 443'; do grep -q "^PASS wl-ci-$NAME $p" "$RUNNER_TEMP/check.log"; done
+          before="$(systemctl show "worklane-ci-${NAME}@1.service" -p InvocationID --value)"
+          n="$(nproc)"
+          sudo bash scripts/setup/ci-runner.sh install "$REPO" 1 --name "$NAME" --label box --cpus "$((n - 2))-$((n - 1))" --memory-max 2G < /dev/null 2>&1 | tee "$RUNNER_TEMP/reinstall.log"
+          grep -qx 'runner 1 is registered already (remove first to register it again)' "$RUNNER_TEMP/reinstall.log"
+          grep -qx "worklane-ci-${NAME}-firewall.service is current" "$RUNNER_TEMP/reinstall.log"
+          if grep -q 'registration token' "$RUNNER_TEMP/reinstall.log"; then echo "asked for a token again" >&2; exit 1; fi
+          grep -qx 'OK: all checks passed' "$RUNNER_TEMP/reinstall.log"
+          [ "$(systemctl show "worklane-ci-${NAME}@1.service" -p InvocationID --value)" = "$before" ] || { echo "the second install restarted the runner" >&2; exit 1; }
+      - name: remove, with a removal token typed at a terminal (hidden), then nothing of it is left
+        run: |
+          tok="rm$(openssl rand -hex 24)"
+          echo "::add-mask::$tok"
+          # Typed after the prompt, as a person would: input that arrives before it would be echoed by the terminal.
+          { sleep 8; printf '%s\n' "$tok"; } | script -qec "sudo bash scripts/setup/ci-runner.sh remove $REPO --name $NAME" /dev/null | tee "$RUNNER_TEMP/remove.log"
+          grep -q 'paste the removal token (input hidden)' "$RUNNER_TEMP/remove.log"
+          grep -q "deregistered, removal token sha256 $(printf '%s' "$tok" | sha256sum | cut -c1-64)" "$RUNNER_TEMP/remove.log"
+          if grep -qF "$tok" "$RUNNER_TEMP/remove.log"; then echo "the token was echoed" >&2; exit 1; fi
+          if id "wl-ci-$NAME" 2> /dev/null; then echo "the user is still there" >&2; exit 1; fi
+          if sudo nft list table inet "worklane_ci_$NAME" 2> /dev/null; then echo "the firewall table is still there" >&2; exit 1; fi
+          if systemctl list-unit-files --no-legend 'worklane-ci-*' | grep .; then echo "units are still there" >&2; exit 1; fi
+          for p in /var/lib/worklane-ci /opt/worklane-ci /usr/local/libexec/worklane-ci /etc/worklane-ci /etc/systemd/system/worklane-ci.slice; do
+            if [ -e "$p" ]; then echo "$p is still there" >&2; exit 1; fi
+          done
+          if getfacl -p /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane | grep "wl-ci-$NAME"; then echo "an ACL entry is still there" >&2; exit 1; fi
+      - name: on failure, the units' logs
+        if: failure()
+        run: |
+          docker_unit="worklane-ci-${NAME}-docker"
+          units=("worklane-ci-${NAME}@1.service" "${docker_unit}@1.service" "worklane-ci-${NAME}-firewall.service")
+          sudo systemctl --no-pager status "${units[@]}" worklane-ci.slice || true
+          sudo journalctl --no-pager -n 200 "${units[@]/#/--unit=}" || true
+          sudo nft list ruleset || true
