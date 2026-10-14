@@ -1,5 +1,5 @@
 {
- "source": "CI run 38448843675 (main at f2831a5), jobs test (ubuntu-latest, 22) and (ubuntu-latest, 24): each file is the sum of its top-level tests duration_ms, the larger of the two Node versions; plus 24 files added since, each timed locally (wall clock of node --test <file>, macOS) on main at 7e13344",
+ "source": "CI run 38448843675 (main at f2831a5), jobs test (ubuntu-latest, 22) and (ubuntu-latest, 24): each file is the sum of its top-level tests duration_ms, the larger of the two Node versions; plus 24 files added since, each timed locally (wall clock of node --test <file>, macOS) on main at 7e13344; plus the first-run wizard test files, each timed the same way (locally, wall clock)",
  "ms": {
   "test/add-project-requests.test.ts": 466,
   "test/add-project-view.test.ts": 626,
@@ -156,6 +156,7 @@
   "test/prodread.test.ts": 83,
   "test/project-env.test.ts": 103,
   "test/projection-review.test.ts": 30,
+  "test/protection-policy.test.ts": 1922,
   "test/providers.test.ts": 1284,
   "test/push-check.test.ts": 1463,
   "test/push-gate.test.ts": 7664,
@@ -196,6 +197,8 @@
   "test/separate-users.test.ts": 581,
   "test/server-auto-config.test.ts": 6461,
   "test/settings.test.ts": 72,
+  "test/setup-actions.test.ts": 4416,
+  "test/setup-automation.test.ts": 1418,
   "test/setup-install-check.test.ts": 55,
   "test/setup-scripts.test.ts": 52041,
   "test/shell.test.ts": 6,
