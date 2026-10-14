@@ -109,6 +109,17 @@ export interface SystemdRunStats {
   memPeakMb: number | null;
 }
 
+/** A run's variables as the sandbox helper's exec reads them on stdin: NAME=value, each ended by a NUL. */
+export function runVars(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([k, v]) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) throw new Error(`not a variable name: ${k}`);
+      if (v.includes('\0') || v.includes('\n')) throw new Error(`${k}: one line, no NUL`);
+      return `${k}=${v}\0`;
+    })
+    .join('');
+}
+
 /**
  * systemd-run --wait's own lines in its stderr (not --quiet; the run's stderr is the same stream under --pipe):
  * "Running as unit: <unit>" near the start (with "; invocation ID: <id>" on some systemd 255 builds, not others), and its summary (result, CPU time, peak memory, ...)
@@ -373,10 +384,12 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
     },
     async exec(id, command, env, timeoutMs, signal) {
       checkId(id);
-      const args = ['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000)))];
-      for (const [k, v] of Object.entries(env)) args.push('--env', `${k}=${v}`);
+      // INVARIANT: no variable's value is ever in an argv. sudo logs its whole command line to the journal and any
+      // user can read a process's argv (ps, /proc/<pid>/cmdline); DATABASE_URL carries the run's database password.
+      // The run's variables go on stdin, each NAME=value ended by a NUL (no value can hold one).
+      const vars = runVars(env);
       // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left).
-      const r = await call([...args, '--', command], { timeoutMs: timeoutMs + 60_000, signal });
+      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
       // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
       const s = systemdRunStats(r.stderr);
       return { code: r.code, out: r.without(s.own), stats: s.stats, err: cut(r.stderr, s.own) };

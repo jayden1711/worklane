@@ -13,7 +13,8 @@
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
 #   worklane-testrun <name> db-start <id> <image> <db> <ready_s> <max_connections>
 #                                                             the run's own Postgres: prints "<port> <password>"
-#   worklane-testrun <name> exec <id> <timeout_s> [--env K=V]... -- <command>
+#   worklane-testrun <name> exec <id> <timeout_s> -- <command>
+#                                                             the run's variables on stdin, each NAME=value then a NUL
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
 #   worklane-testrun <name> version                           this helper's protocol version (an integer)
@@ -47,13 +48,16 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=6
+PROTOCOL=7
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
 # Where each run's short TMPDIR is made (run_tmp): root's own, made here (tmp_base). Short, and never under /tmp or
 # /var/tmp (the INVARIANT above). Not under $BASE, where every entry is an instance's.
 TMP_BASE=/var/lib/wlt
+# Where exec writes a run's variables for systemd to read (EnvironmentFile=): root's own, 0700, made here. Under /run,
+# which the coordinator's unit shares with PID 1 (the INVARIANT above).
+ENV_DIR=/run/worklane-testrun-env
 SLICE=worklane-test.slice
 DOCKER=/opt/worklane-test/docker/docker
 LABEL=worklane.test-run
@@ -129,6 +133,26 @@ valid_env() {
   [[ "$v" != *$'\n'* ]] || die "--env $k: one line"
   if [[ "$k" =~ ^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TMP|TEMP|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|NODE_OPTIONS|NODE_PATH|LD_.*|DYLD_.*|BASH_FUNC_.*|GIT_.*|GH_.*|GITHUB_.*|SSH_.*|CLAUDE_.*|ANTHROPIC_.*|SUDO_.*|WORKLANE_.*|DOCKER_.*|XDG_.*)$ ]]; then die "--env $k: set by the sandbox, never by a run"; fi
   if [ "$k" != DATABASE_URL ] && [[ "$(printf %s "$k" | tr '[:lower:]' '[:upper:]')" =~ TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE ]]; then die "--env $k: looks like a secret; a test run gets none"; fi
+}
+
+# INVARIANT: no variable's value is ever in an argv: not this helper's (sudo logs its whole command line to the
+# journal), not systemd-run's or docker's (any user reads a process's argv with ps or /proc/<pid>/cmdline), and not in
+# the transient unit's Environment= (systemctl show and the unit file under /run/systemd/transient show it to anyone).
+# DATABASE_URL carries the run's database password. So exec reads the run's variables on stdin, and systemd reads
+# them from a root-only file (EnvironmentFile=), removed when the run's command ends and by wipe.
+RUN_ENV=()
+ENV_FILE=
+read_run_env() {
+  local kv=
+  while IFS= read -r -d '' kv; do valid_env "$kv"; RUN_ENV+=("$kv"); kv=; done
+  [ -z "$kv" ] || die "exec: each variable on stdin ends with a NUL"
+  [ "${#RUN_ENV[@]}" -le 256 ] || die "exec: at most 256 variables"
+}
+# A value as an EnvironmentFile= line takes it, literally: double-quoted, with systemd's escapes for \ " ` and $.
+env_quote() {
+  local v="$1"
+  v="${v//\\/\\\\}"; v="${v//\"/\\\"}"; v="${v//\`/\\\`}"; v="${v//\$/\\\$}"
+  printf '"%s"' "$v"
 }
 
 # The clone a run's workspace is made with, as the test user: the same commands as src/testrun/workspace.ts
@@ -244,7 +268,7 @@ shared() {
 }
 
 db_start() {
-  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" maxconn="${5:-}" c pw port i
+  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" maxconn="${5:-}" c pw port i envf
   [ "$#" -eq 5 ] || die "usage: db-start <id> <image@sha256:...> <db> <ready_s> <max_connections>"
   valid_id "$id"
   [[ "$image" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || die "the image must be pinned to its digest, got $image"
@@ -257,10 +281,16 @@ db_start() {
   c="worklane-test-$name-$id"
   pw="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   docker_as_user image inspect "$image" >/dev/null 2>&1 || docker_as_user pull -q "$image" >/dev/null
+  # The password never in docker's argv (the INVARIANT above): in a file of the test user's own, 0600, in the run's
+  # 0700 directory, that the docker client reads and that goes right after. printf is bash's own: no argv either.
+  envf="$(run_dir "$id")/.db-env"
+  as_user rm -f -- "$envf"
+  printf 'POSTGRES_PASSWORD=%s\n' "$pw" | as_user sh -c 'umask 077; set -C; cat > "$1"' _ "$envf"
   # A unique name and a port the daemon picks, on loopback only: any number of runs at once, never a fixed port.
   docker_as_user run -d --name "$c" --label "$LABEL=$name-$id" -p 127.0.0.1::5432 \
-    --tmpfs /var/lib/postgresql/data:rw -e POSTGRES_PASSWORD="$pw" -e POSTGRES_DB="$db" "$image" \
-    -c max_connections="$maxconn" >/dev/null
+    --tmpfs /var/lib/postgresql/data:rw --env-file "$envf" -e POSTGRES_DB="$db" "$image" \
+    -c max_connections="$maxconn" >/dev/null || { as_user rm -f -- "$envf"; exit 1; }
+  as_user rm -f -- "$envf"
   port="$(docker_as_user port "$c" 5432/tcp | sed -n 's/^127\.0\.0\.1:\([0-9]\{1,5\}\)$/\1/p' | head -1)"
   [[ "$port" =~ ^[0-9]+$ ]] || { echo "worklane-testrun: no loopback port for $c" >&2; exit 1; }
   for i in $(seq "$ready"); do
@@ -289,16 +319,11 @@ systemd_command() {
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag
-  local -a envs=() noexpand=()
-  [ "$#" -ge 2 ] || die "usage: exec <id> <timeout_s> [--env K=V]... -- <command>"
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0
+  local -a envfile=() noexpand=()
+  [ "$#" -eq 4 ] && [ "$3" = -- ] || die "usage: exec <id> <timeout_s> -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
   valid_id "$id"; shift 2
   [[ "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || die "timeout_s: seconds, got $timeout"
-  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
-    [ "$1" = --env ] && [ "$#" -ge 2 ] || die "exec: --env NAME=value, then -- <command>"
-    valid_env "$2"; envs+=("--setenv=$2"); shift 2
-  done
-  [ "${1:-}" = -- ] && [ "$#" -eq 2 ] || die "exec: -- then exactly one command string"
   d="$(run_dir "$id")"
   [ -d "$d/work" ] || die "no run $id"
   # WHY: systemd binds the TMPDIR in as root, following a symlink: only the test user's own 0700 directory goes in.
@@ -309,11 +334,23 @@ exec_run() {
   [ -z "$flag" ] || noexpand=("$flag")
   inaccessible="-$sock_dir -$root/docker -$root/docker-home"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
+  # The run's variables (RUN_ENV), for systemd to read from a file of root's only: never on systemd-run's argv nor in
+  # the unit's Environment= (the INVARIANT above). Only the run's own processes get them.
+  if [ "${#RUN_ENV[@]}" -gt 0 ]; then
+    if [ -L "$ENV_DIR" ]; then die "$ENV_DIR is a symlink"; fi
+    [ -d "$ENV_DIR" ] || mkdir -m 0700 -- "$ENV_DIR" 2>/dev/null || [ -d "$ENV_DIR" ] || die "can't make $ENV_DIR"
+    p="$(stat -c '%U %a' -- "$ENV_DIR")"; [ "$p" = "$(id -un) 700" ] || die "$ENV_DIR is $p, not $(id -un)'s and 0700"
+    # Dots: no name or id has one, so wipe's "<name>.<id>.*" is this run's alone.
+    ENV_FILE="$ENV_DIR/$name.$id.$$"
+    trap 'rm -f -- "$ENV_FILE"' EXIT
+    ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
+    envfile=(-p "EnvironmentFile=$ENV_FILE")
+  fi
   # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
   # the run's stdout as its own and reads systemd-run's summary only as the final block of stderr.
-  exec systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} \
+  systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} ${envfile[@]+"${envfile[@]}"} \
     --unit="worklane-test-$name-$id-$$" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
@@ -323,8 +360,15 @@ exec_run() {
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible" \
     --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user" \
-    ${envs[@]+"${envs[@]}"} \
-    /bin/bash -o pipefail -c "$cmd"
+    /bin/bash -o pipefail -c "$cmd" || rc=$?
+  if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
+  return "$rc"
+}
+
+# exec as called: the run's variables from stdin first, then the run (its stdin then at its end, as before).
+exec_cmd() {
+  read_run_env
+  exec_run "$@" </dev/null
 }
 
 # What is left of a run: its units, containers, volumes and directory, one per line ("" when nothing).
@@ -337,6 +381,7 @@ leftovers() {
   fi
   [ ! -e "$(run_dir "$id")" ] || echo "dir $(run_dir "$id")"
   if own_tmp "$(run_tmp "$id")"; then echo "dir $(run_tmp "$id")"; fi
+  for f in "$ENV_DIR/$name.$id."*; do if [ -e "$f" ]; then echo "file $f"; fi; done
   return 0
 }
 
@@ -357,6 +402,8 @@ wipe() {
     [ -z "$vols" ] || docker_as_user volume rm -f $vols >/dev/null
   fi
   rm -rf --one-file-system -- "$(run_dir "$id")"
+  # The run's variables, if an exec was killed before it removed them.
+  rm -f -- "$ENV_DIR/$name.$id."*
   # rm never follows the path itself if it is a symlink, nor one inside it.
   if own_tmp "$(run_tmp "$id")"; then rm -rf --one-file-system -- "$(run_tmp "$id")"; fi
   left="$(leftovers "$id")"
@@ -420,7 +467,7 @@ case "$cmd" in
   cache) cache "$@" ;;
   shared) shared "$@" ;;
   db-start) db_start "$@" ;;
-  exec) exec_run "$@" ;;
+  exec) exec_cmd "$@" ;;
   wipe) wipe "$@" ;;
   check) check "$@" ;;
   *) die "unknown command ${cmd:-(none)}" ;;
