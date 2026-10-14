@@ -40,7 +40,7 @@ export abstract class SuperfanWatch extends Learnings {
     const cfg = this.d.intake?.config() ?? null;
     const sf = cfg?.superfan;
     if (!this.d.superfan || !cfg || !sf?.enabled || !sf.channel || !cfg.discord.enabled || !this.chatSource()) return this.superfanStop();
-    if (this.superfanBusy || this.halt.signal.aborted || this.stopped || this.usagePause()) return;
+    if (this.superfanBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) return;
     this.superfanBusy = true;
     this.superfanRun = (async () => {
       await superfanPass(this.superfanDeps(cfg, 'instance', sf.channel!));

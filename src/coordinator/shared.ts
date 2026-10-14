@@ -117,6 +117,11 @@ export interface CoordinatorDeps {
    */
   prTestRuns?: PrTestRuns;
   /**
+   * The disk guard (src/disk-guard.ts): why no new work may start (the disk is full, or below its floor), or null.
+   * Absent: never held.
+   */
+  disk?: { held(): string | null };
+  /**
    * The test-run service (src/testrun/: startTestRun, postChecks) for PR-mode batching (tests.yaml land.pr_batch).
    * Absent with batching on: queued PRs wait, and nothing merges untested.
    */

@@ -24,7 +24,7 @@ export abstract class HarnessEvals extends SuperfanWatch {
   /** Start a harness eval run when one is due (one at a time). Off unless harness_evals.enabled. */
   async checkHarnessEvals(): Promise<void> {
     const h = this.d.cfg.project.harness_evals;
-    if (!h?.enabled || this.d.harnessEvals?.replay || this.harnessEvalBusy || this.halt.signal.aborted || this.stopped || this.usagePause()) return;
+    if (!h?.enabled || this.d.harnessEvals?.replay || this.harnessEvalBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) return;
     const runs = this.d.log.read(0, ['harness_eval.run']);
     const now = this.d.now?.() ?? new Date();
     const engine = (this.d.harnessEvals?.engine ?? engineSha)();

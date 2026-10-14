@@ -61,7 +61,7 @@ const SUMMARY_MAX = 60_000;
  */
 export function checkOutput(result: TestRunResult, tiers: TestRunResult['tiers'], conclusion: 'success' | 'failure', detailsUrl?: string): { title: string; summary: string } {
   const head = `${result.kind} test run ${result.id}`;
-  const foot = detailsUrl ? `Full logs: [the instance's dashboard](${detailsUrl})` : "Full logs are on the instance's dashboard.";
+  const foot = `${result.note ? `${redactString(result.note)}\n\n` : ''}${detailsUrl ? `Full logs: [the instance's dashboard](${detailsUrl})` : "Full logs are on the instance's dashboard."}`;
   const clean = (x: string) => redactString(x).replace(/```/g, "'''");
   const s = result.setup;
   if (!s) {

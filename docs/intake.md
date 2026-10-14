@@ -109,10 +109,13 @@ discord:
 - **Incidents.** The machine's watchdog (`src/watchdog/`) posts each incident: a service down or crash-looping, an
   engine update rolled back or held, a Claude sign-in failing or a login about to expire, runs paused on the Claude usage limit, the GitHub App's token or
   permissions failing, ready work that hasn't moved for `stall_hours`, the main watch stopping auto-merge, a disk over
-  85%, the test sandbox check failing. One post when it opens (what broke, what was already tried, the one fix, a link
+  85%, an instance's disk full (its event log can't be written: red) or below the free-disk floor (amber), the test
+  sandbox check failing. One post when it opens (what broke, what was already tried, the one fix, a link
   to it on the Health page) and one when it is resolved; at most 5 posts per 10 minutes, machine-wide, and never a
   secret. One coordinator on the machine posts, whichever instances set an ops channel. The machine-level
-  `/etc/<cli>/watchdog.json` may set the thresholds (`stall_hours`, `disk_pct`) and, for instances without their own,
+  `/etc/<cli>/watchdog.json` may set the thresholds (`stall_hours`, `disk_pct`), the free-disk floor before any test
+  run or agent run starts (`min_free_gb`, default 10, and `min_free_pct`, default 5: the larger of the two, on the
+  instance's state and the test runs' filesystems; src/disk-guard.ts) and, for instances without their own,
   `ops_channel` and `dashboard_url`.
 - **The weekly trust digest.** Once a week, the instance's trust numbers and recommendation (src/trust.ts; see
   docs/dashboard.md, "Trust").

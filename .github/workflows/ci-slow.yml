@@ -746,7 +746,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 37
     defaults:
       run:
         shell: bash
@@ -1766,6 +1766,8 @@ jobs:
           path=/api/tailscale; api > "$F/ts-view5.json"
           jq -e '.status.serve and .next==null and (.steps|map(.done)|all)' "$F/ts-view5.json"
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
+      - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
+        run: sudo bash scripts/ci/disk-full-coordinator.sh ci
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
