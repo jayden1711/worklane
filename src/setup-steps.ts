@@ -140,7 +140,7 @@ export type Fix =
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
   | { kind: 'action'; action: string; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
-  | { kind: 'form'; form: 'policy'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -498,7 +498,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'few',
     today: `\`git remote set-head origin --auto\`, then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'default-branch', label: 'Set' },
     detect: (k) => {
       const b = defaultBranch(k);
       if (!b) return no("can't tell the default branch: origin/HEAD isn't set and there's no config yet");
@@ -575,7 +575,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Edit owners in ${BRAND.configDir}/config.yaml (the template's your-github-handle) and merge it through a PR.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -591,7 +591,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks (empty: nothing is ever marked ready).`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -609,7 +609,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Review agents.yaml (budget, models), guardrails.yaml and review.yaml in ${BRAND.configDir}/: they start from the templates.`,
-    fix: { kind: 'screen', path: '/settings', label: 'Settings (read-only here: changed through a reviewed commit)' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
