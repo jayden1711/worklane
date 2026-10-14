@@ -1,5 +1,5 @@
 {
- "source": "CI run 38448843675 (main at f2831a5), jobs test (ubuntu-latest, 22) and (ubuntu-latest, 24): each file is the sum of its top-level tests duration_ms, the larger of the two Node versions; plus 24 files added since, each timed locally (wall clock of node --test <file>, macOS) on main at 7e13344",
+ "source": "CI run 38448843675 (main at f2831a5), jobs test (ubuntu-latest, 22) and (ubuntu-latest, 24): each file is the sum of its top-level tests duration_ms, the larger of the two Node versions; plus 24 files added since, each timed locally (wall clock of node --test <file>, macOS) on main at 7e13344; plus test/intake-check.test.ts, timed the same way (median of three runs)",
  "ms": {
   "test/add-project-requests.test.ts": 466,
   "test/add-project-view.test.ts": 626,
@@ -106,6 +106,7 @@
   "test/instance-settings.test.ts": 599,
   "test/instance.test.ts": 9465,
   "test/intake-alerts.test.ts": 53,
+  "test/intake-check.test.ts": 700,
   "test/intake-coordinator.test.ts": 728,
   "test/intake-exactly-once.test.ts": 870,
   "test/intake-page.test.ts": 422,
