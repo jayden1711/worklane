@@ -39,7 +39,11 @@
 // instance's event log), and after the restart it waits, updates.json "sandbox_wait_minutes" at most (default 5),
 // for a verdict newer than the restart. An instance that passed before and fails after rolls the update back as an
 // unhealthy service does (backups, helpers, the old engine, restart) and holds the commit; the rollback's reason
-// names the instance and the check's own words, redacted. An instance with no test runs, with no verdict before, or
+// names the instance and the check's own words, redacted. That rollback's order: stop the services, put the
+// migrations' backups back, put the old engine's root helpers back (each one the new engine replaced, byte for byte,
+// owner and mode kept), switch /opt/worklane/current back, and only then restart, so the old engine never starts
+// beside a helper of another protocol. A helper that can't be put back is the first thing the reason says.
+// An instance with no test runs, with no verdict before, or
 // already failing before, is never waited for and never rolls anything back. No verdict in time: the install stands
 // and an incident says the check couldn't be confirmed (updates.json "sandbox_on_timeout": "hold" rolls back and
 // holds instead).
@@ -800,6 +804,9 @@ async function update(deps, cfg) {
       const hb = current ? helpersBack(deps, current) : {};
       if (current) deps.switchTo(current);
       const back = current ? await settle() : { h: 'failed' };
+      // WHY: an old engine left with the new one's helpers has no test runs either (another protocol): that is not a
+      // clean rollback, and it goes first in the reason so the incident says it before anything else.
+      if (hb.helpers_error) failed.unshift(`rollback: the old engine's root helpers could NOT be put back (${hb.helpers_error}); its test runs are off until they are: sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`);
       deps.hold({ sha: head, at: new Date(deps.now()).toISOString(), failed });
       // INVARIANT: the reason names the instance and what its check said: the watchdog's update_rollback incident quotes it.
       deps.log({ event: 'rolled_back', from: head, to: current, units, reason: failed.join('; '), sandbox, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });

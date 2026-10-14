@@ -10,8 +10,12 @@ import { sandboxVerdict as startupVerdict } from '../src/testrun/status.js';
 import { updateLog } from '../src/updates.js';
 import { updateFindings } from '../src/watchdog/probes.js';
 import { KINDS } from '../src/watchdog/index.js';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { basename, dirname } from 'node:path';
+import { checkHelper, HELPER_PROTOCOL } from '../src/testrun/helper.js';
+import type { RunHost } from '../src/testrun/host.js';
 import { repoRoot } from './helpers.js';
 
 type Inst = { unit: string; name: string; user: string; env: string[] };
@@ -25,7 +29,10 @@ const u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'w
   sandboxWaitMs(cfg: unknown): number;
   SANDBOX_INCIDENT: string;
   SANDBOX_POLL_MS: number;
+  HELPERS: Helper[];
+  syncHelpers(engineDir: string, helpers?: Helper[]): { path: string; state: string }[];
 };
+type Helper = { dest: string; src: string; check: string };
 
 const OLD = 'a'.repeat(40);
 const NEW = 'b'.repeat(40);
@@ -45,7 +52,7 @@ const passedBefore: Status = { configured: true, last: { ok: true, detail: 'ok',
  * A machine with these instances, updating from OLD to NEW. Every unit comes up healthy on either engine. The fake
  * sandboxStatus is the instance's own log: the old verdict until its new process has said.
  */
-function machine(instances: Record<string, InstanceSpec>, cfg: Record<string, unknown> = {}) {
+function machine(instances: Record<string, InstanceSpec>, cfg: Record<string, unknown> = {}, over: { syncHelpers?: (sha: string) => { path: string; state: string }[]; onStatusAfterRestart?: () => void } = {}) {
   const calls: string[] = [];
   const logs: Record<string, unknown>[] = [];
   const incidents: string[] = [];
@@ -77,7 +84,7 @@ function machine(instances: Record<string, InstanceSpec>, cfg: Record<string, un
     slots: () => [],
     alive: () => false,
     installTree: () => {},
-    syncHelpers: (sha: string) => (calls.push(`syncHelpers ${sha.slice(0, 4)}`), [{ path: '/usr/local/libexec/worklane-testrun', state: 'updated' }]),
+    syncHelpers: (sha: string) => (calls.push(`syncHelpers ${sha.slice(0, 4)}`), over.syncHelpers ? over.syncHelpers(sha) : [{ path: '/usr/local/libexec/worklane-testrun', state: 'updated' }]),
     switchTo: (sha: string) => ((engine = sha), calls.push(`switchTo ${sha.slice(0, 4)}`)),
     now: () => clock,
     sleep: async (ms: number) => void (clock += ms),
@@ -91,6 +98,7 @@ function machine(instances: Record<string, InstanceSpec>, cfg: Record<string, un
       const spec = instances[inst.name]!;
       asked.push(`${inst.name}${restartedAt === null ? ' before' : ''}`);
       if (restartedAt === null || spec.before === null) return spec.before;
+      over.onStatusAfterRestart?.();
       const s = spec.says;
       if (s === 'never' || clock < restartedAt + (s.after ?? 0)) return spec.before;
       return { configured: true, last: { ok: s.ok, detail: s.detail ?? (s.ok ? 'ok' : FAIL), at: at(restartedAt + (s.after ?? 0)) } };
@@ -224,4 +232,102 @@ test('the instance\'s startup verdict, from its events: the sandbox check\'s new
   // An outdated helper skips the check and refuses every run: that start's verdict is a failure too.
   const third = [...first, ev('testrun.helper', { ok: false, have: 4, need: 5, detail: 'the helper speaks protocol 4, this engine needs 5' }, at(T0 + 2 * MIN))];
   assert.deepEqual(startupVerdict(third), { ok: false, detail: 'the helper speaks protocol 4, this engine needs 5', at: at(T0 + 2 * MIN) });
+});
+
+/**
+ * A machine's root helpers on disk, and two engines' copies of every one in HELPERS: the old engine's are this
+ * repo's own files, the new engine's differ in bytes (the test-run helper speaks the next protocol, as a helper
+ * change does). syncHelpers is the updater's real one, on these paths.
+ */
+function helperWorld() {
+  const root = mkdtempSync(join(tmpdir(), 'upd-helpers-'));
+  const libexec = join(root, 'libexec');
+  mkdirSync(libexec);
+  const helpers = u.HELPERS.map((h) => ({ ...h, dest: join(libexec, basename(h.dest)) }));
+  const bytes: Record<string, Record<string, Buffer>> = { [OLD]: {}, [NEW]: {} };
+  for (const h of u.HELPERS) {
+    const own = readFileSync(join(repoRoot, h.src));
+    const next = /worklane-testrun\.sh$/.test(h.src) ? Buffer.from(own.toString('utf8').replace(/^PROTOCOL=\d+$/m, `PROTOCOL=${HELPER_PROTOCOL + 1}`)) : Buffer.concat([own, Buffer.from(h.check === 'node' ? '\n// the next engine\'s\n' : '\n# the next engine\'s\n')]);
+    assert.ok(!own.equals(next), `${h.src}: the new engine's copy differs`);
+    for (const [sha, b] of [[OLD, own], [NEW, next]] as const) {
+      const f = join(root, 'opt', sha, h.src);
+      mkdirSync(dirname(f), { recursive: true });
+      writeFileSync(f, b);
+      bytes[sha]![h.src] = b;
+    }
+  }
+  // Installed as the setup scripts leave them: the old engine's copies, each with its own mode.
+  const modes = [0o755, 0o750, 0o555];
+  helpers.forEach((h, i) => {
+    writeFileSync(h.dest, bytes[OLD]![h.src]!);
+    chmodSync(h.dest, modes[i % modes.length]!);
+  });
+  const stat = () => helpers.map((h) => ((st) => ({ uid: st.uid, gid: st.gid, mode: st.mode & 0o7777 }))(statSync(h.dest)));
+  const onDisk = (sha: string) => helpers.every((h) => readFileSync(h.dest).equals(bytes[sha]![h.src]!));
+  /** The engine's own protocol check (src/testrun/helper.ts), asking the test-run helper on disk for its version. */
+  const protocol = () => {
+    const testrun = helpers.find((h) => /testrun$/.test(h.dest))!;
+    const host = { helperVersion: async () => ((r) => ({ version: Number(r.stdout.trim()), stderr: r.stderr }))(spawnSync('bash', [testrun.dest, 'alice', 'version'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '' } })) } as unknown as RunHost;
+    return checkHelper(host, 'alice');
+  };
+  return { root, libexec, helpers, stat, onDisk, protocol, sync: (sha: string) => u.syncHelpers(join(root, 'opt', sha), helpers) };
+}
+
+const posix = process.platform !== 'win32';
+
+test('the sandbox rollback puts every root helper back: byte for byte the old engine\'s, same owner and mode, before the old engine restarts; its protocol check passes', { skip: !posix && 'POSIX modes and bash' }, async () => {
+  const h = helperWorld();
+  assert.ok(u.HELPERS.length >= 3 && h.helpers.length === u.HELPERS.length, 'every helper in HELPERS');
+  const before = h.stat();
+  assert.deepEqual(await h.protocol().then((p) => [p.ok, p.have]), [true, HELPER_PROTOCOL], 'the old engine and its helper agree to begin with');
+  let sawNew = false;
+  const atRestart: boolean[] = [];
+  const m = machine({ alice: { before: passedBefore, says: { ok: false } } }, {}, {
+    syncHelpers: (sha) => h.sync(sha),
+    // The new engine is running here: every helper on disk is its copy, and the old engine would refuse the test-run one.
+    onStatusAfterRestart: () => void (sawNew = h.onDisk(NEW)),
+  });
+  // What is on disk each time the units are restarted.
+  const exec = m.deps.exec;
+  m.deps.exec = (file: string, args: string[]) => {
+    if (file === 'systemctl' && args[0] === 'restart') atRestart.push(h.onDisk(m.engine()));
+    return exec(file, args);
+  };
+  assert.equal(await u.run(m.deps), 'rolled_back');
+  assert.ok(sawNew, 'the install had replaced every helper with the new engine\'s bytes');
+  assert.ok(h.onDisk(OLD), 'after the rollback every helper is byte for byte the old engine\'s copy');
+  assert.deepEqual(h.stat(), before, 'the same owner, group and mode as before the update');
+  assert.deepEqual(await h.protocol().then((p) => [p.ok, p.have, p.detail]), [true, HELPER_PROTOCOL, ''], 'the old engine\'s protocol check passes on the helper on disk');
+  assert.deepEqual(atRestart, [true, true], 'each engine started beside its own helpers: the old one\'s were back before its restart');
+  assert.deepEqual(m.calls.slice(-4), ['stop on bbbb', 'restore alice', 'syncHelpers aaaa', 'switchTo aaaa', 'restart on aaaa'].slice(-4), 'stop, backups, helpers, switch, restart');
+  const rb = m.last('rolled_back') as Record<string, unknown>;
+  assert.deepEqual((rb.helpers as { path: string; state: string }[]).map((x) => [basename(x.path), x.state]).sort(), u.HELPERS.map((x) => [basename(x.dest), 'updated']).sort(), 'the log names each helper put back');
+  assert.equal(rb.helpers_error, undefined);
+  assert.doesNotMatch(String(rb.reason), /could NOT be put back/);
+});
+
+test('a helper that can\'t be put back is not a clean rollback: the reason, the hold and the incident say so first', { skip: (!posix || process.getuid?.() === 0) && 'needs POSIX permissions as a non-root user' }, async () => {
+  const h = helperWorld();
+  const m = machine({ alice: { before: passedBefore, says: { ok: false } } }, {}, {
+    syncHelpers: (sha) => h.sync(sha),
+    // After the new engine's helpers went in, the directory stops taking writes: the way back fails.
+    onStatusAfterRestart: () => chmodSync(h.libexec, 0o555),
+  });
+  try {
+    assert.equal(await u.run(m.deps), 'rolled_back');
+  } finally {
+    chmodSync(h.libexec, 0o755);
+  }
+  assert.equal(m.engine(), OLD, 'the engine still goes back');
+  assert.ok(h.onDisk(NEW), 'the new engine\'s helpers are still on disk');
+  assert.equal((await h.protocol()).ok, false, 'and the old engine refuses the test-run helper');
+  const rb = m.last('rolled_back') as Record<string, unknown>;
+  assert.match(String(rb.reason), /^rollback: the old engine's root helpers could NOT be put back \(couldn't replace .*worklane-[a-z-]+ with .*\); its test runs are off until they are: sudo bash \/opt\/worklane\/current\/scripts\/setup\/test-user\.sh update-helper; rollback: the test sandbox check passed before the update and fails after it: alice: /);
+  assert.match(String(rb.helpers_error), /couldn't replace/);
+  assert.match(m.held()!.failed[0]!, /could NOT be put back/);
+  const dir = mkdtempSync(join(tmpdir(), 'upd-'));
+  writeFileSync(join(dir, 'updates.jsonl'), m.logs.map((l) => JSON.stringify(l)).join('\n'));
+  const findings = updateFindings(updateLog(join(dir, 'updates.jsonl')));
+  assert.equal(findings[0]!.kind, 'update_rollback');
+  assert.match(findings[0]!.detail, /was rolled back and is held: rollback: the old engine's root helpers could NOT be put back/);
 });
