@@ -429,8 +429,12 @@ async function serverMachine() {
     return r.status === 0 && r.out ? JSON.parse(r.out) : null;
   };
   const tsStep = async (step, during) => {
-    await open('/machine');
     const card = `[data-testid="tailscale-step"][data-step="${step}"]`;
+    // The page offers the next step once it has read the last one's end (its status is read every few seconds).
+    await until(`tailscale ${step} offered`, async () => {
+      await open('/machine');
+      return until('the step button enabled', () => evaluate(`(() => { const b = ${q(`${card} ${tid('tailscale-step-run')}`)}; return !!b && !b.disabled; })()`), 10_000, 500).catch(() => false);
+    }, 120_000, 1000);
     await click(`${card} ${tid('tailscale-step-run')}`);
     await waitFor(`${card} ${tid('tailscale-step-confirm')}`);
     await click(`${card} ${tid('tailscale-step-confirm-run')}`);
