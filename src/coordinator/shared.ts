@@ -54,6 +54,8 @@ export interface CoordinatorDeps {
   appKeyPath?: string;
   maxAttempts?: number;
   leaseMs?: number;
+  /** WHY: tests shorten it; a task waiting on another's files re-checks this often (ms; default 15 s). */
+  ownershipPollMs?: number;
   /** How often each open PR is polled for its checks (ms; default 60 s). */
   prPollMs?: number;
   /** How often the harness's open PRs are read for new reviews that start a fix run (ms; default REVIEW_FIX_POLL_MS, 5 min). */
