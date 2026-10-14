@@ -17,6 +17,7 @@ import { Badge, Button, cx } from './ui';
 import { ComposerMic, MicInterim, mayDictate, useDictation } from '../voice/Mic';
 import { useVoicePrefs } from '../voice/prefs';
 import { TalkStatus, mayTalk, useTalkBack } from '../voice/TalkBack';
+import { onWake, setDictating, startOnWake } from '../voice/wake';
 
 const MAX = 4000;
 const POLL_MS = 2000;
@@ -270,6 +271,19 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
   const talk = useTalkBack({ active: open && mayTalk(role, voice), prefs: voice });
   // WHY: only answers that arrive while this page is open are read; the ones restored on load were heard before.
   const heard = useRef(new Set(restored.turns.flatMap((t) => t.asks.map((a) => a.id))));
+
+  // The wake word (voice/wake.ts): open the panel, then start dictating into the box once the mic can. Nothing sends.
+  const woken = useRef(false);
+  useEffect(() => onWake(() => ((woken.current = true), setOpen(true))), []);
+  useEffect(() => {
+    if (!woken.current) return;
+    const r = startOnWake({ support: mic.support, listening: mic.listening, start: mic.toggle });
+    if (r === 'pending') return;
+    woken.current = false;
+    // WHY: dictation can't start here (no on-device recognition): the wake word listens again.
+    if (r === 'unavailable') setDictating(false);
+  });
+  useEffect(() => setDictating(mic.listening), [mic.listening]);
 
   useEffect(() => {
     void Promise.all([hub, hubInstance]).then(([h, current]) => {
