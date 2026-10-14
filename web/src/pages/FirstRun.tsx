@@ -11,6 +11,7 @@ import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
+import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -196,7 +197,7 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
   // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid), and a
   // sign-in is rerunnable (another account, an expired login); any step opened from Settings' Setup list can be run
   // again; a skipped step stays closed until the skip is undone.
-  const offered = rerun || (!s.skipped && (!s.done || s.fix.kind === 'form' || s.fix.kind === 'signin'));
+  const offered = rerun || (!s.skipped && (!s.done || (s.fix.kind === 'form' && s.fix.form !== 'setup-origin' && s.fix.form !== 'setup-config') || s.fix.kind === 'signin'));
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'}>
       <div className="flex gap-3">
@@ -315,7 +316,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, rerun = null, signin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; rerun?: string | null; signin?: ClaudeSigninData | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -340,6 +341,12 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
   };
   return (
     <div className="space-y-5">
+      {f.setupMode && (
+        <Card className="space-y-1 p-4" data-testid="first-run-setup-mode">
+          <div className="text-[13px] font-medium text-ink">{f.configReady ? 'The config is here: opening the dashboard…' : 'Setup mode: this checkout has no config yet'}</div>
+          <p className="text-[12.5px] text-ink-2">Pick its GitHub repo, answer what auto-config asks, draft the config and merge its PR. The rest of the dashboard opens here on its own once the config is on the default branch and in this checkout.</p>
+        </Card>
+      )}
       {skipError && (
         <p className="break-words text-[12.5px] text-red" data-testid="first-run-skip-error">
           {skipError}
@@ -408,7 +415,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       ) : (
                         <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} />
                       )
-                    ) : undefined
+                    ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
+                      <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
+                      <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
+                    ) : (
+                      <FixPanel s={s} />
+                    )
                   }
                 />
               ))}
@@ -417,7 +430,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
         </section>
       ))}
       <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
-      {f.autoConfig && <AutoConfigView a={f.autoConfig} />}
+      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
           <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
@@ -473,12 +486,18 @@ export function FirstRunPage({ state }: { state: State }) {
     [refused],
   );
   useEffect(() => load(false), [load, state.lastId]);
-  // Live while open: a provider login done in another tab shows here without a click.
+  const setupMode = !!(f && 'setupMode' in f && f.setupMode);
+  const drafting = !!(f && 'draft' in f && f.draft?.running);
+  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app.
+  useEffect(() => {
+    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.reload();
+  }, [f, state.setupMode]);
+  // Live while open: a provider login done in another tab shows here without a click; faster while setting up.
   useEffect(() => {
     if (refused) return;
-    const t = window.setInterval(() => load(false), POLL_MS);
+    const t = window.setInterval(() => load(false), drafting || setupMode ? 3_000 : POLL_MS);
     return () => window.clearInterval(t);
-  }, [load, refused]);
+  }, [load, refused, drafting, setupMode]);
   return (
     <div data-testid="page-first-run">
       <Header title="First run" sub={f && 'setup' in f && f.setup ? `${f.setup.done} of ${f.setup.total} steps done` : 'the guided setup, step by step'} />

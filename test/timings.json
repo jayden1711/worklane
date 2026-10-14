@@ -202,6 +202,7 @@
   "test/setup-actions.test.ts": 4416,
   "test/setup-automation.test.ts": 1418,
   "test/setup-install-check.test.ts": 55,
+  "test/setup-mode.test.ts": 5081,
   "test/setup-scripts.test.ts": 52041,
   "test/shell.test.ts": 6,
   "test/shutdown.test.ts": 3226,

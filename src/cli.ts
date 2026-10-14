@@ -34,6 +34,7 @@ import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
 import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
+import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
@@ -702,10 +703,32 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       const instance = instanceOpt;
+      const portOpt = option(opts, '--port');
+      let fromSetup = false;
+      if (needsSetupMode(root, instance)) {
+        // WHY: no config yet: the first-run page alone (src/setup-mode.ts) until the checkout's config loads, then the dashboard.
+        let login = '';
+        try {
+          login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+        } catch {
+          // not signed in to gh yet: the first-run page says so
+        }
+        const cfg = setupModeConfig(root, login || undefined);
+
+        const port = portOpt ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
+        const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: login || cfg.project.owners.default, port, setupMode: {} });
+        // INVARIANT: the dashboard's key is never in a URL this prints or opens: the page asks for it once (src/dashboard-detach.ts).
+        const shown = setupModeLines(root, port);
+        console.log(shown.lines.join('\n'));
+        if (!flag(opts, '--no-open') && !service) openUrl(shown.url);
+        while (!configReady(root)) await new Promise((r) => setTimeout(r, 2_000));
+        await d.close();
+        console.log(`the config is here: switching to the dashboard`);
+        fromSetup = true;
+      }
       // An instance's log is readable only by its coordinator user: run this as that user.
       const site = dashboardSite(root, instance);
       const cfg = site.cfg;
-      const portOpt = option(opts, '--port');
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
       const app = flag(opts, '--app');
@@ -720,7 +743,7 @@ async function main(argv: string[]): Promise<number> {
       }
       user = user || cfg.project.owners.default;
       const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(instance ? { instance } : {}) });
-      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
+      console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${service || fromSetup ? `${d.url.split('?')[0]} (token in ${join(site.stateDir, 'dashboard-token')})` : d.url}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {
         const bin = desktopBinary();
@@ -732,7 +755,8 @@ async function main(argv: string[]): Promise<number> {
         }
         console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
       }
-      if (!noOpen && !service) openUrl(d.url);
+      // WHY: the setup page in the browser reloads itself onto this one (web/src/pages/FirstRun.tsx).
+      if (!noOpen && !service && !fromSetup) openUrl(d.url);
       await new Promise(() => {});
       return 0;
     }

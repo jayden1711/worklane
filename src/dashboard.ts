@@ -68,7 +68,11 @@ import { SETUP_STEPS, type DetectCache, type SetupContext, type SetupProbe } fro
 export const SKIPS_FILE = 'first-run-skips.json';
 import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
 import { ConfigChangeError, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
-import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
+import { configReady, newDraftJob, originPlan, pushableRepos, saveAnswers, setOrigin, setupPrMerge, SetupModeError, startDraft, type Run as SetupRun } from './setup-mode.js';
+import { systemProbe } from './setup-steps.js';
+import { gitRemoteRepo } from './install.js';
+import type { InitIo } from './init.js';
+import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan } from './setup-actions.js';
 import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
@@ -185,6 +189,8 @@ export interface DashboardOptions {
   setupActions?: Partial<ActionDeps>;
   /** WHY: tests stand in for claude auth login and claude auth status (src/claude-signin.ts). */
   claudeSignin?: Partial<SigninDeps>;
+  /** WHY: a checkout with no config yet (src/setup-mode.ts): the first-run page alone; tests stand in for its commands. */
+  setupMode?: { run?: SetupRun; io?: InitIo };
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -195,7 +201,8 @@ export type FirstRunStart =
   | { kind: 'owner-command'; unit: string; command: string; why: string }
   | { kind: 'unsupported'; why: string };
 
-export function firstRunStart(o: { root: string; cfg: Config; instance?: string | null }): FirstRunStart {
+export function firstRunStart(o: { root: string; cfg: Config; instance?: string | null; setupMode?: unknown }): FirstRunStart {
+  if (o.setupMode) return { kind: 'unsupported', why: "the coordinator starts from this checkout's own config, and it has none yet: finish the repo config first" };
   if (o.instance) {
     const unit = instanceUnit(o.instance);
     // The machine helper's commands run through the coordinator (src/machine-requests.ts), and the coordinator is the
@@ -829,6 +836,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   let lastFresh = 0;
   const actionDeps = (): ActionDeps => ({ ...systemActionDeps(), ...opts.setupActions });
   const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
+  // INVARIANT: in setup mode the config is a stand-in, so only a fix that doesn't read it may run.
+  const planFor = (id: ActionId): ActionPlan =>
+    opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(), actionDeps());
+  const setupRun = (): SetupRun => opts.setupMode?.run ?? ((cmd, args, o) => systemProbe().run(cmd, args, o));
+  const draft = newDraftJob();
   const readSkips = (): string[] => {
     try {
       const j = JSON.parse(readFileSync(join(opts.stateDir, SKIPS_FILE), 'utf8')) as { skipped?: unknown };
@@ -881,6 +893,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const slots = slotStatus(opts.slotsDir);
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
+      setupMode: !!opts.setupMode,
       project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
       user: who.login,
       role: who.role,
@@ -1295,11 +1308,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (fresh) lastFresh = Date.now();
           const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, context: { ...opts.setupContext, skipped: readSkips() } };
           // A server instance's record is the machine's (src/init.ts serverInitFile), readable by its coordinator group.
-          const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
+          const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.setupMode ? (gitRemoteRepo(opts.root) ?? '') : opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
           // Each open action's plan, shown before its button does anything (all local reads: no network).
           const actions: Record<string, ActionPlan> = {};
           // WHY: a done step's fix can be run again (from Settings' Setup list), so every action's plan is here.
-          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = actionPlan(s.fix.action, actionContext(), actionDeps());
+          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = planFor(s.fix.action);
           const policy = opts.policyFile ? policyForm(opts.policyFile, opts.limitsPath) : null;
           // A checkout's config as the default branch has it (what a change is proposed against); a server's is add-project's.
           let repoConfig: ReturnType<typeof repoConfigForm> | { error: string } | null = null;
@@ -1310,7 +1323,55 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               repoConfig = { error: (e as Error).message.split('\n').slice(0, 2).join(' ') };
             }
           }
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig });
+          const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, ...setup });
+        }
+        // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
+        // without confirm, what it would do; every run and refusal audited.
+        if (url.pathname.startsWith('/api/first-run/setup/')) {
+          const what = url.pathname.slice('/api/first-run/setup/'.length);
+          const file = join(opts.stateDir, INIT_FILE);
+          if (!opts.setupMode) return json(res, 404, { error: 'not in setup mode: this checkout has its config' });
+          if (req.method === 'GET' && what === 'repos') return isWriter(who.role) ? json(res, 200, pushableRepos(setupRun())) : json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          if (req.method === 'GET' && what === 'draft') return json(res, 200, draft);
+          if (req.method !== 'POST' || !['origin', 'answers', 'draft', 'merge'].includes(what)) return json(res, 404, { error: `no setup route ${what}` });
+          const body = ((await readBody(req)) ?? {}) as { repo?: unknown; answers?: unknown; confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.setup_refused', { what, why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refused(403, `only the owners may set this checkout up; @${who.login} is a ${who.role}`);
+          try {
+            if (what === 'origin') {
+              const plan = originPlan(opts.root, body.repo);
+              if (body.confirm !== true) return json(res, 200, { ok: true, commands: plan.commands.map((c) => c.join(' ')), confirmed: false });
+              setOrigin(opts.root, plan.repo, setupRun());
+              audit(who, 'first_run.setup_origin', { repo: plan.repo });
+              return json(res, 200, { ok: true, repo: plan.repo, confirmed: true });
+            }
+            if (what === 'answers') {
+              const r = saveAnswers(file, opts.root, body.answers && typeof body.answers === 'object' ? (body.answers as Record<string, unknown>) : {});
+              audit(who, 'first_run.setup_answers', { saved: r.saved });
+              return json(res, 200, { ok: true, ...r });
+            }
+            if (what === 'draft') {
+              if (body.confirm !== true) return refused(400, 'Draft runs your project\'s commands on a scratch copy of the default branch: confirm it ({"confirm": true})');
+              void startDraft({ root: opts.root, file, job: draft, ...(opts.setupMode.io ? { io: opts.setupMode.io } : {}) });
+              audit(who, 'first_run.setup_draft', {});
+              return json(res, 202, { ok: true, draft });
+            }
+            const m = setupPrMerge(file, opts.root, setupRun());
+            if (body.confirm !== true) return json(res, 200, { ok: true, number: m.number, url: m.url, command: m.command.join(' '), confirmed: false });
+            const r = setupRun()(m.command[0]!, m.command.slice(1), { cwd: opts.root });
+            if (r.status !== 0) return refused(502, `GitHub didn't merge PR #${m.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`);
+            audit(who, 'first_run.setup_merge', { number: m.number, method: m.command.at(-1) });
+            // The merged config comes into this checkout as `init` brings it: a fetch and a fast-forward.
+            if (!draft.running) void startDraft({ root: opts.root, file, job: draft, ...(opts.setupMode.io ? { io: opts.setupMode.io } : {}) });
+            return json(res, 200, { ok: true, number: m.number, confirmed: true });
+          } catch (e) {
+            if (e instanceof SetupModeError) return refused(e.status, e.message);
+            throw e;
+          }
         }
         // The checks GitHub ran on the default branch's tip: what the Repo config form offers as required checks.
         if (url.pathname === '/api/first-run/checks-seen' && req.method === 'GET') {
@@ -1396,7 +1457,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!isActionId(id)) return refused(404, `no first-run action ${id}`);
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may run a first-run fix; @${who.login} is a ${who.role}`);
-          const plan = actionPlan(id, actionContext(), actionDeps());
+          const plan = planFor(id);
           if (!plan.available) return refused(409, `not run: ${plan.why ?? 'not available here'}`);
           if (body.confirm !== true) return refused(400, `${plan.label} changes this machine: review what it shows, then confirm it ({"confirm": true})`);
           if (actionRunning) return refused(409, `${actionRunning} is running: one fix at a time`);
