@@ -51,6 +51,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string } }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -2282,6 +2283,17 @@ test("the first-run page's Discord step: the token's place and a paste box, the 
   assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
   const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
   assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
+});
+
+test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  assert.doesNotMatch(r.renderRepoConfigForm(c), /repo-config-merge/, 'nothing to merge before a PR is proposed');
+  const proposed = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7' });
+  assert.match(proposed, /data-testid="repo-config-result"[^>]*>proposed: merge the PR to apply it/);
+  assert.match(proposed, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"/);
+  assert.match(proposed, /data-testid="repo-config-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
+  const confirming = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7', mergePlan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash', then: "then this checkout's main is fast-forwarded to origin's" } });
+  assert.match(confirming, /data-testid="repo-config-merge-confirming"[\s\S]*?gh pr merge 7 --repo example-org\/example-shop --squash[\s\S]*?fast-forwarded to origin(&#x27;|')s\.[\s\S]*?data-testid="repo-config-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="repo-config-merge-cancel"/);
 });
 
 test('Tailscale: the read that shows a step ended offers the next step at once, from the status after it, with no wait for the idle poll', { skip: process.platform === 'win32' }, async () => {

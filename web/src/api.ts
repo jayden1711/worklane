@@ -832,6 +832,9 @@ export interface ConfigChange {
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
+/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
+export const mergeRepoConfig = (number: number, confirm: boolean) =>
+  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
