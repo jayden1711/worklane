@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:pat
 import { fileURLToPath } from 'node:url';
 import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
-import { loadConfig } from './config/load.js';
+import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
 import { writeOwnerOnly } from './os/index.js';
 import { toolBin } from './tool-path.js';
@@ -213,12 +213,20 @@ export function install(opts: InstallOptions): InstallReport {
   }
   const report: InstallReport = { scaffolded, settingsPath, notes };
   if (opts.gitHooks) {
-    report.gitHook = installGitHook(root);
-    // land_mode direct lands by pushing the default branch: there the hook would refuse the landing itself.
-    if (cfg.project.land_mode === 'direct') notes.push('no pre-push hook: land_mode direct lands by pushing the default branch');
-    else report.prePushHook = installCheckoutPrePush(root, [cfg.project.project.default_branch], resolve(opts.engineCli ?? running));
+    const h = installGitHooks(root, cfg, resolve(opts.engineCli ?? running));
+    report.gitHook = h.gitHook;
+    if (h.prePushHook) report.prePushHook = h.prePushHook;
+    notes.push(...h.notes);
   } else notes.push('git pre-commit secret scan not installed (pass --git-hooks); it applies to every worktree of the repo');
   return report;
+}
+
+/** WHY: `install --git-hooks` and the first-run page's Fix install the same hooks, from one place. */
+export function installGitHooks(root: string, cfg: Config, engineCli = fileURLToPath(new URL('./cli.js', import.meta.url))): { gitHook: string; prePushHook?: string; notes: string[] } {
+  const gitHook = installGitHook(root);
+  // land_mode direct lands by pushing the default branch: there the hook would refuse the landing itself.
+  if (cfg.project.land_mode === 'direct') return { gitHook, notes: ['no pre-push hook: land_mode direct lands by pushing the default branch'] };
+  return { gitHook, prePushHook: installCheckoutPrePush(root, [cfg.project.project.default_branch], engineCli), notes: [] };
 }
 
 /**

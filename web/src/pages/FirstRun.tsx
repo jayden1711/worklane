@@ -3,8 +3,8 @@
 // or the provider's own page (a login, a consent) with this page noticing when it's done. It checks again on a short
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
-import { useCallback, useEffect, useState } from 'react';
-import { getFirstRun, startCoordinator, type FirstRun, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
@@ -76,6 +76,84 @@ function AutoConfigView({ a }: { a: FirstRunAutoConfig }) {
 }
 
 
+/** WHY: a Fix the dashboard does itself shows its whole plan first, then needs a second click to confirm (owners only). */
+function ActionPanel({ plan, canAct, initialConfirming = false, onDone }: { plan: FirstRunActionPlan | undefined; canAct: boolean; initialConfirming?: boolean; onDone: () => void }) {
+  const [confirming, setConfirming] = useState(initialConfirming);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  if (!plan) return <p className="text-[12.5px] text-ink-3">Checking what it would do…</p>;
+  const go = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await runFirstRunAction(plan.id);
+      setMsg({ ok: true, text: r.detail });
+      setConfirming(false);
+      onDone();
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2" data-testid="first-run-action" data-action={plan.id}>
+      {!plan.available ? (
+        <p className="break-words text-[12.5px] text-ink-2" data-testid="first-run-action-unavailable">
+          Not from here: {plan.why}.
+        </p>
+      ) : (
+        <>
+          <div className="space-y-1.5 text-[12.5px] text-ink-2" data-testid="first-run-action-plan">
+            {!!plan.changes.length && (
+              <>
+                <p>{plan.label} changes:</p>
+                <ul className="list-disc space-y-1 pl-5">
+                  {plan.changes.map((c) => (
+                    <li key={c} className="break-words">
+                      {c}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {!!plan.commands.length && (
+              <>
+                <p>It runs:</p>
+                <code className={code}>{plan.commands.join('\n')}</code>
+              </>
+            )}
+          </div>
+          {!canAct ? (
+            <p className="text-[12.5px] text-ink-3" data-testid="first-run-action-refused">
+              Only the instance's owners can run it.
+            </p>
+          ) : !confirming ? (
+            <Button size="sm" onClick={() => setConfirming(true)} data-testid="first-run-action-button">
+              {plan.label}…
+            </Button>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg bg-blue-tint p-3" data-testid="first-run-action-confirming">
+              <span className="text-[12.5px] text-ink">Make the change above?</span>
+              <Button size="sm" disabled={busy} onClick={() => void go()} data-testid="first-run-action-confirm">
+                {busy ? 'Working…' : 'Confirm'}
+              </Button>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)} data-testid="first-run-action-cancel">
+                Cancel
+              </Button>
+            </div>
+          )}
+        </>
+      )}
+      {msg && (
+        <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="first-run-action-result">
+          {msg.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /** What a step's Fix shows when it has no screen to open: today's way, a provider's page, or a terminal command. */
 function FixPanel({ s }: { s: SetupStepView }) {
   const f = s.fix;
@@ -109,8 +187,8 @@ function FixPanel({ s }: { s: SetupStepView }) {
   );
 }
 
-function StepRow({ s, open, onFix }: { s: SetupStepView; open: boolean; onFix: () => void }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : 'Fix';
+function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
       <div className="flex gap-3">
@@ -133,7 +211,7 @@ function StepRow({ s, open, onFix }: { s: SetupStepView; open: boolean; onFix: (
       </div>
       {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          <FixPanel s={s} />
+          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
         </div>
       )}
     </li>
@@ -217,7 +295,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
   const [open, setOpen] = useState<string | null>(initialOpen);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
@@ -275,7 +353,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           <Card className="overflow-hidden">
             <ol className="divide-y divide-line" data-testid="first-run-steps">
               {g.steps.map((s) => (
-                <StepRow key={s.id} s={s} open={open === s.id} onFix={() => fix(s)} />
+                <StepRow
+                  key={s.id}
+                  s={s}
+                  open={open === s.id}
+                  onFix={() => fix(s)}
+                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                />
               ))}
             </ol>
           </Card>

@@ -60,6 +60,7 @@ import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
@@ -158,6 +159,8 @@ export interface DashboardOptions {
   setupContext?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
   /** The first-run page's Start: installs and starts the coordinator's service; the OS adapter's installService when unset (tests). */
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
+  /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
+  setupActions?: Partial<ActionDeps>;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -798,6 +801,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
   const setupCache: DetectCache = new Map();
   let lastFresh = 0;
+  const actionDeps = (): ActionDeps => ({ ...systemActionDeps(), ...opts.setupActions });
+  const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
+  // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
+  let actionRunning: string | null = null;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1216,7 +1223,36 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, ...(opts.setupContext ? { context: opts.setupContext } : {}) };
           // A server instance's record is the machine's (src/init.ts serverInitFile), readable by its coordinator group.
           const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere });
+          // Each open action's plan, shown before its button does anything (all local reads: no network).
+          const actions: Record<string, ActionPlan> = {};
+          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (!s.done && s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = actionPlan(s.fix.action, actionContext(), actionDeps());
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere });
+        }
+        // A Fix action (src/setup-actions.ts): the owners only, after they confirmed the plan the page showed; every run
+        // and refusal audited. Its step is checked again on the next poll.
+        const actionMatch = /^\/api\/first-run\/actions\/([a-z-]+)$/.exec(url.pathname);
+        if (actionMatch && req.method === 'POST') {
+          const id = actionMatch[1]!;
+          const body = ((await readBody(req)) ?? {}) as { confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.action_refused', { action: id.slice(0, 40), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isActionId(id)) return refused(404, `no first-run action ${id}`);
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may run a first-run fix; @${who.login} is a ${who.role}`);
+          const plan = actionPlan(id, actionContext(), actionDeps());
+          if (!plan.available) return refused(409, `not run: ${plan.why ?? 'not available here'}`);
+          if (body.confirm !== true) return refused(400, `${plan.label} changes this machine: review what it shows, then confirm it ({"confirm": true})`);
+          if (actionRunning) return refused(409, `${actionRunning} is running: one fix at a time`);
+          actionRunning = id;
+          try {
+            const r = await ACTIONS[id].run(actionContext(), actionDeps()).catch((e: Error): { ok: boolean; detail: string } => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
+            setupCache.delete(plan.step);
+            audit(who, 'first_run.action', { action: id, ok: r.ok, detail: r.detail.slice(0, 300) });
+            return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
+          } finally {
+            actionRunning = null;
+          }
         }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
         // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.
