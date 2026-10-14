@@ -325,7 +325,7 @@ export const AgentsConfig = z
       const named = providerOf(value);
       if (!named) continue;
       const route = key === 'build' ? 'build' : key === 'build_high_risk' ? 'build' : (key as RoutedRun);
-      const why = key === 'build_high_risk' ? 'hosted, local and other vendors\' models never build high-risk work' : providerRefusal(named.kind, { route });
+      const why = key === 'build_high_risk' ? 'hosted and local models never build high-risk work' : providerRefusal(named.kind, { route });
       if (why) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: why });
       const known = named.kind === 'local' ? c.providers?.local : named.kind === 'cli' ? (c.providers?.cli as Record<string, unknown> | undefined)?.[named.name] : c.providers?.hosted?.[named.name];
       if (!known) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: `${value} is not configured under providers` });

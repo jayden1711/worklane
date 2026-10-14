@@ -720,7 +720,9 @@ export class Coordinator extends Optimizer {
         refused = 'rejected' in change ? (change.refused ?? null) : null;
         // A hosted open model never builds L3, money-path or agent-instructions work: such a change is refused, and the
         // task goes on with the next attempt on the build's Anthropic model.
-        const hostedWhy = 'rejected' in change ? null : builtChangeRefusal(out.provider, { files: change.files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails });
+        // WHY: item 38. A cli: build rejected for any reason (a protected path among them) still moves the task to Anthropic.
+        const built = 'rejected' in change ? (out.provider?.startsWith('cli:') ? this.changeFiles(path, base, head) : null) : change.files;
+        const hostedWhy = built ? builtChangeRefusal(out.provider, { files: built, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails }) : null;
         if (hostedWhy) {
           noOpenModel = true;
           this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });
