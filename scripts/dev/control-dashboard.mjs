@@ -26,7 +26,8 @@
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --with-usage-pause (pause the demo on the Claude usage
 // limit, resetting in 2 h: the banner and the Overview's usage line), --with-incidents (watchdog incidents for
-// Health: two open, one resolved, in a slot directory of its own under the temporary directory), --viewport <w>x<h> (default 1440x1000; under
+// Health: two open, one resolved, in a slot directory of its own under the temporary directory), --with-learnings
+// (failed-run notes for the Learnings panel on Reports: one cause seen 3 times, one seen once), --viewport <w>x<h> (default 1440x1000; under
 // 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
 // demo's owner, example-owner; the token is the owner's break-glass, so this only names who answers),
@@ -111,6 +112,7 @@ async function start() {
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
     if (flag('--with-usage-pause')) await seedUsagePause(root, issue);
     if (flag('--with-incidents')) await seedIncidents(process.env.AGENT_SLOTS_DIR);
+    if (flag('--with-learnings')) await seedLearnings(root, state.tasks.map((t) => t.issue));
 
     const profile = join(work, 'chrome');
     mkdirSync(profile);
@@ -207,6 +209,30 @@ async function seedPrs(root, issues) {
     } catch (e) {
       // An older engine doesn't know the event: left out, and said so.
       console.error(`--with-prs: ${type} not recorded (${e.message.split('\n')[0]})`);
+    }
+  }
+}
+
+/** WHY: item 33; the demo fails no task, so --with-learnings notes a cause seen 3 times (promotable) and one seen once. */
+async function seedLearnings(root, issues) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  if (!existsSync(logMod) || !existsSync(svc) || issues.length < 3) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const log = new EventLog(logPath(root));
+  const note = (i, issue, outcome, stage, cause, fp, root) => ({ key: `${issue}:worker:${i}`, issue, role: 'worker', attempt: 1, run: null, outcome, stage, cause, fingerprint: fp, same_as: root });
+  const notes = [
+    note(1, issues[0], 'checks failed', 'verification', 'test: fail', 'f1a2b3c4d5e6f7a8', null),
+    note(2, issues[1], 'checks failed', 'verification', 'test: fail', 'f1a2b3c4d5e6f7a8', `${issues[0]}:worker:1`),
+    note(3, issues[2], 'checks failed', null, 'test: fail', 'f1a2b3c4d5e6f7a8', `${issues[0]}:worker:1`),
+    note(4, issues[2], 'startup failure', 'environment/harness', 'error_during_execution: (no error text)', '0a1b2c3d4e5f6a7b', null),
+  ];
+  for (const n of notes) {
+    try {
+      log.append('learning.noted', n, 'demo');
+    } catch (e) {
+      console.error(`--with-learnings: not recorded (${e.message.split('\n')[0]})`);
     }
   }
 }

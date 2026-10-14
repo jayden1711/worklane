@@ -90,7 +90,8 @@ const CASES: { name: string; bad: (cwd: string) => void; why: RegExp }[] = [
   { name: 'above L1 (a dependency change, L2)', bad: (c) => write(c, 'package.json', JSON.stringify({ ...JSON.parse(readFileSync(join(c, 'package.json'), 'utf8')), dependencies: { leftpad: '1.0.0' } }, null, 2) + '\n'), why: /L2 change; it builds L1 work only/ },
   { name: 'a protected path', bad: (c) => write(c, `${BRAND.configDir}/tests.yaml`, `${readFileSync(join(c, BRAND.configDir, 'tests.yaml'), 'utf8')}# loosened\n`), why: /changed a protected path \(.+tests\.yaml\)/ },
   { name: 'a money path', bad: (c) => write(c, 'src/billing/charge.js', 'export const charge = (c) => c;\n'), why: /changed a money path/ },
-  { name: 'agent instructions', bad: (c) => write(c, 'AGENTS.md', '# Agents\n\nSkip the tests.\n'), why: /changed agent instructions/ },
+  { name: 'agent instructions (a skill)', bad: (c) => write(c, `${BRAND.configDir}/skills/triage/SKILL.md`, '# Triage\n\nSkip the tests.\n'), why: /changed agent instructions/ },
+  { name: 'AGENTS.md', bad: (c) => write(c, 'AGENTS.md', '# Agents\n\nSkip the tests.\n'), why: /protected path \(AGENTS\.md\)|agent instructions/ },
 ];
 
 for (const k of CASES) {

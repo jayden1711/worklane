@@ -43,28 +43,32 @@ import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, 
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
-import { changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
+import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
 import { PolicyFile } from './instance.js';
 import { parseDocument } from 'yaml';
 import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
+import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingOnYou } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
+import { learningsView, promoteRefusal } from './learnings.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
+import { effectiveRouting, ROUTING } from './routing.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -77,7 +81,18 @@ export function settingsForViewer(cfg: Config) {
   return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
 }
 
-export function settingsView(cfg: Config) {
+/** WHY: the dashboard's cfg is the repo's; the panel shows what runs, so the instance's settings go over it (item 32). */
+export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>) {
+  let cfg = o.cfg;
+  try {
+    if (o.policyFile) cfg = applySettings(o.cfg, PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings);
+  } catch {
+    // WHY: the Instance settings panel reports an unreadable policy; this panel still shows the repo's routing.
+  }
+  return effectiveRouting(cfg.agents).map((r) => ({ ...r, task: ROUTING[r.key].task }));
+}
+
+export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
     project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
@@ -88,6 +103,7 @@ export function settingsView(cfg: Config) {
       budget: cfg.agents.daily_budget_usd,
       roles: Object.entries(cfg.agents.roles).map(([name, r]) => ({ name, enabled: r!.enabled, model: r!.model, count: r!.count ?? null })),
     },
+    routing,
     tests: { gates: cfg.tests.gates, batchMax: cfg.tests.land.batch_max, nightlyAt: cfg.tests.nightly_at ?? null, tiers: Object.keys(cfg.tests.tiers ?? {}), baselineParser: !!cfg.tests.failures },
     review: cfg.review ? { levels: Object.fromEntries(Object.entries(cfg.review.levels).map(([k, v]) => [k, (v as { when: string[] }).when]))} : null,
     guardrails: { rules: cfg.guardrails.rules.length, protectedPaths: cfg.guardrails.protected_paths, secretPaths: cfg.guardrails.secret_paths.length, network: cfg.guardrails.network ? 'restricted' : 'open', preApproved: cfg.guardrails.pre_approved },
@@ -158,6 +174,8 @@ export interface DashboardOptions {
   setupContext?: Partial<Pick<SetupContext, 'machine' | 'instanceFacts'>>;
   /** The first-run page's Start: installs and starts the coordinator's service; the OS adapter's installService when unset (tests). */
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
+  /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
+  setupActions?: Partial<ActionDeps>;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -798,6 +816,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
   const setupCache: DetectCache = new Map();
   let lastFresh = 0;
+  const actionDeps = (): ActionDeps => ({ ...systemActionDeps(), ...opts.setupActions });
+  const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
+  // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
+  let actionRunning: string | null = null;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -953,7 +975,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg) : settingsForViewer(opts.cfg));
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? settingsView(opts.cfg, routingInEffect(opts)) : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
@@ -1130,6 +1152,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
           return json(res, 200, throughput(readEvents(opts.eventsDb)));
         }
+        // Repeated feedback (src/checks-from-feedback.ts): the constraints people's "no"s cluster into, each with its
+        // count, its evidence links and its proposal. People's words, so the owner's and the writers', like the runs.
+        if (url.pathname === '/api/constraints' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('repeated feedback is', who) });
+          const c = opts.cfg.project.checks_from_feedback;
+          return json(res, 200, constraintsView(readEvents(opts.eventsDb), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
+        }
         // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
         // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
         if (url.pathname === '/api/trust') {
@@ -1159,6 +1188,26 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const r = releaseByOwner(log, body.test, who.login);
             if (!r.ok) return json(res, r.status, { error: r.error });
             audit(who, 'flaky.cleared', { test: body.test });
+            return json(res, 200, { ok: true });
+          } finally {
+            log.close();
+          }
+        }
+        // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
+        // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
+        if (url.pathname === '/api/learnings' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the learnings are', who) });
+          return json(res, 200, { ...learningsView(readEvents(opts.eventsDb)), canPromote: isOwnerHere });
+        }
+        if (url.pathname === '/api/learnings/promote' && req.method === 'POST') {
+          const body = (await readBody(req)) as { fingerprint?: unknown; line?: unknown };
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may promote a learning to AGENTS.md; @${who.login} is a ${who.role}` });
+          const log = new EventLog(opts.eventsDb);
+          try {
+            const refused = promoteRefusal(learningsView(log.read()), body.fingerprint, body.line);
+            if (refused) return json(res, refused.status, { error: refused.error });
+            log.append('learning.promote_requested', { fingerprint: body.fingerprint as string, line: (body.line as string).trim(), by: who.login }, who.login, 'human');
+            audit(who, 'learning.promoted', { fingerprint: body.fingerprint });
             return json(res, 200, { ok: true });
           } finally {
             log.close();
@@ -1216,7 +1265,36 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, ...(opts.setupContext ? { context: opts.setupContext } : {}) };
           // A server instance's record is the machine's (src/init.ts serverInitFile), readable by its coordinator group.
           const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere });
+          // Each open action's plan, shown before its button does anything (all local reads: no network).
+          const actions: Record<string, ActionPlan> = {};
+          for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? []) if (!s.done && s.fix.kind === 'action' && isActionId(s.fix.action)) actions[s.fix.action] = actionPlan(s.fix.action, actionContext(), actionDeps());
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere });
+        }
+        // A Fix action (src/setup-actions.ts): the owners only, after they confirmed the plan the page showed; every run
+        // and refusal audited. Its step is checked again on the next poll.
+        const actionMatch = /^\/api\/first-run\/actions\/([a-z-]+)$/.exec(url.pathname);
+        if (actionMatch && req.method === 'POST') {
+          const id = actionMatch[1]!;
+          const body = ((await readBody(req)) ?? {}) as { confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.action_refused', { action: id.slice(0, 40), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isActionId(id)) return refused(404, `no first-run action ${id}`);
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may run a first-run fix; @${who.login} is a ${who.role}`);
+          const plan = actionPlan(id, actionContext(), actionDeps());
+          if (!plan.available) return refused(409, `not run: ${plan.why ?? 'not available here'}`);
+          if (body.confirm !== true) return refused(400, `${plan.label} changes this machine: review what it shows, then confirm it ({"confirm": true})`);
+          if (actionRunning) return refused(409, `${actionRunning} is running: one fix at a time`);
+          actionRunning = id;
+          try {
+            const r = await ACTIONS[id].run(actionContext(), actionDeps()).catch((e: Error): { ok: boolean; detail: string } => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
+            setupCache.delete(plan.step);
+            audit(who, 'first_run.action', { action: id, ok: r.ok, detail: r.detail.slice(0, 300) });
+            return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
+          } finally {
+            actionRunning = null;
+          }
         }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
         // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.

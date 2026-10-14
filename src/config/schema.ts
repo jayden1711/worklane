@@ -4,9 +4,11 @@ import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
 import type { RoutedRun } from '../model-routing.js';
+import { ROUTING_ALIASES, type Routing, type RoutingKey } from '../routing.js';
 import { projectEnvProblem } from '../project-env.js';
 import { TestRunConfig } from '../testrun/config.js';
 import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
+import { PreviewConfig } from '../preview/config.js';
 import { SparseExclude } from '../checkout.js';
 import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
 
@@ -79,6 +81,13 @@ export const ProjectConfig = z.strictObject({
     .prefault({}),
   land_mode: z.enum(['direct', 'pr']).default('pr'),
   /**
+   * The plan gate for size:M/L tasks (src/plan-mode.ts): `always` holds every plan, with its acceptance criteria, for
+   * an owner's approval (on the issue, the dashboard, or "approve plan <n>" in its Discord thread) before any worker
+   * runs; `risky` and `off` hold only a plan the merge policy's checks would hold (high-risk or design-level): an
+   * ordinary plan builds at once, a high-risk or design-level one always waits. Smaller tasks have no plan.
+   */
+  plan_gate: z.enum(['always', 'risky', 'off']).default('always'),
+  /**
    * PR mode: the checks that must pass on a PR's exact head (names as GitHub shows them) before it is marked
    * ready. None configured: nothing is ever marked ready.
    */
@@ -101,6 +110,20 @@ export const ProjectConfig = z.strictObject({
       rerun: z.boolean().default(true),
       release_after_passes: z.number().int().min(1).max(1000).default(10),
       rerun_timeout_min: z.number().int().min(5).max(720).default(90),
+    })
+    .prefault({}),
+  /**
+   * Fix-forward (src/fix-forward.ts): when the default branch goes red after an auto-merge (and the flaky re-run says
+   * the failure is real), the culprit is found first (several PRs merged since the last green: each first-parent
+   * commit tested on its own, binary search), then a fix task (an agent with the failing logs, the culprit's diff and
+   * the merged PRs) whose PR goes through the normal gates. The revert PR of the culprit is opened only when no fix is
+   * green within `max_attempts` (0: revert at once), or at once when the culprit touches `revert_first_paths` (globs)
+   * or the money path, auth or secrets (the money-path list and review.yaml's categories).
+   */
+  fix_forward: z
+    .strictObject({
+      max_attempts: z.number().int().min(0).max(5).default(2),
+      revert_first_paths: z.array(z.string().min(1)).default([]),
     })
     .prefault({}),
   /**
@@ -155,6 +178,20 @@ export const ProjectConfig = z.strictObject({
       at: hhmm.default('03:00'),
       max_usd: z.number().positive().max(100).default(5),
       max_prs: z.number().int().min(0).max(10).default(1),
+    })
+    .prefault({}),
+  /**
+   * Repeated "no"s become checks (src/checks-from-feedback.ts): people's words when they turn the harness's work
+   * down (reviews requesting changes, closed PRs, revised or rejected plans, objections, chat corrections), with
+   * the reverts as evidence, are grouped into constraints. At `min_sightings` one proposal per constraint: a draft
+   * ast-grep rule with its test cases (the repo has sgconfig.yml) or a test, as a draft PR quoting the evidence; an
+   * issue instead for a protected area. Never auto-merged; at most `max_proposals_per_week`. Off by default.
+   */
+  checks_from_feedback: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      min_sightings: z.number().int().min(2).max(20).default(2),
+      max_proposals_per_week: z.number().int().min(0).max(20).default(3),
     })
     .prefault({}),
   /**
@@ -244,39 +281,52 @@ export const RoleNames = [
   'gardener',
 ] as const;
 
+const levels = z.array(z.enum(['L0', 'L1', 'L2', 'L3']));
+const modelRoutingShape = {
+  build: model.optional(),
+  build_high_risk: model.optional(),
+  high_risk_labels: z.array(z.string().min(1)).optional(),
+  escalate_after: z.number().int().min(0).max(10).optional(),
+  planner: model.optional(),
+  research: model.optional(),
+  intake_triage: model.optional(),
+  intake_replier: model.optional(),
+  intake_summary: model.optional(),
+  intake_thread: model.optional(),
+  stage_judge: model.optional(),
+  eval_answer: model.optional(),
+  reflection: model.optional(),
+};
+const routingShape = { ...modelRoutingShape, eval_cheap: model.optional(), eval_cheap_levels: levels.optional(), eval_escalate: z.boolean().optional() } satisfies Record<RoutingKey, z.ZodType>;
+// INVARIANT: the routing keys that name a model for a routed run (an open model may be allowed there).
+const ROUTED_MODEL_KEYS = ['build', 'build_high_risk', 'planner', 'research', 'intake_triage', 'intake_replier', 'intake_summary', 'intake_thread', 'stage_judge', 'eval_answer', 'reflection'] as const satisfies readonly RoutingKey[];
+
 export const AgentsConfig = z
   .strictObject({
     /** No longer used (trust stages were removed); accepted so existing configs still load. */
     stage: z.number().int().min(1).max(3).optional(),
     daily_budget_usd: z.number().positive(),
+    /** Worker attempts at one issue before it is blocked (counted across restarts and requeues; reset by a block or an answer). */
+    max_attempts: z.number().int().min(1).max(20).default(8),
+    /**
+     * One issue's budget, all its runs together (src/coordinator/loop-control.ts): agent run time in minutes and
+     * tokens in and out. An incident at 85% of either; the task is stopped at 100%. Unset: no such cap.
+     */
+    budget: z
+      .strictObject({
+        task_minutes: z.number().positive().optional(),
+        task_tokens: z.number().int().positive().optional(),
+      })
+      .optional(),
     roles: z.partialRecord(z.enum(RoleNames), role),
     auto_land: z.array(z.string()).default([]),
     /**
-     * Tiered evaluation: which model judges a change, from its review level, decided in code. Changes at
-     * `cheap_levels` (docs-only, tests-only, comment-only: L0) are judged by `cheap_model`; every other level by
-     * the evaluator role's model. A failed or uncertain verdict from the cheap model is judged once more by the
-     * evaluator role's model before anything is rejected.
+     * Which model each task type uses, and the evaluator's tiering (src/routing.ts: every key, its default and its
+     * task); each key overrides its default. `model_routing` and `eval_routing` are older names for the same keys.
      */
-    /**
-     * Which model each kind of run uses (src/model-routing.ts); each key overrides its default. Builds: `build`
-     * (L1/L2) and `build_high_risk` (issues with a high_risk_labels label, or after escalate_after failed attempts).
-     */
-    model_routing: z
-      .strictObject({
-        build: model.optional(),
-        build_high_risk: model.optional(),
-        high_risk_labels: z.array(z.string().min(1)).optional(),
-        escalate_after: z.number().int().min(0).max(10).optional(),
-        planner: model.optional(),
-        research: model.optional(),
-        intake_triage: model.optional(),
-        intake_replier: model.optional(),
-        intake_summary: model.optional(),
-        intake_thread: model.optional(),
-        stage_judge: model.optional(),
-        eval_answer: model.optional(),
-      })
-      .optional(),
+    routing: z.strictObject(routingShape).optional(),
+    /** INVARIANT: an alias of `routing` (same key names); a key set in both is an error. */
+    model_routing: z.strictObject(modelRoutingShape).optional(),
     /**
      * Open-model providers a model setting can name: `local`, `hosted:<name>` or `cli:<agent>`. Each instance opts in (policy.yaml
      * settings.providers); what each may run is fixed in code (src/providers.ts).
@@ -288,13 +338,8 @@ export const AgentsConfig = z
         cli: z.strictObject({ codex: cliAgent.optional(), gemini: cliAgent.optional() }).optional(),
       })
       .optional(),
-    eval_routing: z
-      .strictObject({
-        cheap_model: model.default('sonnet'),
-        cheap_levels: z.array(z.enum(['L0', 'L1', 'L2', 'L3'])).default(['L0']),
-        escalate: z.boolean().default(true),
-      })
-      .prefault({}),
+    /** INVARIANT: an alias of `routing`: cheap_model is eval_cheap, cheap_levels eval_cheap_levels, escalate eval_escalate. */
+    eval_routing: z.strictObject({ cheap_model: model.optional(), cheap_levels: levels.optional(), escalate: z.boolean().optional() }).optional(),
     /**
      * A change to the agents' own instructions (a skill, AGENTS.md, a role prompt) is evaluated before it
      * lands: its eval cases at the base and at the head. A drop, a cap hit or no cases: the PR waits.
@@ -311,6 +356,23 @@ export const AgentsConfig = z
       })
       .prefault({}),
   })
+  .transform((c, ctx) => {
+    const { routing, model_routing, eval_routing, ...rest } = c;
+    const merged: Partial<Routing> = {};
+    const from: Partial<Record<RoutingKey, string>> = {};
+    const take = (section: 'routing' | keyof typeof ROUTING_ALIASES, values: Record<string, unknown> | undefined) => {
+      for (const [k, v] of Object.entries(values ?? {})) {
+        const key = section === 'routing' ? (k as RoutingKey) : ROUTING_ALIASES[section][k]!;
+        if (v === undefined) continue;
+        if (from[key]) ctx.addIssue({ code: 'custom', path: [section, k], message: `${key} is already set at ${from[key]}; set it once, in routing` });
+        else Object.assign(merged, { [key]: v }), (from[key] = `${section}.${k}`);
+      }
+    };
+    take('routing', routing);
+    take('model_routing', model_routing);
+    take('eval_routing', eval_routing);
+    return { ...rest, routing: merged, routing_from: from };
+  })
   .superRefine((c, ctx) => {
     const w = c.roles.workers;
     if (w && w.count !== undefined && w.max !== undefined && w.count > w.max) {
@@ -320,23 +382,25 @@ export const AgentsConfig = z
       ctx.addIssue({ code: 'custom', path: ['roles', 'evaluator', 'enabled'], message: 'workers require an enabled evaluator' });
     }
     // An open model only where code allows it, and only one that is configured.
-    for (const [key, value] of Object.entries(c.model_routing ?? {})) {
-      if (typeof value !== 'string') continue;
+    const at = (key: RoutingKey) => c.routing_from[key]!.split('.');
+    for (const key of ROUTED_MODEL_KEYS) {
+      const value = c.routing[key];
+      if (value === undefined) continue;
       const named = providerOf(value);
       if (!named) continue;
       const route = key === 'build' ? 'build' : key === 'build_high_risk' ? 'build' : (key as RoutedRun);
       const why = key === 'build_high_risk' ? 'hosted and local models never build high-risk work' : providerRefusal(named.kind, { route });
-      if (why) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: why });
+      if (why) ctx.addIssue({ code: 'custom', path: at(key), message: why });
       const known = named.kind === 'local' ? c.providers?.local : named.kind === 'cli' ? (c.providers?.cli as Record<string, unknown> | undefined)?.[named.name] : c.providers?.hosted?.[named.name];
-      if (!known) ctx.addIssue({ code: 'custom', path: ['model_routing', key], message: `${value} is not configured under providers` });
+      if (!known) ctx.addIssue({ code: 'custom', path: at(key), message: `${value} is not configured under providers` });
     }
     // Everywhere else a model is named (role models, tiered evaluation, instruction evals), only Anthropic models.
-    const plain = (path: (string | number)[], m: string | undefined) => m && providerOf(m) && ctx.addIssue({ code: 'custom', path, message: `${m}: open models are only for model_routing (the evaluator and roles keep their models)` });
+    const plain = (path: (string | number)[], m: string | undefined) => m && providerOf(m) && ctx.addIssue({ code: 'custom', path, message: `${m}: open models are only for routed runs in routing (the evaluator and roles keep their models)` });
     for (const [r, cfg] of Object.entries(c.roles)) {
       plain(['roles', r, 'model'], cfg?.model);
       plain(['roles', r, 'hard_issues_model'], cfg?.hard_issues_model);
     }
-    plain(['eval_routing', 'cheap_model'], c.eval_routing.cheap_model);
+    if (c.routing.eval_cheap !== undefined) plain(at('eval_cheap'), c.routing.eval_cheap);
     plain(['instruction_evals', 'model'], c.instruction_evals.model);
     plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
   });
@@ -578,6 +642,8 @@ export const TestsConfig = z.strictObject({
   test_run: TestRunConfig.optional(),
   /** The pre-deploy gate (src/deploy-gate/, docs/deploy-gate.md); absent: off. */
   deploy_gate: DeployGateConfig.optional(),
+  /** docs/previews.md: PR previews; absent or not enabled, off. */
+  preview: PreviewConfig.optional(),
 }).superRefine((t, ctx) => {
   for (const p of deployGateProblems(t.deploy_gate, t.test_run ? t.test_run.tiers.map((x) => x.name) : null)) ctx.addIssue({ code: 'custom', path: p.path, message: p.message });
 });

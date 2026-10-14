@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { REAL_CHROME_TIMEOUT, realChromeTests, unscaled } from './browser-helpers.js';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfig } from '../src/config/schema.js';
 import { findChrome, freePort, launchChrome, portInUse } from '../src/browser/cdp.js';
-import { isLocal, runFlow, stepLabel, type FlowEvidence } from '../src/browser/run.js';
+import { isLocal, isOnOrigin, runFlow, runFlowAt, stepLabel, type FlowEvidence } from '../src/browser/run.js';
 import { summarizeTrace } from '../src/browser/trace.js';
 
 test('the browser may only reach the app on this machine (and in-page schemes); everything else is refused', () => {
@@ -211,5 +211,35 @@ test("a teardown that goes wrong (the profile can't be removed) is a note, never
   } finally {
     chmodSync(root, 0o755);
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  }
+});
+
+test('a flow against a deployed preview may only reach that origin (and in-page schemes)', () => {
+  const origin = 'https://pr-7.example.test';
+  for (const u of ['https://pr-7.example.test/cart', 'wss://pr-7.example.test/live', 'data:image/png;base64,AA', 'about:blank']) assert.equal(isOnOrigin(u, origin), true, u);
+  for (const u of ['http://pr-7.example.test/', 'https://pr-7.example.test:8443/', 'https://pr-8.example.test/', 'https://evil.pr-7.example.test/', 'http://127.0.0.1:5173/', 'not a url']) assert.equal(isOnOrigin(u, origin), false, u);
+});
+
+test('runFlowAt: a flow against an app running elsewhere starts nothing, reaches only its origin, and leaves the app running', { skip: !chrome && 'no Chrome or Chromium on this machine', timeout: REAL_CHROME_TIMEOUT }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-run-'));
+  fixtureApp(dir);
+  const port = await freePort();
+  const server = spawn(process.execPath, ['server.mjs'], { cwd: dir, env: { ...process.env, PORT: String(port) }, stdio: 'ignore' });
+  try {
+    for (let i = 0; i < 100 && !(await portInUse(port)); i++) await new Promise((r) => setTimeout(r, 100));
+    const app = AppConfig.parse({ version: 1, start: { command: 'false', port: 1024 }, ui_paths: ['web/**'], thresholds: { slow_request_ms: 400 }, flows: { checkout: [{ goto: '/' }, { click: 'testid:go' }, { expect_text: { target: 'testid:out', text: '$10.01' } }] } });
+    const ev = (await runFlowAt({ app, flow: 'checkout', origin: `http://127.0.0.1:${port}`, outDir: join(dir, 'evidence'), chrome })) as FlowEvidence;
+    assert.equal(ev.ok, true, JSON.stringify(ev.steps));
+    assert.deepEqual(ev.blockedRequests, ['https://example.com/track'], 'the other host was refused before it left');
+    assert.ok(ev.screenshot && statSync(ev.screenshot).size > 1000, 'a screenshot');
+    assert.equal(await portInUse(port), true, 'the deployed app is not the run\'s to stop');
+  } finally {
+    server.kill('SIGKILL');
+    const child = Number(readFileSync(join(dir, 'child.pid'), 'utf8'));
+    try {
+      process.kill(child, 'SIGKILL');
+    } catch {
+      // already gone
+    }
   }
 });

@@ -18,6 +18,11 @@ land_mode: pr               # direct (fast-forward to the default branch) | pr
 # listed here passed on the exact commit the evaluator approved. Names as GitHub shows
 # them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
 required_checks: []
+# size:M/L tasks are planned first; the plan, with its acceptance criteria, is posted on the issue and in its
+# Discord decision thread. always: every plan waits for an owner's approval ("approve plan <n>" in the thread, the
+# dashboard, or the issue) before any code is written | risky or off: only a high-risk or design-level plan waits
+# (off never skips those); an ordinary plan builds at once. size:S and unsized tasks have no plan.
+# plan_gate: always
 # Branch protection to set on the default branch (advice only; init reports it, nothing applies it): require the
 # checks above, not strict by default (a PR needn't be up to date with main first). Post-merge CI on main and the
 # main watch catch what strict would have, without PRs queueing to merge main in. true opts this repo in.
@@ -27,6 +32,11 @@ required_checks: []
 # revert), one issue each. Blocks again after release_after_passes passes in a row, or an owner's clear. A re-run not
 # done in rerun_timeout_min is a real failure. The updater still requires every check green.
 # flaky: { rerun: true, release_after_passes: 10, rerun_timeout_min: 90 }
+# Fix-forward: a real red after an auto-merge first names the culprit (several PRs since the last green: each
+# first-parent commit tested on its own), then a fix task gets the failing logs, the culprit's diff and the merged
+# PRs; its PR goes through the normal gates. The culprit's revert PR is opened only if no fix is green within
+# max_attempts (0: revert at once), or at once when it touches revert_first_paths, the money path, auth or secrets.
+# fix_forward: { max_attempts: 2, revert_first_paths: [] }
 # Files two tasks at once would both change and conflict on: such tasks never run together (the second
 # waits; other ready work takes the slot). Leave it out for the defaults (lockfiles, registries and
 # changelogs, shared test helpers); [] turns holds off.
@@ -53,6 +63,11 @@ required_checks: []
 # conflicting, slow and flaky checks. Findings go to one "Gardener log" issue; a fix (a small cleanup or a lint
 # rule) is filed only for a pattern seen 3+ times, at most max_prs per run, never in a high-risk path.
 # gardener: { enabled: false, every_days: 7, at: "03:00", max_usd: 5, max_prs: 1 }
+# Repeated "no"s become checks: what writers say when they turn work down (reviews requesting changes, closed
+# PRs, revised or rejected plans, objections, chat corrections), with reverts as evidence, is grouped into
+# constraints. At min_sightings, one proposal each: a draft ast-grep rule plus test cases (repos with sgconfig.yml)
+# or a test, as a draft PR quoting the evidence; an issue instead for a protected area. Never auto-merged.
+# checks_from_feedback: { enabled: false, min_sightings: 2, max_proposals_per_week: 3 }
 os: auto                  # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches

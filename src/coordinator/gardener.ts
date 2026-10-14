@@ -34,7 +34,7 @@ export abstract class Gardener extends Delegation {
   }
 
   /** A path the gardener never fixes: anything the merge policy treats as high-risk, or a safety floor. */
-  private protectedPath(): (path: string) => boolean {
+  protected protectedPath(): (path: string) => boolean {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const never = new Set([...protectedCategories(review), ...waitCategoriesOf(review)]);
     const money = loadMoneyPaths(this.d.repo, review.money_path_source);

@@ -330,7 +330,8 @@ test('a change another vendor\'s CLI built stands only at L1 or below, off prote
   assert.match(o([f('.claude/settings.json')])!, /protected path/);
   assert.match(o([f('package.json')])!, /L2 change; it builds L1 work only/, 'L2: a hosted model\'s change would stand, this one does not');
   assert.match(o([f('src/billing/charge.js')], [/^src\/billing\//])!, /money path/);
-  assert.match(o([f('AGENTS.md')])!, /agent instructions/);
+  assert.match(o([f('AGENTS.md')])!, /protected path|agent instructions/, 'AGENTS.md is a protected path since item 33');
+  assert.match(o([f(`${BRAND.configDir}/skills/triage/SKILL.md`)])!, /agent instructions/, 'an editable skill is still agent instructions');
   assert.match(o([f('db/migrate.sql', ['DROP TABLE orders;'])])!, /L3|money|protected/);
   // The build loop asks by the provider that built it.
   const held = { files: [f('package.json')], labels: [], moneyPaths: () => [], review, guardrails };

@@ -141,6 +141,9 @@ the same audit entry with `via: discord`. Who may answer from a thread is one fu
 
 - A reply chooses an option only when its first word is that option and it names no other ("approve",
   "Reject."). That answers at once, as before.
+- **Held plans** (the plan gate, `plan_gate` in config.yaml): the thread shows the plan's acceptance criteria and
+  links the issue with the full plan. "approve plan <n>" (n: the issue's number) is the same as "approve"; one
+  naming another number answers nothing. Only an admin's reply answers it; a writer's is a comment.
 - **Plain-language picks.** A reply from an admin or writer that clearly means one option ("yeah approve it",
   "go with a") is read by the `intake-thread` role, and the bot asks back "Confirm: approve?". Only that same
   person's following "yes" records it (through the same decide path, role check and audit); another person's yes
@@ -169,7 +172,7 @@ adds the issue's and the dashboard's links itself). Anything else, a run that en
 spend cap reached, posts the fixed template and the dashboard's link instead; which was used and why is recorded
 (`discord.explained`), once per thread.
 
-Summaries and thread runs are short runs on the routed models (`model_routing.intake_summary`, haiku, and
+Summaries and thread runs are short runs on the routed models (`routing.intake_summary`, haiku, and
 `intake_thread`, sonnet: on haiku its held-out eval score dropped), each counted against `intake.max_usd_per_day` and the daily budget. Over the cap, a summary is
 the template, and a reply that isn't an exact option is asked back without a run.
 
@@ -387,6 +390,26 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   (`deploy.yaml` `prod_read`, the owner's platform login and the read-only role on the production service); with
   either missing, nothing is read.
 
+### 2.4 GitHub issues
+
+- Open issues on the instance's repo carrying the intake label (`<cli>:intake`, the product's CLI name from
+  `src/brand.ts`; `labels` creates it) are reports (`src/intake/github.ts`). An issue template may set the label,
+  so anyone can file one. The author's login is the sender; ready issues, bot authors and issues already seen
+  (the seen ledger) are never taken.
+- Each goes through the same pipeline as a chat report: redaction, caps, the read-only triage run, dedupe
+  (never against its own issue), the money-path (L3) rule and the trust policy (`src/intake/decide.ts`). The issue
+  already exists, so filing it labels that issue (`ready` and the kind label) and puts the drafted five-part issue
+  on it as one comment; no second issue is opened.
+- A login in `trusted.github` is filed `ready` at once; anyone else's draft is an Inbox decision, approved,
+  edited or rejected exactly as for Discord. Until then, and when it is rejected, asked for details or dropped,
+  the issue stays in triage and a comment on it says why (the engine's reason code only, never agent text).
+- Pulled on the intake timer, but listed at most once every `github.poll_minutes` (default 5, at least 1), one
+  listing per pull, and not again before a rate limit's retry-after. The backlog keeps no ETags, so there are
+  none to reuse.
+- Off by default: `github.enabled: true` in `intake.yaml`. The App's `issues: write` permission already covers
+  listing, commenting and labelling. With an App token, the `ready` the App adds doesn't make the issue
+  actionable on its own (`actionable` wants a writer to add it), as for every issue intake files.
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.
@@ -518,6 +541,8 @@ test with an injection-style report.
    messages from the server's members (for the links). Restart the instance.
 8. **One bot for several instances** (2.1.6): invite it to each server, install the same token for each
    instance, and give each instance its own server and channels in its own `intake.yaml`.
+9. **GitHub issues** (2.4): set `github.enabled: true` (and any `trusted.github` logins) in `intake.yaml`, run
+   `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
 
 ## 11. Build order
 
