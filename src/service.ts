@@ -24,6 +24,7 @@ import { maybeOffsiteBackup, OFFSITE_FILE } from './offsite-backup.js';
 import { tidyState } from './state-tidy.js';
 import { EventLog, storageFailure } from './events/log.js';
 import { siteDiskGuard, startDiskGuard } from './disk-guard.js';
+import { addStartGate } from './testrun/gate.js';
 import { watchdogConfig } from './watchdog/config.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
@@ -329,10 +330,14 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     inFlight: () => inFlight(),
   });
   const stopDisk = startDiskGuard(disk);
+  // INVARIANT: every test run this process starts (PR runs, batches, the flaky re-run, fix-forward's probes, the deploy
+  // gate) and every preview passes this one gate (src/testrun/gate.ts); the disk guard is its `disk` source.
+  const ungateDisk = addStartGate('disk', () => disk.held());
   // land_mode direct pushes the default branch itself: never on a branch GitHub doesn't protect (direct-land.ts).
   const refused = await directLandStartGate({ landMode: cfg.project.land_mode, api: opts.protection, local: localRemote(root, 'origin'), repo: cfg.project.project.repo, branch: cfg.project.project.default_branch, label: opts.label ?? 'coordinator', log, actor: instanceId() });
   if (refused) {
     console.error(refused);
+    ungateDisk();
     stopDisk();
     log.close();
     lock.lock.release();
@@ -347,7 +352,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   const depCacheRoot = commandsAs ? { dir: dirname(root), gid: statSync(root).gid } : undefined;
   // The coordinator's own test runs of every PR (tests.yaml test_run). While the sandbox's check fails they are set up
   // but refuse every run, and the check is run again until it passes (src/testrun/sandbox-watch.ts).
-  const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state, hold: () => disk.held() }) : undefined;
+  const testRuns = opts.testRun ? await setupTestRuns(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state }) : undefined;
   // The pre-deploy gate (tests.yaml deploy_gate): only through the test runs just set up, and only while their sandbox's check passes.
   const deployGate = opts.testRun ? setupDeployGate(cfg, opts.testRun, { log, actor: instanceId(), root, stateDir: state, testRunsReady: !!testRuns, ...(opts.incidents ? { incidents: opts.incidents } : {}) }) : undefined;
   const previews = opts.testRun ? setupPreviews(cfg, opts.testRun, { log, actor: instanceId(), stateDir: state }) : undefined;
@@ -442,6 +447,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     clearInterval(watch);
     watchdog?.stop();
     intake?.stop();
+    ungateDisk();
     stopDisk();
     // WHY: events still waiting for room get one last try; what can't be written is named in the journal, not lost silently.
     const left = log.buffered().count;

@@ -3,6 +3,7 @@
 // bisect, the fix tasks, the revert when they fail, and the default branch going green again. Its revert, its stop
 // and its ops posts are the merge flow's (deps). Only the latest fix task's PR auto-merges while the branch is red
 // (holds).
+import { HeldTime, startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { BRAND } from '../brand.js';
 import type { Backlog } from '../backlog/types.js';
 import type { EventLog } from '../events/log.js';
@@ -70,7 +71,9 @@ type Payload<T extends EventType> = EventPayload<T>;
 
 export class FixForward {
   /** Test-run probes in this process, by candidate: running, or each failing check's result. */
-  private probes = new Map<string, 'running' | Map<string, 'pass' | 'fail'>>();
+  private probes = new Map<string, 'running' | 'held' | Map<string, 'pass' | 'fail'>>();
+  /** Time each probe spent held at the start gate: not counted against its timeout. */
+  private heldTime = new HeldTime();
   private lookedAt = -Infinity;
   private attached = new Set<number>();
 
@@ -279,7 +282,7 @@ export class FixForward {
 
   /** A probe asked for earlier: its verdict once in (true), or still running (false); not done in time: skip. */
   private async resolve(ep: Episode, sha: string, t: Payload<'fix_forward.tested'> & { at: string }): Promise<boolean> {
-    if (this.now - Date.parse(t.at) >= this.d.probeTimeoutMin() * 60_000) {
+    if (this.now - Date.parse(t.at) - this.heldTime.ms(sha, this.now) >= this.d.probeTimeoutMin() * 60_000) {
       this.probes.delete(sha);
       this.tested(ep, sha, 'skip', t.via, t.ids, `not done in ${this.d.probeTimeoutMin()} min`);
       return true;
@@ -288,6 +291,13 @@ export class FixForward {
       const mem = this.probes.get(sha);
       if (!mem) {
         this.startTestRun(ep, sha); // lost with a restart: run it again
+        return false;
+      }
+      // WHY: held at the start gate (src/testrun/gate.ts) is no verdict: it runs once the gate lets it, its timeout paused.
+      if (mem === 'held') {
+        const held = startRefusal() !== null;
+        this.heldTime.held(sha, this.now, held);
+        if (!held) this.startTestRun(ep, sha);
         return false;
       }
       if (mem === 'running') return false;
@@ -322,6 +332,11 @@ export class FixForward {
           }
         }
       } catch (e) {
+        if (e instanceof TestRunHeld) {
+          this.probes.set(sha, 'held');
+          this.heldTime.held(sha, this.now, true);
+          return;
+        }
         this.error(`test run of ${sha.slice(0, 8)}`, e);
       }
       this.probes.set(sha, got);
