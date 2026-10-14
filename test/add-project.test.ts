@@ -203,6 +203,21 @@ test('no Claude token, or not one from claude setup-token: the step fails and no
   assert.ok(!existsSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json')));
 });
 
+// WHY: wizard screen 5 makes the manifest flow the App step's only way. A failure there must never send the owner off
+// to make an App by hand and copy its key to the server: it names the manifest flow and its own retry, nothing else.
+test("the App step is manifest only: with no hub it stops, naming the hub and the manifest retry, never an App made by hand", { skip: !posix }, () => {
+  const m = machine();
+  rmSync(join(m.T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub', 'dashboard-token'));
+  const r = m.run();
+  assert.equal(r.status, 1);
+  const last = r.events.at(-1)!;
+  assert.deepEqual([last.step, last.state], ['app', 'failed']);
+  assert.match(last.detail, /no dashboard hub on this machine yet[\s\S]*manifest flow[\s\S]*dashboards\.sh/);
+  assert.equal(last.retry, `sudo bash ${m.s}/add-project.sh alpha example/alpha (it skips the steps already done); or this step alone: sudo ${m.T}/bin/worklane app-manifest alpha example/alpha`);
+  assert.doesNotMatch(`${last.detail} ${last.retry} ${r.stderr}`, /by hand|credentials\.sh|key\.pem/);
+  assert.ok(!m.calls().some((c) => c.startsWith('app ')), 'the manifest flow never started');
+});
+
 test("an instance by that name for another repo is never reused", { skip: !posix }, () => {
   const m = machine();
   mkdirSync(m.instDir('alpha'), { recursive: true });
