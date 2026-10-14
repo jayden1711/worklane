@@ -7,7 +7,7 @@
 // after reading the login (src/dashboard-auth.ts), and an App's own token reaches only the repos it is installed on.
 // So GitHub answers with public repos only, and the page says so: a private repo is typed as owner/name, and checked
 // the same way. Asking for a broader token just to fill a list would be a worse trade.
-import { BRAND } from '../brand.js';
+import { GITHUB_API } from '../github-hosts.js';
 
 type Fetch = typeof fetch;
 
@@ -37,7 +37,7 @@ export interface RepoPickerView {
 }
 
 const HEADERS = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' } as const;
-const defaultApi = () => (process.env[`${BRAND.envPrefix}_GITHUB_API`] ?? 'https://api.github.com').replace(/\/+$/, '');
+const defaultApi = () => GITHUB_API;
 /** GitHub allows 60 unauthenticated requests an hour per address: a list is kept this long. */
 export const REPO_LIST_TTL_MS = 5 * 60_000;
 const PRIVATE_NOTE = "GitHub lists only public repos here (the dashboard keeps no GitHub token that could list private ones): type a private repo as owner/name; it's checked the same way.";

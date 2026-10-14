@@ -19,6 +19,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
+import { GITHUB_WEB } from './github-hosts.js';
 import { assertLoopbackHost, parseCookies } from './dashboard-auth.js';
 import { fileAccess, installOwnerOnlySecret, ownerOnlyDir, writeOwnerOnly } from './os/index.js';
 import { FlowError, GITHUB_LOGIN, INSTANCE_NAME, MANIFEST_CALLBACK_PATH, MANIFEST_START_PATH, ManifestFlows } from './setup/app-manifest.js';
@@ -147,7 +148,8 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
   let pending: { id: string; owner: string } | null = null;
   const gh = o.github ?? {};
   const flows = new ManifestFlows({ isMachineOwner: () => false, signIn: false, publicUrl: origin, now, ...(gh.api ? { api: gh.api } : {}), ...(gh.web ? { web: gh.web } : {}), ...(gh.fetch ? { fetch: gh.fetch } : {}) });
-  const githubWeb = new URL(gh.web ?? process.env[`${BRAND.envPrefix}_GITHUB_WEB`] ?? 'https://github.com').origin;
+  // GitHub itself: `gh.web` is a test's, in this process; no setting names another host (src/github-hosts.ts).
+  const githubWeb = new URL(gh.web ?? GITHUB_WEB).origin;
 
   let over: string | null = null;
   let done!: (why: string) => void;
