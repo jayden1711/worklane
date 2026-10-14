@@ -181,6 +181,14 @@ const PROGRESS = new Set(['issue.claimed', 'run.started', 'run.finished', 'pr.op
 const GITHUB_AUTH_KINDS = new Set(['unauthenticated', 'insufficient_scope', 'insufficient_role', 'sso_required', 'forbidden']);
 /** How far back a failure counts: one hour for sign-in and GitHub access. */
 export const AUTH_WINDOW_MS = 3600_000;
+/**
+ * Watchdog passes in a row (one a minute) in which the instance's GitHub token couldn't be renewed because GitHub
+ * wasn't reached (no answer at all, not a refusal) before that is reported, amber: GitHub not reachable. The token is
+ * renewed once it has 10 minutes left (src/github-app.ts), so a blip of a minute or two (DNS, a dropped connection)
+ * heals by itself with nobody told, and 5 failed passes still leave about 5 minutes of the old token: someone hears
+ * of it before work that needs GitHub stops.
+ */
+export const GITHUB_UNREACHABLE_PASSES = 5;
 /** A login that expires within this long is flagged. */
 export const LOGIN_EXPIRY_MS = 3 * 86_400_000;
 
@@ -195,8 +203,15 @@ export interface InstanceFacts {
   auth: { loggedIn: boolean; expiresAt?: string | null } | null;
   /** When the probe first said signed out, of the probes in a row that say so (ms); unset: not known. */
   authFailingSince?: number;
-  /** Why the instance's GitHub token couldn't be had just now (an App token that wouldn't mint); null when it was. */
+  /**
+   * Why GitHub refused the instance's token the last time one was asked for (an App token that wouldn't mint: a bad
+   * key, a revoked installation, a 401); null when the last answer was a token. A network failure is not this.
+   */
   githubTokenError: string | null;
+  /** GitHub wasn't reached when a token was asked for, this many passes in a row (since `since`, ms); unset: it was. */
+  githubUnreachable?: { passes: number; since: number; detail: string } | null;
+  /** When a GitHub call with the instance's token last succeeded (ms); unset or null: not known. */
+  githubOkAt?: number | null;
   /** An emergency stop is in force: no work moves, on purpose. */
   emergency: boolean;
 }
@@ -227,11 +242,20 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
     out.push({ kind: 'claude_login_expiring', key: i, instance: i, detail: exp <= f.now ? `the agent user's Claude login expired on ${f.auth.expiresAt!.slice(0, 10)}` : `the agent user's Claude login expires in ${days} day${days === 1 ? '' : 's'}, on ${f.auth.expiresAt!.slice(0, 10)}`, fix: "Renew the agent user's Claude login (a new setup-token for that user) before then", tried: [] });
   }
 
-  // GitHub: the token wouldn't mint, or a call failed on the token or its permissions in the last hour.
-  const ghFail = [...recent].reverse().find((e) => e.type === 'coordinator.error' && GITHUB_AUTH_KINDS.has((e.payload as { kind: string }).kind));
+  // GitHub: the token wouldn't mint, or a call failed on the token or its permissions in the last hour. A refused
+  // token (401, unauthenticated) stands only until a call with it succeeds after it: the token works again. A refused
+  // permission (a 403 on one call) is not cleared by another call succeeding, which proves nothing about that one.
+  const okAt = f.githubOkAt ?? null;
+  const standing = (e: StoredEvent) => !((e.payload as { kind: string }).kind === 'unauthenticated' && okAt !== null && okAt > at(e));
+  const ghFail = [...recent].reverse().find((e) => e.type === 'coordinator.error' && GITHUB_AUTH_KINDS.has((e.payload as { kind: string }).kind) && standing(e));
   if (f.githubTokenError || ghFail) {
     const p = ghFail?.payload as { where: string; kind: string; message: string } | undefined;
     out.push({ kind: 'github_auth', key: i, instance: i, detail: f.githubTokenError ? `the instance's GitHub token couldn't be had: ${f.githubTokenError}` : `${p!.where}: GitHub refused the instance's token (${p!.kind}): ${p!.message}`, fix: "Check the instance's GitHub App: installed on the repo, with the permissions the setup lists, and its private key in place (or replace an expired token)", tried: ['retries every tick; nothing that needs GitHub can move until it works'] });
+  }
+  // GitHub not reached at all (no answer, not a refusal), pass after pass: amber, under its own key, never the red one.
+  const net = f.githubUnreachable;
+  if (net && net.passes >= GITHUB_UNREACHABLE_PASSES) {
+    out.push({ kind: 'github_auth', key: `${i}:network`, instance: i, severity: 'amber', detail: `GitHub not reachable: the instance's GitHub token couldn't be renewed in ${net.passes} passes in a row, since ${new Date(net.since).toISOString()} (${net.detail}). Nothing says the token or the App is wrong`, fix: "Check this machine's network, DNS and proxy, and GitHub's status page; nothing to change on the GitHub App. It resolves by itself once GitHub answers", tried: ['asks GitHub again every pass; work that needs GitHub waits until it answers'] });
   }
   const perm = [...f.events].reverse().find((e) => e.type === 'testrun.checks_permission');
   const level = (perm?.payload as { level?: string } | undefined)?.level;

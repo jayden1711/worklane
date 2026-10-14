@@ -13,6 +13,7 @@ import { emergencyStop } from '../slots.js';
 import { updateLog } from '../updates.js';
 import { machineChanges } from '../machine.js';
 import type { IncidentSink } from '../usage-limit.js';
+import { githubOkAt } from '../github/seen.js';
 import { watchdogConfig } from './config.js';
 import { raiseIncident, resolveIncident } from './incidents.js';
 import { discordPoster } from './post.js';
@@ -77,7 +78,8 @@ export function watchdogForInstance(o: {
       const s = claudeAuthStatusJson(o.env, o.runAs);
       return s ? { loggedIn: s.loggedIn, ...(typeof s.expiresAt === 'string' ? { expiresAt: s.expiresAt } : {}) } : null;
     },
-    ...(o.tokens ? { githubToken: o.tokens } : {}),
+    // The same token source the coordinator's GitHub clients use: a call of theirs that succeeds is seen here.
+    ...(o.tokens ? { githubToken: o.tokens, githubOkAt: () => githubOkAt(o.tokens!) } : {}),
     instances: () => machineInstances(),
     units: (u) => unitStates(u),
     updates: () => updateLog(),
