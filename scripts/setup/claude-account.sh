@@ -3,7 +3,7 @@
 # (review it first).
 #
 #   sudo bash scripts/setup/claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...]
-#   sudo bash scripts/setup/claude-account.sh status [--json]
+#   sudo bash scripts/setup/claude-account.sh status [--json] [<instance>...]
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -22,7 +22,9 @@
 # checked on its current login and resumed if that passes.
 #
 # status: each agent user's account (as claude auth status names it), whether it is signed in, which token (the first
-# 8 hex digits of its sha256: the same login shows the same id) and when that expires.
+# 8 hex digits of its sha256: the same login shows the same id) and when that expires. With instances named (add-project
+# and credentials.sh name theirs once its token is in, before the machine helper lists it), only their records are
+# found again; status.json keeps every other instance's as it was.
 #
 # Output: plain lines, or with --json one JSON line per step change (switch) or one JSON object (status). Either way
 # the switch's lines go to $CLAUDE_ACCOUNT_DIR/switch.jsonl and what status found to status.json, root's 0644, for the
@@ -30,7 +32,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
@@ -53,7 +55,6 @@ case "$cmd" in switch | status) ;; *) echo "$usage" >&2; exit 2 ;; esac
 [[ "$token_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--token-timeout: minutes, 1 to 999" >&2; exit 2; }
 [ -z "$token_from" ] || instance_name_ok "$token_from" || { echo "--token-from: an instance name" >&2; exit 2; }
 for n in ${names[@]+"${names[@]}"}; do instance_name_ok "$n" || { echo "instance name $n: lowercase letters, digits and dashes" >&2; exit 2; }; done
-[ "$cmd" = switch ] || [ "${#names[@]}" -eq 0 ] || { echo "$usage" >&2; exit 2; }
 
 # --- the instances and their agent users
 
@@ -139,6 +140,21 @@ write_file() { # <name> <content>: into CLAUDE_ACCOUNT_DIR, root's 0644, by a re
   mv -f "$CLAUDE_ACCOUNT_DIR/.$1.tmp" "$CLAUDE_ACCOUNT_DIR/$1"
 }
 save_status() { write_file status.json "{\"at\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"users\":$1}"; }
+# status.json with these instances' records replaced by the ones given (a JSON array), every other record kept.
+merge_status() { # <records json> <instance>...
+  local recs="$1"
+  shift
+  "$(command -v node)" -e '
+const fs = require("node:fs");
+const [file, fresh, ...named] = process.argv.slice(1);
+let old = [];
+try {
+  const o = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (Array.isArray(o.users)) old = o.users;
+} catch {}
+process.stdout.write(JSON.stringify([...old.filter((u) => !u || !named.includes(u.instance)), ...JSON.parse(fresh)]));
+' "$CLAUDE_ACCOUNT_DIR/status.json" "$recs" "$@"
+}
 show_status() { # <records json>: one line per user
   "$(command -v node)" -e '
 const rows = JSON.parse(process.argv[1]);
@@ -153,7 +169,7 @@ for (const r of rows) {
 
 if [ "$cmd" = status ]; then
   recs="$(collect_status)"
-  save_status "$recs"
+  if [ "${#names[@]}" -gt 0 ]; then save_status "$(merge_status "$recs" "${names[@]}")"; else save_status "$recs"; fi
   if [ -n "$json" ]; then printf '{"users":%s}\n' "$recs"; else show_status "$recs"; fi
   # Exit 1 when any user isn't signed in.
   if printf '%s' "$recs" | grep -q '"logged_in":false'; then exit 1; fi

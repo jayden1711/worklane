@@ -308,8 +308,10 @@ Every agent on a machine uses one Claude login, stored for each agent user (each
 
 ```
 sudo bash scripts/setup/claude-account.sh switch          # every instance; or name some
-sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry
+sudo bash scripts/setup/claude-account.sh status          # each agent user's account, token id and expiry; or name some
 ```
+
+What `status` finds is kept in `/var/lib/worklane/claude-account/status.json` (root's, 0644; token ids, never a token). The first-run page's "The agents' Claude login" step reads it. add-project and `credentials.sh <name> claude` refresh their instance's records once its token is in, and a switch rewrites it.
 
 The switch:
 

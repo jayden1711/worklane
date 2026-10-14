@@ -905,6 +905,9 @@ jobs:
       # unit itself, before its App step. The drop-in goes afterwards, and the real hub runs with the instance.
       - name: "a machine's first project, no hub and no instance: add-project starts the hub before the App step, the App through the manifest flow, to the end; nothing by hand"
         run: |
+          # A stand-in claude from here on (scripts/ci/claude-stand-in.cjs): add-project's claude-token step asks claude
+          # auth status as the agent user, and records what it says for the first-run step (claude-account status.json).
+          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
           sudo bash scripts/setup/machine-owners.sh --first ci-owner
           dd=/etc/systemd/system/worklane-dashboard-hub.service.d
           printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
@@ -971,6 +974,20 @@ jobs:
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
+      - name: "regression (bug B): after add-project installed the agents' token, the first-run step reads it done, from claude-account's status.json (never the token, never the cached email)"
+        run: |
+          s=/var/lib/worklane/claude-account/status.json
+          [ "$(stat -c '%U %a' "$s")" = "root 644" ]
+          id="$(tr -d '[:space:]' < "$F/claude-token" | tr -d '\n' | sha256sum | cut -c1-8)"
+          jq -e --arg id "$id" '.users | map(select(.instance == "ci" and .kind == "agent")) | length == 1 and .[0].user == "wl-ci-agent" and .[0].logged_in == true and .[0].stored == true and .[0].token_id == $id' "$s"
+          if sudo grep -qFf "$F/claude-token" "$s"; then echo "status.json holds the token" >&2; exit 1; fi
+          # The step, through the real hub (wl-dash, break-glass) to the instance's dashboard (wl-ci), which can't sudo.
+          hub="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; printf 'authorization: Bearer %s\n' "$(sudo cat "$hub")" > "$F/hub-auth-b")
+          for _ in $(seq 1 20); do curl -sS -H @"$F/hub-auth-b" 'http://127.0.0.1:4398/api/i/ci/first-run?fresh=1' > "$F/first-run-b.json" && jq -e '.setup' "$F/first-run-b.json" > /dev/null && break; sleep 3; done
+          jq '.setup.groups[].steps[] | select(.id == "claude-token")' "$F/first-run-b.json"
+          jq -e --arg id "$id" '.setup.groups[].steps[] | select(.id == "claude-token") | .done == true and (.detail | test("^wl-ci-agent is signed in \\(claude\\.ai\\), per claude auth status as that user at .*; token " + $id + "$"))' "$F/first-run-b.json"
+          if grep -q '@example.test' "$F/first-run-b.json"; then echo "the first-run page shows the cached account email" >&2; exit 1; fi
       - name: "outbound env on a real unit, as the coordinator (#381 follow-up): the unit's redirecting and TLS-trust variables reach no child; root's network.json proxy and CA do (a real Node, git and gh handshake); a writable, non-root, symlinked or non-PEM one is refused"
         run: |
           # As wl-ci in a transient unit whose own environment points every redirecting variable elsewhere: the env the
