@@ -32,6 +32,7 @@ type State = { tasks: { issue: number; title: string; status: string }[]; decisi
 interface Render {
   renderPage(name: string, state: State): string;
   renderIssue(state: State, issue: number): string;
+  renderGoalGraph(graph: unknown): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
   renderIntake(data: unknown, view?: string): string;
@@ -2315,4 +2316,77 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
+});
+
+/** A goal's graph as GET /api/goal-graph serves it (src/goal-graph.ts): 11 first, 12 and 14 after it, 13 after 12. */
+const GOAL_GRAPH = {
+  goal: 10,
+  split: true,
+  nodes: [
+    { issue: 11, key: 'schema', title: 'Add the export schema', status: 'landed', pr: null, run: null, cycle: false, layer: 0 },
+    { issue: 12, key: 'api', title: 'Serve the export', status: 'in_review', pr: { number: 120, url: 'https://example.test/pr/120' }, run: 'run-12', cycle: false, layer: 1 },
+    { issue: 14, key: 'docs', title: 'Document exports', status: null, pr: null, run: null, cycle: false, layer: 1 },
+    { issue: 13, key: 'ui', title: 'Export button', status: 'building', pr: null, run: 'run-13', cycle: false, layer: 2 },
+  ],
+  edges: [
+    { from: 11, to: 12, cycle: false },
+    { from: 12, to: 13, cycle: false },
+    { from: 11, to: 14, cycle: false },
+  ],
+  cycles: [] as number[][],
+  total: 4,
+  capped: false,
+};
+const attrs = (html: string, testid: string) => [...html.matchAll(new RegExp(`<[a-z]+ [^>]*data-testid="${testid}"[^>]*>`, 'g'))].map((m) => Object.fromEntries([...m[0].matchAll(/([a-z-]+)="([^"]*)"/g)].map((a) => [a[1]!, a[2]!])));
+
+test("a goal's task graph: a node per task in its state's colours, an edge per dependency, each node a focusable link to its PR, run or issue", () => {
+  const html = r.renderGoalGraph(GOAL_GRAPH);
+  const nodes = attrs(html, 'goal-graph-node');
+  assert.deepEqual(nodes.map((n) => [n['data-issue'], n['data-status']]), [['11', 'landed'], ['12', 'in_review'], ['14', 'unseen'], ['13', 'building']]);
+  const edges = attrs(html, 'goal-graph-edge');
+  assert.deepEqual(edges.map((e) => `${e['data-from']}>${e['data-to']}`).sort(), ['11>12', '11>14', '12>13']);
+  // The state is written on the node, in the colour tokens its status badge uses (landed green, building blue).
+  assert.match(html, /Landed<\/text>/);
+  assert.match(html, /Building<\/text>/);
+  assert.match(html, /Not seen yet<\/text>/);
+  assert.match(html, /fill:var\(--green-tint\)/);
+  assert.match(html, /fill:var\(--blue-tint\)/);
+  // Click targets: the PR's recorded URL (new tab), else its latest run, else its issue page; links are focusable.
+  const by = Object.fromEntries(nodes.map((n) => [n['data-issue'], n]));
+  assert.equal(by['12']!.href, 'https://example.test/pr/120');
+  assert.equal(by['12']!['data-target'], 'pr');
+  assert.equal(by['12']!.target, '_blank');
+  assert.equal(by['13']!.href, '/runs/run-13');
+  assert.equal(by['13']!['data-target'], 'run');
+  assert.equal(by['11']!.href, '/issues/11');
+  assert.equal(by['14']!.href, '/issues/14');
+  for (const n of nodes) assert.match(n['aria-label']!, /^#\d+ .+\. Opens /, 'each node says what it is and where it goes');
+  // A PR URL that isn't https is never a link: the node goes to its issue instead.
+  const bad = r.renderGoalGraph({ ...GOAL_GRAPH, nodes: [{ ...GOAL_GRAPH.nodes[1]!, pr: { number: 1, url: 'javascript:alert(1)' }, run: null }], edges: [] });
+  assert.doesNotMatch(bad, /javascript:/);
+  assert.match(bad, /href="\/issues\/12"/);
+  // Phone width: the graph scrolls inside its own box, never the page.
+  assert.match(attrs(html, 'goal-graph-scroll')[0]!.class!, /overflow-x-auto/);
+  assert.doesNotMatch(html, /goal-graph-cycles|goal-graph-capped|goal-graph-empty/);
+});
+
+test("a goal's task graph: a cycle is flagged on its nodes, its edges and in words; a capped graph says so; an empty one says why", () => {
+  const cyc = { ...GOAL_GRAPH, nodes: GOAL_GRAPH.nodes.map((n) => ({ ...n, cycle: n.issue === 12 || n.issue === 13 })), edges: [...GOAL_GRAPH.edges.map((e) => (e.from === 12 ? { ...e, cycle: true } : e)), { from: 13, to: 12, cycle: true }], cycles: [[12, 13]] };
+  const html = r.renderGoalGraph(cyc);
+  assert.match(html, /data-testid="goal-graph-cycles"/);
+  assert.match(html, /#12 → #13 → #12/);
+  assert.deepEqual(attrs(html, 'goal-graph-node').filter((n) => n['data-cycle'] === 'true').map((n) => n['data-issue']).sort(), ['12', '13']);
+  assert.deepEqual(attrs(html, 'goal-graph-edge').filter((e) => e['data-cycle'] === 'true').map((e) => `${e['data-from']}>${e['data-to']}`).sort(), ['12>13', '13>12']);
+
+  assert.match(r.renderGoalGraph({ ...GOAL_GRAPH, total: 75, capped: true }), /Showing 4 of 75 tasks/);
+
+  assert.match(r.renderGoalGraph({ goal: 10, split: false, nodes: [], edges: [], cycles: [], total: 0, capped: false }), /data-testid="goal-graph-empty"[^>]*>No task graph yet/);
+  assert.match(r.renderGoalGraph({ goal: 10, split: true, nodes: [], edges: [], cycles: [], total: 0, capped: false }), /This goal&#x27;s split has no tasks/);
+});
+
+test("the task graph is on a goal's own page, and only a goal's", () => {
+  const t = asOwner.tasks[0]!;
+  const withLabels = (labels: (x: State['tasks'][number]) => string[]) => ({ ...asOwner, tasks: asOwner.tasks.map((x) => ({ ...x, labels: labels(x) })) }) as State;
+  assert.match(r.renderIssue(withLabels((x) => (x.issue === t.issue ? ['type:goal'] : [])), t.issue), /data-testid="goal-graph"/);
+  assert.doesNotMatch(r.renderIssue(withLabels(() => []), t.issue), /data-testid="goal-graph"/);
 });
