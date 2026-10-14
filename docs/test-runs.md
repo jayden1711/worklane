@@ -79,6 +79,13 @@ startTestRun(req, opts?: { signal?: AbortSignal }): Promise<TestRunResult>
 postChecks(sha, result, checkNames): Promise<void>
 ```
 
+0. **The start gate** (src/testrun/gate.ts). Before anything is queued or recorded, the run asks the gate's refusal
+   sources (`addStartGate(name, fn)`; today one, `disk`: the coordinator's disk guard, src/disk-guard.ts). While free disk is below the floor (`min_free_gb`, `min_free_pct` in watchdog.json)
+   or the event log's writes wait in memory on a full disk, it refuses with `TestRunHeld`. Every caller holds such a
+   run: a PR's head runs at a later listing; a batch is abandoned with nobody blamed and batched again; the flaky
+   re-run and fix-forward's probes wait, their timeouts paused; the deploy gate gives no verdict and runs the same
+   commit later. Previews ask the same gate before one launches. A test (test/test-run-gate.test.ts) keeps every
+   other path from starting a run around it.
 1. **A slot.** The run waits for a test-run slot: `test-<i>.lock` in the machine's slot directory (docs/slots.md). The machine's cap is `max_test_runs`, changed from the dashboard's machine settings through the machine helper (`set-test-slots <1..8>`).
 2. **The full-run lock**, `/run/lock/worklane-full-run.lock`, taken **shared**. Test runs never wait on each other. Agents' and other full runs take it exclusive, so a test run waits for one in progress and then proceeds; it never fails for the wait. The wait is recorded (`lock_wait_ms`). A missing lock file fails the run: it is never run unlocked.
 3. **The run.** The workspace, the change's files, the caches, the shared directories and the database (only if a tier needs it) are set up first. Then the setup steps run, then the tiers. A failed setup step fails every tier. A tier that needs `{changed_files}` fails when the run was given none. No tiers of the kind is never a pass.

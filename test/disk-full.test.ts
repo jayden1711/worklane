@@ -15,6 +15,9 @@ import type { RunHost } from '../src/testrun/host.js';
 import type { TestRunResult } from '../src/testrun/run.js';
 import { coordinator, easyIssue, fixture, skip } from './repro-state-graph/harness.js';
 import { FakeRunner } from '../src/runner.js';
+import { addStartGate, clearStartGates, passGate } from '../src/testrun/gate.js';
+
+test.afterEach(() => clearStartGates());
 
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), p));
 const bufferedLog = (o: { max?: number } = {}) => new EventLog(join(tmp('full-'), 'events.db'), { buffer: o });
@@ -209,6 +212,8 @@ test('below the free-disk floor no test run starts (amber incident); above it th
 
 /** PrTestRuns with stand-ins: each run writes an event (as a real one does) and finishes at once. */
 function rig(log: EventLog, hold?: () => string | null) {
+  clearStartGates();
+  if (hold) addStartGate('disk', hold);
   let now = 0;
   const posted: { sha: string; result: TestRunResult }[] = [];
   const s = { prs: [] as OpenPr[] };
@@ -224,12 +229,13 @@ function rig(log: EventLog, hold?: () => string | null) {
     now: () => now,
     pollMs: 1000,
     start: async (req) => {
+      // WHY: as runTestRun does, the only function that starts a run: the start gate first (src/testrun/gate.ts).
+      passGate();
       // WHY: as a real run does: its events, and on a failure the coordinator's error (the line the machine crashed on).
       log.append('issue.seen', seen(req.prs[0]!), 'test');
       return { id: `r${req.prs[0]}`, sha: req.sha, kind: 'fast', ok: true, outcome: 'done', tiers: [{ tier: 'unit', ok: true, durationMs: 5, summary: 'ok' }] } as unknown as TestRunResult;
     },
     post: async (sha, result) => void posted.push({ sha, result }),
-    ...(hold ? { hold } : {}),
   });
   return {
     runs,

@@ -85,8 +85,8 @@ function RoutingSection({ routes, configDir }: { routes: Route[]; configDir: str
 
 const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span className="text-muted-foreground">none</span>);
 
-/** `owner`: whether this person is one of the instance's owners (State.role), for the owners-only voice section. */
-export function SettingsPage({ owner = false }: { owner?: boolean }) {
+/** `owner`: whether this person is one of the instance's owners (State.role), for the owners-only voice section; `brand` names its wake word. */
+export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?: string }) {
   const { data: s, error } = useFetch(getSettings);
   // A viewer gets the project part only; the rest is the owners' and writers'.
   const full = s && !('forViewer' in s) ? s : null;
@@ -112,7 +112,7 @@ export function SettingsPage({ owner = false }: { owner?: boolean }) {
         .
       </div>
       <div className="grid gap-6 p-6 lg:grid-cols-2">
-        <VoiceSettings owner={owner} />
+        <VoiceSettings owner={owner} brand={brand} />
         <Section title="Project">
           <Row k="Name">{s.project.name}</Row>
           <Row k="Repository">{s.project.repo}</Row>
