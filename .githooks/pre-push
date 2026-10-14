@@ -1,3 +1,6 @@
 #!/bin/sh
-# Push gate: nothing private leaves the machine (scripts/push-gate.mjs). Enable with: npm run setup:hooks
-exec node scripts/push-gate.mjs "$@"
+# Push gate, for a clone still set up with core.hooksPath=.githooks. This file comes from whatever branch is
+# checked out, so that branch could change it: `npm run setup:hooks` installs the hook outside any branch instead.
+# Either way the gate and its rules are loaded from origin's default branch (scripts/push-gate-hook.mjs).
+echo "push gate: this hook runs from the checked-out branch (core.hooksPath=.githooks). Run 'npm run setup:hooks' once to install the fixed one." >&2
+exec node scripts/push-gate-hook.mjs "$@"
