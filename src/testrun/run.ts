@@ -14,6 +14,7 @@ import type { TestRunConfig, TestRunTier } from './config.js';
 import type { HelperState } from './helper.js';
 import { newRunId, SetupStepError, type RunDatabase, type RunHost } from './host.js';
 import { waitTestSlot } from './slots.js';
+import { SETUP_TIMEOUT_S, timedOutLine } from './timeout.js';
 import { createWorkspace, runEnv } from './workspace.js';
 import { configBehind, missingReferencedPath, oldHeadFailure, type Predates } from './predates.js';
 import type { Plan } from './affected.js';
@@ -146,7 +147,6 @@ const tail = (out: string, lines = 20) => String(redact(out.trim().split('\n').s
  */
 export const TIER_LINES = 30;
 export const lastLines = (out: string, lines = TIER_LINES) => redactString(out).trim().split('\n').slice(-lines).join('\n').slice(-4000);
-
 export function validateRequest(req: TestRunRequest): void {
   if (!/^[0-9a-f]{7,40}$/.test(req.sha)) throw new Error(`not a commit: ${req.sha}`);
   if (req.kind !== 'fast' && req.kind !== 'full') throw new Error(`a run is fast or full, not ${String(req.kind)}`);
@@ -215,12 +215,13 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     stage = 'setup';
     for (const [i, step] of d.config.setup.entries()) {
       if (o.signal?.aborted) break;
-      const r = await d.host.exec(id, step, baseEnv, 1800_000, o.signal);
+      const r = await d.host.exec(id, step, baseEnv, SETUP_TIMEOUT_S * 1000, o.signal);
       writeFileSync(join(d.logDir, id, `setup-${i + 1}.log`), r.out, { mode: 0o600 });
       if (r.code !== 0) {
         setupFailed = true;
-        setup = { step: `setup step ${i + 1} (${step})`, detail: `exit ${r.code ?? 'killed'}`, stderr: tail(r.err ?? '') };
-        failAll(`setup step ${i + 1} (${step}) failed (exit ${r.code ?? 'killed'}):\n${tail(r.out)}`);
+        const why = r.timedOut ? timedOutLine(`setup step ${i + 1} (${step})`, SETUP_TIMEOUT_S, 'the setup steps\' cap') : `setup step ${i + 1} (${step}) failed (exit ${r.code ?? 'killed'})`;
+        setup = { step: `setup step ${i + 1} (${step})`, detail: r.timedOut ? `timed out after ${SETUP_TIMEOUT_S / 60} min` : `exit ${r.code ?? 'killed'}`, stderr: tail(r.err ?? '') };
+        failAll(`${why}:\n${tail(r.out)}`);
         break;
       }
     }
@@ -262,7 +263,9 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal);
       const logRef = `${id}/${t.name}.log`;
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
-      const out = r.code === null ? `timed out or cancelled\n${lastLines(r.out)}` : lastLines(r.out);
+      // WHY: the sandbox's unit stopped at its RuntimeMaxSec exits non-zero like any failure; only systemd-run's result
+      // says it was the tier's own cap, and the check names the tier and that cap.
+      const out = r.timedOut ? `${timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run')}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
       const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: selects ? `${selection.line}\n${out}` : out, logRef };
       const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
       if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
