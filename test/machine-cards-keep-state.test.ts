@@ -6,7 +6,7 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -16,7 +16,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { TailscaleStatus } from '../src/tailscale-setup.js';
 import { ALLOWED_SIGNERS } from '../src/updater-setup.js';
-import { REAL_CHROME_TIMEOUT, realChromeTests } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
 
 test('the machine settings are never keyed on their data: new data is new props, and each input follows what is set until the owner types', () => {
@@ -73,7 +73,6 @@ test('the live panels (Tailscale, Claude account, Discord) take every failed loo
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
-const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
 
 async function js<T>(cdp: Cdp, expression: string): Promise<T> {
   const r = await cdp.send<{ result: { value: T }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
@@ -98,7 +97,7 @@ async function type(cdp: Cdp, element: string, text: string) {
 
 test(
   'in a real Chrome: a signer half typed, a slot cap typed and the request message all survive a machine change landing',
-  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'machine-cards-'));
     const updatesConfigPath = join(dir, 'updates.json');
@@ -118,8 +117,9 @@ test(
       await cdp.send('Network.enable');
       // The machine owner, from an allowed console device, as the hub names them.
       await cdp.send('Network.setExtraHTTPHeaders', { headers: asDevicePerson('example-owner') });
-      const base = d.url.split('/?')[0]!;
-      await cdp.send('Page.navigate', { url: `${base}/machine?t=${d.url.split('?t=')[1]!}` });
+      // #418: the key goes in the tab's session storage, as the page's key form keeps it: never in a URL.
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(d.token)}); } catch {}` });
+      await cdp.send('Page.navigate', { url: `${d.url}/machine` });
 
       // Ask for the install and confirm it: the message says it was requested, and the page now looks again every
       // few seconds while the request waits for the coordinator.
@@ -153,7 +153,7 @@ test(
 
 test(
   "in a real Chrome: Tailscale's looks failing mid-confirm keep the step's confirmation open, with a note; a 403 then hides the panel",
-  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
   async () => {
     const dir = mkdtempSync(join(tmpdir(), 'tailscale-refresh-'));
     const eventsDb = join(dir, 'events.db');
@@ -180,7 +180,9 @@ test(
         else void cdp.send('Fetch.fulfillRequest', { requestId, responseCode: 403, responseHeaders: [{ name: 'content-type', value: 'application/json' }], body: Buffer.from(JSON.stringify({ error: 'not a machine owner' })).toString('base64') });
       });
       await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/tailscale*', requestStage: 'Request' }] });
-      await cdp.send('Page.navigate', { url: `${d.url.split('/?')[0]!}/machine?t=${d.url.split('?t=')[1]!}` });
+      // #418: the key goes in the tab's session storage, as the page's key form keeps it: never in a URL.
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(d.token)}); } catch {}` });
+      await cdp.send('Page.navigate', { url: `${d.url}/machine` });
 
       // The next step's confirmation, open.
       const next = `document.querySelector('[data-testid="tailscale-step"][data-next="true"]')`;
