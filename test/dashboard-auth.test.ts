@@ -334,6 +334,38 @@ test('a person sees only the instances they have a role on; any other instance i
   }
 });
 
+test("a signed-in person's list keeps an instance that stopped answering (as down) while the hub's copy of their role there is fresh; never one they have no role on", async () => {
+  const s = await setup();
+  let aOpen = true;
+  try {
+    s.gh.perms.set('example/a:vic', 'read');
+    s.gh.perms.set('example/b:wes', 'write');
+    const vic = await s.signIn('vic');
+    const wes = await s.signIn('wes');
+    const list = async (p: { get: (path: string) => Promise<Response> }) => ((await (await p.get('/api/hub')).json()) as { instances: { name: string; up: boolean; role: string | null }[] }).instances.map((i) => [i.name, i.up, i.role]);
+    assert.deepEqual(await list(vic), [['a', true, 'viewer']]);
+    assert.deepEqual(await list(wes), [['b', true, 'writer']]);
+    // a stops answering (an update's restart): vic still sees it, marked down, rather than losing it from the sidebar.
+    await s.a.d.close();
+    aOpen = false;
+    assert.deepEqual(await list(vic), [['a', false, 'viewer']], 'a: listed as down, from the role the hub learned while it answered');
+    assert.equal(await status(vic.get('/api/i/a/state')), 502, "and nothing of it is read: it isn't answering");
+    // Someone with no role on a never gets it, down or not; nor does someone the hub never learned a role for.
+    assert.deepEqual(await list(wes), [['b', true, 'writer']], 'wes: no role on a, so a is not listed');
+    s.gh.perms.set('example/a:ivy', 'admin');
+    const ivy = await s.signIn('ivy');
+    assert.deepEqual(await list(ivy), [], 'ivy: a is down, and the hub has no fresh copy of her role there');
+    // Past the role cache, the hub's copy is stale: the down instance is no longer listed (as before).
+    s.clock.t += ROLE_CACHE_MS + 1000;
+    assert.deepEqual(await list(vic), []);
+  } finally {
+    await s.h.close();
+    if (aOpen) await s.a.d.close();
+    await s.b.d.close();
+    await s.gh.close();
+  }
+});
+
 /** An SSE response read in the background: all that came in so far, whether it ended, and a wait for some text. */
 function streamOf(res: Response) {
   const reader = res.body!.getReader();

@@ -14,6 +14,8 @@ const c = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelo
   changelogSection(version: string, date: string, prs: Pr[]): string;
   withSection(existing: string, version: string, section: string): string;
   sectionFor(changelog: string, version: string): string | null;
+  handWritten(section: string | undefined): string;
+  scrubTitle(title: string, denied: (word: string) => boolean): string;
 };
 const s = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'signing.mjs')).href)) as {
   signingProblem(cfg: Record<string, string>, exists?: (f: string) => boolean): string | null;
@@ -31,6 +33,56 @@ test('the PRs between two releases, from first-parent subjects: squash merges an
     ]),
     [177, 170, 156, 158, 175],
   );
+});
+
+test('regression: merge commits name their PR ("Merge #N:", "Merge pull request #N", a reviewed range); a title starting "Merge" is still a PR', () => {
+  assert.deepEqual(
+    c.prNumbers([
+      'Merge stages 1-5 (reviewed PRs #8-#11) into main',
+      'Merge pull request #274 from someone/feat/usage-limit-pause',
+      'Merge train: up to land.parallel_merges green PRs merge in one pass (#296)',
+      'Batch 7 (final): #220 #223 (#229)',
+      "Merge #381: GitHub's hosts are constants (#377)",
+      "Merge branch 'main' into feat/x",
+      'Merge remote-tracking branch origin/main',
+      'Merge #427: docs: a short, current README',
+    ]),
+    [8, 9, 10, 11, 274, 296, 220, 223, 381, 427],
+  );
+});
+
+test('a PR reverted in the same release is listed once, with its revert, and in no group; its reland is listed as usual', () => {
+  const sec = c.changelogSection('0.5.0', '2026-10-14', [
+    { number: 416, title: 'CI: build the dashboard UI before the tests', files: ['.github/workflows/ci.yml'] },
+    { number: 421, title: 'Revert #416 (web UI built before the tests): main red' },
+    { number: 422, title: 'Reland #416 with Chrome started through the engine' },
+    { number: 430, title: 'Revert #12: an older change' },
+  ]);
+  assert.match(sec, /### Reverted in this release\n\n- CI: build the dashboard UI before the tests \(#416\): reverted by #421\n/);
+  assert.equal((sec.match(/#416\)/g) ?? []).length, 1, '#416 is listed once');
+  assert.doesNotMatch(sec, /\(#421\)/, 'the revert is named beside what it reverted, not listed on its own');
+  assert.match(sec, /### Features\n\n- Reland #416 with Chrome started through the engine \(#422\)\n- Revert #12: an older change \(#430\)/, 'the reland, and a revert of an earlier release, are ordinary entries');
+});
+
+test('regenerating a section keeps what is written by hand above the generated lists; the lists are replaced', () => {
+  const lead = '### Highlights\n\nOne command, one URL.\n\n### Upgrade notes (from v0.4.1)\n\n- Remove `every_minutes`.';
+  const first = c.withSection('', '0.5.0', c.changelogSection('0.5.0', '2026-10-13', [{ number: 10, title: 'Dashboard: a chat panel' }]));
+  const edited = first.replace('## v0.5.0 (2026-10-13)\n\n', `## v0.5.0 (2026-10-13)\n\n${lead}\n\n`);
+  assert.equal(c.handWritten(c.sectionFor(edited, '0.5.0')!), lead);
+  const again = c.withSection(edited, '0.5.0', c.changelogSection('0.5.0', '2026-10-14', [{ number: 10, title: 'Dashboard: a chat panel' }, { number: 11, title: 'Fix the queue' }]));
+  assert.ok(again.includes(`## v0.5.0 (2026-10-14)\n\n${lead}\n\n### Features\n\n- Dashboard: a chat panel (#10)`), again);
+  assert.match(again, /### Fixes\n\n- Fix the queue \(#11\)/);
+  assert.equal(c.withSection(again, '0.5.0', c.sectionFor(again, '0.5.0')!), again, 'a rerun with nothing new changes nothing');
+  assert.equal(c.handWritten(c.changelogSection('0.5.1', '2026-10-20', [])), '', 'a generated section, even an empty one, has no hand-written top');
+  const other = c.withSection(again, '0.6.0', c.changelogSection('0.6.0', '2026-10-20', [{ number: 20, title: 'Releases' }]));
+  assert.equal(c.handWritten(c.sectionFor(other, '0.6.0')!), '', "another version's highlights are never carried over");
+  assert.equal(c.handWritten(c.sectionFor(other, '0.5.0')!), lead);
+});
+
+test('a PR title loses the words the denylist refuses, so a regenerated changelog passes it with no hand edit', () => {
+  const denied = (w: string) => /\binternal-key-[0-9]+\b/.test(w);
+  assert.equal(c.scrubTitle('Dashboard: the chat panel (internal-key-11) — merge after #82', denied), 'Dashboard: the chat panel — merge after #82');
+  assert.equal(c.scrubTitle('Dashboard: a chat panel', denied), 'Dashboard: a chat panel');
 });
 
 test('groups: guardrail files or words go to security, fixes by label or title, the rest are features', () => {

@@ -9,10 +9,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
-import { liveMerge, startConfig } from '../src/config/live.js';
+import { CONFIG_INCIDENT, configTree, liveMerge, startConfig } from '../src/config/live.js';
 import type { EventPayload } from '../src/events/types.js';
 import { rolePrompt } from '../src/roles.js';
 import { FakeRunner } from '../src/runner.js';
+import { openIncidents, raiseIncident, readIncidents, resolveIncident } from '../src/watchdog/incidents.js';
 import { coordinator, fixture, git, passing, type Fixture } from './repro-state-graph/harness.js';
 
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -125,4 +126,52 @@ test('live config: turning direct landing on needs a restart; turning it off app
   const off = liveMerge(direct, pr);
   assert.equal(off.cfg.project.land_mode, 'pr');
   assert.deepEqual(off.restart, []);
+});
+
+/** The persistent incident store (incidents.json) in a fresh dir, already holding an open config_invalid for `key`. */
+function staleIncident(key: string) {
+  const dir = mkdtempSync(join(tmpdir(), 'incidents-'));
+  raiseIncident(CONFIG_INCIDENT, key, 'invalid under an older engine', 'fix it', { dir, instance: key });
+  const sink = { raiseIncident: (kind: string, k: string, detail: string, fix: string) => void raiseIncident(kind, k, detail, fix, { dir, instance: k }), resolveIncident: (kind: string, k: string) => void resolveIncident(kind, k, { dir }) };
+  const open = () => openIncidents(readIncidents(dir)).filter((x) => x.kind === CONFIG_INCIDENT && x.key === key);
+  return { sink, open };
+}
+
+test('live config: a config_invalid left open by an earlier process is resolved when the coordinator starts on a valid config', async () => {
+  // Both start paths: the service's (the tree startConfig read) and a coordinator built without one (the checkout's HEAD).
+  for (const fromStart of [true, false]) {
+    const f = fixture();
+    const s = staleIncident('alice');
+    assert.equal(s.open().length, 1);
+    const start = startConfig({ repo: f.repo, remote: 'origin', fallback: f.cfg });
+    assert.equal(start.note, null);
+    const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0, incidents: s.sink, ...(fromStart ? { liveConfig: { tree: start.tree } } : {}) });
+    await c.tick();
+    assert.deepEqual(s.open(), [], `still open after the first tick (fromStart=${fromStart})`);
+    // Nothing applied: the running config was already the branch's.
+    assert.equal(f.log.read(0, ['config.applied']).length, 0);
+  }
+});
+
+test("live config: starting while the default branch's config is invalid keeps the incident open, and raises it when none was", async () => {
+  const w = world();
+  const bad = w.push((t) => `${t}not_a_setting: true\n`, 'bad config');
+  const start = startConfig({ repo: w.f.repo, remote: 'origin', fallback: w.f.cfg });
+  assert.match(start.note ?? '', /invalid/);
+  const s = staleIncident('alice');
+  const c = coordinator(w.f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0, incidents: s.sink, liveConfig: { tree: start.tree } });
+  await c.tick();
+  await c.tick();
+  assert.equal(s.open().length, 1);
+  assert.match(s.open()[0]!.detail, new RegExp(`at ${bad.slice(0, 8)} is invalid`));
+  // The branch's tree is the running one, but fails the instance's checks: never trusted as valid, raised on the first tick.
+  const f = fixture();
+  const fresh = { raised: [] as string[], resolved: [] as string[] };
+  const sink = { raiseIncident: (kind: string) => void fresh.raised.push(kind), resolveIncident: (kind: string) => void fresh.resolved.push(kind) };
+  const check = () => [{ file: 'config.yaml', path: 'project', message: 'loosens the policy' }];
+  const c2 = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0, incidents: sink, liveConfig: { tree: configTree(f.repo, 'refs/remotes/origin/main'), check } });
+  await c2.tick();
+  await c2.tick();
+  assert.deepEqual(fresh.raised, [CONFIG_INCIDENT]);
+  assert.deepEqual(fresh.resolved, []);
 });
