@@ -107,7 +107,8 @@ assert.ok(Array.isArray(cfg.required_checks) && cfg.required_checks.length > 0, 
 assert.equal(sh('systemctl', ['is-active', 'worklane-update.timer']), 'active');
 assert.equal(sh('systemctl', ['is-enabled', 'worklane-update.timer']), 'enabled');
 assert.ok(!existsSync(SIGNERS), 'installing lists no signer');
-assert.deepEqual(changes().filter((c) => c.what === 'install-updater').map((c) => [c.by, c.to]), [[coordinator, 'updates.sh']]);
+// The inline attempt above (root, in the sandbox) logged its try before it failed; the coordinator's install is the one after it.
+assert.deepEqual(changes().filter((c) => c.what === 'install-updater').map((c) => [c.by, c.to]), [['root', 'updates.sh'], [coordinator, 'updates.sh']]);
 // The updater as installed runs, as its unit runs it, and does nothing while off.
 updaterRun();
 assert.equal(sh('systemctl', ['show', '-p', 'Result', '--value', 'worklane-update.service']), 'success');
