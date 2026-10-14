@@ -3,7 +3,7 @@
 // data; decisions are still answerable only where the server says so.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -2058,4 +2058,15 @@ test('the interim line is marked as interim and says how to stop; an error says 
   assert.match(r.renderMicInterim(true, 'why is'), /data-testid="chat-mic-interim"[\s\S]*Listening[\s\S]*class="truncate italic" data-testid="chat-mic-interim-text">why is…/);
   assert.match(r.renderMicInterim(true, ''), /Esc stops/);
   assert.match(r.renderMicInterim(false, '', 'no microphone found'), /data-testid="chat-mic-error"[^>]*>Dictation stopped: no microphone found/);
+});
+
+test("no effect in the web app returns a member call's value: React calls it as the cleanup (scrollIntoView returns a Promise in Chrome)", () => {
+  const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : /\.tsx?$/.test(e.name) ? [join(dir, e.name)] : []));
+  const bad: string[] = [];
+  for (const f of files(join(repoRoot, 'web', 'src'))) {
+    // An expression-bodied effect may be `void x`, a cleanup `() => ...`, or a call of a plain local function;
+    // a member call (`a.b()`, `a?.b()`) returns whatever that API returns.
+    for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
+  }
+  assert.deepEqual(bad, []);
 });

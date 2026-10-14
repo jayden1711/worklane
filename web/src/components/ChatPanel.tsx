@@ -294,7 +294,11 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
     return () => window.clearTimeout(timer);
   }, [turns, pending]);
 
-  useEffect(() => bottom.current?.scrollIntoView({ block: 'end' }), [turns.length]);
+  // WHY: braces, not an expression: Chrome's scrollIntoView now returns a Promise, and React calls whatever an
+  // effect returns as its cleanup, which threw and took the panel down on the next question.
+  useEffect(() => {
+    bottom.current?.scrollIntoView({ block: 'end' });
+  }, [turns.length]);
 
   const ask = async () => {
     const question = q.trim();
