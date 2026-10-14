@@ -145,15 +145,79 @@ test(
   },
 );
 
+// The click helper itself, on a page of its own: a covered target fails at once naming the cover, and a target its
+// ancestor is still moving into place is clicked where it ends up, while an endless pulse around it is not waited on.
+const CLICK_PAGE = `<!doctype html><meta charset="utf-8"><body style="margin:0;font:14px sans-serif">
+<div id="pulse"><div id="slide" style="padding:40px"><button id="moving" aria-expanded="false">Show more</button></div></div>
+<div style="position:relative;padding:40px"><button id="covered" aria-expanded="false">Show more</button>
+<div id="cover" data-testid="click-cover" style="position:absolute;inset:0;background:rgba(0,0,0,.1)"></div></div>
+<script>window.presses = { moving: 0, covered: 0 };
+for (const b of document.querySelectorAll('button')) b.addEventListener('click', () => { window.presses[b.id]++; b.setAttribute('aria-expanded', 'true'); });</script>`;
+
+test(
+  'the real-Chrome click: a covered target fails naming what is under the cursor; a moving one is clicked once it settles',
+  { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (process.platform === 'win32' && 'checked on macOS and Linux') },
+  async () => {
+    const b = await launchChrome(chrome!, { width: 800, height: 600 });
+    try {
+      const cdp = b.cdp;
+      await cdp.send('Page.enable');
+      await cdp.send('Runtime.enable');
+      await cdp.send('Page.navigate', { url: `data:text/html;charset=utf-8,${encodeURIComponent(CLICK_PAGE)}` });
+      await until('the click page', () => js<boolean>(cdp, `!!window.presses && !!document.getElementById('cover')`), 20_000);
+
+      await assert.rejects(click(cdp, `document.getElementById('covered')`), /would land on <div id="cover" data-testid="click-cover"/, 'a covered target fails, naming the cover');
+      assert.equal(await js<number>(cdp, 'window.presses.covered'), 0, 'and nothing was pressed');
+
+      // Start the moves now, so the click begins mid-entrance: the slide (finite, an ancestor) ends 300px above where it starts.
+      await js(cdp, `(() => {
+        document.getElementById('pulse').animate([{ opacity: 1 }, { opacity: 0.9 }], { duration: 400, iterations: Infinity });
+        document.getElementById('slide').animate([{ transform: 'translateY(300px)' }, { transform: 'none' }], { duration: 700 });
+        return true;
+      })()`);
+      await click(cdp, `document.getElementById('moving')`);
+      assert.equal(await js<number>(cdp, 'window.presses.moving'), 1, 'the moving target is pressed once, where it settled');
+
+      await js(cdp, `(document.getElementById('cover').remove(), true)`);
+      await click(cdp, `document.getElementById('covered')`);
+      assert.equal(await js<number>(cdp, 'window.presses.covered'), 1, 'uncovered, it is pressed');
+    } finally {
+      await b.close();
+    }
+  },
+);
+
 async function js<T>(cdp: Cdp, expression: string): Promise<T> {
   const r = await cdp.send<{ result: { value: T }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
   return r.result.value;
 }
 
-/** A real mouse click at the element's centre. */
+/**
+ * A real mouse click at the element's centre, once it holds still and is what the mouse would hit there. The finite
+ * animations on it or an ancestor (a card's entrance moves it) are awaited first, inside the one evaluate the command
+ * timeout already bounds; endless ones (a pulse, a spinner) are not. Then the point is hit-tested: a press that would
+ * land on something else fails at once, naming what is under the cursor, rather than waiting out a click that never lands.
+ */
 async function click(cdp: Cdp, element: string) {
-  const at = await js<{ x: number; y: number }>(cdp, `(() => { const e = ${element}; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+  const at = await js<{ x: number; y: number; hit: string | null }>(
+    cdp,
+    `(async () => {
+      const e = ${element};
+      e.scrollIntoView({ block: 'center' });
+      const moving = document.getAnimations().filter((a) => {
+        const t = a.effect && a.effect.target;
+        return t && (t === e || t.contains(e)) && a.effect.getComputedTiming().endTime !== Infinity;
+      });
+      await Promise.all(moving.map((a) => a.finished.catch(() => {})));
+      const r = e.getBoundingClientRect();
+      const x = r.x + r.width / 2, y = r.y + r.height / 2;
+      const h = document.elementFromPoint(x, y);
+      const name = (n) => n ? '<' + n.tagName.toLowerCase() + [...n.attributes].map((a) => ' ' + a.name + '="' + a.value.slice(0, 60) + '"').join('') + '>' : 'nothing';
+      return { x, y, hit: h === e || (h && e.contains(h)) ? null : name(h) };
+    })()`,
+  );
+  if (at.hit) throw new Error(`the click at (${Math.round(at.x)}, ${Math.round(at.y)}) would land on ${at.hit}, not on ${element}`);
   for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
   await until('the click to land', () => js<boolean>(cdp, `${element}?.getAttribute('aria-expanded') === 'true'`), 5_000);
 }
