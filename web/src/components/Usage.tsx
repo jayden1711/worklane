@@ -1,8 +1,9 @@
 // The Claude usage limit on the dashboard: while an instance is paused on it, a banner on every page counting down
 // to its reset; and on the Overview, a usage line per instance (today's runs, limit hits, running or paused). Read
 // from each instance's /api/usage (on a hub, every instance that answers; elsewhere, this page's own server).
-import { useEffect, useState } from 'react';
-import { api, hub, instanceApi, type UsageInfo } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import { api, hub, hubNow, instanceApi, scopeNowOrNull, viewUrl, type UsageInfo } from '../api';
+import { peek } from '../cache';
 import { ago, Card, cx } from './ui';
 
 /** How long until `resetAt`, as "2 h 05 min 09 s" (or "now" once it has passed). */
@@ -34,22 +35,43 @@ export function useNow(on: boolean): number {
   return now;
 }
 
-/** Every instance's usage this page can read: re-read every 30 s and whenever the event log moves (`lastId`). */
+/**
+ * Every instance's usage this page can read: shown at once from what was kept (web/src/cache.ts), re-read every 30 s,
+ * and the instance shown's again whenever its event log moves (`lastId`; the others' logs don't move with it).
+ */
 export function useUsage(lastId: number | undefined): UsageInfo[] {
-  const [usage, setUsage] = useState<UsageInfo[]>([]);
+  const names = (): (string | null)[] => {
+    const h = hubNow();
+    return h ? h.instances.filter((i) => i.up).map((i) => i.name) : [null];
+  };
+  const got = useRef<Map<string | null, UsageInfo | null>>(null as unknown as Map<string | null, UsageInfo | null>);
+  got.current ??= new Map(names().map((n) => [n, peek<UsageInfo>(viewUrl('/api/usage', n))?.data ?? null]));
+  const shown = () => names().flatMap((n) => (got.current.get(n) ? [got.current.get(n)!] : []));
+  const [usage, setUsage] = useState<UsageInfo[]>(shown);
+  const gone = useRef(false);
+  const load = async (which: (string | null)[]) => {
+    await hub;
+    await Promise.all(which.map(async (n) => got.current.set(n, await (n ? instanceApi<UsageInfo>(n, '/api/usage') : api<UsageInfo>('/api/usage')).catch(() => null))));
+    if (!gone.current) setUsage(shown());
+  };
   useEffect(() => {
-    let gone = false;
-    const load = async () => {
-      const h = await hub;
-      const got = h ? await Promise.all(h.instances.filter((i) => i.up).map((i) => instanceApi<UsageInfo>(i.name, '/api/usage').catch(() => null))) : [await api<UsageInfo>('/api/usage').catch(() => null)];
-      if (!gone) setUsage(got.filter((u): u is UsageInfo => u !== null));
-    };
-    void load();
-    const t = window.setInterval(() => void load(), 30_000);
+    gone.current = false;
+    void load(names());
+    const t = window.setInterval(() => void load(names()), 30_000);
     return () => {
-      gone = true;
+      gone.current = true;
       window.clearInterval(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    void load([scopeNowOrNull()?.current ?? null]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastId]);
   return usage;
 }

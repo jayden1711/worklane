@@ -16,7 +16,7 @@ import { UpdatesPanel } from '../components/UpdatesPanel';
 import { TestRunsPanel } from '../components/TestRuns';
 import { RecordsTable } from '../components/patterns';
 import { ago } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 /** The machine's agent slots: how many of the cap are in use, and who holds each (also what the render checks render). */
 export function MachineSlots({ slots }: { slots: State['slots'] }) {

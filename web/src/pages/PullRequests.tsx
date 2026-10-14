@@ -1,8 +1,8 @@
-import { api, useFetch, type PrView, type PrsView, type State } from '../api';
+import { useView, type PrView, type PrsView, type State } from '../api';
 import { navigate } from '../App';
 import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink' };
 const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; mark: MarkState }> = {
@@ -364,12 +364,12 @@ export function PullRequestsView({ view }: { view: PrsView }) {
 }
 
 export function PullRequests({ state }: { state: State }) {
-  const { data, error } = useFetch(() => api<PrsView>('/api/prs'), state.lastId);
+  const { data, error } = useView<PrsView>('/api/prs', state.lastId);
   const c = state.prCounts;
   return (
     <div data-testid="page-prs">
       <Header title="Pull requests" sub={c ? `${c.open} open · ${c.needYou} need you` : undefined} />
-      {error ? <div className="p-8 text-[13px] text-red">Can't load pull requests: {error}</div> : data ? <PullRequestsView view={data} /> : <Loading />}
+      {error && !data ? <div className="p-8 text-[13px] text-red">Can't load pull requests: {error}</div> : data ? <PullRequestsView view={data} /> : <Loading />}
     </div>
   );
 }

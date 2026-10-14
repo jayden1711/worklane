@@ -5,7 +5,7 @@ import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { LiveRun } from '../components/LiveRun';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
@@ -13,8 +13,7 @@ const markFor = (reason: string | null): MarkState => (reason === null ? 'runnin
 export const runsRefused = (message: string) => (/^agent runs are for /.test(message) ? message : null);
 
 /** For a viewer the state says may not read runs, the refusal the server would give; null for the owner and writers. */
-export const runsRefusal = (state: Pick<State, 'canReadRuns' | 'owners' | 'user' | 'role'>) =>
-  state.canReadRuns === false ? `agent runs are for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
+export { runsRefusal } from '../refusals';
 
 /** Agent runs are the owner's and the writers': anyone else is told so, not shown an empty list. */
 export function RunsRefused({ message }: { message: string }) {

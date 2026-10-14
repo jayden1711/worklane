@@ -1,9 +1,9 @@
-import { api, useFetch, type State } from '../api';
+import { useView, type State } from '../api';
 import { navigate } from '../App';
 import { liveRunFor, type LiveList } from '../components/LiveRun';
 import { StatusMark, TaskRow } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 import { runsRefusal, RunsRefused } from './RunDetail';
 
 const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
@@ -12,7 +12,7 @@ export function Agents({ state, live: given }: { state: State; live?: LiveList |
   const g = state.governor;
   // Each running agent's live view, where the coordinator lists the run (it does once its session is up); not asked
   // for by someone the state says may not read runs (no live links for them).
-  const { data: fetched } = useFetch(() => (given === undefined && !runsRefusal(state) ? api<LiveList>('/api/live') : Promise.resolve(given ?? null)), state.lastId);
+  const { data: fetched } = useView<LiveList>(given === undefined && !runsRefusal(state) ? '/api/live' : null, state.lastId);
   const live = given === undefined ? fetched : given;
   // Agent runs are the owners' and writers': a viewer's state has none (the runs cards say so).
   const runs = state.runs ?? { active: [], recent: [] };

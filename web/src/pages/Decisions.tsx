@@ -3,7 +3,7 @@ import { decide, type Decision, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
 import { ValuePill } from '../components/patterns';
 import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 /** The detail line that carries a recommendation's reasoning: src/decision-ask.ts writes it (a test keeps the two equal). */
 export const RECOMMENDATION_PREFIX = 'Recommendation: ';
