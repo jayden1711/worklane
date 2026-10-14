@@ -118,6 +118,17 @@ interface Render {
   speechCtor(w: unknown): unknown;
   mayDictate(role: string | undefined, prefs: VoicePrefs): boolean;
   readVoicePrefs(): VoicePrefs;
+  renderTalkStatus(role: string | undefined, prefs: VoicePrefs, speaking: boolean, note?: string | null): string;
+  renderVoiceSettingsVoices(prefs: VoicePrefs, voices: { local: number; network: number } | null): string;
+  mayTalk(role: string | undefined, prefs: VoicePrefs): boolean;
+  countVoices(voices: FakeVoice[], lang: string): { local: number; network: number };
+  pickVoice(voices: FakeVoice[], lang: string, allowNetwork: boolean): FakeVoice | null;
+  spokenText(answer: string): string;
+  stopSpeaking(): void;
+  TalkBack: new (o: { lang: string; allowNetwork: boolean; synth?: unknown; voicesWaitMs?: number }) => TalkBackLike;
+  CODE_OMITTED: string;
+  SECRET_OMITTED: string;
+  NO_LOCAL_VOICE: string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
   citationHref(c: unknown): string;
@@ -130,7 +141,9 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
-type VoicePrefs = { dictation: boolean; allowCloud: boolean };
+type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean };
+type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
+type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
 let asOwner: State;
 let asOther: State;
@@ -1915,15 +1928,15 @@ test("the mic is the owners' only, from the role the server serves: not a writer
 test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
   localStorage.setItem('dash-voice', '{}');
   const prefs = r.readVoicePrefs();
-  assert.deepEqual(prefs, { dictation: false, allowCloud: false }, 'both off by default');
+  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'all off by default');
   assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
   const settings = r.renderVoiceSettings(true);
   assert.match(settings, /data-testid="voice-dictation"/);
   assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false }, 'only a stored true turns either on');
+  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'only a stored true turns either on');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false });
+  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false });
   assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
   assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
   localStorage.setItem('dash-voice', '{}');
@@ -2058,6 +2071,239 @@ test('the interim line is marked as interim and says how to stop; an error says 
   assert.match(r.renderMicInterim(true, 'why is'), /data-testid="chat-mic-interim"[\s\S]*Listening[\s\S]*class="truncate italic" data-testid="chat-mic-interim-text">why is…/);
   assert.match(r.renderMicInterim(true, ''), /Esc stops/);
   assert.match(r.renderMicInterim(false, '', 'no microphone found'), /data-testid="chat-mic-error"[^>]*>Dictation stopped: no microphone found/);
+});
+
+// Talk-back in the Ask panel (web/src/voice/talk.ts): owners only, off until turned on, on-device voices only by
+// default, the answer without code or secrets, and stopped the moment the owner talks.
+
+const LOCAL_EN: FakeVoice = { name: 'Samantha', lang: 'en-US', localService: true };
+const NETWORK_EN: FakeVoice = { name: 'Google US English', lang: 'en-US', localService: false, default: true };
+
+/** A stand-in for window.speechSynthesis and SpeechSynthesisUtterance: it records what it is asked to do. */
+function fakeSynth(voices: FakeVoice[] = [LOCAL_EN, NETWORK_EN]) {
+  const calls: string[] = [];
+  const spoken: { text: string; voice: FakeVoice | null; lang: string; onend: (() => void) | null }[] = [];
+  class Utterance {
+    lang = '';
+    voice: FakeVoice | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((e: { error?: string }) => void) | null = null;
+    constructor(public text: string) {}
+  }
+  const synth = {
+    speak(u: Utterance) {
+      calls.push('speak');
+      spoken.push(u);
+    },
+    cancel() {
+      calls.push('cancel');
+    },
+    getVoices: () => voices,
+  };
+  return { s: { synth, Utterance }, calls, spoken };
+}
+
+const TALK_ON = { dictation: false, allowCloud: false, talkBack: true, allowNetworkVoices: false };
+
+test("talk-back is off by default and the owners' only: a writer, a viewer or an owner who didn't turn it on hear nothing", async () => {
+  localStorage.setItem('dash-voice', '{}');
+  const prefs = r.readVoicePrefs();
+  assert.equal(prefs.talkBack, false, 'off by default');
+  assert.equal(prefs.allowNetworkVoices, false, 'network voices off by default');
+  localStorage.setItem('dash-voice', JSON.stringify({ talkBack: 'yes', allowNetworkVoices: 1 }));
+  assert.deepEqual([r.readVoicePrefs().talkBack, r.readVoicePrefs().allowNetworkVoices], [false, false], 'only a stored true turns it on');
+  localStorage.setItem('dash-voice', '{}');
+  assert.doesNotMatch(r.renderVoiceSettings(true), /data-testid="voice-talk-back" checked=""/, 'the switch starts off');
+  assert.match(r.renderVoiceSettings(true), /data-testid="voice-allow-network-voices"/);
+
+  const owner = roleOf(asOwner);
+  assert.equal(r.mayTalk(owner, prefs), false, 'an owner who did not turn it on');
+  assert.equal(r.mayTalk(owner, TALK_ON), true);
+  for (const s of [asWriter, asOther]) {
+    assert.equal(r.mayTalk(roleOf(s), TALK_ON), false, `not a ${roleOf(s)}`);
+    assert.equal(r.renderTalkStatus(roleOf(s), TALK_ON, true), '', `no reading line for a ${roleOf(s)}`);
+  }
+  assert.equal(r.mayTalk(undefined, TALK_ON), false, 'no role (an older server)');
+  assert.equal(r.renderTalkStatus(owner, prefs, true), '', 'nothing for an owner with it off');
+  assert.match(r.renderTalkStatus(owner, TALK_ON, true), /data-testid="chat-speaking"[\s\S]*data-testid="chat-speaking-stop"/);
+
+  // The reader itself does nothing until it is made active (the panel open, for an owner who turned it on).
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    assert.deepEqual(await t.speak('Issue 12 is waiting on a review.'), { spoken: false, why: null });
+    assert.deepEqual(f.calls, [], 'speechSynthesis.speak is never called while inactive');
+  } finally {
+    t.dispose();
+  }
+});
+
+test('reading an answer hands speechSynthesis.speak the answer with code blocks and secrets left out', async () => {
+  const token = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8';
+  const key = 'sk-ant-' + 'api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2';
+  const jwtish = 'eyJhbGciOiJIUzI1NiJ9.' + 'eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456';
+  const answer = [
+    '**Issue 12** is stuck: the `review` lane has no free slot.',
+    '```bash',
+    'export GH_TOKEN=' + token,
+    'git push --force-with-lease',
+    '```',
+    `The key ${key} was pasted in the log, and so was ${jwtish}.`,
+    'Run it with postgres://app:hunter2pass@db.internal/main.',
+  ].join('\n');
+  const said = r.spokenText(answer);
+  for (const secret of [token, key, jwtish, 'hunter2pass', 'force-with-lease', 'GH_TOKEN']) assert.ok(!said.includes(secret), `"${secret}" is not read out: ${said}`);
+  assert.match(said, new RegExp(`${r.CODE_OMITTED}`), 'the code block is named, not read');
+  assert.match(said, new RegExp(`The key ${r.SECRET_OMITTED} was pasted`), 'a secret is named, not read');
+  assert.match(said, /^Issue 12 is stuck: the review lane has no free slot\./, 'markdown marks are not read out');
+  assert.match(r.spokenText('Before\n```\nan unclosed block\nstill code'), new RegExp(`^Before\\n${r.CODE_OMITTED}\\.$`), 'an unclosed block is left out to the end');
+  assert.equal(r.spokenText('Commit 3f2a9c1 is fine.'), 'Commit 3f2a9c1 is fine.', 'a short id is ordinary text');
+
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    t.setActive(true);
+    assert.deepEqual(await t.speak(answer), { spoken: true });
+    assert.deepEqual(f.calls, ['speak']);
+    assert.equal(f.spoken[0]!.text, said, 'speak gets the redacted text, nothing else');
+    assert.equal(t.speaking, true);
+    f.spoken[0]!.onend?.();
+    assert.equal(t.speaking, false, 'done when the browser says it ended');
+  } finally {
+    t.dispose();
+  }
+});
+
+test("the owner starting to dictate stops the answer being read, at once", async () => {
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  try {
+    t.setActive(true);
+    await t.speak('A long answer about issue 12.');
+    assert.equal(t.speaking, true);
+    const { ctor } = fakeRecognizer();
+    new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: () => {} }).start();
+    assert.deepEqual(f.calls, ['speak', 'cancel'], 'starting dictation cancels speech');
+    assert.equal(t.speaking, false);
+    // And the hook other voice input (the wake word) calls does the same.
+    await t.speak('Another answer.');
+    r.stopSpeaking();
+    assert.deepEqual(f.calls, ['speak', 'cancel', 'speak', 'cancel']);
+  } finally {
+    t.dispose();
+  }
+});
+
+test('Esc, the panel closing and the tab being hidden each stop the reading; nothing starts after a stop', async () => {
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+  const unhide = t.stopWhenHidden(doc);
+  try {
+    t.setActive(true);
+    // Esc.
+    await t.speak('One.');
+    assert.equal(t.escape(), true, 'Esc while reading is taken by the reading');
+    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'Esc cancels');
+    assert.equal(t.escape(), false, 'the next Esc is the panel’s (it closes)');
+    // The tab hidden.
+    await t.speak('Two.');
+    doc.dispatchEvent(new Event('visibilitychange'));
+    assert.equal(t.speaking, true, 'still visible: still reading');
+    doc.visibilityState = 'hidden';
+    const before = f.calls.length;
+    doc.dispatchEvent(new Event('visibilitychange'));
+    assert.deepEqual([f.calls.slice(before), t.speaking], [['cancel'], false], 'hidden cancels');
+    doc.visibilityState = 'visible';
+    // The panel closing (useTalkBack makes it inactive).
+    await t.speak('Three.');
+    t.setActive(false);
+    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'closing the panel cancels');
+    assert.deepEqual(await t.speak('Four.'), { spoken: false, why: null }, 'closed: nothing is read');
+    // A stop while the browser's voices are still loading: nothing starts once they arrive.
+    const late = fakeSynth([]);
+    let fire = () => {};
+    const slow = { ...late.s, synth: { ...late.s.synth, addEventListener: (_: string, fn: () => void) => (fire = fn), removeEventListener: () => {} } };
+    const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: slow, voicesWaitMs: 5000 });
+    t2.setActive(true);
+    const pending = t2.speak('Five.');
+    t2.stop();
+    late.s.synth.getVoices = () => [LOCAL_EN];
+    fire();
+    assert.deepEqual(await pending, { spoken: false, why: null });
+    assert.ok(!late.calls.includes('speak'), 'nothing is read after a stop');
+    t2.dispose();
+  } finally {
+    unhide();
+    t.dispose();
+  }
+});
+
+test('only on-device voices unless the owner allowed network voices; never the browser default by omission', async () => {
+  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', false), LOCAL_EN);
+  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', false), null, 'a network voice is not used unless allowed');
+  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', true), NETWORK_EN, 'allowed: a network voice when there is no local one');
+  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', true), LOCAL_EN, 'allowed, a local voice still comes first');
+  assert.equal(r.pickVoice([{ name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US', false), null, 'not another language');
+
+  const only = fakeSynth([NETWORK_EN]);
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: only.s });
+  try {
+    t.setActive(true);
+    assert.deepEqual(await t.speak('Hello.'), { spoken: false, why: r.NO_LOCAL_VOICE });
+    assert.deepEqual(only.calls, [], 'nothing is spoken with only a network voice');
+  } finally {
+    t.dispose();
+  }
+  const both = fakeSynth();
+  const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: both.s });
+  try {
+    t2.setActive(true);
+    await t2.speak('Hello.');
+    assert.equal(both.spoken[0]!.voice, LOCAL_EN, 'the voice is set to the local one, never left to the browser default');
+  } finally {
+    t2.dispose();
+  }
+  assert.match(r.renderTalkStatus(roleOf(asOwner), TALK_ON, false, r.NO_LOCAL_VOICE), /data-testid="chat-talk-note"[^>]*>Not read aloud: no on-device voice/);
+  assert.deepEqual(r.countVoices([LOCAL_EN, NETWORK_EN, { name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US'), { local: 1, network: 1 });
+  assert.match(r.renderVoiceSettingsVoices(TALK_ON, { local: 0, network: 2 }), /data-testid="voice-voices"[^>]*>Voices for reading aloud \(en-US\): 0 on-device \(2 network, not used\): answers aren(&#x27;|')t read aloud here/);
+});
+
+test('reading aloud sends nothing: no fetch, WebSocket, XHR or EventSource while it speaks or stops', async () => {
+  const g = globalThis as Record<string, unknown>;
+  const network: string[] = [];
+  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
+  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in talk-back')));
+  g.WebSocket = class {
+    constructor(url: string) {
+      network.push(`ws ${url}`);
+    }
+  };
+  g.XMLHttpRequest = class {
+    open(_m: string, url: string) {
+      network.push(`xhr ${url}`);
+    }
+  };
+  g.EventSource = class {
+    constructor(url: string) {
+      network.push(`sse ${url}`);
+    }
+  };
+  const f = fakeSynth();
+  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: true, synth: f.s });
+  try {
+    t.setActive(true);
+    await t.speak('Issue 12 is waiting.\n```\ncode\n```');
+    f.spoken[0]!.onend?.();
+    await t.speak('Again.');
+    t.escape();
+    t.setActive(false);
+    assert.deepEqual(f.calls, ['speak', 'speak', 'cancel', 'cancel']);
+    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during talk-back');
+  } finally {
+    t.dispose();
+    Object.assign(g, saved);
+  }
 });
 
 test("no effect in the web app returns a member call's value: React calls it as the cleanup (scrollIntoView returns a Promise in Chrome)", () => {
