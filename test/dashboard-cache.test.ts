@@ -100,16 +100,23 @@ test("an instance switch doesn't reload, and an answer from the last instance th
   hold.add('/api/i/alpha/state');
   const late = web.instanceApi('alpha', '/api/state');
   await new Promise((r) => setTimeout(r, 10));
-  web.selectInstance('beta');
+  const release = () => {
+    held.get('/api/i/alpha/state')?.();
+    hold.clear();
+  };
+  try {
+    web.selectInstance('beta');
   assert.equal(web.scopeNowOrNull()?.current, 'beta', 'switched in place');
   assert.equal((await web.instanceScope).current, 'beta', 'whatever asks for the scope after the switch gets the new one');
-  assert.equal(web.viewUrl('/api/state'), '/api/i/beta/state');
-  held.get('/api/i/alpha/state')!();
-  hold.clear();
-  await late;
-  assert.equal(web.peek(web.viewUrl('/api/state')), undefined, "beta's view shows nothing of alpha's late answer");
-  assert.ok(web.peek('/api/i/alpha/state'), "it is kept as alpha's");
-  web.selectInstance('alpha');
+    assert.equal(web.viewUrl('/api/state'), '/api/i/beta/state');
+    release();
+    await late;
+    assert.equal(web.peek(web.viewUrl('/api/state')), undefined, "beta's view shows nothing of alpha's late answer");
+    assert.ok(web.peek('/api/i/alpha/state'), "it is kept as alpha's");
+  } finally {
+    release();
+    web.selectInstance('alpha');
+  }
 });
 
 test('another role on an instance forgets what was read there under the old one; another person forgets everything', () => {
@@ -175,7 +182,7 @@ test('nothing is ever written to the tab\'s storage but which instance it shows'
   assert.doesNotMatch(src, /localStorage|indexedDB|setItem/);
 });
 
-test('one GET of a URL at a time: a second ask waits and asks again (its answer may predate the change); a prefetch takes the one in flight', async () => {
+test('one GET of a URL at a time: a second ask waits and asks again (its answer may predate the change); a prefetch takes the one in flight', { timeout: 5000 }, async () => {
   let n = 0;
   let release: () => void = () => {};
   const run = () => new Promise<number>((r) => (release = () => r(++n)));
