@@ -97,9 +97,9 @@ answer=<question id>=<choice>
 
 The keys are `mode=local|server`, `answer=<question id>=<choice>` (repeatable: auto-config's questions, as `worklane init --answer` takes them), `machine_owner=<login>` and `public_url=<https url>`. `--yes` alone does the same with no answers.
 
-### If the engine predates the wizard
+### The engine it installs
 
-The command installs the engine release pinned in `scripts/bootstrap.sh` (`ENGINE_TAG`). If that release is older than the first-run wizard (it has no `dashboard --detach`), the command says so. Locally, it then runs the same checklist in the terminal (`worklane init`, below) instead of opening the wizard. To get the wizard before the next release, install the engine from a build of this checkout:
+The command installs the signed engine release pinned in `scripts/bootstrap.sh` (`ENGINE_TAG`), checked by its release commit (`ENGINE_COMMIT`). To try an unreleased change instead, install the engine from a build of this checkout:
 
 ```sh
 npm ci --ignore-scripts && npm run build && npm run build:web && npm pack

@@ -26,9 +26,7 @@ sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
 
 Either way, the command installs pinned, checksum-checked tools and the engine, then prints one URL: the dashboard's first-run wizard. That's where every setup step after the install happens. The URL never carries a key: the page asks for it once, and the key stays in a file only you can read.
 
-[docs/quickstart.md](docs/quickstart.md) is the getting-started guide. It covers what each wizard screen does, the server path (Tailscale, setup mode, the GitHub Apps), your first project, engine updates, Discord, and where to look when something's wrong. It also covers the current limits:
-- A fresh server with no https origin gets no URL yet.
-- The engine release pinned in the script (`ENGINE_TAG`) can predate the wizard, as it does until the next release. Locally, the command then says so and runs the checklist in the terminal instead. A server install gets that older engine. The guide shows how to install the engine from a build of this checkout locally.
+[docs/quickstart.md](docs/quickstart.md) is the getting-started guide. It covers what each wizard screen does, the server path (Tailscale, setup mode, the GitHub Apps), your first project, engine updates, Discord, and where to look when something's wrong. It also covers the current limit: a fresh server with no https origin gets no URL yet.
 
 Once it's installed, you can look around without a repo of your own. The demo uses scripted agents and needs no login:
 

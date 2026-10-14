@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
@@ -16,6 +17,8 @@ const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
 const skip = process.platform === 'win32' && 'bash scripts (macOS and Linux)';
 const script = join(repoRoot, 'scripts', 'bootstrap.sh');
+/** The engine release the script pins, read from it (scripts/pin-engine.mjs writes it), so a pin bump edits no test. */
+const PIN = ((await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'engine-pin.mjs')).href)) as { readPin(text: string): { tag: string; commit: string } }).readPin(readFileSync(script, 'utf8'));
 const TOOLS = ['bash', 'sed', 'cat', 'mkdir', 'tr', 'cut', 'dirname', 'basename', 'mktemp', 'rm', 'head', 'git', 'id', 'ln', 'tar', 'install', 'env', 'sh', 'sha256sum', 'shasum', 'perl'];
 
 /** A machine of stand-ins: `uname` says what it is, and only the given commands exist (plus basic tools). */
@@ -49,7 +52,7 @@ function machine(o: { os?: 'Linux' | 'Darwin'; arch?: string; have?: Record<stri
 /** The pinned release recorded as installed (so a run never fetches it). */
 function released(m: ReturnType<typeof machine>) {
   mkdirSync(join(m.prefix, 'share', 'worklane-bootstrap'), { recursive: true });
-  writeFileSync(join(m.prefix, 'share', 'worklane-bootstrap', 'engine'), 'release:v0.4.1:9c24a10eb91ffac894e24f0b0a54d8407f23d423\n');
+  writeFileSync(join(m.prefix, 'share', 'worklane-bootstrap', 'engine'), `release:${PIN.tag}:${PIN.commit}\n`);
   return m;
 }
 
@@ -85,7 +88,7 @@ test('bootstrap: a dry run on a bare Linux machine plans every step, pinned and 
   assert.match(r.out, /would download node-v24\.21\.0-linux-x64\.tar\.xz \(sha256 fd8e59d5a511510f6a298afb548f18c7d2b1be404d8b4a27d94fbe49f56cb2d6\)/);
   assert.match(r.out, /would download gitleaks_8\.30\.1_linux_x64\.tar\.gz \(sha256 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb\)/);
   assert.match(r.out, /would run: npm install -g --prefix \S+ --no-audit --no-fund @anthropic-ai\/claude-code@2\.1\.296/);
-  assert.match(r.out, new RegExp(`would fetch https://github\\.com/${esc(ENGINE_REPO)}\\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423 \\(v0\\.4\\.1\\), check the commit, and pack it`), 'the engine at its release commit, not main');
+  assert.match(r.out, new RegExp(`would fetch https://github\\.com/${esc(ENGINE_REPO)}\\.git at ${esc(PIN.commit)} \\(${esc(PIN.tag)}\\), check the commit, and pack it`), 'the engine at its release commit, not main');
   assert.match(r.out, /would run: npm install -g --prefix \S+ --ignore-scripts --no-audit --no-fund \S+engine\.tgz/);
   assert.match(r.out, new RegExp(`would run: worklane init --mode local ${m.repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`), 'the guided checklist, in local mode');
   assert.match(r.out, /would run: worklane doctor --root/);
@@ -124,7 +127,7 @@ test('bootstrap: a download that does not match its pinned checksum is refused a
 test('bootstrap: idempotent: with everything in place it installs nothing, sets the repo up and ends with doctor', { skip }, () => {
   const m = machine({ have: installed({ npm: 'echo "npm must not run" >&2; exit 9' }) });
   mkdirSync(join(m.prefix, 'share', 'worklane-bootstrap'), { recursive: true });
-  writeFileSync(join(m.prefix, 'share', 'worklane-bootstrap', 'engine'), 'release:v0.4.1:9c24a10eb91ffac894e24f0b0a54d8407f23d423\n');
+  writeFileSync(join(m.prefix, 'share', 'worklane-bootstrap', 'engine'), `release:${PIN.tag}:${PIN.commit}\n`);
   for (let i = 0; i < 2; i++) {
     const r = m.run(m.repo);
     assert.equal(r.code, 0, r.out);
@@ -251,7 +254,7 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   const r = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
   assert.equal(r.code, 0, r.out);
   const steps = [...r.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
-  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh ${PIN.tag} shop acme/shop`]);
   assert.match(r.out, /credentials\.sh shop github-app/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
   assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop']);
@@ -309,7 +312,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   assert.match(m.calls().join('\n'), /gh api user --jq \.login/, 'the login, from gh');
   assert.match(r.out, /first machine owner: @ada-lovelace/);
   assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n', 'written as the first machine owner');
-  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', 'engine.sh v0.4.1 shop acme/shop']);
+  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh ${PIN.tag} shop acme/shop`]);
   assert.match(r.out, /no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin, and there is none yet\.\n {3}fix: turn on Tailscale[\s\S]*--public-url https:\/\/<machine>\.<tailnet>\.ts\.net shop acme\/shop\n?$/);
   assert.doesNotMatch(r.out, /\n(https?:\/\/\S+)\n?$/, 'no URL last');
 
@@ -431,5 +434,27 @@ test("bootstrap: the release comes from the repo its package.json names; with no
   assert.match(r.stderr, /can't tell the engine's repo .* pass --engine/);
   writeFileSync(join(alone, 'package.json'), JSON.stringify({ repository: { type: 'git', url: 'git+https://github.com/example-org/engine-fork.git' } }));
   const f = spawnSync(join(m.bin, 'bash'), [join(alone, 'bootstrap.sh'), '--dry-run', '--no-repo'], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, WORKLANE_PREFIX: m.prefix } });
-  assert.match(f.stdout, /would fetch https:\/\/github\.com\/example-org\/engine-fork\.git at 9c24a10eb91ffac894e24f0b0a54d8407f23d423/, 'a package.json beside it, as in the Docker image');
+  assert.match(f.stdout, new RegExp(`would fetch https://github\\.com/example-org/engine-fork\\.git at ${esc(PIN.commit)} `), 'a package.json beside it, as in the Docker image');
+});
+
+test('the pinned engine is a release tag at its full release commit: until scripts/pin-engine.mjs fills ENGINE_COMMIT in, this fails', () => {
+  assert.match(PIN.tag, /^v\d+\.\d+\.\d+$/, 'ENGINE_TAG is a release tag');
+  assert.match(PIN.commit, /^[0-9a-f]{40}$/, `ENGINE_COMMIT for ${PIN.tag} isn't filled in: after the signed tag exists, run node scripts/pin-engine.mjs ${PIN.tag}`);
+});
+
+test('regression: bootstrap refuses a pinned engine with no full release commit (empty or short), before anything is fetched', { skip }, () => {
+  const m = machine();
+  const dir = join(m.dir, 'copy');
+  mkdirSync(dir);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ repository: { type: 'git', url: 'git+https://github.com/example-org/engine-fork.git' } }));
+  for (const commit of ['', '9c24a10', `${'a'.repeat(40)}x`]) {
+    writeFileSync(join(dir, 'bootstrap.sh'), readFileSync(script, 'utf8').replace(/^ENGINE_COMMIT=.*$/m, `ENGINE_COMMIT=${commit} # a test's copy`));
+    const r = spawnSync(join(m.bin, 'bash'), [join(dir, 'bootstrap.sh'), '--dry-run', '--no-repo'], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, WORKLANE_PREFIX: m.prefix } });
+    assert.equal(r.status, 1, `ENGINE_COMMIT=${commit}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /has no release commit in this script yet .* pass --engine <spec>/, `ENGINE_COMMIT=${commit}`);
+    assert.doesNotMatch(r.stdout, /would fetch/, `ENGINE_COMMIT=${commit}: nothing fetched`);
+  }
+  writeFileSync(join(dir, 'bootstrap.sh'), readFileSync(script, 'utf8').replace(/^ENGINE_COMMIT=.*$/m, `ENGINE_COMMIT=${'a'.repeat(40)}`));
+  const pinned = spawnSync(join(m.bin, 'bash'), [join(dir, 'bootstrap.sh'), '--dry-run', '--no-repo'], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, WORKLANE_PREFIX: m.prefix } });
+  assert.match(pinned.stdout, new RegExp(`would fetch \\S+ at ${'a'.repeat(40)} \\(${esc(PIN.tag)}\\)`), pinned.stderr);
 });
