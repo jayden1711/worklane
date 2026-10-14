@@ -18,6 +18,8 @@ import type { StoredEvent } from '../src/events/types.js';
 import { flakeRates, flakyView, quarantine, releaseByOwner } from '../src/flaky.js';
 import type { RequiredCheck } from '../src/pr-watch.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { passGate } from '../src/testrun/gate.js';
+import { GATE_MODES, guardGate } from './gate-helpers.js';
 
 const sha = (n: number) => n.toString(16).padStart(40, 'a');
 
@@ -304,3 +306,46 @@ test('dashboard: owners and writers read the flaky tests; only an owner clears o
     await d.close();
   }
 });
+
+for (const mode of GATE_MODES) {
+  test(`a test-run re-run held at the start gate (${mode}) is no verdict: it waits, its timeout paused, and runs once there is room`, async () => {
+    const g = guardGate();
+    try {
+      const runs: string[] = [];
+      let finish: () => void = () => undefined;
+      const finished = new Promise<void>((r) => (finish = r));
+      const testRuns: TestRuns = {
+        startTestRun: async (req) => {
+          // WHY: as runTestRun does, the only function that starts a run: the start gate first.
+          passGate();
+          runs.push(req.sha);
+          await finished;
+          return { id: 'r1', sha: req.sha, kind: req.kind, ok: true, outcome: 'done', tiers: [{ tier: 'unit', ok: true, durationMs: 1, summary: '', logRef: 'r1/unit.log' }] };
+        },
+        postChecks: async () => undefined,
+        checkNames: () => ({ unit: 'test-run/unit' }),
+      };
+      const f = fixture({ testRuns, tiers: [{ name: 'unit', kind: 'full' }], rerun: false });
+      g.close(mode);
+      const judge = () => f.gate.judge({ sha: sha(31), number: 4, outcomes: [check('test-run/unit', 'fail', 311)] });
+      assert.deepEqual(await judge(), { wait: true });
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(await judge(), { wait: true }, 'held: not failed');
+      f.tick(2 * 3600_000); // past rerun_timeout_min (60), all of it held
+      assert.deepEqual(await judge(), { wait: true }, 'the time held is not counted against the timeout');
+      assert.deepEqual(runs, []);
+      assert.equal(f.log.read(0, ['flaky.rerun_result']).length, 0, 'no result while held');
+      g.open();
+      assert.deepEqual(await judge(), { wait: true }, 'the re-run starts');
+      await new Promise((r) => setImmediate(r));
+      assert.deepEqual(await judge(), { wait: true }, 'running: the hours it was held do not time it out');
+      finish();
+      await new Promise((r) => setImmediate(r));
+      const r = await judge();
+      assert.deepEqual(failedOf(r), [], 'passed on the re-run: flaky, not red');
+      assert.deepEqual(runs, [sha(31)]);
+    } finally {
+      g.done();
+    }
+  });
+}

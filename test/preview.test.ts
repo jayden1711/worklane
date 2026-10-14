@@ -1,4 +1,5 @@
 // docs/previews.md. INVARIANT: the host's API and GitHub are fakes on this machine; the token is a test value.
+import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
@@ -397,3 +398,26 @@ test('GitHub side: open PRs (a fork told apart), one comment edited in place, sc
     server.close();
   }
 });
+
+for (const mode of GATE_MODES) {
+  test(`a preview is held at the start gate (${mode}): nothing created, deployed or run, nothing failed; it launches once there is room`, async () => {
+    const g = guardGate();
+    const t = await setup({ prs: [{ number: 7, head: HEAD(7), sameRepo: true }] });
+    try {
+      g.close(mode);
+      await t.pass();
+      await t.pass();
+      assert.equal(t.host.of('CREATE').length, 0, 'nothing created');
+      assert.equal(t.host.of('DEPLOY').length, 0);
+      assert.deepEqual(t.flowsRun, []);
+      assert.deepEqual(t.of('preview.failed'), [], 'held is not a failure');
+      g.open();
+      await t.pass();
+      assert.deepEqual(t.host.of('CREATE').map((c) => (c.variables.i as { name: string }).name), ['pr-preview-7']);
+      assert.equal(t.of('preview.ready').length, 1);
+    } finally {
+      g.done();
+      t.done();
+    }
+  });
+}
