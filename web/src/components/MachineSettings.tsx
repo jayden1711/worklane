@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { DotPill, RecordsTable } from './patterns';
+import { UpdaterSetupView, type UpdaterData } from './UpdaterSetup';
 import { ago, Button, Card, cx } from './ui';
 
 /** A machine change asked for from the dashboard, as the coordinator has handled it so far (src/machine-requests.ts). */
@@ -37,6 +38,8 @@ export interface MachineData {
   /** The machine's test-run slot cap; absent from older servers. */
   testSlots?: { cap: number; running: number; min: number; max: number };
   updates: { configured: true; enabled: boolean; branch: string; requiredChecks: string[] } | { configured: false; enabled: null };
+  /** The updater's setup (installed, channel, release signers), for the Updater setup steps; absent from older servers. */
+  updater?: UpdaterData;
   changes: { at: string; by: string; what: string; from: unknown; to: unknown }[];
   history: { at: string; event: string; from?: string | null; to?: string | null; reason?: string; units?: string[]; failed?: string[]; back?: string }[];
   /** Changes asked for here, newest first; absent from older servers. */
@@ -159,6 +162,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
           {data.deviceReady === true ? `You may change these: this page came from ${data.needs}.` : data.deviceReady === false ? `A change needs ${data.needs}, and this page didn't come from one.` : `A change needs ${data.needs}.`}
         </div>
       )}
+      <UpdaterSetupView data={data} onChanged={onChanged} />
       <div className="overflow-hidden rounded-card bg-surface shadow-card">
         <table className="w-full table-fixed border-collapse text-left">
           <thead>
@@ -197,7 +201,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               label="Engine updates"
               testKey="updates"
               current={data.updates.configured ? (data.updates.enabled ? 'on' : 'off') : 'not set up'}
-              bounds={data.updates.configured ? `on: the updater installs green ${data.updates.branch} commits when the machine is quiet, and rolls back a failed one` : "the updater isn't set up on this machine (an admin runs its setup script)"}
+              bounds={data.updates.configured ? `on: the updater installs green ${data.updates.branch} commits when the machine is quiet, and rolls back a failed one` : data.updater ? "the updater isn't set up on this machine: install it in Updater setup, above" : "the updater isn't set up on this machine (an admin runs its setup script)"}
               disabled={!data.canChange || !data.updates.configured}
               proposed={{ value: updates === 'on', text: updates }}
               onConfirm={send('updates')}

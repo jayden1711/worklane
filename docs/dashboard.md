@@ -236,6 +236,30 @@ Machine health moved off Overview to its own page (`/machine`, `g m`): the agent
 
 The Settings page's **Model routing** panel (part of `GET /api/settings`, owners and writers) lists every task type in agents.yaml `routing` (src/routing.ts): the model or value in effect and where it came from: the default in code, a role's model that stands in for it, the agents.yaml key (an older `model_routing` or `eval_routing` key is flagged with its new name), or the instance's policy.yaml. It is read-only: its "Change it" snippet is the `routing:` block to edit in agents.yaml through a pull request.
 
+### Updater setup
+
+At the top of the machine settings, **Updater setup** sets the engine updater up from the page (the first-run page's "Engine updater set up" step opens it). It has three steps, and nothing changes until you review one and confirm it. Skip any of them, or all of them, and the machine stays as it is.
+
+1. **The updater.** Installs `/usr/local/libexec/worklane-update` and its 10-minute timer, with updates off. An existing `updates.json` is kept.
+2. **Release signers.** Lists the keys in `/etc/worklane/allowed_signers` with their fingerprints. On the release channel the updater installs only a release tag whose signature verifies against one of them. To add one, type its principal (the signer's email) and paste the public key (`ssh-ed25519 AAAA...`, the line of the `.pub` file). **Review** shows the exact principal, the whole key, its fingerprint (the same as `ssh-keygen -lf <key>.pub` prints) and the line that will be written; **Add this signer** confirms that key and no other.
+3. **Channel.** `release` (signed release tags) or `main` (main's newest commit whose checks are all green; there is no tag on that channel, so no tag signature is checked). The page says what each follows before you confirm.
+
+The on/off switch is the **Engine updates** row in the table below, as before.
+
+What it can change, and as whom: each confirmed step is one command of the root-owned machine helper (`install-updater`, `add-update-signer <principal> ssh-ed25519 <public key>`, `set-update-channel release|main`), recorded by this instance's dashboard and run by its coordinator through `sudo -n`. Only an owner of the instance who is also a machine owner, on an allowed device, can confirm one. The dashboard itself never runs sudo and never writes these files.
+
+What it can never do: remove or replace a signer (the helper only adds a line; every line already in the file stays as it is), add a wildcard, a list or an option such as `cert-authority`, add any key type but ed25519, point the updater at another signers file, change the required checks, or turn signature or check verification off. Those are an admin's, at a root shell.
+
+The same from a terminal, as root, from the engine's checkout:
+
+```bash
+sudo bash scripts/setup/updates.sh                                                    # install (off)
+sudo bash scripts/setup/updates.sh --signer <principal> ssh-ed25519 <public key>      # add one release signer
+sudo bash scripts/setup/updates.sh --channel release                                  # or: main
+```
+
+`--signer` and `--channel` run the machine helper's own code, so they check and write exactly as the page's steps do. Any other kind of key, or removing one, is an edit of `/etc/worklane/allowed_signers` by hand (one line per key: `<principal> <key type> <public key>`, root:root 0644). A machine whose sudo is older than 1.9.10 can't match the signer command's pattern: there, use `--signer`.
+
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 
 ## Trust

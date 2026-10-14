@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, addUpdateSigner, claudeAccount, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdateChannel, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, UPDATE_CHANNELS, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -30,7 +30,7 @@ export function slotCeiling(): number {
   return typeof max === 'function' ? max() : max;
 }
 
-/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>. Nothing else. */
+/** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release|main, add-update-signer <principal> ssh-ed25519 <public key>. Nothing else. */
 export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'set-slots',
@@ -62,6 +62,27 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     usage: 'claude-account status|switch',
     allows: (a) => a.length === 1 && (a[0] === 'status' || a[0] === 'switch'),
     run: (a, exec) => claudeAccount(a[0] as 'status' | 'switch', exec),
+  },
+  {
+    command: 'install-updater',
+    what: 'install the engine updater and its timer, with updates off (the installed engine\'s scripts/setup/updates.sh, as root)',
+    usage: 'install-updater',
+    allows: (a) => a.length === 0,
+    run: (_a, exec) => installUpdater(exec),
+  },
+  {
+    command: 'set-update-channel',
+    what: 'set what the engine updater follows: signed release tags, or main',
+    usage: `set-update-channel ${UPDATE_CHANNELS.join('|')}`,
+    allows: (a) => a.length === 1 && (UPDATE_CHANNELS as readonly string[]).includes(a[0]!),
+    run: (a, exec) => setUpdateChannel(a[0]!, exec),
+  },
+  {
+    command: 'add-update-signer',
+    what: 'add one release-signing public key to the keys the updater verifies release tags against (it only adds; none is removed or replaced)',
+    usage: 'add-update-signer <principal> ssh-ed25519 <public key>',
+    allows: (a) => a.length === 3 && signerPrincipalOk(a[0]) && a[1] === 'ssh-ed25519' && signerKeyOk(a[2]),
+    run: (a, exec) => addUpdateSigner(a[0]!, a[2]!, exec),
   },
   {
     command: 'add-project',
