@@ -78,8 +78,12 @@ async function click(sel) {
 /** Clear a field and type into it, as a person would. */
 async function type(sel, value) {
   await click(sel);
-  await evaluate(`${q(sel)}.select?.()`);
+  // Select what's there (a number field has no select()), as Ctrl+A does, then type over it.
+  await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65, commands: ['selectAll'] });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
   await cdp.send('Input.insertText', { text: String(value) });
+  const now = await evaluate(`${q(sel)}.value`);
+  assert.equal(now, String(value), `typed into ${sel}`);
   await sleep(150);
 }
 async function stepStatus(step) {
@@ -382,6 +386,9 @@ async function server() {
     await waitFor(`${p} ${tid('policy-form')}`);
     await type(`${p} [data-testid="policy-field"][data-key="budget.daily_usd"] input`, '15');
     await click(`${p} ${tid('policy-review')}`);
+    await until('the policy change shown (or a refusal)', () => evaluate(`!!${q(`${p} ${tid('policy-confirming')}`)} || !!${q(`${p} ${tid('policy-result')}`)}`), 30_000, 300);
+    const refused = await text(`${p} ${tid('policy-result')}`);
+    assert.ok(!refused, `the review: ${refused}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
     await waitText(`${p} ${tid('policy-result')}`, /./);
