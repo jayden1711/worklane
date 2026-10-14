@@ -28,6 +28,26 @@
 // cgroup, because the switch stops every coordinator, that one included; it takes the token from the asking
 // instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
 // admin switches from a terminal with claude-account.sh itself.
+//
+// The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
+//
+//   worklane-machine install-updater
+//   worklane-machine set-update-channel release
+//   worklane-machine stage-update-signer <principal> ssh-ed25519 <public key>
+//   worklane-machine discard-update-signer <principal> ssh-ed25519 <public key>
+//
+// install-updater runs the installed engine's scripts/setup/updates.sh with no arguments, under the same root-owned
+// check: the updater, its timer and its config, off, an existing config kept as it is. set-update-channel writes
+// updates.json's "channel" and nothing else, only once the updater is installed, and only to "release" (signed
+// release tags): following main instead is an admin's, at a root shell (updates.sh --channel main).
+//
+// The keys a release tag's signature is checked against (the updater's allowed signers file, in /etc/worklane) are
+// the root of trust for the release channel, and nothing in this helper writes that file. A coordinator can only
+// STAGE a signer: stage-update-signer records one principal (an email's shape: no wildcard, list or option) and one
+// ed25519 public key (its exact encoding, decoded here) in /var/lib/worklane/pending-signers.json, a root-owned list of
+// at most 4, each dropped 24 hours after it was staged. A staged signer is trusted for nothing. It becomes a signer
+// only when an admin, at a root shell on the machine, runs updates.sh --confirm-signer <its SHA256 fingerprint>.
+// discard-update-signer takes one back out of the pending list.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -39,9 +59,13 @@ const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
 const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
 const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
+const UPDATES = '/opt/worklane/current/scripts/setup/updates.sh';
+const PENDING = '/var/lib/worklane/pending-signers.json'; // staged signers: trusted for nothing until an admin confirms one
+const PENDING_MAX = 4;
+const PENDING_TTL_MS = 24 * 60 * 60_000;
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key>';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -141,6 +165,98 @@ function claudeAccount(action) {
   return 0;
 }
 
+// An ed25519 public key's encoding never varies: the key type's name, then 32 bytes, 51 bytes in all, 68 characters.
+const ED25519_HEAD = Buffer.concat([Buffer.from([0, 0, 0, 11]), Buffer.from('ssh-ed25519'), Buffer.from([0, 0, 0, 32])]);
+/** A signer's principal: one email-shaped name. Never a pattern (*, ?, !), a list (,) or anything quoted or spaced. */
+const signerPrincipal = (s) => typeof s === 'string' && s.length <= 254 && /^[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/.test(s);
+/** An ed25519 public key as ssh writes it (base64, 68 characters), decoding to exactly that key type and 32 bytes. */
+function ed25519Key(s) {
+  if (typeof s !== 'string' || !/^[A-Za-z0-9+/]{68}$/.test(s)) return false;
+  const blob = Buffer.from(s, 'base64');
+  return blob.length === 51 && blob.subarray(0, ED25519_HEAD.length).equals(ED25519_HEAD) && blob.toString('base64') === s;
+}
+/** A key's fingerprint as `ssh-keygen -l` prints it. */
+const fingerprint = (key) => `SHA256:${require('node:crypto').createHash('sha256').update(Buffer.from(key, 'base64')).digest('base64').replace(/=+$/, '')}`;
+
+/** The signer a list names, or null when it is anything but `<command> <principal> ssh-ed25519 <key>`. */
+function parseSigner(command, args) {
+  if (args.length !== 4 || args[0] !== command || !signerPrincipal(args[1]) || args[2] !== 'ssh-ed25519' || !ed25519Key(args[3])) return null;
+  return { principal: args[1], key: args[3] };
+}
+
+/**
+ * The staged signers that still count: well-formed (a file is never trusted for more than its own checks pass) and
+ * staged less than PENDING_TTL_MS ago. Each is { principal, key, fingerprint, by, at }.
+ */
+function readPending(file = PENDING, now = Date.now()) {
+  let list = [];
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (j && Array.isArray(j.pending)) list = j.pending;
+  } catch {
+    // none staged
+  }
+  return list
+    .filter((e) => e && signerPrincipal(e.principal) && ed25519Key(e.key) && typeof e.at === 'string' && now - Date.parse(e.at) >= 0 && now - Date.parse(e.at) < PENDING_TTL_MS)
+    .slice(0, PENDING_MAX)
+    .map((e) => ({ principal: e.principal, key: e.key, fingerprint: fingerprint(e.key), by: typeof e.by === 'string' ? e.by.slice(0, 64) : 'unknown', at: e.at }));
+}
+
+/** The pending list, whole: a temp file beside it, then a rename. */
+function writePending(list, file = PENDING) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, `${JSON.stringify({ pending: list })}\n`, { mode: 0o644 });
+  fs.chmodSync(tmp, 0o644);
+  fs.renameSync(tmp, file);
+}
+
+/** Stage one signer for an admin to confirm at a root shell. Only the pending list is written. */
+function stageSigner(s) {
+  const pending = readPending();
+  const fp = fingerprint(s.key);
+  if (pending.some((e) => e.principal === s.principal && e.key === s.key)) {
+    process.stdout.write(`${s.principal} ssh-ed25519 ${s.key} (${fp}) is already staged; nothing changed\n`);
+    return 0;
+  }
+  if (pending.length >= PENDING_MAX) {
+    process.stderr.write(`${PENDING_MAX} signers are already staged: confirm or discard one first\n`);
+    return 1;
+  }
+  const by = process.env.SUDO_USER || 'root';
+  writePending([...pending, { principal: s.principal, key: s.key, fingerprint: fp, by, at: new Date().toISOString() }]);
+  logLine('updates.pending_signer', null, `staged ${s.principal} ssh-ed25519 ${s.key} (${fp})`);
+  process.stdout.write(`staged ${s.principal} ssh-ed25519 ${s.key} (${fp}): not a signer until an admin confirms it on this machine, within 24 hours, with: sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer ${fp}\n`);
+  return 0;
+}
+
+/** Take one staged signer back out of the pending list. */
+function discardSigner(s) {
+  const pending = readPending();
+  const rest = pending.filter((e) => !(e.principal === s.principal && e.key === s.key));
+  if (rest.length === pending.length) {
+    process.stderr.write(`${s.principal} with that key isn't staged (or its 24 hours have passed)\n`);
+    return 1;
+  }
+  writePending(rest);
+  logLine('updates.pending_signer', `staged ${s.principal} ssh-ed25519 ${s.key} (${fingerprint(s.key)})`, 'discarded');
+  process.stdout.write(`discarded the staged signer ${s.principal} (${fingerprint(s.key)})\n`);
+  return 0;
+}
+
+/** updates.sh from the installed engine, as root, with no arguments: the updater, its timer and its config (off). */
+function installUpdater() {
+  const real = rootScript(UPDATES);
+  if (!real) return 1;
+  logLine('install-updater', null, 'updates.sh');
+  const r = spawnSync('bash', [real], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
+  if (r.error) {
+    process.stderr.write(`install-updater: ${r.error.message}\n`);
+    return 1;
+  }
+  return r.status === null ? 1 : r.status;
+}
+
 function addProject(p) {
   const real = rootScript(ADD_PROJECT);
   if (!real) return 1;
@@ -160,6 +276,8 @@ function parse(args) {
   if (cmd === 'set-slots' && /^([1-9]|1[0-6])$/.test(arg)) return { what: 'slots.max_agents', file: 'slots.json', key: 'max_agents', value: Number(arg) };
   if (cmd === 'set-test-slots' && /^[1-8]$/.test(arg)) return { what: 'slots.max_test_runs', file: 'slots.json', key: 'max_test_runs', value: Number(arg) };
   if (cmd === 'set-updates' && (arg === 'on' || arg === 'off')) return { what: 'updates.enabled', file: 'updates.json', key: 'enabled', value: arg === 'on' };
+  // The channel of an updater that is installed: a config holding only a channel would read as one that is set up.
+  if (cmd === 'set-update-channel' && arg === 'release') return { what: 'updates.channel', file: 'updates.json', key: 'channel', value: arg, existing: true };
   return null;
 }
 
@@ -177,12 +295,21 @@ function main(args) {
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
   if (account) return claudeAccount(account);
+  if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
+  const stage = parseSigner('stage-update-signer', args);
+  if (stage) return stageSigner(stage);
+  const discard = parseSigner('discard-update-signer', args);
+  if (discard) return discardSigner(discard);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
   const file = path.join(ETC, change.file);
+  if (change.existing && !fs.existsSync(file)) {
+    process.stderr.write(`${file} is missing: install the updater first (install-updater)\n`);
+    return 1;
+  }
   const current = readJson(file);
   const from = current[change.key] === undefined ? null : current[change.key];
   const next = { ...current, [change.key]: change.value };
@@ -204,4 +331,4 @@ function main(args) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance };
+module.exports = { parse, parseAddProject, parseClaudeAccount, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
