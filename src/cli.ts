@@ -29,7 +29,8 @@ import { lintSkills, SKILL_SECTIONS, skillLintReport, trackedSkills } from './sk
 import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
-import { dashboardSite, DEFAULT_WEB_DIR, instancePort, startDashboard, webUiBuilt } from './dashboard.js';
+import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
+import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
@@ -111,6 +112,10 @@ usage: ${BRAND.cli} <command> [options]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user); its
                                    token is the owner's break-glass (--user: the login recorded)
+  dashboard --detach [--port n] [--no-open]
+                                   the checkout's dashboard in the background, unless it already
+                                   answers; prints its first-run wizard URL last (no key in it:
+                                   the page asks for the key, kept in a file only you can read)
   dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
             [--console-user admin --console-devices tag:x,node]
             [--client-id id --public-url https://<host> --signin-dir dir]
@@ -651,6 +656,29 @@ async function main(argv: string[]): Promise<number> {
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;
+      }
+      if (flag(opts, '--detach')) {
+        if (instanceOpt) {
+          console.error("dashboard --detach is a checkout's (local mode); an instance's dashboard runs as its own service (scripts/setup/dashboards.sh)");
+          return 2;
+        }
+        const portOpt = option(opts, '--port');
+        if (portOpt !== undefined && !/^[1-9][0-9]{0,4}$/.test(portOpt)) {
+          console.error('dashboard: --port is a port number');
+          return 2;
+        }
+        const port = portOpt ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
+        const where = { root, tokenFile: join(projectStateDir(root), 'dashboard-token'), logFile: join(projectStateDir(root), 'dashboard.log') };
+        try {
+          const d = await detachDashboard({ ...where, port, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--service', '--root', root, '--port', String(port)] });
+          console.log(detachedLines(d, where).join('\n'));
+          if (!flag(opts, '--no-open')) openUrl(d.url);
+          return 0;
+        } catch (e) {
+          if (!(e instanceof DetachError)) throw e;
+          console.error(`dashboard --detach: ${e.message}`);
+          return 1;
+        }
       }
       const instance = instanceOpt;
       // An instance's log is readable only by its coordinator user: run this as that user.
