@@ -7,6 +7,7 @@ import { dirname, join, posix, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { shimsNeedShell } from '../src/os/index.js';
+import { webUiBuilt } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 /** npm, as the user runs it (a .cmd shim on Windows). Scripts off: packing must not rebuild. */
@@ -153,6 +154,6 @@ test('the package as packed now: its bin, every built file the engine reads, and
   for (const p of selfRelativePaths().filter((p) => existsSync(join(repoRoot, p)))) {
     assert.ok(packed.includes(p) || packed.some((f) => f.startsWith(p.endsWith('/') ? p : `${p}/`)), `${p} is packed`);
   }
-  if (existsSync(join(repoRoot, 'dist', 'web', 'index.html'))) assert.ok(packed.includes('dist/web/index.html'), 'the built dashboard is packed');
+  if (webUiBuilt()) assert.ok(packed.includes('dist/web/index.html'), 'the built dashboard is packed');
   assert.deepEqual(packed.filter(forbidden), [], 'in the package, but must not be');
 });

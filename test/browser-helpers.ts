@@ -4,6 +4,8 @@
 // next begins.
 import { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { liveProcesses } from '../src/browser/cdp.js';
 
@@ -30,4 +32,33 @@ export function realChromeTests(): void {
   afterEach(() => {
     assert.deepEqual(liveProcesses(), [], 'a browser or app process outlived its test');
   });
+}
+
+/**
+ * CI sets CI_REQUIRE_WEB=1 on its test step: there a web-UI test must run, never skip. A test that needs the built
+ * dashboard UI (npm run build:web) or a Chrome asks through these two, the only place a test looks at dist/web
+ * (test/web-ui-required.test.ts keeps it so); with CI_REQUIRE_WEB=1 a missing UI or Chrome throws when the test file
+ * loads, so the file fails instead of reporting a quiet "# SKIP web UI not built".
+ */
+const REQUIRE_WEB = 'CI_REQUIRE_WEB';
+/** The built UI's page, from dist/test/ where this runs (not repoRoot: a use of that reads the whole repo, to the test selection). */
+const WEB_INDEX = join(import.meta.dirname, '..', '..', 'dist', 'web', 'index.html');
+
+function required(what: string): void {
+  if (process.env[REQUIRE_WEB] === '1') throw new Error(`${REQUIRE_WEB}=1, but ${what}: in CI the web-UI tests must run, not skip (build the UI before the tests)`);
+}
+
+/** Whether the dashboard UI is built (dist/web/index.html, or `index`); with CI_REQUIRE_WEB=1, not built throws. */
+export function webUiBuilt(index = WEB_INDEX): boolean {
+  const built = existsSync(index);
+  if (!built) required('the web UI is not built (npm run build:web)');
+  return built;
+}
+
+/** A web-UI test's skip: why it can't run here (no Chrome, UI not built, Windows), or false; CI_REQUIRE_WEB=1 makes the first two throw. */
+export function webUiSkip(chrome: string | null, index = WEB_INDEX): string | false {
+  if (process.platform === 'win32') return 'checked on macOS and Linux';
+  if (!chrome) required('no Chrome or Chromium was found (set CHROME)');
+  const built = webUiBuilt(index);
+  return (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built (npm run build:web)');
 }

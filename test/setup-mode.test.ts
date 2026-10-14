@@ -308,7 +308,8 @@ test('`dashboard` on a checkout with no config: setup mode at the given address,
     assert.equal((await state()).setupMode, true);
     // The config arrives (here: copied in, as the fast-forward would bring it).
     cpSync(join(repoRoot, 'examples', 'basic', BRAND.configDir), join(p.root, BRAND.configDir), { recursive: true });
-    await waitFor(new RegExp(`switching to the dashboard[\\s\\S]*http://127\\.0\\.0\\.1:${port}/ \\(token in `));
+    // #418: the URL carries no key and is followed by the key file's note (keyFileNote).
+    await waitFor(new RegExp(`switching to the dashboard[\\s\\S]*http://127\\.0\\.0\\.1:${port} \\(the page asks for the key once: it is in `));
     assert.equal((await state()).setupMode, false, 'the normal dashboard, same address and key');
     noKeyInOutput();
   } finally {

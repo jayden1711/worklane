@@ -70,6 +70,21 @@ export function findChrome(given = option('--chrome', process.env.CHROME)) {
 
 export { freePort };
 
+/**
+ * The dashboard's URL and key from what `dashboard` (or signin-fake.mjs's `instance` line) printed: the key-free URL
+ * and the key read from the file named after it; an older engine printed the key on the URL as `?t=`.
+ */
+export function printedDashboard(printed) {
+  const m = printed.match(/(http:\/\/127\.0\.0\.1:\d+)(?:\/\?t=([A-Za-z0-9_-]+)|\/? \(the page asks for the key once: it is in (.+)\))/);
+  if (!m) return null;
+  if (m[2]) return { base: m[1], token: m[2] };
+  if (!existsSync(m[3])) return null;
+  return { base: m[1], token: readFileSync(m[3], 'utf8').trim() };
+}
+
+/** A script for a new document: puts the key in this origin's session storage, as the page's key form does. */
+export const keySeed = (token) => `try { sessionStorage.setItem('dash-token', ${JSON.stringify(token)}); } catch {}`;
+
 /** Seed the demo, start its dashboard, start Chrome: everything under one temporary directory. */
 async function start() {
   const cli = join(engine, 'dist', 'src', 'cli.js');
@@ -101,13 +116,14 @@ async function start() {
     let printed = '';
     dash.stdout.on('data', (d) => (printed += d));
     dash.stderr.on('data', (d) => (printed += d));
-    const shown = await until('the dashboard URL', () => printed.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[A-Za-z0-9_-]+/)?.[0], 20_000).catch((e) => {
+    // The printed URL carries no key; the key's file follows it (an older engine put the key on the URL as ?t=).
+    const shown = await until('the dashboard URL', () => printedDashboard(printed), 20_000).catch((e) => {
       throw new Error(`${e.message}\n${printed}`);
     });
     // With --as, the browser goes through the hub and signs in; the token here only seeds the run below.
     const hub = as ? await until('the hub URL', () => printed.match(/^hub (http:\/\/127\.0\.0\.1:\d+)$/m)?.[1], 20_000) : null;
-    const direct = shown.split('/?')[0];
-    const token = shown.split('?t=')[1];
+    const direct = shown.base;
+    const token = shown.token;
     const base = hub ?? direct;
     const state = await (await fetch(`${direct}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
@@ -373,8 +389,10 @@ class Controller {
       this.signedIn = true;
       this.opened = true;
     }
-    // The token goes on the first load only; the page moves it to session storage.
-    const url = `${this.base}${path}${this.opened || !this.token ? '' : `${path.includes('?') ? '&' : '?'}t=${this.token}`}`;
+    // The key never goes in a URL (the server refuses one that carries it): it is put in this tab's session
+    // storage, where the page's key form would keep it, before the first page loads.
+    if (!this.opened && this.token) await this.cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: keySeed(this.token) });
+    const url = `${this.base}${path}`;
     await this.cdp.send('Page.navigate', { url });
     this.opened = true;
     const want = readyText(found.page, params);

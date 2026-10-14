@@ -6,9 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { webUiSkip } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const dir = join(repoRoot, 'scripts', 'dev');
@@ -53,10 +53,9 @@ const CLOSED = `({ open: !!document.getElementById('nav-drawer'), focus: documen
 
 type Out = { line: number; ok: boolean; error?: string; value?: Record<string, unknown> & { small?: string[] } };
 
-// Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise.
+// Needs a built UI (npm run build:web) and a Chrome or Chromium; skipped otherwise, but never in CI (CI_REQUIRE_WEB).
 const chrome = ctl.findChrome(process.env.CHROME);
-const built = existsSync(join(repoRoot, 'dist', 'web', 'index.html'));
-test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, and the navigation opens from the menu button', { skip: (!chrome && 'no Chrome or Chromium') || (!built && 'web UI not built') || (process.platform === 'win32' && 'checked on macOS and Linux'), timeout: 600_000 }, (t) => {
+test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, and the navigation opens from the menu button', { skip: webUiSkip(chrome), timeout: 600_000 }, (t) => {
   const cmds: string[] = [];
   const what = new Map<number, { page: string; check: string }>();
   const add = (page: string, check: string, c: object) => {
