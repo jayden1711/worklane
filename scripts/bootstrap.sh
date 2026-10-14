@@ -237,7 +237,8 @@ if [ "$HARDENED" = 1 ]; then
   if [ "$AFTER_CREDENTIALS" = 0 ]; then
     say "next, by hand: the instance's credentials"
     echo "   bash scripts/setup/credentials.sh $NAME github-app <app-id> <installation-id> <key.pem> $GITHUB"
-    echo "   bash scripts/setup/credentials.sh $NAME claude"
+    echo "   claude setup-token   (on a machine signed in to the Claude account the agents should use), then"
+    echo "   bash scripts/setup/credentials.sh $NAME claude   (paste the token it printed; it is not shown)"
     echo "   then: sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
     echo "   (docs/separate-users.md has the details)"
   fi

@@ -760,7 +760,8 @@ export type SetupFix =
   | { kind: 'outside'; url: string | null; label: string; why: string; command?: string }
   | { kind: 'terminal'; command: string; why: string }
   | { kind: 'start' }
-  | { kind: 'action'; action: string; label: string };
+  | { kind: 'action'; action: string; label: string }
+  | { kind: 'signin'; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -825,6 +826,39 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Sign in to Claude (src/claude-signin.ts), as GET /api/first-run/claude-signin serves it. */
+export interface ClaudeStatusView {
+  loggedIn: boolean;
+  method: string | null;
+  /** Claude Code's cached account email: may predate a token change, so it is shown as cached. */
+  cachedAccount: string | null;
+}
+export type ClaudeSigninData =
+  | {
+      mode: 'local';
+      canAct: boolean;
+      state: 'idle' | 'waiting' | 'done' | 'failed' | 'cancelled' | 'timed-out';
+      /** Anthropic's sign-in page while waiting (the owners only). */
+      url: string | null;
+      detail: string;
+      startedAt: string | null;
+      endedAt: string | null;
+      status: ClaudeStatusView | null;
+    }
+  | {
+      mode: 'server';
+      canAct: boolean;
+      agentUser: string;
+      /** add-project's open claude-token paste box for this instance, when one is waiting. */
+      ask: (Ask & { kind: 'paste_secret' }) | null;
+      status: { at: string; loggedIn: boolean; method: string | null; cachedAccount: string | null; installedAt: string | null } | null;
+      command: string;
+      script: string;
+    };
+export const getClaudeSignin = () => api<ClaudeSigninData>('/api/first-run/claude-signin');
+/** Start the relayed `claude auth login` (local mode), after the person confirmed what it does. */
+export const startClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+export const cancelClaudeSignin = () => api<{ ok: boolean }>('/api/first-run/claude-signin/cancel', { method: 'POST', body: '{}' });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**

@@ -8,7 +8,7 @@ There is one runtime: the locally installed, unmodified `claude` binary, headles
 
 | | Claude login (default) | API key (option) |
 |---|---|---|
-| Set by | the agent user signs in to Claude: `scripts/setup/credentials.sh <name> claude` | `scripts/setup/credentials.sh <name> api-key`, then `agent_api_key: <file>` in the instance's `credentials.yaml` |
+| Set by | a token from `claude setup-token`, pasted into the dashboard (first run's Sign in to Claude, or Add project's paste box) or at `scripts/setup/credentials.sh <name> claude`'s hidden prompt | `scripts/setup/credentials.sh <name> api-key`, then `agent_api_key: <file>` in the instance's `credentials.yaml` |
 | `agent_runtime` | `cli` | `api_key` for an instance with `agent_api_key` (an instance's billing is set by its own credentials, not by the repo's config); a local run without an instance uses `agent_runtime.kind: api_key` (`sdk` is accepted as the old name) and `ANTHROPIC_API_KEY` |
 | Where the credential lives | the agent user's Claude config dir | a file owned by the agent user, mode 0400, in a 0700 directory of its own |
 | How `claude` gets it | its own login | `apiKeyHelper` (`cat -- <file>`), passed in each run's `--settings` and in the agent user's own Claude settings, so `claude` reads the key as the agent user when it starts |

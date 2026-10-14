@@ -803,6 +803,34 @@ jobs:
           unset t
           sudo -H -u wl-probe-agent env PATH=/usr/local/bin:/usr/bin:/bin claude auth status --json | jq -e '.loggedIn == true'
           sudo -H -u wl-probe env PATH=/usr/local/bin:/usr/bin:/bin claude auth status --json | jq -e '.loggedIn == false'
+      - name: credentials.sh claude (first run's server sign-in) installs a pasted setup token for the agent user only, 0600, never echoed
+        # The terminal half of wizard screen 2: the token on stdin, as automation (and a no-tty run) passes it. Not a
+        # real token: the stand-in claude says signed in for any sk-ant-oat01- token in the agent user's own home.
+        run: |
+          a="$(getent passwd wl-probe-agent | cut -d: -f6)"
+          f="$a/.claude/.credentials.json"
+          sudo rm -f "$f"
+          # A bad token: refused, nothing installed, never echoed.
+          bad="not-a-token-$(openssl rand -hex 16)"
+          if printf '%s\n' "$bad" | sudo bash scripts/setup/credentials.sh probe claude > "$RUNNER_TEMP/bad.out" 2>&1; then echo "a bad token was accepted"; exit 1; fi
+          cat "$RUNNER_TEMP/bad.out"
+          if grep -qF "$bad" "$RUNNER_TEMP/bad.out"; then echo "the bad token was echoed"; exit 1; fi
+          grep -q 'not a token from claude setup-token' "$RUNNER_TEMP/bad.out"
+          if sudo test -e "$f"; then echo "a bad token installed something"; exit 1; fi
+          # A good one: installed as the agent user's own Claude login, 0600 in its 0700 ~/.claude, and checked.
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"
+          printf '%s\n' "$t" | sudo bash scripts/setup/credentials.sh probe claude > "$RUNNER_TEMP/good.out" 2>&1
+          cat "$RUNNER_TEMP/good.out"
+          if grep -qF "${t#sk-ant-oat01-}" "$RUNNER_TEMP/good.out"; then echo "the token was echoed"; exit 1; fi
+          grep -q 'wl-probe-agent is signed in to Claude, per claude auth status' "$RUNNER_TEMP/good.out"
+          [ "$(sudo stat -c '%U %a' "$f")" = "wl-probe-agent 600" ]
+          [ "$(sudo stat -c '%U %a' "$a/.claude")" = "wl-probe-agent 700" ]
+          printf '%s' "$t" | sudo node -e 'const fs = require("node:fs"); process.exit(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).claudeAiOauth.accessToken === fs.readFileSync(0, "utf8") ? 0 : 1)' "$f"
+          unset t
+          if sudo -u wl-probe cat "$f" > /dev/null 2>&1; then echo "the coordinator user can read the agent's login"; exit 1; fi
+          sudo -H -u wl-probe-agent env PATH=/usr/local/bin:/usr/bin:/bin claude auth status --json | jq -e '.loggedIn == true'
+          # No interactive /login session is ever started: the script never runs claude but to check.
+          if grep -n '/login' scripts/setup/credentials.sh; then echo "credentials.sh still names /login"; exit 1; fi
       - name: the probe, as the coordinator through sudo, finds the agent user signed in
         run: |
           # What wl-probe runs, world-readable: the build, its dependencies, node and the driver.
