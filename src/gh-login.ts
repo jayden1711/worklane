@@ -10,6 +10,7 @@
 // anything token-shaped masked.
 import { spawn, spawnSync } from 'node:child_process';
 import { findTool, withToolPath } from './tool-path.js';
+import { outboundEnv } from './network.js';
 
 export const GH_DEVICE_URL = 'https://github.com/login/device';
 /** What runs: the web (device) flow for github.com, git over https, so gh asks nothing else. */
@@ -42,12 +43,15 @@ export interface GhLoginDeps {
   timeoutMs: number;
 }
 
+/** WHY: gh's login and status carry a GitHub token: no host-redirect variable reaches them (src/network.ts, #391). */
+export const ghEnv = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => outboundEnv(withToolPath(env));
+
 export function systemGhLoginDeps(): GhLoginDeps {
   return {
-    spawn: () => spawn(findTool('gh') ?? 'gh', [...GH_LOGIN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: withToolPath() }),
+    spawn: () => spawn(findTool('gh') ?? 'gh', [...GH_LOGIN_ARGS], { stdio: ['ignore', 'pipe', 'pipe'], env: ghEnv() }),
     status: () => {
       // Exit code only: its output (which names the account and a masked token) is never read.
-      const r = spawnSync(findTool('gh') ?? 'gh', ['auth', 'status', '--hostname', 'github.com'], { stdio: 'ignore', timeout: 20_000, env: withToolPath() });
+      const r = spawnSync(findTool('gh') ?? 'gh', ['auth', 'status', '--hostname', 'github.com'], { stdio: 'ignore', timeout: 20_000, env: ghEnv() });
       return r.error ? null : r.status;
     },
     installed: () => findTool('gh') !== null,

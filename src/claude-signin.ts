@@ -23,6 +23,10 @@ import { CLAUDE_TOKEN_CREDENTIAL } from './coordinator/add-project.js';
 import { mayAnswerAsk, type Ask, type Role } from './console/asks.js';
 import { browserRelay, ownerOnlyDir } from './os/index.js';
 import { withToolPath } from './tool-path.js';
+import { outboundEnv } from './network.js';
+
+/** WHY: claude's login carries Anthropic credentials: no host-redirect variable reaches it (src/network.ts, #391). */
+export const signinEnv = (relay: string | null, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => outboundEnv({ ...withToolPath(env), ...(relay ? { BROWSER: relay } : {}) });
 
 /** How often a sign-in checks `claude auth status`, and how long it waits before giving up. */
 export const SIGNIN_POLL_MS = 2_000;
@@ -109,7 +113,7 @@ export function systemSigninDeps(): SigninDeps {
     },
     status: () =>
       new Promise((resolve) => {
-        execFile('claude', ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 30_000, env: withToolPath() }, (_e, stdout) => resolve(parseClaudeStatus(stdout ?? '')));
+        execFile('claude', ['auth', 'status', '--json'], { encoding: 'utf8', timeout: 30_000, env: signinEnv(null) }, (_e, stdout) => resolve(parseClaudeStatus(stdout ?? '')));
       }),
     relay: browserRelay,
     now: Date.now,
@@ -156,7 +160,7 @@ export class ClaudeSignin {
     ownerOnlyDir(this.dir);
     const urlFile = join(this.dir, 'url');
     const relay = this.d.relay(this.dir, urlFile);
-    const env = { ...withToolPath(), ...(relay ? { BROWSER: relay } : {}) };
+    const env = signinEnv(relay);
     this.s = {
       state: 'waiting',
       url: null,

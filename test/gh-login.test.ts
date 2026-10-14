@@ -13,7 +13,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard, type DashboardOptions } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { GH_DEVICE_URL, GH_LOGIN_ARGS, GhLogin, GhLoginError, safeLine, type GhLoginDeps, type LoginChild } from '../src/gh-login.js';
+import { GH_DEVICE_URL, GH_LOGIN_ARGS, GhLogin, GhLoginError, ghEnv, safeLine, type GhLoginDeps, type LoginChild } from '../src/gh-login.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { SETUP_STEPS } from '../src/setup-steps.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
@@ -208,4 +208,11 @@ test('through the dashboard: a server instance never runs a gh login', async () 
   } finally {
     await s.d.close();
   }
+});
+
+test("gh's login and status get no host-redirect variable (#391): GH_HOST, GITHUB_API_URL and proxies are stripped, PATH kept", () => {
+  const env = ghEnv({ PATH: '/usr/bin', HOME: '/h', GH_HOST: 'elsewhere.example', GITHUB_API_URL: 'https://elsewhere.example', HTTPS_PROXY: 'http://p.example:1', https_proxy: 'http://p.example:1' });
+  assert.equal(env.HOME, '/h');
+  assert.match(env.PATH!, /^\/usr\/bin/);
+  for (const k of ['GH_HOST', 'GITHUB_API_URL', 'HTTPS_PROXY', 'https_proxy']) assert.equal(env[k], undefined, k);
 });

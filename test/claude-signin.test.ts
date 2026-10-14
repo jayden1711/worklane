@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
-import { relayableSigninUrl, parseClaudeStatus, type ClaudeStatus, type SigninChild, type SigninDeps } from '../src/claude-signin.js';
+import { relayableSigninUrl, parseClaudeStatus, signinEnv, type ClaudeStatus, type SigninChild, type SigninDeps } from '../src/claude-signin.js';
 import { asks } from '../src/console/asks.js';
 import { startDashboard, type DashboardOptions } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
@@ -260,4 +260,12 @@ test("server, the terminal's way: credentials.sh claude takes the setup token at
   assert.doesNotMatch(sh, /\/login/, 'no interactive Claude session to sign in through');
   const bs = readFileSync(join(repoRoot, 'scripts', 'bootstrap.sh'), 'utf8');
   assert.match(bs, /claude setup-token[^\n]*\n[^\n]*credentials\.sh \$NAME claude {3}\(paste the token it printed; it is not shown\)/);
+});
+
+test("claude's login and status get no host-redirect variable (#391): ANTHROPIC_BASE_URL, provider switches and proxies are stripped; the relay's BROWSER kept", () => {
+  const env = signinEnv('/tmp/relay', { PATH: '/usr/bin', HOME: '/h', ANTHROPIC_BASE_URL: 'https://elsewhere.example', CLAUDE_CODE_USE_BEDROCK: '1', HTTP_PROXY: 'http://p.example:1', ALL_PROXY: 'socks5://p.example:1' });
+  assert.equal(env.BROWSER, '/tmp/relay');
+  assert.equal(env.HOME, '/h');
+  for (const k of ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'HTTP_PROXY', 'ALL_PROXY']) assert.equal(env[k], undefined, k);
+  assert.equal(signinEnv(null, { PATH: '/usr/bin' }).BROWSER, undefined);
 });
