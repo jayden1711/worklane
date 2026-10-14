@@ -20,13 +20,11 @@ const script = join(repoRoot, 'scripts', 'ci', 'batch.mjs');
 const b = (await import(pathToFileURL(script).href)) as {
   SLOW_JOBS: Record<string, string[]>;
   BISECT_PREFIX: string;
-  SPACING_MS: number;
-  MAX_WAIT_MS: number;
   TURN_WAIT_MS: number;
   TURN_POLL_MS: number;
-  batchToStart(runs: Run[], head: string, branch?: string, now?: number): { start: boolean; why: string; waitMs?: number };
+  batchToStart(runs: Run[], head: string, branch?: string): { start: boolean; why: string };
   olderRuns(gh: FakeGh, R: string, runId: number): Promise<number[]>;
-  batchStep(o: { gh: FakeGh; R: string; branch: string; runId?: number; first?: { head: string; runs: Run[] } | null; dry?: boolean; say: (line: string) => void; now: () => number; sleep: (ms: number) => Promise<void> }): Promise<'started' | 'nothing' | 'yielded' | 'gave-up'>;
+  batchStep(o: { gh: FakeGh; R: string; branch: string; runId?: number; first?: { head: string; runs: Run[] } | null; say: (line: string) => void; sleep: (ms: number) => Promise<void> }): Promise<'started' | 'nothing'>;
   lastBatches(runs: Run[], branch?: string): { last: Run | null; green: Run | null };
   firstParentLine(cmp: unknown, good: string, bad: string): { sha: string; subject: string }[] | null;
   verdictOf(runs: { status: string; conclusion: string | null; started_at: string | null; id: number }[], dispatched?: boolean): Verdict;
@@ -95,48 +93,32 @@ test('batchToStart: once per commit, never while a batch is queued or running; a
   assert.equal(b.batchToStart([run({ head_sha: head, created_at: '2026-10-13T01:00:00Z', event: 'pull_request', head_branch: 'feature' })], head).start, true, 'a PR run is not a batch');
 });
 
-test('batchToStart: at most one batch every 30 minutes, from the last one\'s start; only then does it say how long to wait', () => {
+test('batchToStart: no time spacing: a batch that ended a minute ago doesn\'t hold back the next commit\'s', () => {
   const head = sha(9);
-  const at = Date.parse('2026-10-13T01:00:00Z');
-  const last = run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' });
-  assert.equal(b.SPACING_MS, 30 * 60_000);
-  // The incident's shape: a new main commit, its fast checks done 10 minutes after the last batch started.
-  const early = b.batchToStart([last], head, 'main', at + 10 * 60_000);
-  assert.equal(early.start, false, 'skip: spacing');
-  assert.equal(early.waitMs, 20 * 60_000);
-  assert.match(early.why, /started 10 minutes ago: at most one every 30/);
-  assert.equal(b.batchToStart([last], head, 'main', at + b.SPACING_MS - 1).start, false);
-  assert.deepEqual(b.batchToStart([last], head, 'main', at + b.SPACING_MS), { start: true, why: `${head.slice(0, 7)} has had no batch` });
-  // The newest batch counts, whatever order GitHub lists them in, and whatever it ended as; a cancelled one doesn't.
-  const older = run({ head_sha: sha(7), created_at: '2026-10-13T00:20:00Z' });
-  assert.equal(b.batchToStart([older, last], head, 'main', at + 10 * 60_000).waitMs, 20 * 60_000);
-  assert.equal(b.batchToStart([{ ...last, conclusion: 'failure' }, older], head, 'main', at + 10 * 60_000).waitMs, 20 * 60_000);
-  assert.equal(b.batchToStart([{ ...last, conclusion: 'cancelled' }, older], head, 'main', at + 10 * 60_000).start, true);
-  // A bisect step is not a batch: it doesn't space one out.
-  assert.equal(b.batchToStart([run({ head_sha: sha(8), head_branch: `${b.BISECT_PREFIX}${sha(8)}`, created_at: '2026-10-13T01:00:00Z' })], head, 'main', at + 60_000).start, true);
-  // Already batched, or one running: nothing to wait for (no waitMs), however recent.
-  const had = b.batchToStart([run({ head_sha: head, created_at: '2026-10-13T01:00:00Z' })], head, 'main', at + 60_000);
-  assert.deepEqual([had.start, had.waitMs], [false, undefined]);
-  assert.match(had.why, /has had its batch/);
-  const busy = b.batchToStart([run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z', status: 'in_progress', conclusion: null })], head, 'main', at + 60 * 60_000);
-  assert.deepEqual([busy.start, busy.waitMs], [false, undefined]);
-  assert.match(busy.why, /is in_progress/);
+  const justEnded = run({ head_sha: sha(8), created_at: new Date(Date.now() - 6 * 60_000).toISOString() });
+  assert.deepEqual(b.batchToStart([justEnded], head), { start: true, why: `${head.slice(0, 7)} has had no batch` });
+  assert.deepEqual(b.batchToStart([{ ...justEnded, conclusion: 'failure' }], head).start, true, 'whatever it ended as');
+  // Still one at a time, and once per commit, however recent.
+  assert.match(b.batchToStart([{ ...justEnded, status: 'in_progress', conclusion: null }], head).why, /is in_progress/);
+  assert.match(b.batchToStart([{ ...justEnded, head_sha: head }], head).why, /has had its batch/);
 });
 
 /**
- * batchStep against an in-process GitHub with its own clock: `slow` are ci-slow.yml's runs, `mine` this workflow's
- * runs still going (by id), `onSleep` what happens in the world while the step sleeps.
+ * batchStep against an in-process GitHub: `slow` are ci-slow.yml's runs, `mine` this workflow's runs still going
+ * (by id), `onSleep` what happens in the world while the step sleeps. `first` is what the run read when it began.
  */
-type StepWorld = { head: string; slow: Run[]; mine: number[]; clock: number };
-function stepWorld(o: { head: string; slow: Run[]; mine?: number[]; start: number; onSleep?: (w: StepWorld) => void }) {
-  const w: StepWorld = { head: o.head, slow: [...o.slow], mine: [...(o.mine ?? [])], clock: o.start };
+type StepWorld = { head: string; slow: Run[]; mine: number[] };
+function stepWorld(o: { head: string; slow: Run[]; mine?: number[]; onSleep?: (w: StepWorld, n: number) => void }) {
+  const w: StepWorld = { head: o.head, slow: [...o.slow], mine: [...(o.mine ?? [])] };
   const said: string[] = [];
   const sleeps: number[] = [];
   const dispatched: string[] = [];
+  const asked: string[] = [];
   const gh: FakeGh = {
     get: async (path) => {
+      asked.push(path);
       if (path === '/r/commits/main') return { sha: w.head };
-      if (path.startsWith('/r/actions/workflows/ci-slow.yml/runs?')) return { workflow_runs: w.slow };
+      if (path.startsWith('/r/actions/workflows/ci-slow.yml/runs?')) return { workflow_runs: [...w.slow] };
       if (path.startsWith('/r/actions/workflows/ci-batch.yml/runs?status=in_progress')) return { workflow_runs: w.mine.map((id) => ({ id, status: 'in_progress' })) };
       if (path.startsWith('/r/actions/workflows/ci-batch.yml/runs?status=queued')) return { workflow_runs: [] };
       throw new Error(`no fake for ${path}`);
@@ -145,94 +127,78 @@ function stepWorld(o: { head: string; slow: Run[]; mine?: number[]; start: numbe
       assert.equal(`${method} ${path}`, 'POST /r/actions/workflows/ci-slow.yml/dispatches');
       assert.deepEqual(body, { ref: 'main', inputs: { job: 'all', sha: '' } });
       dispatched.push(w.head);
-      w.slow.push(run({ head_sha: w.head, created_at: new Date(w.clock).toISOString(), status: 'queued', conclusion: null }));
+      w.slow.push(run({ head_sha: w.head, created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
       return null;
     },
   };
-  const step = (runId: number, extra: { dry?: boolean } = {}) =>
+  const first = { head: w.head, runs: [...w.slow] };
+  const step = (runId: number) =>
     b.batchStep({
       gh,
       R: '/r',
       branch: 'main',
       runId,
-      ...extra,
+      first,
       say: (l) => said.push(l),
-      now: () => w.clock,
       sleep: async (ms) => {
         sleeps.push(ms);
-        w.clock += ms;
-        o.onSleep?.(w);
+        o.onSleep?.(w, sleeps.length);
       },
     });
-  return { w, said, sleeps, dispatched, step };
+  return { w, said, sleeps, dispatched, asked, step };
 }
 
-test('batchStep: the fast checks done on a new main commit start its batch at once when the last one is 30 minutes old', async () => {
-  const at = Date.parse('2026-10-13T01:00:00Z');
-  const s = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })], start: at + 31 * 60_000 });
+test('batchStep: a look when ci ends on main, or when a batch ends, starts the newest commit\'s batch at once; never a second one', async () => {
+  // The incident's shape: the last batch ended minutes ago on an older commit; main's tip has had none.
+  const s = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })] });
   assert.equal(await s.step(500), 'started');
-  assert.deepEqual([s.dispatched, s.sleeps], [[sha(9)], []]);
-  // Already batched now (queued): the next look, from the schedule say, starts nothing.
-  assert.equal(await s.step(501), 'nothing');
-  assert.equal(s.dispatched.length, 1);
+  assert.deepEqual([s.dispatched, s.sleeps], [[sha(9)], []], 'no waiting');
+  assert.match(s.said.join('\n'), /batch: started on main/);
+  // One running (the last commit of a burst lands meanwhile): nothing now; the look when it ends starts the next.
+  const busy = stepWorld({ head: sha(10), slow: [run({ head_sha: sha(9), created_at: '2026-10-13T01:00:00Z', status: 'in_progress', conclusion: null })] });
+  assert.equal(await busy.step(501), 'nothing');
+  assert.deepEqual([busy.dispatched, busy.asked], [[], []], 'nothing to start: decided on what the run read, nothing more asked');
+  busy.w.slow[0] = { ...busy.w.slow[0]!, status: 'completed', conclusion: 'success' };
+  const next = stepWorld({ head: sha(10), slow: busy.w.slow });
+  assert.equal(await next.step(502), 'started');
+  assert.deepEqual(next.dispatched, [sha(10)], 'main\'s newest commit, without the schedule');
+  // Already batched: nothing.
+  const had = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(9), created_at: '2026-10-13T01:00:00Z', conclusion: 'failure' })] });
+  assert.equal(await had.step(503), 'nothing');
+  assert.deepEqual(had.dispatched, []);
 });
 
-test('batchStep: inside the 30 minutes it waits the rest out, then starts the batch on main\'s newest commit by then', async () => {
-  const at = Date.parse('2026-10-13T01:00:00Z');
-  const s = stepWorld({
-    head: sha(9),
-    slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })],
-    start: at + 10 * 60_000,
-    onSleep: (w) => (w.head = sha(10)), // main moved on while it waited
-  });
-  assert.equal(await s.step(500), 'started');
-  assert.deepEqual(s.sleeps, [20 * 60_000], 'no batch before the spacing is up, and no later event needed');
-  assert.deepEqual(s.dispatched, [sha(10)]);
-  assert.match(s.said.join('\n'), /waiting 20 minute\(s\)/);
-  // A dry run says so and neither waits nor starts anything.
-  const d = stepWorld({ head: sha(9), slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })], start: at + 10 * 60_000 });
-  assert.equal(await d.step(500, { dry: true }), 'nothing');
-  assert.deepEqual([d.sleeps, d.dispatched], [[], []]);
-  // A batch someone started by hand while it waited: nothing more to start.
-  const m = stepWorld({
-    head: sha(9),
-    slow: [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })],
-    start: at + 10 * 60_000,
-    onSleep: (w) => w.slow.push(run({ head_sha: sha(9), created_at: new Date(w.clock - 60_000).toISOString(), status: 'in_progress', conclusion: null })),
-  });
-  assert.equal(await m.step(500), 'nothing');
-  assert.deepEqual(m.dispatched, []);
-});
-
-test('batchStep: runs take turns by run id, so two never start a batch each and only one waits', async () => {
-  const at = Date.parse('2026-10-13T01:00:00Z');
+test('batchStep: two looks at once never start a batch each: the newer lets the older finish, then reads again', async () => {
   const slow = [run({ head_sha: sha(8), created_at: '2026-10-13T01:00:00Z' })];
-  // An older run is mid-look and starts the batch: this one lets it finish, reads again, and starts nothing.
+  // A batch ends as ci finishes on main: runs 499 and 500 both read "no batch on the tip, none running". 499 starts
+  // it while 500 gives it its turn; 500 then reads again and starts nothing.
   const a = stepWorld({
     head: sha(9),
     slow,
     mine: [499, 500, 777],
-    start: at + 31 * 60_000,
     onSleep: (w) => {
-      w.slow.push(run({ head_sha: w.head, created_at: new Date(w.clock).toISOString(), status: 'queued', conclusion: null }));
+      w.slow.push(run({ head_sha: w.head, created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
       w.mine = [500, 777];
     },
   });
   assert.equal(await a.step(500), 'nothing');
   assert.deepEqual([a.dispatched, a.sleeps], [[], [b.TURN_POLL_MS]], 'a newer run (777) and itself (500) are not waited for');
-  // An older run is waiting out the spacing (still going after a minute): the batch is left to it.
-  const y = stepWorld({ head: sha(9), slow, mine: [499, 500], start: at + 10 * 60_000 });
-  assert.equal(await y.step(500), 'yielded');
-  assert.deepEqual(y.dispatched, []);
-  assert.equal(y.sleeps.reduce((n, x) => n + x, 0), b.TURN_WAIT_MS, 'it doesn\'t wait out the spacing as well');
-  assert.match(y.said.at(-1)!, /left to the older run 499/);
-  // The oldest run decides without waiting on anyone, and one with nothing to start never asks.
-  const o = stepWorld({ head: sha(9), slow, mine: [500, 600], start: at + 31 * 60_000 });
-  assert.equal(await o.step(500), 'started');
-  assert.deepEqual(o.sleeps, []);
-  const n = stepWorld({ head: sha(8), slow, mine: [499, 500], start: at + 31 * 60_000 });
-  assert.equal(await n.step(500), 'nothing');
-  assert.deepEqual(n.sleeps, []);
+  assert.match(a.said.at(-1)!, /is queued/);
+  // The oldest run waits on nobody, but still decides on a fresh read: an older run that finished between this
+  // run's first read and now may have started the batch.
+  const o = stepWorld({ head: sha(9), slow, mine: [500, 600] });
+  o.w.slow.push(run({ head_sha: sha(9), created_at: '2026-10-13T02:00:00Z', status: 'queued', conclusion: null }));
+  assert.equal(await o.step(500), 'nothing');
+  assert.deepEqual([o.dispatched, o.sleeps], [[], []]);
+  // Main moved on while it gave way: the batch goes to the newest commit.
+  const m = stepWorld({ head: sha(9), slow, mine: [499, 500], onSleep: (w) => ((w.head = sha(10)), (w.mine = [500])) });
+  assert.equal(await m.step(500), 'started');
+  assert.deepEqual(m.dispatched, [sha(10)]);
+  // An older run stuck for a minute is not waited for any longer: at most TURN_WAIT_MS, then a fresh read decides.
+  const stuck = stepWorld({ head: sha(9), slow, mine: [499, 500] });
+  assert.equal(await stuck.step(500), 'started');
+  assert.equal(stuck.sleeps.reduce((n, x) => n + x, 0), b.TURN_WAIT_MS);
+  assert.ok(b.TURN_WAIT_MS <= 60_000, 'a minute at most: the run\'s check on main\'s tip is never in progress for long');
 });
 
 test('ci-batch.yml: it looks when ci.yml ends on a push to main, never for a pull request\'s run, and only ever runs main\'s own script', () => {
@@ -259,9 +225,9 @@ test('ci-batch.yml: it looks when ci.yml ends on a push to main, never for a pul
   assert.deepEqual(checkouts.map((x) => x.with), [{ ref: '${{ github.event.repository.default_branch }}', 'persist-credentials': false }]);
   assert.doesNotMatch(text, /workflow_run\.(head_sha|head_commit|pull_requests)|workflow_run\.head_branch \}\}/);
   assert.deepEqual(wf.jobs.batch.steps.map((x) => x.run).filter(Boolean), ['node scripts/ci/batch.mjs']);
-  // The job outlasts the longest wait: a timed-out run's cancelled check on main's tip would stop the updater.
-  assert.ok(b.MAX_WAIT_MS >= b.SPACING_MS, 'a full spacing can be waited out');
-  assert.ok(wf.jobs.batch['timeout-minutes'] * 60_000 >= b.MAX_WAIT_MS + b.TURN_WAIT_MS + 5 * 60_000);
+  // A short job: its check lands on main's tip, where an in-progress check reads as pending to the updater and a merge.
+  assert.equal(wf.jobs.batch['timeout-minutes'], 10);
+  assert.ok(b.TURN_WAIT_MS <= 60_000);
 });
 
 test('lastBatches: the newest finished batch, and the newest green one before it on another commit', () => {
@@ -487,18 +453,17 @@ test('a new main commit with no batch gets one, dispatched on main; a dry run on
   });
 });
 
-test('a whole run inside the spacing: it waits the rest out for real, then dispatches the batch on main', async () => {
+test('a whole run minutes after the last batch ended: the new main commit\'s batch is dispatched at once', async () => {
   const w = world(2, 2);
-  // The last batch (green) started 3 seconds short of 30 minutes ago; main has a newer commit with no batch.
+  // The last batch (green) started 6 minutes ago and has ended; main has a newer commit with no batch.
   w.runs[1]!.conclusion = 'success';
-  w.runs[1]!.created_at = new Date(Date.now() - b.SPACING_MS + 3_000).toISOString();
+  w.runs[1]!.created_at = new Date(Date.now() - 6 * 60_000).toISOString();
   w.line.push(sha(40));
   w.head = sha(40);
   await withFake(w, async (port) => {
-    const began = Date.now();
     const out = await tick(port);
-    assert.match(out, /at most one every 30\n.*batch: waiting 1 minute\(s\), then looking again\n.*batch: started on main/s);
-    assert.ok(Date.now() - began >= 2_000, 'not before the 30 minutes are up');
+    assert.match(out, /batch: started on main/);
+    assert.doesNotMatch(out, /wait/);
     assert.deepEqual(w.writes, [{ method: 'POST', path: '/actions/workflows/ci-slow.yml/dispatches', body: { ref: 'main', inputs: { job: 'all', sha: '' } } }]);
   });
 });

@@ -144,7 +144,7 @@ function checks(): Check[] {
 
 /** Every check run a push to main creates, but the shards (their summary jobs gate them). */
 const pushChecks = () => checks().filter((c) => c.push && c.tier !== 'pr-only' && !(c.key in SHARDS)).map((c) => c.name).sort();
-/** Every check run each batch on main creates (on main's newest commit, at most every 30 minutes). */
+/** Every check run each batch on main creates (on main's newest commit, one batch at a time). */
 const batchChecks = () => checks().filter((c) => c.batch).map((c) => c.name).sort();
 /** Every check run every pull request creates, but the shards (their summary jobs gate them). */
 const prChecks = () => checks().filter((c) => c.pr && c.tier !== 'slow' && !(c.key in SHARDS)).map((c) => c.name).sort();

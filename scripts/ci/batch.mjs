@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 // CI only (.github/workflows/ci-batch.yml: whenever the fast checks finish on a push to main, whenever a ci-slow.yml
 // batch or bisect run ends, and every 30 minutes as a backstop, since GitHub drops scheduled runs): the slow checks
-// on main, in batches, and the bisect of a red batch. It keeps no state of its own (what ran is read back from
-// GitHub: ci-slow.yml's runs, this workflow's runs, and the check runs on main's commits).
-//   1. Bisect and 2. cleanup, below, first: one short look.
-//   3. Batch: when main's newest commit has had no batch (no ci-slow.yml run on main for it, but a cancelled one),
-//      none is queued or running, and the last one started SPACING_MS (30 minutes) ago or more, it starts one there:
-//      workflow_dispatch on main, job=all. A dispatched run's check runs land on the commit it runs on, so that
-//      commit gets the slow checks the engine updater requires. A commit the batch skipped never gets them, and the
-//      updater never installs it. When only the spacing is in the way, the run waits it out and looks again (no
-//      later event is promised to: main may stay quiet, and the schedule may be dropped), then starts the batch on
-//      whatever main's newest commit is by then. Runs of this workflow take turns by run id (olderRuns): the oldest
-//      decides, a newer one lets it finish first, or leaves it to it when it is waiting out the spacing. So two
-//      runs never start a batch each, and only one sits waiting.
+// on main, in batches, and the bisect of a red batch. Each run is one short look; it keeps no state of its own (what
+// ran is read back from GitHub: ci-slow.yml's runs, this workflow's runs, and the check runs on main's commits).
+//   1. Bisect and 2. cleanup, below, first.
+//   3. Batch: when main's newest commit has had no batch (no ci-slow.yml run on main for it, but a cancelled one)
+//      and none is queued or running, it starts one there: workflow_dispatch on main, job=all. A dispatched run's
+//      check runs land on the commit it runs on, so that commit gets the slow checks the engine updater requires.
+//      A commit the batch skipped never gets them, and the updater never installs it. There is no time spacing:
+//      while a batch runs, newer commits wait, and the look when it ends starts the next one on main's newest
+//      commit, so the last commit of a burst gets its batch without the schedule.
+//      Two looks often come at once (a batch ends as the fast checks finish, or as the schedule fires), and each
+//      would see no batch running and start one: two batches on one commit. So a run about to start a batch first
+//      lets every older run of this workflow finish (olderRuns: by run id, TURN_WAIT_MS at most), then reads
+//      GitHub again and decides on that.
 //   1. Bisect: when the newest finished batch is red, the first-parent commits between the last green batch and it
 //      are the candidates. The failing job's result on each is its check run there (a batch's, or an earlier
 //      bisect step's). Binary search: the next candidate is the untested one nearest the middle of the commits
@@ -38,11 +39,7 @@ export const SLOW_JOBS = {
 };
 export const SLOW_WORKFLOW = 'ci-slow.yml';
 export const BATCH_WORKFLOW = 'ci-batch.yml';
-/** INVARIANT: two batches on main never start closer together than this (the rule was only the schedule's before). */
-export const SPACING_MS = 30 * 60_000;
-/** WHY: the job's timeout (ci-batch.yml) must never cut a wait short: a cancelled check on main's tip stops the updater. */
-export const MAX_WAIT_MS = 35 * 60_000;
-/** How long a newer run gives an older one to finish its look, and how often it asks. */
+/** How long a run about to start a batch gives older runs of this workflow to finish their look, and how often it asks. */
 export const TURN_WAIT_MS = 60_000;
 export const TURN_POLL_MS = 10_000;
 export const BISECT_PREFIX = 'ci-bisect/';
@@ -56,19 +53,14 @@ const isBatch = (r, branch) => r.event === 'workflow_dispatch' && r.head_branch 
 
 /**
  * Whether to start a batch on `head`, from ci-slow.yml's runs: not while one is queued or running on `branch`
- * (concurrency would only queue it behind), not when `head` has had one already (a cancelled one doesn't count), and
- * not within SPACING_MS of the last batch's start (its run's created_at; a cancelled one doesn't count). When only
- * the spacing is in the way, waitMs says how long until it isn't.
+ * (concurrency would only queue it behind), and not when `head` has had one already (a cancelled one doesn't count).
  */
-export function batchToStart(runs, head, branch = 'main', now = Date.now()) {
+export function batchToStart(runs, head, branch = 'main') {
   const batches = runs.filter((r) => isBatch(r, branch));
   const busy = batches.find((r) => r.status !== 'completed');
   if (busy) return { start: false, why: `batch ${busy.html_url ?? busy.id} on ${short(busy.head_sha)} is ${busy.status}` };
   const done = batches.find((r) => r.head_sha === head && r.conclusion !== 'cancelled');
   if (done) return { start: false, why: `${short(head)} has had its batch (${done.conclusion}, ${done.html_url ?? done.id})` };
-  const last = batches.filter((r) => r.conclusion !== 'cancelled').sort(byCreated)[0];
-  const waitMs = last ? Date.parse(last.created_at) + SPACING_MS - now : 0;
-  if (waitMs > 0) return { start: false, waitMs, why: `${short(head)} has had no batch, but the last one (${short(last.head_sha)}) started ${Math.max(0, Math.floor((now - Date.parse(last.created_at)) / 60_000))} minutes ago: at most one every ${SPACING_MS / 60_000}` };
   return { start: true, why: `${short(head)} has had no batch` };
 }
 
@@ -83,50 +75,30 @@ export async function olderRuns(gh, R, runId) {
 }
 
 /**
- * Step 3, the batch: decide (batchToStart), and start it, or wait out the spacing and decide again. `first` is what
- * main() read already ({ head, runs }). Before starting or waiting, a run with a run id gives way to older runs of
- * this workflow: it lets them finish (TURN_WAIT_MS at most) and reads again; one still going after that is waiting
- * out the spacing itself, and the batch is left to it. Returns what it did: started, nothing, yielded or gave-up.
+ * Step 3, the batch: decide (batchToStart) and start it. `first` is what main() read already ({ head, runs }): when
+ * that says there is nothing to start, nothing more is asked. Otherwise a run with a run id first lets older runs
+ * of this workflow finish (TURN_WAIT_MS at most; one still going then is stuck, and isn't waited for), and whatever
+ * it found, reads main's head and the batches again and decides on that: an older run's look may have started the
+ * batch a moment ago. Returns what it did: started or nothing.
  */
-export async function batchStep({ gh, R, branch, runId = 0, first = null, dry = false, say, now = () => Date.now(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
-  const began = now();
-  for (let state = first; ; state = null) {
-    const head = state ? state.head : (await gh.get(`${R}/commits/${encodeURIComponent(branch)}`)).sha;
-    const runs = state ? state.runs : (await gh.get(`${R}/actions/workflows/${SLOW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100`)).workflow_runs ?? [];
-    const b = batchToStart(runs, head, branch, now());
-    say(`batch: ${b.why}`);
-    if (!b.start && !(b.waitMs > 0)) return 'nothing';
-    if (runId) {
-      let older = await olderRuns(gh, R, runId);
-      if (older.length) {
-        for (let waited = 0; older.length && waited < TURN_WAIT_MS; waited += TURN_POLL_MS) {
-          await sleep(TURN_POLL_MS);
-          older = await olderRuns(gh, R, runId);
-        }
-        if (older.length) {
-          say(`batch: left to the older run ${older[0]} of ${BATCH_WORKFLOW}, which is waiting to start it`);
-          return 'yielded';
-        }
-        continue; // WHY: the older run may have started the batch: read again before deciding.
-      }
-    }
-    if (b.start) {
-      await gh.write('POST', `${R}/actions/workflows/${SLOW_WORKFLOW}/dispatches`, { ref: branch, inputs: { job: 'all', sha: '' } });
-      say(`batch: started on ${branch} (${short(head)})`);
-      return 'started';
-    }
-    const mins = Math.ceil(b.waitMs / 60_000);
-    if (dry) {
-      say(`batch: would wait ${mins} minute(s) and look again`);
-      return 'nothing';
-    }
-    if (now() + b.waitMs - began > MAX_WAIT_MS) {
-      say(`batch: not waiting ${mins} more minute(s): past this run's ${MAX_WAIT_MS / 60_000}; a later run starts it`);
-      return 'gave-up';
-    }
-    say(`batch: waiting ${mins} minute(s), then looking again`);
-    await sleep(b.waitMs);
+export async function batchStep({ gh, R, branch, runId = 0, first = null, say, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  const read = async () => ({
+    head: (await gh.get(`${R}/commits/${encodeURIComponent(branch)}`)).sha,
+    runs: (await gh.get(`${R}/actions/workflows/${SLOW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100`)).workflow_runs ?? [],
+  });
+  let state = first ?? (await read());
+  let b = batchToStart(state.runs, state.head, branch);
+  if (b.start && runId) {
+    for (let waited = 0; waited < TURN_WAIT_MS && (await olderRuns(gh, R, runId)).length; waited += TURN_POLL_MS) await sleep(TURN_POLL_MS);
+    // INVARIANT: what it starts a batch on was read after every older run's look ended.
+    state = await read();
+    b = batchToStart(state.runs, state.head, branch);
   }
+  say(`batch: ${b.why}`);
+  if (!b.start) return 'nothing';
+  await gh.write('POST', `${R}/actions/workflows/${SLOW_WORKFLOW}/dispatches`, { ref: branch, inputs: { job: 'all', sha: '' } });
+  say(`batch: started on ${branch} (${short(state.head)})`);
+  return 'started';
 }
 
 /** The newest finished batch (cancelled ones aside), and the newest green batch older than it on another commit. */
@@ -232,7 +204,7 @@ async function main() {
   const branch = info.default_branch;
   const head = (await gh.get(`${R}/commits/${encodeURIComponent(branch)}`)).sha;
   const runs = (await gh.get(`${R}/actions/workflows/${SLOW_WORKFLOW}/runs?event=workflow_dispatch&per_page=100`)).workflow_runs ?? [];
-  // WHY: each line goes out as it is known: the batch step may wait out the spacing, and the bisect's lines shouldn't wait with it.
+  // WHY: each line goes out as it is known: the batch step may give older runs up to a minute first.
   const say = (line) => {
     console.log(line);
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${line}\n`);
@@ -251,8 +223,8 @@ async function main() {
     annotate(e);
   }
 
-  // 3. Batch: last, since it may wait.
-  await batchStep({ gh, R, branch, runId: Number(process.env.GITHUB_RUN_ID) || 0, first: { head, runs }, dry, say });
+  // 3. Batch: last, since it may give older runs their turn first.
+  await batchStep({ gh, R, branch, runId: Number(process.env.GITHUB_RUN_ID) || 0, first: { head, runs }, say });
 }
 
 async function bisect({ gh, R, repoUrl, runs, refs, branch }) {
