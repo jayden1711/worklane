@@ -18,6 +18,8 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload, EventType } from '../src/events/types.js';
 import { candidateVerdict, episodes, FIX_FORWARD_LABEL, revertFirstReasons } from '../src/fix-forward.js';
 import { computeLevel } from '../src/review.js';
+import { passGate } from '../src/testrun/gate.js';
+import { GATE_MODES, guardGate } from './gate-helpers.js';
 
 const sha = (n: number) => n.toString(16).padStart(40, 'c');
 const check = (conclusion: string, id: number, name = 'ci'): CommitCheck => ({ name, source: 'check_run', status: 'completed', conclusion, id });
@@ -27,7 +29,7 @@ const running = (id: number): CommitCheck => ({ name: 'ci', source: 'check_run',
  * A default branch: the last green commit, then one merge commit per PR (#11, #12, ...), the last one red. `files`:
  * what each PR's commit changes (by its index, 1-based). The red commit's `ci` failed, its log readable.
  */
-function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max_attempts?: number; revert_first_paths?: string[] }; testRuns?: TestRuns; rerun?: boolean; limited?: number } = { prs: 1 }) {
+function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max_attempts?: number; revert_first_paths?: string[] }; testRuns?: TestRuns; rerun?: boolean; limited?: number; now?: () => number } = { prs: 1 }) {
   const dir = mkdtempSync(join(tmpdir(), 'fix-forward-'));
   const log = new EventLog(join(dir, 'events.db'));
   const backlog = new FileBacklog(join(dir, 'backlog.json'), 'bot');
@@ -84,6 +86,7 @@ function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max
       return 'sent';
     },
     pollMs: () => 0,
+    ...(o.now ? { now: o.now } : {}),
   });
   // The commit before the PRs was green after its own merge.
   emit('merge.main_result', { issue: 1, number: 10, sha: line[0]!, outcome: 'green', failed: [] });
@@ -313,3 +316,55 @@ test('a red while the branch is already red is the same one: nothing new; no gre
   assert.equal(w.ep().attempts.length, 0);
   assert.equal(w.reverts.length, 0);
 });
+
+for (const mode of GATE_MODES) {
+  test(`a test-run probe held at the start gate (${mode}) is no verdict: never skipped, its timeout paused, and it runs once there is room`, async () => {
+    const g = guardGate();
+    try {
+      const runs: TestRunRequest[] = [];
+      let finish: () => void = () => undefined;
+      const finished = new Promise<void>((r) => (finish = r));
+      const testRuns: TestRuns = {
+        async startTestRun(req) {
+          // WHY: as runTestRun does, the only function that starts a run: the start gate first.
+          passGate();
+          runs.push(req);
+          await finished;
+          const ok = req.sha === sha(101);
+          return { id: `r${runs.length}`, sha: req.sha, kind: req.kind, ok, outcome: 'done', tiers: [{ tier: 'unit', ok, durationMs: 1, summary: ok ? 'ok' : '1 failing', logRef: 'log://1' }] };
+        },
+        async postChecks() {},
+        checkNames: () => ({ unit: 'test-run/unit' }),
+      };
+      // WHY: from the wall clock, as the probe's own time is its event's.
+      let now = Date.now();
+      const t = fixture({ prs: 3, testRuns, rerun: false, now: () => now });
+      t.backlog.setChecks(t.red, [check('failure', 500, 'test-run/unit')]);
+      g.close(mode);
+      await t.ff.start({ sha: t.red, number: 13, failed: ['test-run/unit'] });
+      const steps = async (n: number) => {
+        for (let i = 0; i < n && !t.ep().culprit; i++) {
+          await new Promise((r) => setImmediate(r));
+          await t.ff.step();
+        }
+      };
+      await steps(3);
+      now += 3 * 3600_000; // past probeTimeoutMin (90), all of it held
+      await steps(3);
+      assert.equal(runs.length, 0, 'nothing ran while held');
+      assert.ok(![...t.ep().tested.values()].some((x) => x.verdict === 'skip'), 'no candidate skipped for the time held');
+      assert.ok(!t.ep().culprit, 'no culprit named while held');
+      g.open();
+      await steps(3);
+      assert.equal(runs.length, 1, 'the first probe runs');
+      assert.ok(![...t.ep().tested.values()].some((x) => x.verdict === 'skip'), 'running: the hours it was held do not time it out');
+      finish();
+      await steps(2);
+      assert.equal(runs[0]!.sha, t.line[1]);
+      // WHY: the probe held for hours gets its verdict; later probes start at this test's clock, hours ahead of their events.
+      assert.equal(t.ep().tested.get(t.line[1]!)!.verdict, 'good', 'its verdict, not a skip');
+    } finally {
+      g.done();
+    }
+  });
+}

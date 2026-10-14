@@ -33,6 +33,7 @@ type State = { tasks: { issue: number; title: string; status: string }[]; decisi
 interface Render {
   renderPage(name: string, state: State): string;
   renderIssue(state: State, issue: number): string;
+  renderGoalGraph(graph: unknown): string;
   renderChecks(runs: unknown[]): string;
   renderRunList(issue: number): string;
   renderIntake(data: unknown, view?: string): string;
@@ -51,7 +52,7 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string } }): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -118,8 +119,16 @@ interface Render {
   renderChatAnswer(f: unknown, cli: string): string;
   renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
   renderMicInterim(listening: boolean, interim: string, error?: string | null): string;
-  renderVoiceSettings(owner: boolean): string;
-  renderVoiceSettingsView(prefs: VoicePrefs, status: unknown): string;
+  renderVoiceSettings(owner: boolean, brand?: string): string;
+  renderVoiceSettingsView(prefs: VoicePrefs, status: unknown, brand?: string, wakeModel?: string | null): string;
+  renderWakeIndicator(micOpen: boolean, phrase: string): string;
+  WakeListener: new (engine: unknown, env: unknown, phrase: string, hooks: { onWake: () => void; onChange: (s: { status: string; micOpen: boolean; why: string | null }) => void }) => { set(o: { enabled: boolean; held?: boolean }): void; dictating(on: boolean): void; dispose(): void; status: string; micOpen: boolean };
+  startOnWake(o: { support: unknown; listening: boolean; start: () => void }): string;
+  mayWake(role: string | undefined, prefs: VoicePrefs): boolean;
+  wakePhrase(brand: string): string;
+  registerWakeEngine(e: unknown): () => void;
+  wakeEngine(): unknown;
+  NO_WAKE_MODEL: string;
   checkSupport(ctor: unknown, o: { lang: string; allowCloud: boolean }): Promise<{ kind: string; why?: string; local?: boolean }>;
   Dictation: new (ctor: unknown, o: { lang: string; local: boolean }, hooks: { onFinal: (t: string) => void; onInterim: (t: string) => void; onListening: (l: boolean) => void; onError: (w: string) => void }) => { start(): void; stop(): void; abort(): void; listening: boolean };
   insertAt(text: string, start: number, end: number, chunk: string): { text: string; caret: number };
@@ -151,7 +160,7 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
-type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean };
+type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean; wakeWord?: boolean };
 type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
 type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
@@ -2440,15 +2449,15 @@ test("the mic is the owners' only, from the role the server serves: not a writer
 test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
   localStorage.setItem('dash-voice', '{}');
   const prefs = r.readVoicePrefs();
-  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'all off by default');
+  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false }, 'all off by default');
   assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
   const settings = r.renderVoiceSettings(true);
   assert.match(settings, /data-testid="voice-dictation"/);
   assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false }, 'only a stored true turns either on');
+  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false }, 'only a stored true turns either on');
   localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false });
+  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false });
   assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
   assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
   localStorage.setItem('dash-voice', '{}');
@@ -2827,4 +2836,413 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
+});
+
+/** The markup with each reserved slot's contents taken out (its own tag, and so its fixed size, kept). */
+function withoutReserved(html: string): string {
+  let out = html;
+  for (;;) {
+    const at = out.search(/<(\w+)[^>]*data-reserved="[^"]*"[^>]*>/);
+    if (at < 0) return out;
+    const open = /<(\w+)[^>]*>/.exec(out.slice(at))!;
+    const tag = open[1]!;
+    let depth = 0;
+    const re = new RegExp(`<(/?)${tag}\\b[^>]*>`, 'g');
+    re.lastIndex = at;
+    let end = -1;
+    for (let m; (m = re.exec(out)); ) {
+      depth += m[1] ? -1 : 1;
+      if (depth === 0) {
+        end = m.index;
+        break;
+      }
+    }
+    assert.ok(end > 0, `unclosed reserved <${tag}>`);
+    out = `${out.slice(0, at)}${open[0].replace('data-reserved', 'data-was-reserved')}${out.slice(end)}`;
+  }
+}
+
+test("the Repo config form: no input moves when GitHub's checks answer arrives after mount", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const loading = r.renderRepoConfigForm(c);
+  assert.match(loading, /data-testid="repo-config-checks-status"[^>]*>checking GitHub…</);
+  const states = {
+    'checks arrived': r.renderRepoConfigForm(c, { seenLoaded: true, seen: ['ci/test', 'ci/lint', 'ci/e2e', 'ci/docs', 'ci/build', 'ci/typecheck'] }),
+    'no checks ran': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: 'GitHub ran no checks on its tip' }),
+    'GitHub refused': r.renderRepoConfigForm(c, { seenLoaded: true, seenNote: "GitHub didn't answer: HTTP 502" }),
+  };
+  assert.match(states['no checks ran'], /data-testid="repo-config-checks-status"[^>]*>GitHub ran no checks on its tip</);
+  assert.match(states['checks arrived'], /data-check="ci\/typecheck"/);
+  // Everything above each field is the same markup before and after, apart from what is inside the reserved slots.
+  const inputs = [...loading.matchAll(/<input[^>]*data-testid="([a-z-]+)"/g)].map((m) => m[1]!);
+  assert.ok(inputs.includes('repo-config-check-name') && inputs.includes('repo-config-budget'), inputs.join(', '));
+  const above = (html: string, id: string) => withoutReserved(html.slice(0, html.indexOf(`data-testid="${id}"`)));
+  for (const [what, html] of Object.entries(states)) for (const id of inputs) assert.equal(above(html, id), above(loading, id), `${id} moves once ${what}`);
+  // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
+  assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
+  assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
+});
+
+/** A goal's graph as GET /api/goal-graph serves it (src/goal-graph.ts): 11 first, 12 and 14 after it, 13 after 12. */
+const GOAL_GRAPH = {
+  goal: 10,
+  split: true,
+  nodes: [
+    { issue: 11, key: 'schema', title: 'Add the export schema', status: 'landed', pr: null, run: null, cycle: false, layer: 0 },
+    { issue: 12, key: 'api', title: 'Serve the export', status: 'in_review', pr: { number: 120, url: 'https://example.test/pr/120' }, run: 'run-12', cycle: false, layer: 1 },
+    { issue: 14, key: 'docs', title: 'Document exports', status: null, pr: null, run: null, cycle: false, layer: 1 },
+    { issue: 13, key: 'ui', title: 'Export button', status: 'building', pr: null, run: 'run-13', cycle: false, layer: 2 },
+  ],
+  edges: [
+    { from: 11, to: 12, cycle: false },
+    { from: 12, to: 13, cycle: false },
+    { from: 11, to: 14, cycle: false },
+  ],
+  cycles: [] as number[][],
+  total: 4,
+  capped: false,
+};
+const attrs = (html: string, testid: string) => [...html.matchAll(new RegExp(`<[a-z]+ [^>]*data-testid="${testid}"[^>]*>`, 'g'))].map((m) => Object.fromEntries([...m[0].matchAll(/([a-z-]+)="([^"]*)"/g)].map((a) => [a[1]!, a[2]!])));
+
+test("a goal's task graph: a node per task in its state's colours, an edge per dependency, each node a focusable link to its PR, run or issue", () => {
+  const html = r.renderGoalGraph(GOAL_GRAPH);
+  const nodes = attrs(html, 'goal-graph-node');
+  assert.deepEqual(nodes.map((n) => [n['data-issue'], n['data-status']]), [['11', 'landed'], ['12', 'in_review'], ['14', 'unseen'], ['13', 'building']]);
+  const edges = attrs(html, 'goal-graph-edge');
+  assert.deepEqual(edges.map((e) => `${e['data-from']}>${e['data-to']}`).sort(), ['11>12', '11>14', '12>13']);
+  // The state is written on the node, in the colour tokens its status badge uses (landed green, building blue).
+  assert.match(html, /Landed<\/text>/);
+  assert.match(html, /Building<\/text>/);
+  assert.match(html, /Not seen yet<\/text>/);
+  assert.match(html, /fill:var\(--green-tint\)/);
+  assert.match(html, /fill:var\(--blue-tint\)/);
+  // Click targets: the PR's recorded URL (new tab), else its latest run, else its issue page; links are focusable.
+  const by = Object.fromEntries(nodes.map((n) => [n['data-issue'], n]));
+  assert.equal(by['12']!.href, 'https://example.test/pr/120');
+  assert.equal(by['12']!['data-target'], 'pr');
+  assert.equal(by['12']!.target, '_blank');
+  assert.equal(by['13']!.href, '/runs/run-13');
+  assert.equal(by['13']!['data-target'], 'run');
+  assert.equal(by['11']!.href, '/issues/11');
+  assert.equal(by['14']!.href, '/issues/14');
+  for (const n of nodes) assert.match(n['aria-label']!, /^#\d+ .+\. Opens /, 'each node says what it is and where it goes');
+  // A PR URL that isn't https is never a link: the node goes to its issue instead.
+  const bad = r.renderGoalGraph({ ...GOAL_GRAPH, nodes: [{ ...GOAL_GRAPH.nodes[1]!, pr: { number: 1, url: 'javascript:alert(1)' }, run: null }], edges: [] });
+  assert.doesNotMatch(bad, /javascript:/);
+  assert.match(bad, /href="\/issues\/12"/);
+  // Phone width: the graph scrolls inside its own box, never the page.
+  assert.match(attrs(html, 'goal-graph-scroll')[0]!.class!, /overflow-x-auto/);
+  assert.doesNotMatch(html, /goal-graph-cycles|goal-graph-capped|goal-graph-empty/);
+});
+
+test("a goal's task graph: a cycle is flagged on its nodes, its edges and in words; a capped graph says so; an empty one says why", () => {
+  const cyc = { ...GOAL_GRAPH, nodes: GOAL_GRAPH.nodes.map((n) => ({ ...n, cycle: n.issue === 12 || n.issue === 13 })), edges: [...GOAL_GRAPH.edges.map((e) => (e.from === 12 ? { ...e, cycle: true } : e)), { from: 13, to: 12, cycle: true }], cycles: [[12, 13]] };
+  const html = r.renderGoalGraph(cyc);
+  assert.match(html, /data-testid="goal-graph-cycles"/);
+  assert.match(html, /#12 → #13 → #12/);
+  assert.deepEqual(attrs(html, 'goal-graph-node').filter((n) => n['data-cycle'] === 'true').map((n) => n['data-issue']).sort(), ['12', '13']);
+  assert.deepEqual(attrs(html, 'goal-graph-edge').filter((e) => e['data-cycle'] === 'true').map((e) => `${e['data-from']}>${e['data-to']}`).sort(), ['12>13', '13>12']);
+
+  assert.match(r.renderGoalGraph({ ...GOAL_GRAPH, total: 75, capped: true }), /Showing 4 of 75 tasks/);
+
+  assert.match(r.renderGoalGraph({ goal: 10, split: false, nodes: [], edges: [], cycles: [], total: 0, capped: false }), /data-testid="goal-graph-empty"[^>]*>No task graph yet/);
+  assert.match(r.renderGoalGraph({ goal: 10, split: true, nodes: [], edges: [], cycles: [], total: 0, capped: false }), /This goal&#x27;s split has no tasks/);
+});
+
+test("the task graph is on a goal's own page, and only a goal's", () => {
+  const t = asOwner.tasks[0]!;
+  const withLabels = (labels: (x: State['tasks'][number]) => string[]) => ({ ...asOwner, tasks: asOwner.tasks.map((x) => ({ ...x, labels: labels(x) })) }) as State;
+  assert.match(r.renderIssue(withLabels((x) => (x.issue === t.issue ? ['type:goal'] : [])), t.issue), /data-testid="goal-graph"/);
+  assert.doesNotMatch(r.renderIssue(withLabels(() => []), t.issue), /data-testid="goal-graph"/);
+});
+
+// The wake word, "hey <brand>" (web/src/voice/wake.ts): owners only, off by default, on this computer only, the
+// microphone open only while everything allows it and never without the indicator, and a hit only starts dictation.
+
+/** Stands in for fetch, WebSocket, XHR and EventSource while `fn` runs; returns every request anything made. */
+async function noNetwork(fn: () => Promise<void> | void): Promise<string[]> {
+  const g = globalThis as Record<string, unknown>;
+  const network: string[] = [];
+  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
+  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network')));
+  g.WebSocket = class {
+    constructor(url: string) {
+      network.push(`ws ${url}`);
+    }
+  };
+  g.XMLHttpRequest = class {
+    open(_m: string, url: string) {
+      network.push(`xhr ${url}`);
+    }
+  };
+  g.EventSource = class {
+    constructor(url: string) {
+      network.push(`sse ${url}`);
+    }
+  };
+  try {
+    await fn();
+  } finally {
+    Object.assign(g, saved);
+  }
+  return network;
+}
+
+const settle = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((res) => setImmediate(res));
+};
+
+/** A browser and a wake-word model, stood in: the test says what is visible, what the permission is, and when it hears. */
+function fakeWake(o: { perm?: 'granted' | 'prompt' | 'denied' | null; engine?: boolean } = {}) {
+  const calls: string[] = [];
+  const changes: { status: string; micOpen: boolean }[] = [];
+  let visible = true;
+  const onVis = new Set<() => void>();
+  const onPerm = new Set<() => void>();
+  const perm = o.perm === null ? null : { state: o.perm ?? 'granted', addEventListener: (_t: string, cb: () => void) => onPerm.add(cb), removeEventListener: (_t: string, cb: () => void) => onPerm.delete(cb) };
+  const tracks: { stopped: boolean; ended: (() => void) | undefined }[] = [];
+  const hits: (() => void)[] = [];
+  let listener: { micOpen: boolean } | null = null;
+  const micOpenAtAsk: boolean[] = [];
+  const env = {
+    getUserMedia: async () => {
+      calls.push('getUserMedia');
+      micOpenAtAsk.push(listener?.micOpen ?? false);
+      const t = {
+        stopped: false,
+        ended: undefined as (() => void) | undefined,
+        stop() {
+          this.stopped = true;
+        },
+        addEventListener(_t: string, cb: () => void) {
+          this.ended = cb;
+        },
+      };
+      tracks.push(t);
+      return { getTracks: () => [t] };
+    },
+    visible: () => visible,
+    onVisibility: (cb: () => void) => (onVis.add(cb), () => void onVis.delete(cb)),
+    permission: async () => (calls.push('permission'), perm),
+  };
+  const engine =
+    o.engine === false
+      ? null
+      : {
+          id: 'test',
+          label: 'test model (licence checked)',
+          start: async (a: { phrase: string; onHit: () => void }) => {
+            calls.push(`engine start: ${a.phrase}`);
+            hits.push(a.onHit);
+            return { stop: () => calls.push('engine stop') };
+          },
+        };
+  const woken: number[] = [];
+  const make = (phrase = r.wakePhrase(BRAND.name)) => {
+    const l = new r.WakeListener(engine, env, phrase, { onWake: () => woken.push(1), onChange: (s) => changes.push(s) });
+    listener = l;
+    return l;
+  };
+  return {
+    make,
+    calls,
+    changes,
+    tracks,
+    woken,
+    micOpenAtAsk,
+    hit: () => hits.at(-1)!(),
+    setVisible(v: boolean) {
+      visible = v;
+      for (const cb of onVis) cb();
+    },
+    setPerm(s: 'granted' | 'prompt' | 'denied') {
+      perm!.state = s;
+      for (const cb of onPerm) cb();
+    },
+    gum: () => calls.filter((c) => c === 'getUserMedia').length,
+    open: () => tracks.filter((t) => !t.stopped).length,
+  };
+}
+
+test("the wake word is the owners' only, off by default, and its phrase is the product's name from brand.ts", () => {
+  const all = { dictation: true, allowCloud: false, wakeWord: true };
+  assert.equal(r.mayWake('owner', all), true);
+  for (const role of ['writer', 'viewer', undefined]) assert.equal(r.mayWake(role, all), false, `not for ${role ?? 'no role'}`);
+  assert.equal(r.mayWake('owner', { ...all, wakeWord: false }), false, 'not until an owner turns it on');
+  assert.equal(r.mayWake('owner', { ...all, dictation: false }), false, 'not without the mic button it dictates through');
+  localStorage.setItem('dash-voice', '{}');
+  assert.equal(r.readVoicePrefs().wakeWord, false, 'off by default');
+  localStorage.setItem('dash-voice', JSON.stringify({ dictation: true, wakeWord: 'on' }));
+  assert.equal(r.readVoicePrefs().wakeWord, false, 'only a stored true turns it on');
+  // Settings: the switch is in the owners-only section, unchecked, and names the phrase from the brand the server serves.
+  assert.equal(r.renderVoiceSettings(false, BRAND.name), '', 'no section for anyone but an owner');
+  const settings = r.renderVoiceSettings(true, BRAND.name);
+  assert.match(settings, /data-testid="voice-wake-word"/);
+  assert.doesNotMatch(settings, /checked=""[^>]*data-testid="voice-wake-word"/, 'starts off');
+  assert.ok(settings.includes(`“${r.wakePhrase(BRAND.name)}”`), 'the phrase, from brand.ts');
+  assert.equal(r.wakePhrase('Acme'), 'hey Acme', 'whatever the product is called');
+  localStorage.setItem('dash-voice', '{}');
+  // Nothing in the voice module spells the name out.
+  const dir = join(repoRoot, 'web', 'src', 'voice');
+  for (const f of readdirSync(dir)) assert.doesNotMatch(readFileSync(join(dir, f), 'utf8'), new RegExp(BRAND.cli, 'i'), `${f} doesn't hardcode the product name`);
+});
+
+test('no wake-word model ships: Settings says so and nothing opens the mic', async () => {
+  assert.equal(r.wakeEngine(), null, 'no engine bundled');
+  const on = { dictation: true, allowCloud: false, wakeWord: true };
+  assert.match(r.renderVoiceSettingsView(on, null, BRAND.name), /data-testid="voice-wake-model">No wake-word model installed: it won(&#x27;|')t listen/);
+  assert.match(r.renderVoiceSettingsView(on, null, BRAND.name, 'test model'), /data-testid="voice-wake-model">Model: test model/);
+  const w = fakeWake({ engine: false });
+  const l = w.make();
+  l.set({ enabled: true });
+  await settle();
+  assert.equal(l.status, 'no-model');
+  assert.deepEqual(w.calls, [], 'no permission query, no getUserMedia');
+});
+
+test('no getUserMedia (and no permission query) until an owner turns it on; then the mic opens once', async () => {
+  const w = fakeWake();
+  const l = w.make();
+  await settle();
+  l.set({ enabled: false });
+  await settle();
+  assert.deepEqual([...w.calls], [], 'nothing asked while off');
+  l.set({ enabled: true });
+  await settle();
+  assert.equal(w.gum(), 1);
+  assert.equal(l.status, 'listening');
+  assert.ok(w.calls.includes(`engine start: hey ${BRAND.name}`));
+  // Off again (the setting, or anyone but an owner): the mic closes at once.
+  l.set({ enabled: false });
+  assert.equal(w.open(), 0, 'tracks stopped');
+  assert.equal(l.micOpen, false);
+  assert.ok(w.calls.includes('engine stop'));
+  await settle();
+  assert.equal(w.gum(), 1, 'not reopened');
+});
+
+test('the indicator is on screen whenever the mic is open for the wake word, from the moment it is asked for', async () => {
+  const w = fakeWake();
+  const l = w.make();
+  l.set({ enabled: true });
+  await settle();
+  assert.deepEqual(w.micOpenAtAsk, [true], 'micOpen (the indicator) is already true when getUserMedia is called');
+  assert.ok(w.changes.some((c) => c.micOpen && c.status === 'listening'));
+  assert.equal(l.micOpen, w.open() > 0);
+  w.setVisible(false);
+  assert.equal(l.micOpen, w.open() > 0);
+  const phrase = r.wakePhrase(BRAND.name);
+  const shown = r.renderWakeIndicator(true, phrase);
+  assert.match(shown, /data-testid="wake-indicator"/);
+  assert.match(shown, /role="status"/);
+  assert.match(shown, /class="fixed /, 'fixed: on screen whatever the page');
+  assert.ok(shown.includes(`Mic on: listening for <q class="font-medium">${phrase}</q>`), 'says so in words');
+  assert.match(shown, /data-testid="wake-off"/, 'and can be turned off right there');
+  assert.equal(r.renderWakeIndicator(false, phrase), '', 'gone once the mic is closed');
+  // The dashboard renders it on every page, outside the routed page.
+  assert.match(readFileSync(join(repoRoot, 'web', 'src', 'App.tsx'), 'utf8'), /\{state && <WakeWord role=\{state\.role\} brand=\{state\.brand\.name\} \/>\}/);
+});
+
+test('a wake word stops talk-back and starts on-device dictation into the box; nothing is sent, no network at all', async () => {
+  const box = { value: 'Draft', selectionStart: 5, selectionEnd: 5, setSelectionRange() {} };
+  const { ctor, made } = fakeRecognizer();
+  const w = fakeWake();
+  // An answer being read aloud (talk.ts) when the owner says the wake word.
+  const f = fakeSynth();
+  const talk = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
+  const network = await noNetwork(async () => {
+    const l = w.make();
+    l.set({ enabled: true });
+    talk.setActive(true);
+    await talk.speak('A long answer about issue 12.');
+    assert.equal(talk.speaking, true);
+    await settle();
+    w.hit();
+    assert.deepEqual(w.woken, [1], 'the Ask panel is told');
+    assert.equal(talk.speaking, false, "talk-back stopped at the hit, through talk.ts's stopSpeaking, before dictation starts");
+    assert.deepEqual(f.calls, ['speak', 'cancel']);
+    assert.equal(w.open(), 0, 'the wake mic is closed: dictation has it now');
+    assert.equal(l.status, 'held');
+    // What the Ask panel does on the wake: the same dictation as the mic button.
+    const dictation = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, () => {}), onInterim: () => {}, onListening: () => {}, onError: () => {} });
+    assert.equal(r.startOnWake({ support: READY_LOCAL, listening: false, start: () => dictation.start() }), 'started');
+    l.dictating(true);
+    await settle();
+    assert.equal(w.gum(), 1, 'no wake mic while dictating');
+    l.dictating(false);
+    await settle();
+    assert.equal(w.gum(), 2, 'listening again once dictation ends');
+    l.dispose();
+    talk.dispose();
+  });
+  assert.deepEqual(made[0]!.calls, ['start'], 'dictation started, and only that');
+  assert.equal((made[0] as unknown as { processLocally: boolean }).processLocally, true, 'on-device, as the mic button');
+  assert.equal(box.value, 'Draft', 'nothing typed, nothing sent');
+  assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource from the wake word');
+  // The support check still running waits; no on-device recognizer never starts one.
+  let started = 0;
+  assert.equal(r.startOnWake({ support: null, listening: false, start: () => started++ }), 'pending');
+  assert.equal(r.startOnWake({ support: { kind: 'disabled', why: r.NO_ON_DEVICE }, listening: false, start: () => started++ }), 'unavailable');
+  assert.equal(started, 0);
+});
+
+test('a hidden tab closes the wake mic at once; visible again, it listens again', async () => {
+  const w = fakeWake();
+  const l = w.make();
+  l.set({ enabled: true });
+  await settle();
+  assert.equal(w.open(), 1);
+  w.setVisible(false);
+  assert.equal(w.open(), 0, 'tracks stopped synchronously on hide');
+  assert.equal(l.micOpen, false);
+  await settle();
+  assert.equal(l.status, 'hidden');
+  assert.equal(w.gum(), 1);
+  w.setVisible(true);
+  await settle();
+  assert.equal(w.gum(), 2);
+  assert.equal(l.status, 'listening');
+  // Hidden while the mic is still being asked for: the stream that arrives late is stopped, not used.
+  w.setVisible(false);
+  w.setVisible(true);
+  w.setVisible(false);
+  await settle();
+  assert.equal(w.open(), 0);
+  assert.equal(l.micOpen, false);
+  l.dispose();
+});
+
+test('a revoked or denied mic permission closes it and it is not asked for again', async () => {
+  const w = fakeWake();
+  const l = w.make();
+  l.set({ enabled: true });
+  await settle();
+  w.setPerm('prompt');
+  await settle();
+  assert.equal(w.open(), 0);
+  assert.equal(l.status, 'revoked');
+  assert.equal(w.gum(), 1, 'not asked again');
+  w.setPerm('granted');
+  await settle();
+  assert.equal(w.gum(), 2, 'granted again: listens');
+  // A track that ends (the browser took the mic away): closed, not reopened.
+  w.tracks.at(-1)!.ended?.();
+  await settle();
+  assert.equal(l.status, 'revoked');
+  assert.equal(w.gum(), 2);
+  l.dispose();
+  const denied = fakeWake({ perm: 'denied' });
+  const d = denied.make();
+  d.set({ enabled: true });
+  await settle();
+  assert.equal(denied.gum(), 0, 'denied: never asked');
+  assert.equal(d.status, 'blocked');
+});
+
+test('the listening marker is our own ring, and holds still under prefers-reduced-motion', () => {
+  const css = readFileSync(join(repoRoot, 'web', 'src', 'styles.css'), 'utf8');
+  assert.match(r.renderWakeIndicator(true, 'hey x'), /<span class="wake-ring" aria-hidden="true"><\/span>/);
+  assert.match(css, /\.wake-ring::after \{[^}]*animation: wake-pulse /, 'it pulses');
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.wake-ring::after \{ display: none; animation: none; \} \}/, 'reduced motion: the pulse is gone');
+  assert.match(css, /\.wake-ring \{[^}]*border: 2px solid var\(--red\)/, 'the still ring stays, in the theme token');
 });

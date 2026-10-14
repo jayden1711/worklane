@@ -10,6 +10,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import type { RunHost } from '../testrun/host.js';
 import { ChecksPermissionMissing, type TestRunRequest, type TestRunResult } from '../testrun/index.js';
 import { SANDBOX_STEP } from '../testrun/run.js';
+import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 
 /** A PR as the test runs need it. */
 export interface OpenPr {
@@ -56,8 +57,6 @@ export interface PrTestRunDeps {
   fetchPr?: (pr: OpenPr) => string;
   /** The files a PR changes against its base (tests inject this). */
   changed?: (pr: OpenPr) => string[];
-  /** Why no new run may start now (the disk is full or below its floor: src/disk-guard.ts), or null; absent: never held. */
-  hold?: () => string | null;
   /** The sandbox's check, held and run again while it fails (src/testrun/sandbox-watch.ts); absent: nothing to wait for. */
   sandbox?: { readonly ok: boolean; stop(): void };
 }
@@ -158,7 +157,8 @@ export class PrTestRuns {
       if (this.finished.get(pr.number)?.has(pr.headSha)) continue;
       // INVARIANT: nothing starts (not even the fetch, which writes refs) while the disk is full or below its floor;
       // the heads not started are started from a later listing, once there is room.
-      if (this.d.hold?.()) break;
+      // WHY: the gate is asked here too (src/testrun/gate.ts), so a held head isn't fetched each listing only to be refused.
+      if (startRefusal()) break;
       // WHY: one "test runs are off" check per head while the sandbox's check fails, not one every listing.
       if (this.refused.get(pr.number) === pr.headSha && !this.ready()) continue;
       let sha: string;
@@ -188,6 +188,8 @@ export class PrTestRuns {
     try {
       result = await this.d.start({ repo: this.d.repo, sha, kind: 'fast', prs: [pr.number], changedFiles }, { signal: controller.signal });
     } catch (e) {
+      // WHY: held at the gate is no result: the head isn't finished, so a later listing runs it once there is room.
+      if (e instanceof TestRunHeld) return;
       this.d.log.append('coordinator.error', { instance: this.d.actor, where: `test run of #${pr.number}`, kind: 'error', message: (e as Error).message.slice(0, 500) }, this.d.actor);
       return;
     }

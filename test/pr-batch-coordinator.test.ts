@@ -1,5 +1,7 @@
 // PR-mode batching wired into the coordinator's PR watch and merge policy: a PR ready on its fast check is batched,
 // merges only after its batch passes (both checks on its head), and a high-risk one still waits for the owner.
+import { addStartGate, clearStartGates, passGate } from '../src/testrun/gate.js';
+import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { EventPayload } from '../src/events/types.js';
@@ -10,12 +12,14 @@ import { approve, changeOnMain, lastOf, openPr, passing, skip, type Fixture, typ
 const full = { name: 'full', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 2 };
 
 /** A test-run service whose full runs pass (or not) and whose checks land on the PR's head as GitHub would show them. */
-function service(ok = true, o: { holdFirst?: boolean } = {}) {
+function service(ok = true, o: { holdFirst?: boolean; gated?: boolean } = {}) {
   const runs: TestRunRequest[] = [];
   const signals: (AbortSignal | undefined)[] = [];
   let backlog: Fixture['backlog'] | null = null;
   const t: TestRuns = {
     async startTestRun(req, opts) {
+      // WHY: gated, the run goes through the start gate first, as runTestRun (the only start of a run) does.
+      if (o.gated) passGate();
       runs.push(req);
       signals.push(opts?.signal);
       // The first run waits (a slot, the lock, its tiers) until it is cancelled, as src/testrun/ reports a cancel.
@@ -41,8 +45,8 @@ function batching(cfg: Fixture['cfg'], edit?: (cfg: Fixture['cfg']) => void) {
   edit?.(cfg);
 }
 
-async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean; prTestRuns?: PrTestRuns } = {}) {
-  const s = service(o.ok ?? true, { holdFirst: o.holdFirst ?? false });
+async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean; prTestRuns?: PrTestRuns; gated?: boolean } = {}) {
+  const s = service(o.ok ?? true, { holdFirst: o.holdFirst ?? false, gated: o.gated ?? false });
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: o.wired === false ? {} : { testRuns: s.t, ...(o.prTestRuns ? { prTestRuns: o.prTestRuns } : {}) } });
   s.bind(t.f.backlog);
   return { t, s };
@@ -205,4 +209,54 @@ test("batching: a push to a PR while its batch runs cancels that run; the batch 
   assert.ok(steps.includes('abandoned') && steps.includes('dropped'), steps.join());
   assert.ok(!steps.includes('red') && !steps.includes('culprit'), 'nobody blamed');
   assert.ok(!t.pr().merged);
+});
+
+for (const mode of GATE_MODES) {
+  test(`batching: held at the start gate (${mode}) no batch runs and nothing merges; once there is room the same coordinator batches and merges`, { skip }, async () => {
+    const g = guardGate();
+    try {
+      const { t, s } = await batched({ gated: true });
+      g.close(mode);
+      await fastGreen(t, 4);
+      assert.equal(s.runs.length, 0, 'no batch run while held');
+      assert.equal(t.f.log.read(0, ['pr_batch.step']).filter((e) => (e.payload as { step: string }).step === 'abandoned').length, 0, 'no batch built only to be abandoned');
+      assert.ok(!t.pr().merged);
+      assert.ok(!t.pr().labels.includes('ci-failing'), 'nobody blamed');
+      g.open();
+      await fastGreen(t);
+      assert.equal(s.runs.length, 1);
+      assert.ok(t.pr().merged, 'merged after its batch passed, with no restart');
+    } finally {
+      g.done();
+    }
+  });
+}
+
+test('batching: a batch run refused at its start (the disk filled after the batch was built) is no verdict: abandoned, nobody blamed, and batched again once there is room', { skip }, async () => {
+  try {
+    const { t, s } = await batched({ gated: true });
+    const start = s.t.startTestRun.bind(s.t);
+    let first = true;
+    s.t.startTestRun = async (req, opts) => {
+      // WHY: open while the coordinator looked, shut by the time this run passes the gate.
+      if (first) addStartGate('disk', () => 'the disk is full');
+      first = false;
+      return start(req, opts);
+    };
+    await fastGreen(t, 2);
+    assert.equal(s.runs.length, 0);
+    assert.ok(!t.pr().merged);
+    assert.ok(!t.pr().labels.includes('ci-failing'), 'nobody blamed');
+    assert.ok(t.f.log.read(0, ['pr_batch.step']).some((e) => (e.payload as { step: string; detail?: string }).step === 'abandoned' && /its run was held: the disk is full; batched again, nobody blamed/.test((e.payload as { detail?: string }).detail ?? '')), 'abandoned as held');
+    assert.equal(t.f.log.read(0, ['coordinator.error']).filter((e) => (e.payload as { where: string }).where === 'pr-batch').length, 0, 'held is not an error');
+    clearStartGates();
+    const later = t.f.log.read(0, ['pr_batch.step']).length;
+    (t.c as unknown as { prBatch: { nextTryAt: number } }).prBatch.nextTryAt = 0;
+    await fastGreen(t);
+    assert.ok(t.f.log.read(0, ['pr_batch.step']).length > later);
+    assert.equal(s.runs.length, 1);
+    assert.ok(t.pr().merged, 'merged once its batch ran');
+  } finally {
+    clearStartGates();
+  }
 });

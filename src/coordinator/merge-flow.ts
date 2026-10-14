@@ -1,5 +1,6 @@
 // The merge-policy flow: watching opened PRs, the merge decision, waiting for the owner, the light check, and
 // main's checks after a merge (revert on red).
+import { startRefusal } from '../testrun/gate.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -164,8 +165,9 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Start the next PR batch in the background (one at a time). */
   protected prBatchTick() {
-    // WHY: a batch starts full test runs: none while the disk is full or below its floor (src/disk-guard.ts).
-    if (this.prBatching() && !this.diskHeld()) this.prBatch.tick();
+    // WHY: a batch starts full test runs: none while the start gate refuses (src/testrun/gate.ts); asked here too, so a
+    // held batch isn't built only to be abandoned.
+    if (this.prBatching() && !startRefusal()) this.prBatch.tick();
   }
 
   /** When each person's PR was last looked at (its fast checks), by number. */

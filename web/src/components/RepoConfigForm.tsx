@@ -64,7 +64,15 @@ function MergePanel({ number, initialPlan = null, onDone }: { number: number; in
   );
 }
 
-export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialProposed = null, initialMergePlan = null, onMerged }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialProposed?: string | null; initialMergePlan?: { command: string; then: string } | null; onMerged?: () => void }) {
+/**
+ * INVARIANT: nothing above an input moves once the form is on screen. The checks GitHub ran arrive after mount, so
+ * they go in slots of a fixed size, reserved from the first render (data-reserved): a one-line status and a check list
+ * that scrolls inside its own height. A late answer changes what is in them, never where the fields below them are.
+ */
+const STATUS_SLOT = 'block h-5 truncate text-[12px] leading-5 text-ink-3';
+const CHECKS_SLOT = 'h-[4.75rem] overflow-y-auto rounded-lg';
+
+export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialMergePlan = null, onMerged }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialMergePlan?: { command: string; then: string } | null; onMerged?: () => void }) {
   const [writers, setWriters] = useState(c.values.writers.join(', '));
   const [checks, setChecks] = useState<string[]>(c.values.required_checks);
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
@@ -72,14 +80,16 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [model, setModel] = useState(c.values.workers_model);
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
-  const [seenNote, setSeenNote] = useState<string | null>(null);
+  const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
+  const [seenLoaded, setSeenLoaded] = useState(initialSeenLoaded);
   const [changes, setChanges] = useState<ConfigChange[] | null>(initialChanges);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(initialProposed ? { ok: true, text: 'proposed: merge the PR to apply it', url: initialProposed } : null);
   useEffect(() => {
     getChecksSeen()
       .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : 'GitHub ran no checks on its tip'))))
-      .catch((e: Error) => setSeenNote(e.message));
+      .catch((e: Error) => setSeenNote(e.message))
+      .finally(() => setSeenLoaded(true));
   }, []);
   const edited = () => (setChanges(null), setMsg(null));
   const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model });
@@ -111,8 +121,12 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
       </label>
       <div className="space-y-1 text-[12.5px] text-ink" data-testid="repo-config-checks">
         <span>Required checks (a PR is marked ready once these pass)</span>
+        <span className={STATUS_SLOT} data-reserved="status" data-testid="repo-config-checks-status">
+          {!seenLoaded ? 'checking GitHub…' : (seenNote ?? `the checks GitHub ran on ${c.branch}'s tip are offered below`)}
+        </span>
+        <div className={CHECKS_SLOT} data-reserved="checks" data-testid="repo-config-check-list">
         {offered.length ? (
-          <ul className="flex flex-wrap gap-1.5">
+          <ul className="flex flex-wrap gap-1.5 p-0.5">
             {offered.map((name) => (
               <li key={name}>
                 <label className={cx('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-mono text-[12px] shadow-hairline', checks.includes(name) ? 'bg-blue-tint text-blue-ink' : 'bg-surface text-ink-2')} data-testid="repo-config-check" data-check={name}>
@@ -122,8 +136,10 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
               </li>
             ))}
           </ul>
-        ) : null}
-        {seenNote && <p className="text-[12px] text-ink-3">{seenNote}</p>}
+        ) : (
+          <p className="text-[12px] text-ink-3">none yet</p>
+        )}
+        </div>
         {canEdit && (
           <form
             className="flex flex-wrap items-center gap-2"

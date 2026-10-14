@@ -11,9 +11,11 @@ export interface VoicePrefs {
   talkBack: boolean;
   /** Let talk-back use the browser's network voices (they send the text to the browser's vendor). Off: on-device voices only. */
   allowNetworkVoices: boolean;
+  /** Listen for "hey <brand>" on this computer while a dashboard tab is visible (wake.ts). Off until an owner turns it on. */
+  wakeWord: boolean;
 }
 
-export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false };
+export const VOICE_DEFAULTS: VoicePrefs = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false };
 const KEY = 'dash-voice';
 const CHANGED = 'dash-voice-changed';
 
@@ -21,7 +23,7 @@ export function readVoicePrefs(): VoicePrefs {
   try {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Record<keyof VoicePrefs, unknown>>;
     // INVARIANT: only a stored `true` turns any of them on; anything else (missing, unreadable, odd) is the default, off.
-    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true, talkBack: raw.talkBack === true, allowNetworkVoices: raw.allowNetworkVoices === true };
+    return { dictation: raw.dictation === true, allowCloud: raw.allowCloud === true, talkBack: raw.talkBack === true, allowNetworkVoices: raw.allowNetworkVoices === true, wakeWord: raw.wakeWord === true };
   } catch {
     return { ...VOICE_DEFAULTS };
   }

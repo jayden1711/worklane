@@ -25,6 +25,7 @@ import { IntakePage } from './pages/Intake';
 import { Deploys } from './pages/Deploys';
 import { Reports } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
+import { WakeWord } from './voice/WakeIndicator';
 import { LogsPage, logsRefusal } from './pages/Logs';
 import { RunDetail, runsRefusal } from './pages/RunDetail';
 import { PullRequests } from './pages/PullRequests';
@@ -319,7 +320,7 @@ function Dashboard() {
   else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
-  else if (path === '/settings') page = <SettingsPage owner={state.role === 'owner'} />;
+  else if (path === '/settings') page = <SettingsPage owner={state.role === 'owner'} brand={state.brand.name} />;
   else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
   else if (path === '/health') page = <HealthPage />;
   else if (path === '/machine') page = <MachinePage state={state} />;
@@ -344,6 +345,7 @@ function Dashboard() {
         </NavDrawer>
         <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
         {state && <ChatPanel cli={state.brand.cli} role={state.role} />}
+        {state && <WakeWord role={state.role} brand={state.brand.name} />}
       </div>
     </NavMenu.Provider>
   );

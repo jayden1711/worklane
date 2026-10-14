@@ -1,4 +1,5 @@
 // docs/previews.md, "How it works": each pass deletes closed, expired and failed previews, then creates new ones.
+import { startRefusal } from '../testrun/gate.js';
 import { mkdirSync, readFileSync, existsSync, renameSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { AppConfig } from '../config/schema.js';
@@ -155,6 +156,8 @@ export class Previews {
         }
         continue;
       }
+      // INVARIANT: a preview launches only through the start gate (src/testrun/gate.ts); held, it launches at a later pass.
+      if (startRefusal()) continue;
       this.launch(pr, env);
       live.add(pr.number);
     }
