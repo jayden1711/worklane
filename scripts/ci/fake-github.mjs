@@ -18,4 +18,7 @@ if (!dist || !port || !gitRoot || !repo || !logFile) {
 const { fakeGitHub } = await import(pathToFileURL(join(dist, 'test', 'fake-github.js')).href);
 const { AGENT_APP_PERMISSIONS } = await import(pathToFileURL(join(dist, 'src', 'setup', 'app-manifest.js')).href);
 const gh = await fakeGitHub({ repo, permissions: { ...AGENT_APP_PERMISSIONS }, installed: true, gitRoot, lenient: true, port: Number(port), log: (l) => appendFileSync(logFile, `${l}\n`) });
+// The manifest code GitHub would send back once the owner approves the dashboard's sign-in App (the hub's setup mode,
+// dashboards.sh --setup): converted once, to client id Iv1.madeapp00001 and the fake's client secret.
+gh.codes.set('ci-signin-code', { slug: 'ci-dash-signin', id: 92 });
 console.log(`fake GitHub at ${gh.url}, ${repo} at ${join(gitRoot, `${repo}.git`)}`);

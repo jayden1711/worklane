@@ -469,7 +469,8 @@ jobs:
 
   add-project-real-systemd:
     # scripts/setup/add-project.sh end to end on a real host, as root, against a fake GitHub (test/fake-github.ts, the
-    # manifest flow's, served by scripts/ci/fake-github.mjs): a first run stops at the App step (no hub yet) naming its
+    # manifest flow's, served by scripts/ci/fake-github.mjs): the dashboard's sign-in App made through the hub's setup
+    # mode (dashboards.sh --setup; its one-time token, and it turning itself off); a first run stops at the App step (no hub yet) naming its
     # retry; the App by hand (credentials.sh github-app), then the rerun goes on from there with a stand-in Claude
     # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step.
@@ -527,12 +528,57 @@ jobs:
           echo "F=$f" >> "$GITHUB_ENV"
           # The fake is reached through these, as the engine reads them: kept through sudo, and set for the units.
           printf 'Defaults env_keep += "WORKLANE_GITHUB_API WORKLANE_GITHUB_WEB"\n' > "$f/sudoers" && sudo visudo -cf "$f/sudoers" && sudo install -m 0440 "$f/sudoers" /etc/sudoers.d/ci-fake-github
-          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do
+          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub worklane-dashboard-hub-setup; do
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
-          # The dashboard sign-in App's secrets (credentials.sh dashboard-signin), for the hub dashboards.sh starts.
-          printf 'cisigninclientsecret0123456789\n' | sudo bash scripts/setup/credentials.sh dashboard-signin
+      - name: "the sign-in App through the hub's setup mode (B8): wl-dash's one-time token from a 0600 file, never printed or in a URL; it turns itself off once the secret exists"
+        run: |
+          u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399
+          sudo bash scripts/setup/dashboards.sh --setup --public-url "$pub" | tee "$F/setup1.log"
+          systemctl is-active "$u"
+          [ "$(systemctl show -p User --value "$u")" = wl-dash ]
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          [ "$(sudo stat -c '%U %a' "$tf")" = "wl-dash 600" ]
+          grep -qx "setup-mode hub: $pub" "$F/setup1.log"
+          grep -qF "sudo cat $tf" "$F/setup1.log"
+          # The token: into a file of the runner's only, masked; curl reads it from there (never an argument or the env).
+          (umask 077; sudo cat "$tf" > "$F/setup-token")
+          echo "::add-mask::$(cat "$F/setup-token")"
+          if grep -qFf "$F/setup-token" "$F/setup1.log" "/etc/systemd/system/$u" || sudo journalctl --no-pager -u "$u" | grep -qFf "$F/setup-token"; then echo "the setup token was echoed" >&2; exit 1; fi
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          [ "$(code "$h/?token=anything")" = 400 ]
+          [ "$(code -H 'Origin: https://evil.example' --data-urlencode "token@$F/setup-token" "$h/setup/unlock")" = 403 ]
+          [ "$(code -H "Origin: $pub" --data-urlencode token=wrong "$h/setup/unlock")" = 401 ]
+          [ "$(code -H "Origin: $pub" -d owner=example "$h/setup/signin-app")" = 401 ]
+          curl -s -D "$F/unlock.h" -o /dev/null -H "Origin: $pub" --data-urlencode "token@$F/setup-token" "$h/setup/unlock"
+          head -n 1 "$F/unlock.h" | grep -q ' 303'
+          c="$(tr -d '\r' < "$F/unlock.h" | sed -n 's/^[Ss]et-[Cc]ookie: \(__Host-setup=[^;]*\);.*/\1/p')"
+          [ -n "$c" ]
+          if sudo test -e "$tf"; then echo "the used token is still there" >&2; exit 1; fi
+          [ "$(code -H "Origin: $pub" --data-urlencode "token@$F/setup-token" "$h/setup/unlock")" = 410 ]
+          csrf="$(curl -s -H "Cookie: $c" "$h/" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')"
+          [ -n "$csrf" ]
+          loc="$(curl -s -D - -o /dev/null -H "Cookie: $c" -H "Origin: $pub" --data-urlencode "csrf=$csrf" --data-urlencode owner=example "$h/setup/signin-app" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+          curl -s -H "Cookie: $c" "$h$loc" > "$F/start.html"
+          grep -qF "action=\"$GH_FAKE/settings/apps/new?state=" "$F/start.html"
+          state="$(sed -n 's/.*?state=\([A-Za-z0-9_-]*\)".*/\1/p' "$F/start.html")"
+          [ -n "$state" ]
+          # GitHub's redirect back, with the code the fake converts once (scripts/ci/fake-github.mjs).
+          curl -s -H "Cookie: $c" "$h/setup/app-manifest/callback?state=$state&code=ci-signin-code" | tee "$F/back.html" | grep -q 'GitHub made'
+          for _ in $(seq 1 15); do systemctl is-active -q "$u" || break; sleep 1; done
+          if systemctl is-active -q "$u"; then echo "setup mode did not turn itself off" >&2; exit 1; fi
+          [ "$(systemctl show -p Result --value "$u")" = success ]
+          if curl -s -o /dev/null "$h/"; then echo "something still answers on 4399" >&2; exit 1; fi
+          d="$(getent passwd wl-dash | cut -d: -f6)/.config/dashboard-signin"
+          [ "$(sudo stat -c '%U %a' "$d")" = "wl-dash 700" ]
+          for f in client-secret session-secret client-id public-url; do [ "$(sudo stat -c '%U %a' "$d/$f")" = "wl-dash 400" ]; done
+          [ "$(sudo cat "$d/client-id")" = Iv1.madeapp00001 ] && [ "$(sudo cat "$d/public-url")" = "$pub" ]
+          (umask 077; sudo cat "$d/client-secret" > "$F/client-secret")
+          if grep -qFf "$F/client-secret" "$F/back.html" "$F/start.html" || sudo journalctl --no-pager | grep -qFf "$F/client-secret"; then echo "the client secret was echoed" >&2; exit 1; fi
+          # Setup mode is off for good: a rerun is refused.
+          if sudo bash scripts/setup/dashboards.sh --setup --public-url "$pub" 2> "$F/setup2.err"; then echo "setup mode started again" >&2; exit 1; fi
+          grep -q 'setup mode is off' "$F/setup2.err"
       - name: first run, no hub yet; stops at the App step and names the retry
         run: |
           # The stand-in token: in a file of the runner's only, masked in case anything prints it; never in the env.
@@ -550,7 +596,8 @@ jobs:
       - name: the App by hand (the manual way), then the rerun goes on from the App step to the end
         run: |
           echo n | sudo env WORKLANE_GITHUB_API="$GH_FAKE" bash scripts/setup/credentials.sh ci github-app 91 4242 "$F/app.pem" example/alpha
-          cat "$F/claude-token" | sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha --client-id Iv1.cisignin0001 --public-url https://hub.example.test > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
+          # No --client-id or --public-url: the dashboards step takes what the hub's setup mode stored.
+          cat "$F/claude-token" | sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh ci example/alpha > "$F/run2.jsonl" 2> "$F/run2.err" || { cat "$F/run2.jsonl"; tail -n 60 "$F/run2.err"; exit 1; }
           cat "$F/run2.jsonl"
           for s in instance app; do jq -se --arg s "$s" 'map(select(.step==$s and .state=="done")) | length == 1' "$F/run2.jsonl"; done
           [ "$(jq -sc 'map(select(.state=="started") | .step)' "$F/run2.jsonl")" = '["instance","app","claude-token","checkout","policy","service","test-user","machine-helper","dashboards"]' ]
@@ -573,6 +620,9 @@ jobs:
           if grep '^git as ' "$F/requests.log" | grep -v '^git as x-access-token:'; then echo "git authenticated as someone else" >&2; exit 1; fi
           grep -q "^POST /app/installations/4242/access_tokens$" "$F/requests.log"
           for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do systemctl is-active "$u.service"; done
+          # The real hub took over from setup mode, with the sign-in App setup mode made: its unit is gone.
+          systemctl show -p ExecStart --value worklane-dashboard-hub.service | grep -q -- '--client-id Iv1.madeapp00001 --public-url https://hub.example.test '
+          if [ -e /etc/systemd/system/worklane-dashboard-hub-setup.service ]; then echo "the setup-mode unit is still installed" >&2; exit 1; fi
           sleep 15 && systemctl is-active worklane-ci.service
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
@@ -763,7 +813,7 @@ jobs:
           tail -n 80 "$F2"/*.log || true
           sudo journalctl --no-pager -n 60 -u worklane-gamma.service || true
           sudo systemctl --no-pager status worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service worklane-beta.service || true
-          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-beta.service -u worklane-claude-account.service || true
+          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-dashboard-hub-setup.service -u worklane-beta.service -u worklane-claude-account.service || true
           sudo cat /var/lib/worklane/claude-account/switch.jsonl || true
           tail -n 80 "$F/requests.log" "$F/server.log" || true
           tail -n 80 "$F"/run*.err || true

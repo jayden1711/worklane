@@ -4,7 +4,7 @@
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getFirstRun, runFirstRunAction, startCoordinator, type FirstRun, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
+import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, startCoordinator, startGhLogin, type FirstRun, type GhLoginView, type FirstRunActionPlan, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from './Overview';
@@ -154,6 +154,116 @@ function ActionPanel({ plan, canAct, initialConfirming = false, onDone }: { plan
   );
 }
 
+/** How often Connect GitHub asks where the login is, while it waits for the code to be typed on GitHub. */
+export const GH_POLL_MS = 2_000;
+
+/**
+ * WHY: Connect GitHub (audit row 8). The server runs `gh auth login --web` and relays only its one-time code; the person
+ * types it on GitHub's device page, and the step is done once `gh auth status` says so. The token stays in gh's store.
+ */
+export function GhLoginPanel({ canAct, command, initial = null, onDone }: { canAct: boolean; command: string; initial?: GhLoginView | null; onDone: () => void }) {
+  const [v, setV] = useState<GhLoginView | null>(initial);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const waiting = v?.state === 'waiting';
+  useEffect(() => {
+    if (initial || !canAct) return;
+    getGhLogin()
+      .then(setV)
+      .catch((e: Error) => setErr(e.message));
+  }, [initial, canAct]);
+  useEffect(() => {
+    if (!waiting || initial) return;
+    const t = window.setInterval(() => {
+      getGhLogin()
+        .then((n) => {
+          setV(n);
+          if (n.state === 'done') onDone();
+        })
+        .catch((e: Error) => setErr(e.message));
+    }, GH_POLL_MS);
+    return () => window.clearInterval(t);
+  }, [waiting, initial, onDone]);
+  const act = async (f: () => Promise<GhLoginView>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const n = await f();
+      setV(n);
+      if (n.state === 'done') onDone();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2.5" data-testid="gh-login" data-state={v?.state ?? 'loading'}>
+      <p className="text-[12.5px] text-ink-2">
+        This runs <code className="font-mono text-[12px] text-ink">{command}</code> on this machine for you. GitHub gives a one-time code to type on its device page; gh keeps the login in its own store, and this page never sees the token.
+      </p>
+      {!canAct ? (
+        <p className="text-[12.5px] text-ink-3" data-testid="gh-login-refused">
+          Only the instance's owners can connect GitHub here.
+        </p>
+      ) : v?.state === 'waiting' ? (
+        <div className="space-y-2 rounded-lg bg-blue-tint p-3" data-testid="gh-login-waiting">
+          {v.code ? (
+            <>
+              <p className="text-[12.5px] text-ink">Type this code on GitHub:</p>
+              <div className="select-all font-mono text-[22px] font-semibold tracking-[0.12em] text-ink" data-testid="gh-login-code">
+                {v.code}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a href={v.url ?? 'https://github.com/login/device'} target="_blank" rel="noreferrer" className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="gh-login-link">
+                  Open github.com/login/device
+                </a>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void act(cancelGhLogin)} data-testid="gh-login-cancel">
+                  Cancel
+                </Button>
+              </div>
+              <p className="text-[12px] text-ink-3">
+                This page checks every {GH_POLL_MS / 1000} s and marks the step done once GitHub has the code{v.expiresAt ? `; the code lasts until ${new Date(v.expiresAt).toLocaleTimeString()}` : ''}.
+              </p>
+            </>
+          ) : (
+            <p className="text-[12.5px] text-ink" data-testid="gh-login-starting">
+              Asking GitHub for a code…
+            </p>
+          )}
+        </div>
+      ) : v?.state === 'done' ? (
+        <p className="text-[12.5px] text-green" data-testid="gh-login-done">
+          {v.detail ?? 'Signed in.'} Checking that you can push…
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {v && v.state !== 'idle' && v.detail && (
+            <p className={cx('break-words text-[12.5px]', v.state === 'cancelled' ? 'text-ink-3' : 'text-red')} data-testid="gh-login-detail">
+              {v.detail}
+            </p>
+          )}
+          {v && !v.installed ? (
+            <p className="text-[12.5px] text-ink-2" data-testid="gh-login-no-gh">
+              gh isn't installed yet: the Tools step installs it.
+            </p>
+          ) : (
+            <Button size="sm" disabled={busy || !v} onClick={() => void act(startGhLogin)} data-testid="gh-login-start">
+              {busy ? 'Starting…' : v && v.state !== 'idle' ? 'Try again' : 'Connect GitHub'}
+            </Button>
+          )}
+        </div>
+      )}
+      {err && (
+        <p className="break-words text-[12.5px] text-red" data-testid="gh-login-error">
+          {err}
+        </p>
+      )}
+      <p className="text-[12px] text-ink-3">You can skip this and run the command in a terminal instead; the step turns done either way.</p>
+    </div>
+  );
+}
+
 /** What a step's Fix shows when it has no screen to open: today's way, a provider's page, or a terminal command. */
 function FixPanel({ s }: { s: SetupStepView }) {
   const f = s.fix;
@@ -188,7 +298,7 @@ function FixPanel({ s }: { s: SetupStepView }) {
 }
 
 function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode }) {
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' ? s.fix.label : 'Fix';
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'gh-login' ? s.fix.label : 'Fix';
   return (
     <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : 'todo'}>
       <div className="flex gap-3">
@@ -211,7 +321,7 @@ function StepRow({ s, open, onFix, action }: { s: SetupStepView; open: boolean; 
       </div>
       {open && !s.done && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
-          {s.fix.kind === 'action' ? action : <FixPanel s={s} />}
+          {s.fix.kind === 'action' || s.fix.kind === 'gh-login' ? action : <FixPanel s={s} />}
         </div>
       )}
     </li>
@@ -295,8 +405,9 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialGhLogin?: GhLoginView | null }) {
   const [open, setOpen] = useState<string | null>(initialOpen);
+  const recheck = useCallback(() => onRecheck?.(), [onRecheck]);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
   const pct = setup?.total ? Math.round((setup.done / setup.total) * 100) : 0;
@@ -358,7 +469,13 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   s={s}
                   open={open === s.id}
                   onFix={() => fix(s)}
-                  action={s.fix.kind === 'action' ? <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} /> : undefined}
+                  action={
+                    s.fix.kind === 'action' ? (
+                      <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'gh-login' ? (
+                      <GhLoginPanel canAct={!!f.canAct} command={s.fix.command} initial={initialGhLogin} onDone={recheck} />
+                    ) : undefined
+                  }
                 />
               ))}
             </ol>

@@ -63,6 +63,7 @@ import { ADD_PROJECT_EVENTS, addProjectView } from './console/add-project.js';
 import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
 import { type DetectCache, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionPlan } from './setup-actions.js';
+import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
 import { checkRootStep } from './console/root-steps.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { readSecretBody } from './console/secrets.js';
@@ -176,6 +177,8 @@ export interface DashboardOptions {
   startService?: (spec: ServiceSpec) => { path: string; started: boolean; detail: string };
   /** WHY: tests stand in for what the first-run page's Fix actions do to the machine (src/setup-actions.ts). */
   setupActions?: Partial<ActionDeps>;
+  /** WHY: tests stand in for gh in Connect GitHub's device login (src/gh-login.ts). */
+  ghLogin?: Partial<GhLoginDeps>;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -820,6 +823,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const actionContext = () => ({ mode: opts.instance ? ('server' as const) : ('local' as const), root: opts.root, cfg: opts.cfg });
   // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
   let actionRunning: string | null = null;
+  /** Connect GitHub's device login (local mode): made on first use, one at a time. */
+  let ghLogin: GhLogin | null = null;
 
   /**
    * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
@@ -1294,6 +1299,39 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
           } finally {
             actionRunning = null;
+          }
+        }
+        // Connect GitHub (local mode, src/gh-login.ts): `gh auth login --web` run for the person, its one-time code shown,
+        // done once `gh auth status` says so. The instance's owners only; starting and cancelling are audited. The token
+        // stays in gh's own store: nothing here reads it. A server instance works as its GitHub App, never a gh login.
+        if (url.pathname === '/api/first-run/gh-login') {
+          const refused = (status: number, error: string) => {
+            if (req.method !== 'GET') audit(who, 'first_run.gh_login_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may connect GitHub here; @${who.login} is a ${who.role}`);
+          if (opts.instance) return refused(409, "a server instance works as its GitHub App, not a gh login: the agents' App is Add project's step");
+          ghLogin ??= new GhLogin(opts.ghLogin);
+          try {
+            if (req.method === 'GET') {
+              const v = ghLogin.poll();
+              if (v.state === 'done') setupCache.delete('gh-login');
+              return json(res, 200, v);
+            }
+            if (req.method === 'POST') {
+              const v = ghLogin.start();
+              audit(who, 'first_run.gh_login', { state: v.state === 'done' ? 'signed-in-already' : 'started' });
+              return json(res, 200, v);
+            }
+            if (req.method === 'DELETE') {
+              const v = ghLogin.cancel();
+              audit(who, 'first_run.gh_login', { state: 'cancelled' });
+              return json(res, 200, v);
+            }
+            return json(res, 405, { error: 'GET, POST or DELETE' });
+          } catch (e) {
+            if (e instanceof GhLoginError) return refused(e.status, e.message);
+            throw e;
           }
         }
         // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change

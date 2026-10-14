@@ -54,6 +54,8 @@ export const MANIFEST_STATE_MS = 10 * 60_000;
 /** An instance name, as add-project takes it. */
 export const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,20}$/;
 const REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
+/** A GitHub user or organization name. */
+export const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
 /** GitHub's longest App name. */
 const MAX_APP_NAME = 34;
 /** The machine's user names, as scripts/setup/lib.sh makes them: wl-<name> (coordinator), wl-dash (the hub). */
@@ -229,11 +231,18 @@ export class ManifestFlows {
   }
 
   /** Register a flow for the runner (break-glass only): its manifest, a fresh state token, and the page to open. */
-  async register(input: { kind?: unknown; instance?: unknown; repo?: unknown; publicUrl?: unknown }): Promise<Registered> {
+  async register(input: { kind?: unknown; instance?: unknown; repo?: unknown; owner?: unknown; publicUrl?: unknown }): Promise<Registered> {
     const kind = input.kind === 'signin' ? 'signin' : input.kind === 'agent' ? 'agent' : null;
     if (!kind) throw new FlowError('kind must be agent or signin');
     if (typeof input.instance !== 'string' || !INSTANCE_NAME.test(input.instance)) throw new FlowError(`instance must match ${INSTANCE_NAME}`);
-    if (!validRepo(input.repo)) throw new FlowError('repo must be owner/name');
+    // WHY: the sign-in App belongs to the machine, not to a repo: the hub's setup mode (src/hub-setup.ts) names only the
+    // account that owns it. The repo's owner is all a sign-in flow ever reads from it.
+    let repo = input.repo;
+    if (kind === 'signin' && repo === undefined && typeof input.owner === 'string') {
+      if (!GITHUB_LOGIN.test(input.owner)) throw new FlowError('owner must be a GitHub account or organization name');
+      repo = `${input.owner}/${input.owner}`;
+    }
+    if (!validRepo(repo)) throw new FlowError('repo must be owner/name');
     const publicUrl = this.o.publicUrl ?? (typeof input.publicUrl === 'string' ? input.publicUrl : '');
     let origin: URL;
     try {
@@ -244,7 +253,7 @@ export class ManifestFlows {
     if (origin.protocol !== 'https:' || origin.pathname !== '/' || origin.search) throw new FlowError("the public URL must be the hub's https origin");
     const api = this.o.api ?? defaultApi();
     const f = this.o.fetch ?? fetch;
-    const owner = input.repo.split('/')[0]!;
+    const owner = repo.split('/')[0]!;
     const u = await f(`${api}/users/${encodeURIComponent(owner)}`, { headers: HEADERS });
     const ownerType = u.ok && ((await u.json()) as { type?: string }).type === 'Organization' ? 'Organization' : 'User';
     const name = await availableAppName(appBaseName(input.instance, kind), { api, fetch: f });
@@ -253,8 +262,8 @@ export class ManifestFlows {
     const t = this.now();
     for (const [k, x] of this.flows) if (x.expiresAt + MANIFEST_STATE_MS < t) this.flows.delete(k);
     if (this.flows.size > 100) throw new FlowError('too many App setups pending on this hub');
-    const manifest = appManifest({ kind, name, repo: input.repo, publicUrl: origin.origin });
-    this.flows.set(id, { id, kind, instance: input.instance, repo: input.repo, name, manifest, target: manifestTarget(owner, ownerType, state, this.o.web ?? defaultWeb()), stateHash: sha(state), expiresAt: t + MANIFEST_STATE_MS, status: 'pending', by: null, error: null, app: null, waiters: new Set() });
+    const manifest = appManifest({ kind, name, repo, publicUrl: origin.origin });
+    this.flows.set(id, { id, kind, instance: input.instance, repo, name, manifest, target: manifestTarget(owner, ownerType, state, this.o.web ?? defaultWeb()), stateHash: sha(state), expiresAt: t + MANIFEST_STATE_MS, status: 'pending', by: null, error: null, app: null, waiters: new Set() });
     return { id, name, startUrl: `${origin.origin}${MANIFEST_START_PATH}/${id}`, expiresAt: new Date(t + MANIFEST_STATE_MS).toISOString() };
   }
 
