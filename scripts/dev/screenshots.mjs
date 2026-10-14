@@ -362,6 +362,9 @@ async function shootCli(url, file, theme) {
     '--hide-scrollbars',
     '--no-first-run',
     '--no-default-browser-check',
+    // Never the OS keychain (src/browser/cdp.ts CHROME_NO_KEYCHAIN_ARGS; an older engine may not export it).
+    '--use-mock-keychain',
+    '--password-store=basic',
     `--user-data-dir=${profile}`,
     '--window-size=1440,1000',
     // Headless capture doesn't run entrance animations to the end; reduced motion turns them off (the UI honours it).
