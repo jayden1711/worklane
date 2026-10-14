@@ -9,6 +9,8 @@
 //     real ssh signatures); a tag signed with a key nobody added is refused, before and after.
 //   - set-update-channel: the channel and nothing else.
 //   - Any other argument list is refused by sudo itself, and changes nothing.
+//   - The same from a terminal, as root: updates.sh --channel and --signer (what the dashboard's Updater setup names
+//     as its script) add a signer after the ones there and set the channel; a bad one is refused before anything.
 //
 //   sudo node updater-setup-root.mjs <coordinator user>
 import assert from 'node:assert/strict';
@@ -178,6 +180,31 @@ for (const to of ['main', 'release']) {
   assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), { ...cfg, channel: to });
   assert.equal(owner(CONFIG), '0:0 644');
 }
+// ---- the same from a terminal: the installed engine's updates.sh, as root
+// By its relative path from the checkout, the way the docs and the page spell the command.
+const engine = '/opt/worklane/current';
+const script = 'scripts/setup/updates.sh';
+const third = key('third');
+release('v1.0.3', third.file);
+assert.equal(verify('v1.0.3').ok, false, 'a third key, not added yet');
+const two = readFileSync(SIGNERS, 'utf8');
+const state = () => [sha(CONFIG), sha(SIGNERS), sha(UPDATER), changes().length];
+const untouched = state();
+for (const bad of [['--signer', '*', 'ssh-ed25519', third.pub], ['--signer', 'third@example.com', 'ssh-rsa', third.pub], ['--signer', 'third@example.com', 'ssh-ed25519', `${third.pub}A`], ['--signer', 'third@example.com', 'ssh-ed25519'], ['--channel', 'beta'], ['--channel', 'main', '--signer', 'a@example.com,b@example.com', 'ssh-ed25519', third.pub]]) {
+  const r = spawnSync('bash', [script, ...bad], { encoding: 'utf8', cwd: engine });
+  assert.equal(r.status, 2, `updates.sh ${bad.join(' ')}: ${r.stdout}${r.stderr}`);
+  assert.deepEqual(state(), untouched, `updates.sh ${bad.join(' ')} changed something`);
+}
+console.log(sh('bash', [script, '--channel', 'main', '--signer', 'third@example.com', 'ssh-ed25519', third.pub], engine));
+assert.equal(readFileSync(SIGNERS, 'utf8'), `${two}third@example.com ssh-ed25519 ${third.pub}\n`, 'added after the two there, which stay as they were');
+assert.equal(owner(SIGNERS), '0:0 644');
+assert.deepEqual(JSON.parse(readFileSync(CONFIG, 'utf8')), { ...cfg, channel: 'main' }, 'the channel alone');
+assert.equal(owner(CONFIG), '0:0 644');
+assert.equal(verify('v1.0.3').ok, true);
+// Run again as it is: nothing is added twice.
+sh('bash', [script, '--channel', 'main', '--signer', 'third@example.com', 'ssh-ed25519', third.pub], engine);
+assert.equal(readFileSync(SIGNERS, 'utf8'), `${two}third@example.com ssh-ed25519 ${third.pub}\n`);
+
 // Nothing here turned updates on, moved the signers file, or dropped a required check.
 const end = JSON.parse(readFileSync(CONFIG, 'utf8'));
 assert.deepEqual([end.enabled, end.allowed_signers, end.required_checks], [false, SIGNERS, cfg.required_checks]);
@@ -188,4 +215,4 @@ if (spawnSync('id', ['-u', 'wl-dash']).status === 0) {
   }
 }
 rmSync(work, { recursive: true, force: true });
-console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), 2 signers added and none replaced, a tag verified only against an added key, the channel set; every other argument list refused`);
+console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), 2 signers added and none replaced, a tag verified only against an added key, the channel set; every other argument list refused. As root: updates.sh --signer and --channel did the same, and refused a bad signer or channel before changing anything`);
