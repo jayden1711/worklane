@@ -78,6 +78,9 @@ async function click(sel) {
 /** Clear a field and type into it, as a person would. */
 async function type(sel, value) {
   await click(sel);
+  // INVARIANT: the click focused the field. If the page moved under the pointer, say so here, not as an empty value
+  // later (run 38541318584: the click landed above the field and Ctrl+A selected the whole page).
+  assert.ok(await evaluate(`document.activeElement === ${q(sel)}`), `the click on ${sel} didn't focus it (focus is on ${await evaluate('document.activeElement?.outerHTML?.slice(0, 120) ?? null')})`);
   // Select what's there (a number field has no select()), as Ctrl+A does, then type over it.
   await cdp.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65, commands: ['selectAll'] });
   await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', modifiers: 2, windowsVirtualKeyCode: 65 });
@@ -289,6 +292,10 @@ async function local() {
     await open('/first-run?step=required-checks');
     const p = `${row('required-checks')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('repo-config-form')}`);
+    // Async by design: the form asks GitHub which checks ran on the tip (RepoConfigForm.tsx's getChecksSeen) and then
+    // shows them, or a note, ABOVE the field (run 38541318584's click landed where the field had been). The signal: that
+    // answer in the checks block (a check offered, or the note), bounded.
+    await until('the checks GitHub ran, or the note', () => evaluate(`(() => { const b = ${q(`${p} ${tid('repo-config-checks')}`)}; return !!b && (!!b.querySelector('[data-testid="repo-config-check"]') || !!b.querySelector('p')); })()`), 30_000, 200);
     await type(`${p} ${tid('repo-config-check-name')}`, 'test');
     await click(`${p} ${tid('repo-config-check-add')}`);
     await click(`${p} ${tid('repo-config-review')}`);
