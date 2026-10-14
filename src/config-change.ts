@@ -10,6 +10,7 @@ import { BRAND } from './brand.js';
 import { configFrom, loadConfig, type Config } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { checkedPush } from './push-check.js';
 import { withToolPath } from './tool-path.js';
 
 const HANDLE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -153,9 +154,10 @@ export function proposeConfigChange(o: { root: string; cfg: Config; values: Part
     const msg = `Config from the first-run page: ${changes.map((c) => c.key).join(', ')}`;
     const commit = git(['commit', '-q', '-m', msg], path);
     if (commit.status !== 0) throw new ConfigChangeError(`git commit failed: ${(commit.stderr || commit.stdout).trim().split('\n')[0]}`);
-    const ref = `HEAD:refs/heads/${branch}`;
-    const push = git(['push', '-q', 'origin', ref], path);
-    if (push.status !== 0) throw new ConfigChangeError(`pushing ${branch} failed: ${push.stderr.trim().split('\n')[0] ?? ''}`);
+    const sha = git(['rev-parse', 'HEAD'], path).stdout.trim();
+    // INVARIANT: through checkedPush like every engine push: the push limits, and never the default branch.
+    const push = checkedPush({ cwd: path, remote: 'origin', base: head, head: sha, ref: `refs/heads/${branch}`, limits: o.cfg.guardrails.push, guard: { defaultBranch: base, blocked: () => undefined } });
+    if (!push.ok) throw new ConfigChangeError(`pushing ${branch} failed: ${'refused' in push ? push.refused.join('; ') : (push.error.split('\n')[0] ?? '')}`);
     const body = [`Proposed from the ${BRAND.name} first-run page by @${o.by}. Merge it to apply; nothing changes until then.`, '', '| file | key | from | to |', '|---|---|---|---|', ...changes.map((c) => `| ${c.file} | ${c.key} | \`${JSON.stringify(c.from)}\` | \`${JSON.stringify(c.to)}\` |`)].join('\n');
     const pr = gh(['pr', 'create', '--repo', repo, '--base', base, '--head', branch, '--title', msg, '--body', body], o.root);
     if (pr.status !== 0) throw new ConfigChangeError(`${branch} is pushed, but opening its PR failed: ${pr.stderr.trim().split('\n')[0] ?? ''}`);
