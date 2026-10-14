@@ -4,6 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { EventPayload } from '../src/events/types.js';
 import type { TestRuns, TestRunRequest } from '../src/coordinator/pr-batch.js';
+import type { PrTestRuns } from '../src/coordinator/test-runs.js';
 import { approve, changeOnMain, lastOf, openPr, passing, skip, type Fixture, type OpenPr } from './repro-state-graph/harness.js';
 
 const full = { name: 'full', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 2 };
@@ -40,9 +41,9 @@ function batching(cfg: Fixture['cfg'], edit?: (cfg: Fixture['cfg']) => void) {
   edit?.(cfg);
 }
 
-async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean } = {}) {
+async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean; prTestRuns?: PrTestRuns } = {}) {
   const s = service(o.ok ?? true, { holdFirst: o.holdFirst ?? false });
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: o.wired === false ? {} : { testRuns: s.t } });
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: o.wired === false ? {} : { testRuns: s.t, ...(o.prTestRuns ? { prTestRuns: o.prTestRuns } : {}) } });
   s.bind(t.f.backlog);
   return { t, s };
 }
@@ -75,6 +76,23 @@ test('batching: without the test-run service nothing merges, however green the f
   assert.ok(!t.pr().merged);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
   assert.equal(t.f.log.read(0, ['pr_batch.queued']).length, 1, 'queued, waiting');
+});
+
+test('batching: while the test sandbox\'s check is failing no batch runs and nothing merges; when it passes, the same coordinator batches and merges', { skip }, async () => {
+  // WHY: the service is wired even while the sandbox's check fails (the PRs' "test runs are off" checks go through
+  // it), so a batch must wait on the check itself: a refused run is no verdict, and must not be asked for at all.
+  const sandbox = { ok: false };
+  const prTestRuns = { tick: async () => ({ started: [], cancelled: [] }), idle: async () => undefined, stop: () => undefined, recover: async () => [], listing: () => [], ready: () => sandbox.ok } as unknown as PrTestRuns;
+  const { t, s } = await batched({ prTestRuns });
+  await fastGreen(t, 4);
+  assert.equal(s.runs.length, 0, 'no run was asked of a sandbox whose check is failing');
+  assert.ok(!t.pr().merged);
+  assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
+  assert.equal(t.f.log.read(0, ['pr_batch.queued']).length, 1, 'queued, waiting');
+  sandbox.ok = true;
+  await fastGreen(t);
+  assert.equal(s.runs.length, 1);
+  assert.ok(t.pr().merged, 'merged after its batch passed, with no restart');
 });
 
 test('batching: a red batch returns the PR with the failing tier; it never merges', { skip }, async () => {

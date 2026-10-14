@@ -11,6 +11,7 @@ import { projectSettingsRefusal, runSettings, type Settings } from './agent-sett
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { safeProjectEnv } from './project-env.js';
+import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
@@ -166,7 +167,8 @@ export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', ex
     GH_CONFIG_DIR: mkdtempSync(join(tmpdir(), 'no-gh-')),
     ...extra,
   });
-  return env;
+  // INVARIANT: no agent starts with the push gate's first-time-setup hatch, whatever `base` or `extra` holds.
+  return withoutPushGateHatch(env);
 }
 
 /**
@@ -224,14 +226,15 @@ export function agentUserEnv(r: RunAs): Record<string, string> {
 
 /** The agent's environment when it runs as its own user: its home, its login, git trusting worktrees it doesn't own. */
 export function runAsEnv(env: NodeJS.ProcessEnv, r: RunAs): NodeJS.ProcessEnv {
-  return {
+  // INVARIANT: as agentEnv: an agent user never gets the push gate's hatch from the environment it is built on.
+  return withoutPushGateHatch({
     ...env,
     ...agentUserEnv(r),
     // Worktrees belong to the coordinator user; git refuses repos owned by someone else unless trusted.
     GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_1: 'safe.directory',
     GIT_CONFIG_VALUE_1: '*',
-  };
+  });
 }
 
 /**

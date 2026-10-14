@@ -7,6 +7,7 @@ import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { safeProjectEnv } from '../project-env.js';
+import { withoutPushGateHatch } from '../guardrails/push-hook.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -600,7 +601,8 @@ export function shellCommand(command: string): [file: string, args: string[]] {
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
-  return env;
+  // WHY: project commands run code an agent wrote; the push gate's hatch in the engine's own environment stops here.
+  return withoutPushGateHatch(env);
 }
 
 /**

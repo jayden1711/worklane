@@ -9,6 +9,7 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import type { RunHost } from '../testrun/host.js';
 import { ChecksPermissionMissing, type TestRunRequest, type TestRunResult } from '../testrun/index.js';
+import { SANDBOX_STEP } from '../testrun/run.js';
 
 /** A PR as the test runs need it. */
 export interface OpenPr {
@@ -55,6 +56,8 @@ export interface PrTestRunDeps {
   fetchPr?: (pr: OpenPr) => string;
   /** The files a PR changes against its base (tests inject this). */
   changed?: (pr: OpenPr) => string[];
+  /** The sandbox's check, held and run again while it fails (src/testrun/sandbox-watch.ts); absent: nothing to wait for. */
+  sandbox?: { readonly ok: boolean; stop(): void };
 }
 
 interface InFlight {
@@ -77,6 +80,11 @@ export class PrTestRuns {
   private inFlight = new Map<number, InFlight>();
   /** pr -> heads whose fast run finished (from the log, so a restart doesn't run them again). */
   private finished = new Map<number, Set<string>>();
+  /**
+   * pr -> the head whose run was refused because the sandbox's check is failing: its "test runs are off" check is
+   * posted once, and the head runs for real once the check passes (sandboxPassed).
+   */
+  private refused = new Map<number, string>();
   private lastPoll = 0;
   /** The latest listing of open PRs (the coordinator batches people's PRs from it: no listing of its own). */
   private openPrs: OpenPr[] = [];
@@ -143,6 +151,8 @@ export class PrTestRuns {
       const cur = this.inFlight.get(pr.number);
       if (cur && cur.sha === pr.headSha) continue;
       if (this.finished.get(pr.number)?.has(pr.headSha)) continue;
+      // WHY: one "test runs are off" check per head while the sandbox's check fails, not one every listing.
+      if (this.refused.get(pr.number) === pr.headSha && !this.ready()) continue;
       let sha: string;
       let changedFiles: string[];
       try {
@@ -174,13 +184,32 @@ export class PrTestRuns {
       return;
     }
     if (controller.signal.aborted) return; // superseded: its head is no longer the PR's, so no check on it
-    this.finished.set(pr.number, new Set([...(this.finished.get(pr.number) ?? []), sha]));
+    // INVARIANT: a refused head is never "finished": it gets its real run as soon as the sandbox's check passes.
+    if (result.setup?.step === SANDBOX_STEP) this.refused.set(pr.number, sha);
+    else {
+      this.refused.delete(pr.number);
+      this.finished.set(pr.number, new Set([...(this.finished.get(pr.number) ?? []), sha]));
+    }
     try {
       await this.d.post(sha, result);
     } catch (e) {
       // A missing permission is recorded (testrun.checks_failed) and shown in health; anything else is an error.
       if (!(e instanceof ChecksPermissionMissing)) this.d.log.append('coordinator.error', { instance: this.d.actor, where: `checks for #${pr.number}`, kind: 'error', message: (e as Error).message.slice(0, 500) }, this.d.actor);
     }
+  }
+
+  /** False while the sandbox's check is failing: every run is refused, and nothing else may go through the service. */
+  ready(): boolean {
+    return this.d.sandbox?.ok ?? true;
+  }
+
+  /**
+   * The sandbox's check passed (at start, or after failing): what a stopped coordinator's runs left is wiped, and the
+   * next tick lists the PRs at once and runs every head that only got a "test runs are off" check.
+   */
+  async sandboxPassed(): Promise<void> {
+    this.lastPoll = 0;
+    await this.recover();
   }
 
   /** The open PRs as last listed (empty before the first listing). */
@@ -194,6 +223,7 @@ export class PrTestRuns {
   }
 
   stop(): void {
+    this.d.sandbox?.stop();
     this.stopped.abort();
     for (const f of this.inFlight.values()) f.controller.abort();
   }

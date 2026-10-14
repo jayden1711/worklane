@@ -124,7 +124,7 @@ export class Coordinator extends HarnessEvals {
     await step('fix forward', () => this.fixForwardStep(), undefined);
     await step('merge posts', () => this.postMerges(), undefined);
     await step('ci metrics', () => this.measureCi(), undefined);
-    await step('deploy gate', () => this.d.deployGate?.step(), undefined);
+    await step('deploy gate', () => this.liveDeployGate?.step(), undefined);
     await step('previews', () => this.d.previews?.step(), undefined);
     await step('retry', () => this.retryBlocked(), undefined);
     await step('corrections', () => this.checkCorrections(), undefined);

@@ -469,6 +469,7 @@ How each level is cleared:
 | Production DB, live-wallet signing | blocked | blocked |
 | Production variable sets and deploys | ask | ask |
 | Harness-file edits, secret files, domain allowlist | blocked | not applied |
+| The push gate's first-time-setup hatch (`PUSH_GATE_BOOTSTRAP`) and git's pre-push hook: setting, exporting, passing or storing the hatch (a shell rc, `.env`, git config); `git push --no-verify`; `core.hooksPath` by `-c`, `git config` or `GIT_CONFIG_*`; writes to a git hooks dir or git config file (`src/guardrails/push-hook.ts`) | blocked (`push-gate-hatch`, `push-hook-bypass`); the runner also drops the hatch from every agent's and project command's environment, and the hook refuses it in an agent run | not applied |
 | Commit secret scan | every `git commit` (PreToolUse) | opt-in git pre-commit hook (`install --git-hooks`) |
 | Stop gate | runs `done_when` | none (recorded) |
 | Engine not installed | every hook blocks | one-line warning at session start; nothing blocks |
