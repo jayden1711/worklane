@@ -172,6 +172,15 @@ export function validateRequest(req: TestRunRequest): void {
 }
 
 /**
+ * The longest a run can take once it holds its slot: each setup step's cap, the database's start, and each tier's own
+ * timeout_s. Recorded in the slot, so the engine updater's drain can say when the machine will be quiet.
+ */
+export function runLimitMs(config: TestRunConfig, tiers: TestRunTier[]): number {
+  const db = config.database && tiers.some((t) => t.database) ? config.database.ready_timeout_s : 0;
+  return (config.setup.length * SETUP_TIMEOUT_S + db + tiers.reduce((n, t) => n + t.timeout_s, 0)) * 1000;
+}
+
+/**
  * Run one test run. Waits for a slot and then the lock as long as either takes (until `signal` aborts: a
  * superseded run), wipes the run whatever happens, and records every step. Never throws for a test failure, a
  * setup failure or a cancellation: those are the result (ok false). Throws for a bad request, and TestRunHeld while
@@ -214,7 +223,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   // The step in progress, for a failure that doesn't name its own.
   let stage = 'slot';
   try {
-    slot = await waitTestSlot(`${d.actor} test run ${id}`, { ...(d.slotsDir ? { dir: d.slotsDir } : {}), ...(d.slotPollMs ? { pollMs: d.slotPollMs } : {}), ...(o.signal ? { signal: o.signal } : {}) });
+    slot = await waitTestSlot(`${d.actor} test run ${id}`, { ...(d.slotsDir ? { dir: d.slotsDir } : {}), ...(d.slotPollMs ? { pollMs: d.slotPollMs } : {}), ...(o.signal ? { signal: o.signal } : {}), limitMs: runLimitMs(d.config, tiers) });
     const waitFrom = now();
     lock = await (d.lock ?? ((p, s) => holdFlock(p, 'shared', s)))(d.lockPath ?? FULL_RUN_LOCK, o.signal);
     emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom) });

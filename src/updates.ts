@@ -155,12 +155,25 @@ export interface UpdatesPanel {
   lastInstall: { at: string; from: string | null; to: string | null } | null;
   /** The newest rollback, while no later install succeeded: when, what, why, and whether it is held. */
   rollback: { at: string; sha: string | null; reason: string; held: boolean; canary: boolean } | null;
+  /**
+   * The updater is draining the machine for an install (src/update-drain.ts): since when, the commit it waits to
+   * install, and what is still finishing (test runs, the full-run lock, agents). Null when it isn't, or the flag lapsed.
+   */
+  drain: UpdatesDrain | null;
   canary: {
     settings: CanarySettings | null;
     /** A canary filed and not yet passed or failed. */
     running: { at: string; trigger: 'update' | 'daily'; issue: number | null; url: string | null; deadline: string | null } | null;
     last: CanaryResult | null;
   };
+}
+
+export interface UpdatesDrain {
+  since: string;
+  until: string;
+  to: string | null;
+  testRuns: number;
+  agents: number;
 }
 
 /** The engine the services run: its commit (the link's target) and version (its package.json); null where there's none. */
@@ -183,7 +196,7 @@ export function installedEngine(current = ENGINE_CURRENT): { sha: string | null;
 }
 
 /** The Updates panel from the updater's log (oldest first), its settings and the engine installed now. */
-export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }): UpdatesPanel {
+export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }, drain: UpdatesDrain | null = null): UpdatesPanel {
   const lastOf = (f: (e: UpdateEntry) => boolean) => [...log].reverse().find(f) ?? null;
   const install = lastOf((e) => e.event === 'installed');
   const rolled = lastOf((e) => e.event === 'rolled_back');
@@ -200,6 +213,7 @@ export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof upd
     rollback: rollbackNow
       ? { at: rollbackNow.at, sha: rollbackNow.from ?? null, reason: rollbackNow.reason ?? (rollbackNow.failed?.length ? `rolled back: ${rollbackNow.failed.join('; ')}` : 'rolled back'), held: !!held && held.at === rollbackNow.at, canary: !!rollbackNow.canary }
       : null,
+    drain,
     canary: {
       settings: settings?.canary ?? null,
       running: running ? { at: running.at, trigger: running.trigger === 'update' ? 'update' : 'daily', issue: running.issue ?? null, url: running.url ?? null, deadline: running.deadline ?? null } : null,

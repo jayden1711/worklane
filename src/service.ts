@@ -25,6 +25,7 @@ import { tidyState } from './state-tidy.js';
 import { EventLog, storageFailure } from './events/log.js';
 import { siteDiskGuard, startDiskGuard } from './disk-guard.js';
 import { addStartGate } from './testrun/gate.js';
+import { drainRefusal } from './update-drain.js';
 import { watchdogConfig } from './watchdog/config.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
@@ -333,11 +334,15 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   // INVARIANT: every test run this process starts (PR runs, batches, the flaky re-run, fix-forward's probes, the deploy
   // gate) and every preview passes this one gate (src/testrun/gate.ts); the disk guard is its `disk` source.
   const ungateDisk = addStartGate('disk', () => disk.held());
+  // The engine updater draining the machine for an install (src/update-drain.ts: root's machine-wide flag, ignored once
+  // past its expiry): no new test run starts until it is installed. Its `drain` source.
+  const ungateDrain = addStartGate('drain', drainRefusal);
   // land_mode direct pushes the default branch itself: never on a branch GitHub doesn't protect (direct-land.ts).
   const refused = await directLandStartGate({ landMode: cfg.project.land_mode, api: opts.protection, local: localRemote(root, 'origin'), repo: cfg.project.project.repo, branch: cfg.project.project.default_branch, label: opts.label ?? 'coordinator', log, actor: instanceId() });
   if (refused) {
     console.error(refused);
     ungateDisk();
+    ungateDrain();
     stopDisk();
     log.close();
     lock.lock.release();
@@ -448,6 +453,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     watchdog?.stop();
     intake?.stop();
     ungateDisk();
+    ungateDrain();
     stopDisk();
     // WHY: events still waiting for room get one last try; what can't be written is named in the journal, not lost silently.
     const left = log.buffered().count;
