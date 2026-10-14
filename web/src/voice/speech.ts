@@ -6,6 +6,10 @@
 // recognition is the `processLocally` option, checked with the static `available()` (and fetched with
 // `install()`); a browser without them, or whose model isn't there, gets no recognition at all unless
 // the owner allowed the cloud fallback in Settings (prefs.ts, off by default).
+//
+// INVARIANT: the owner starting to talk stops any answer being read aloud (talk.ts): Dictation.start calls
+// stopSpeaking() before anything else.
+import { stopSpeaking } from './talk';
 
 /** The parts of a SpeechRecognition this uses (the DOM lib has no types for it). */
 export interface Recognition {
@@ -67,7 +71,7 @@ export async function checkSupport(ctor: RecognitionCtor | null, o: { lang: stri
   if (availability === 'available') return { kind: 'ready', local: true, title: 'Dictate (on-device: the audio stays on this computer)' };
   if (o.allowCloud) return { kind: 'ready', local: false, title: "Dictate (the browser's cloud speech service: in Chrome, the audio goes to Google)" };
   if (availability === 'downloadable' || availability === 'downloading')
-    return { kind: 'disabled', availability, why: `on-device speech recognition for ${o.lang} isn't downloaded yet: download it in Settings, Voice dictation` };
+    return { kind: 'disabled', availability, why: `on-device speech recognition for ${o.lang} isn't downloaded yet: download it in Settings, Voice` };
   return { kind: 'disabled', availability, why: NO_ON_DEVICE };
 }
 
@@ -146,6 +150,7 @@ export class Dictation {
   }
 
   start() {
+    stopSpeaking();
     if (this.rec) return;
     const rec = new this.ctor();
     if (this.o.local) {
