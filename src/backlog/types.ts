@@ -138,6 +138,8 @@ export const LABELS = [
   { name: 'ci-failing', color: 'b60205', description: 'A required check fails and CI fix runs stopped; see the latest comment' },
   { name: 'needs-owner', color: 'd93f0b', description: 'Waits for the owner to review and merge; the latest comment says why' },
   { name: 'type:investigation', color: 'c5def5', description: 'Read-only: findings and evidence, no code change' },
+  { name: 'type:goal', color: 'c5def5', description: 'A goal: split into child issues that depend on each other, not built itself' },
+  { name: 'goal:split', color: 'ededed', description: 'This goal was split; its child issues are listed in a comment' },
   { name: 'report', color: 'bfdadc', description: 'Scheduled reports are posted here' },
   { name: 'size:S', color: 'c2e0c6', description: 'Small' },
   { name: 'size:M', color: 'fef2c0', description: 'Medium: plan mode first' },

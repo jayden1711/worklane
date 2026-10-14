@@ -46,6 +46,7 @@ interface Render {
   renderMetrics(m: unknown): string;
   renderMetricsPanel(state: unknown): string;
   renderFlaky(f: unknown): string;
+  renderHarnessEvals(h: unknown): string;
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
@@ -1806,6 +1807,21 @@ test('flaky tests: each quarantined check is a row with its sightings, issue and
   assert.match(html, /The updater still needs every check green/);
   const none = r.renderFlaky({ releaseAfter: 10, quarantined: [], released: [], rates: [{ days: 7, redRuns: 0, flakyReruns: 0, rate: null }, { days: 30, redRuns: 0, flakyReruns: 0, rate: null }], canClear: false });
   assert.match(none, /No flaky tests found yet/);
+});
+
+test('harness evals: one row per run, newest first, with success, its change from the baseline, cost, wall-clock and interventions per replay', async () => {
+  const { harnessEvalView } = await import('../src/harness-evals/score.js');
+  let id = 0;
+  const ev = (type: string, payload: object, ts: string) => ({ id: ++id, ts, type, actor: 'a', source: 'coordinator', payload }) as never;
+  const task = (run: string, ok: boolean) => ev('harness_eval.task', { run, task: 'repo-1', held_out: false, sample: 1, success: ok, done_when: ok, verdict: ok, outcome: ok ? 'queued' : 'blocked', cost_usd: 1, wall_ms: 120_000, interventions: ok ? 0 : 1, detail: '' }, '2026-10-01T00:00:00Z');
+  const run = (rid: string, passed: number, cost: number, ts: string, extra: object = {}) => ev('harness_eval.run', { id: rid, trigger: 'change', engine: 'a'.repeat(40), pr: 42, tasks: 1, samples: 2, runs: 2, passed, cost_usd: cost, wall_ms: 240_000, interventions: 2 - passed, budget_usd: 10, stopped: null, ...extra }, ts);
+  const view = harnessEvalView([task('r1', true), task('r1', true), run('r1', 2, 2, '2026-10-01T00:00:00Z'), task('r2', true), task('r2', false), run('r2', 1, 3, '2026-10-08T00:00:00Z')]);
+  const html = r.renderHarnessEvals({ ...view, enabled: true });
+  const rows = [...html.matchAll(/data-testid="harness-eval-run" data-run="([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(rows, ['r2', 'r1'], 'newest first');
+  assert.match(html, /data-run="r2"[\s\S]*?data-testid="harness-eval-success"[^>]*>50% \(1\/2\)[\s\S]*?−50 pts[\s\S]*?~\$1\.50[\s\S]*?\+\$0\.50[\s\S]*?2\.0 min[\s\S]*?0\.50/);
+  assert.match(html, /data-testid="harness-evals-tasks"[\s\S]*?repo-1: 1\/2/);
+  assert.match(r.renderHarnessEvals({ enabled: false, runs: [], latest: [] }), /No runs yet/);
 });
 
 test('learnings: each cause with its sightings and stages; Promote only for an owner on a ready cause not promoted yet', () => {
