@@ -20,9 +20,9 @@ permissions:
 jobs:
   # The unit tests (npm test: build, then dist/test/**/*.test.js) in 4 shards per Node version, split by
   # scripts/ci/shard.mjs on the measured per-file durations in test/timings.json. Each shard builds for itself
-  # (cheaper on the wall clock than one build job the shards wait for). Shard 4 also runs the typecheck and the
-  # dashboard UI build: shard 1 gets the longest file, so 4 has room. The checks the ruleset, .worklane/config.yaml
-  # and the updater require are the summary jobs below, test (ubuntu-latest, 22) and (ubuntu-latest, 24), green only
+  # (cheaper on the wall clock than one build job the shards wait for), the dashboard UI too, before its tests.
+  # Shard 4 also runs the typecheck: shard 1 gets the longest file, so 4 has room. The checks the ruleset,
+  # .worklane/config.yaml and the updater require are the summary jobs below, test (ubuntu-latest, 22) and (ubuntu-latest, 24), green only
   # when all 4 of their shards are; the shards themselves are required by nothing (test/update-checks.test.ts).
   # On a pull request the shards run only the test files its change can affect (scripts/ci/affected.mjs: the
   # import graph; the whole suite when it can't tell, or a shared or config file changed), split the same way; a
@@ -66,9 +66,15 @@ jobs:
       - run: npm run typecheck
         if: matrix.shard == 4
       - run: npm run build
+      # Before the tests, in every shard: the web-UI tests (real Chrome against dist/web) run only on a built UI,
+      # and CI_REQUIRE_WEB=1 makes a missing UI or Chrome fail them instead of skipping (test/browser-helpers.ts).
+      # About a second (vite), cheaper than one build shared as an artifact.
+      - name: build the dashboard UI
+        run: npm run build:web
       - name: this shard's tests
         shell: bash
         env:
+          CI_REQUIRE_WEB: '1'
           SHARD: ${{ matrix.shard }}
           EVENT: ${{ github.event_name }}
           FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
@@ -84,9 +90,6 @@ jobs:
             exit 0
           fi
           node --test "${files[@]}"
-      - name: build the dashboard UI
-        if: runner.os == 'Linux' && matrix.shard == 4
-        run: npm run build:web
 
   test-shard-24:
     name: test shard ${{ matrix.shard }}/4 (${{ matrix.os }}, ${{ matrix.node }})
