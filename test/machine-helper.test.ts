@@ -506,3 +506,39 @@ test('every step that writes system paths runs in a transient unit of its own, s
   const src = readFileSync(helperSrc, 'utf8');
   assert.match(src, /if \(!inner && process\.getuid && process\.getuid\(\) === 0 && needsUnit\(args\)\) return inUnit\(args\);\n  const add = parseAddProject\(args\);/);
 });
+
+test('a step is recorded only once it has run: as done when it exited 0, as failed when it failed or never started; never as a change before it happened', () => {
+  const h = helperIn(mkdtempSync(join(tmpdir(), 'machine-')));
+  const { runLogged } = createRequire(import.meta.url)(h.copy) as { runLogged: (what: string, to: string, run: () => number) => number };
+  const records = () => (existsSync(h.log) ? readFileSync(h.log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { what: string; to: string }) : []);
+  let seen: number | null = null;
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      seen = records().length;
+      return 1;
+    }),
+    1,
+  );
+  assert.equal(seen, 0, 'nothing is recorded while the step runs');
+  assert.equal(
+    runLogged('install-updater', 'updates.sh', () => {
+      throw new Error('spawn bash ENOENT');
+    }),
+    1,
+  );
+  assert.deepEqual(records().map((c) => [c.what, c.to]), [['install-updater', 'failed: updates.sh: exit 1'], ['install-updater', 'failed: updates.sh: exit 1']], 'a failed step writes no success record');
+  assert.equal(runLogged('install-updater', 'updates.sh', () => 0), 0);
+  assert.deepEqual(records().at(-1)?.to, 'updates.sh');
+  // Every step the helper runs inline goes through it; a unit started with --no-block is recorded only after systemd-run, by outcome.
+  const src = readFileSync(helperSrc, 'utf8');
+  for (const s of ["runLogged('install-updater', 'updates.sh',", "runLogged('add-project', `${p.name} ${p.repo}`,", "runLogged('claude-account', 'status',"]) assert.ok(src.includes(s), s);
+  const units: [string, string, string][] = [
+    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", "logLine('claude-account', null, `switch (token", "logLine('claude-account', null, `failed: switch"],
+    ["spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT", "logLine('tailscale', null, action);", "logLine('tailscale', null, `failed: ${action}: not started`);"],
+  ];
+  for (const [start, ok, failed] of units) {
+    const at = src.indexOf(start);
+    assert.ok(at > 0 && src.indexOf(ok) > at && src.indexOf(failed) > at, `${ok}: recorded after systemd-run, by outcome`);
+    assert.equal(src.split(ok).length, 2, `${ok}: one success record`);
+  }
+});

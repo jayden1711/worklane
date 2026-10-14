@@ -137,6 +137,23 @@ function logLine(what, from, to) {
   return by;
 }
 
+/**
+ * Run a step that changes the machine, then record it: the change log is the audit of what changed, so a step is
+ * recorded only once it has run, as done (`to`) when it exited 0 and as `failed: <to>: exit <n>` otherwise, never as
+ * a change before it happened. Returns the step's status.
+ */
+function runLogged(what, to, run) {
+  let status;
+  try {
+    status = run();
+  } catch (e) {
+    process.stderr.write(`${what}: ${(e && e.message) || e}\n`);
+    status = 1;
+  }
+  logLine(what, null, status === 0 ? to : `failed: ${to}: exit ${status}`);
+  return status;
+}
+
 /** A setup script's whole path, resolved (current is a link to the engine's directory), when every part is root's alone; else null, having said why. */
 function rootScript(file) {
   let real;
@@ -170,9 +187,11 @@ function claudeAccount(action) {
   if (!real) return 1;
   const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
   if (action === 'status') {
-    logLine('claude-account', null, 'status');
-    const r = spawnSync('bash', [real, 'status', '--json'], { cwd: '/', env, stdio: 'inherit' });
-    return r.error ? 1 : r.status === null ? 1 : r.status;
+    return runLogged('claude-account', 'status', () => {
+      const r = spawnSync('bash', [real, 'status', '--json'], { cwd: '/', env, stdio: 'inherit' });
+      if (r.error) throw r.error;
+      return r.status === null ? 1 : r.status;
+    });
   }
   // switch: for the asking coordinator's dashboard, in a unit of its own (it stops that coordinator too).
   const instance = coordinatorInstance(process.env.SUDO_USER);
@@ -180,13 +199,14 @@ function claudeAccount(action) {
     process.stderr.write('claude-account switch here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh switch\n');
     return 2;
   }
-  logLine('claude-account', null, `switch (token from ${instance}'s dashboard)`);
   const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account switch', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', real, 'switch', '--json', '--token-from', instance], { cwd: '/', env, encoding: 'utf8' });
   if (r.error || r.status !== 0) {
     const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
     process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch is already running (worklane-claude-account.service)\n' : `couldn't start the switch: ${text.split('\n')[0]}\n`);
+    logLine('claude-account', null, `failed: switch (token from ${instance}'s dashboard): not started`);
     return 1;
   }
+  logLine('claude-account', null, `switch (token from ${instance}'s dashboard)`);
   process.stdout.write(`started the Claude account switch as ${CLAUDE_ACCOUNT_UNIT}.service; it waits for the token in ${instance}'s dashboard\n`);
   return 0;
 }
@@ -275,13 +295,11 @@ function discardSigner(s) {
 function installUpdater() {
   const real = rootScript(UPDATES);
   if (!real) return 1;
-  logLine('install-updater', null, 'updates.sh');
-  const r = spawnSync('bash', [real], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
-  if (r.error) {
-    process.stderr.write(`install-updater: ${r.error.message}\n`);
-    return 1;
-  }
-  return r.status === null ? 1 : r.status;
+  return runLogged('install-updater', 'updates.sh', () => {
+    const r = spawnSync('bash', [real], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
+    if (r.error) throw r.error;
+    return r.status === null ? 1 : r.status;
+  });
 }
 
 /** The tailscale step a list asks for (install, up, serve or public-url), or null when it is anything else: exactly two words. */
@@ -302,14 +320,15 @@ function tailscale(action) {
     process.stderr.write('tailscale here is for a coordinator, through sudo; an admin runs scripts/setup/tailscale.sh\n');
     return 2;
   }
-  logLine('tailscale', null, action);
   const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
   const r = spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT, '--collect', '--no-block', '--quiet', '--description', `worklane tailscale ${action}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, ...tailscaleCommand(real, action, instance)], { cwd: '/', env, encoding: 'utf8' });
   if (r.error || r.status !== 0) {
     const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
     process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a tailscale step is already running (worklane-tailscale.service); wait for it to finish\n' : `couldn't start tailscale ${action}: ${text.split('\n')[0]}\n`);
+    logLine('tailscale', null, `failed: ${action}: not started`);
     return 1;
   }
+  logLine('tailscale', null, action);
   process.stdout.write(`started tailscale ${action} as ${TAILSCALE_UNIT}.service\n`);
   return 0;
 }
@@ -317,13 +336,11 @@ function tailscale(action) {
 function addProject(p) {
   const real = rootScript(ADD_PROJECT);
   if (!real) return 1;
-  logLine('add-project', null, `${p.name} ${p.repo}`);
-  const r = spawnSync('bash', [real, p.name, p.repo], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
-  if (r.error) {
-    process.stderr.write(`add-project: ${r.error.message}\n`);
-    return 1;
-  }
-  return r.status === null ? 1 : r.status;
+  return runLogged('add-project', `${p.name} ${p.repo}`, () => {
+    const r = spawnSync('bash', [real, p.name, p.repo], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
+    if (r.error) throw r.error;
+    return r.status === null ? 1 : r.status;
+  });
 }
 
 /** The change an argument list asks for, or null when it is anything but the exact allowed forms. */
@@ -436,4 +453,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
