@@ -455,7 +455,7 @@ jobs:
               socket.socket(socket.AF_UNIX).bind(os.path.join(old, "SingletonSocket")); print("old place bound")
           except OSError as e:
               print("old place:", len(os.path.join(old, "SingletonSocket").encode()), "bytes:", e)'
-          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200")"
+          out="$(as2 exec "$id" 120 -- "python3 -c '$probe' && google-chrome --headless=new --no-sandbox --disable-gpu --no-first-run --user-data-dir=\"\$TMPDIR/profile\" --dump-dom about:blank | head -c 200" < /dev/null)"
           echo "$out"
           grep -qx "TMPDIR $t TMP $t TEMP $t" <<<"$out"
           grep -q "^bound $t/org.chromium.Chromium.[A-Za-z0-9_]*/SingletonSocket " <<<"$out"
@@ -530,6 +530,75 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "regression: no value of a run's variables, nor its database password, in any argv, the journal or the unit (a canary, watched as nobody)"
+        run: |
+          # sudo logs its whole command line to the journal; any user reads a process's argv (ps, /proc/<pid>/cmdline)
+          # and a unit's systemctl show / cat. A run's DATABASE_URL carries its database's password. Each phase: a run
+          # made as wl-ci, its exec given a canary variable and its database started, while nobody watches
+          # (scripts/ci/argv-watch.sh); then the canary and the password are looked for in that output and the journal.
+          H=/usr/local/libexec/worklane-testrun
+          w="$(mktemp -d /tmp/wl-watch-XXXXXX)"; cp scripts/ci/argv-watch.sh "$w/"; chmod -R a+rX "$w"
+          mkrun() {
+            local r id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+            r="$(mktemp -d)"
+            git init -q "$r" && date > "$r/f" && git -C "$r" add f && git -C "$r" "${id_[@]}" commit -q -m probe
+            for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$1/$x" HEAD; done
+            git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$1/head" "refs/worklane/test-run/$1/base"
+            sudo -u wl-ci sudo -n "$H" ci create "$1" main "refs/worklane/test-run/$1/head" "refs/worklane/test-run/$1/base" "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" >/dev/null
+            rm -rf "$r"
+          }
+          # One phase: $1 old|new. Prints how often the canary and the password were seen, and where.
+          phase() {
+            local which="$1" id="argv-$1-$$" canary value since out pw seen cmd watcher
+            canary="wl-canary-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+            value="$canary x \"q\" \$HOME \`id\` #h 'a'"
+            mkrun "$id"
+            since="$(date '+%Y-%m-%d %H:%M:%S')"
+            rm -f "$w/stop"
+            sudo -u nobody bash "$w/argv-watch.sh" ci "$w/stop" > "$RUNNER_TEMP/watch-$which.log" 2>&1 &
+            watcher=$!
+            sleep 1
+            cmd='printf %s "$CANARY_VAR" | sha256sum; sleep 3'
+            if [ "$which" = old ]; then
+              out="$(sudo -u wl-ci sudo -n "$H" ci exec "$id" 60 --env "CANARY_VAR=$value" -- "$cmd" 2>/dev/null < /dev/null)"
+            else
+              # As the engine passes them (src/testrun/host.ts runVars): NAME=value, a NUL, on stdin. printf is bash's own.
+              out="$(printf 'CANARY_VAR=%s\0' "$value" | sudo -u wl-ci sudo -n "$H" ci exec "$id" 60 -- "$cmd" 2>/dev/null)"
+            fi
+            [ "$(cut -d' ' -f1 <<<"$out")" = "$(printf %s "$value" | sha256sum | cut -d' ' -f1)" ] || { echo "$which: the run didn't get the value exactly: $out" >&2; exit 1; }
+            echo "$which helper: the run got CANARY_VAR exactly (its sha256 matches)"
+            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
+            [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
+            touch "$w/stop"; wait "$watcher" || true
+            sudo journalctl --since "$since" -o verbose --no-pager > "$RUNNER_TEMP/journal-$which.txt"
+            for secret in canary pw; do
+              seen="$(grep -cF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" || true) $(grep -cF -- "${!secret}" "$RUNNER_TEMP/journal-$which.txt" || true)"
+              echo "$which helper: the $secret in argv/units as nobody, in the journal: $seen (lines)"
+              grep -hF -- "${!secret}" "$RUNNER_TEMP/watch-$which.log" "$RUNNER_TEMP/journal-$which.txt" | sort -u | head -n 3 | cut -c1-240 | sed "s/^/  $which, $secret seen: /" || true  # WHY: none seen is the pass, and grep then exits 1
+              echo "$which $secret $seen" >> "$RUNNER_TEMP/seen"
+            done
+            echo "$which helper: who can ask the test user's Docker for the container's environment (docker inspect): $(sudo stat -c '%U:%G %a' /run/worklane-test-ci-docker)"
+            sudo -u wl-ci sudo -n "$H" ci wipe "$id" >/dev/null
+          }
+          : > "$RUNNER_TEMP/seen"
+          # Fail-without: the helper before this change (protocol 6, as on main at 593e0d2), as a machine had it.
+          old=593e0d248f0ba2f9d984522b8d2675f0ba51133a
+          git fetch -q --depth=1 origin "$old"
+          git show "$old:scripts/machine/worklane-testrun.sh" > "$RUNNER_TEMP/helper-6.sh"
+          grep -qx 'PROTOCOL=6' "$RUNNER_TEMP/helper-6.sh"
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/helper-6.sh" "$H"
+          phase old
+          sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+          phase new
+          cat "$RUNNER_TEMP/seen"
+          # The old helper showed both (else this proves nothing); the new one shows neither, anywhere.
+          grep -Eq '^old canary [1-9][0-9]* [1-9][0-9]*$' "$RUNNER_TEMP/seen"
+          grep -Eq '^old pw [1-9][0-9]* ' "$RUNNER_TEMP/seen"
+          grep -qx 'new canary 0 0' "$RUNNER_TEMP/seen"
+          grep -qx 'new pw 0 0' "$RUNNER_TEMP/seen"
+          [ -z "$(sudo ls -A /run/worklane-testrun-env)" ] || { echo "a variables file was left" >&2; sudo ls -la /run/worklane-testrun-env >&2; exit 1; }
+          echo "no value seen with this helper; its variables files are gone"
+          rm -rf "$w"
       - name: the coordinator's sandbox host, as wl-ci, against real systemd-run
         run: |
           # What wl-ci runs, world-readable: the build, its one dependency, node, the driver and the fixtures.
