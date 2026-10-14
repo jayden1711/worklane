@@ -116,6 +116,18 @@ interface Render {
   navRows: { to: string; label: string; testId: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
+  renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
+  renderMicInterim(listening: boolean, interim: string, error?: string | null): string;
+  renderVoiceSettings(owner: boolean): string;
+  renderVoiceSettingsView(prefs: VoicePrefs, status: unknown): string;
+  checkSupport(ctor: unknown, o: { lang: string; allowCloud: boolean }): Promise<{ kind: string; why?: string; local?: boolean }>;
+  Dictation: new (ctor: unknown, o: { lang: string; local: boolean }, hooks: { onFinal: (t: string) => void; onInterim: (t: string) => void; onListening: (l: boolean) => void; onError: (w: string) => void }) => { start(): void; stop(): void; abort(): void; listening: boolean };
+  insertAt(text: string, start: number, end: number, chunk: string): { text: string; caret: number };
+  intoBox(box: () => unknown, setText: (t: string) => void): (words: string) => void;
+  NO_ON_DEVICE: string;
+  speechCtor(w: unknown): unknown;
+  mayDictate(role: string | undefined, prefs: VoicePrefs): boolean;
+  readVoicePrefs(): VoicePrefs;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
   citationHref(c: unknown): string;
@@ -128,6 +140,7 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
+type VoicePrefs = { dictation: boolean; allowCloud: boolean };
 let r: Render;
 let asOwner: State;
 let asOther: State;
@@ -2360,4 +2373,201 @@ test('Tailscale and Claude account: a request handed to its own unit keeps the c
   assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [account] }, now));
   assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [account] }, now));
   assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
+});
+
+// Voice dictation in the Ask panel (web/src/voice/): owners only, off until turned on, on-device only by default,
+// and nothing it hears is ever sent.
+
+/** A stand-in for the browser's SpeechRecognition: the test says what it hears. */
+function fakeRecognizer(o: { availability?: string | null; processLocally?: boolean } = {}) {
+  const made: FakeRec[] = [];
+  class FakeRec {
+    lang = '';
+    continuous = false;
+    interimResults = false;
+    onresult: ((e: unknown) => void) | null = null;
+    onerror: ((e: { error: string }) => void) | null = null;
+    onend: (() => void) | null = null;
+    calls: string[] = [];
+    constructor() {
+      made.push(this);
+    }
+    start() {
+      this.calls.push('start');
+    }
+    stop() {
+      this.calls.push('stop');
+    }
+    abort() {
+      this.calls.push('abort');
+    }
+    hear(results: [string, boolean][], resultIndex = 0) {
+      this.onresult?.({ resultIndex, results: results.map(([transcript, isFinal]) => ({ isFinal, 0: { transcript } })) });
+    }
+  }
+  if (o.processLocally !== false) Object.defineProperty(FakeRec.prototype, 'processLocally', { value: false, writable: true });
+  if (o.availability !== null) (FakeRec as unknown as { available: unknown }).available = async () => o.availability ?? 'available';
+  return { ctor: FakeRec, made };
+}
+
+const READY_LOCAL = { kind: 'ready', local: true, title: 'Dictate (on-device)' };
+const roleOf = (s: State) => (s as unknown as { role?: string }).role;
+
+test("the mic is the owners' only, from the role the server serves: not a writer's, not a viewer's", () => {
+  const on = { dictation: true, allowCloud: false };
+  assert.deepEqual([roleOf(asOwner), roleOf(asWriter), roleOf(asOther)], ['owner', 'writer', 'viewer'], 'the roles a real dashboard serves');
+  assert.match(r.renderComposerMic(roleOf(asOwner), on, READY_LOCAL), /data-testid="chat-mic"[^>]*data-state="idle"[^>]*data-local="true"/);
+  for (const s of [asWriter, asOther]) assert.equal(r.renderComposerMic(roleOf(s), on, READY_LOCAL), '', `no mic for a ${roleOf(s)}`);
+  assert.equal(r.renderComposerMic(undefined, on, READY_LOCAL), '', 'no role (an older server): no mic');
+  // The Settings section that turns it on: an owner's only too.
+  assert.match(r.renderVoiceSettings(true), /data-testid="settings-voice"/);
+  assert.equal(r.renderVoiceSettings(false), '');
+});
+
+test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
+  localStorage.setItem('dash-voice', '{}');
+  const prefs = r.readVoicePrefs();
+  assert.deepEqual(prefs, { dictation: false, allowCloud: false }, 'both off by default');
+  assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
+  const settings = r.renderVoiceSettings(true);
+  assert.match(settings, /data-testid="voice-dictation"/);
+  assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
+  localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
+  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false }, 'only a stored true turns either on');
+  localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
+  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false });
+  assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
+  assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
+  localStorage.setItem('dash-voice', '{}');
+});
+
+test("without speech recognition there is no button; on-device only, a browser that can't keep the audio local gets a disabled one saying why", async () => {
+  const on = { dictation: true, allowCloud: false };
+  const owner = roleOf(asOwner);
+  assert.equal(r.speechCtor({}), null);
+  const none = await r.checkSupport(null, { lang: 'en-US', allowCloud: false });
+  assert.deepEqual(none, { kind: 'none' });
+  assert.equal(r.renderComposerMic(owner, on, none), '', 'no recognizer: no button at all');
+  // A recognizer with no on-device API (an older Chrome's webkitSpeechRecognition): it would stream to the cloud.
+  const old = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: false });
+  assert.deepEqual([old.kind, old.why], ['disabled', r.NO_ON_DEVICE]);
+  assert.match(r.renderComposerMic(owner, on, old), /<button[^>]*disabled=""[^>]*title="on-device speech recognition isn(&#x27;|')t available in this browser"[^>]*data-state="disabled"/);
+  // The on-device API, but no model for the language: still disabled.
+  for (const availability of ['unavailable', 'downloadable']) {
+    const s = await r.checkSupport(fakeRecognizer({ availability }).ctor, { lang: 'en-US', allowCloud: false });
+    assert.equal(s.kind, 'disabled', availability);
+  }
+  const throws = fakeRecognizer();
+  (throws.ctor as unknown as { available: unknown }).available = async () => {
+    throw new Error('boom');
+  };
+  assert.deepEqual(await r.checkSupport(throws.ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.why]), ['disabled', r.NO_ON_DEVICE], 'a check that throws is no error, just disabled');
+  // On the device: ready, and local.
+  assert.deepEqual(await r.checkSupport(fakeRecognizer().ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.local]), ['ready', true]);
+  // Only when the owner allowed the cloud does a browser without on-device get a working mic, marked not local.
+  const cloud = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: true });
+  assert.deepEqual([cloud.kind, cloud.local], ['ready', false]);
+  assert.match(r.renderComposerMic(owner, { dictation: true, allowCloud: true }, cloud), /data-local="false"/);
+  assert.match(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'downloadable' }), /data-testid="voice-install"/);
+  assert.doesNotMatch(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'available' }), /data-testid="voice-install"/);
+});
+
+test('dictation puts what it hears in the box at the caret, interim apart, and sends nothing: no fetch, no WebSocket', () => {
+  const g = globalThis as Record<string, unknown>;
+  const network: string[] = [];
+  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
+  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in dictation')));
+  g.WebSocket = class {
+    constructor(url: string) {
+      network.push(`ws ${url}`);
+    }
+  };
+  g.XMLHttpRequest = class {
+    open(_m: string, url: string) {
+      network.push(`xhr ${url}`);
+    }
+  };
+  g.EventSource = class {
+    constructor(url: string) {
+      network.push(`sse ${url}`);
+    }
+  };
+  try {
+    const { ctor, made } = fakeRecognizer();
+    // The text box: a question already typed, the caret after "Why is".
+    const box = {
+      value: 'Why is stuck?',
+      selectionStart: 6,
+      selectionEnd: 6,
+      setSelectionRange(a: number, b: number) {
+        this.selectionStart = a;
+        this.selectionEnd = b;
+      },
+    };
+    let state = box.value;
+    const interims: string[] = [];
+    const listening: boolean[] = [];
+    const errors: string[] = [];
+    const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: (t) => interims.push(t), onListening: (l) => listening.push(l), onError: (w) => errors.push(w) });
+    d.start();
+    const rec = made[0]!;
+    assert.equal((rec as unknown as { processLocally: boolean }).processLocally, true, 'on-device asked of this recognizer');
+    assert.deepEqual([rec.continuous, rec.interimResults, rec.lang], [true, true, 'en-US']);
+    rec.hear([['issue', false]]);
+    assert.equal(interims.at(-1), 'issue', 'interim, not in the box');
+    assert.equal(box.value, 'Why is stuck?');
+    rec.hear([['issue twelve', true], [' and', false]]);
+    assert.equal(box.value, 'Why is issue twelve stuck?', 'the final lands at the caret');
+    assert.equal(state, box.value, "the box's own state has it too");
+    assert.equal(box.selectionStart, 'Why is issue twelve'.length, 'the caret sits after it');
+    assert.equal(interims.at(-1), 'and');
+    // Two finals in one event: both land, in order; "send" is only a word.
+    rec.hear([['issue twelve', true], ['and thirteen', true], ['send', true]], 1);
+    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'no voice command');
+    // The second click stops; the browser ends.
+    d.stop();
+    assert.deepEqual(rec.calls, ['start', 'stop']);
+    rec.onend?.();
+    assert.deepEqual(listening, [true, false]);
+    assert.equal(interims.at(-1), '', 'the interim line clears');
+    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'still in the box, for review: the end sends nothing');
+    assert.deepEqual(errors, []);
+    // Aborted (the panel closed or lost focus): nothing more lands, even if the browser still says something.
+    const d2 = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: () => {}, onListening: () => {}, onError: () => {} });
+    d2.start();
+    const rec2 = made[1]!;
+    const handler = rec2.onresult;
+    d2.abort();
+    assert.deepEqual(rec2.calls, ['start', 'abort']);
+    assert.equal(d2.listening, false);
+    handler?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: 'late words' } }] });
+    assert.doesNotMatch(box.value, /late words/, 'nothing lands after an abort');
+    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during dictation');
+  } finally {
+    Object.assign(g, saved);
+  }
+});
+
+test('on-device only: a recognizer without the processLocally option is never started', () => {
+  const { ctor, made } = fakeRecognizer({ processLocally: false });
+  const errors: string[] = [];
+  const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: (w) => errors.push(w) });
+  d.start();
+  assert.deepEqual(made[0]!.calls, [], 'not started');
+  assert.deepEqual(errors, [r.NO_ON_DEVICE]);
+});
+
+test('dictated words go in at the caret with a space where words meet, replacing a selection', () => {
+  assert.deepEqual(r.insertAt('', 0, 0, ' hello '), { text: 'hello', caret: 5 });
+  assert.deepEqual(r.insertAt('Why', 3, 3, 'stuck'), { text: 'Why stuck', caret: 9 });
+  assert.deepEqual(r.insertAt('a c', 1, 2, 'b'), { text: 'a b c', caret: 4 }, 'a space each side where words meet; the caret after them');
+  assert.deepEqual(r.insertAt('Why old stuck', 4, 7, 'new'), { text: 'Why new stuck', caret: 7 });
+  assert.deepEqual(r.insertAt('x', 1, 1, '  '), { text: 'x', caret: 1 }, 'nothing heard: nothing changes');
+});
+
+test('the interim line is marked as interim and says how to stop; an error says dictation stopped', () => {
+  assert.equal(r.renderMicInterim(false, ''), '');
+  assert.match(r.renderMicInterim(true, 'why is'), /data-testid="chat-mic-interim"[\s\S]*Listening[\s\S]*class="truncate italic" data-testid="chat-mic-interim-text">why is…/);
+  assert.match(r.renderMicInterim(true, ''), /Esc stops/);
+  assert.match(r.renderMicInterim(false, '', 'no microphone found'), /data-testid="chat-mic-error"[^>]*>Dictation stopped: no microphone found/);
 });

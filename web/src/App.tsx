@@ -319,7 +319,7 @@ function Dashboard() {
   else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;
   else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
-  else if (path === '/settings') page = <SettingsPage />;
+  else if (path === '/settings') page = <SettingsPage owner={state.role === 'owner'} />;
   else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
   else if (path === '/health') page = <HealthPage />;
   else if (path === '/machine') page = <MachinePage state={state} />;
@@ -343,7 +343,7 @@ function Dashboard() {
           <SidebarBody {...sidebar} />
         </NavDrawer>
         <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
-        {state && <ChatPanel cli={state.brand.cli} />}
+        {state && <ChatPanel cli={state.brand.cli} role={state.role} />}
       </div>
     </NavMenu.Provider>
   );
