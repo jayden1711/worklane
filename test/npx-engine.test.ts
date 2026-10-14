@@ -3,7 +3,7 @@
 // stand-in npm here; the release workflow runs the real thing from the packed tarball.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ import { BRAND } from '../src/brand.js';
 import { initCommand, localInitFile } from '../src/init.js';
 import { fromNpxCache, handOffFromNpx, type NpxRunner } from '../src/npx-engine.js';
 import { npmGlobalPackageDir } from '../src/os/index.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, repoRoot } from './helpers.js';
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'npx-state-'));
 
@@ -130,4 +130,12 @@ test('init: local mode hands over before any step; server mode never does', asyn
   assert.deepEqual(said, []);
   assert.equal(await initCommand({ ...base, target: 'example-org/example-shop', mode: 'server' }, io, () => false, handOff), 2);
   assert.equal(handed, 1);
+});
+
+test('--help never tells people to run the package through npx while it is not published', () => {
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), '--help'], { encoding: 'utf8', timeout: 20_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /usage:/);
+  assert.equal(r.stdout.includes(`npx ${BRAND.pkg}`), false, 'help suggests npx for a package not on npm');
+  assert.match(r.stdout, /bash scripts\/bootstrap\.sh <repo>/);
 });
