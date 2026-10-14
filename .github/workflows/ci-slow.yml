@@ -94,7 +94,7 @@ jobs:
           docker run --rm worklane-trial sh -c 'gitleaks version && claude --version && node --version'
       - name: no GitHub from here on (a stand-in gh, signed in, that reaches nothing; a stand-in claude, signed in)
         run: echo "$GITHUB_WORKSPACE/scripts/ci/stand-ins" >> "$GITHUB_PATH"
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, three times, each ending with the same one wizard URL that answers
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
@@ -104,15 +104,32 @@ jobs:
           git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
           bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
+          # Unattended (--yes): init's checklist here, then the dashboard and its URL.
           bash scripts/bootstrap.sh --mode local --yes --engine "$tgz" "$ex" | tee "$RUNNER_TEMP/first.log"
           # Each step's result line ("   done: ...") can follow what the step printed doing it: count them, not neighbours.
           [ "$(grep -cE '^   done: ' "$RUNNER_TEMP/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
-          # The second run: no --mode and no terminal (local, said so); it installs nothing and redoes no step.
+          grep -q 'started in the background' "$RUNNER_TEMP/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$RUNNER_TEMP/first.log")"
+          [ "$(ls -l "$kf" | cut -c1-10)" = '-rw-------' ] || { ls -l "$kf"; echo "the key file isn't 0600" >&2; exit 1; }
+          u1="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/first.log" "$kf" /api/first-run | tail -n 1)"
+          # The second run, the one command as a person runs it: no --mode and no terminal (local, said so); no checklist
+          # in the terminal, nothing installed, the dashboard already running: the same URL.
           bash scripts/bootstrap.sh --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$RUNNER_TEMP/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$RUNNER_TEMP/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/second.log"
+          grep -q 'already running; nothing changed' "$RUNNER_TEMP/second.log"
+          u2="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/second.log" "$kf" /api/first-run | tail -n 1)"
+          # The dashboard stopped (a reboot, say): the third run, unattended from a config file (the wizard's steps as
+          # key=value lines), redoes no step, starts the dashboard again, and ends at the same URL.
+          pkill -f 'dashboard --service --root' && sleep 2
+          printf 'mode=local\n' > "$RUNNER_TEMP/setup.conf"
+          bash scripts/bootstrap.sh --config "$RUNNER_TEMP/setup.conf" --engine "$tgz" "$ex" < /dev/null | tee "$RUNNER_TEMP/third.log"
+          grep -q 'resuming: 6 of 6 steps done earlier' "$RUNNER_TEMP/third.log"
+          grep -q 'started in the background' "$RUNNER_TEMP/third.log"
+          u3="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/third.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] && [ "$u2" = "$u3" ] || { echo "the URL changed: $u1 / $u2 / $u3" >&2; exit 1; }
+          echo "every run ended with $u1"
       - name: doctor shows the checklist, and what local mode can't do
         run: |
           export PATH="$HOME/.local/bin:$PATH"
@@ -218,7 +235,7 @@ jobs:
         run: |
           . /etc/wl-ci.env
           if command -v node; then echo "node is already here; the bootstrap must fetch its own" >&2; exit 1; fi
-      - name: bootstrap in local mode, twice
+      - name: bootstrap in local mode, twice, each ending with the same one wizard URL that answers
         shell: wsl-sudo {0}
         run: |
           . /etc/wl-ci.env
@@ -230,10 +247,16 @@ jobs:
           bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$H/first.log"
           [ "$(grep -cE '^   done: ' "$H/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$H/first.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$H/first.log")"
+          [ "$(stat -c %a "$kf")" = 600 ]
+          u1="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/first.log" "$kf" /api/first-run | tail -n 1)"
           bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$H/second.log"
-          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
+          if grep -E 'added [0-9]+ package|would download|installed [a-z]+ [0-9]|kept .worklane/|init --mode|started in the background' "$H/second.log"; then echo "the second run did something again" >&2; exit 1; fi
           grep -q 'no --mode, and no terminal to ask on: local mode' "$H/second.log"
-          grep -q 'resuming: 6 of 6 steps done earlier' "$H/second.log"
+          grep -q 'already running; nothing changed' "$H/second.log"
+          u2="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/second.log" "$kf" /api/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          pkill -f 'dashboard --service --root' || true
       - name: doctor shows the checklist, the OS as WSL, and what local mode can't do
         shell: wsl-sudo {0}
         run: |
@@ -517,8 +540,8 @@ jobs:
     # retry; the App by hand (credentials.sh github-app), then the rerun goes on from there with a stand-in Claude
     # token: the checkout cloned through the App's credential helper, the coordinator's service active, the machine
     # helper and the dashboards. A third run, through the machine helper as the coordinator, skips every step. Last,
-    # with the hub up, another instance gets its App through the manifest flow itself (wizard screen 5), GitHub's
-    # conversion faked: no real App is made.
+    # another instance gets its App through the manifest flow itself (wizard screen 5), with GitHub's conversion faked
+    # and a stand-in hub for the owner's sign-in: no real App is made.
     name: add-project (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
@@ -806,22 +829,48 @@ jobs:
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
           cat "$F2/doctor2.log"
           for s in tools claude github repo-config coordinator protection; do grep -q "^ok    setup $s: " "$F2/doctor2.log"; done
-      # Wizard screen 5: the agents' App through GitHub's manifest flow, for a new instance (delta), with the real hub,
-      # add-project.sh as root and the machine owner's browser played by scripts/ci/manifest-browser.mjs. The fake GitHub
-      # stands in for GitHub's side (the one-time code and its conversion); nothing is created on GitHub.
-      - name: "the agents' App through the manifest flow: add-project.sh as root, the hub's callback from a signed-in machine owner, GitHub's conversion faked"
+      - name: "server: the install ends with one URL, the hub's wizard, no key in it; it answers 200, and the checklist given the hub's key; a rerun prints the same"
+        run: |
+          tail -n 12 "$F2/boot3.log"
+          # The hub's key, root's to read: copied into a 0600 file of the runner's, never into an argument.
+          hk="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; sudo cat "$hk" > "$F2/hub-key")
+          u1="$(bash scripts/ci/wizard-url.sh "$F2/boot3.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          # The sign-in App is set up here, but the machine has no public name (no Tailscale, no --public-url): the break-glass.
+          [ "$u1" = http://127.0.0.1:4398/first-run ]
+          grep -qF "asks once for the hub's key: it is in $hk" "$F2/boot3.log"
+          sudo env WORKLANE_GITHUB_API="$GH_FAKE2" WORKLANE_GITHUB_WEB="$GH_FAKE2" bash scripts/bootstrap.sh --hardened --after-credentials --yes --machine-owner ci-owner gamma example/gamma > "$F2/boot4.log" 2>&1 || { cat "$F2/boot4.log"; exit 1; }
+          u2="$(bash scripts/ci/wizard-url.sh "$F2/boot4.log" "$F2/hub-key" /api/i/ci/first-run | tail -n 1)"
+          [ "$u1" = "$u2" ] || { echo "the URL changed: $u1 / $u2" >&2; exit 1; }
+          rm -f "$F2/hub-key"
+      # Wizard screen 5: the agents' App through GitHub's manifest flow, for a new instance (delta): add-project.sh as
+      # root, and the machine owner's browser played by scripts/ci/manifest-browser.mjs. The fake GitHub stands in for
+      # GitHub's side (the one-time code and its conversion); nothing is created on GitHub. The hub is a stand-in for
+      # this step (scripts/ci/hub-stand-in.mjs: the hub's own code, as wl-dash, in place of its stopped unit), because
+      # the real hub signs people in at github.com only, with no override: its sign-in is not exercised on this runner.
+      - name: "the agents' App through the manifest flow: add-project.sh as root, a hub stand-in's callback from a signed-in machine owner, GitHub's conversion faked"
         run: |
           sudo bash scripts/setup/machine-owners.sh --first ci-owner
           jq -e '.owners | index("ci-owner") != null' /etc/worklane/machine-owners.json
-          systemctl is-active worklane-dashboard-hub.service
+          # The real hub's unit has no GitHub host to be pointed anywhere: sign-in's hosts are constants.
+          if sudo grep -rqE 'GITHUB_(API|WEB)' /etc/systemd/system/worklane-dashboard-hub.service; then echo "the hub's unit names a GitHub host" >&2; exit 1; fi
+          sudo systemctl stop worklane-dashboard-hub.service
+          sudo -H -u wl-dash nohup /usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist "$GH_FAKE" https://hub.example.test > "$F/hub-stand-in.log" 2>&1 &
+          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/auth/login)" = 302 ] && break; sleep 1; done
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/auth/login)" = 302 ] || { cat "$F/hub-stand-in.log"; exit 1; }
           for u in worklane-delta worklane-dashboard-delta; do
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=WORKLANE_GITHUB_API=%s WORKLANE_GITHUB_WEB=%s\n' "$GH_FAKE" "$GH_FAKE" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
           ( set +e; sudo env WORKLANE_GITHUB_API="$GH_FAKE" WORKLANE_GITHUB_WEB="$GH_FAKE" bash scripts/setup/add-project.sh delta example/alpha --timeout 3 < "$F/claude-token" > "$F/run4.jsonl" 2> "$F/run4.err"; echo "$?" > "$F/run4.rc" ) &
           node scripts/ci/manifest-browser.mjs "$GITHUB_WORKSPACE/dist" http://127.0.0.1:4399 https://hub.example.test "$GH_FAKE" ci-owner "$F/run4.jsonl" "$F/manifest-code" || { cat "$F/run4.jsonl"; tail -n 40 "$F/run4.err"; exit 1; }
+          # The App step is over: the stand-in goes, before add-project's last step starts the real hub on the same ports.
+          for _ in $(seq 1 120); do grep -q '"step":"app","state":"\(done\|failed\)"' "$F/run4.jsonl" && break; sleep 0.5; done
+          sudo pkill -TERM -u wl-dash -f hub-stand-in.mjs
           wait
           cat "$F/run4.jsonl"
+          # add-project's dashboards step brought the real hub back, with the new instance.
+          systemctl is-active worklane-dashboard-hub.service
           [ "$(cat "$F/run4.rc")" = 0 ] || { tail -n 60 "$F/run4.err"; exit 1; }
           jq -se 'map(select(.state=="failed")) | length == 0' "$F/run4.jsonl"
           jq -se 'map(select(.step=="app" and .state=="ask" and .ask.kind=="approve_link")) | length == 2' "$F/run4.jsonl"
