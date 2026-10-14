@@ -43,6 +43,9 @@ test('regression: the longest TMPDIR a sandboxed run can get leaves room for Chr
   const script = `set -euo pipefail\n${consts}\nname=${LONGEST_NAME}\nroot="$BASE/$name"\nid=${LONGEST_ID}\n${fnBody(src, 'run_dir')}${fnBody(src, 'run_tmp')}d="$(run_dir "$id")"\nif declare -F run_tmp >/dev/null; then t="$(run_tmp "$id")"; fi\nprintf '%s' ${expr}\n`;
   const tmp = execFileSync('bash', ['-c', script], { encoding: 'utf8' });
   assert.ok(tmp.startsWith('/'), tmp);
+  // Regression: the coordinator calls the helper from a unit with PrivateTmp=yes, where /tmp and /var/tmp are not
+  // the host's; systemd, binding the directory into the run's sandbox, looked in the host's and the run died (226).
+  assert.doesNotMatch(tmp, /^\/(var\/)?tmp(\/|$)/, `${tmp} is under a directory PrivateTmp replaces`);
   const socket = tmp + CHROME_SOCKET;
   assert.ok(Buffer.byteLength(socket) < SUN_PATH_MAX, `${socket} is ${Buffer.byteLength(socket)} bytes`);
   // Tools that read TMP or TEMP instead get the same directory.
@@ -50,7 +53,7 @@ test('regression: the longest TMPDIR a sandboxed run can get leaves room for Chr
 });
 
 /** The helper, runnable as this user: its root-only tools stubbed, its paths in a temp dir, systemd-run logging its arguments. */
-function helperCopy(o: { user?: string } = {}) {
+function helperCopy(o: { user?: string; helperUser?: string; tmpBase?: 'absent' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'tr-tmp-'));
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -61,7 +64,9 @@ function helperCopy(o: { user?: string } = {}) {
   const real = (t: string) => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].map((d) => join(d, t)).find((p) => existsSync(p));
   const sdLog = join(dir, 'systemd-run.log');
   stub('systemd-run', `[ "$1" = --version ] && { echo 'systemd 255 (test)'; exit 0; }\nprintf '%s\\n' "$@" > "${sdLog}"`);
-  for (const t of ['systemctl', 'getent', 'id']) stub(t, 'exit 0');
+  for (const t of ['systemctl', 'getent', 'chown']) stub(t, 'exit 0');
+  // id -un: who the helper runs as (root on a machine; here this user, or a stand-in). Any other id: the user exists.
+  stub('id', `[ "$1" = -un ] && { echo '${o.helperUser ?? userInfo().username}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   // As this user: no chown to the test user, and rm without GNU's --one-file-system where it has none.
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
@@ -73,8 +78,11 @@ function helperCopy(o: { user?: string } = {}) {
     if (p) symlinkSync(p, join(bin, t));
   }
   const base = join(dir, 'base');
-  const tmpBase = join(dir, 'tmp');
-  mkdirSync(tmpBase);
+  const tmpBase = join(dir, 't');
+  if (o.tmpBase !== 'absent') {
+    mkdirSync(tmpBase);
+    chmodSync(tmpBase, 0o711);
+  }
   const user = o.user ?? userInfo().username;
   let src = readFileSync(helperSrc, 'utf8');
   for (const [re, to] of [
@@ -90,7 +98,7 @@ function helperCopy(o: { user?: string } = {}) {
   writeFileSync(helper, src);
   const name = 'shop';
   const run = (args: string[], input?: Buffer) => spawnSync('/bin/bash', [helper, name, ...args], { encoding: 'utf8', input, env: { PATH: '/usr/bin:/bin' } });
-  const runTmp = (id: string) => join(tmpBase, 'wlt-' + execFileSync('bash', ['-c', `printf '%s/%s' "$1" "$2" | ${real('sha256sum') ?? 'sha256sum'} | cut -c1-8`, '_', name, id], { encoding: 'utf8' }).trim());
+  const runTmp = (id: string) => join(tmpBase, execFileSync('bash', ['-c', `printf '%s/%s' "$1" "$2" | ${real('sha256sum') ?? 'sha256sum'} | cut -c1-8`, '_', name, id], { encoding: 'utf8' }).trim());
   /** create, from a real bundle of one commit under the run's refs. */
   const create = (id: string) => {
     const repo = mkdtempSync(join(dir, `repo-${id}-`));
@@ -107,7 +115,7 @@ function helperCopy(o: { user?: string } = {}) {
   };
   const runDir = (id: string) => join(base, name, 'runs', id);
   const sdArgs = () => (existsSync(sdLog) ? readFileSync(sdLog, 'utf8').trim().split('\n') : []);
-  return { dir, run, create, runTmp, runDir, sdArgs, user, done: () => rmSync(dir, { recursive: true, force: true }) };
+  return { dir, tmpBase, run, create, runTmp, runDir, sdArgs, user, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 const mode = (p: string) => (statSync(p).mode & 0o777).toString(8);
@@ -128,9 +136,48 @@ test('a run\'s TMPDIR is made by create as the run\'s user, 0700, and exec gives
     const a = h.sdArgs();
     for (const v of ['TMPDIR', 'TMP', 'TEMP']) assert.ok(a.includes(`--setenv=${v}=${t}`), `${v}: ${a.join(' ')}`);
     assert.ok(a.includes(`BindPaths=${t}`) && a.includes(`ReadWritePaths=${t}`), 'bound in and writable under ProtectSystem=strict');
-    assert.ok(a.includes('PrivateTmp=yes'), 'the rest of /tmp stays private');
+    assert.ok(a.includes(`TemporaryFileSystem=${h.tmpBase}:ro`), 'no other run\'s TMPDIR is in the sandbox');
+    assert.ok(a.includes('PrivateTmp=yes'), '/tmp stays private');
   } finally {
     h.done();
+  }
+});
+
+test('the base of the runs\' TMPDIRs is made by the helper itself, 0711 and its own user\'s; any other base is refused', { skip: !posix && 'bash' }, () => {
+  // A machine installed before the base existed: the first create makes it, with no setup step.
+  const h = helperCopy({ tmpBase: 'absent' });
+  try {
+    assert.ok(!existsSync(h.tmpBase));
+    const c = h.create('fast-abc-8');
+    assert.equal(c.status, 0, c.stderr);
+    assert.ok(lstatSync(h.tmpBase).isDirectory());
+    assert.equal(mode(h.tmpBase), '711');
+    assert.equal(statSync(h.tmpBase).uid, process.getuid!());
+    // Again, with it there: idempotent.
+    assert.equal(h.create('fast-abc-9').status, 0);
+    chmodSync(h.tmpBase, 0o777);
+    let bad = h.create('fast-abc-10');
+    assert.equal(bad.status, 2, bad.stderr);
+    assert.match(bad.stderr, / is \S+ 777, not \S+ and 0711/);
+    assert.ok(!existsSync(h.runDir('fast-abc-10')), 'no run was made');
+    rmSync(h.tmpBase, { recursive: true });
+    const target = join(h.dir, 'elsewhere');
+    mkdirSync(target);
+    symlinkSync(target, h.tmpBase);
+    bad = h.create('fast-abc-10');
+    assert.equal(bad.status, 2, bad.stderr);
+    assert.match(bad.stderr, /is a symlink/);
+  } finally {
+    h.done();
+  }
+  // Not the helper's own user's (root's, on a machine): refused.
+  const other = helperCopy({ helperUser: 'root-stand-in' });
+  try {
+    const bad = other.create('fast-abc-11');
+    assert.equal(bad.status, 2, bad.stderr);
+    assert.match(bad.stderr, /not root-stand-in's and 0711/);
+  } finally {
+    other.done();
   }
 });
 
@@ -154,7 +201,7 @@ test('create refuses a TMPDIR that is already there, a directory or a symlink, a
     assert.equal(c.status, 2, c.stderr);
     assert.match(c.stderr, /exists; refusing/);
     assert.ok(lstatSync(t).isSymbolicLink(), 'the symlink is left');
-    assert.ok(!existsSync(join(target, 'wlt')) && !existsSync(h.runDir(id)));
+    assert.ok(!existsSync(h.runDir(id)));
   } finally {
     h.done();
   }
@@ -222,8 +269,9 @@ test('wipe removes the run\'s TMPDIR with its directory, after a failed or timed
   } finally {
     h.done();
   }
-  // Someone else's directory at that path was never the run's: wipe leaves it, and doesn't count it as left over.
-  const other = helperCopy({ user: 'someone-else' });
+  // Another instance's directory at that path (neither this test user's nor the helper's own) was never the run's:
+  // wipe leaves it, and doesn't count it as left over.
+  const other = helperCopy({ user: 'someone-else', helperUser: 'root-stand-in' });
   try {
     const t = other.runTmp('fast-abc-7');
     mkdirSync(t, { mode: 0o700 });
@@ -233,4 +281,29 @@ test('wipe removes the run\'s TMPDIR with its directory, after a failed or timed
   } finally {
     other.done();
   }
+});
+
+test('regression: the CI step that calls the helper from inside the coordinator\'s sandbox takes every setting from the generated unit', { skip: !posix && 'bash' }, () => {
+  // The helper passed every check from a plain shell and failed on the machine, where the coordinator's unit
+  // (PrivateTmp=yes, ProtectSystem=full) calls it. The step's transient unit must be that unit's sandbox, not a copy.
+  const printed = execFileSync('bash', [join(repoRoot, 'scripts', 'setup', 'service.sh'), 'ci', '--print'], { encoding: 'utf8' });
+  const unit = printed.slice(printed.indexOf('# /etc/systemd/system/worklane-ci.service'));
+  const service = unit.slice(unit.indexOf('[Service]\n') + '[Service]\n'.length, unit.indexOf('\n[Install]'));
+  const settings = service.split('\n').filter((l) => /^[A-Za-z]+=/.test(l));
+  // What the unit starts and when it restarts is the unit's alone; everything else goes to the transient unit.
+  const want = settings.filter((l) => !/^(ExecStart|Type|Restart|RestartSec)=/.test(l));
+  const props = execFileSync('bash', [join(repoRoot, 'scripts', 'ci', 'coordinator-unit-props.sh'), 'ci'], { encoding: 'utf8' }).trim().split('\n');
+  assert.deepEqual(props, want);
+  for (const p of ['User=wl-ci', 'PrivateTmp=yes', 'ProtectSystem=full']) assert.ok(props.includes(p), p);
+  const wf = readFileSync(join(repoRoot, '.github', 'workflows', 'ci-slow.yml'), 'utf8');
+  const at = wf.indexOf('      - name: "regression: the helper works when called from inside the coordinator\'s own unit sandbox');
+  assert.ok(at > 0, 'the step is there');
+  const step = wf.slice(at, wf.indexOf('\n      - name:', at + 1));
+  assert.ok(step.includes('mapfile -t props < <(bash scripts/ci/coordinator-unit-props.sh ci)'));
+  assert.ok(step.includes('args=(); for p in "${props[@]}"; do args+=(-p "$p"); done'));
+  assert.ok(step.includes('inside() { sudo systemd-run --wait --pipe --collect --quiet "${args[@]}" "$@"; }'), 'no setting of its own');
+  assert.doesNotMatch(step, /systemd-run[^\n]* -p [A-Z]/, 'no -p written in the step');
+  // check, a run made, a command in it and its wipe all go through that unit; the old helper must fail there with 226.
+  for (const call of ['inside sudo -n "$H" ci check', 'inside sudo -n "$H" ci create ', 'inside sudo -n "$H" ci exec ', 'inside sudo -n "$H" ci wipe ']) assert.ok(step.includes(call), call);
+  assert.ok(step.includes('grep -q \'^FAIL in the sandbox (exit 226)\' "$RUNNER_TEMP/old-inside.log"'));
 });
