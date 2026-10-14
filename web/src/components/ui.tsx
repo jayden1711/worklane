@@ -85,7 +85,7 @@ export const STATUS_LABEL: Record<TaskStatus, string> = {
   released: 'Released',
 };
 
-const STATUS_TONE: Record<TaskStatus, 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = {
+export const STATUS_TONE: Record<TaskStatus, 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = {
   triage: 'neutral',
   ready: 'neutral',
   claimed: 'info',

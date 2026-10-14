@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { GoalGraph, DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -38,6 +38,7 @@ import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
+import { GoalGraphView } from './components/GoalGraph';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
 import { LogsPage } from './pages/Logs';
@@ -78,6 +79,7 @@ export function renderPage(name: keyof typeof pages, state: State): string {
   return renderToStaticMarkup(pages[name](state));
 }
 
+export const renderGoalGraph = (graph: GoalGraph) => renderToStaticMarkup(<GoalGraphView graph={graph} />);
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);

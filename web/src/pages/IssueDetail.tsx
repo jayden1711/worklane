@@ -8,6 +8,10 @@ import { DecisionCard } from './Decisions';
 import { Header } from './Overview';
 import { RunList, runsRefusal } from './RunDetail';
 import { areaOf } from './Issues';
+import { GoalGraphPanel } from '../components/GoalGraph';
+
+/** A goal issue (src/goal-split.ts GOAL_LABEL), or one already split (GOAL_SPLIT_LABEL): its page shows the task graph. */
+export const isGoal = (labels: readonly string[]) => labels.includes('type:goal') || labels.includes('goal:split');
 
 interface RawEvent { id: number; ts: string; type: string; actor: string; payload: Record<string, unknown> }
 
@@ -155,6 +159,7 @@ export function IssueDetail({ state, issue }: { state: State; issue: number }) {
               </div>
             </Card>
           )}
+          {isGoal(t.labels) && <GoalGraphPanel issue={t.issue} lastId={state.lastId} />}
           <Checks runs={checks} />
           <RunList issue={t.issue} lastId={state.lastId} refused={runsRefusal(state)} />
           <Card className="overflow-hidden">
