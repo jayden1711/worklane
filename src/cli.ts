@@ -53,6 +53,7 @@ import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
+import { intakeCheckCommand } from './intake/check.js';
 import { installService, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
@@ -158,6 +159,8 @@ usage: ${BRAND.cli} <command> [options]
   discord channels [--instance name]
                                    read-only: the text and announcement channels the instance's bot can see,
                                    one "<server> / #<channel> <id>" line each (run as the instance's user)
+  intake check [--instance name]   read-only: validate the instance's intake.yaml as the coordinator reads it:
+                                   what is on, or each error with its path (exit 1); no file: intake is off
   instance init <name> --repo <path> --github <owner/repo>
                                    create an instance home (policy, credential references, state)
   instance list | show <name>      instances on this machine; show checks policy and credentials
@@ -1064,6 +1067,14 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return discordChannelsCommand({ instance: instanceOpt });
+    }
+
+    case 'intake': {
+      if (sub !== 'check' || rest.length) {
+        console.error(commandUsage('intake'));
+        return 2;
+      }
+      return intakeCheckCommand({ instance: instanceOpt });
     }
 
     case 'prod-read': {
