@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventLog, storageFailure } from '../src/events/log.js';
-import { DiskGuard, floorBytes, RETRY_MIN_MS } from '../src/disk-guard.js';
+import { DiskGuard, floorBytes, RETRY_MIN_MS, siteDiskGuard } from '../src/disk-guard.js';
 import { readIncidents } from '../src/watchdog/incidents.js';
 import { EVENTS_KEPT_NOTE, PrTestRuns, type OpenPr } from '../src/coordinator/test-runs.js';
 import { checkOutput } from '../src/testrun/checks.js';
@@ -305,4 +305,22 @@ test('a coordinator tick keeps running on a full disk, starts no agent run while
   await c.idle();
   assert.ok(runner.calls.length > 0, 'runs start again');
   assert.ok(log.read(0, ['coordinator.tick']).filter((e) => e.actor !== 'filler').length >= 3, 'every tick is in the log');
+});
+
+test("an instance's coordinator raises disk_full under the instance's name (what the Health page filters on), never its user@host id", () => {
+  const log = bufferedLog();
+  const dir = tmp('incidents-');
+  const g = siteDiskGuard({ log, stateDir: tmp('state-'), testRuns: true, instance: 'shop', actor: 'wl-shop@machine', floor: () => ({ gb: 1, pct: 0 }), incidentsDir: dir, say: () => undefined });
+  fill(log);
+  log.append('issue.seen', seen(1), 'c');
+  const open = readIncidents(dir).incidents.filter((x) => x.kind === 'disk_full' && !x.resolvedAt);
+  assert.deepEqual(open.map((x) => [x.instance, x.key, x.severity]), [['shop', 'shop', 'red']]);
+  assert.ok(open[0]!.detail.includes('Paused: new test runs'));
+  g.stop();
+  const local = bufferedLog();
+  const dir2 = tmp('incidents-');
+  siteDiskGuard({ log: local, stateDir: tmp('state-'), testRuns: false, instance: null, actor: 'me@laptop', floor: () => ({ gb: 1, pct: 0 }), incidentsDir: dir2, say: () => undefined });
+  fill(local);
+  local.append('issue.seen', seen(1), 'c');
+  assert.equal(readIncidents(dir2).incidents.length, 0, 'a local site raises none');
 });

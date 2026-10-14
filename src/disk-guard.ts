@@ -191,6 +191,23 @@ export class DiskGuard {
   }
 }
 
+/**
+ * The guard for a coordinator's site: its state dir, and the test runs' base when it runs test runs. INVARIANT: the
+ * incident names the instance by its name, as the Health page and the watchdog filter on it, never the process's
+ * user@host id; a site with no instance (local mode) says it in the journal only.
+ */
+export function siteDiskGuard(o: { log: EventLog; stateDir: string; testRuns: boolean; instance: string | null; actor: string; floor: () => Floor; inFlight?: () => number | undefined; incidentsDir?: string; say?: (line: string) => void }): DiskGuard {
+  return new DiskGuard({
+    log: o.log,
+    instance: o.instance ?? o.actor,
+    paths: [o.stateDir, ...(o.testRuns ? [TEST_RUN_BASE] : [])],
+    floor: o.floor,
+    ...(o.instance ? { incidents: o.incidentsDir ? { dir: o.incidentsDir } : {} } : {}),
+    ...(o.inFlight ? { inFlight: o.inFlight } : {}),
+    ...(o.say ? { say: o.say } : {}),
+  });
+}
+
 /** Run a guard's step on its own timer until stopped; a failure that isn't the disk's is said in the journal, and the next step tries again. */
 export function startDiskGuard(g: DiskGuard, everyMs = RETRY_MIN_MS, say: (line: string) => void = (l) => console.error(l)): () => void {
   const t = setInterval(() => {

@@ -23,7 +23,7 @@ import { backup, dirStore } from './events/backup.js';
 import { maybeOffsiteBackup, OFFSITE_FILE } from './offsite-backup.js';
 import { tidyState } from './state-tidy.js';
 import { EventLog, storageFailure } from './events/log.js';
-import { DiskGuard, startDiskGuard, TEST_RUN_BASE } from './disk-guard.js';
+import { siteDiskGuard, startDiskGuard } from './disk-guard.js';
 import { watchdogConfig } from './watchdog/config.js';
 import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
@@ -247,7 +247,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const lanes = laneRuns(i);
   const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
   const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile);
-  return runSite(siteForInstance(i), { ...opts, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /**
@@ -300,7 +300,7 @@ function wakeableSleep() {
   };
 }
 
-export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan'] }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+export async function runSite(site: Site, opts: { /** The instance's name (its incidents' `instance`); absent: a local site, which raises none. */ instance?: string; once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan'] }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -316,15 +316,16 @@ export async function runSite(site: Site, opts: { once?: boolean; intervalMs?: n
   // guard writes it again, holds new work meanwhile, and raises the disk_full incident (src/disk-guard.ts).
   const log = new EventLog(site.logPath, { buffer: {} });
   let inFlight = (): number | undefined => undefined;
-  const disk = new DiskGuard({
+  const disk = siteDiskGuard({
     log,
-    instance: instanceId(),
-    paths: [state, ...(opts.testRun ? [TEST_RUN_BASE] : [])],
+    stateDir: state,
+    testRuns: !!opts.testRun,
+    instance: opts.instance ?? null,
+    actor: instanceId(),
     floor: () => {
       const c = watchdogConfig();
       return { gb: c.minFreeGb, pct: c.minFreePct };
     },
-    ...(opts.incidents ? { incidents: {} } : {}),
     inFlight: () => inFlight(),
   });
   const stopDisk = startDiskGuard(disk);
