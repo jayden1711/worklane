@@ -144,7 +144,7 @@ export type Fix =
   /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
   | { kind: 'signin'; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
-  | { kind: 'form'; form: 'policy'; label: string };
+  | { kind: 'form'; form: 'policy' | 'repo-config'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
 
@@ -287,6 +287,9 @@ export function detectTailscale(p: Pick<SetupProbe, 'which' | 'run'>): (Detected
     return null;
   }
 }
+
+/** WHY: what the Repo config form does, by hand (the owners, required checks and budget steps). */
+const REPO_CONFIG_BY_HAND = `a reviewed commit (PR) to ${BRAND.configDir}/config.yaml (owners.writers, required_checks) and ${BRAND.configDir}/agents.yaml (daily_budget_usd, roles.workers count and model)`;
 
 const placeholderOwners = (cfg: Config) => /your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project.owners)) || /^owner\/repo$/.test(cfg.project.project.repo);
 
@@ -508,7 +511,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'few',
     today: `\`git remote set-head origin --auto\`, then \`${BRAND.cli} init\` again.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'action', action: 'default-branch', label: 'Set' },
+    automation: 'git fetch origin <branch>, then git remote set-head origin --auto',
     detect: (k) => {
       const b = defaultBranch(k);
       if (!b) return no("can't tell the default branch: origin/HEAD isn't set and there's no config yet");
@@ -586,7 +590,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Edit owners in ${BRAND.configDir}/config.yaml (the template's your-github-handle) and merge it through a PR.`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -602,7 +607,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks (empty: nothing is ever marked ready).`,
-    fix: { kind: 'coming' },
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
@@ -620,8 +626,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'most',
     today: `Review agents.yaml (budget, models), guardrails.yaml and review.yaml in ${BRAND.configDir}/: they start from the templates.`,
-    fix: { kind: 'screen', path: '/settings', label: 'Settings (read-only here: changed through a reviewed commit)' },
-    automation: `a reviewed commit to ${BRAND.configDir}/agents.yaml (daily_budget_usd, roles), guardrails.yaml and review.yaml`,
+    fix: { kind: 'form', form: 'repo-config', label: 'Change' },
+    automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
