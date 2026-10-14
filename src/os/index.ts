@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, chownSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
@@ -346,6 +346,35 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+}
+
+/**
+ * A regular file's owner, mode and text, read through one descriptor opened without following a symlink, so what is
+ * checked is what is read. Refused (by kind): no such file, unreadable, a symlink, not a regular file, or over
+ * `maxBytes`. Native Windows has no owners to check: unsupported.
+ */
+export function readRegularFile(file: string, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
+  if (process.platform === 'win32') return { kind: 'unsupported' };
+  let fd: number;
+  try {
+    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up).
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
+    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+  try {
+    const s = fstatSync(fd);
+    if (!s.isFile()) return { kind: 'not-file' };
+    if (s.size > maxBytes) return { kind: 'too-big', size: s.size };
+    const buf = Buffer.alloc(maxBytes + 1);
+    const n = readSync(fd, buf, 0, maxBytes + 1, 0);
+    if (n > maxBytes) return { kind: 'too-big', size: n };
+    return { kind: 'file', uid: s.uid, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), text: buf.subarray(0, n).toString('utf8') };
+  } finally {
+    closeSync(fd);
   }
 }
 

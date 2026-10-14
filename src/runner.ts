@@ -143,8 +143,9 @@ export interface AgentRunner {
   run(req: RunRequest): Promise<RunResult>;
 }
 
-// CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret).
-const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles', 'NODE_EXTRA_CA_CERTS'];
+// CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret). No CA bundle: a custom CA comes only from
+// root's network.json (src/network.ts outboundEnv, applied below).
+const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
 
 /**
  * The agent's whole environment. Anything not listed is dropped, which
