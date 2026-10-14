@@ -64,6 +64,11 @@ cat /etc/worklane/slots.json
 
 say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo> and stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
+if sudo_regex_ok; then
+  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the stage-update-signer and discard-update-signer rules are installed"
+else
+  echo "REFUSED: the stage-update-signer and discard-update-signer rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. Staging a release signer from the dashboard is refused here; add one at a root shell with updates.sh --signer." >&2
+fi
 
 say "check"
 for u in "${users[@]}"; do
@@ -96,8 +101,8 @@ for u in "${users[@]}"; do
     # shellcheck disable=SC2086 # each case is its words; set -f: the * is a word, never a file list
     if (set -f; sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1); then echo "FAIL: $u may run $bad" >&2; exit 1; fi
   done
-  if ! sudo -n -l -U "$u" "$MACHINE_HELPER" stage-update-signer owner@example.com ssh-ed25519 "$probe_key" >/dev/null 2>&1; then
-    add_signer_note="NOTE: this sudo ($(sudo -V | head -1)) doesn't match stage-update-signer's pattern (it needs 1.9.10 or later), so staging a release signer from the dashboard is refused; add one in a terminal instead (updates.sh --signer)"
+  if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" stage-update-signer owner@example.com ssh-ed25519 "$probe_key" >/dev/null 2>&1; then
+    echo "FAIL: sudo $(sudo_version) should match the stage-update-signer pattern, and $u can't run it" >&2; exit 1
   fi
   if ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
     add_project_note="NOTE: this sudo ($(sudo -V | head -1)) doesn't match add-project's pattern (it needs 1.9.10 or later), so add-project from the dashboard is refused; run add-project.sh in a terminal instead"
@@ -105,5 +110,4 @@ for u in "${users[@]}"; do
 done
 if id -u wl-dash >/dev/null 2>&1 && sudo -n -l -U wl-dash "$MACHINE_HELPER" set-slots 1 >/dev/null 2>&1; then echo "FAIL: wl-dash may run the helper" >&2; exit 1; fi
 [ -z "${add_project_note:-}" ] || echo "$add_project_note"
-[ -z "${add_signer_note:-}" ] || echo "$add_signer_note"
 echo "OK: each coordinator may run the helper's exact commands; nothing else, and not wl-dash"

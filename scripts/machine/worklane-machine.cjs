@@ -220,7 +220,7 @@ function readPending(file = PENDING, now = Date.now()) {
   return list
     .filter((e) => e && signerPrincipal(e.principal) && ed25519Key(e.key) && typeof e.at === 'string' && now - Date.parse(e.at) >= 0 && now - Date.parse(e.at) < PENDING_TTL_MS)
     .slice(0, PENDING_MAX)
-    .map((e) => ({ principal: e.principal, key: e.key, fingerprint: fingerprint(e.key), by: typeof e.by === 'string' ? e.by.slice(0, 64) : 'unknown', at: e.at }));
+    .map((e) => ({ principal: e.principal, key: e.key, fingerprint: fingerprint(e.key), by: typeof e.by === 'string' ? e.by.slice(0, 64) : 'unknown', instance: instanceName(e.instance) ? e.instance : null, at: e.at }));
 }
 
 /** The pending list, whole: a temp file beside it, then a rename. */
@@ -244,8 +244,9 @@ function stageSigner(s) {
     process.stderr.write(`${PENDING_MAX} signers are already staged: confirm or discard one first\n`);
     return 1;
   }
+  // Who staged it: the coordinator user that ran this through sudo, and so the instance whose dashboard asked.
   const by = process.env.SUDO_USER || 'root';
-  writePending([...pending, { principal: s.principal, key: s.key, fingerprint: fp, by, at: new Date().toISOString() }]);
+  writePending([...pending, { principal: s.principal, key: s.key, fingerprint: fp, by, instance: coordinatorInstance(by), at: new Date().toISOString() }]);
   logLine('updates.pending_signer', null, `staged ${s.principal} ssh-ed25519 ${s.key} (${fp})`);
   process.stdout.write(`staged ${s.principal} ssh-ed25519 ${s.key} (${fp}): not a signer until an admin confirms it on this machine, within 24 hours, with: sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer ${fp}\n`);
   return 0;

@@ -4,7 +4,7 @@
 // daily digest is its Markdown, posted as a GitHub comment (`#n` and commit SHAs link themselves there).
 
 import { project } from './projection.js';
-import { heldUpdate, updateLog, type UpdateEntry } from './updates.js';
+import { heldUpdate, RELEASE_HOLD, updateLog, type UpdateEntry } from './updates.js';
 import { batchSummaries, type BatchSummary } from './coordinator/pr-batch.js';
 import type { StoredEvent } from './events/types.js';
 
@@ -259,7 +259,7 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
   // An engine update the machine rolled back and holds (a failed migration, or services that didn't come up):
   // the owner's, until a later install succeeds. From the machine's update log, not this instance's events.
   const held = heldUpdate((o.updates ?? updateLog()).filter((u) => Date.parse(u.at) <= t));
-  if (held) add('update_held', held.at, null, null, `${held.reason.split('\n')[0]!.slice(0, 240)}; the commit is held until a newer one, or until you turn updates off and on`, held.sha ? { sha: held.sha } : {});
+  if (held) add('update_held', held.at, null, null, `${held.reason.split('\n')[0]!.slice(0, 240)}; the commit is held until a newer one, or until an admin releases it at a root shell: ${RELEASE_HOLD}`, held.sha ? { sha: held.sha } : {});
 
   // By kind, then the longest-waiting first.
   items.sort((a, b) => WAIT_KINDS.indexOf(a.kind) - WAIT_KINDS.indexOf(b.kind) || a.since.localeCompare(b.since));

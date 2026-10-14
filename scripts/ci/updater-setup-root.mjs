@@ -169,7 +169,16 @@ console.log(out);
 assert.ok(out.includes(`staged other@example.com ssh-ed25519 ${other.pub} (${other.fingerprint})`), 'it says the principal, the key and ssh-keygen\'s fingerprint');
 assert.ok(out.includes(`sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer ${other.fingerprint}`), 'and the root command that would confirm it');
 assert.equal(owner(PENDING), '0:0 644');
-assert.deepEqual(pending().map((e) => [e.principal, e.key, e.fingerprint, e.by]), [['other@example.com', other.pub, other.fingerprint, coordinator]]);
+assert.deepEqual(pending().map((e) => [e.principal, e.key, e.fingerprint, e.by, e.instance]), [['other@example.com', other.pub, other.fingerprint, coordinator, coordinator.slice(3)]]);
+// Staging raises its own alert, through the installed engine's watchdog probe: the principal, the fingerprint, who staged it and from which instance.
+{
+  const { stagedSignerFindings } = await import(pathToFileURL('/opt/worklane/current/dist/src/watchdog/probes.js').href);
+  const { machineChanges } = await import(pathToFileURL('/opt/worklane/current/dist/src/machine.js').href);
+  const staged = stagedSignerFindings(machineChanges(), Date.now()).filter((f) => f.key === `other@example.com ${other.fingerprint}`);
+  assert.deepEqual(staged.map((f) => [f.kind, f.instance]), [['update_signer_staged', coordinator.slice(3)]]);
+  assert.ok(staged[0].detail.includes(`by ${coordinator} (instance ${coordinator.slice(3)})`), staged[0].detail);
+  console.log(`OK: staging raised update_signer_staged: ${staged[0].detail}`);
+}
 assert.ok(!existsSync(SIGNERS), 'staging didn\'t start the signers file');
 assert.match(verify('v1.0.2').reason ?? '', /no allowed signers file/, 'a staged key is trusted for nothing');
 
@@ -221,8 +230,17 @@ assert.match(refusedAsRoot(['--confirm-signer', mine.fingerprint]), /no staged s
 for (const bad of [['--confirm-signer', 'SHA256:x'], ['--confirm-signer', other.pub], ['--confirm-signer'], ['--signer', '*', 'ssh-ed25519', other.pub], ['--signer', 'third@example.com', 'ssh-rsa', other.pub], ['--signer', 'third@example.com', 'ssh-ed25519'], ['--channel', 'beta']]) refusedAsRoot(bad, engine);
 assert.deepEqual(state(), untouched, 'a refused updates.sh changed something');
 assert.equal(verify('v1.0.2').ok, false);
-// The staged signer's own fingerprint: shown, then added after the admin's line, then cleared.
-const confirmed = sh('bash', [script, '--confirm-signer', other.fingerprint]);
+// The staged signer's own fingerprint, with the wrong principal typed (or none): nothing is added, and it stays staged.
+for (const typed of ['owner@example.com\n', '\n', '']) {
+  const r = spawnSync('bash', [script, '--confirm-signer', other.fingerprint], { encoding: 'utf8', cwd: '/', input: typed });
+  assert.notEqual(r.status, 0, `typed ${JSON.stringify(typed)}`);
+  assert.match(r.stderr, /isn't the staged signer's \(other@example\.com\): nothing was added/);
+  assert.match(r.stdout, new RegExp(`the staged signer, staged by ${coordinator} \\(instance ${coordinator.slice(3)}\\) at `));
+}
+assert.deepEqual(state(), untouched, 'a wrong principal changed something');
+console.log('OK: --confirm-signer with the right fingerprint but a wrong or missing typed principal added nothing');
+// Then shown, the principal typed, added after the admin's line, cleared.
+const confirmed = execFileSync('bash', [script, '--confirm-signer', other.fingerprint], { encoding: 'utf8', cwd: '/', input: 'other@example.com\n', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 console.log(confirmed);
 const shown = confirmed.indexOf(`  principal:   other@example.com\n  public key:  ssh-ed25519 ${other.pub}\n  fingerprint: ${other.fingerprint}`);
 assert.ok(shown > 0 && shown < confirmed.indexOf('allowed_signers: added other@example.com'), 'the principal and key are printed before the signer is added');
@@ -269,5 +287,65 @@ if (spawnSync('id', ['-u', 'wl-dash']).status === 0) {
     assert.notEqual(spawnSync('sudo', ['-n', '-l', '-U', 'wl-dash', HELPER, ...a]).status, 0, `wl-dash may run ${a.join(' ')}`);
   }
 }
+// ---- a hold on a rolled-back commit: what the updater writes after a rollback (root, here). Nothing a coordinator
+// runs through the helper releases it; only updates.sh --release-hold does, at a root shell.
+const HELD = '/var/lib/worklane/update-held.json';
+const heldSha = 'b'.repeat(40);
+writeFileSync(HELD, `${JSON.stringify({ sha: heldSha, at: new Date(Date.now() - 60_000).toISOString(), failed: ['worklane-ci.service: failed'] })}\n`, { mode: 0o644 });
+const heldBytes = sha(HELD);
+const heldRun = async () => {
+  let current = 'a'.repeat(40);
+  let clock = 0;
+  return updater.run({
+    config: () => JSON.parse(readFileSync(CONFIG, 'utf8')),
+    held: () => (existsSync(HELD) ? JSON.parse(readFileSync(HELD, 'utf8')) : null),
+    installed: () => current,
+    installedVersion: () => '1.0.0',
+    verifyRelease: () => ({ ok: true, base: 'c'.repeat(40) }),
+    exec: (file, args) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\trefs/tags/v1.0.9\n${heldSha}\trefs/tags/v1.0.9^{}\n` : file === 'git' ? `${heldSha}\trefs/heads/main\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-ci-standin.service loaded active running x\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : ''),
+    fetchJson: async (url) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: heldSha, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
+    slots: () => [],
+    alive: () => false,
+    installTree: () => {},
+    syncHelpers: () => [],
+    switchTo: (s) => (current = s),
+    now: () => clock,
+    sleep: async (ms) => void (clock += ms),
+    log: () => {},
+    hold: () => {},
+    note: (event) => event,
+  });
+};
+// Updates on (as root, here), so the run gets as far as the hold.
+writeFileSync(CONFIG, `${JSON.stringify({ ...JSON.parse(readFileSync(CONFIG, 'utf8')), enabled: true })}\n`);
+assert.equal(await heldRun(), 'held');
+for (const args of [['set-update-channel', 'release'], ['set-updates', 'off'], ['set-updates', 'on'], ['set-update-channel', 'release']]) {
+  ok(...args);
+  assert.equal(sha(HELD), heldBytes, `${args.join(' ')} left the hold file as it was`);
+  assert.equal(await heldRun(), args[1] === 'off' ? 'disabled' : 'held', `still held after ${args.join(' ')}`);
+}
+console.log(`OK: a rolled-back commit stayed held through set-update-channel release and set-updates off/on, run as ${coordinator} through sudo`);
+const released = sh('bash', [script, '--release-hold']);
+assert.ok(released.includes(`held: ${heldSha.slice(0, 12)}`) && released.includes('released:'), released);
+assert.ok(!existsSync(HELD) && existsSync('/var/lib/worklane/update-held.released.json'));
+assert.equal(await heldRun(), 'installed');
+console.log('OK: sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold released it, and the next run installed the commit');
+writeFileSync(CONFIG, `${JSON.stringify({ ...JSON.parse(readFileSync(CONFIG, 'utf8')), enabled: false })}\n`);
+
+// ---- the signer rules and this runner's sudo
+const sudoV = sh('sudo', ['-V']).split('\n')[0];
+const rule = readFileSync('/etc/sudoers.d/worklane-machine', 'utf8');
+assert.ok(rule.includes('^stage-update-signer ') && rule.includes('^discard-update-signer '), 'the signer rules are installed');
+console.log(`OK: ${sudoV} on this runner (1.9.10 or later): the stage-update-signer and discard-update-signer rules are installed`);
+// The same rule, made with a stand-in sudo reporting 1.9.9: those two left out, the rest there, and visudo accepts it.
+const fake = mkdtempSync('/var/lib/wl-fake-sudo-');
+writeFileSync(join(fake, 'sudo'), '#!/bin/sh\n[ "$1" = -V ] && echo "Sudo version 1.9.9" && exit 0\nexit 1\n', { mode: 0o755 });
+const older = execFileSync('bash', ['-c', 'source "$1"; machine_sudoers wl-ci', '_', '/opt/worklane/current/scripts/setup/lib.sh'], { encoding: 'utf8', env: { ...process.env, PATH: `${fake}:${process.env.PATH}` } });
+assert.ok(!older.includes('stage-update-signer ') && !older.includes('discard-update-signer ') && older.includes('install-updater') && older.includes('^add-project '), older);
+writeFileSync(join(fake, 'rule'), older);
+assert.equal(spawnSync('visudo', ['-cf', join(fake, 'rule')]).status, 0, 'visudo accepts the rule without them');
+rmSync(fake, { recursive: true, force: true });
+console.log('OK: with a stand-in sudo reporting 1.9.9, the rule leaves out stage-update-signer and discard-update-signer, keeps the rest, and visudo accepts it');
+
 rmSync(work, { recursive: true, force: true });
 console.log(`OK: as ${coordinator} through sudo: the updater installed (off, timer active), the channel set to release and never to main, a signer staged in the root-owned pending list (at most 4) with the signers file untouched and its tag still refused; adding or confirming a signer, and every other argument list, refused. As root: updates.sh --confirm-signer added only the staged signer with the matching fingerprint, appended, and cleared it; an expired one and a wrong fingerprint added nothing; --signer and --channel main worked; each signer added reads as a watchdog alert`);

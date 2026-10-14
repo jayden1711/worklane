@@ -360,12 +360,14 @@ The on/off switch is the **Engine updates** row in the table below, as before.
    sudo bash /opt/worklane/current/scripts/setup/updates.sh --confirm-signer SHA256:<the fingerprint the page shows>
    ```
 
-   Check that fingerprint against your own key first (`ssh-keygen -lf <key>.pub` prints the same). The command applies only a staged signer with exactly that fingerprint, prints its principal and key before adding it, appends one line (the signers already there stay as they are), and clears it from the pending list. A fingerprint that matches nothing staged adds nothing.
+   Check that fingerprint against your own key first (`ssh-keygen -lf <key>.pub` prints the same). The command applies only a staged signer with exactly that fingerprint. It prints who staged it (the coordinator user, and so the instance) with its principal and key, then asks you to **type the principal**: anything else, or nothing, adds nothing. Then it appends one line (the signers already there stay as they are), and clears it from the pending list. A fingerprint that matches nothing staged adds nothing.
 3. A staged signer waits 24 hours, then is dropped; **Discard** takes it out sooner. At most 4 wait at once.
 
-Whenever a signer is added, by this route or by `updates.sh --signer`, the watchdog raises an incident ("A release signer was added for engine updates") with the principal and the key's fingerprint: it shows on the Health page and is posted once to the ops channel. It closes by itself a day later. If you didn't add it, turn engine updates off, remove its line at a root shell, and find out who did.
+Staging a signer raises its own incident ("A release signer was staged for engine updates"), with the principal, the fingerprint, and the coordinator user and instance that staged it, so an owner hears of a request before anyone is asked to confirm it. Whenever a signer is added, by this route or by `updates.sh --signer`, the watchdog raises an incident ("A release signer was added for engine updates") with the principal and the key's fingerprint: it shows on the Health page and is posted once to the ops channel. It closes by itself a day later. If you didn't add it, turn engine updates off, remove its line at a root shell, and find out who did.
 
 What the page can change, and as whom: each confirmed step is one command of the root-owned machine helper (`install-updater`, `set-update-channel release`, `stage-update-signer` or `discard-update-signer <principal> ssh-ed25519 <public key>`), recorded by this instance's dashboard and run by its coordinator through `sudo -n`. Only an owner of the instance who is also a machine owner, on an allowed device, can confirm one. The dashboard itself never runs sudo and never writes these files.
+
+**Holds.** A commit the updater rolled back is held: it is not tried again until a newer commit lands, or until an admin releases it at a root shell with `sudo bash /opt/worklane/current/scripts/setup/updates.sh --release-hold`, which shows what was held and why, moves the hold aside and logs it. Nothing on this page releases a hold: neither the channel nor the on/off switch, nor anything else a coordinator can run through the machine helper.
 
 What it can never do: add a signer, or remove or replace one (the helper never writes `allowed_signers`; only `updates.sh` does, as root, and only by adding a line); stage a wildcard, a list or an option such as `cert-authority`, or any key type but ed25519; move a machine to the `main` channel; point the updater at another signers file; change the required checks; or turn signature or check verification off.
 
@@ -378,7 +380,7 @@ sudo bash scripts/setup/updates.sh --confirm-signer SHA256:<fingerprint>        
 sudo bash scripts/setup/updates.sh --channel release                                  # or: main (a root shell only)
 ```
 
-Any other kind of key, or removing one, is an edit of `/etc/worklane/allowed_signers` by hand (one line per key: `<principal> <key type> <public key>`, root:root 0644). A machine whose sudo is older than 1.9.10 can't match the staging command's pattern: there, use `--signer`.
+Any other kind of key, or removing one, is an edit of `/etc/worklane/allowed_signers` by hand (one line per key: `<principal> <key type> <public key>`, root:root 0644). The two signer rules in the machine helper's sudoers file are written as patterns, which sudo reads as such only from 1.9.10. `machine-helper.sh` checks this machine's sudo: on an older one it does not install those two, says so (`REFUSED: ...`), and installs every other rule. Staging from the page is then refused; use `--signer` at a root shell.
 
 Above the machine settings, the **Updates** panel (`GET /api/updates`, owners and writers) says where the engine stands: the version and commit installed now, the last update, any rollback or held commit with its reason (a canary that failed says so), and the canary's last result: passed or failed (or timed out), after an update or the daily one, how long it took, and a link to its PR. See [canary.md](canary.md) for setting the canary up.
 
