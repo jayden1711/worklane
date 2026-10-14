@@ -49,8 +49,15 @@ jobs:
           sudo useradd --create-home --shell /bin/bash wl-shop
           sudo chmod 0750 "$(getent passwd wl-shop | cut -d: -f6)"
           sudo install -d -m 0755 /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane
+          # The test runs' directory as test-user.sh makes it: root 0711, each test user passing through to its own run
+          # directory. Anyone may pass through it, so only the ACL keeps the runner user out (a real machine's install refused
+          # without one: "FAIL wl-ci-worklane can reach /var/lib/worklane-test (open)").
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin wl-test-shop
+          sudo install -d -o root -g root -m 0711 /var/lib/worklane-test
+          sudo install -d -o wl-test-shop -g wl-test-shop -m 0700 /var/lib/worklane-test/shop
+          sudo -u wl-test-shop touch /var/lib/worklane-test/shop/.ci-test-user
           # A file in each place the runner user must not reach: its jobs must not see these.
-          for d in /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /root "$(getent passwd wl-shop | cut -d: -f6)"; do sudo touch "$d/.ci-sentinel"; done
+          for d in /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test /root "$(getent passwd wl-shop | cut -d: -f6)"; do sudo touch "$d/.ci-sentinel"; done
           # A service on this machine, as nobody, on every address: reachable by others, by the runner user on none.
           port=18080
           sudo -u nobody nohup python3 -m http.server "$port" --bind 0.0.0.0 --directory /tmp > /dev/null 2>&1 &
@@ -136,6 +143,10 @@ jobs:
           for _ in $(seq 180); do [ "$(sudo journalctl -u "worklane-ci-${NAME}@1.service" -o cat --no-pager | grep -c '^STANDIN idle$')" -ge 7 ] && break; sleep 1; done
           sudo bash scripts/setup/ci-runner.sh check "$REPO" --name "$NAME" | tee "$RUNNER_TEMP/check.log"
           tail -n 1 "$RUNNER_TEMP/check.log" | grep -qx 'OK: all checks passed'
+          grep -qx "PASS wl-ci-$NAME can't read, write or enter /var/lib/worklane-test" "$RUNNER_TEMP/check.log"
+          # The test user still reaches its own run directory through the denied one: the entry is the runner user's only.
+          sudo -u wl-test-shop test -f /var/lib/worklane-test/shop/.ci-test-user || { echo "the ACL locked the test user out" >&2; exit 1; }
+          getfacl -p /var/lib/worklane-test | grep -qx "user:wl-ci-$NAME:---"
           for p in 'is refused 127.0.0.1 9' 'is refused 10.255.255.1 9' 'is refused 100.100.100.100 80' 'reaches github.com 443'; do grep -q "^PASS wl-ci-$NAME $p" "$RUNNER_TEMP/check.log"; done
           before="$(systemctl show "worklane-ci-${NAME}@1.service" -p InvocationID --value)"
           n="$(nproc)"
@@ -157,10 +168,11 @@ jobs:
           if id "wl-ci-$NAME" 2> /dev/null; then echo "the user is still there" >&2; exit 1; fi
           if sudo nft list table inet "worklane_ci_$NAME" 2> /dev/null; then echo "the firewall table is still there" >&2; exit 1; fi
           if systemctl list-unit-files --no-legend 'worklane-ci-*' | grep .; then echo "units are still there" >&2; exit 1; fi
+          sudo -u wl-test-shop test -f /var/lib/worklane-test/shop/.ci-test-user || { echo "remove locked the test user out" >&2; exit 1; }
           for p in /var/lib/worklane-ci /opt/worklane-ci /usr/local/libexec/worklane-ci /etc/worklane-ci /etc/systemd/system/worklane-ci.slice; do
             if [ -e "$p" ]; then echo "$p is still there" >&2; exit 1; fi
           done
-          if getfacl -p /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane | grep "wl-ci-$NAME"; then echo "an ACL entry is still there" >&2; exit 1; fi
+          if getfacl -p /srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test | grep "wl-ci-$NAME"; then echo "an ACL entry is still there" >&2; exit 1; fi
       - name: on failure, the units' logs
         if: failure()
         run: |
