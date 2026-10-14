@@ -126,7 +126,12 @@ function stat(path) {
 }
 
 const results = [];
-async function screen(name, fn) {
+/**
+ * One screen of the walk. A failed screen is recorded with what the page showed, and the walk goes on to the next
+ * (the run still fails at the end), so one run shows every screen's result; `gate` stops the walk there instead,
+ * for a screen everything after needs (the key page).
+ */
+async function screen(name, fn, { gate = false } = {}) {
   const s = Date.now();
   try {
     const detail = (await fn()) ?? null;
@@ -136,12 +141,14 @@ async function screen(name, fn) {
   } catch (e) {
     const shot = join(out, `${name.replace(/[^a-z0-9]+/gi, '-')}.png`);
     try {
-      writeFileSync(shot, Buffer.from((await cdp.send('Page.captureScreenshot', { format: 'png' })).data, 'base64'));
+      writeFileSync(shot, Buffer.from((await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true })).data, 'base64'));
     } catch {
       // the screenshot is a help, never the failure
     }
-    say({ screen: name, ok: false, ms: Date.now() - s, error: e.message.split('\n').slice(0, 4).join(' | '), screenshot: shot, page: (await text('#root').catch(() => ''))?.slice(0, 1500) });
-    throw e;
+    const r = { screen: name, ok: false, ms: Date.now() - s, error: e.message.split('\n').slice(0, 6).join(' | '), screenshot: shot, page: (await text('main').catch(() => ''))?.replace(/\s+/g, ' ').slice(0, 3000) };
+    results.push(r);
+    say(r);
+    if (gate) throw e;
   }
 }
 
@@ -158,7 +165,7 @@ async function keyPage() {
     await waitFor(tid('page-first-run'), 30_000);
     assert.ok(!(await evaluate('location.href')).includes('t='), 'no key in the address bar');
     return { at: await evaluate('location.pathname') };
-  });
+  }, { gate: true });
 }
 
 /** Every step's "Without this page" line: on the first-run page (opened from ?step=) and in Settings' Setup screens. */
@@ -360,10 +367,12 @@ async function server() {
     await waitText(tid('first-run-mode'), /^Server mode/);
     const status = Object.fromEntries(f.setup.groups.flatMap((g) => g.steps).map((s) => [s.id, s.done ? 'done' : s.skipped ? 'skipped' : 'todo']));
     for (const s of ['signin-app', 'agent-app', 'config-on-main', 'owners', 'coordinator']) assert.equal(status[s], 'done', `${s} is done after the install and the first project (${JSON.stringify(status)})`);
-    // WHY not asserted: after add-project.sh stores the agents' token, this step reads credentials.yaml or init's
-    // record, and add-project writes neither (reported with this job). What it says is kept for the report.
+    return { status };
+  });
+  await screen('screen 2 (server): the agents\' Claude login reads done after the first project stored it', async () => {
+    // add-project.sh stored the token for wl-<instance>-agent (the job checked the file, 0600); the step must say so.
     const claude = f.setup.groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-token');
-    return { status, claudeToken: `${status['claude-token']}: ${claude?.detail}` };
+    assert.ok(claude?.done, `the agents' Claude login reads not done: ${claude?.detail}`);
   });
 
   await screen('screen 2 (server): the agents\' Claude login panel: no paste box open, the root command shown', async () => {
@@ -430,12 +439,16 @@ async function serverMachine() {
   };
   const tsStep = async (step, during) => {
     const card = `[data-testid="tailscale-step"][data-step="${step}"]`;
-    // The page offers the next step once it has read the last one's end (its status is read every few seconds).
-    await until(`tailscale ${step} offered`, async () => {
-      await open('/machine');
-      return until('the step button enabled', () => evaluate(`(() => { const b = ${q(`${card} ${tid('tailscale-step-run')}`)}; return !!b && !b.disabled; })()`), 10_000, 500).catch(() => false);
-    }, 120_000, 1000);
-    await click(`${card} ${tid('tailscale-step-run')}`);
+    await open('/machine');
+    try {
+      await click(`${card} ${tid('tailscale-step-run')}`);
+    } catch (e) {
+      // What the page and its data said when the step wasn't offered (run 38518412799: serve's button stayed disabled).
+      const view = await evaluate(`fetch('/api/i/${instance}/tailscale', { headers: { authorization: 'Bearer ' + sessionStorage.getItem('dash-token') } }).then((r) => r.json()).then((j) => ({ next: j.next, busy: j.busy, run: j.run, steps: j.steps, allowed: j.allowed })).catch((x) => String(x))`);
+      const panel = ((await text(tid('tailscale-setup'))) ?? '').replace(/\s+/g, ' ').slice(0, 1500);
+      const unit = sh('systemctl', ['show', '-p', 'ActiveState,SubState,ExecMainExitTimestamp', 'worklane-tailscale.service']).out.replace(/\n/g, ' ');
+      throw new Error(`${e.message}; the view: ${JSON.stringify(view)}; the panel: ${panel}; the unit: ${unit}; now ${new Date().toISOString()}`);
+    }
     await waitFor(`${card} ${tid('tailscale-step-confirm')}`);
     await click(`${card} ${tid('tailscale-step-confirm-run')}`);
     if (during) await during();
@@ -503,7 +516,11 @@ async function serverMachine() {
     } catch (e) {
       const files = sh('sudo', ['ls', '-la', '/etc/worklane', '/usr/local/libexec']).out;
       const asWl = sh('sudo', ['-u', `wl-${instance}`, 'cat', '/etc/worklane/updates.json']);
-      throw new Error(`${e.message}; the page's step 1: ${seen.replace(/\s+/g, ' ')}; the section: ${((await text(tid('updater-setup'))) ?? '').replace(/\s+/g, ' ').slice(0, 1500)}; on the machine: ${files.replace(/\s+/g, ' ')}; updates.json as wl-${instance}: ${asWl.status} ${asWl.err}`);
+      // The machine request's own result, as the page lists it under "Requested here", and the coordinator's sandbox.
+      const main = ((await text('main')) ?? '').replace(/\s+/g, ' ');
+      const at = main.indexOf('Requested here');
+      const sandbox = sh('systemctl', ['show', '-p', 'ProtectSystem,PrivateTmp,ReadWritePaths', `worklane-${instance}.service`]).out.replace(/\n/g, ' ');
+      throw new Error(`${e.message}; the page's step 1: ${seen.replace(/\s+/g, ' ')}; requested here: ${at < 0 ? '(none listed)' : main.slice(at, at + 1200)}; on the machine: ${files.replace(/\s+/g, ' ')}; updates.json as wl-${instance}: ${asWl.status} ${asWl.err}; the coordinator's unit: ${sandbox}`);
     }
     assert.equal(stat('/usr/local/libexec/worklane-update'), 'root 755');
     assert.equal(stat('/etc/worklane/updates.json'), 'root 644');
@@ -584,6 +601,8 @@ try {
 } finally {
   writeFileSync(join(out, `urls-${mode}.txt`), `${urls.join('\n')}\n`);
   if (errors.length) writeFileSync(join(out, `page-errors-${mode}.txt`), `${errors.join('\n')}\n`);
-  say({ walk: mode, ms: Date.now() - t0, screens: results.length, pageErrors: errors.length });
+  const failed = results.filter((r) => !r.ok).map((r) => r.screen);
+  say({ walk: mode, ms: Date.now() - t0, screens: results.length, failed, pageErrors: errors.length });
   await browser.close();
+  if (failed.length) process.exitCode = 1;
 }
