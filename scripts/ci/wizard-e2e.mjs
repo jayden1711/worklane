@@ -280,7 +280,8 @@ async function local() {
     assert.ok(existsSync(join(checkout, '.worklane', 'config.yaml')), 'the checkout has the config');
   });
 
-  await screen('screen 4: the repo config form (required checks) proposed as a PR; GitHub\'s merge played by the stand-in', async () => {
+  let configPr = null;
+  await screen('screen 4: the repo config form (required checks) proposed as a PR', async () => {
     await open('/first-run?step=required-checks');
     const p = `${row('required-checks')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('repo-config-form')}`);
@@ -290,25 +291,35 @@ async function local() {
     await waitText(`${p} ${tid('repo-config-confirming')}`, /required_checks/);
     await click(`${p} ${tid('repo-config-propose')}`);
     const res = await waitText(`${p} ${tid('repo-config-result')}`, /pull\/\d+/);
-    const n = res.match(/pull\/(\d+)/)[1];
+    const n = (configPr = res.match(/pull\/(\d+)/)[1]);
     const [repo, base, head, state] = readFileSync(st(`prs/${n}`), 'utf8').trim().split(' ');
     assert.deepEqual([repo, base, state], ['example/alpha', 'main', 'OPEN']);
     const bare = st('git/example/alpha.git');
     assert.match(sh('git', ['-C', bare, 'show', `${head}:.worklane/config.yaml`]).out, /required_checks:[\s\S]*- test/);
-    // The person merges it on GitHub (the stand-in's merge). Nothing after the install is a terminal command.
-    assert.equal(sh('gh', ['pr', 'merge', n, '--repo', 'example/alpha', '--merge']).status, 0);
     return { pr: n, head };
   });
 
-  await screen('screen 4: the merged config reaches the checkout and the page, with no git pull and no restart', async () => {
-    // INVARIANT (owner, #393): no `git pull` and no dashboard restart after a merge. Re-check is the page's own button.
+  await screen('screen 4: the config PR merged from the page; the checkout and the page have it when the merge reports done', async () => {
+    // INVARIANT (owner, #393): the page's merge fast-forwards the checkout as part of the merge action, so everything is
+    // checked right after the action's own result: no polling, no git pull, no dashboard restart.
+    // TODO(#393, bug E): these test ids follow setup mode's merge (setup-merge-*); set them to the fix's real ones
+    // before this is pushed.
     await open('/first-run?step=required-checks');
-    await until('the checkout and the page have the merged required check', async () => {
-      const inCheckout = /required_checks:[\s\S]*- test/.test(readFileSync(join(checkout, '.worklane', 'config.yaml'), 'utf8'));
-      if (inCheckout && /required: test/.test((await text(row('required-checks'))) ?? '')) return true;
-      if (await evaluate(`!!${q(tid('first-run-recheck'))} && !${q(tid('first-run-recheck'))}.disabled`)) await click(tid('first-run-recheck'));
-      return false;
-    }, 60_000, 2000);
+    const p = `${row('required-checks')} ${tid('first-run-fix-panel')}`;
+    await click(`${p} ${tid('repo-config-merge-review')}`);
+    await waitText(`${p} ${tid('repo-config-merge-confirming')}`, /gh pr merge \d+ --repo example\/alpha --merge/);
+    await click(`${p} ${tid('repo-config-merge-confirm')}`);
+    // The action's own answer (the request returning), not a timer.
+    const done = await waitText(`${p} ${tid('repo-config-result')}`, /merged/i);
+    const bare = st('git/example/alpha.git');
+    assert.ok(configPr, 'the config PR from the screen before');
+    assert.match(readFileSync(st(`prs/${configPr}`), 'utf8'), / MERGED$/m, 'merged at "GitHub" by the page');
+    assert.equal(sh('git', ['-C', checkout, 'rev-parse', 'HEAD']).out, sh('git', ['-C', bare, 'rev-parse', 'main']).out, 'the checkout is at the merged main');
+    assert.match(readFileSync(join(checkout, '.worklane', 'config.yaml'), 'utf8'), /required_checks:[\s\S]*- test/);
+    // The page's state after the action (it re-reads when an action ends), checked once.
+    await open('/first-run');
+    assert.match((await text(row('required-checks'))) ?? '', /required: test/);
+    return { result: done };
   });
 }
 
