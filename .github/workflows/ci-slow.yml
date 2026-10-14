@@ -427,7 +427,7 @@ jobs:
       - name: a sandboxed run with the longest instance name and run id binds Chrome's SingletonSocket under its TMPDIR, and Chrome runs
         run: |
           # Regression: with TMPDIR under the run's directory, Chrome died with "Socket path too long". The run's TMPDIR is
-          # /tmp/wlt-<8 hex>, the test user's own, 0700; a socket where Chrome puts one binds, and headless Chrome runs.
+          # /var/lib/wlt/<8 hex>, the test user's own, 0700; a socket where Chrome puts one binds, and headless Chrome runs.
           H=/usr/local/libexec/worklane-testrun
           id="fast-$(printf 'c%.0s' $(seq 43))"
           [ "${#I2}" -eq 21 ] && [ "${#id}" -eq 48 ]
@@ -439,7 +439,7 @@ jobs:
           git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
           sha="$(git -C "$r" rev-parse HEAD)"
           as2 create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$sha" "$sha" < "$r/b"
-          t="/tmp/wlt-$(printf '%s/%s' "$I2" "$id" | sha256sum | cut -c1-8)"
+          t="/var/lib/wlt/$(printf '%s/%s' "$I2" "$id" | sha256sum | cut -c1-8)"
           echo "the run's TMPDIR on the host: $t, $(sudo stat -c '%U %a' "$t")"
           [ "$(sudo stat -c '%U %a' "$t")" = "wl-test-$I2 700" ]
           # Where Chrome binds: mkdtemp under TMPDIR, then SingletonSocket in it. And, for contrast, the old place.
@@ -462,6 +462,63 @@ jobs:
           grep -q '^old place: .*AF_UNIX path too long' <<<"$out"
           grep -q '<html><head></head><body></body></html>' <<<"$out"
           as2 wipe "$id"
+          if sudo test -e "$t"; then echo "$t is still there after the wipe" >&2; exit 1; fi
+          echo "wiped: $t is gone"
+          rm -rf "$r"
+      - name: "regression: the helper works when called from inside the coordinator's own unit sandbox (PrivateTmp, ProtectSystem=full), as on a machine"
+        run: |
+          # The coordinator calls the helper from inside worklane-<name>.service, never from a plain shell as the steps
+          # above do. With the run's TMPDIR in /tmp, the helper made it in the unit's private /tmp and systemd looked
+          # for it in the host's: every run, and the startup check, died with exit 226 (EXIT_NAMESPACE).
+          H=/usr/local/libexec/worklane-testrun
+          # The transient unit's settings are the generated unit's own, every one from the script: none written here.
+          mapfile -t props < <(bash scripts/ci/coordinator-unit-props.sh ci)
+          args=(); for p in "${props[@]}"; do args+=(-p "$p"); done
+          inside() { sudo systemd-run --wait --pipe --collect --quiet "${args[@]}" "$@"; }
+          echo "the coordinator unit's settings: ${props[*]}"
+          printf '%s\n' "${props[@]}" | grep -qx 'PrivateTmp=yes'
+          printf '%s\n' "${props[@]}" | grep -qx 'ProtectSystem=full'
+          printf '%s\n' "${props[@]}" | grep -qx 'User=wl-ci'
+          # Fail-without: the helper as it was (protocol 5, TMPDIR in /tmp), installed as a machine had it. It passes
+          # from a plain shell, which is why no step above saw it, and fails from inside the unit with 226.
+          old=8c8e340242deaf7b9f33d95fd5a3ef15c30e5ad3
+          git fetch -q --depth=1 origin "$old"
+          git show "$old:scripts/machine/worklane-testrun.sh" > "$RUNNER_TEMP/helper-5.sh"
+          grep -qx 'PROTOCOL=5' "$RUNNER_TEMP/helper-5.sh"
+          sudo install -o root -g root -m 0755 "$RUNNER_TEMP/helper-5.sh" "$H"
+          sudo -u wl-ci sudo -n "$H" ci check | tail -n 2 | sed 's/^/old helper, from a plain shell: /'
+          rc=0; inside sudo -n "$H" ci check > "$RUNNER_TEMP/old-inside.log" 2>&1 || rc=$?
+          grep -E '^(FAIL|OK|FAILED)' "$RUNNER_TEMP/old-inside.log" | sed "s/^/old helper, inside the unit (exit $rc): /"
+          [ "$rc" -ne 0 ] || { echo "the old helper passed inside the unit: the bug can't be shown here" >&2; exit 1; }
+          grep -q '^FAIL in the sandbox (exit 226)' "$RUNNER_TEMP/old-inside.log"
+          # The helper of this commit: check passes from inside the unit.
+          sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+          inside sudo -n "$H" ci check > "$RUNNER_TEMP/new-inside.log" 2>&1 || { cat "$RUNNER_TEMP/new-inside.log"; exit 1; }
+          grep -E '^(FAIL|OK|FAILED)|^PASS a sandboxed run' "$RUNNER_TEMP/new-inside.log" | sed 's/^/new helper, inside the unit: /'
+          grep -q '^PASS a sandboxed run reaches none of them' "$RUNNER_TEMP/new-inside.log"
+          tail -n 1 "$RUNNER_TEMP/new-inside.log" | grep -qx OK
+          # And a run, each step from inside a unit of its own: made, a Unix socket bound under its TMPDIR, wiped.
+          id="fast-inside-$$"
+          r="$(mktemp -d)"
+          id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+          git init -q "$r" && date > "$r/f" && git -C "$r" add f && git -C "$r" "${id_[@]}" commit -q -m probe
+          for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$id/$x" HEAD; done
+          git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
+          sha="$(git -C "$r" rev-parse HEAD)"
+          inside sudo -n "$H" ci create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$sha" "$sha" < "$r/b"
+          t="/var/lib/wlt/$(printf '%s/%s' ci "$id" | sha256sum | cut -c1-8)"
+          echo "the base on the host: $(sudo stat -c '%U %a' /var/lib/wlt); the run's TMPDIR on the host: $t, $(sudo stat -c '%U %a' "$t")"
+          [ "$(sudo stat -c '%U %a' /var/lib/wlt)" = 'root 711' ]
+          [ "$(sudo stat -c '%U %a' "$t")" = 'wl-test-ci 700' ]
+          probe='import os, socket, tempfile
+          d = tempfile.mkdtemp(prefix="org.chromium.Chromium.")
+          p = os.path.join(d, "SingletonSocket")
+          s = socket.socket(socket.AF_UNIX); s.bind(p); s.close()
+          print("bound", p, len(p.encode()), "bytes; in the base:", os.listdir(os.path.dirname(os.environ["TMPDIR"])))'
+          out="$(inside sudo -n "$H" ci exec "$id" 120 -- "python3 -c '$probe'" < /dev/null)"
+          echo "inside the unit, a sandboxed run: $out"
+          grep -q "^bound $t/org.chromium.Chromium.[A-Za-z0-9_]*/SingletonSocket .* in the base: \['${t##*/}'\]$" <<<"$out"
+          inside sudo -n "$H" ci wipe "$id"
           if sudo test -e "$t"; then echo "$t is still there after the wipe" >&2; exit 1; fi
           echo "wiped: $t is gone"
           rm -rf "$r"
