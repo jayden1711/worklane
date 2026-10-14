@@ -40,7 +40,15 @@ function timed(server, sink) {
   server.on('request', (req, res) => {
     const t = performance.now();
     const path = (req.url ?? '/').split('?')[0];
-    res.on('finish', () => sink.push({ method: req.method, path, ms: performance.now() - t, status: res.statusCode, bytes: Number(res.getHeader('content-length') ?? 0) || null, encoding: res.getHeader('content-encoding') ?? null }));
+    // The headers as sent (writeHead's own, which getHeader doesn't see).
+    let sent = {};
+    const writeHead = res.writeHead;
+    res.writeHead = function (status, ...rest) {
+      const h = rest.find((x) => x && typeof x === 'object' && !Array.isArray(x));
+      if (h) sent = Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+      return writeHead.call(this, status, ...rest);
+    };
+    res.on('finish', () => sink.push({ method: req.method, path, ms: performance.now() - t, status: res.statusCode, bytes: Number(sent['content-length'] ?? res.getHeader('content-length') ?? 0) || null, encoding: sent['content-encoding'] ?? res.getHeader('content-encoding') ?? null }));
     handler(req, res);
   });
   return () => connections;
