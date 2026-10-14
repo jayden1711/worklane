@@ -1,0 +1,104 @@
+#!/bin/sh
+# CI only (the wizard end-to-end job, .github/workflows/ci-slow.yml): a stand-in GitHub CLI that a person can sign in
+# to from the first-run page. Nothing reaches GitHub. Its state is files in $WIZARD_STANDIN_DIR, which the job reads
+# and writes in place of what GitHub would do:
+#   gh-code-typed   the person typed the device code on github.com/login/device: `auth login --web` finishes
+#   gh-signed-in    gh's own store holds a login (written by `auth login`, never by hand)
+#   gh-protected    the default branch has protection (written by the PUT the Protection step sends)
+#   gh-calls        every call, one per line: its arguments (no token ever passes through here: there is none)
+# It is example-owner, an admin of every repo, and no check runs on any commit. Anything else is refused, loudly.
+# WHY not scripts/ci/stand-ins/gh: that one is always signed in (bootstrap's unattended run); this one starts signed
+# out, so the wizard's Connect GitHub screen has a login to relay.
+set -u
+d="${WIZARD_STANDIN_DIR:?the wizard stand-ins keep their state in WIZARD_STANDIN_DIR}"
+printf '%s\n' "$*" >> "$d/gh-calls"
+signed_in() { [ -f "$d/gh-signed-in" ]; }
+need_login() { signed_in || { echo "gh: not signed in (HTTP 401)" >&2; exit 1; }; }
+case "${1:-} ${2:-}" in
+  "auth status")
+    if signed_in; then echo "github.com: Logged in to github.com account example-owner (stand-in)"; else echo "You are not logged into any GitHub hosts." >&2; exit 1; fi ;;
+  "auth login")
+    # gh's device flow, as it prints it: the code, the page, then it waits for the person.
+    echo "! First copy your one-time code: WZRD-2E2E" >&2
+    echo "Open this URL to continue in your web browser: https://github.com/login/device" >&2
+    i=0
+    while [ ! -f "$d/gh-code-typed" ]; do
+      i=$((i + 1)); [ "$i" -le 1200 ] || { echo "gh stand-in: nobody typed the code" >&2; exit 1; }
+      sleep 0.5
+    done
+    : > "$d/gh-signed-in"
+    echo "✓ Logged in as example-owner" >&2 ;;
+  "auth token") echo "gh stand-in: never prints a token" >&2; exit 1 ;;
+  "api user")
+    need_login
+    echo example-owner ;;
+  "api user/repos"*)
+    need_login
+    (cd "$d/git" && ls -d */*.git) | sed 's/\.git$//' ;;
+  "api --method")
+    need_login
+    case "$3 $4" in
+      "PUT repos/"*/branches/*/protection)
+        cat > "$d/gh-protection-body.json"
+        : > "$d/gh-protected"
+        echo '{"url":"stand-in"}' ;;
+      *) echo "gh stand-in: api --method $3 $4 is not something this stand-in does" >&2; exit 1 ;;
+    esac ;;
+  "api repos/"*)
+    need_login
+    case "$2" in
+      */branches/*/protection)
+        [ -f "$d/gh-protected" ] || { echo "gh: Branch not protected (HTTP 404)" >&2; exit 1; }
+        [ "${3:-}" = --silent ] || cat "$d/gh-protection-body.json" ;;
+      */commits/*/check-runs | */commits/*/status) ;;
+      repos/*/*/*) echo "gh stand-in: api $2 is not something this stand-in does" >&2; exit 1 ;;
+      repos/*/*)
+        case "$*" in
+          *".permissions.push"*) echo true ;;
+          *"allow_merge_commit"*) echo 'true,true,true' ;;
+          *) echo '{"permissions":{"admin":true,"push":true,"pull":true}}' ;;
+        esac ;;
+      *) echo "gh stand-in: api $2 is not something this stand-in does" >&2; exit 1 ;;
+    esac ;;
+  "pr "*)
+    # Pull requests on the stand-in's bare repos ($d/git/<owner>/<repo>.git): $d/prs/<n> holds "<repo> <base> <head>
+    # <state>". A merge fast-forwards the base to the head, as GitHub's merge of a branch based on it ends up.
+    need_login
+    sub="$2"; shift 2
+    repo="" base="" head="" n=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --repo) repo="$2"; shift 2 ;;
+        --base) base="$2"; shift 2 ;;
+        --head) head="$2"; shift 2 ;;
+        --title | --body | --json | --jq | --state) shift 2 ;;
+        --*) shift ;;
+        *) n="$1"; shift ;;
+      esac
+    done
+    mkdir -p "$d/prs"
+    case "$sub" in
+      create)
+        n=$(( $(ls "$d/prs" | wc -l) + 1 ))
+        echo "$repo $base $head OPEN" > "$d/prs/$n"
+        echo "https://github.com/$repo/pull/$n" ;;
+      list)
+        for f in $(ls "$d/prs" | sort -n); do
+          set -- $(cat "$d/prs/$f")
+          [ "$1" = "$repo" ] && [ "$3" = "$head" ] && [ "$4" = OPEN ] && { echo "$f https://github.com/$repo/pull/$f"; break; }
+        done ;;
+      view)
+        [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
+        set -- $(cat "$d/prs/$n"); echo "$4" ;;
+      merge)
+        [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
+        set -- $(cat "$d/prs/$n")
+        [ "$4" = OPEN ] || { echo "gh: pull request $n is $4" >&2; exit 1; }
+        git -C "$d/git/$1.git" merge-base --is-ancestor "refs/heads/$2" "refs/heads/$3" || { echo "gh stand-in: $3 isn't based on $2" >&2; exit 1; }
+        git -C "$d/git/$1.git" update-ref "refs/heads/$2" "refs/heads/$3"
+        echo "$1 $2 $3 MERGED" > "$d/prs/$n"
+        echo "✓ Merged pull request #$n" ;;
+      *) echo "gh stand-in: pr $sub is not something this stand-in does" >&2; exit 1 ;;
+    esac ;;
+  *) echo "gh stand-in: $* is not something this stand-in does" >&2; exit 1 ;;
+esac

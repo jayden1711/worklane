@@ -19,7 +19,7 @@ on:
       job:
         description: The slow job to run (all of them for a batch)
         type: choice
-        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users]
+        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users, wizard-e2e-real-systemd]
         default: all
       sha:
         description: The commit to test; empty for the commit the run is on. A bisect step names it, and the run refuses any other.
@@ -1541,3 +1541,266 @@ jobs:
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
             sh -c 'cd "$HOME" && exec node "$1/auth-probe-real-users.mjs" "$1/dist" wl-probe-agent "$2"' _ "$t" "$a"
+
+  wizard-e2e-real-systemd:
+    # The first-run wizard end to end, the way a person walks it, on a fresh runner with real systemd: the one install
+    # command, the one URL it prints, that URL in headless Chrome (scripts/ci/wizard-e2e.mjs: real clicks, the key page
+    # given the key file), each screen in order with its effect on the machine checked, one screen skipped, one rerun
+    # from Settings, every screen's "Without this page" line, and the project's dashboard at the end. Local mode first
+    # (as the runner user, systemd --user), then server mode (bootstrap --hardened as root, the first project through
+    # add-project.sh, then the hub's break-glass). Outside services are stand-ins, never a host override: gh, claude and
+    # git's ssh to github.com (scripts/ci/wizard-stand-ins/), the fake GitHub behind the loopback stand-in, the hub
+    # stand-in for the App's approval, and the tailscale CLI after its real install. Last, no secret in any URL the
+    # browser asked for, any log, the journal, or any process's arguments.
+    name: wizard end to end (real systemd)
+    needs: scope
+    if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' wizard-e2e-real-systemd ') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_FAKE: http://127.0.0.1:8999
+      LOOPBACK: --import=/opt/worklane/current/scripts/ci/loopback-github.mjs
+      HELPER: /usr/local/libexec/worklane-machine
+      # The same nothing-from-GitHub as the bootstrap job: no token in any step's environment.
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: this commit's engine, built and packed as a release ships it
+        run: |
+          npm ci --no-audit --no-fund && npm run build && npm run build:web
+          npm pack --pack-destination "$RUNNER_TEMP" > /dev/null
+          F="$RUNNER_TEMP/wiz" && mkdir -p "$F" && chmod 0700 "$F"
+          { echo "F=$F"; echo "TGZ=$(ls "$RUNNER_TEMP"/*.tgz)"; echo "WIZARD_STANDIN_DIR=$RUNNER_TEMP/standin"; } >> "$GITHUB_ENV"
+      - name: every process's arguments, sampled twice a second from here to the end (for the leak check)
+        run: |
+          nohup bash -c 'while :; do ps -e -ww -o args=; sleep 0.5; done | awk "!seen[\$0]++" > "$1"' _ "$F/argv.txt" > /dev/null 2>&1 &
+          echo "$!" > "$F/argv.pid"
+      # ---------------------------------------------------------------- local mode
+      - name: "local mode: a repo with no config, signed out of Claude and GitHub; the one command ends with one URL"
+        run: |
+          d="$WIZARD_STANDIN_DIR" && mkdir -p "$d/git/example" "$RUNNER_TEMP/seed"
+          echo "$GITHUB_WORKSPACE/scripts/ci/wizard-stand-ins" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/scripts/ci/wizard-stand-ins:$PATH"
+          # GitHub's side of the repo: a bare repo the ssh stand-in serves as github.com:example/alpha.git.
+          printf 'alpha\n' > "$RUNNER_TEMP/seed/README.md" && printf 'test:\n\t@echo ok\n' > "$RUNNER_TEMP/seed/Makefile"
+          git init -q --bare -b main "$d/git/example/alpha.git"
+          git -C "$RUNNER_TEMP/seed" init -q -b main && git -C "$RUNNER_TEMP/seed" add README.md Makefile
+          git -C "$RUNNER_TEMP/seed" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
+          git -C "$RUNNER_TEMP/seed" push -q "$d/git/example/alpha.git" main
+          git config --global core.sshCommand "$GITHUB_WORKSPACE/scripts/ci/wizard-stand-ins/ssh"
+          git config --global user.email owner@example.com && git config --global user.name owner
+          git clone -q github.com:example/alpha.git "$RUNNER_TEMP/alpha"
+          # The runner user's own systemd manager, as a desktop login has one (Start installs a systemd --user unit).
+          sudo loginctl enable-linger "$USER"
+          rt="/run/user/$(id -u)"
+          for _ in $(seq 1 30); do [ -S "$rt/bus" ] && break; sleep 1; done
+          { echo "XDG_RUNTIME_DIR=$rt"; echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$rt/bus"; } >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="unix:path=$rt/bus"
+          systemctl --user is-system-running || true
+          claude auth status && { echo "the stand-in claude starts signed in" >&2; exit 1; } || true
+          gh auth status && { echo "the stand-in gh starts signed in" >&2; exit 1; } || true
+          # The one command, as a person runs it: no --mode and no terminal (local, said so).
+          bash scripts/bootstrap.sh --engine "$TGZ" "$RUNNER_TEMP/alpha" < /dev/null | tee "$F/local-install.log"
+          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$F/local-install.log")"
+          [ "$(stat -c '%U %a' "$kf")" = "$USER 600" ]
+          u="$(bash scripts/ci/wizard-url.sh "$F/local-install.log" "$kf" /api/first-run | tail -n 1)"
+          { echo "LOCAL_URL=$u"; echo "LOCAL_KEY=$kf"; } >> "$GITHUB_ENV"
+          echo "the install's one URL: $u"
+      - name: "local mode, in the browser: Claude sign-in, Connect GitHub, the repo config in setup mode and its form (screens 1-4)"
+        run: node scripts/ci/wizard-e2e.mjs local "$GITHUB_WORKSPACE/dist" "$LOCAL_URL" "$LOCAL_KEY" "$F/browser" "$RUNNER_TEMP/alpha" | tee "$F/walk-local.jsonl"
+      - name: "local mode: the merged config change pulled; the dashboard restarted with the install command (same URL)"
+        run: |
+          git -C "$RUNNER_TEMP/alpha" pull -q --ff-only
+          grep -q -- '- test' "$RUNNER_TEMP/alpha/.worklane/config.yaml"
+          # WHY a restart: the first-run actions read the config the dashboard started with (opts.cfg), so Protect
+          # still says "name the required checks first" after they are merged and pulled. Reported with this job; the
+          # install command again is the documented way to (re)start the dashboard, and it must print the same URL.
+          pkill -f "dashboard --service --root $RUNNER_TEMP/alpha" && sleep 2
+          bash scripts/bootstrap.sh --engine "$TGZ" "$RUNNER_TEMP/alpha" < /dev/null | tee "$F/local-install2.log"
+          u2="$(bash scripts/ci/wizard-url.sh "$F/local-install2.log" "$LOCAL_KEY" /api/first-run | tail -n 1)"
+          [ "$u2" = "$LOCAL_URL" ] || { echo "the URL changed: $LOCAL_URL / $u2" >&2; exit 1; }
+      - name: "local mode, in the browser: skip, hooks, Protect, every automation line, rerun from Settings, Start, the dashboard (screens 6, 10)"
+        run: node scripts/ci/wizard-e2e.mjs local-after "$GITHUB_WORKSPACE/dist" "$LOCAL_URL" "$LOCAL_KEY" "$F/browser" "$RUNNER_TEMP/alpha" | tee -a "$F/walk-local.jsonl"
+      - name: "local mode: the coordinator's systemd --user unit, then down; the dashboard stopped"
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          label="$(jq -r 'select(.screen? and (.screen|startswith("Start:"))) | .detail.unit' "$F/walk-local.jsonl")"
+          [ -n "$label" ] && [ "$label" != null ]
+          systemctl --user is-active "$label"
+          unit="$(systemctl --user show -p FragmentPath --value "$label")"
+          [ "$(stat -c '%U' "$unit")" = "$USER" ]
+          worklane down --root "$RUNNER_TEMP/alpha"
+          if systemctl --user is-active -q "$label"; then echo "down left $label running" >&2; exit 1; fi
+          pkill -f "dashboard --service --root $RUNNER_TEMP/alpha" || true
+      # ---------------------------------------------------------------- server mode
+      - name: "server mode: the one command (bootstrap --hardened, as root) with this commit's engine; it ends with one URL"
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q acl
+          sha="$(git rev-parse HEAD)"
+          # This commit's engine where engine.sh puts it, built (engine.sh finds it there and only links it).
+          sudo chmod 0755 /opt && sudo install -d -m 0755 /opt/worklane
+          sudo cp -a "$GITHUB_WORKSPACE" "/opt/worklane/$sha"
+          sudo chown -R root:root "/opt/worklane/$sha" && sudo chmod -R a+rX,go-w "/opt/worklane/$sha"
+          # The install command from a root-owned copy of this checkout whose pinned engine is this commit, its origin
+          # itself (engine.sh clones the origin of the scripts it runs from). Only ENGINE_TAG differs, in the copy.
+          b=/var/tmp/wizard-boot
+          sudo rsync -a --exclude node_modules --exclude dist "$GITHUB_WORKSPACE/" "$b/"
+          sudo chown -R root:root "$b"
+          sudo git -C "$b" remote set-url origin "$b"
+          sudo sed -i "s/^ENGINE_TAG=.*/ENGINE_TAG=$sha/" "$b/scripts/bootstrap.sh"
+          [ "$(sudo git -C "$b" diff --name-only)" = scripts/bootstrap.sh ]
+          echo "BOOT=$b" >> "$GITHUB_ENV"
+          sudo bash "$b/scripts/bootstrap.sh" --hardened --yes --machine-owner ci-owner ci example/alpha 2>&1 | tee "$F/server-install.log"
+          [ "$(readlink -f /opt/worklane/current)" = "/opt/worklane/$sha" ]
+          id wl-ci && id wl-ci-agent
+          jq -e '.owners == ["ci-owner"]' /etc/worklane/machine-owners.json
+          u="$(tail -n 1 "$F/server-install.log")"
+          [ "$u" = http://127.0.0.1:4398/first-run ] || { echo "the install's last line: $u" >&2; exit 1; }
+          closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/server-install.log")"
+          [ "$(grep -c '://' <<< "$closing")" = 1 ]
+          # What answers there on a fresh server, before any hub exists (reported, not asserted: see the job's PR).
+          echo "GET $u right after the install: HTTP $(curl -s -o /dev/null -w '%{http_code}' "$u" || true)"
+          # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
+          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+      - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
+        run: |
+          f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
+          git init -q --bare -b main "$f/git/example/alpha.git"
+          cp -r examples/basic "$f/seed"
+          sed -i -e 's|^  repo: example-org/example-shop |  repo: example/alpha |' "$f/seed/.worklane/config.yaml"
+          sed -i -e 's|^daily_budget_usd: 40 |daily_budget_usd: 20 |' -e 's|count: 1, max: 4,|count: 1, max: 2,|' "$f/seed/.worklane/agents.yaml"
+          git -C "$f/seed" init -q -b main && git -C "$f/seed" add -A
+          git -C "$f/seed" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -m init
+          git -C "$f/seed" push -q "$f/git/example/alpha.git" main
+          openssl genrsa -traditional -out "$f/app.pem" 2048 2>/dev/null || openssl genrsa -out "$f/app.pem" 2048
+          nohup node scripts/ci/fake-github.mjs "$GITHUB_WORKSPACE/dist" 8999 "$f/git" example/alpha "$f/requests.log" "$f/app.pem" > "$f/server.log" 2>&1 &
+          for _ in $(seq 1 30); do curl -sf "$GH_FAKE/repos/example/alpha" >/dev/null && break; sleep 1; done
+          curl -sf "$GH_FAKE/repos/example/alpha" > /dev/null
+          echo "FK=$f" >> "$GITHUB_ENV"
+          sudo git config --system url."$GH_FAKE/example/alpha".insteadOf https://github.com/example/alpha
+          printf 'Defaults env_keep += "NODE_OPTIONS CI_LOOPBACK_GITHUB_PORT"\n' > "$F/sudoers" && sudo visudo -cf "$F/sudoers" && sudo install -m 0440 "$F/sudoers" /etc/sudoers.d/ci-fake-github
+          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub worklane-dashboard-hub-setup; do
+            sudo install -d "/etc/systemd/system/$u.service.d"
+            printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8999\n' "$LOOPBACK?port=8999" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
+          done
+      # Screen 3 (server): the hub's setup mode makes the sign-in App. Not in Chrome: its page takes writes only from the
+      # hub's https origin (tailscale serve, which a runner can't have), and its form posts to github.com itself. These
+      # are the requests that browser makes, with that origin, as the add-project job's proof makes them.
+      - name: "server, screen 3: the sign-in App through the hub's setup mode (its one-time token from a 0600 file, never in a URL)"
+        run: |
+          u=worklane-dashboard-hub-setup.service pub=https://hub.example.test h=http://127.0.0.1:4399
+          sudo bash scripts/setup/dashboards.sh --setup --public-url "$pub" | tee "$F/setup1.log"
+          systemctl is-active "$u"
+          tf="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/setup-token"
+          [ "$(sudo stat -c '%U %a' "$tf")" = "wl-dash 600" ]
+          (umask 077; sudo cat "$tf" > "$F/setup-token")
+          echo "::add-mask::$(cat "$F/setup-token")"
+          curl -s -D "$F/unlock.h" -o /dev/null -H "Origin: $pub" --data-urlencode "token@$F/setup-token" "$h/setup/unlock"
+          c="$(tr -d '\r' < "$F/unlock.h" | sed -n 's/^[Ss]et-[Cc]ookie: \(__Host-setup=[^;]*\);.*/\1/p')"
+          [ -n "$c" ]
+          csrf="$(curl -s -H "Cookie: $c" "$h/" | sed -n 's/.*name="csrf" value="\([^"]*\)".*/\1/p')"
+          loc="$(curl -s -D - -o /dev/null -H "Cookie: $c" -H "Origin: $pub" --data-urlencode "csrf=$csrf" --data-urlencode owner=example "$h/setup/signin-app" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+          curl -s -H "Cookie: $c" "$h$loc" > "$F/start.html"
+          grep -qF 'action="https://github.com/settings/apps/new?state=' "$F/start.html"
+          state="$(sed -n 's/.*?state=\([A-Za-z0-9_-]*\)".*/\1/p' "$F/start.html")"
+          curl -s -H "Cookie: $c" "$h/setup/app-manifest/callback?state=$state&code=ci-signin-code" | tee "$F/back.html" | grep -q 'GitHub made'
+          for _ in $(seq 1 15); do systemctl is-active -q "$u" || break; sleep 1; done
+          if systemctl is-active -q "$u"; then echo "setup mode did not turn itself off" >&2; exit 1; fi
+          d="$(getent passwd wl-dash | cut -d: -f6)/.config/dashboard-signin"
+          for x in client-secret session-secret client-id public-url; do [ "$(sudo stat -c '%U %a' "$d/$x")" = "wl-dash 400" ]; done
+          (umask 077; sudo cat "$d/client-secret" > "$F/client-secret")
+      # Screens 5 and 2 (server): the machine's first project. add-project.sh as root (the Setup console's Add project
+      # needs a running coordinator to run it, and a fresh machine has none): the agents' App through the manifest flow,
+      # approved by the machine owner's browser (scripts/ci/manifest-browser.mjs) on a hub stand-in, since the real hub
+      # signs people in at github.com only; the Claude token pasted on stdin.
+      - name: "server, screens 5 and 2: the first project: the agents' App through the manifest flow, the Claude token, the checkout, the services"
+        run: |
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
+          dd=/etc/systemd/system/worklane-dashboard-hub.service.d
+          printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
+          ( set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/add-project.sh ci example/alpha --timeout 3 < "$F/claude-token" > "$F/add.jsonl" 2> "$F/add.err"; echo "$?" > "$F/add.rc" ) &
+          for _ in $(seq 1 90); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/auth/login)" = 302 ] && break; sleep 1; done
+          node scripts/ci/manifest-browser.mjs "$GITHUB_WORKSPACE/dist" http://127.0.0.1:4399 https://hub.example.test "$GH_FAKE" ci-owner "$F/add.jsonl" "$F/manifest-code" || { cat "$F/add.jsonl"; tail -n 40 "$F/add.err"; exit 1; }
+          wait
+          cat "$F/add.jsonl"
+          [ "$(cat "$F/add.rc")" = 0 ] || { tail -n 60 "$F/add.err"; exit 1; }
+          jq -se 'map(select(.state=="failed")) | length == 0' "$F/add.jsonl"
+          a="$(getent passwd wl-ci | cut -d: -f6)/.config/ci-app"
+          for x in private-key.pem client-secret webhook-secret; do [ "$(sudo stat -c '%U %a' "$a/$x")" = "wl-ci 400" ]; done
+          c="$(getent passwd wl-ci-agent | cut -d: -f6)/.claude/.credentials.json"
+          [ "$(sudo stat -c '%U %a' "$c")" = "wl-ci-agent 600" ]
+          # The real hub, with the instance (the stand-in goes).
+          sudo rm -f "$dd/stand-in.conf" && sudo systemctl daemon-reload && sudo systemctl restart worklane-dashboard-hub.service
+          for u in worklane-ci worklane-dashboard-ci worklane-dashboard-hub; do systemctl is-active "$u.service"; done
+          node --input-type=module -e 'const f = await import(process.argv[1]); process.stdout.write(f.APP_SECRET + "\n" + f.WEBHOOK_SECRET + "\n");' "file://$GITHUB_WORKSPACE/dist/test/fake-github.js" > "$F/app-secrets"
+      - name: "server mode: the install command again ends with the same one URL, now the hub's wizard; it answers, given the hub's key"
+        run: |
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash "$BOOT/scripts/bootstrap.sh" --hardened --after-credentials --yes ci example/alpha > "$F/server-install2.log" 2>&1 || { cat "$F/server-install2.log"; exit 1; }
+          tail -n 12 "$F/server-install2.log"
+          hk="$(getent passwd wl-dash | cut -d: -f6)/.local/state/worklane/dashboard-hub/dashboard-token"
+          (umask 077; sudo cat "$hk" > "$F/hub-key")
+          u="$(bash scripts/ci/wizard-url.sh "$F/server-install2.log" "$F/hub-key" /api/i/ci/first-run | tail -n 1)"
+          [ "$u" = "$(tail -n 1 "$F/server-install.log")" ]
+          echo "SERVER_URL=$u" >> "$GITHUB_ENV"
+      - name: "server mode, in the browser through the hub: Claude, Protect, the policy, Discord skipped, Tailscale, the updater, every automation line, rerun from Settings, the project's dashboard (screens 2, 6-9, 11)"
+        run: node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
+      - name: "the first project's dashboard: the hub lists it, reachable, the coordinator running"
+        run: |
+          (umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$F/hub-key")" > "$F/hub-auth")
+          curl -sf -H @"$F/hub-auth" http://127.0.0.1:4398/api/hub | tee "$F/hub.json"; echo
+          jq -e '.instances | length == 1 and .[0].name == "ci"' "$F/hub.json"
+          curl -sf -H @"$F/hub-auth" http://127.0.0.1:4398/api/i/ci/first-run | jq -e '[.setup.groups[].steps[] | select(.id == "discord")][0].skipped'
+          systemctl is-active worklane-ci.service worklane-dashboard-ci.service worklane-dashboard-hub.service
+          rm -f "$F/hub-auth"
+      - name: "no secret in any URL the browser asked for, any log or output, the journal, a unit, the machine's state, or any process's arguments"
+        run: |
+          kill "$(cat "$F/argv.pid")" || true
+          # Every secret of the run, one per line, in a file of the runner's only.
+          (umask 077
+            for x in "$LOCAL_KEY" "$F/hub-key" "$F/setup-token" "$F/client-secret" "$F/claude-token" "$F/app-secrets" "$F/manifest-code" "$F/browser/tailscale-link"; do cat "$x"; echo; done
+            sed -n 2p "$FK/app.pem"
+            sudo cat "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state/dashboard-token"; echo
+          ) | grep -v '^$' > "$F/never"
+          # The local key, the hub's key, the setup token, the sign-in secret, the Claude token, the App's two secrets,
+          # the one-time code, the login link's id, a line of the App's key, the instance's own key.
+          [ "$(wc -l < "$F/never")" = 11 ] || { echo "expected 11 secrets, have $(wc -l < "$F/never")" >&2; exit 1; }
+          sudo journalctl --no-pager > "$F/journal.txt" 2>&1
+          journalctl --user --no-pager > "$F/journal-user.txt" 2>&1 || true
+          leaks=0
+          for x in "$F"/browser/urls-*.txt "$F/argv.txt" "$F/journal.txt" "$F/journal-user.txt" "$F"/*.log "$F"/*.jsonl "$F"/*.err "$FK/requests.log" "$FK/server.log" "$RUNNER_TEMP/alpha"; do
+            if grep -rqaFf "$F/never" "$x" 2>/dev/null; then echo "a secret is in $x" >&2; leaks=1; fi
+          done
+          # The local dashboard's state, but for the key's own file.
+          if grep -rqaFf "$F/never" --exclude=dashboard-token "$HOME/.local/state"; then echo "a secret is in the local state" >&2; leaks=1; fi
+          if sudo grep -rqaFf "$F/never" /etc/systemd/system /var/lib/worklane /etc/worklane; then echo "a secret is in a unit or the machine's state" >&2; leaks=1; fi
+          [ "$leaks" = 0 ]
+          # The browser's own URLs: none carries a key or token parameter at all.
+          if grep -E '[?&](t|token|key|code)=' "$F"/browser/urls-*.txt | grep -v '^http://127.0.0.1:[0-9]*/assets/'; then echo "a URL carries a credential parameter" >&2; exit 1; fi
+          echo "checked $(cat "$F"/browser/urls-*.txt | wc -l) URLs, $(wc -l < "$F/argv.txt") distinct process argument lists, the journal, the logs and the machine's state"
+      - name: "the walk's screens and how long each took"
+        if: always()
+        run: cat "$F"/walk-*.jsonl 2>/dev/null | jq -r 'select(.screen) | "\(if .ok then "ok  " else "FAIL" end) \(.ms / 1000 | floor)s  \(.screen)"' || true
+      - name: the browser's screenshots, the units and the logs, on failure
+        if: failure()
+        run: |
+          ls -la "$F/browser" || true
+          cat "$F"/browser/page-errors-*.txt 2>/dev/null || true
+          sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-tailscale.service || true
+          journalctl --user --no-pager -n 60 || true
+          tail -n 60 "$F"/*.err "$FK/server.log" 2>/dev/null || true
+          cat "$HOME"/.local/state/worklane/projects/*/dashboard.log 2>/dev/null | tail -n 60 || true
+      - name: the browser's screenshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wizard-e2e-screenshots
+          path: ${{ runner.temp }}/wiz/browser/*.png
+          if-no-files-found: ignore
