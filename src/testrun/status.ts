@@ -122,7 +122,7 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
   st.tierStats = [...tierRuns.entries()].map(([tier, t]) => ({ tier, runs: t.ms.length, medianMs: median(t.ms), peakMemMb: t.mem.length ? Math.max(...t.mem) : null, maxCpuS: t.cpu.length ? Math.max(...t.cpu) : null }));
   st.wipeFailures = st.wipeFailures.slice(-10);
   if (helperProblem) st.problems.push(`Test runs are off: ${helperProblem}`);
-  if (st.sandbox && !st.sandbox.ok) st.problems.push(`Test runs are off: the sandbox failed its check (${st.sandbox.detail.split('\n')[0]}). An admin runs scripts/setup/test-user.sh check, fixes the FAIL lines, then restarts the instance.`);
+  if (st.sandbox && !st.sandbox.ok) st.problems.push(`Test runs are off: the sandbox failed its check (${st.sandbox.detail.split('\n')[0]}). It is checked again by itself (every 5 minutes at most), and test runs go on when it passes. If it keeps failing, an admin runs scripts/setup/test-user.sh check and fixes the FAIL lines; no restart needed.`);
   const cannotPost = st.checksBlocked ?? (st.checksPermission && st.checksPermission.level !== 'write' && st.checksPermission.level !== 'unknown' ? st.checksPermission : null);
   if (cannotPost) st.problems.push(`Test runs can't post their checks: the App has no Checks: write permission${st.checksPermission ? ` (it has ${st.checksPermission.level})` : ''}. The owner adds Checks: read & write in the App's settings and accepts it on the installation; until then results are only on the dashboard.`);
   if (st.wipeFailures.length) st.problems.push(`A test run was not wiped completely (${st.wipeFailures.at(-1)!.id}: ${st.wipeFailures.at(-1)!.left.slice(0, 3).join(', ')}).`);
