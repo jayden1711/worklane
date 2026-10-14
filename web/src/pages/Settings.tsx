@@ -4,6 +4,7 @@ import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
 import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
+import { SetupScreens } from '../components/SetupScreens';
 import { Header } from './Overview';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -100,6 +101,9 @@ export function SettingsPage() {
       <Header title="Settings" sub={`the instance's settings, then the repo's config (read-only: change it in ${s.configDir}/ through a reviewed commit)`} />
       <div className="px-6 pt-6">
         <InstanceSettings />
+      </div>
+      <div className="px-6 pt-6">
+        <SetupScreens />
       </div>
       <div className="px-6 pt-6 text-[12.5px] text-ink-2">
         The machine-wide settings (the agent slot cap, engine updates) and their history are on the{' '}

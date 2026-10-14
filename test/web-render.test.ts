@@ -49,8 +49,9 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[] }): string;
+  renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; rerun?: string }): string;
   renderFirstRunPage(state: unknown): string;
+  renderSetupScreens(steps: unknown[]): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
@@ -1260,6 +1261,28 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
   const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
   assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
   assert.match(writer, /type="number"[^>]*disabled=""/);
+});
+
+test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const owner = { ...f, canAct: true, actions: { 'git-hooks': { id: 'git-hooks', step: 'pre-commit', label: 'Install the git hooks', available: true, changes: ['hooks'], commands: [] } } };
+  const html = r.renderFirstRun(owner);
+  assert.match(html, /data-step="pre-commit" data-status="todo"[\s\S]*?data-testid="first-run-skip" data-skipped="false"[^>]*>Skip</);
+  assert.doesNotMatch(r.renderFirstRun({ ...owner, canAct: false }), /first-run-skip"/, 'writers: no Skip');
+  const skipped = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, skipped: true } : s)) })) } };
+  const sk = r.renderFirstRun(skipped, { open: 'pre-commit' });
+  assert.match(sk, /data-step="pre-commit" data-status="skipped"[\s\S]*?>skipped<[\s\S]*?data-testid="first-run-skip" data-skipped="true"[^>]*>Undo skip</);
+  assert.doesNotMatch(sk.slice(sk.indexOf('data-step="pre-commit"'), sk.indexOf('</li>', sk.indexOf('data-step="pre-commit"'))), /first-run-fix-panel/, 'a skipped step stays closed');
+  const open = r.renderFirstRun(owner, { open: 'pre-commit' });
+  assert.match(open, /data-testid="first-run-automation"[^>]*>Without this page: <code[^>]*>worklane install --git-hooks<\/code>/);
+  const done = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, done: true } : s)) })) } };
+  assert.doesNotMatch(r.renderFirstRun(done).match(/data-step="pre-commit"[\s\S]*?<\/li>/)![0], /first-run-fix"/, 'done: no Fix on the checklist');
+  assert.match(r.renderFirstRun(done, { open: 'pre-commit', rerun: 'pre-commit' }), /data-step="pre-commit" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Run again[\s\S]*?data-testid="first-run-action" data-action="git-hooks"/);
+  const settings = r.renderSetupScreens(done.setup!.groups.flatMap((g) => g.steps));
+  assert.match(settings, /data-testid="setup-screens"[\s\S]*?Setup screens/);
+  assert.match(settings, /data-step="pre-commit"[\s\S]*?>done<[\s\S]*?worklane install --git-hooks[\s\S]*?href="\/first-run\?step=pre-commit"[^>]*>Run again/);
+  assert.match(settings, /data-step="service"[\s\S]*?worklane up[\s\S]*?href="\/first-run\?step=service"[^>]*>Open/);
+  assert.doesNotMatch(settings, /data-step="claude-login"/, 'a provider login has no screen of its own');
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

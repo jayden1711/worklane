@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { PolicyChange, DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { SetupStepView, PolicyChange, DeployGate, AddProjectData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -28,6 +28,7 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
@@ -112,8 +113,9 @@ export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
 export const renderWaiting = (w: Waiting, now?: number) => renderToStaticMarkup(<WaitingView w={w} {...(now !== undefined ? { now } : {})} />);
 export const renderWaitingPage = (state: State) => renderToStaticMarkup(<WaitingPage state={state} />);
-export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: PolicyChange[] } = {}) => renderToStaticMarkup(<FirstRunView f={f} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} initialPolicyChanges={o.policyChanges ?? null} onRecheck={() => {}} />);
+export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: PolicyChange[]; rerun?: string } = {}) => renderToStaticMarkup(<FirstRunView f={f} rerun={o.rerun ?? null} initialOpen={o.open ?? null} initialConfirming={!!o.confirming} initialActionConfirming={!!o.actionConfirming} initialPolicyChanges={o.policyChanges ?? null} onRecheck={() => {}} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
+export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = () => renderToStaticMarkup(<SignInPage />);
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);

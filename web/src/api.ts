@@ -799,6 +799,10 @@ export interface SetupStepView {
   detail: string;
   today: string;
   fix: SetupFix;
+  /** The command or config key that does the same without the page. */
+  automation: string | null;
+  /** Skipped on the first-run page (not counted as left). */
+  skipped: boolean;
   network: boolean;
   checkedAt: string;
 }
@@ -850,6 +854,8 @@ export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fre
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
 /** Run a first-run Fix action after the person confirmed the plan it showed. */
 export const runFirstRunAction = (id: string) => api<{ ok: boolean; detail: string }>(`/api/first-run/actions/${encodeURIComponent(id)}`, { method: 'POST', body: JSON.stringify({ confirm: true }) });
+/** Skip a setup step on the first-run page, or undo the skip. */
+export const skipStep = (step: string, skip: boolean) => api<{ ok: boolean; skipped: string[] }>('/api/first-run/skip', { method: 'POST', body: JSON.stringify({ step, skip }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
