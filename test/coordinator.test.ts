@@ -1133,14 +1133,16 @@ test('#470: every governor hold records its kind and numbers, the Board shows it
   assert.equal(h.wait, new Date(2026, 9, 11, 8, 0).toISOString());
   assert.equal(h.fix, 'or change the run windows in Settings.');
 
-  // The daily budget: it waits for the next day (UTC).
+  // The daily budget: it waits for the next local day (this machine's midnight, as the dashboard's "today").
   f.log.append('run.cost', { issue: null, role: 'x', model: 'm', usd: 1, turns: 1 }, 'alice');
   current = { settings: { daily_budget_usd: 0.5 }, error: null };
   await c.tick();
   assert.equal(last().kind, 'budget');
   h = banner()!;
-  assert.equal(h.numbers, '$1.00 spent today (UTC) of the $0.5 daily budget');
-  assert.ok(h.wait && Date.parse(h.wait) > Date.now() && Date.parse(h.wait) - Date.now() <= 86_400_000, 'until the next UTC day');
+  assert.equal(h.numbers, '$1.00 spent today of the $0.5 daily budget');
+  const midnight = new Date();
+  midnight.setHours(24, 0, 0, 0);
+  assert.equal(h.wait, midnight.toISOString(), 'until the next local midnight');
 
   // The machine-wide agent cap: both slots held by other harnesses.
   current = { settings: {}, error: null };
