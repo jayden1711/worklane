@@ -131,6 +131,17 @@ export function signInFromFiles(o: { clientId: string; publicUrl: string; dir: s
   return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin };
 }
 
+/** The request headers a chat attachment upload needs on the instance (src/dashboard.ts). */
+const ATTACHMENT_REQUEST_HEADERS = ['x-attachment-name', 'x-attach-anyway', 'content-length'] as const;
+/** A download's own response headers (a chat attachment): a download or an image, and its exact length. */
+const DOWNLOAD_RESPONSE_HEADERS = ['content-disposition', 'content-length'] as const;
+/**
+ * The policy on every response forwarded from an instance, whatever the instance said: an API answer is data, never a
+ * page, so even a hostile instance can't serve something the browser runs on the hub's origin. (A fetch() ignores it;
+ * only a response opened as a document, like an attachment, is held to it.)
+ */
+export const FORWARDED_CSP = "default-src 'none'; sandbox; frame-ancestors 'none'";
+
 /**
  * The hub's connections to its instances' servers, kept open between calls: a page switch makes several calls at once,
  * and each would otherwise open a new connection. Said here rather than left to Node's default.
@@ -160,11 +171,19 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
   if (login && deviceOk) headers[DEVICE_HEADER] = '1';
+  // A chat attachment's upload (src/chat-attachments.ts): its name and the "attach anyway" answer, and its length so
+  // the instance can refuse an oversized one before reading it. Nothing else of the client's goes upstream. 4096: room
+  // for a 200-character name percent-encoded (up to 12 characters each).
+  for (const k of ATTACHMENT_REQUEST_HEADERS) {
+    const v = req.headers[k];
+    if (typeof v === 'string' && v.length <= 4096) headers[k] = v;
+  }
   // No accept-encoding goes upstream (the headers are built above), so the instance answers uncompressed over loopback;
   // a view COMPRESSIBLE_API lists is compressed here, on its way to the browser. Never a stream: it is text/event-stream.
   const enc = mayCompressApi(path) ? requestEncoding(req) : null;
   const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers, agent: upstream }, (r) => {
-    const h: Record<string, string> = { 'cache-control': 'no-store' };
+    // nosniff on everything forwarded: the browser takes the type the instance said, never one it guesses.
+    const h: Record<string, string> = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': FORWARDED_CSP };
     const type = r.headers['content-type'];
     if (type) h['content-type'] = type;
     const json = !!type && /^application\/json/.test(type) && !r.headers['content-encoding'];
@@ -172,6 +191,11 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
     if (enc && json) {
       res.writeHead(r.statusCode ?? 502, { ...h, 'content-encoding': enc });
       return void r.pipe(compressStream(enc)).pipe(res);
+    }
+    // A download's own headers (a chat attachment, src/chat-attachments.ts): a download or an image, its exact length.
+    for (const k of DOWNLOAD_RESPONSE_HEADERS) {
+      const v = r.headers[k];
+      if (typeof v === 'string') h[k] = v;
     }
     res.writeHead(r.statusCode ?? 502, h);
     r.pipe(res);

@@ -70,7 +70,7 @@ function agentDir(dir: string, gid: number, mode: number, what: string): void {
 }
 
 /** A file the agent user can read but not write: owner this user, group `gid`, 0640. */
-export function writeAgentReadable(file: string, data: string, gid: number): void {
+export function writeAgentReadable(file: string, data: string | Buffer, gid: number): void {
   writeFileSync(file, data, { mode: 0o640 });
   if (process.platform === 'win32') return;
   chownSync(file, process.getuid!(), gid);

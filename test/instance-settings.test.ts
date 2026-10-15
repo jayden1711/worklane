@@ -59,7 +59,11 @@ test('the instance settings: each value in effect and where it comes from, the b
     'intake.drafts_per_day',
     'intake.max_usd_per_day',
     'stuck_guard',
+    'chat_attachments.max_file_mb',
+    'chat_attachments.max_message_mb',
+    'chat_attachments.retention_days',
   ]);
+  assert.deepEqual([by['chat_attachments.max_file_mb']!.value, by['chat_attachments.max_message_mb']!.value, by['chat_attachments.retention_days']!.value], [10, 25, 30], 'the chat attachments defaults');
   assert.equal(by.stuck_guard!.value, 'dry-run', 'the stuck-run guard only logs unless the owner turns it on');
   assert.equal(by['research.repo_access']!.value, false, 'research has no repo access unless the owner turns it on');
   assert.deepEqual(by.daily_budget_usd, { key: 'daily_budget_usd', value: 12, source: 'instance' });
@@ -94,6 +98,9 @@ test('where a value comes from: the instance\'s policy, else the repo\'s config 
     'intake.drafts_per_day': 'engine',
     'intake.max_usd_per_day': 'engine',
     stuck_guard: 'engine', // only the instance's policy sets the guard's mode
+    'chat_attachments.max_file_mb': 'engine', // only the instance's policy sets the chat attachments' caps
+    'chat_attachments.max_message_mb': 'engine',
+    'chat_attachments.retention_days': 'engine',
   });
   // The repo's config as written, not as loaded with defaults: drop a key from the file and it's the engine's.
   const agents = join(s.cfg.dir, 'agents.yaml');
