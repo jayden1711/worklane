@@ -144,8 +144,12 @@ test('the main watch is off under No CI, and says what that means', async () => 
 
 test('the event log the No CI tiers are read from is out of the agent user\'s reach, as the setup scripts make it (the CI job add-project (real systemd) proves it on a real host)', () => {
   const read = (f: string) => readFileSync(join(repoRoot, 'scripts', 'setup', f), 'utf8');
-  // The coordinator's home, which holds its instance state and events.db: 0700, its own.
-  assert.match(read('lib.sh'), /ensure_user\(\) \{[\s\S]*?chmod 0700 "\$\(home_of "\$1"\)"/);
+  // Each user has a private group of its own (useradd's default), and the coordinator's state is for that user and
+  // group only (src/os/index.ts groupOnly: 0770 directories, 0660 files, nothing for others).
+  assert.match(read('lib.sh'), /ensure_user\(\) \{[\s\S]*?useradd --create-home --shell \/bin\/bash "\$1"/);
+  assert.doesNotMatch(read('lib.sh'), /useradd[^\n]*(-g|--gid|-N|--no-user-group)\b/, 'no shared primary group');
+  const os = readFileSync(join(repoRoot, 'src', 'os', 'index.ts'), 'utf8');
+  assert.match(os, /const want = st\.isDirectory\(\) \? 0o770 : \(st\.mode & 0o777\) === 0o600 \? 0o600 : 0o660;/);
   const instance = read('instance.sh');
   assert.match(instance, /coord="wl-\$name" agent="wl-\$name-agent"/);
   // The agent shares the work group with the coordinator, never the coordinator's own group.

@@ -1051,10 +1051,18 @@ jobs:
           db="$state/events.db"
           sudo test -f "$db"
           sudo stat -c '%U:%G %a %n' "$home" "$home/.local" "$state" "$db"* | tee "$F/log-modes.txt"
-          # The coordinator's home is its own and closed (instance.sh); the log is the coordinator's, in its own group.
-          [ "$(sudo stat -c '%U %a' "$home")" = "wl-ci 700" ]
-          [ "$(sudo stat -c '%U:%G' "$db")" = "wl-ci:wl-ci" ]
-          if id -nG wl-ci-agent | tr ' ' '\n' | grep -qx wl-ci; then echo "the agent user is in the coordinator's group" >&2; exit 1; fi
+          # The home, the state and the log are the coordinator's, in its own private group, with nothing for others
+          # (the engine keeps its state 0770/0660, src/os/index.ts groupOnly; the home was found 0770 here too).
+          for p in "$home" "$home/.local" "$state" "$db"; do
+            [ "$(sudo stat -c '%U:%G' "$p")" = "wl-ci:wl-ci" ] || { echo "$p isn't wl-ci:wl-ci" >&2; exit 1; }
+            [ "$(( 0$(sudo stat -c '%a' "$p") % 10 ))" = 0 ] || { echo "$p gives others access" >&2; exit 1; }
+          done
+          # So the group is what keeps everyone else out: wl-ci is its only member, and no other user has it as theirs.
+          getent group wl-ci
+          [ -z "$(getent group wl-ci | cut -d: -f4)" ] || { echo "wl-ci's group has members" >&2; exit 1; }
+          gid="$(getent group wl-ci | cut -d: -f3)"
+          [ "$(getent passwd | awk -F: -v g="$gid" '$4 == g {print $1}')" = wl-ci ] || { echo "another user has wl-ci's group" >&2; exit 1; }
+          for u in wl-ci-agent wl-dash; do if id -nG "$u" | tr ' ' '\n' | grep -qx wl-ci; then echo "$u is in the coordinator's group" >&2; exit 1; fi; done
           # No ACL anywhere on the way gives the agent user or the work group anything.
           sudo getfacl -p "$home" "$home/.local" "$home/.local/state" "$state" "$db" > "$F/log-acl.txt"
           cat "$F/log-acl.txt"
