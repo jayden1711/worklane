@@ -553,7 +553,7 @@ test('after a restart: a PR\'s GPU fast run cut off gets a failing check on its 
   assert.equal(r.ok, false);
   assert.deepEqual(r.tiers.map((t) => [t.tier, t.ok]), [['lint', false], ['cuda', false]]);
   assert.equal(r.setup?.step, 'gpu');
-  assert.equal(r.setup?.detail, 'cut off (GPU run ended by the coordinator or the machine stopping during it): not rerun automatically; push again to run it (a new head runs it), or rerun it by hand');
+  assert.equal(r.setup?.detail, 'cut off (GPU run ended by the coordinator or the machine stopping during it): not rerun automatically; push again to run it');
   assert.deepEqual(checksFor(r, { lint: 'test / lint', cuda: 'test / cuda' }).map((c) => [c.name, c.conclusion]), [['test / lint', 'failure'], ['test / cuda', 'failure']]);
   assert.equal(checkOutput(r, r.tiers, 'failure').title, 'Cut off (GPU run): not rerun automatically');
   await runs.tick();
