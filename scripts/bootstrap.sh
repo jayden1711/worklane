@@ -137,10 +137,11 @@ case "$OS" in Darwin | Linux) ;; *) die "unsupported system $OS (macOS and Linux
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
-# Download $1 to $2 and refuse it unless its sha256 is $3.
+# Download $1 to $2 and refuse it unless its sha256 is $3. --retry: a CDN's passing 5xx (a 504 from GitHub's release
+# host failed main's bootstrap job, 2026-10-15) is tried again, up to 3 times; the checksum below decides either way.
 fetch_checked() {
   local url="$1" out="$2" want="$3" got
-  curl -fsSL -o "$out" "$url"
+  curl -fsSL --retry 3 -o "$out" "$url"
   got="$(sha256_of "$out")"
   [ "$got" = "$want" ] || { rm -f "$out"; die "checksum mismatch for $url: got $got, want $want"; }
 }
@@ -513,6 +514,16 @@ init_args=(init --mode "$MODE")
 [ "$YES" = 0 ] || init_args+=(--yes)
 status=0
 run "$CLI" "${init_args[@]}" ${ANSWERS[@]+"${ANSWERS[@]}"} "$REPO" || status=$?
+# WHY (#469): init stopped only for the CI choice (exit 5: the repo names no required check and no ci: none). That
+# choice is the wizard's (Required checks named: a starter CI, or No CI), so unattended too it ends at the wizard's
+# URL, as the interactive install does.
+if [ "$status" = 5 ] && [ "$WIZARD" = 1 ] && [ "$DRY" = 0 ]; then
+  echo
+  echo "init stopped only for the CI choice: make it in the wizard (Required checks named), then run this again"
+  path_note
+  open_wizard
+  exit $?
+fi
 if [ "$status" != 0 ]; then
   echo
   echo "init stopped (exit $status): fix what it says, then run this again; it picks up where it stopped"

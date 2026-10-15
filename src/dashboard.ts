@@ -15,7 +15,13 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
+import { starterCiView } from './starter-ci.js';
+import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+
+/** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
+const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
 import { GITHUB_API } from './github-hosts.js';
+import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
@@ -30,14 +36,20 @@ import { deployGateView } from './deploy-gate/gate.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
-import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswer, type ChatAnswerFile } from './chat.js';
+import { handleConversationRoute } from './chat-routes.js';
+import { mayDownload, mayRemove, sharers } from './chat-conversations.js';
+import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
+import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
 import { readRun, runsForIssue } from './run-record.js';
+import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
+import { gpuFilePath, gpuOptIn } from './testrun/gpu.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
@@ -46,7 +58,7 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, stableNodePath, type ServiceSpec } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
@@ -94,6 +106,8 @@ import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
 import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
+import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
+import { profilesView } from './claude-profiles.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
@@ -101,6 +115,9 @@ import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
+import { handleSiri, siriGatewayToken } from './siri/instance.js';
+import { siriDevicesRoute } from './siri/manage.js';
+import { RateLimits } from './siri/tokens.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -136,7 +153,7 @@ export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>)
 export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
-    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
+    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime, ci: ciMode(cfg) },
     owners: cfg.project.owners,
     reports: cfg.project.reports,
     governor: cfg.project.governor,
@@ -201,6 +218,9 @@ export interface DashboardOptions {
    */
   actor?: string;
   /** The full-run lock whose holders the test-runs view shows (tests). */
+  /** Root's GPU opt-in file and the uid that must own it (tests: their own; src/testrun/gpu.ts). */
+  gpuFile?: string;
+  gpuFileUid?: number;
   testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
@@ -212,6 +232,8 @@ export interface DashboardOptions {
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
+  /** gitleaks over an uploaded chat attachment (src/chat-attachments.ts); null: the engine's patterns only. Tests set it. */
+  attachmentScan?: ((path: string) => Promise<string[]>) | null;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; updatesStatePath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
@@ -247,6 +269,8 @@ export interface DashboardOptions {
    * cli.js, by absolute path.
    */
   discordListing?: DiscordListingStandIn;
+  /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
+  avatars?: AvatarOptions;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -506,6 +530,9 @@ const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = 
   'intake.reports_per_sender_per_day': null,
   'intake.drafts_per_day': null,
   'intake.max_usd_per_day': null,
+  'chat_attachments.max_file_mb': null,
+  'chat_attachments.max_message_mb': null,
+  'chat_attachments.retention_days': null,
 };
 
 const defines = (obj: unknown, path: string[]): boolean => {
@@ -816,6 +843,13 @@ export function tokenGiven(req: IncomingMessage, _url: URL, token: string): bool
 /** The marker a hub puts on the page it serves, so the UI asks for the hub's instances only there (else /api/hub is a 404). */
 export const HUB_MARKER = '<meta name="dashboard-hub" content="1">';
 
+/**
+ * The dashboard page's content security policy, on the hub and on an instance's own server: everything from this
+ * origin only. People's pictures come from this server too (src/avatars.ts), read with the page's own auth and shown
+ * from a blob: URL the page made; no outside host is in any directive (#462).
+ */
+export const PAGE_CSP = "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
 export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts: { hub?: boolean } = {}): void {
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
   let file = resolve(webDir, rel);
@@ -834,6 +868,7 @@ export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts:
   const enc = compressibleType(type) ? requestEncoding(res.req) : null;
   if (compressibleType(type)) headers.vary = 'accept-encoding';
   if (html) {
+    headers['content-security-policy'] = PAGE_CSP;
     const page = readFileSync(file, 'utf8');
     const body = Buffer.from(opts.hub ? (page.includes('</head>') ? page.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${page}`) : page);
     return send(res, 200, headers, body, enc);
@@ -928,6 +963,15 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   send(res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(view ? { vary: 'accept-encoding' } : {}) }, Buffer.from(JSON.stringify(body)), view ? requestEncoding(req) : null);
 }
 
+/** The chat attachments' caps in force: the instance's policy settings, else the engine's defaults. */
+export function chatAttachmentCaps(o: Pick<DashboardOptions, 'policyFile'>): AttachmentCaps {
+  try {
+    return attachmentCaps(o.policyFile ? PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings : {});
+  } catch {
+    return attachmentCaps({});
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -947,6 +991,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
+  // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
+  const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
+  const siriLimits = new RateLimits();
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -958,8 +1005,19 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
   const eventCache = new EventCache(opts.eventsDb);
   let lastId = eventCache.lastId();
+  // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
+  const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
 
   const owners = opts.cfg.project.owners;
+  const avatars = new Avatars(join(opts.stateDir, 'avatars'), opts.avatars);
+  /** Whether a person is one this instance knows (so their picture may be fetched): its people, the asker, a machine owner. */
+  const knowsPerson = (login: string, who: Who) => {
+    const l = login.toLowerCase();
+    if (l === who.login.toLowerCase() || isMachineOwner(login, opts.machineOwnersFile ?? MACHINE_OWNERS_FILE)) return true;
+    const today = localDay();
+    const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
+    return peopleOf({ owners: opts.cfg.project.owners, tasks: p.tasks, decisions: p.decisions }).has(l);
+  };
   const repo = opts.cfg.project.project.repo;
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
@@ -1052,6 +1110,29 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     audit(who, 'first_run.config_merged', { number: plan.number, approver, here: !plan.merged, method: plan.command[6]?.replace(/^--/, '') ?? null, synced: after.synced, detail: (after.synced ? mergedLine(after) : (after.why ?? '')).slice(0, 300) });
     setupCache.clear();
     return { status: 200, body: { ok: true, number: plan.number, merged: true, synced: after.synced, detail: after.synced ? mergedLine(after) : after.why, record: after, confirmed: true } };
+  };
+  /**
+   * WHY (#468): the Issues page's "not picked up" list: ONE read of the open issues (Backlog.openIssues), kept two
+   * minutes for everyone (GitHub's rate limit is shared with the coordinator), with the reasons from the events.
+   */
+  let ignoredCache: { at: number; issues: IgnoredIssue[]; error: string | null } | null = null;
+  const ignoredNow = async (): Promise<{ at: number; issues: IgnoredIssue[]; error: string | null }> => {
+    if (ignoredCache && Date.now() - ignoredCache.at < 120_000) return ignoredCache;
+    const b = opts.backlog?.();
+    if (!b?.openIssues) return (ignoredCache = { at: Date.now(), issues: [], error: 'this dashboard has no backlog to list issues from' });
+    try {
+      const open = await b.openIssues();
+      ignoredCache = { at: Date.now(), issues: ignoredIssues(open, eventCache.all(), { repo }), error: null };
+    } catch (e) {
+      ignoredCache = { at: Date.now(), issues: ignoredCache?.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` };
+    }
+    return ignoredCache;
+  };
+  /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
+  const testFiles = (): string[] => {
+    const r = spawnSync('git', ['ls-files'], { cwd: opts.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    if (r.status !== 0) return [];
+    return r.stdout.split('\n').filter((f) => /(^|\/)(tests?|__tests__|spec)\/.+\.[a-z]+$|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$|(^|\/)test_[^/]+\.py$/.test(f)).slice(0, 300);
   };
   const readSkips = (): string[] => {
     try {
@@ -1150,7 +1231,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       setupMode: !!opts.setupMode,
-      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
+      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode, ci: ciMode(opts.cfg) },
       user: who.login,
       role: who.role,
       via: who.via,
@@ -1206,8 +1287,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, [token])) return;
+    if (refuseKeyInUrl(url, res, siriToken ? [token, siriToken] : [token])) return;
     try {
+      // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
+      // gateway token works there, and nothing under /api/siri falls through to any other route.
+      if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
+        if (!siriToken) return json(res, 404, { error: 'not found' });
+        return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
+      }
       // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
       // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
       if (url.pathname === PROOF_PATH && req.method === 'GET') {
@@ -1236,9 +1323,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
           return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
         }
+        // The agents' Claude account profiles (src/claude-profiles-routes.ts): a refusal is audited even with no session.
+        if (req.method === 'POST' && isProfileRoute(url.pathname) && 'status' in id && id.status === 403) {
+          const r = refuseUnidentified(req, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name }, url.pathname, id);
+          return json(res, r.status, r.body);
+        }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
+        if (req.method === 'POST' && isProfileRoute(url.pathname)) {
+          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), audit, readBody });
+          return json(res, r.status, r.body);
+        }
         // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
         // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
         if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
@@ -1261,6 +1357,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // A person's picture from this server, never from GitHub in the browser (#462); and, for the hub, whether a
+        // login is a person this instance knows, so the hub fetches only theirs.
+        const avatar = url.pathname.match(AVATAR_ROUTE);
+        if (avatar && req.method === 'GET') return void (await avatars.serve(req, res, avatar[1]!, url.searchParams.get('size'), (l) => knowsPerson(l, who)));
+        const person = url.pathname.match(/^\/api\/people\/([^/]+)$/);
+        if (person && req.method === 'GET') return json(res, 200, { known: validLogin(person[1]) && knowsPerson(person[1]!, who) });
         // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
         // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
         // Each action is refused again by the route it calls (decide, the console).
@@ -1272,7 +1374,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
         if (url.pathname === '/api/test-runs' && req.method === 'GET') {
           const held = testSlotsHeld(opts.slotsDir);
-          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
+          // Root's GPU opt-in for this instance, read-only (src/testrun/gpu.ts): only a root shell changes it.
+          const name = opts.instance ?? opts.cfg.project.project.name;
+          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) }, gpu: gpuOptIn(name, opts.gpuFile ?? gpuFilePath(), opts.gpuFileUid ?? 0), instance: name }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
@@ -1323,54 +1427,164 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, runsForIssue(opts.stateDir, issue));
         }
+        // WHY (#468): "Your first task": the form's picks (the repo's test files) and the template; and the form's issue,
+        // built and checked with the coordinator's own parser, then (confirmed) filed with `ready`. A checkout's only:
+        // on a server an issue filed here would be the App's, which the coordinator doesn't take as a writer's.
+        if (url.pathname === '/api/first-run/first-task') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('your first task is', who) });
+          const why = "on a server an issue filed from this page would be its GitHub App's, which the coordinator doesn't count as a writer's: file it on GitHub with the template, and add ready";
+          if (req.method === 'GET') return json(res, 200, { local: !opts.instance, why: opts.instance ? why : null, template: FIRST_TASK_TEMPLATE, tests: opts.instance ? [] : testFiles(), runner: opts.cfg.tests.runner });
+          if (req.method !== 'POST') return json(res, 405, { error: 'GET or POST' });
+          const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.first_task_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (opts.instance) return refused(400, `not from here: ${why}`);
+          if (!opts.backlog) return refused(400, 'this dashboard has no backlog to file to');
+          let issue: { title: string; body: string };
+          try {
+            issue = firstTaskBody((body.values && typeof body.values === 'object' ? body.values : {}) as Record<string, unknown>);
+          } catch (e) {
+            if (e instanceof FirstTaskError) return refused(400, e.message);
+            throw e;
+          }
+          if (body.confirm !== true) return json(res, 200, { ok: true, ...issue, label: 'ready', confirmed: false });
+          const b = opts.backlog();
+          const created = await b.ensureLabels([READY_LABEL]);
+          const number = await b.createIssue(issue.title, issue.body, ['ready']);
+          setupCache.delete('first-task');
+          ignoredCache = null;
+          audit(who, 'first_run.first_task_filed', { issue: number, label_created: created.includes('ready') });
+          return json(res, 200, { ok: true, number, url: opts.cfg.project.backlog === 'github' ? `https://github.com/${repo}/issues/${number}` : null, labelCreated: created.includes('ready'), confirmed: true });
+        }
+        // WHY (#468): why each open issue isn't being worked on (anyone may read it; the fix is a writer's, locally).
+        if (url.pathname === '/api/issues/ignored' && req.method === 'GET') {
+          const v = await ignoredNow();
+          return json(res, 200, { ...v, canFix: isWriter(who.role) && !opts.instance, local: !opts.instance });
+        }
+        const readyFix = url.pathname.match(/^\/api\/issues\/(\d+)\/ready$/);
+        if (readyFix && req.method === 'POST') {
+          const n = Number(readyFix[1]);
+          if (!isWriter(who.role)) return json(res, 403, { error: `only the project's writers may mark an issue ready; @${who.login} is a ${who.role}` });
+          // On a server the label would be added by the App, which the coordinator doesn't count as a writer's.
+          if (opts.instance) return json(res, 400, { error: "on a server, add ready on GitHub: added from here it would be the App's, which the coordinator doesn't count as a writer's" });
+          if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog' });
+          const b = opts.backlog();
+          await b.ensureLabels([READY_LABEL]);
+          await b.addLabels(n, ['ready']);
+          ignoredCache = null;
+          audit(who, 'issue.ready_added', { issue: n });
+          return json(res, 200, { ok: true, issue: n });
+        }
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
+        // Chat attachments (src/chat-attachments.ts): the owners' and writers' only, to upload, read or remove; a
+        // viewer is refused on every one, downloads included. The file streams to the instance's state, never a
+        // buffer; it is served with its allowlisted type, nosniff, and as a download unless it is an image.
+        const attachPath = url.pathname.match(/^\/api\/chat\/attachments(?:\/(limits|att-[a-f0-9]{32}))?$/);
+        if (attachPath) {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('chat attachments are', who) });
+          const caps = chatAttachmentCaps(opts);
+          const sub = attachPath[1];
+          if (sub === 'limits' && req.method === 'GET') return json(res, 200, { maxFileMb: caps.max_file_mb, maxMessageMb: caps.max_message_mb, retentionDays: caps.retention_days, maxFiles: MAX_ATTACHMENTS, extensions: ATTACHMENT_EXTENSIONS });
+          if (!sub && req.method === 'POST') {
+            let name = '';
+            try {
+              name = decodeURIComponent(String(req.headers['x-attachment-name'] ?? ''));
+            } catch {
+              return json(res, 400, { error: 'the file name header is not URI-encoded' });
+            }
+            const length = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
+            try {
+              const m = await storeUpload({ stateDir: opts.stateDir, name, body: req, declaredLength: Number.isFinite(length) ? length : null, caps, by: who.login, anyway: req.headers['x-attach-anyway'] === '1', ...(opts.attachmentScan !== undefined ? { gitleaks: opts.attachmentScan } : {}) });
+              // Only what the attachment is: never its content, nor (on a secret warning) what matched.
+              audit(who, 'chat.attachment_added', { id: m.id, name: redactString(m.name), type: m.kind, size: m.size, sha256: m.sha256 });
+              return json(res, 200, { attachment: attachmentView(m), secretKinds: m.secretKinds, scanned: SCANNED_KINDS.includes(m.kind) });
+            } catch (e) {
+              if (!(e instanceof AttachmentError)) throw e;
+              // Refused mid-stream: answer, then drop the connection rather than read the rest of the body.
+              if (!req.readableEnded) {
+                res.setHeader('connection', 'close');
+                res.on('finish', () => req.destroy());
+              }
+              return json(res, e.status, { error: e.message, ...(e.secretKinds.length ? { secret: { kinds: e.secretKinds } } : {}) });
+            }
+          }
+          const m = sub && sub !== 'limits' ? readAttachment(opts.stateDir, sub) : null;
+          if (sub && sub !== 'limits' && !m) return json(res, 404, { error: 'no such attachment (it may have expired)' });
+          if (m && req.method === 'GET') {
+            // Its uploader, or someone who can see a Project that holds it (src/chat-conversations.ts): anyone else is
+            // refused even knowing the id, owners included.
+            if (!mayDownload(opts.stateDir, m, who.login, await sharers(opts.stateDir, opts.roleOf))) return json(res, 403, { error: 'only who attached it, or someone who can see a project that holds it, may open an attachment' });
+            res.writeHead(200, downloadHeaders(m));
+            return void res.end(attachmentBytes(opts.stateDir, m.id));
+          }
+          if (m && req.method === 'DELETE') {
+            // Its uploader, or the creator of a Project holding it: nobody else, owners included (src/chat-conversations.ts).
+            if (!mayRemove(opts.stateDir, m, who.login)) return json(res, 403, { error: 'only who attached it, or the creator of a project that holds it, may remove an attachment' });
+            removeAttachment(opts.stateDir, m.id);
+            audit(who, 'chat.attachment_removed', { id: m.id });
+            return json(res, 200, { ok: true });
+          }
+          return json(res, 405, { error: 'not a method here' });
+        }
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string; key?: unknown };
+          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
           try {
+            const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts), who.login).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}) });
-            audit(who, 'chat.asked', { id: asked.id });
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
+            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
             return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
+            if (e instanceof AttachmentError) return json(res, e.status, { error: e.message });
             throw e;
           }
         }
+        // The confirm flow that files a chat answer's draft (a single-shot answer's, or a conversation turn's): the
+        // owner's only; the stored draft, validated again here, with `ready`, through this instance's backlog; once.
+        const fileDraft = async (id: string, answer: ChatAnswer | null): Promise<{ status: number; body: unknown }> => {
+          if (!isOwnerHere) return { status: 403, body: { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` } };
+          if (!answer?.issueDraft) return { status: 400, body: { error: 'this answer has no issue draft' } };
+          if (existsSync(filedPath(opts.stateDir, id))) return { status: 409, body: { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, id), 'utf8')) as object) } };
+          // The draft as the answer file has it, never one from the request, checked again as the harness will.
+          const d = validateDraft(answer.issueDraft.title, answer.issueDraft.body);
+          if (!d.ok) return { status: 400, body: { error: `the draft isn't one the harness can take: ${d.why}` } };
+          if (!opts.backlog) return { status: 400, body: { error: 'this dashboard has no backlog to file to' } };
+          // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
+          mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
+          try {
+            writeFileSync(filedPath(opts.stateDir, id), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
+          } catch {
+            return { status: 409, body: { error: 'this draft is being filed already' } };
+          }
+          let number: number;
+          try {
+            number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
+          } catch (e) {
+            rmSync(filedPath(opts.stateDir, id), { force: true });
+            throw e;
+          }
+          writeFileSync(filedPath(opts.stateDir, id), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
+          audit(who, 'chat.draft_filed', { id, issue: number });
+          return { status: 200, body: { ok: true, number } };
+        };
+        const filedOf = (id: string) => {
+          const rec = existsSync(filedPath(opts.stateDir, id)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, id), 'utf8')) as { number?: number }) : null;
+          return typeof rec?.number === 'number' ? { number: rec.number } : null;
+        };
+        // Conversations and Projects (src/chat-routes.ts): owners' and writers' only, each conversation its creator's.
+        if (await handleConversationRoute(req, res, url, { stateDir: opts.stateDir, who, roleOf: opts.roleOf, caps: chatAttachmentCaps(opts), readBody, json, audit: (action, detail) => audit(who, action, detail), answerFor: chatAnswerFor, filed: filedOf, fileDraft })) return;
         const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
         if (chat) {
           const f = chatAnswer(opts.stateDir, chat[1]!);
           if (!f) return json(res, 404, { error: `no chat question ${chat[1]}` });
-          if (!chat[2] && req.method === 'GET') {
-            const rec = existsSync(filedPath(opts.stateDir, chat[1]!)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as { number?: number }) : null;
-            const filed = typeof rec?.number === 'number' ? { number: rec.number } : null;
-            return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed });
-          }
+          if (!chat[2] && req.method === 'GET') return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed: filedOf(chat[1]!) });
           if (chat[2] && req.method === 'POST') {
-            if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` });
-            if (f.state !== 'answered' || !f.answer.issueDraft) return json(res, 400, { error: 'this answer has no issue draft' });
-            if (existsSync(filedPath(opts.stateDir, chat[1]!))) return json(res, 409, { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as object) });
-            // The draft as the answer file has it, never one from the request, checked again as the harness will.
-            const d = validateDraft(f.answer.issueDraft.title, f.answer.issueDraft.body);
-            if (!d.ok) return json(res, 400, { error: `the draft isn't one the harness can take: ${d.why}` });
-            if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog to file to' });
-            // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
-            mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
-            try {
-              writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
-            } catch {
-              return json(res, 409, { error: 'this draft is being filed already' });
-            }
-            let number: number;
-            try {
-              number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
-            } catch (e) {
-              rmSync(filedPath(opts.stateDir, chat[1]!), { force: true });
-              throw e;
-            }
-            writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
-            audit(who, 'chat.draft_filed', { id: chat[1]!, issue: number });
-            return json(res, 200, { ok: true, number });
+            const r = await fileDraft(chat[1]!, f.state === 'answered' ? f.answer : null);
+            return json(res, r.status, r.body);
           }
         }
         // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
@@ -1533,6 +1747,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true });
           } finally {
             log.close();
+          }
+        }
+        // A decision's (or held PR's) detail, asked when its page opens (src/decision-detail.ts): a viewer gets only a
+        // viewer's fields; …/diff is the owners' (from this checkout's git), …/pr the owners' and writers' (the PR body).
+        if (url.pathname.startsWith('/api/decisions/') && req.method === 'GET') {
+          const [raw = '', part, ...more] = url.pathname.slice('/api/decisions/'.length).split('/');
+          if (more.length || (part !== undefined && part !== 'diff' && part !== 'pr')) return json(res, 404, { error: 'no such view' });
+          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
+          if (!detail) return json(res, 404, { error: 'no such decision' });
+          if (part === undefined) return json(res, 200, detail);
+          if (part === 'diff') {
+            if (!isOwnerHere) return json(res, 403, { error: `a change's diff is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+            const c = detail.change;
+            return json(res, 200, c?.base && c.head ? await decisionDiff(opts.root, c.base, c.head) : { diff: null, why: 'no commits recorded for this change' });
+          }
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly("a PR's body is", who) });
+          const pr = detail.pr;
+          if (!pr) return json(res, 200, { pr: null, failWithout: null, never: null, why: 'no PR' });
+          if (!opts.backlog) return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: 'this dashboard has no backlog to read the PR from' });
+          const kept = prBodies.get(pr.number);
+          const body = kept && Date.now() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
+          if (body !== kept?.body) prBodies.set(pr.number, { at: Date.now(), body });
+          try {
+            return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
+          } catch (e) {
+            prBodies.delete(pr.number);
+            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR: ${(e as Error).message}` });
           }
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
@@ -1702,6 +1943,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (runs.status !== 0 && statuses.status !== 0) return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
           const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
           return json(res, 200, { checks, sha });
+        }
+        // The starter CI (src/starter-ci.ts, #469): a drafted workflow and GitHub's new-file page for it, and its first
+        // run on the default branch. Read only: the person commits the workflow on GitHub, never the engine.
+        if (url.pathname === '/api/first-run/starter-ci' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          const gh = actionDeps().gh;
+          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, testRun: !!liveCfg().tests.test_run, gh: (args) => gh(args) }));
         }
         // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
         // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.
@@ -1982,7 +2230,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (plan.kind === 'owner-command') return refused(409, `not started from here: ${plan.why}`, { command: plan.command });
           if (plan.kind === 'unsupported') return refused(409, plan.why);
           if (body.confirm !== true) return refused(400, 'Start changes this machine: review the change it shows, then confirm it ({"confirm": true})');
-          const r = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          const started = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          // WHY (#468): said at install, when the only node is one an upgrade deletes.
+          const nodeWhy = stableNodePath().why;
+          const r = nodeWhy ? { ...started, detail: `${started.detail}; warning: ${nodeWhy}` } : started;
           setupCache.delete('service');
           audit(who, 'first_run.start', { label: plan.label, file: r.path, started: r.started, detail: r.detail.slice(0, 300) });
           return json(res, r.started ? 200 : 500, r.started ? { ok: true, ...r } : { error: `not started: ${r.detail}`, ...r });
@@ -2094,7 +2345,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
           const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name) });
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
@@ -2249,6 +2500,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
           audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
           return json(res, 200, { ok: true, id: voiceId });
+        }
+        // Settings, Siri devices (src/siri/manage.ts): the list, a new token (shown once), revoke and unbind.
+        if (url.pathname === '/api/siri-devices' || url.pathname.startsWith('/api/siri-devices/')) {
+          const body = req.method === 'POST' ? ((await readBody(req)) as Record<string, unknown>) : {};
+          const a = siriDevicesRoute(who, req.method ?? 'GET', url.pathname, body && typeof body === 'object' ? body : {}, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), audit: (action, detail) => audit(who, action, detail) });
+          if (a) return json(res, a.status, a.body);
         }
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);

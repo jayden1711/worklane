@@ -10,6 +10,7 @@
 // batch. Every step is an event, so a restart resumes a green batch's checks and abandons anything else (its PRs go
 // back in the queue), and nothing is merged twice.
 import { TestRunHeld } from '../testrun/gate.js';
+import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
 import { spawnSync } from 'node:child_process';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
@@ -29,6 +30,8 @@ export interface TestRunRequest {
   changedFiles?: string[];
   /** 1-based: index 1..total. */
   shard?: { index: number; total: number };
+  /** Only these tiers, of either kind, unsharded (src/testrun/run.ts; No CI's post-merge run, the deploy gate's). */
+  tiers?: string[];
 }
 export interface TierResult {
   tier: string;
@@ -49,6 +52,8 @@ export interface TestRunResult {
    * a setup step failed) says the same.
    */
   outcome?: 'done' | 'cancelled' | 'error';
+  /** A GPU command of it timed out or was killed (src/testrun/gpu.ts): held, never run again by itself. */
+  gpuStopped?: boolean;
 }
 export interface TestRuns {
   /** Queues, waits for a slot and the lock, runs, wipes, records events. `signal`: cancel it (the result says cancelled). */
@@ -138,12 +143,13 @@ export function batchState(events: StoredEvent[]): BatchState {
       b.last = e.ts;
       if (s.step === 'built') Object.assign(b, { prs: s.prs, sha: s.sha, base: s.base, trees: s.trees ?? [], open: true });
       if (s.step === 'green' || s.step === 'red') b.run = s.run;
-      if (s.step === 'finished' || s.step === 'abandoned') b.open = false;
+      if (s.step === 'finished' || s.step === 'abandoned' || s.step === 'gpu_held') b.open = false;
       for (const p of s.prs) {
         if (s.step === 'checks_posted') posted.set(key(p.number, p.head), s.id);
         // Main is no longer what the batch tested for it: untested again, back in the queue.
         if (s.step === 'stale' && posted.get(key(p.number, p.head)) === s.id) posted.delete(key(p.number, p.head));
-        if (s.step === 'culprit' || s.step === 'conflict') returned.set(key(p.number, p.head), s);
+        // gpu_held: a GPU run of its batch timed out, was killed or was cut off; never batched again at this head.
+        if (s.step === 'culprit' || s.step === 'conflict' || s.step === 'gpu_held') returned.set(key(p.number, p.head), s);
         if (s.step === 'dropped') gone.add(key(p.number, p.head));
       }
       if (s.step === 'error' && s.tier === BASE_TIER) baseRed = s.base;
@@ -375,6 +381,12 @@ export function noVerdict(r: TestRunResult): string | null {
 class NoVerdict extends Error {}
 
 /**
+ * A GPU command of the batch's run timed out or was killed (src/testrun/gpu.ts): no verdict, nobody blamed, and the
+ * batch's PRs are never batched again at these heads by themselves (a new head is).
+ */
+class GpuHeld extends Error {}
+
+/**
  * Whether a green batch's PRs are still merging (posted, not merged, not closed, not left to the owner, posted in
  * the last half hour). The next batch waits for them: built on the main they're about to change, it would be stale.
  */
@@ -526,6 +538,7 @@ export class PrBatcher {
   returnedFor(number: number, head: string): string | null {
     const s = this.state().returned.get(key(number, head));
     if (!s) return null;
+    if (s.step === 'gpu_held') return `held from batch ${s.id}: ${GPU_NO_REPEAT}`;
     return s.step === 'conflict' ? `does not merge onto ${this.d.branch} in batch ${s.id}` : `returned from batch ${s.id}: the full run's ${s.tier ?? '?'} tier failed with it`;
   }
 
@@ -581,11 +594,22 @@ export class PrBatcher {
         await this.pass(b.id, live, { id: b.run.id, sha: b.sha, kind: 'full', ok: true, tiers: b.run.tiers });
         this.step(b.id, 'resumed', live, { detail: why });
         this.finish(b.id, b.prs);
+      } else if (b.sha && gpuRunsNotToRepeat(this.d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished']), b.sha).length) {
+        // A GPU run of it was cut off (the coordinator or the machine stopped): never run again by itself.
+        await this.holdGpu(b.id, b.prs, `${why}, during a GPU run`);
       } else {
         this.step(b.id, 'abandoned', b.prs, { detail: why });
         this.dropRef(b.id);
       }
     }
+  }
+
+  /** A batch whose GPU run timed out, was killed or was cut off: held, each PR told why; nobody blamed. */
+  private async holdGpu(id: string, prs: BatchEntry[], why: string) {
+    for (const b of this.state().batches.values()) if (b.open && b.parent === id) this.step(b.id, 'abandoned', b.prs, { parent: id, detail: why });
+    this.step(id, 'gpu_held', prs, { detail: `${why}; ${GPU_NO_REPEAT}`.slice(0, 2000) });
+    this.dropRef(id);
+    for (const e of prs) await this.tell(e, `its full run in ${id} was not finished: ${why}. ${GPU_NO_REPEAT[0]!.toUpperCase()}${GPU_NO_REPEAT.slice(1)}.`);
   }
 
   private nextId(): string {
@@ -677,6 +701,9 @@ export class PrBatcher {
     }
     // No verdict (cancelled, interrupted, errored, a tier that never ran): never red, never bisected.
     if (signal?.aborted) throw new NoVerdict(`its run was cancelled: ${this.current?.why ?? 'cancelled'}`);
+    // A GPU command stopped at its cap or killed: never red (no bisection would run it again), never batched again.
+    const stopped = results.find((r) => r.gpuStopped);
+    if (stopped) throw new GpuHeld(`a GPU command of its run ${stopped.id} timed out or was killed`);
     for (const r of results) {
       if (r.sha !== sha || r.kind !== 'full') throw new NoVerdict(`the test run reported ${r.kind} on ${r.sha.slice(0, 8)}, not full on ${sha.slice(0, 8)}`);
       const why = noVerdict(r);
@@ -721,6 +748,7 @@ export class PrBatcher {
     try {
       await this.runBatch(id, entries, base, size, alone);
     } catch (e) {
+      if (e instanceof GpuHeld) return await this.holdGpu(id, entries, e.message);
       if (!(e instanceof NoVerdict)) throw e;
       await this.abandon(id, entries, e.message);
     } finally {

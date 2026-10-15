@@ -14,7 +14,7 @@ import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from '.
 import { BRAND } from './brand.js';
 import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
-import { writeOwnerOnly } from './os/index.js';
+import { stableNodePath, writeOwnerOnly } from './os/index.js';
 import { toolBin } from './tool-path.js';
 import { installPrePushHook } from './push-guard.js';
 
@@ -233,9 +233,10 @@ export function installGitHooks(root: string, cfg: Config, engineCli = fileURLTo
  * The pre-push hook in the repo's common hooks dir (every worktree's), refusing any push to the default branch:
  * `branches` (the config's, when there is one) and whatever origin/HEAD names at push time.
  */
-export function installCheckoutPrePush(root: string, branches: string[], engineCli?: string): string {
+export function installCheckoutPrePush(root: string, branches: string[], engineCli?: string, node: string = stableNodePath().path): string {
   const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
-  return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node: process.execPath, ...(engineCli ? { engine: engineCli } : {}) });
+  // WHY (#468): the checkout's hook runs node by Homebrew's stable bin/node (or this node's own path), as the service does.
+  return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node, ...(engineCli ? { engine: engineCli } : {}) });
 }
 
 /** gitleaks pre-commit hook in the repo's common hooks dir, chaining any existing hook. */

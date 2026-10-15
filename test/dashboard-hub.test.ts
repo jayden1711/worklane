@@ -180,8 +180,9 @@ test('dashboards.sh --no-instances: the hub alone, never with names, never over 
 test('the dashboards setup gives the viewer read of each token and traverse on the way, nothing more', () => {
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'dashboards.sh'), 'utf8');
   const acls = [...sh.matchAll(/setfacl -m "([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual(acls, ['g:$viewer:--x', 'g:$viewer:r--'], 'traverse on directories, read on the token file');
+  assert.deepEqual(acls, ['g:$viewer:--x', 'g:$viewer:r--', 'g:$viewer:r--'], 'traverse on directories, read on the token file and (with --siri only) the Siri gateway token');
   assert.match(sh, /setfacl -m "g:\$viewer:r--" "\$state\/dashboard-token"/);
+  assert.match(sh, /if \[ -n "\$siri" \]; then\n\s+setfacl -m "g:\$viewer:r--" "\$state\/siri-gateway-token"\n\s+else\n\s+setfacl -x "g:\$viewer" "\$state\/siri-gateway-token"/, 'the Siri gateway token: read with --siri, taken away without');
   assert.doesNotMatch(sh, /setfacl[^\n]*-d\b|setfacl[^\n]*:rw|setfacl[^\n]*-R\b/, 'no default, recursive or write ACLs');
   assert.doesNotMatch(sh, /usermod|gpasswd|ensure_member/, 'no instance user joins a new group');
   assert.match(sh, /User=wl-\$1\n/, 'each instance\'s dashboard runs as that instance\'s coordinator');
@@ -193,7 +194,7 @@ test('the dashboards setup gives the viewer read of each token and traverse on t
   // Per-person sign-in: no single --user for people; the hub gets the sign-in App's client id and its public URL.
   assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --instance \$1 --service\n/, 'an instance\'s dashboard names no person: roles come from its repo');
   assert.doesNotMatch(sh, /--user/);
-  assert.match(sh, /--hub \$hub_arg --service --client-id \$client_id --public-url \$public_url --signin-dir \$signin_dir(\$\{console_user:\+ --console-user \$console_user\}\$\{console_devices:\+ --console-devices \$console_devices\})?\n/);
+  assert.match(sh, /--hub \$hub_arg --service --client-id \$client_id --public-url \$public_url --signin-dir \$signin_dir\$\{siri:\+ --siri-port 4397\}(\$\{console_user:\+ --console-user \$console_user\}\$\{console_devices:\+ --console-devices \$console_devices\})?\n/);
   assert.match(sh, /run credentials.sh dashboard-signin first/, 'it refuses to start the hub without the sign-in secrets');
   assert.match(sh, /tailscale serve --bg --https=443 http:\/\/127\.0\.0\.1:4399/, 'tailscale serve forwards the sign-in port');
   assert.doesNotMatch(sh, /tailscale serve --[^\n]*4398/, 'never the break-glass port');

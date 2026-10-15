@@ -8,6 +8,7 @@ import { classifyGitHubError } from '../github/errors.js';
 import type { EventLog } from '../events/log.js';
 import { redactString } from '../events/redact.js';
 import { SANDBOX_STEP, type TestRunResult } from './run.js';
+import { GPU_STEP } from './gpu.js';
 
 type Fetch = typeof fetch;
 
@@ -48,6 +49,8 @@ export function checksFor(result: TestRunResult, checkNames: Record<string, stri
 export const PREDATES_TITLE = 'This PR predates the test-run config: update it with main';
 /** The title of the check on a head whose run was refused because the sandbox's check is failing (./sandbox-watch.ts). */
 export const SANDBOX_TITLE = 'Not run: test runs are off (the test sandbox check is failing)';
+/** The title of the failing check on the head of a GPU run cut off by a stop (src/coordinator/test-runs.ts recover). */
+export const GPU_CUT_OFF_TITLE = 'Cut off (GPU run): not rerun automatically';
 // GitHub takes a summary of at most 65535 characters.
 const SUMMARY_MAX = 60_000;
 
@@ -86,7 +89,7 @@ export function checkOutput(result: TestRunResult, tiers: TestRunResult['tiers']
   const said = s.step === SANDBOX_STEP ? 'What the check said (redacted)' : 'The last lines of its stderr (redacted)';
   const err = s.stderr.trim() ? `\n\n${said}:\n\n\`\`\`\n${clean(s.stderr.trim()).slice(-4000)}\n\`\`\`` : '';
   const lines = tiers.map((t) => `- not run: ${t.tier}`);
-  const title = s.step === 'helper' ? 'Not run: the test sandbox helper is outdated' : s.step === SANDBOX_STEP ? SANDBOX_TITLE : `Failed in setup: ${s.step}`.slice(0, 200);
+  const title = s.step === 'helper' ? 'Not run: the test sandbox helper is outdated' : s.step === SANDBOX_STEP ? SANDBOX_TITLE : s.step === GPU_STEP ? GPU_CUT_OFF_TITLE : `Failed in setup: ${s.step}`.slice(0, 200);
   return { title, summary: `${head}\n\nSetup failed at **${clean(s.step)}**: ${clean(s.detail)}${err}\n\n${lines.join('\n')}\n\n${foot}` };
 }
 

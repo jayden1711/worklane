@@ -40,6 +40,9 @@ export const LABEL: Record<string, string> = {
   'intake.drafts_per_day': 'Intake drafts per day',
   'intake.max_usd_per_day': 'Intake spend per day (estimated, USD)',
   stuck_guard: 'Stuck-run guard',
+  'chat_attachments.max_file_mb': 'Chat attachment size per file (MB)',
+  'chat_attachments.max_message_mb': 'Chat attachments per question (MB)',
+  'chat_attachments.retention_days': 'Days chat attachments are kept',
 };
 
 /** Settings picked from a fixed list of words. */
@@ -85,6 +88,12 @@ export function boundsOf(key: string, d: InstanceSettingsData): string {
       return l.intake ? `1–${l.intake[key.slice('intake.'.length) as 'reports_per_sender_per_day' | 'drafts_per_day']} (machine limit)` : '';
     case 'intake.max_usd_per_day':
       return l.intake ? `up to $${l.intake.max_usd_per_day} (machine limit)` : '';
+    case 'chat_attachments.max_file_mb':
+      return 'up to 100 MB; no more than the per-question size';
+    case 'chat_attachments.max_message_mb':
+      return 'up to 250 MB; at least the per-file size';
+    case 'chat_attachments.retention_days':
+      return '1–365 days; older attachments are deleted';
     default:
       return SWITCHES.has(key) ? 'on or off' : '';
   }
@@ -265,7 +274,8 @@ export function proposedSetting(search: string): { key: string; value: unknown }
   }
 }
 
-export function InstanceSettings() {
+/** `onLoaded`: called once its first answer (the data, or an error it shows) is in, for the page's in-order panels. */
+export function InstanceSettings({ onLoaded }: { onLoaded?: () => void } = {}) {
   const [data, setData] = useState<InstanceSettingsData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
@@ -274,6 +284,9 @@ export function InstanceSettings() {
       .then((d) => (setData(d), setError(null)))
       .catch((e: Error) => setError(e.message));
   }, [n]);
+  useEffect(() => {
+    if (data || error !== null) onLoaded?.();
+  }, [data, error, onLoaded]);
   if (error) return <div className="text-[13px] text-red" data-testid="instance-settings">Can't load the instance settings: {error}</div>;
   if (!data) return null;
   return <InstanceSettingsView data={data} onChanged={() => setN((x) => x + 1)} proposed={n === 0 ? proposedSetting(window.location.search) : null} />;

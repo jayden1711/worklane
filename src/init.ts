@@ -28,9 +28,12 @@ import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
-import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, protectionAnswer, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
-import { varLibPath } from './os/system-paths.js';
+import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
+import { ciChoiceProblem } from './ci-choice.js';
+import { ProjectConfig } from './config/schema.js';
+import { parse as parseYaml } from 'yaml';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
@@ -185,7 +188,15 @@ export interface InitContext {
 export interface StepResult {
   status: Exclude<StepStatus, 'pending'>;
   detail: string;
+  /** Failed only for want of a CI choice (#469): the wizard makes it (init's exit CI_CHOICE_EXIT). */
+  ciChoice?: true;
 }
+
+/**
+ * init's exit when everything before it is done and only the CI choice is missing (#469): bootstrap then still starts
+ * the dashboard and prints the wizard's URL, where the choice is made (Required checks named).
+ */
+export const CI_CHOICE_EXIT = 5;
 
 /** A registry detector's answer as a walked step's result. */
 const asStep = (d: Detected): StepResult => ({ status: d.done ? 'done' : 'failed', detail: d.detail });
@@ -374,11 +385,10 @@ async function protection(c: InitContext): Promise<StepResult> {
   }
   const watch = readWatchState(join(projectStateDir(c.root!), 'main-watch.json'));
   if (watch.mode === 'github') return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
-  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}: the main watch guards it${advice}; ${later}` };
+  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}; ${MAIN_WATCH_GUARDS}${advice}; ${later}` };
   const r = c.io.run('gh', ['api', `repos/${c.repo}/branches/${branch}/protection`, '--silent']);
-  if (r.status === 0) return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
-  const code = r.stderr.match(/HTTP (\d{3})/)?.[1];
-  return { status: 'done', detail: `GitHub doesn't protect ${branch}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge (land_mode pr)${advice}; ${later}` };
+  // WHY (#468): what GitHub's answer means (protected, not yet, can't on this plan, no access), never a bare HTTP code.
+  return { status: 'done', detail: `${protectionAnswer(r, branch).detail}${advice}; ${later}` };
 }
 
 async function discord(): Promise<StepResult> {
@@ -390,7 +400,49 @@ async function tailscale(c: InitContext): Promise<StepResult> {
   return t ? asStep(t) : { status: 'skipped', detail: 'optional, not on a tailnet: the dashboard stays on this machine (docs/dashboard.md sets up Tailscale sign-in)' };
 }
 
-const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': repoConfig, coordinator, protection, discord, tailscale };
+/**
+ * The project configs a choice of CI is judged on: the checkout's working tree and its origin/<default> as last
+ * fetched (server mode: the coordinator keeps it fetched; read as root, so git is told the coordinator's checkout is
+ * safe). A choice in either counts: one merged on GitHub and fetched, or one pulled into the checkout. Empty: nothing
+ * readable here.
+ */
+function projectsForCiChoice(c: InitContext): Pick<ProjectConfig, 'land_mode' | 'required_checks' | 'ci'>[] {
+  const root = c.mode === 'local' ? c.root : c.instance && c.repo ? srvCheckoutPath(c.instance, c.repo.split('/')[1]!) : null;
+  if (!root || !existsSync(join(root, BRAND.configDir, 'config.yaml'))) return [];
+  const out: ProjectConfig[] = [];
+  try {
+    out.push(loadConfig(root).project);
+  } catch {
+    // the repo-config step reports an invalid config
+  }
+  const branch = out[0]?.project.default_branch ?? 'main';
+  const r = c.io.run('git', ['-c', `safe.directory=${root}`, 'show', `origin/${branch}:${BRAND.configDir}/config.yaml`], { cwd: root });
+  if (r.status === 0) {
+    try {
+      const p = ProjectConfig.safeParse(parseYaml(r.stdout));
+      if (p.success) out.push(p.data);
+    } catch {
+      // unparseable on the branch: the coordinator's config_invalid incident says so
+    }
+  }
+  return out;
+}
+
+/**
+ * WHY (#469): init never finishes on a config that can never mark a PR ready (an empty required_checks in PR mode):
+ * the repo-config step stays failed, saying what to choose, until the choice is on the default branch.
+ */
+const withCiChoice =
+  (run: (c: InitContext, act: boolean) => Promise<StepResult>) =>
+  async (c: InitContext, act: boolean): Promise<StepResult> => {
+    const r = await run(c, act);
+    if (r.status !== 'done') return r;
+    const ps = projectsForCiChoice(c);
+    const problem = ps.length && ps.every((p) => ciChoiceProblem(p)) ? ciChoiceProblem(ps[0]!) : null;
+    return problem ? { status: 'failed', detail: `${r.detail}; but ${problem}. Then run \`${BRAND.cli} init\` again (it picks up here)`, ciChoice: true } : r;
+  };
+
+const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': withCiChoice(repoConfig), coordinator, protection, discord, tailscale };
 
 export interface ChecklistItem extends StepDef {
   status: StepStatus;
@@ -448,7 +500,7 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
       c.state.finishedAt = null;
       save();
       if (c.mode === 'local' && s.id === 'repo-config' && c.root && !existsSync(join(c.root, BRAND.configDir))) await offerSetupPage(c);
-      return 1;
+      return r.ciChoice ? CI_CHOICE_EXIT : 1;
     }
   }
   c.state.finishedAt = now();

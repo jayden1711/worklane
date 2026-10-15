@@ -162,6 +162,13 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
 
+### Siri Shortcuts
+
+`dashboards.sh --siri` adds the hub's Siri gateway, a listener of its own on 127.0.0.1:4397 that `tailscale.sh
+serve-siri` publishes on the tailnet's port 8443: "Hey Siri, tell" leaves an idea in the Inbox and "Hey Siri, ask"
+answers aloud at a viewer's level, with a per-device token an owner makes in Settings, Siri devices. See
+[docs/siri.md](siri.md).
+
 ## The owner terminal
 
 The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
@@ -263,7 +270,7 @@ The next step reads the new config with no restart and no `git pull`.
 | The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
 | The agents' GitHub App | server | `sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)` |
 | Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
-| Auto-config questions answered | local | `worklane init --answer <id>=<choice> (or answer init's questions in a terminal)` |
+| Auto-config questions answered | local | `worklane init --mode local` |
 | .worklane/ valid and on the default branch | local, server | `worklane init (drafts the config and proposes it as a PR), then gh pr merge <number>, then worklane init again (it fast-forwards)` |
 | Hooks for local runs installed | local | `worklane install` |
 | Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
@@ -278,6 +285,7 @@ The next step reads the new config with no restart and no `git pull`.
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
 | The coordinator running | local | `worklane up` |
+| An issue ready for the harness | local | `gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>` |
 
 ## Tailscale and HTTPS from the dashboard
 
@@ -340,6 +348,54 @@ The switch:
 6. **Resumes** each instance whose users all passed, and reports each instance's result. An instance whose check failed stays paused. The script remembers it, so once you've fixed the problem a rerun resumes it. Rerunning is always safe. A resumed instance on the new login also ends its Claude usage-limit pause, if it had one (`usage.resumed`, reason "account switched", and its watchdog incident resolved), since the old account's limit no longer applies; one resumed on its current login (no token came) stays paused until the reset.
 
 From the dashboard, the Machine page's **Claude account** card shows the same status. It's visible only to machine owners: the server refuses everyone else its data (`GET /api/claude-account`, `src/claude-account.ts`). **Refresh** and **Switch account** are the machine requests `claude-account status` and `claude-account switch`, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device). The machine helper starts the switch as its own unit, `worklane-claude-account.service`, because the switch stops that coordinator too. The card follows the switch step by step from the script's progress file, `/var/lib/worklane/claude-account/switch.jsonl`. When the switch asks for the token, a password box appears in the dashboard of the instance that started it. The pasted token is stored for that instance's coordinator user only (0400). The script reads it once, as root, and deletes it. The token is never in an event, a response or the audit, which records only that a token was stored. The machine helper's sudoers rule needs rerunning once to allow `claude-account` (`machine-helper.sh` with every instance).
+
+## Claude account profiles
+
+Several Claude accounts can be signed in side by side for each instance's agent user (issue #464). Each lives in its own `CLAUDE_CONFIG_DIR`, `<agent home>/.claude-profiles/<name>/`, 0700, that user's own. The login the agent user always had (`~/.claude`, or `instance.yaml`'s `claude_config_dir`) is the profile named `default`. The eval user keeps its own login.
+
+At a root shell on the machine (an admin's), every instance or any one:
+
+```sh
+sudo bash scripts/setup/claude-account.sh profile-add work          # the token claude setup-token prints, at a hidden prompt
+sudo bash scripts/setup/claude-account.sh confirm-profile work      # one added from a dashboard: shows the account, asks you to type the name
+sudo bash scripts/setup/claude-account.sh use work [<instance>]     # every instance, or one
+sudo bash scripts/setup/claude-account.sh use default [<instance>]  # back to the login each had
+sudo bash scripts/setup/claude-account.sh remove work               # refused while any instance uses it
+```
+
+- **profile-add** installs the token as the agent users in that profile's dir, then makes one minimal real call as each user on it (Haiku, "Reply with the single word: ok", one turn, `--max-budget-usd 0.05`). If the API refuses it for any user, nothing is kept: each user's new profile dir is removed, as that user. At a root shell it is for every agent user and usable at once.
+- **From a dashboard it is STAGED.** It is for that instance's agent user only, and nothing may use it (no `use`, no failover, and the engine ignores it even if the file names it) until a root admin runs **confirm-profile** on the machine. That makes the same real call as each user it was added for, prints the account's email, org and plan as Claude reports them, and asks for the profile's name to be typed back; anything else confirms nothing (the same pattern as `updates.sh --confirm-signer`). A coordinator, or the dashboard, can never confirm: the command is not in the machine helper, and it refuses a coordinator user (`SUDO_USER=wl-*`) and any asking instance (`--for`, `--token-from`).
+- **use** makes the same real call as each agent user it's for, on that profile. Only when every one is answered does `profiles.json` name it active. If one is refused, nothing changes: each instance stays on the profile it had. There's no pause: the engine reads the active profile when each run starts, so runs already going finish on the login they started on, and every new one starts on the checked one.
+- **remove** deletes the profile's dir, as each user (never as root: the dir is in the user's home). It's refused while any instance uses the profile.
+
+**Sign in an account from the dashboard** (the owner's approved exception, `docs/auth.md`): a name starts `claude-account login <name>`, for this instance's agent user. While it waits, the card shows Anthropic's sign-in link to this dashboard's machine owners; the code its page shows is pasted back once (`POST /api/claude-account/login-code`), goes to `claude auth login`'s stdin, and is kept nowhere. The account is then checked with a real call and staged, like any account added from a dashboard. A wrong code, or none within 30 minutes, signs nothing in and keeps nothing; the code is single-use, so start again.
+
+**From a dashboard, only its own instance.** The machine helper's commands take a profile's name and nothing else: `claude-account profile-add|remove|use|login <name>`. The instance is the asking coordinator's, which the helper reads from sudo (`SUDO_USER=wl-<instance>`) and passes the script as `--for` (and `--token-from`); the script refuses any other instance than that one. So no coordinator can name another instance, or every instance, through sudo: the sudoers patterns have no place for one. A dashboard's **remove** removes only its own agent user's copy, of a profile it has. Every instance, or another one, is a root admin's, at a root shell.
+
+**Ops alerts.** Every add (or staging), confirmation, use, remove and failover setting is a line in the machine change log (`/var/lib/worklane/machine-changes.jsonl`, what `claude_account.profile`), which the watchdog turns into an alert on the ops channel and the Health page (kind `claude_profile_changed`, open for a day): the profile, the instances and who asked. The account's email or org appears only in a confirmation, after a root admin saw it. Never a token.
+
+What they keep, in `/var/lib/worklane/claude-account/` (root's, 0644, never a token): `profiles.json` (each profile, whether it is staged, each agent user's last real call on it, and which profile each instance uses) and `profile-ops.jsonl` (each step). A profile switch counts as an account switch for the rest of the engine: it ends a usage-limit pause, and rechecks a held login (below). A refused login is held per profile: its key is the profile's dir, so a refused account pauses runs on that profile only.
+
+No agent command may read any profile's `.credentials.json`, whichever profile it runs on: every one is added to each run's sandbox and Read deny list.
+
+From the dashboard, the Machine page's **Claude account** card has an **Accounts** table: each account against each instance, which one is active, and whether its agent user's last real call on it was answered (with the account and plan Claude names, and when). A staged one says so, with the command that confirms it. **Use here** (this instance's column only), **Remove** and **Add account** (a name and the setup token, in a password field) are machine requests, `claude-account use|remove|profile-add <name>`, gated like any machine change: an owner here who is a machine owner, signed in, on an allowed device. Every refusal is audited, a request with no session's too (`claude_account.refused`), and starts nothing: no token is read or stored, no request recorded. A new account's token is stored for the coordinator user only (0400) before the request; profile-add reads it once, as root, and deletes it, and a refused request deletes it. The helper starts each step as `worklane-claude-account.service`, so one at a time, with the switch too. A finished switch is recorded once in the asking instance's log as `account.switched`, with from, to, who asked and the result. The machine helper's sudoers rule needs rerunning once to allow the six profile, sign-in and failover patterns (sudo 1.9.10 or later, like add-project).
+
+### Failover on a usage limit
+
+Off by default. With two usable accounts or more, a machine owner turns it on from an instance's dashboard for that instance alone; a root admin sets it for every instance (an instance's own setting wins, off included). It is an order of accounts and whether to move back after the reset:
+
+```sh
+sudo bash scripts/setup/claude-account.sh failover default+work+spare back [<instance>]   # or: failover off stay
+```
+
+From a dashboard the machine helper takes `claude-account failover <order|off> back|stay` and nothing more: the instance is the asking coordinator's, from sudo. The order's names are joined by `+`, because sudoers reads a comma as the end of a command. A staged account can't be in an order, and is skipped if it is. The setting goes only into `profiles.json`: no login is touched. Each coordinator acts for its own instance (`src/claude-failover.ts`):
+
+- When a usage limit pauses the instance, it asks for the next account in the order after the one in use. It skips any it tried for this pause, and any a move left whose reset hasn't come. The move is a `claude-account use <next>` through the machine helper, for its own instance, the same step a person takes: proven by a real call as the agent user first, and refused if the API refuses it. Then the next one is tried. With none free, it waits for the reset and says so once.
+- A move that's done raises an info notice (`claude_account_failover`: it never colours the instance's status, and its post says Notice) naming both accounts and when the limit resets, and the `use` is an ops alert like any other. The pause ends at once, as for any account switch.
+- With move-back on, once the first move's reset has passed and the instance is still on the account the last move put it on, it asks for the account it began on, proven the same way. Refused, it stays, and asks again 15 minutes later. Back, the notice resolves.
+- It never moves on an auth failure: a refused login is held per profile (below), with its red incident, and failover only acts on a usage-limit pause.
+
+Each step is an `account.failover` event (asked, switched, refused, none, back-asked, back, back-refused), and each move's `account.switched` names `failover` as who asked.
 
 ## When Claude refuses the login
 
@@ -504,6 +560,95 @@ value under each. A figure whose source has recorded nothing yet says **not meas
 
 The weekly digest posts these after the trust numbers, with the slow-tests list (the weekly optimization pass's
 targets) in its own message.
+
+## Chat attachments
+
+In the Ask panel, the owners and the writers attach files to a question: drop them on the panel, paste them into
+the box, or use the paperclip next to the mic. Each shows as a chip (name, size, remove) and uploads at once to the
+instance being asked (on a hub, one instance: not "Every instance"). A viewer never sees the paperclip, and the
+server refuses a viewer every attachment route (403), downloads included. Code: `src/chat-attachments.ts`,
+`web/src/components/ChatAttachments.tsx`.
+
+- **Types:** images (png, jpeg, gif, webp), PDF, plain text and code (by extension, then checked to be valid UTF-8
+  with no NUL bytes), CSV, JSON, and Office files (docx, xlsx, pptx). The type comes from the extension, checked
+  against the bytes (an image's or a PDF's magic number, Office's zip header); the client's Content-Type is never
+  trusted. Anything else is refused with a reason (415), and macro-enabled Office files (docm, xlsm, pptm and the
+  rest) always are.
+- **Sizes:** 10 MB per file and 25 MB per question by default, at most 10 files. The per-file cap is enforced as the
+  body streams in (a declared length over it is refused before any of it is read; past it mid-stream, the upload
+  stops and the partial file is deleted); the per-question total is checked when the question is asked. Set them in
+  the instance settings (Settings, or `policy.yaml` `settings.chat_attachments.max_file_mb` and `max_message_mb`).
+- **Storage:** `<state>/chat-attachments/<id>`, file 0600 in a 0700 directory, under a random id (`att-` and 32
+  hex digits); the uploader's file name is kept only in the record beside it, for display and the download's name,
+  never as a path. Never in the repo, the logs, events or URLs (the name travels in the `X-Attachment-Name` header).
+  The audit event (`chat.attachment_added`) records only the id, name, type, size and sha256. Files are deleted
+  after 30 days by default (`settings.chat_attachments.retention_days`), except a file a chat Project holds (kept
+  until it is taken off the Project or the Project is deleted); the coordinator sweeps about once an hour, and removes
+  uploads left half-written.
+- **Secrets:** a text file is scanned on upload with the engine's secret patterns and, where it is installed,
+  gitleaks. A hit is not attached: the chip says which kinds it looks like (a GitHub token, a private key; never the
+  value) and offers **Attach anyway**. The matched value is never logged, echoed or stored anywhere but the file;
+  what the chat's model is given is redacted again. Images, PDFs and Office files aren't read by the scan (it reads
+  text only): their chip says "Not scanned for secrets".
+- **Download:** through the dashboard only, with the normal sign-in (fetched, never a link with a key in it). Each is
+  served with its allowlisted type, `X-Content-Type-Options: nosniff`, a sandboxing CSP, and
+  `Content-Disposition: attachment` unless it is an image (shown inline). HTML is served as text/plain; SVG is never
+  taken. Through a hub, every forwarded response gets the hub's own `default-src 'none'; sandbox` policy and nosniff,
+  whatever the instance sent, so not even a hostile instance can serve a page the browser runs on the hub's origin.
+  In the page, a fetched file becomes a blob: URL (the page's own origin, without the server's headers), so the
+  page decides again: only a png, jpeg, gif or webp opens in a tab; anything else downloads as opaque bytes.
+- **What the answer sees:** nothing runs from the chat. Text goes into the chat turn's prompt between markers that
+  carry a random nonce, redacted, framed as data from the asker and never instructions; images and PDFs are copied
+  into the turn's bundle for the Read tool to view, and deleted from it when the turn ends (the state keeps the only
+  copy, for its retention days); Office files are named and described, never unpacked or opened. Text the answer
+  reads, like the question itself, is part of the chat run's own Claude session.
+- **Who opens one:** its uploader, or someone who can see a chat Project that holds it. Anyone else is refused (403)
+  even knowing its id, an owner included. Deleting one is the same: its uploader, or the creator of a Project that
+  holds it; the sweeps still remove what they remove. A question, a conversation message or a Project takes only its sender's
+  own uploads; someone else's id reads as unknown.
+- **API:** `POST /api/chat/attachments` (the body is the file; `X-Attachment-Name`, URI-encoded; `X-Attach-Anyway: 1`
+  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or the creator of a Project holding it;
+  nobody else, owners included),
+  `GET /api/chat/attachments/limits`, and `attachments: [<id>, ...]` on `POST /api/chat`. Anything that refers to a
+  file names only its id.
+
+## Chat: conversations and Projects
+
+The owners and writers get a sidebar in the Ask panel (`src/chat-conversations.ts`, `src/chat-routes.ts`,
+`web/src/components/Conversations.tsx`): their own multi-turn conversations, the Projects they can see, and the
+quick single-shot question, unchanged. A viewer never sees it, and every route refuses them (403).
+- **A conversation** keeps its thread: each answer is given the conversation's earlier turns, the newest that fit
+  (at most 12 turns and 24,000 characters, each question and answer clipped to 4,000); older ones are left out, never
+  summarised, and the prompt says how many. It is its creator's only: nobody else lists, reads, asks in, renames or
+  deletes it, the instance's owners included (to anyone else it reads as not there, 404). An untitled one takes its
+  first question's opening words. A message can carry chat attachments, its sender's own, within the same caps.
+- **A Project** has a name, custom instructions and shared files (chat attachments, at most 10, within the
+  per-question size cap). It is its creator's until an **owner** shares it, with all the instance's owners and
+  writers: they see it read-only and start their own (still private) conversations in it. Only its creator edits or
+  deletes it; a writer can't share one, nor edit an owner's shared one. A shared Project stays shared only while its
+  creator is still an owner. Its files stay past the attachment retention days while it holds them; one taken off, or
+  the Project deleted, is deleted at once unless another Project still holds it.
+- **What the answer sees:** the earlier turns and the Project's instructions go into the turn's prompt as data, each
+  block between markers carrying a random nonce (as attachments are framed), never into the system prompt: they steer
+  tone, focus and format only, and the prompt says nothing in them overrides the chat's rules. The message's files
+  and the Project's go through the attachment framing above. Same tools (Read, Glob, Grep), same read-only rule for
+  anyone but the instance's default owner. A conversation turn neither reads nor writes the single-shot chat's
+  summary and history, and its run record and bundle are removed when the turn ends.
+- **Nothing runs from it:** an answer's issue draft and proposals are the single-shot chat's own: a draft is filed
+  only through its confirm, by an owner, once (`POST .../turns/<turn>/file-issue`); each proposal opens the flow that
+  already confirms that change.
+- **Kept:** in the instance's state dir (`chat/conversations/<id>/`, `chat/projects/<id>.json`; 0600 files, redacted),
+  never the repo, logs or events (the audit carries ids only). No retention limit: a conversation or Project lasts
+  until its creator deletes it, and delete is a hard delete (its turns, any question still waiting, its filed-draft
+  records and its messages' files). When someone loses their role here, all of theirs is out of reach at once (every
+  route asks their role; their shared Projects disappear from others' view) and is deleted 30 days later by the
+  coordinator's hourly sweep; a role given back before then keeps it. The sweep does nothing while the instance's
+  default owner doesn't read as an owner (roles can't be trusted then). A turn cut off by a restart is refused once,
+  never run again.
+- **API:** `GET|POST /api/chat/conversations` (`?cursor=&limit=&project=`), `GET|PATCH|DELETE
+  /api/chat/conversations/<id>`, `POST /api/chat/conversations/<id>/messages` (`{ text, attachments?, key? }`; the
+  text only ever in the body), `POST /api/chat/conversations/<id>/turns/<turn>/file-issue`, `GET|POST
+  /api/chat/projects`, `GET|PATCH|DELETE /api/chat/projects/<id>`.
 
 ## Pull requests
 

@@ -23,7 +23,7 @@
 //     and a request carrying a proxy's headers is refused there anyway.
 import { Agent, createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
 import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
@@ -34,6 +34,9 @@ import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/t
 import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
+import { Avatars, type AvatarOptions } from './avatars.js';
+import { startSiriGateway } from './siri/gateway.js';
+import { SIRI_GATEWAY_TOKEN_FILE } from './siri/instance.js';
 
 export interface HubInstance {
   name: string;
@@ -71,8 +74,18 @@ export interface HubOptions {
    * bases (a fake GitHub in tests; the sign-in's, else GitHub's, by default).
    */
   appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
+  /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
+  avatars?: AvatarOptions;
+  /**
+   * The Siri gateway (src/siri/gateway.ts): its own loopback listener on `port` (tailscale serve publishes it on
+   * 8443), given each instance's Siri gateway token file only. Absent: no gateway. whois and peerUid: tests only.
+   */
+  siri?: { port: number; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; lockout?: { fails: number; windowMs: number; forMs: number } };
   now?: () => number;
 }
+
+/** A person's picture through the hub: /api/i/<instance>/avatar/<login>, served by the hub itself (#462). */
+const HUB_AVATAR = /^\/api\/i\/([^/]+)\/avatar\/([^/]+)$/;
 
 /** The hub's port: next to the instances' range (4400-4899). */
 export const HUB_PORT = 4399;
@@ -125,6 +138,17 @@ export function signInFromFiles(o: { clientId: string; publicUrl: string; dir: s
   return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin };
 }
 
+/** The request headers a chat attachment upload needs on the instance (src/dashboard.ts). */
+const ATTACHMENT_REQUEST_HEADERS = ['x-attachment-name', 'x-attach-anyway', 'content-length'] as const;
+/** A download's own response headers (a chat attachment): a download or an image, and its exact length. */
+const DOWNLOAD_RESPONSE_HEADERS = ['content-disposition', 'content-length'] as const;
+/**
+ * The policy on every response forwarded from an instance, whatever the instance said: an API answer is data, never a
+ * page, so even a hostile instance can't serve something the browser runs on the hub's origin. (A fetch() ignores it;
+ * only a response opened as a document, like an attachment, is held to it.)
+ */
+export const FORWARDED_CSP = "default-src 'none'; sandbox; frame-ancestors 'none'";
+
 /**
  * The hub's connections to its instances' servers, kept open between calls: a page switch makes several calls at once,
  * and each would otherwise open a new connection. Said here rather than left to Node's default.
@@ -154,11 +178,19 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
   if (login && deviceOk) headers[DEVICE_HEADER] = '1';
+  // A chat attachment's upload (src/chat-attachments.ts): its name and the "attach anyway" answer, and its length so
+  // the instance can refuse an oversized one before reading it. Nothing else of the client's goes upstream. 4096: room
+  // for a 200-character name percent-encoded (up to 12 characters each).
+  for (const k of ATTACHMENT_REQUEST_HEADERS) {
+    const v = req.headers[k];
+    if (typeof v === 'string' && v.length <= 4096) headers[k] = v;
+  }
   // No accept-encoding goes upstream (the headers are built above), so the instance answers uncompressed over loopback;
   // a view COMPRESSIBLE_API lists is compressed here, on its way to the browser. Never a stream: it is text/event-stream.
   const enc = mayCompressApi(path) ? requestEncoding(req) : null;
   const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers, agent: upstream }, (r) => {
-    const h: Record<string, string> = { 'cache-control': 'no-store' };
+    // nosniff on everything forwarded: the browser takes the type the instance said, never one it guesses.
+    const h: Record<string, string> = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'content-security-policy': FORWARDED_CSP };
     const type = r.headers['content-type'];
     if (type) h['content-type'] = type;
     const json = !!type && /^application\/json/.test(type) && !r.headers['content-encoding'];
@@ -166,6 +198,11 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
     if (enc && json) {
       res.writeHead(r.statusCode ?? 502, { ...h, 'content-encoding': enc });
       return void r.pipe(compressStream(enc)).pipe(res);
+    }
+    // A download's own headers (a chat attachment, src/chat-attachments.ts): a download or an image, its exact length.
+    for (const k of DOWNLOAD_RESPONSE_HEADERS) {
+      const v = r.headers[k];
+      if (typeof v === 'string') h[k] = v;
     }
     res.writeHead(r.statusCode ?? 502, h);
     r.pipe(res);
@@ -176,6 +213,34 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   });
   res.on('close', () => up.destroy());
   req.pipe(up);
+}
+
+/**
+ * Whether `who` is a person instance `i` knows (its events and config name them), as that instance says when asked
+ * as `asker` (null: the break-glass); false when it can't say.
+ */
+function instanceKnows(i: HubInstance, who: string, asker: string | null): Promise<boolean> {
+  const token = readToken(i);
+  if (!token) return Promise.resolve(false);
+  return new Promise((done) => {
+    const r = request({ host: '127.0.0.1', port: i.port, path: `/api/people/${who}`, headers: { authorization: `Bearer ${token}`, ...(asker ? { [LOGIN_HEADER]: asker } : {}) }, timeout: 3000, agent: upstream }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => {
+        if (body.length + c.length <= 4096) body += c;
+      });
+      res.on('end', () => {
+        try {
+          done(res.statusCode === 200 && (JSON.parse(body) as { known?: unknown }).known === true);
+        } catch {
+          done(false);
+        }
+      });
+    });
+    r.on('timeout', () => r.destroy(new Error('timed out')));
+    r.on('error', () => done(false));
+    r.end();
+  });
 }
 
 /** Whether an instance's own server answers, as the hub sees it, and the person's role there (owner for the break-glass). */
@@ -223,7 +288,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; siriUrl: string | null; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -234,6 +299,20 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const signIn = opts.signIn ?? null;
   const sessions = signIn ? new Sessions({ secret: signIn.sessionSecret, file: join(opts.stateDir, 'sessions.json'), now }) : null;
   const states = new SignInStates(now);
+  const avatars = new Avatars(join(opts.stateDir, 'avatars'), { now, ...opts.avatars });
+  // Who each instance said it knows, per asker, kept as long as a role is.
+  const knownCache = new Map<string, { known: boolean; until: number }>();
+  /** Whether the hub may fetch `who`'s picture for `asker` on instance `i`: themselves, a machine owner, or a person `i` knows. */
+  const mayShow = async (i: HubInstance, who: string, asker: string | null) => {
+    if ((asker && who.toLowerCase() === asker.toLowerCase()) || (am.isMachineOwner ?? ((l: string) => isMachineOwner(l)))(who)) return true;
+    const k = `${i.name}\n${asker ?? ''}\n${who.toLowerCase()}`;
+    const c = knownCache.get(k);
+    if (c && now() < c.until) return c.known;
+    const known = await instanceKnows(i, who, asker);
+    if (knownCache.size >= 10_000) knownCache.clear();
+    knownCache.set(k, { known, until: now() + ROLE_CACHE_MS });
+    return known;
+  };
   const origin = signIn ? new URL(signIn.publicUrl).origin : null;
   const am = opts.appManifest ?? {};
   const appApi = am.api ?? signIn?.api;
@@ -335,6 +414,12 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
           const listed = all.map((i) => (i.up ? i : { ...i, role: knownRole(i.name, session.login)?.role ?? null }));
           return json(res, 200, { instances: listed.filter((i) => i.role) });
         }
+        const av = url.pathname.match(HUB_AVATAR);
+        if (av && req.method === 'GET') {
+          const inst = byName.get(av[1]!);
+          if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${av[1]}` });
+          return await avatars.serve(req, res, av[2]!, url.searchParams.get('size'), (l) => mayShow(inst, l, session.login));
+        }
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
         if (m) {
           const inst = byName.get(m[1]!);
@@ -367,6 +452,12 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (url.pathname === '/api/hub' && req.method === 'GET') {
           const instances = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, null)) })));
           return json(res, 200, { instances });
+        }
+        const av = url.pathname.match(HUB_AVATAR);
+        if (av && req.method === 'GET') {
+          const inst = byName.get(av[1]!);
+          if (!inst) return json(res, 404, { error: `no instance ${av[1]} in this hub` });
+          return await avatars.serve(req, res, av[2]!, url.searchParams.get('size'), (l) => mayShow(inst, l, null));
         }
         // /api/i/<instance>/<path> is that instance's /api/<path>.
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
@@ -406,6 +497,27 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     server.close();
     throw e;
   }
+  // The Siri gateway: built from each instance's Siri gateway token file only, never its dashboard token.
+  let siri: Awaited<ReturnType<typeof startSiriGateway>> | null = null;
+  if (opts.siri) {
+    try {
+      siri = await startSiriGateway({
+        instances: opts.instances.map((i) => ({ name: i.name, port: i.port, gatewayTokenFile: join(dirname(i.tokenFile), SIRI_GATEWAY_TOKEN_FILE) })),
+        port: opts.siri.port,
+        host,
+        auditFile: join(opts.stateDir, 'siri-audit.jsonl'),
+        ...(opts.siri.whois ? { whois: opts.siri.whois } : {}),
+        ...(opts.siri.peerUid ? { peerUid: opts.siri.peerUid } : {}),
+        ...(opts.siri.lockout ? { lockout: opts.siri.lockout } : {}),
+        now,
+      });
+    } catch (e) {
+      detachTerminal();
+      server.close();
+      breakGlass.close();
+      throw e;
+    }
+  }
   return {
     server,
     breakGlass,
@@ -415,6 +527,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     keyFile: join(opts.stateDir, 'dashboard-token'),
     token,
     session,
+    siriUrl: siri?.url ?? null,
     close: () => {
       detachTerminal();
       return Promise.all(
@@ -424,7 +537,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
               s.closeAllConnections();
               s.close(() => r());
             }),
-        ),
+        ).concat(siri ? [siri.close()] : []),
       ).then(() => undefined);
     },
   };

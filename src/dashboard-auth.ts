@@ -78,7 +78,7 @@ export function csrfFromProtocols(req: IncomingMessage): string | undefined {
  * The hub asks Tailscale for the device on these reads, as on every write, and the instance serves these views
  * under exactly these paths (src/dashboard.ts), so the two can't drift apart.
  */
-export const DEVICE_VIEWS = { addProject: 'add-project', machine: 'machine', claudeAccount: 'claude-account', tailscale: 'tailscale' } as const;
+export const DEVICE_VIEWS = { addProject: 'add-project', machine: 'machine', claudeAccount: 'claude-account', tailscale: 'tailscale', siriDevices: 'siri-devices' } as const;
 export const isDeviceView = (path: string) => (Object.values(DEVICE_VIEWS) as string[]).includes(path);
 /** The session cookie: __Host- binds it to this origin, Path=/, Secure, with no Domain. */
 export const SESSION_COOKIE = '__Host-session';

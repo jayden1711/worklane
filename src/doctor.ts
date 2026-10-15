@@ -14,14 +14,16 @@ import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, diskFree, fileAccess, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
+import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { modelWarnings } from './model-routing.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -65,6 +67,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   try {
     cfg = loadConfig(root);
     add('config', 'ok', `${BRAND.configDir}/ valid`);
+    // WHY (#468): a model the engine doesn't list is a warning, never a refusal (the config still loads).
+    const models = modelWarnings(cfg.agents);
+    add('config models', models.length ? 'warn' : 'ok', models.length ? models.join('\n') : 'every model named is one the engine lists');
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
   }
@@ -218,8 +223,30 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   out.push(...setupChecks(root, opts));
+  const gpu = gpuCheck();
+  if (gpu) out.push(gpu);
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * GPU test runs (docs/test-runs.md "GPU"): nothing while root's file is absent (off). On for some instance but a node
+ * its runs need is missing (the driver not loaded, a GPU index that isn't there): a warning, since each of those runs
+ * then runs without the GPU. A file the helper would refuse: a warning too, saying so.
+ */
+export function gpuCheck(file = gpuFilePath(), present: (path: string) => boolean = (p) => existsSync(p), rootUid = 0, nodes: (indices: number[]) => string[] = (i) => nvidiaNodes(i)): DoctorCheck | null {
+  const f = readGpuFile(file, rootUid);
+  if ('state' in f) {
+    if (f.state === 'off' && f.why.startsWith('GPU test runs are off')) return null;
+    return { name: 'gpu test runs', level: 'warn', detail: `${f.why}; fix it with ${gpuCommands('<name>').status} (and enable/disable)` };
+  }
+  const names = Object.keys(f.instances);
+  if (!names.length) return null;
+  const need = nodes(gpuIndices(f));
+  const missing = need.filter((n) => !present(n));
+  const on = `on for ${names.join(', ')} (GPU ${gpuIndices(f).join(', ')}; at most ${f.maxMinutes} min a GPU command)`;
+  if (missing.length) return { name: 'gpu test runs', level: 'warn', detail: `${on}, but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing: those runs run without the GPU until ${missing.length === 1 ? 'it exists' : 'they exist'} (the NVIDIA driver loaded, the GPU present)` };
+  return { name: 'gpu test runs', level: 'ok', detail: on };
 }
 
 /**

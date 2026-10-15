@@ -14,9 +14,10 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
-import { firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
+import { CI_CHOICE_EXIT, firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
 import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/os/index.js';
+import { srvCheckoutPath } from '../src/os/system-paths.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX tools (tar, sh)';
@@ -24,11 +25,19 @@ process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'init-s
 // Server mode's records: the machine's (/var/lib/... on a server), here a scratch directory.
 process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'init-machine-'));
 
-/** The example project with a GitHub origin. */
-function repo(): string {
+/** The example project with a GitHub origin; `named`: its CI's check named (init finishes only with a CI chosen, #469). */
+function repo(named = true): string {
   const { dir } = exampleProject();
+  if (named) nameCheck(dir);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git'], { cwd: dir });
   return dir;
+}
+
+/** config.yaml names the check `test`, committed. */
+function nameCheck(dir: string) {
+  const f = join(dir, BRAND.configDir, 'config.yaml');
+  writeFileSync(f, `${readFileSync(f, 'utf8')}\nrequired_checks: [test]\n`);
+  execFileSync('git', ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'name the CI check'], { cwd: dir });
 }
 
 interface World {
@@ -113,7 +122,7 @@ test('init, local mode: the checklist in order; stopped at the Claude login, a r
   assert.match(s2.steps.github!.detail, /gh signed in; you can push to example-org\/example-shop/);
   assert.match(s2.steps['repo-config']!.detail, /\.worklane\/ valid \(example-org\/example-shop\), hooks installed/);
   assert.ok(existsSync(join(root, '.claude', 'settings.json')), 'the hooks for local runs, as `install` writes them');
-  assert.match(s2.steps.protection!.detail, /GitHub doesn't protect main \(HTTP 404\)[\s\S]*reported only/);
+  assert.match(s2.steps.protection!.detail, /main isn't protected on GitHub yet[\s\S]*reported only/);
   assert.ok(s2.finishedAt);
   assert.match(again.out(), /not in local mode: separate OS users: local mode runs the agents as you/);
   // A third run: everything done earlier, the optional step skipped earlier stays skipped (not asked again).
@@ -295,6 +304,43 @@ test('init, server mode: the true status. A failed or waiting add-project step i
   assert.deepEqual(stepsFor('server').map((x) => readInitState(serverInitFile('shopd'))!.steps[x.id]?.status), ['done', 'done', 'done', 'done', 'done', 'done', 'skipped', 'skipped']);
 });
 
+test('init (#469), local mode: a config with no CI chosen (an empty required_checks, PR mode) is never "all done": the repo-config step says why and the fix; chosen, it finishes', async () => {
+  const root = repo(false);
+  const t = world();
+  assert.equal(await initCommand(t.args({ target: root }), t.io), CI_CHOICE_EXIT, t.out());
+  assert.equal(CI_CHOICE_EXIT, 5, "bootstrap.sh reads it as 5: it ends at the wizard's URL then");
+  const s = readInitState(localInitFile(root))!;
+  assert.equal(s.steps['repo-config']!.status, 'failed');
+  assert.match(s.steps['repo-config']!.detail, /^\.worklane\/ valid \(example-org\/example-shop\), hooks installed; but required_checks is empty and no CI is chosen: no PR is ever marked ready, so nothing ever merges\. Fix: on the dashboard's First-run page, "Required checks named": add the starter CI .* Then run `worklane init` again \(it picks up here\)$/);
+  assert.match(t.out(), /stopped at Repo config/);
+  assert.equal(s.finishedAt, null);
+  nameCheck(root);
+  const again = world();
+  assert.equal(await initCommand(again.args({ target: root }), again.io), 0, again.out());
+  assert.equal(readInitState(localInitFile(root))!.steps['repo-config']!.status, 'done');
+});
+
+test('init (#469), server mode: the same refusal, judged on the checkout add-project made, as its default branch was last fetched', async () => {
+  const all = Object.fromEntries(['instance', 'app', 'claude-token', 'checkout', 'policy', 'service', 'test-user', 'machine-helper', 'dashboards'].map((s) => [s, 'done']));
+  const ok = () => world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 0, steps: all, details: {}, last: '' }) });
+  const { dir: upstream } = exampleProject();
+  const checkout = srvCheckoutPath('shopz', 'shop');
+  mkdirSync(dirname(checkout), { recursive: true });
+  execFileSync('git', ['clone', '-q', upstream, checkout]);
+  const first = ok();
+  assert.equal(await initCommand(first.args({ target: 'example-org/shop', mode: 'server', instance: 'shopz' }), first.io, () => true), CI_CHOICE_EXIT, first.out());
+  const s = readInitState(serverInitFile('shopz'))!;
+  assert.equal(s.steps['repo-config']!.status, 'failed');
+  assert.match(s.steps['repo-config']!.detail, /required_checks is empty and no CI is chosen/);
+  assert.equal(s.steps.coordinator, undefined, 'not reached');
+  // The choice merged on the default branch and fetched there (the coordinator fetches it): init finishes.
+  nameCheck(upstream);
+  execFileSync('git', ['fetch', '-q', 'origin'], { cwd: checkout });
+  const second = ok();
+  assert.equal(await initCommand(second.args({ target: 'example-org/shop', mode: 'server', instance: 'shopz' }), second.io, () => true), 0, second.out());
+  assert.equal(readInitState(serverInitFile('shopz'))!.steps['repo-config']!.status, 'done');
+});
+
 test('init, server mode: the record is the machine\'s, outside root\'s home, so doctor as the coordinator reads it; one it cannot read is said, never "not reached yet"', async () => {
   const machine = process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`]!;
   assert.equal(serverInitFile('shope'), join(machine, 'shope.json'));
@@ -346,7 +392,7 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   // its order (linger only where loginctl answers: Linux), a step not done a warning, never a failure.
   assert.deepEqual(names(setup).filter((n) => !n.startsWith('setup step ')), ['setup tools', 'setup claude', 'setup github', 'setup repo-config', 'setup protection', 'setup discord']);
   assert.ok(setup.filter((c) => !c.name.startsWith('setup step ')).every((c) => c.level === 'ok'), JSON.stringify(setup));
-  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
+  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service', 'first-task'].map((id) => `setup step ${id}`));
   assert.ok(setup.every((c) => c.level !== 'fail'), JSON.stringify(setup));
   for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup step ${id}`)!.level, 'ok', id);
   const off = local.filter((c) => c.level === 'off');

@@ -11,6 +11,7 @@ import type { AppCredentials } from '../github-app.js';
 import { listOpenPrs, PrTestRuns } from '../coordinator/test-runs.js';
 import { checksPermission } from './checks.js';
 import { checkHelper } from './helper.js';
+import { gpuOptIn } from './gpu.js';
 import { sandboxHost, type RunHost } from './host.js';
 import { SandboxWatch, type SandboxWatchDeps } from './sandbox-watch.js';
 import { checkNamesFor, postChecks, startTestRun, useTestRuns, type TestRunRequest, type TestRunResult } from './index.js';
@@ -64,7 +65,8 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     ? new SandboxWatch({ check: () => host.check(), log: d.log, actor: d.actor, passed: () => runs?.sandboxPassed(), ...(s.say ? { say: s.say } : {}), ...(s.timer ? { timer: s.timer } : {}) })
     : undefined;
   useTestRuns({
-    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, ...(sandbox ? { sandbox } : {}), sparseExclude: cfg.tests.checkout.sparse_exclude },
+    // Root's GPU file, read for planning and the record only: the helper reads it itself to grant (./gpu.ts).
+    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, ...(sandbox ? { sandbox } : {}), sparseExclude: cfg.tests.checkout.sparse_exclude, gpuOptIn: () => gpuOptIn(s.instance) },
     checks: { repo: s.repo, token: s.token, log: d.log, actor: d.actor, ...(s.api ? { api: s.api } : {}) },
   });
   const names = checkNamesFor(config);
@@ -77,6 +79,7 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     listPrs: () => listOpenPrs(s.repo, s.token, fetch, s.api),
     start: (req, o) => startTestRun(req, o),
     post: (sha, result) => postChecks(sha, result, names),
+    fastTiers: () => config.tiers.filter((t) => t.kind === 'fast').map((t) => t.name),
     ...(sandbox ? { sandbox } : {}),
   });
   // INVARIANT: the first check is awaited here, so a coordinator whose sandbox passes starts exactly as before; one

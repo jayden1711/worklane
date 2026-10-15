@@ -23,12 +23,15 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
+import { lingerEnabled, nodePathProblem, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
+import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
+import { ciChoiceProblem } from './ci-choice.js';
+import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -49,6 +52,10 @@ export interface SetupProbe {
   systemUnitActive(unit: string): boolean | null;
   /** Linux: whether this user's services outlive a login session; null elsewhere. */
   linger(): boolean | null;
+  /** This user's service file for a label and the node it runs (src/os/index.ts serviceProgram); absent: not asked. */
+  serviceProgram?(label: string): { file: string; node: string } | null;
+  /** Whether a path exists (the service's node); the real file system when absent. */
+  exists?(path: string): boolean;
 }
 
 export function systemProbe(): SetupProbe {
@@ -61,6 +68,7 @@ export function systemProbe(): SetupProbe {
     serviceRunning,
     systemUnitActive,
     linger: () => lingerEnabled(),
+    serviceProgram: (label) => serviceProgram(label),
   };
 }
 
@@ -153,13 +161,13 @@ export type Fix =
   /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
   | { kind: 'signin'; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
   | { kind: 'gh-login'; label: string; command: string }
   /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
   | { kind: 'discord'; label: string };
 
-export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
+export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service' | 'first-task';
 
 export interface GroupDef {
   id: GroupId;
@@ -185,6 +193,8 @@ export const GROUPS: readonly GroupDef[] = [
   { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
   { id: 'extras', title: 'Extras', optional: true, modes: MODES, walked: false },
   { id: 'service', title: 'Start', optional: false, modes: ['local'], walked: false },
+  // WHY (#468): after Start, how to give the harness work; local mode only for now (the owner, 2026-10-15).
+  { id: 'first-task', title: 'Your first task', optional: false, modes: ['local'], walked: false },
 ];
 
 /** How many installs reach a step (the audit's estimate from where it sits on the path, not usage data). */
@@ -363,6 +373,31 @@ function defaultBranch(k: Checking): string | null {
   if (!isErr(cfg)) return cfg.project.project.default_branch;
   const head = k.p.run('git', ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'], { cwd: k.c.root });
   return head.status === 0 ? head.stdout.trim().replace(/^origin\//, '') || null : null;
+}
+
+/** What the main watch does for a branch GitHub doesn't protect (src/main-watch.ts), said the same way everywhere. */
+export const MAIN_WATCH_GUARDS = "the harness's main watch guards it instead: once the coordinator runs, a commit that didn't land through a reviewed PR with its checks green stops auto-merge and raises an alert";
+
+export type ProtectionState = 'protected' | 'unprotected' | 'plan' | 'no-access' | 'unknown';
+
+/**
+ * WHY (#468): GitHub's answer to `GET repos/{repo}/branches/{branch}/protection`, in words: never a bare HTTP code.
+ * 200: protected. 404 "Branch not protected": it could be, and isn't. 403 asking to upgrade or go public: a private
+ * repo on a free plan, where GitHub can't protect a branch at all. Any other 404 or 403: this gh login can't read
+ * it (the protection API answers only a repo admin). Anything else: what gh said, its first line.
+ */
+export function protectionAnswer(r: Pick<RunResult, 'status' | 'stderr' | 'stdout'>, branch: string): { state: ProtectionState; detail: string } {
+  if (r.status === 0) return { state: 'protected', detail: `GitHub enforces protection on ${branch}` };
+  const said = `${r.stderr}\n${r.stdout}`;
+  const code = said.match(/HTTP (\d{3})/)?.[1];
+  const real = 'For real protection: make the repo public, or move it to a paid GitHub plan (Pro, Team or Enterprise)';
+  if (/upgrade to github pro|make this repository public|not available for this repository|Upgrade to/i.test(said) || (code === '403' && /plan/i.test(said)))
+    return { state: 'plan', detail: `GitHub can't protect branches on this repo: a private repo on a free plan has no branch protection or rulesets. ${MAIN_WATCH_GUARDS[0]!.toUpperCase()}${MAIN_WATCH_GUARDS.slice(1)}. ${real}` };
+  if (/branch not protected/i.test(said)) return { state: 'unprotected', detail: `${branch} isn't protected on GitHub yet: Protect requires your checks before anything merges into it. Until then, ${MAIN_WATCH_GUARDS}` };
+  if (code === '404' || code === '403' || /not found|resource not accessible|must have admin/i.test(said))
+    return { state: 'no-access', detail: `your gh login can't read ${branch}'s protection: GitHub shows it only to the repo's admins. Ask an admin to check the repo's Settings, Branches (or Rules)` };
+  const first = (said.trim().split('\n')[0] ?? '').replace(/\s*\(HTTP \d{3}\)\s*$/, '').replace(/^gh:\s*/, '');
+  return { state: 'unknown', detail: `couldn't ask GitHub about ${branch}'s protection${first ? `: ${first}` : ''}` };
 }
 
 /** The registry: every step of the audit's table (rows 1-33), in the order the page shows them. */
@@ -600,7 +635,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'some',
     today: `Answer them in the terminal (\`${BRAND.cli} init\` asks), or \`${BRAND.cli} init --answer <id>=<choice>\`.`,
     fix: { kind: 'form', form: 'setup-config', label: 'Answer' },
-    automation: `${BRAND.cli} init --answer <id>=<choice> (or answer init's questions in a terminal)`,
+    // WHY (#468): one complete line to copy, nothing to fill in: init, run in this checkout, asks the same questions.
+    automation: `${BRAND.cli} init --mode local`,
     detect: (k) => {
       if (existsSync(join(k.c.root, BRAND.configDir, 'config.yaml'))) return ok(`${BRAND.configDir}/ is here: nothing to ask`);
       return k.c.openQuestions ? no(`${k.c.openQuestions} question${k.c.openQuestions === 1 ? '' : 's'} open (shown below)`) : ok('none open');
@@ -679,14 +715,17 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: MODES,
     optional: false,
     reach: 'most',
-    today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks (empty: nothing is ever marked ready).`,
+    today: `List your CI checks in ${BRAND.configDir}/config.yaml required_checks; a repo with no CI adds the starter CI here first (empty: nothing is ever marked ready).`,
     fix: { kind: 'form', form: 'repo-config', label: 'Change' },
     automation: REPO_CONFIG_BY_HAND,
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
       const r = cfg.project.required_checks;
-      return r.length ? ok(`required: ${r.join(', ')}`) : no('required_checks is empty: nothing is ever marked ready');
+      if (r.length) return ok(`required: ${r.join(', ')}`);
+      if (ciIsNone(cfg.project)) return ok(`${CI_NONE_MEANS}. Required: ${requiredFor(cfg.project, cfg.tests).join(', ')}`);
+      // WHY (#469): never a silent empty list; the step is blocked with the fix (src/ci-choice.ts).
+      return no(ciChoiceProblem(cfg.project) ?? 'required_checks is empty: nothing is ever marked ready');
     },
   },
   {
@@ -704,7 +743,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
-      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}`);
+      // WHY (#468): a model the engine doesn't list is a warning here, never a refusal: the step stays done.
+      const models = modelWarnings(cfg.agents);
+      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}${models.length ? `; warning: ${models.join('; ')}` : ''}`);
     },
   },
   {
@@ -764,13 +805,11 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const b = defaultBranch(k) ?? 'main';
       const watch = readWatchState(join(k.c.stateDir, 'main-watch.json'));
       if (watch.mode === 'github') return ok(`GitHub enforces protection on ${b}`);
-      if (watch.mode === 'main_watch') return ok(`GitHub doesn't protect ${b}: the main watch guards it`);
+      if (watch.mode === 'main_watch') return ok(`GitHub doesn't protect ${b}; ${MAIN_WATCH_GUARDS}`);
       if (!k.c.repo) return no('no GitHub origin: nothing to protect yet');
       if (!k.p.which('gh')) return no(`can't ask GitHub: gh isn't installed`);
-      const r = k.p.run('gh', ['api', `repos/${k.c.repo}/branches/${b}/protection`, '--silent']);
-      if (r.status === 0) return ok(`GitHub enforces protection on ${b}`);
-      const code = r.stderr.match(/HTTP (\d{3})/)?.[1];
-      return no(`GitHub doesn't protect ${b}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge`);
+      const a = protectionAnswer(k.p.run('gh', ['api', `repos/${k.c.repo}/branches/${b}/protection`, '--silent']), b);
+      return a.state === 'protected' ? ok(a.detail) : no(a.detail);
     },
   },
   // Policy (server)
@@ -969,6 +1008,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet: the coordinator needs one');
       const label = serviceLabel(cfg);
+      // WHY (#468): a service that runs node by a path an upgrade deleted (or will) stops at its next restart.
+      const svc = k.p.serviceProgram?.(label) ?? null;
+      const bad = svc ? nodePathProblem(svc.node, k.p.exists ?? existsSync) : null;
+      if (svc && bad) return no(`${svc.file} ${bad}: run \`${BRAND.cli} up\` to rewrite it with a stable node (Homebrew's bin/node, or this node's own path)`);
       const up = k.p.serviceRunning(label);
       if (up === null) return no('no service manager here (agents need macOS, Linux or WSL2)');
       return up ? ok(`${label} is running`) : no(`${label} isn't running`);
@@ -988,6 +1031,37 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const l = k.p.linger();
       if (l === null) return null;
       return l ? ok('linger is on: the service outlives your login') : no('linger is off: the coordinator stops when you log out');
+    },
+  },
+  // Your first task (local): one issue the coordinator will take, filed from the page or by hand.
+  {
+    id: 'first-task',
+    group: 'first-task',
+    rows: [20],
+    title: 'An issue ready for the harness',
+    modes: ['local'],
+    optional: false,
+    reach: 'all',
+    today: 'Open an issue whose body has a fenced ```done_when block (a test or a command that passes when it is done), and add the ready label.',
+    fix: { kind: 'form', form: 'first-task', label: 'File one' },
+    automation: 'gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>',
+    network: true,
+    detect: (k) => {
+      const cfg = k.cfg();
+      if (isErr(cfg)) return no('no valid config yet');
+      if (cfg.project.backlog === 'file') {
+        try {
+          const j = JSON.parse(readFileSync(join(k.c.stateDir, 'backlog.json'), 'utf8')) as { issues?: { labels?: string[]; pr?: unknown }[] };
+          const n = (j.issues ?? []).filter((i) => !i.pr && i.labels?.includes('ready')).length;
+          return n ? ok(`${n} issue${n === 1 ? '' : 's'} labelled ready`) : no('no issue is labelled ready yet');
+        } catch {
+          return no('no issue is labelled ready yet');
+        }
+      }
+      if (!k.c.repo || !k.p.which('gh')) return no("can't ask GitHub: no GitHub origin or no gh");
+      const r = k.p.run('gh', ['api', `repos/${k.c.repo}/issues?labels=ready&state=all&per_page=1`, '--jq', 'length']);
+      if (r.status !== 0) return no(`couldn't ask GitHub: ${firstLine(r.stderr)}`);
+      return Number(r.stdout.trim()) > 0 ? ok('an issue is labelled ready: the coordinator picks it up when it runs') : no('no issue is labelled ready yet: the coordinator has nothing to work on');
     },
   },
 ];

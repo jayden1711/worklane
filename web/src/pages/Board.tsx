@@ -207,9 +207,20 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
         </div>
       )}
       {card.waiting && (
-        <div className="mt-2 text-[11.5px] text-orange" data-testid="board-card-wait" title={card.waiting.detail ?? undefined}>
+        <div className="mt-2 text-[11.5px] text-orange" data-testid="board-card-wait">
           {card.waiting.label} · {elapsed(card.waiting.since, now)}
-          {card.waiting.detail && <div className="mt-0.5 line-clamp-2 text-ink-2">{card.waiting.detail}</div>}
+          {/* Every reason in full, one chip each, wrapping inside the card: never cut off (#471). */}
+          {card.waiting.reasons?.length ? (
+            <ul className="mt-1 flex min-w-0 flex-wrap gap-1" data-testid="board-card-reasons">
+              {card.waiting.reasons.map((r, i) => (
+                <li key={i} className="min-w-0 max-w-full whitespace-normal rounded-control bg-inset px-1.5 py-0.5 leading-snug text-ink-2 shadow-hairline wrap-anywhere" data-testid="board-card-reason">
+                  {r}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            card.waiting.detail && <div className="mt-0.5 whitespace-normal text-ink-2 wrap-anywhere">{card.waiting.detail}</div>
+          )}
         </div>
       )}
       {(a.watch || a.steer || a.answer || a.approve) && (

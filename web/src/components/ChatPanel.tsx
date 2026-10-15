@@ -8,10 +8,15 @@
 // each instance's own server. An owner who turned it on in Settings gets a mic that dictates
 // into the box for review (web/src/voice/); it never sends. One who turned on talk-back hears answers read aloud
 // by the browser (web/src/voice/talk.ts): no code, nothing secret-shaped, stopped by talking, Esc, closing or a new question.
+// The owners and writers attach files by dropping, pasting or the paperclip (ChatAttachments.tsx): data the answer
+// reads, never run. They also get conversations and Projects (./Conversations.tsx): a sidebar of their own multi-turn
+// conversations and the Projects they can see; the quick single-shot question stays as it was.
 import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { MessageCircle, X } from 'lucide-react';
-import { askChat, chatAnswer, fileChatDraft, hub, hubInstance, requestKey, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatCitation, type HubInfo } from '../api';
+import { MessageCircle, PanelLeft, X } from 'lucide-react';
+import { ConversationPane, ConversationSidebar, mayConverse, ProjectEditor, type ChatView } from './Conversations';
+import { askChat, chatAnswer, fileChatDraft, fileConversationDraft, hub, hubInstance, newConversation, requestKey, sendConversationMessage, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatAttachment, type ChatCitation, type HubInfo } from '../api';
+import { AttachButton, AttachmentList, DropHint, filesOf, mayAttach, SentAttachments, useAttachments } from './ChatAttachments';
 import { navigate } from '../App';
 import { Badge, Button, cx } from './ui';
 import { ComposerMic, MicInterim, mayDictate, useDictation } from '../voice/Mic';
@@ -219,6 +224,8 @@ export function ChatAnswerView({ f, cli, onOpen = () => {}, onFile = () => Promi
 
 interface Turn {
   question: string;
+  /** Files sent with the question (on the one instance asked). */
+  attachments?: ChatAttachment[];
   asks: { instance: string | null; id: string | null; f: ChatAnswerFile | { state: 'error'; why: string } }[];
 }
 
@@ -230,13 +237,13 @@ const pendingFile = (id: string): ChatAnswerFile => ({ v: 1, id, at: '', owner: 
  * itself isn't kept once the coordinator takes it).
  */
 function restoreTurns(): { turns: Turn[]; open: boolean } {
-  let saved: { question: string; asks: { instance: string | null; id: string }[] }[] = [];
+  let saved: { question: string; attachments?: ChatAttachment[]; asks: { instance: string | null; id: string }[] }[] = [];
   try {
     saved = JSON.parse(sessionStorage.getItem('dash-chat') ?? '[]') as typeof saved;
   } catch {
     // no storage, or unreadable: a fresh thread
   }
-  const turns: Turn[] = saved.map((t) => ({ question: t.question, asks: t.asks.map((a) => ({ ...a, f: pendingFile(a.id) })) }));
+  const turns: Turn[] = saved.map((t) => ({ question: t.question, ...(t.attachments ? { attachments: t.attachments } : {}), asks: t.asks.map((a) => ({ ...a, f: pendingFile(a.id) })) }));
   const linked = new URLSearchParams(window.location.search).get('chat');
   if (linked && /^[0-9]+-[a-f0-9]+$/.test(linked) && !turns.some((t) => t.asks.some((a) => a.id === linked))) turns.push({ question: '', asks: [{ instance: null, id: linked, f: pendingFile(linked) }] });
   return { turns, open: !!linked };
@@ -244,7 +251,7 @@ function restoreTurns(): { turns: Turn[]; open: boolean } {
 
 function saveTurns(turns: Turn[]) {
   try {
-    sessionStorage.setItem('dash-chat', JSON.stringify(turns.slice(-20).map((t) => ({ question: t.question, asks: t.asks.filter((a) => a.id).map((a) => ({ instance: a.instance, id: a.id })) }))));
+    sessionStorage.setItem('dash-chat', JSON.stringify(turns.slice(-20).map((t) => ({ question: t.question, ...(t.attachments?.length ? { attachments: t.attachments } : {}), asks: t.asks.filter((a) => a.id).map((a) => ({ instance: a.instance, id: a.id })) }))));
   } catch {
     // no storage: the thread lasts as long as the page
   }
@@ -254,7 +261,7 @@ function saveTurns(turns: Turn[]) {
  * The floating Ask button and its panel. `cli` is the command the machine-only proposals name; `role` is this
  * person's on the instance (State.role), which decides the owners-only mic.
  */
-export function ChatPanel({ cli, role }: { cli: string; role?: string | undefined }) {
+export function ChatPanel({ cli, role, user }: { cli: string; role?: string | undefined; user?: string | undefined }) {
   const [restored] = useState(restoreTurns);
   const [open, setOpen] = useState(restored.open);
   const [q, setQ] = useState('');
@@ -263,6 +270,24 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
   const [hubInfo, setHubInfo] = useState<{ hub: HubInfo; current: string } | null>(null);
   const [target, setTarget] = useState<string>('');
   const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [view, setView] = useState<ChatView>({ kind: 'quick' });
+  // Bumped to reload the sidebar's lists, and the open conversation after a send.
+  const [version, setVersion] = useState(0);
+  const [sideOpen, setSideOpen] = useState(false);
+  const [convErr, setConvErr] = useState<string | null>(null);
+  // Conversations go to one instance: this page's own, or the hub's chosen one (not "every instance").
+  const convInstance: string | null | undefined = !hubInfo ? null : target === '*' ? undefined : target || null;
+  const convsOn = mayConverse(role) && convInstance !== undefined;
+  // Attachments go to one instance: this page's own, or on a hub the chosen one (never "Every instance"); a Project's
+  // editor has its own.
+  const attachTo = hubInfo ? (target === '*' ? null : target) : null;
+  const canAttach = mayAttach(role) && !(hubInfo && target === '*') && !(convsOn && view.kind === 'project');
+  const att = useAttachments({ instance: attachTo, active: open && mayAttach(role) });
+  // WHY: a file is kept on the instance it was uploaded to; asking another one starts the attachments over.
+  useEffect(() => {
+    att.clear();
+  }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
   const bottom = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const content = useRef<HTMLDivElement>(null);
@@ -329,14 +354,40 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
       }
   }, [turns]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const select = (v: ChatView) => {
+    setView(v);
+    setSideOpen(false);
+    setConvErr(null);
+  };
+  const startConversation = (project: string | null) =>
+    void newConversation(convInstance ?? null, project).then(
+      (r) => (select({ kind: 'conversation', id: r.conversation.id }), setVersion((n) => n + 1)),
+      (e: Error) => setConvErr(e.message),
+    );
+
   const ask = async () => {
     const question = q.trim();
-    if (!question || question.length > MAX) return;
+    if (!question || question.length > MAX || att.busy || att.blocked) return;
+    const sent = att.ready;
     // WHY: what is sent is what the person reviewed; nothing dictated lands after Ask. A new question stops the
     // last answer being read.
     mic.abort();
     talk.stop();
     setBusy(true);
+    if (convsOn && view.kind === 'conversation') {
+      // The message goes in the body (never a URL), with one key per send so a retry is the same turn.
+      try {
+        await sendConversationMessage(convInstance ?? null, view.id, question, requestKey(), sent.map((a) => a.id));
+        setQ('');
+        att.clear();
+        setConvErr(null);
+      } catch (e) {
+        setConvErr((e as Error).message);
+      }
+      setVersion((n) => n + 1);
+      setBusy(false);
+      return;
+    }
     // One key per question: a retried POST is the same ask, never a second turn.
     const key = requestKey();
     // On a hub: the chosen instance, or each one that answers; elsewhere this page's own server.
@@ -344,15 +395,16 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
     const asks = await Promise.all(
       targets.map(async (instance) => {
         try {
-          const { id } = await askChat(instance, question, key);
+          const { id } = await askChat(instance, question, key, sent.map((a) => a.id));
           return { instance, id, f: pendingFile(id) };
         } catch (e) {
           return { instance, id: null, f: { state: 'error' as const, why: (e as Error).message } };
         }
       }),
     );
-    setTurns((t) => [...t, { question, asks }]);
+    setTurns((t) => [...t, { question, ...(sent.length ? { attachments: sent } : {}), asks }]);
     setQ('');
+    if (asks.some((a) => a.id)) att.clear();
     setBusy(false);
   };
 
@@ -381,14 +433,51 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
             }
             if (talk.escape()) e.preventDefault();
           }}
-          onOpenAutoFocus={(e) => (e.preventDefault(), input.current?.focus())} className="fixed top-0 right-0 bottom-0 z-50 flex w-[min(440px,100vw)] flex-col bg-surface shadow-overlay" style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }} data-testid="chat-panel" aria-describedby={undefined}>
+          onOpenAutoFocus={(e) => (e.preventDefault(), input.current?.focus())} className={cx('fixed top-0 right-0 bottom-0 z-50 flex flex-col bg-surface shadow-overlay', convsOn ? 'w-[min(820px,100vw)]' : 'w-[min(440px,100vw)]')} style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }} data-testid="chat-panel" aria-describedby={undefined}
+          onDragOver={(e) => {
+            if (!canAttach || !Array.from(e.dataTransfer.types).includes('Files')) return;
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+          }}
+          onDrop={(e) => {
+            setDragging(false);
+            const files = filesOf(e.dataTransfer);
+            if (!canAttach || !files.length) return;
+            e.preventDefault();
+            att.add(files);
+          }}>
+          <DropHint active={dragging} />
           <div className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
+            {convsOn && (
+              <button type="button" onClick={() => setSideOpen((o) => !o)} className="primitive-icon-button size-7 text-ink-3 hover:bg-hover-2 hover:text-ink sm:hidden" aria-label="Conversations" aria-expanded={sideOpen} data-testid="conv-toggle">
+                <PanelLeft className="size-4" />
+              </button>
+            )}
             <Dialog.Title className="text-[13.5px] font-medium text-ink">Ask</Dialog.Title>
             <span className="text-[11.5px] text-ink-3">answers cite what they come from; nothing runs from here</span>
             <Dialog.Close className="primitive-icon-button ml-auto size-7 text-ink-3 hover:bg-hover-2 hover:text-ink" aria-label="Close" data-testid="chat-close">
               <X className="size-4" />
             </Dialog.Close>
           </div>
+          <div className="flex min-h-0 flex-1">
+          {convsOn && (
+            <div className={cx('min-h-0 w-full flex-col border-r border-line sm:flex sm:w-56 sm:shrink-0', sideOpen ? 'flex' : 'hidden')}>
+              <ConversationSidebar instance={convInstance ?? null} view={view} version={version} onSelect={select} onNew={startConversation} onChanged={() => setVersion((n) => n + 1)} />
+            </div>
+          )}
+          <div className={cx('min-h-0 min-w-0 flex-1 flex-col', convsOn && sideOpen ? 'hidden sm:flex' : 'flex')}>
+          {convsOn && view.kind === 'conversation' ? (
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              <ConversationPane instance={convInstance ?? null} id={view.id} cli={cli} version={version} onOpen={opener(convInstance ?? null)} onFile={async (turn) => (await fileConversationDraft(convInstance ?? null, view.id, turn)).number} />
+            </div>
+          ) : convsOn && view.kind === 'project' ? (
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              <ProjectEditor instance={convInstance ?? null} id={view.id} role={role} {...(user ? { me: user } : {})} onSaved={(id) => (setView({ kind: 'project', id }), setVersion((n) => n + 1))} onDeleted={() => (select({ kind: 'quick' }), setVersion((n) => n + 1))} onNewConversation={(p) => startConversation(p)} />
+            </div>
+          ) : (
           <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-3" data-testid="chat-thread">
             {!turns.length && <div className="text-[12.5px] text-ink-3">Ask why something is stuck, what ran, or what to do next. The owner gets drafts and proposals to confirm; everyone else gets answers.</div>}
             {turns.map((t, i) => (
@@ -396,6 +485,7 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
                 {t.question && (
                   <div className="ml-8 rounded-card bg-inset px-3 py-2 text-[13px] text-ink shadow-hairline" data-testid="chat-question">
                     {t.question}
+                    {t.attachments && <SentAttachments items={t.attachments} instance={t.asks[0]?.instance ?? null} />}
                   </div>
                 )}
                 {t.asks.map((a) => (
@@ -405,6 +495,8 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
             ))}
             <div ref={bottom} />
           </div>
+          )}
+          {!(convsOn && view.kind === 'project') && (
           <form
             className="shrink-0 space-y-2 border-t border-line p-3"
             onSubmit={(e) => {
@@ -415,16 +507,23 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
             {hubInfo && (
               <div className="flex flex-wrap gap-1.5" role="group" aria-label="Ask which instance">
                 {[...hubInfo.hub.instances.filter((i) => i.up).map((i) => i.name), '*'].map((n) => (
-                  <button key={n} type="button" onClick={() => setTarget(n)} className={cx('h-6 rounded-full px-2.5 text-[11.5px]', target === n ? 'bg-ink font-medium text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')} data-testid="chat-target">
+                  <button key={n} type="button" onClick={() => (setTarget(n), select({ kind: 'quick' }))} className={cx('h-6 rounded-full px-2.5 text-[11.5px]', target === n ? 'bg-ink font-medium text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')} data-testid="chat-target">
                     {n === '*' ? 'Every instance' : n}
                   </button>
                 ))}
               </div>
             )}
+            <AttachmentList items={att.items} onRemove={att.remove} onAnyway={att.anyway} />
             <textarea
               ref={input}
               value={q}
               onChange={(e) => setQ(e.target.value)}
+              onPaste={(e) => {
+                const files = filesOf(e.clipboardData);
+                if (!canAttach || !files.length) return;
+                e.preventDefault();
+                att.add(files);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
@@ -441,14 +540,23 @@ export function ChatPanel({ cli, role }: { cli: string; role?: string | undefine
             <TalkStatus role={role} prefs={voice} speaking={talk.speaking} note={talk.note} onStop={talk.stop} />
             <div className="flex items-center gap-2">
               <ComposerMic role={role} prefs={voice} support={mic.support} listening={mic.listening} onToggle={mic.toggle} />
+              <AttachButton role={role} disabled={!canAttach} {...(!canAttach ? { why: 'Attachments go to one instance: choose it above' } : {})} {...(att.limits ? { accept: att.limits.extensions } : {})} onFiles={att.add} />
               <span className={cx('text-[11.5px] tabular-nums', q.length > MAX ? 'text-red' : 'text-ink-3')}>
                 {q.length > MAX ? `${q.length - MAX} over the ${MAX} limit` : '⌘↵ to ask'}
               </span>
-              <Button size="sm" type="submit" className="ml-auto" disabled={busy || !q.trim() || q.length > MAX} data-testid="chat-ask">
+              <Button size="sm" type="submit" className="ml-auto" disabled={busy || !q.trim() || q.length > MAX || att.busy || att.blocked} data-testid="chat-ask">
                 {busy ? 'Asking…' : 'Ask'}
               </Button>
             </div>
+            {convErr && (
+              <div className="text-[12px] text-red" data-testid="conv-send-error">
+                {convErr}
+              </div>
+            )}
           </form>
+          )}
+          </div>
+          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

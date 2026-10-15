@@ -154,7 +154,7 @@ export const EventSchemas = {
    * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
    * owner's break-glass), on which instance, and what was done.
    */
-  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord', 'siri']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -296,6 +296,23 @@ export const EventSchemas = {
   'claude_auth.failed': z.strictObject({ key: z.string().max(500), login: z.string().max(300), lane: z.string().max(100), issue: issue.nullable(), role: z.string(), detail: z.string().max(1000) }),
   /** A minimal real call on a held login: `by` the periodic check, the owner's re-check, or an account switch. */
   'claude_auth.checked': z.strictObject({ key: z.string().max(500), login: z.string().max(300), ok: z.boolean(), by: z.enum(['timer', 'owner', 'account_switch']), detail: z.string().max(1000), cost_usd: z.number().nonnegative() }),
+  /**
+   * An instance's Claude account profile switch, as the root script recorded it (src/claude-profiles.ts, issue #464):
+   * `op` its id, `to` the profile asked for, `from` each instance's profile before, `by` who asked (a GitHub login, or
+   * `terminal`), `ok` whether every agent user's real call on it was answered (if not, nothing changed). Never a token.
+   */
+  'account.switched': z.strictObject({ op: z.string().max(80), to: z.string().max(40), from: z.record(z.string().max(40), z.string().max(40)), instances: z.array(z.string().max(40)).max(200), by: z.string().max(100), ok: z.boolean(), detail: z.string().max(1000) }),
+  /**
+   * A Claude account profile request the dashboard refused before it knew who asked (no session, or no role here):
+   * the path, the login the hub named if any, and why. Nothing was read from the body or started.
+   */
+  'claude_account.refused': z.strictObject({ path: z.string().max(100), login: z.string().max(100).nullable(), status: z.number().int(), why: z.string().max(300) }),
+  /**
+   * Auto-failover between account profiles on a usage limit (src/claude-failover.ts): asked (a move, proven by a
+   * real call before it happens), switched, refused, none (no free account in the order), and the move back after
+   * the reset (back-asked, back, back-refused). Never on an auth failure. Never a token.
+   */
+  'account.failover': z.strictObject({ stage: z.enum(['asked', 'switched', 'refused', 'none', 'back-asked', 'back', 'back-refused']), from: z.string().max(40), to: z.string().max(40), reset_at: z.string().max(40).nullable(), detail: z.string().max(1000) }),
   /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
   'claude_auth.recovered': z.strictObject({ key: z.string().max(500), login: z.string().max(300), via: z.enum(['run', 'check']), role: z.string(), held_ms: z.number().int().nonnegative(), hold_id: z.number().int().nonnegative() }),
   /**
@@ -341,6 +358,8 @@ export const EventSchemas = {
     patch_correct: z.boolean(),
     test_correct: z.boolean(),
     confidence: z.enum(['high', 'medium', 'low']),
+    /** Why the confidence isn't high (src/verdict-confidence.ts): always set when it isn't; absent on high and on older verdicts. */
+    confidence_reason: z.string().max(2000).optional(),
     advice: z.string(),
     /** The worker's claims no recorded command or check backs: never evidence; `confidence` was lowered for them. */
     unverified_claims: z.array(z.string()).optional(),
@@ -655,7 +674,7 @@ export const EventSchemas = {
    */
   'pr_batch.step': z.strictObject({
     id: z.string(),
-    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale']),
+    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale', 'gpu_held']),
     prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string().optional() })),
     sha: sha.nullable(),
     base: sha.nullable(),
@@ -743,10 +762,15 @@ export const EventSchemas = {
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
   // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
   'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),
-  /** It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. */
-  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative() }),
+  /**
+   * It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. `gpu`:
+   * planned when a tier of it asks for the GPU and root's file lists the instance (or can't be read): recorded before
+   * any GPU command, so a run cut off by a hung machine is never run again by itself (src/testrun/gpu.ts).
+   */
+  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative(), gpu: z.literal('planned').optional() }),
   /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
-  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable() }),
+  // `gpu`: only for a tier that asked for the GPU: whether the sandbox helper granted it, the nodes, and its line.
+  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable(), gpu: z.strictObject({ granted: z.boolean(), devices: z.array(z.string()), detail: z.string().max(300) }).optional() }),
   /** `results`: each tier's pass or fail, all a viewer sees of a run. */
   'testrun.finished': z.strictObject({
     id: z.string(),
@@ -757,6 +781,8 @@ export const EventSchemas = {
     outcome: z.enum(['done', 'cancelled', 'error', 'interrupted']),
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
+    /** A granted GPU command of it timed out or was killed: the run is never run again by itself (src/testrun/gpu.ts). */
+    gpu_stopped: z.boolean().optional(),
   }),
   /**
    * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and

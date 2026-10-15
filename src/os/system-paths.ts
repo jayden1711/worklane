@@ -1,7 +1,8 @@
 // The machine's own locations: everything the engine reads or runs outside a checkout and a user's home, in one place.
 // /etc/<cli> (machine owners, network, updates, slots, limits, the watchdog, signers), /var/lib/<cli> (the machine's
 // state: changes, updates log, the Claude account, the init lock, the agent slots), /usr/local/libexec/<cli>-* (the
-// root helpers), /opt/<cli> (the installed engine), /run/lock (the full-run lock), and the systemd unit directory.
+// root helpers), /opt/<cli> (the installed engine), /run/lock (the full-run lock), /run/<cli> (the GPU test runs'
+// locks), and the systemd unit directory.
 //
 // WHY: the release runs `npm test` on a machine that runs the engine (#312). A test that read the real
 // /etc/<cli>/machine-owners.json, the real helper, or the real updates log got the machine's answer, not the test's.
@@ -105,6 +106,7 @@ export const SYSTEM_ROOTS = {
   libexec: '/usr/local/libexec',
   opt: `/opt/${BRAND.cli}`,
   runLock: '/run/lock',
+  run: `/run/${BRAND.cli}`,
   units: '/etc/systemd/system',
   varTmp: '/var/tmp',
 } as const;
@@ -119,8 +121,12 @@ export const libexecPath = (name: string) => systemPath(`${SYSTEM_ROOTS.libexec}
 export const optPath = (name: string) => systemPath(`${SYSTEM_ROOTS.opt}/${name}`);
 /** /run/lock/<cli>-<name> */
 export const runLockPath = (name: string) => systemPath(`${SYSTEM_ROOTS.runLock}/${BRAND.cli}-${name}`);
+/** /run/<cli>/<name>: root's runtime files every user may read (the GPU test runs' locks). */
+export const runPath = (name: string) => systemPath(`${SYSTEM_ROOTS.run}/${name}`);
 /** /etc/systemd/system/<unit> */
 export const unitPath = (unit: string) => systemPath(`${SYSTEM_ROOTS.units}/${unit}`);
+/** /srv/<cli>/<instance>/<repo name>: a server instance's checkout (scripts/setup/lib.sh SRV_ROOT, add-project.sh). */
+export const srvCheckoutPath = (instance: string, repoName: string) => systemPath(`/srv/${BRAND.cli}/${instance}/${repoName}`);
 /** The test-run sandbox's base (scripts/setup/testrun-sandbox.sh): beside /var/lib/<cli>, its own directory. */
 export const testRunBasePath = () => systemPath(`/var/lib/${BRAND.cli}-test`);
 /** Single-user and development machines' slot directory (unbranded: every agent harness on the box shares it). */
@@ -136,4 +142,5 @@ export const asRoot = {
   varLib: (name: string) => `${SYSTEM_ROOTS.varLib}/${name}`,
   libexec: (name: string) => `${SYSTEM_ROOTS.libexec}/${BRAND.cli}-${name}`,
   opt: (name: string) => `${SYSTEM_ROOTS.opt}/${name}`,
+  run: (name: string) => `${SYSTEM_ROOTS.run}/${name}`,
 } as const;

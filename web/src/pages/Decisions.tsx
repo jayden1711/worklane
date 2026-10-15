@@ -4,6 +4,7 @@ import { navigate, pageKey, typing } from '../App';
 import { useEntrance, ValuePill } from '../components/patterns';
 import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
 import { Header } from '../components/Header';
+import { useArrivalOrder } from '../arrival-order';
 
 /** The detail line that carries a recommendation's reasoning: src/decision-ask.ts writes it (a test keeps the two equal). */
 export const RECOMMENDATION_PREFIX = 'Recommendation: ';
@@ -86,6 +87,9 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
           <Badge tone={d.kind === 'land' ? 'danger' : 'warn'}>{d.kind === 'land' ? 'Approve landing' : 'Question'}</Badge>
           <span>for @{d.owner}</span>
           <span>· asked {ago(d.askedAt)}</span>
+          <a href={`/decisions/${d.id}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/${d.id}`))} className="ml-auto font-medium text-blue-ink hover:underline" data-testid="decision-details">
+            Details
+          </a>
         </div>
         <div className="mt-2 text-[14px] font-medium text-ink">{d.question}</div>
         {isOption && (
@@ -147,7 +151,8 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
 export function Decisions({ state }: { state: State }) {
   const [showAnswered, setShowAnswered] = useState(false);
   const open = useMemo(() => state.decisions.filter((d) => !d.answer), [state.decisions]);
-  const list = showAnswered ? state.decisions : open;
+  // A decision asked while the page is open goes below those shown, never above them (web/src/arrival-order.ts).
+  const list = useArrivalOrder(showAnswered ? state.decisions : open, showAnswered);
   const [sel, setSel] = useState(0);
   // An answer the chat proposed for the decision in the address: marked on its option, never sent by itself.
   const proposed = useMemo(() => new URLSearchParams(window.location.search).get('proposed'), []);
@@ -178,9 +183,12 @@ export function Decisions({ state }: { state: State }) {
     return () => window.removeEventListener('keydown', on);
   }, [list, sel]);
 
+  // Only when the selection moves (j/k, a link to one): a change to the list (a decision asked or answered) never
+  // scrolls the page, which moved every card under the cursor (#455: 329 px, scrolled 150 px down).
   useEffect(() => {
     document.querySelector(`[data-decision="${list[sel]?.id}"]`)?.scrollIntoView({ block: 'nearest' });
-  }, [sel, list]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel]);
 
   return (
     <div data-testid="page-decisions">

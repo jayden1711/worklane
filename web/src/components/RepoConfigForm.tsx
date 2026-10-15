@@ -3,7 +3,8 @@
 // like every config PR (web/src/components/ConfigPr.tsx, #468): merged here or anywhere, this checkout is brought to it.
 // In setup mode the same form changes the held draft instead (the preview's Change), and nothing is pushed.
 import { useEffect, useState } from 'react';
-import { changeRepoConfig, getChecksSeen, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues } from '../api';
+import { changeRepoConfig, getChecksSeen, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues, type StarterCi as StarterCiView } from '../api';
+import { StarterCi } from './StarterCi';
 import { Button, cx } from './ui';
 
 const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
@@ -25,12 +26,16 @@ export interface DraftTarget {
   onCancel: () => void;
 }
 
-export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, onChanged, draft }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; onChanged?: () => void; draft?: DraftTarget }) {
+export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialStarter = null, initialStarterOpen = false, onChanged, draft }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialStarter?: StarterCiView | null; initialStarterOpen?: boolean; onChanged?: () => void; draft?: DraftTarget }) {
   const [writers, setWriters] = useState(c.values.writers.join(', '));
   const [checks, setChecks] = useState<string[]>(c.values.required_checks);
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
   const [count, setCount] = useState(c.values.workers_count);
   const [model, setModel] = useState(c.values.workers_model);
+  const models = c.models ?? [c.values.workers_model];
+  // #468 (the owner): a full Anthropic model id counts as listed; only the server's own answer says so of the saved one.
+  const listed = (m: string) => models.includes(m) || (m === c.values.workers_model ? c.modelListed !== false : false);
+  const [ci, setCi] = useState<'github' | 'none'>(c.values.ci ?? 'github');
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
   const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
@@ -40,12 +45,12 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(initialProposed ? { ok: true, text: 'proposed: merge the PR to apply it', url: initialProposed } : null);
   useEffect(() => {
     getChecksSeen()
-      .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : 'GitHub ran no checks on its tip'))))
+      .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : `GitHub ran no checks on its tip${c.values.required_checks.length ? '' : ': add a starter CI below'}`))))
       .catch((e: Error) => setSeenNote(e.message))
       .finally(() => setSeenLoaded(true));
   }, []);
   const edited = () => (setChanges(null), setMsg(null));
-  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model });
+  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model, ...(ci !== (c.values.ci ?? 'github') ? { ci } : {}) });
   const send = async (confirm: boolean) => {
     setBusy(true);
     setMsg(null);
@@ -133,8 +138,29 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
         </label>
         <label className="flex items-center gap-2">
           <span>Worker model</span>
-          <input value={model} disabled={!canEdit || busy} onChange={(e) => (setModel(e.target.value), edited())} className={cx(field, 'w-32')} spellCheck={false} data-testid="repo-config-workers-model" />
+          {/* WHY (#468): the engine's own list (the server's), the default marked; a hand-edited value not in it is shown,
+              with a warning, never replaced behind the person's back. */}
+          <select value={model} disabled={!canEdit || busy} onChange={(e) => (setModel(e.target.value), edited())} className={cx(field, 'w-40 font-sans')} data-testid="repo-config-workers-model">
+            {!models.includes(model) &&
+              (listed(model) ? (
+                <option value={model}>{model}</option>
+              ) : (
+                <option value={model} data-testid="repo-config-model-unknown">
+                  {model} (not listed)
+                </option>
+              ))}
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m === c.defaultModel ? `${m} (default)` : m}
+              </option>
+            ))}
+          </select>
         </label>
+        {!listed(model) && (
+          <p className="basis-full text-[12px] text-orange" data-testid="repo-config-model-warning">
+            The config names a worker model the engine doesn't list ({model}): it is kept as it is unless you pick another ({models.join(', ')}).
+          </p>
+        )}
       </div>
       {!canEdit ? (
         <p className="text-[12.5px] text-ink-3" data-testid="repo-config-refused">
@@ -181,6 +207,8 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
           Back to the preview
         </Button>
       )}
+      {/* #469: no checks chosen yet. Last in the form, so a late answer moves nothing above it. */}
+      {!c.values.required_checks.length && c.values.ci !== 'none' && <StarterCi canEdit={canEdit} initialView={initialStarter} initialOpen={initialStarterOpen} noCiChosen={ci === 'none'} onCheckRan={(name) => !checks.includes(name) && (setChecks((now) => (now.includes(name) ? now : [...now, name])), edited())} onChooseNoCi={() => (setCi('none'), setChecks([]), edited())} />}
     </div>
   );
 }

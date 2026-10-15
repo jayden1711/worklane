@@ -11,6 +11,8 @@ import { configFrom, loadConfig, type Config } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
 import { checkedPush } from './push-check.js';
+import { listedModel, MODEL_TIERS } from './model-routing.js';
+import { ROUTING } from './routing.js';
 import { withToolPath } from './tool-path.js';
 
 const HANDLE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -21,6 +23,8 @@ export interface RepoConfigValues {
   daily_budget_usd: number;
   workers_count: number;
   workers_model: string;
+  /** Which CI judges a PR (#469): github (required_checks), or none (this machine's test runs, src/ci-none.ts). */
+  ci: 'github' | 'none';
 }
 
 /** Where each value lives: its file and its YAML path. */
@@ -30,11 +34,19 @@ const WHERE: Record<keyof RepoConfigValues, { file: string; path: string[] }> = 
   daily_budget_usd: { file: 'agents.yaml', path: ['daily_budget_usd'] },
   workers_count: { file: 'agents.yaml', path: ['roles', 'workers', 'count'] },
   workers_model: { file: 'agents.yaml', path: ['roles', 'workers', 'model'] },
+  ci: { file: 'config.yaml', path: ['ci'] },
 };
 const KEYS = Object.keys(WHERE) as (keyof RepoConfigValues)[];
 
+/**
+ * WHY (#468): the models the form offers the workers, from the engine's own list (the tiers routing and the model cap
+ * know), and the one the engine builds with by default; the page reads both from here, never a copy of its own.
+ */
+export const WORKER_MODELS: readonly string[] = MODEL_TIERS;
+export const DEFAULT_WORKER_MODEL: string = ROUTING.build.default;
+
 export function repoConfigValues(cfg: Config): RepoConfigValues {
-  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? 'sonnet' };
+  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? DEFAULT_WORKER_MODEL, ci: cfg.project.ci ?? 'github' };
 }
 
 export interface RepoConfigForm {
@@ -43,9 +55,14 @@ export interface RepoConfigForm {
   /** The default branch the change is proposed against. */
   branch: string;
   repo: string;
+  /** The workers' models the form offers, and the engine's default among them. */
+  models: readonly string[];
+  defaultModel: string;
+  /** Whether the config's worker model is one the engine lists (an alias, or a full Anthropic model id). */
+  modelListed: boolean;
 }
 
-export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo });
+export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo, models: WORKER_MODELS, defaultModel: DEFAULT_WORKER_MODEL, modelListed: listedModel(repoConfigValues(cfg).workers_model) });
 
 export class ConfigChangeError extends Error {}
 
@@ -78,6 +95,10 @@ function cleaned(v: Partial<Record<keyof RepoConfigValues, unknown>>): Partial<R
   if (v.daily_budget_usd !== undefined) out.daily_budget_usd = Number(v.daily_budget_usd);
   if (v.workers_count !== undefined) out.workers_count = Number(v.workers_count);
   if (v.workers_model !== undefined) out.workers_model = String(v.workers_model).trim();
+  if (v.ci !== undefined) {
+    if (v.ci !== 'github' && v.ci !== 'none') throw new ConfigChangeError('ci: github or none');
+    out.ci = v.ci;
+  }
   return out;
 }
 
@@ -101,6 +122,8 @@ export function applyConfigValues(show: (file: string) => string | null, now: Re
   const changes: ConfigChange[] = [];
   for (const k of KEYS) {
     if (v[k] === undefined || JSON.stringify(v[k]) === JSON.stringify(now[k])) continue;
+    // INVARIANT (#468): the form proposes only a model the engine lists; a hand-edited one is kept as it is unless changed.
+    if (k === 'workers_model' && !listedModel(v.workers_model!)) throw new ConfigChangeError(`worker model: not one the engine supports: ${v.workers_model!.slice(0, 80)} (one of ${WORKER_MODELS.join(', ')}, or a full Anthropic model id)`);
     const { file, path } = WHERE[k];
     if (!docs.has(file)) {
       const text = show(file);

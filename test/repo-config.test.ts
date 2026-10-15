@@ -89,7 +89,7 @@ test("the Repo config form: values from the default branch's config; Review show
   const before = readFileSync(join(f.dir, BRAND.configDir, 'config.yaml'), 'utf8');
   try {
     const v = await s.get();
-    assert.deepEqual(v.repoConfig, { values: { writers: ['example-owner', 'example-collaborator'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' });
+    assert.deepEqual(v.repoConfig, { values: { writers: ['example-owner', 'example-collaborator'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet', ci: 'github' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop', models: ['haiku', 'sonnet', 'opus'], defaultModel: 'sonnet', modelListed: true });
     assert.deepEqual((await s.get('/api/first-run/checks-seen')).checks, ['ci/legacy', 'lint', 'test']);
     const values = { writers: ['example-owner', 'example-collaborator', 'ada-l'], required_checks: ['test', 'lint'], daily_budget_usd: 25 };
     const preview = await s.post('/api/first-run/repo-config', 'example-owner', { values });
@@ -136,6 +136,8 @@ test('the Repo config form refuses, pushing nothing: a value the config would re
       [{ daily_budget_usd: -5 }, /daily_budget_usd/],
       [{ land_mode: 'direct' }, /not editable here: land_mode/],
       [{ daily_budget_usd: 40 }, /nothing to change/],
+      // #468: only a model the engine lists, named with the list
+      [{ workers_model: 'gpt-something' }, /worker model: not one the engine supports: gpt-something \(one of haiku, sonnet, opus, or a full Anthropic model id\)/],
     ];
     for (const [values, why] of cases) {
       for (const confirm of [false, true]) {
@@ -146,6 +148,38 @@ test('the Repo config form refuses, pushing nothing: a value the config would re
     }
     assert.deepEqual(branches(f.remote), ['main']);
     assert.equal(gh.calls.filter((c) => c[0] === 'pr').length, 0);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('#468: the worker model is one of the engine\'s own list (MODEL_TIERS), its default the routing default; a hand-edited one is kept unless changed', async () => {
+  const { MODEL_TIERS } = await import('../src/model-routing.js');
+  const { ROUTING } = await import('../src/routing.js');
+  const { WORKER_MODELS, DEFAULT_WORKER_MODEL, repoConfigForm } = await import('../src/config-change.js');
+  assert.deepEqual(WORKER_MODELS, MODEL_TIERS);
+  assert.equal(DEFAULT_WORKER_MODEL, ROUTING.build.default);
+  const f = fixture();
+  // A hand-edited model the list doesn't have, on the default branch: shown as it is, and a change to anything else keeps it.
+  const agents = join(f.dir, BRAND.configDir, 'agents.yaml');
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(agents, readFileSync(agents, 'utf8').replace(/model: sonnet/, 'model: claude-sonnet-4-5'));
+  f.git('commit', '-qam', 'hand-edited model');
+  f.git('push', '-q', 'origin', 'HEAD:main');
+  f.git('fetch', '-q', 'origin');
+  assert.equal(repoConfigForm(loadConfig(f.dir)).values.workers_model, 'claude-sonnet-4-5');
+  const gh = ghStandIn();
+  const s = await dashboard(f.dir, gh.gh);
+  try {
+    const kept = await s.post('/api/first-run/repo-config', 'example-owner', { values: { workers_model: 'claude-sonnet-4-5', daily_budget_usd: 30 } });
+    assert.equal(kept.status, 200, JSON.stringify(kept.body));
+    assert.deepEqual(kept.body.changes!.map((c) => c.key), ['daily_budget_usd'], 'the unknown model, unchanged, is not refused nor touched');
+    // #468 (the owner): a full Anthropic model id counts as listed.
+    const full = await s.post('/api/first-run/repo-config', 'example-owner', { values: { workers_model: 'claude-opus-4-1' } });
+    assert.equal(full.status, 200, JSON.stringify(full.body));
+    const picked = await s.post('/api/first-run/repo-config', 'example-owner', { values: { workers_model: 'opus' } });
+    assert.equal(picked.status, 200, JSON.stringify(picked.body));
+    assert.deepEqual(picked.body.changes, [{ file: `${BRAND.configDir}/agents.yaml`, key: 'roles.workers.model', from: 'claude-sonnet-4-5', to: 'opus' }]);
   } finally {
     await s.d.close();
   }
@@ -165,6 +199,55 @@ test('Fetch the default branch: origin/main not fetched here is fetched (no loca
     assert.equal(f.git('rev-parse', 'origin/main').trim(), head);
     assert.equal(f.git('rev-parse', 'HEAD').trim(), head);
     assert.equal((await s.get()).setup.groups.flatMap((g) => g.steps).find((x) => x.id === 'default-branch')!.done, true);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#468 a model the engine doesn't list is a config warning, never a refusal: the config loads, doctor warns, the first-run step stays done and says so; full Anthropic ids are listed", async () => {
+  const { listedModel, modelWarnings } = await import('../src/model-routing.js');
+  const { doctor } = await import('../src/doctor.js');
+  const { writeFileSync } = await import('node:fs');
+  for (const m of ['haiku', 'sonnet', 'opus', 'claude-sonnet-4-5', 'claude-opus-4-1-20250805', 'claude-3-5-haiku-20241022']) assert.ok(listedModel(m), m);
+  for (const m of ['gpt-5', 'claude-instant', 'sonnet-ish', 'claude-', 'local']) assert.equal(listedModel(m), false, m);
+  const f = fixture();
+  const agents = join(f.dir, BRAND.configDir, 'agents.yaml');
+  writeFileSync(agents, readFileSync(agents, 'utf8').replace(/model: sonnet, hard_issues_model: opus/, 'model: gpt-5, hard_issues_model: claude-opus-4-1'));
+  const cfg = loadConfig(f.dir);
+  assert.equal(cfg.agents.roles.workers!.model, 'gpt-5', 'it loads as written');
+  assert.deepEqual(modelWarnings(cfg.agents), [`agents.yaml roles.workers.model: gpt-5 isn't a model the engine lists (haiku, sonnet, opus, or a full Anthropic model id such as claude-sonnet-4-5); it is used as written`]);
+  const d = doctor(f.dir).find((c) => c.name === 'config models')!;
+  assert.equal(d.level, 'warn');
+  assert.match(d.detail, /roles\.workers\.model: gpt-5/);
+  assert.equal(doctor(f.dir).find((c) => c.name === 'config')!.level, 'ok', 'never a refusal');
+  const s = await dashboard(f.dir, ghStandIn().gh);
+  try {
+    const step = (await s.get()).setup.groups.flatMap((g) => g.steps).find((x) => x.id === 'agents-config')!;
+    assert.equal(step.done, true);
+    assert.match(step.detail, /; warning: agents\.yaml roles\.workers\.model: gpt-5 isn't a model the engine lists/);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('the Repo config form, No CI (#469): ci: none is refused where tests.yaml has no test_run (the fix: the starter CI); with test_run it is proposed as config.yaml ci: none, nothing else', async () => {
+  const f = fixture();
+  const gh = ghStandIn();
+  const s = await dashboard(f.dir, gh.gh);
+  try {
+    const refused = await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'none' } });
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error!, /refused: .*ci: none judges PRs by this machine's test runs .*add the starter CI/);
+    assert.equal((await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'maybe' } })).status, 400);
+    // The default branch gets a test_run: now it is offered, and proposed as one key.
+    const tests = join(f.dir, BRAND.configDir, 'tests.yaml');
+    execFileSync('sh', ['-c', `printf '\\ntest_run:\\n  tiers:\\n    - { name: unit, command: "npm test", kind: fast }\\n' >> "$1"`, 'sh', tests]);
+    f.git('-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'test runs');
+    f.git('push', '-q', 'origin', 'main');
+    f.git('fetch', '-q', 'origin');
+    const preview = await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'none' } });
+    assert.equal(preview.status, 200, JSON.stringify(preview.body));
+    assert.deepEqual(preview.body.changes, [{ file: `${BRAND.configDir}/config.yaml`, key: 'ci', to: 'none' }]);
   } finally {
     await s.d.close();
   }

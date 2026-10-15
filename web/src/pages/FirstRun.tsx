@@ -13,8 +13,10 @@ import { Header } from '../components/Header';
 import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
+import { StarterCi } from '../components/StarterCi';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 import { ConfigPrList } from '../components/ConfigPr';
+import { FirstTaskForm } from '../components/FirstTask';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -47,7 +49,7 @@ function AutoConfigView({ a: given, settled = false }: { a: FirstRunAutoConfig; 
       )}
       {!!a.questions.length && (
         <Card className="space-y-3 p-4" data-testid="first-run-questions">
-          <p className="text-[12.5px] text-ink-2">Nothing is guessed: answer these in the terminal (init asks them), or give each answer to init.</p>
+          <p className="text-[12.5px] text-ink-2">Nothing is guessed: init asks these in the terminal.</p>
           <ol className="space-y-3">
             {a.questions.map((q) => (
               <li key={q.id} className="space-y-1.5" data-testid="first-run-question" data-question={q.id}>
@@ -63,7 +65,7 @@ function AutoConfigView({ a: given, settled = false }: { a: FirstRunAutoConfig; 
               </li>
             ))}
           </ol>
-          <code className="block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline">{a.answer}</code>
+          <WithoutThisPage command={a.answer} />
         </Card>
       )}
       {!!a.verified.length && (
@@ -306,15 +308,81 @@ function FixPanel({ s }: { s: SetupStepView }) {
   );
 }
 
-function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; onSkip?: (skip: boolean) => void }) {
+/**
+ * WHY (#468): the one way to do a step without the page, folded away under "Without this page": the whole command,
+ * on one line that scrolls rather than wraps or cuts, selected whole on a click, with Copy. Its text is "Without this
+ * page: <command>". Open from the start on a step opened by its link (Settings' "Run again", ?step=): the person came
+ * for that step, and its line is part of what they came to see.
+ */
+export function WithoutThisPage({ command, className, open = false }: { command: string; className?: string; open?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <details className={cx('mt-2.5 border-t border-line pt-2 text-[12px] text-ink-3', className)} data-testid="first-run-without" {...(open ? { open: true } : {})}>
+      <summary className="cursor-pointer select-none" data-testid="first-run-without-summary">
+        Without this page
+      </summary>
+      <div className="mt-1.5 flex min-w-0 items-center gap-2">
+        <p className="min-w-0 flex-1" data-testid="first-run-automation">
+          {/* The line reads "Without this page: <command>" as text (Settings and the walk read it so); the words are the
+              summary's, shown once: here they take no room (an inline span, so the text stays one line). */}
+          <span className="text-[0px]" aria-hidden>
+            {'Without this page: '}
+          </span>
+          <code className="inline-block max-w-full select-all overflow-x-auto whitespace-pre rounded bg-surface px-2 py-1 align-middle font-mono text-[11.5px] text-ink-2 shadow-hairline">{command}</code>
+        </p>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            void navigator.clipboard?.writeText(command).then(
+              () => setCopied(true),
+              () => setCopied(false),
+            );
+          }}
+          data-testid="first-run-without-copy"
+        >
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+      </div>
+    </details>
+  );
+}
+
+/**
+ * The one step to do next (#468): the first required step not done (nor skipped), in screen order; null when every
+ * required step is done. Its button is the page's one primary button.
+ */
+export const nextStep = (f: Pick<FirstRun, 'setup'>): SetupStepView | null => f.setup?.groups.flatMap((g) => g.steps).find((s) => !s.optional && !s.done && !s.skipped) ?? null;
+
+/** Where the page keeps which steps are open, in this tab only (#468): a reload in the same tab keeps them. */
+export const OPEN_STEPS_KEY = 'first-run-open';
+function readOpenSteps(): string[] {
+  try {
+    const v = JSON.parse(window.sessionStorage.getItem(OPEN_STEPS_KEY) ?? '[]') as unknown;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return []; // no storage (a private window, the server's render): every step starts folded
+  }
+}
+function keepOpenSteps(ids: string[]) {
+  try {
+    window.sessionStorage.setItem(OPEN_STEPS_KEY, JSON.stringify(ids));
+  } catch {
+    // the page works without it: only a reload forgets
+  }
+}
+
+function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; primary?: boolean; onSkip?: (skip: boolean) => void }) {
   const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord';
   const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
-  // WHY: a form's values can be reviewed and changed whether or not the step is done (the policy starts valid), and a
-  // sign-in or the Discord step is rerunnable (another account, an expired login, another channel); any step opened from Settings' Setup list can be run
-  // again; a skipped step stays closed until the skip is undone.
-  const offered = rerun || (!s.skipped && (!s.done || (s.fix.kind === 'form' && s.fix.form !== 'setup-origin' && s.fix.form !== 'setup-config') || s.fix.kind === 'signin' || s.fix.kind === 'discord'));
+  // WHY: a done step with a screen on this page can be opened again (#468: any step expands and collapses): a form's
+  // values changed, a sign-in or Discord redone, an action run again. Setup mode's origin and draft are the exception
+  // (once done, there is nothing left for them to change). A skipped step stays closed until the skip is undone.
+  const offered = rerun || (!s.skipped && (!s.done || (panel && !(s.fix.kind === 'form' && (s.fix.form === 'setup-origin' || s.fix.form === 'setup-config')))));
+  // WHY (#468): a done step folds to one line (what it found), its screen behind its button.
+  const folded = s.done && !open;
   return (
-    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'}>
+    <li className="px-4 py-3" data-testid="first-run-step" data-step={s.id} data-status={s.done ? 'done' : s.skipped ? 'skipped' : 'todo'} data-expanded={open && offered && s.fix.kind !== 'screen' && s.fix.kind !== 'start'}>
       <div className="flex gap-3">
         <span className={cx('mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold', s.done ? 'bg-green-tint text-green' : s.optional ? 'bg-inset text-ink-3 shadow-hairline' : 'bg-red-tint text-red')} aria-hidden>
           {s.done ? '✓' : ''}
@@ -325,7 +393,9 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
             {s.optional && <span className="text-[11.5px] text-ink-3">optional</span>}
             <Badge tone={s.done ? 'ok' : s.optional || s.skipped ? 'neutral' : 'warn'}>{s.done ? 'done' : s.skipped ? 'skipped' : 'not done'}</Badge>
           </div>
-          <p className="break-words text-[12.5px] text-ink-2">{s.detail}</p>
+          <p className={cx('text-[12.5px] text-ink-2', folded ? 'truncate' : 'break-words')} title={folded ? s.detail : undefined} data-testid="first-run-step-detail">
+            {s.detail}
+          </p>
         </div>
         <div className="flex shrink-0 flex-wrap items-start justify-end gap-1.5 self-start">
           {onSkip && !s.done && (
@@ -334,7 +404,7 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
             </Button>
           )}
           {offered && (
-            <Button size="sm" variant={open || (s.done && (s.fix.kind === 'signin' || s.fix.kind === 'discord')) ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind}>
+            <Button size="sm" variant={primary && !open ? 'default' : open || s.done ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind} {...(primary ? { 'data-primary': 'true' } : {})}>
               {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' ? 'Change' : 'Run again') : label}
             </Button>
           )}
@@ -343,11 +413,7 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
       {open && offered && s.fix.kind !== 'screen' && s.fix.kind !== 'start' && (
         <div className="mt-2.5 rounded-lg bg-inset p-3 sm:ml-8" data-testid="first-run-fix-panel">
           {panel ? action : <FixPanel s={s} />}
-          {s.automation && (
-            <p className="mt-2.5 break-words border-t border-line pt-2 text-[12px] text-ink-3" data-testid="first-run-automation">
-              Without this page: <code className="font-mono text-[11.5px] text-ink-2">{s.automation}</code>
-            </p>
-          )}
+          {s.automation && <WithoutThisPage command={s.automation} open={rerun} />}
         </div>
       )}
     </li>
@@ -355,7 +421,7 @@ function StepRow({ s, open, onFix, action, rerun = false, onSkip }: { s: SetupSt
 }
 
 /** Start: what it changes, shown first; then a confirmation; then what happened. */
-function StartCard({ start, canStart, blocked, confirming, setConfirming, onStarted }: { start: FirstRunStart; canStart: boolean; blocked: number; confirming: boolean; setConfirming: (b: boolean) => void; onStarted: () => void }) {
+function StartCard({ start, canStart, blocked, confirming, setConfirming, onStarted, primary = false }: { start: FirstRunStart; canStart: boolean; blocked: number; confirming: boolean; setConfirming: (b: boolean) => void; onStarted: () => void; primary?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const go = async () => {
@@ -396,7 +462,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
               Only the instance's owners can start it.
             </p>
           ) : !confirming ? (
-            <Button size="sm" onClick={() => setConfirming(true)} data-testid="first-run-start-button">
+            <Button size="sm" variant={primary ? 'default' : 'outline'} onClick={() => setConfirming(true)} data-testid="first-run-start-button" {...(primary ? { 'data-primary': 'true' } : {})}>
               Start…
             </Button>
           ) : (
@@ -439,7 +505,10 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
       .then(() => onRecheck?.())
       .catch((e: Error) => setSkipError(e.message));
   };
-  const [open, setOpen] = useState<string | null>(initialOpen);
+  // WHY (#468): any step expands and collapses, several at once, kept in this tab (a reload keeps them); a link's
+  // ?step= or ?open= opens its step too.
+  const [opened, setOpened] = useState<string[]>(() => [...new Set([...readOpenSteps(), ...(initialOpen ? [initialOpen] : [])])]);
+  useEffect(() => keepOpenSteps(opened), [opened]);
   const recheck = useCallback(() => onRecheck?.(), [onRecheck]);
   const [confirming, setConfirming] = useState(initialConfirming);
   const setup = f.setup;
@@ -452,8 +521,11 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
       document.getElementById('first-run-start')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       return;
     }
-    setOpen(open === s.id ? null : s.id);
+    setOpened((o) => (o.includes(s.id) ? o.filter((x) => x !== s.id) : [...o, s.id]));
   };
+  const next = nextStep(f);
+  // WHY (#468): Start's own button is the primary only where it has one (a checkout's owner); else the step's row.
+  const startPressable = f.start.kind === 'local' && !!f.canStart;
   return (
     <div className="space-y-5">
       {f.setupMode && (
@@ -511,9 +583,10 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                 <StepRow
                   key={s.id}
                   s={s}
-                  open={open === s.id}
+                  open={opened.includes(s.id)}
                   onFix={() => fix(s)}
                   rerun={rerun === s.id}
+                  primary={next?.id === s.id && !(s.fix.kind === 'start' && startPressable)}
                   {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
                   action={
                     s.fix.kind === 'action' ? (
@@ -536,8 +609,16 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'first-task' ? (
+                      <FirstTaskForm canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
                       <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
+                    ) : s.id === 'required-checks' && !s.done && !f.repoConfig && !f.setupMode ? (
+                      // #469: a server's instance has no Repo config form; the starter CI is offered here all the same.
+                      <div className="space-y-2">
+                        <FixPanel s={s} />
+                        <StarterCi canEdit={!!f.canAct} inForm={false} />
+                      </div>
                     ) : (
                       <FixPanel s={s} />
                     )
@@ -550,20 +631,26 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
       ))}
       {/* #468: every config PR, followed to its end the same way (merged here or anywhere: this checkout brought to it). */}
       {f.configPrs && <ConfigPrList prs={f.configPrs} canAct={!!f.canAct} onDone={() => onRecheck?.()} />}
-      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
+      {/* #468: the first-task form is a checkout's only for now (the owner, 2026-10-15); on a server, why, in one line. */}
+      {f.mode === 'server' && (
+        <p className="text-[12.5px] text-ink-2" data-testid="first-run-first-task-server">
+          Your first task: open an issue on GitHub with a ```done_when block and the ready label. There is no form for it on a server: an issue filed from this page would be the App's, which the coordinator doesn't count as a writer's.
+        </p>
+      )}
+      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
       {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} settled={!!f.setup?.groups.flatMap((g) => g.steps).find((s) => s.id === 'config-on-main')?.done || !!f.configPrs?.some((p) => p.number === f.autoConfig?.pr?.number && p.state === 'merged')} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
           <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
-          <p className="text-[12.5px] text-ink-2">The steps above are checked live either way. To walk them in a terminal (it does what isn't done, asking before it installs anything):</p>
-          <code className={code}>{f.command}</code>
+          <p className="text-[12.5px] text-ink-2">The steps above are checked live either way; init walks the same steps in a terminal, asking before it installs anything.</p>
+          <WithoutThisPage command={f.command} />
         </Card>
       )}
       {stopped && (
         <Card className="space-y-2 p-4" data-testid="first-run-resume">
           <div className="text-[13px] font-medium text-ink">init last stopped at {stopped.title}</div>
-          <p className="text-[12.5px] text-ink-2">{stopped.detail}. Once that's fixed, run it again: it picks up there.</p>
-          <code className={code}>{f.command}</code>
+          <p className="text-[12.5px] text-ink-2">Once that step is done here, init picks up after it.</p>
+          <WithoutThisPage command={f.command} />
         </Card>
       )}
       {f.diskFloor && <DiskFloorCheck d={f.diskFloor} />}

@@ -323,6 +323,15 @@ test('init: the questions in the checklist and on the First-run page with their 
 
   // The owner merges it on GitHub (here: the branch fast-forwarded into the bare repo's main).
   execFileSync('git', ['push', '-q', p.bare, `refs/heads/${SETUP_BRANCH}:refs/heads/main`], { cwd: p.bare });
+  // The config is in, but names no required check: init doesn't finish until a CI is chosen (#469), saying how.
+  assert.equal(await initCommand(args(), io), 5);
+  const s3a = readInitState(localInitFile(p.root))!;
+  assert.equal(s3a.steps['repo-config']!.status, 'failed');
+  assert.match(s3a.steps['repo-config']!.detail, /required_checks is empty and no CI is chosen: no PR is ever marked ready.*Fix: .*starter CI/);
+  // Chosen (its check named, as the first-run page's config PR does, pulled into the checkout): init finishes.
+  const cfgFile = join(p.root, BRAND.configDir, 'config.yaml');
+  const text = readFileSync(cfgFile, 'utf8');
+  writeFileSync(cfgFile, /^required_checks:/m.test(text) ? text.replace(/^required_checks:.*$/m, 'required_checks: [test]') : `${text}\nrequired_checks: [test]\n`);
   const code = await initCommand(args(), io);
   const s3 = readInitState(localInitFile(p.root))!;
   assert.equal(s3.steps['repo-config']!.status, 'done', s3.steps['repo-config']!.detail + said.join('\n'));

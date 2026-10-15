@@ -94,6 +94,9 @@ export class FileBacklog implements Backlog {
   async list(label: string) {
     return this.load().issues.filter((i) => !i.pr && i.state === 'open' && i.labels.includes(label)).map(strip);
   }
+  async openIssues() {
+    return this.load().issues.filter((i) => !i.pr && i.state === 'open').map(strip);
+  }
   /** No update times here: every closed issue (a superset, as the contract allows). */
   async closedSince(_since: string) {
     return this.load().issues.filter((i) => !i.pr && i.state === 'closed').map((i) => i.number);
@@ -150,7 +153,7 @@ export class FileBacklog implements Backlog {
     if (!i) throw new Error(`pull request #${n} not found`);
     const state = i.pr!.mergeableState ?? 'clean';
     const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, body: i.body, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
   }
   /** Test hook: re-running a check run's failed Actions jobs (a file backlog has no Actions: absent, nothing re-runs). */
   rerunFailedJobs?: (checkRunIds: number[]) => Promise<Map<number, RerunJobs>>;

@@ -7,6 +7,10 @@ import type { ConfigPr, HeldDraftView, GoalGraph, DiscordBot, DiscordIntakePlan,
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
+import { AttachButton, AttachmentList, DropHint, SentAttachments, type Pending } from './components/ChatAttachments';
+import type { ChatAttachment } from './api';
+import { ConversationSidebarView, ConversationThreadView, ProjectEditorView, type ChatView } from './components/Conversations';
+import type { ChatProject, ConversationData, ConversationItem, ProjectItem } from './api';
 import { ComposerMic, MicInterim } from './voice/Mic';
 import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
 import { TalkStatus } from './voice/TalkBack';
@@ -14,7 +18,7 @@ import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
-import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
 import { Header } from './components/Header';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
@@ -40,7 +44,11 @@ import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
 import { ConfigPrList, ConfigPrRow } from './components/ConfigPr';
 import { DraftPreview } from './components/SetupConfig';
+import { FirstTaskForm, IgnoredIssues } from './components/FirstTask';
 import { RepoConfigForm } from './components/RepoConfigForm';
+import type { StarterCi as StarterCiView } from './api';
+import { StarterCi } from './components/StarterCi';
+import { CiNote } from './components/CiNote';
 import { ClaudeSigninView } from './components/ClaudeSignin';
 import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
@@ -64,6 +72,8 @@ import { TailscaleSetupView } from './components/TailscaleSetup';
 export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
 export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
+import { DecisionDetailView, DETAIL_SECTIONS } from './pages/DecisionDetail';
+import type { DecisionDetail, DecisionDiff, DecisionPrBody } from './api';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
 
@@ -116,6 +126,16 @@ export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBann
 export const renderDeployGate = (gate: DeployGate) => renderToStaticMarkup(<DeployGateStatus gate={gate} />);
 export const renderProtection = (protection: Protection, brand: string) => renderToStaticMarkup(<ProtectionStatus protection={protection} brand={brand} />);
 export const renderMainWatchAlert = (protection: Protection) => renderToStaticMarkup(<MainWatchAlert protection={protection} />);
+export const renderAttachmentList = (items: Pending[]) => renderToStaticMarkup(<AttachmentList items={items} onRemove={() => {}} onAnyway={() => {}} />);
+export const renderAttachButton = (role: string | undefined, disabled = false) => renderToStaticMarkup(<AttachButton role={role} disabled={disabled} accept={['png', 'pdf']} onFiles={() => {}} />);
+export const renderDropHint = (active: boolean) => renderToStaticMarkup(<DropHint active={active} />);
+export const renderSentAttachments = (items: ChatAttachment[]) => renderToStaticMarkup(<SentAttachments items={items} instance={null} />);
+export { filesOf, fmtSize, mayAttach, precheck, safeBlob } from './components/ChatAttachments';
+export const renderConversationSidebar = (conversations: ConversationItem[], projects: ProjectItem[], view: ChatView = { kind: 'quick' }) => renderToStaticMarkup(<ConversationSidebarView conversations={conversations} projects={projects} view={view} onSelect={() => {}} onNew={() => {}} onRename={() => {}} onDelete={() => {}} />);
+export const renderConversationThread = (data: ConversationData) => renderToStaticMarkup(<ConversationThreadView data={data} cli="wl" />);
+export const renderProjectEditor = (project: ChatProject | null, owner: boolean, me: string) => renderToStaticMarkup(<ProjectEditorView project={project} owner={owner} me={me} attach={<span data-slot="attach" />} onSave={() => {}} onDelete={() => {}} onNewConversation={() => {}} />);
+export { mayConverse } from './components/Conversations';
+export { attachmentNameHeader } from './api';
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
@@ -167,7 +187,7 @@ export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage 
 export const renderKeyPage = (help: { file: string; copy: string | null } | null = null) => renderToStaticMarkup(<KeyPage help={help} />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
 export { needsKey, tryKey } from './api';
-export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
+export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>, o: { hubPage?: boolean } = {}) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} hubPage={!!o.hubPage} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], now?: number) => renderToStaticMarkup(<BoardView boards={boards} {...(now !== undefined ? { now } : {})} />);
@@ -184,6 +204,10 @@ export { addProjectInvalid } from './api';
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
 export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+/** A decision's detail page from its data; `prBody` and `diff` as already read (undefined: not asked yet). */
+export const renderDecisionDetail = (d: DecisionDetail, prBody?: DecisionPrBody | { error: string } | null, diff?: DecisionDiff | { error: string } | null) =>
+  renderToStaticMarkup(<DecisionDetailView d={d} {...(prBody !== undefined ? { prBody } : {})} {...(diff !== undefined ? { diff } : {})} />);
+export { DETAIL_SECTIONS };
 export const renderRunWhy = (detail?: string) => renderToStaticMarkup(<RunWhy detail={detail} />);
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
@@ -202,11 +226,16 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     </NavMenu.Provider>,
   );
 };
+export const renderSetupModeHidden = (path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
+export { nextStep } from './pages/FirstRun';
+/** #468: Your first task's form (its picks loaded, a preview shown), and the Issues page's "Not picked up". */
+export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?: { title: string; body: string } } = {}) => renderToStaticMarkup(<FirstTaskForm canEdit={o.canEdit ?? true} initial={info as never} initialPreview={o.preview ?? null} onDone={() => {}} />);
+export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIssues initial={data as never} />);
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 
-export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean } = {}) =>
-  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} />);
+export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
+  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
 /** #468: the config PRs as the page follows them; one row with its merge plan shown. */
 export const renderConfigPrs = (prs: ConfigPr[], o: { canAct?: boolean; plan?: { command: string; then: string } } = {}) =>
   renderToStaticMarkup(o.plan ? <ul><ConfigPrRow pr={prs[0]!} canAct={o.canAct ?? true} initialPlan={o.plan} onDone={() => {}} /></ul> : <ConfigPrList prs={prs} canAct={o.canAct ?? true} onDone={() => {}} />);
@@ -216,3 +245,9 @@ export const renderDraftPreview = (held: HeldDraftView, o: { canEdit?: boolean; 
 // What a live panel keeps when a look fails (web/src/refresh.tsx), for the tests to call.
 export { afterLoad, NOTHING_YET } from './refresh';
 export { ApiError, isRefusal } from './api';
+
+/** The starter CI outside the Repo config form (a server's instance, #469). */
+export const renderStarterCi = (v: StarterCiView, inForm = false) => renderToStaticMarkup(<StarterCi canEdit initialView={v} inForm={inForm} />);
+
+/** The No CI note on the PR and Land pages (#469). */
+export const renderCiNote = (ci: Parameters<typeof CiNote>[0]['ci']) => renderToStaticMarkup(<CiNote ci={ci} />);

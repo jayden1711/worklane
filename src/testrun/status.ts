@@ -2,6 +2,7 @@
 // takes, and the two things that stop them working (a sandbox that failed its check, an App that can't post checks).
 // For health and the dashboard; viewers get viewerTestRuns, tier pass or fail only.
 import type { EventPayload, StoredEvent } from '../events/types.js';
+import { gpuCommands, type GpuOptIn } from './gpu.js';
 
 /**
  * Whether this instance's test runs came up, as its coordinator last said at a start (./setup.ts): the newest of its
@@ -35,8 +36,10 @@ export interface TestRunRow {
   finishedAt: string | null;
   slot: string | null;
   lockWaitMs: number | null;
-  /** Each tier's outcome so far (or at the end). */
-  tiers: { tier: string; ok: boolean; durationMs: number | null; summary?: string; logRef?: string }[];
+  /** Recorded as a GPU run when it started (a tier asked, root's file listed the instance). */
+  gpu: 'planned' | null;
+  /** Each tier's outcome so far (or at the end); `gpu` only for a tier that asked for the GPU. */
+  tiers: { tier: string; ok: boolean; durationMs: number | null; summary?: string; logRef?: string; gpu?: { granted: boolean; devices: string[]; detail: string } }[];
 }
 
 export interface TierStats {
@@ -76,18 +79,18 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
     switch (e.type) {
       case 'testrun.queued': {
         const p = e.payload as EventPayload<'testrun.queued'>;
-        rows.set(p.id, { id: p.id, sha: p.sha, kind: p.kind, prs: p.prs, shard: p.shard, state: 'queued', queuedAt: e.ts, startedAt: null, finishedAt: null, slot: null, lockWaitMs: null, tiers: [] });
+        rows.set(p.id, { id: p.id, sha: p.sha, kind: p.kind, prs: p.prs, shard: p.shard, state: 'queued', queuedAt: e.ts, startedAt: null, finishedAt: null, slot: null, lockWaitMs: null, gpu: null, tiers: [] });
         break;
       }
       case 'testrun.started': {
         const p = e.payload as EventPayload<'testrun.started'>;
         const r = rows.get(p.id);
-        if (r) Object.assign(r, { state: 'running', startedAt: e.ts, slot: p.slot, lockWaitMs: p.lock_wait_ms });
+        if (r) Object.assign(r, { state: 'running', startedAt: e.ts, slot: p.slot, lockWaitMs: p.lock_wait_ms, gpu: p.gpu ?? null });
         break;
       }
       case 'testrun.tier': {
         const p = e.payload as EventPayload<'testrun.tier'>;
-        rows.get(p.id)?.tiers.push({ tier: p.tier, ok: p.ok, durationMs: p.duration_ms, summary: p.summary, logRef: p.log_ref });
+        rows.get(p.id)?.tiers.push({ tier: p.tier, ok: p.ok, durationMs: p.duration_ms, summary: p.summary, logRef: p.log_ref, ...(p.gpu ? { gpu: p.gpu } : {}) });
         const t = tierRuns.get(p.tier) ?? { ms: [], mem: [], cpu: [] };
         t.ms.push(p.duration_ms);
         if (p.mem_peak_mb !== null) t.mem.push(p.mem_peak_mb);
@@ -164,6 +167,16 @@ export interface TestRunsViewInput {
   cap: number;
   slots: { slot: string; owner: string; acquiredAt: string }[];
   lock: { path: string; holders: { pid: number; mode: 'shared' | 'exclusive' }[] | null };
+  /** Root's GPU opt-in for this instance (./gpu.ts gpuOptIn), read-only here; absent: not shown. */
+  gpu?: GpuOptIn;
+  /** The instance, for the root commands shown with the opt-in. */
+  instance?: string;
+}
+
+/** Root's GPU opt-in as the Machine page shows it: read-only, with the root commands that change it. */
+export function gpuView(o: GpuOptIn, instance: string) {
+  const c = gpuCommands(instance);
+  return o.state === 'on' ? { state: 'on' as const, devices: o.devices, maxMinutes: o.maxMinutes, change: c.disable, status: c.status } : { state: o.state, why: o.why, change: c.enable, status: c.status };
 }
 
 /**
@@ -187,5 +200,6 @@ export function testRunsView(i: TestRunsViewInput) {
     sandbox: s.sandbox,
     checksPermission: s.checksPermission,
     problems: s.problems,
+    ...(i.gpu ? { gpu: gpuView(i.gpu, i.instance ?? '<name>') } : {}),
   };
 }

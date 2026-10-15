@@ -32,6 +32,8 @@ export interface Backlog {
   comments(n: number): Promise<{ author: string; body: string; at?: string }[]>;
   close(n: number): Promise<void>;
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
+  /** WHY (#468): the open issues (not PRs), at most 100, in ONE read: the Issues page's "not picked up" list. Absent: this tracker can't. */
+  openIssues?(): Promise<Issue[]>;
   /**
    * Open a pull request from a pushed branch, or return the open one for that branch. `draft` asks for a draft
    * (a repo that doesn't support drafts gets an ordinary PR); `headSha` is the commit just pushed.
@@ -82,6 +84,8 @@ export interface PullRequest {
   draft: boolean;
   state: 'open' | 'closed' | 'merged';
   title: string;
+  /** Its description (Markdown), as the tracker has it: a decision's detail reads its fail-without and never sections. */
+  body?: string;
   /** GitHub's merge check: null while it's still computing. */
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */

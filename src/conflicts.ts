@@ -155,12 +155,12 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
 }
 
 /** Why a resolved PR waits for the owner instead of auto-merging (empty: the merge policy decides as usual). */
-export function conflictWaitReasons(o: { outside: string[]; riskCategories: string[]; evaluator: { approved: boolean; confidence: string; bothSidesKept: boolean | null } }): string[] {
+export function conflictWaitReasons(o: { outside: string[]; riskCategories: string[]; evaluator: { approved: boolean; confidence: string; confidenceReason?: string | undefined; bothSidesKept: boolean | null } }): string[] {
   const r: string[] = [];
   if (o.outside.length) r.push(`conflict fix: changed outside the conflicted hunks: ${o.outside.slice(0, 5).join('; ')}`);
   if (o.riskCategories.length) r.push(`conflict fix: touches ${o.riskCategories.join(', ')}`);
   if (!o.evaluator.approved) r.push('conflict fix: the evaluator rejected the resolution');
-  else if (o.evaluator.confidence !== 'high') r.push(`conflict fix: the evaluator's confidence is ${o.evaluator.confidence}, not high`);
+  else if (o.evaluator.confidence !== 'high') r.push(`conflict fix: the evaluator's confidence is ${o.evaluator.confidence}, not high: ${o.evaluator.confidenceReason?.trim() || 'no reason recorded'}`);
   if (o.evaluator.bothSidesKept !== true) r.push(`conflict fix: the evaluator ${o.evaluator.bothSidesKept === false ? 'found a side whose behavior was lost' : "didn't confirm both sides' behavior is kept"}`);
   return r;
 }

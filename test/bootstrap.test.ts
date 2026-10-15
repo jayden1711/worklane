@@ -249,6 +249,25 @@ test('bootstrap --config: unattended, the same end: init --yes with the file\'s 
   assert.match(bad('mode=server\n').out, /server mode is the hardened multi-user Linux setup/, 'server mode is --hardened, from the file too');
 });
 
+test('bootstrap --yes on a repo with no CI chosen (#469): init stops only for the CI choice (exit 5), and the install still ends with the wizard URL, where the choice is made; any other stop is still the script\'s', { skip }, () => {
+  const m = released(machine({ have: installed({ worklane: wizardEngine('init) exit 5 ;;') }) }));
+  const r = m.run('--mode', 'local', '--yes', m.repo);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /init stopped only for the CI choice: make it in the wizard \(Required checks named\), then run this again/);
+  assert.equal(r.out.trim().split('\n').at(-1), 'http://127.0.0.1:4317/first-run', 'the last line is the wizard URL');
+  assert.deepEqual(engineCalls(m), [`worklane init --mode local --yes ${m.repo}`, `worklane dashboard --detach --root ${m.repo} --no-open`], 'no doctor: the wizard is next');
+  // Any other stop (a login missing, say: exit 1) ends the script there, as before.
+  const other = released(machine({ have: installed({ worklane: wizardEngine('init) exit 1 ;;') }) }));
+  const o = other.run('--mode', 'local', '--yes', other.repo);
+  assert.equal(o.code, 1);
+  assert.match(o.out, /init stopped \(exit 1\)/);
+  assert.ok(!engineCalls(other).some((c) => c.includes('dashboard')), 'no dashboard after another stop');
+  // A dry run plans the checklist and starts nothing.
+  const dry = released(machine({ have: installed({ worklane: wizardEngine('init) exit 5 ;;') }) }));
+  dry.run('--dry-run', '--mode', 'local', '--yes', dry.repo);
+  assert.ok(!engineCalls(dry).some((c) => c.includes('dashboard --detach')));
+});
+
 test('bootstrap --mode: local is this path; server is the hardened one; with no terminal to ask on, local, said so', { skip }, () => {
   const m = released(machine({ have: installed() }));
   const quiet = m.run(m.repo);

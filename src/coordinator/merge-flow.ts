@@ -1,6 +1,7 @@
 // The merge-policy flow: watching opened PRs, the merge decision, waiting for the owner, the light check, and
 // main's checks after a merge (revert on red).
-import { startRefusal } from '../testrun/gate.js';
+import { startRefusal, TestRunHeld } from '../testrun/gate.js';
+import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -90,7 +91,8 @@ export abstract class MergeFlow extends FixRuns {
         diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },
       config: () => this.d.cfg.project.fix_forward,
-      required: () => this.d.cfg.project.required_checks,
+      required: () => this.requiredChecks(),
+      checks: (sha) => this.headChecksOf(sha),
       probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
       // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
       get testRuns() {
@@ -198,7 +200,7 @@ export abstract class MergeFlow extends FixRuns {
       this.peoplePolled.set(pr.number, now);
       const role = pr.bot ? null : ((await this.d.roleOf?.(pr.author)) ?? null);
       const mapped = role === 'owner' || role === 'writer';
-      const fast = requiredOutcomes(fastChecks, await this.d.backlog.checks(pr.headSha));
+      const fast = requiredOutcomes(fastChecks, await this.headChecksOf(pr.headSha));
       if (fast.some((c) => c.outcome !== 'pass')) continue;
       if (!mapped && !(await this.adminApproved(pr.number))) continue;
       this.prBatch.enqueue({ issue: pr.number, number: pr.number, head: pr.headSha, by: pr.author || 'unknown' });
@@ -284,7 +286,7 @@ export abstract class MergeFlow extends FixRuns {
     // A docs-only PR with light checks configured: ready on those alone, and never batched (src/pr-rules.ts).
     const plan = this.checksPlan(n, pr.headSha);
     const batching = this.prBatching() && !plan.fast;
-    const except = plan.fast ? this.d.cfg.project.required_checks.filter((c) => !plan.checks.includes(c)) : batching ? this.d.cfg.tests.land.pr_batch.full_checks : [];
+    const except = plan.fast ? this.requiredChecks().filter((c) => !plan.checks.includes(c)) : batching ? this.d.cfg.tests.land.pr_batch.full_checks : [];
     const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha), except);
     const returned = batching && r.ready ? this.prBatch.returnedFor(number, pr.headSha) : null;
     if (returned) {
@@ -510,7 +512,7 @@ export abstract class MergeFlow extends FixRuns {
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
       // Decided on the light checks, but GitHub's ruleset still requires every required check: blocked until they pass.
-      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.d.cfg.project.required_checks, await this.d.backlog.checks(pr.headSha))) : { act: 'none' as const };
+      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.requiredChecks(), await this.headChecksOf(pr.headSha))) : { act: 'none' as const };
       if (hold.act === 'wait') return;
       if (hold.act === 'hold') d.reasons.push(hold.why);
       else if (pr.mergeable === null || pr.mergeableState === 'unknown') {
@@ -544,7 +546,7 @@ export abstract class MergeFlow extends FixRuns {
       }
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons, ...(d.auto ? {} : { why: d.why }) });
-    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons, d.advice);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (batching) return this.mergeTested(w, pr, 'auto');
@@ -567,7 +569,7 @@ export abstract class MergeFlow extends FixRuns {
   private async mergeTested(w: EventPayload<'pr.opened'>, pr: PullRequest, how: 'auto' | 'approved') {
     const { issue: n, number } = w;
     const events = () => this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided', 'pr.status', 'pr.opened']);
-    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.d.backlog.checks(pr.headSha), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
+    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.headChecksOf(pr.headSha), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
     if (!ok.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: `not merged untested: ${ok.why}`.slice(0, 500) });
       return;
@@ -670,13 +672,13 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** A PR that waits for the owner: the needs-owner label, one comment with every reason, a review request. */
-  private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[]) {
+  private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[], advice?: string) {
     const owner = this.ownerOf(w.issue);
     await this.d.backlog.addLabels(w.number, ['needs-owner']);
     const ask = this.prBatching()
       ? `waits for your review: approve it and ${BRAND.name} merges it onto exactly the ${this.branch} its full run tested (testing it again first if ${this.branch} moved). Merging it by hand skips that`
       : 'waits for you to review and merge';
-    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}`);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}${advice ? `\n\n**Evaluator's advice:** ${advice.slice(0, 1500)}` : ''}`);
     try {
       await this.d.backlog.requestReview(w.number, [owner]);
     } catch (e) {
@@ -698,11 +700,16 @@ export abstract class MergeFlow extends FixRuns {
       const m = e.payload as EventPayload<'merge.done'>;
       if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
       this.mainPolled.set(m.sha, now);
-      const required = this.d.cfg.project.required_checks;
+      const required = this.requiredChecks();
+      // WHY (#469): nothing to judge by is never "green": no result is recorded (the config_invalid incident and the
+      // first-run step say why); a merge is never marked green with nothing checked.
+      if (!required.length) continue;
+      // No CI: every test_run tier (fast and full) runs on the merge commit, in the sandbox; judged from the log.
+      if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
       // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
       // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
       // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
-      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.d.backlog.checks(m.sha)) });
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.headChecksOf(m.sha)) });
       if (gate.wait) continue;
       const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
@@ -719,6 +726,39 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       if (failed.length) await this.mainWentRed(m, failed);
     }
+  }
+
+  /** No CI: merge commits whose tier runs this process started (or found already queued in the log). */
+  private readonly mainRuns = new Set<string>();
+
+  /**
+   * No CI (#469): run every test_run tier, fast and full, on merge commit `sha` in the sandbox, once (a restart finds
+   * them queued in the log). Their results land in the event log as testrun.finished, which is all main is judged by.
+   * Held at the start gate, or test runs off: nothing starts now, the next poll tries again, and the main check's
+   * timeout says so if it never can.
+   */
+  private startMainRuns(sha: string) {
+    if (this.mainRuns.has(sha)) return;
+    if (this.d.log.read(0, ['testrun.queued']).some((e) => (e.payload as EventPayload<'testrun.queued'>).sha === sha)) {
+      this.mainRuns.add(sha);
+      return;
+    }
+    const tr = this.liveTestRuns;
+    if (!tr) return;
+    const tiers = (this.d.cfg.tests.test_run?.tiers ?? []).map((t) => t.name);
+    if (!tiers.length) return;
+    this.mainRuns.add(sha);
+    void (async () => {
+      try {
+        this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+        // Every tier, fast and full, in one run (as the deploy gate's post-merge run asks for them).
+        await tr.startTestRun({ repo: this.d.repo, sha, kind: 'full', prs: [], tiers });
+      } catch (e) {
+        // Held, or failed to start: try again on a later poll.
+        this.mainRuns.delete(sha);
+        if (!(e instanceof TestRunHeld)) this.emit('coordinator.error', { instance: this.d.instance, where: `No CI runs on ${sha.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
+      }
+    })();
   }
 
   /** A real red after auto-merging `m`: fix-forward takes it (coordinator/fix-forward.ts), unless the branch was red already. */
@@ -848,6 +888,8 @@ export abstract class MergeFlow extends FixRuns {
       stateFile: this.mainWatchFile,
       branch: this.branch,
       required: () => this.d.cfg.project.required_checks,
+      // No CI: the watch is off, and says what that means (src/ci-none.ts).
+      offWhy: () => (ciIsNone(this.d.cfg.project) ? CI_NONE_MAIN_WATCH : null),
       api: w.api,
       git: repoGit(this.d.repo, this.remote, this.branch),
       harnessMerge: (sha) => {
@@ -992,7 +1034,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected checksPlan(n: number, head: string): { checks: string[]; fast: boolean } {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-    const required = this.d.cfg.project.required_checks;
+    const required = this.requiredChecks();
     if (!review.docs_only_checks.length) return { checks: required, fast: false };
     const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)?.payload as EventPayload<'issue.claimed'> | undefined;
     if (!claimed) return { checks: required, fast: false };
@@ -1011,7 +1053,24 @@ export abstract class MergeFlow extends FixRuns {
   prReadiness(n: number, head: string, checks: CommitCheck[], except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     const judged = v && carriedHead(this.mergeInsOf(), null, head) === v.head ? head : v?.head;
-    return readiness({ required: this.d.cfg.project.required_checks.filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
+    // No CI (src/ci-none.ts): the test-run checks from this instance's event log, never GitHub's of the same name.
+    const judgedChecks = headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: checks, events: () => this.testRunEvents(), sha: head });
+    return readiness({ required: this.requiredChecks().filter((c) => !except.includes(c)), checks: judgedChecks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
+  }
+
+  /** The checks a PR must pass: config.yaml required_checks, or under No CI every test-run tier's check (src/ci-none.ts). */
+  protected requiredChecks(): string[] {
+    return requiredFor(this.d.cfg.project, this.d.cfg.tests);
+  }
+
+  /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
+  protected async headChecksOf(sha: string): Promise<CommitCheck[]> {
+    return headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: await this.d.backlog.checks(sha), events: () => this.testRunEvents(), sha });
+  }
+
+  /** The test runs' own records in this instance's event log: what No CI judges by. */
+  private testRunEvents() {
+    return this.d.log.read(0, ['testrun.queued', 'testrun.finished']);
   }
 
   /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */

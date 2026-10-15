@@ -52,6 +52,48 @@ export interface Decision {
   voiceRefused?: string | null;
 }
 
+/** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
+export interface DecisionDetail {
+  id: string;
+  kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'pr';
+  issue: number | null;
+  owner: string;
+  question: string;
+  options: { option: string; does: string; cannot: string; recommended: boolean }[];
+  recommendation: string;
+  askedAt: string;
+  answer: { by: string; answer: string; at: string } | null;
+  canAnswer: boolean;
+  ifNothing: string;
+  /** A viewer's: why the rest isn't here. */
+  withheld: string | null;
+  title?: string | null;
+  summary?: { happened: string; agent: string | null };
+  reasoning?: string[];
+  receipts?: string[];
+  findings?: { list: { claim: string; evidence: string; file?: string; line?: number; severity?: string; confidence?: string }[]; confidence: string | null; unverified: string[] } | null;
+  change?: { base: string | null; head: string | null; files: { path: string; added: number | null; removed: number | null }[]; filesMore: number; level: string | null; levelReasons: string[]; source: 'asked' | 'log' } | null;
+  verdict?: { patch_correct: boolean; test_correct: boolean; confidence: string; confidenceReason: string | null; advice: string; unread: string[]; unverifiedClaims: string[]; designChange: boolean | null; designReason: string | null } | null;
+  tests?: { check: string; status: string; duration_ms: number | null; tail?: string }[] | null;
+  tampered?: string[];
+  pr?: { number: number; url: string; head: string; phase: string; draft: boolean; checks: { name: string; outcome: string }[]; checksOnHead: boolean; waitReasons: string[]; why: { category: string; text: string }[] } | null;
+  impact?: { flags: { flag: 'money-path' | 'auth' | 'secrets'; files: string[] | null }[]; others: string[]; note: string | null };
+  runs?: { id: string; role: string; model: string; startedAt: string; endedAt: string | null; reason: string | null }[] | null;
+  auth?: { failed: { at: string; role: string; detail: string }[]; held: { login: string; detail: string; since: string } | null };
+  diff?: 'owner' | 'owners-only' | 'none';
+  prBody?: boolean;
+  ownerOnly?: string | null;
+}
+/** A decision's change as a diff (owners only), or why there's none. */
+export type DecisionDiff = { diff: string; truncated: boolean } | { diff: null; why: string };
+/** A decision's PR body: its fail-without and "never" sections (null: the body has none), or why it couldn't be read. */
+export interface DecisionPrBody {
+  pr: number | null;
+  failWithout: string | null;
+  never: string | null;
+  why: string | null;
+}
+
 /** One step of an agent run: a shell command or a file write. */
 export interface RunStep {
   kind: 'command' | 'write';
@@ -230,7 +272,7 @@ export interface State {
   canReadRuns?: boolean;
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
-  project: { name: string; repo: string; landMode: string };
+  project: { name: string; repo: string; landMode: string; ci?: CiMode };
   /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
   /** Their role on this instance, read by its server from their permission on the repo; absent from an older server. */
@@ -376,7 +418,7 @@ export interface Settings {
   /** Whether this dashboard has the First run page's Discord step (a server instance's). */
   discordSetup?: boolean;
   configDir: string;
-  project: { name: string; repo: string; landMode: string; runtime: unknown };
+  project: { name: string; repo: string; landMode: string; runtime: unknown; ci?: CiMode };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number; min_free_disk_gb?: number };
@@ -493,7 +535,8 @@ export function probeMe(servedByHub: boolean, get: typeof fetch = fetch, auth = 
     .then((m) => (m && (m.login || m.breakGlass) ? m : null))
     .catch(() => null);
 }
-const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
+/** Whether the hub served this page (its sign-in or break-glass port); false on an instance's own dashboard. */
+export const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
 export const me: Promise<Me | null> = probeMe(servedByHub);
 /** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
 export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
@@ -711,6 +754,31 @@ export function selectAllInstances() {
 export async function apiPath(path: string): Promise<string> {
   const inst = await hubInstance;
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
+}
+
+/** The sizes the server fetches people's pictures at (src/avatars.ts AVATAR_SIZES; test/avatars.test.ts keeps them the same). */
+export const AVATAR_SIZES = [40, 80, 160];
+const avatarUrls = new Map<string, Promise<string | null>>();
+
+/**
+ * A person's picture for a box of `box` px, as a blob: URL the page shows, or null (the page shows initials). Read from
+ * this page's own server with the page's own auth, never from GitHub (#462): an <img> can't send the key in a header.
+ * Asked once per picture while the page is open, whatever the answer (initials until a reload when there was none).
+ */
+export async function avatarSrc(login: string, box: number): Promise<string | null> {
+  const size = AVATAR_SIZES.find((s) => s >= box * 2) ?? AVATAR_SIZES[AVATAR_SIZES.length - 1]!;
+  const url = await apiPath(`/api/avatar/${encodeURIComponent(login)}?size=${size}`);
+  let p = avatarUrls.get(url);
+  if (!p) {
+    p = (async () => {
+      await me;
+      const r = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!r.ok || !/^image\/(?:png|jpeg|gif|webp)$/.test(r.headers.get('content-type') ?? '')) return null;
+      return URL.createObjectURL(await r.blob());
+    })().catch(() => null);
+    avatarUrls.set(url, p);
+  }
+  return p;
 }
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
@@ -1064,12 +1132,24 @@ export interface RepoConfigValues {
   daily_budget_usd: number;
   workers_count: number;
   workers_model: string;
+  /** Which CI judges a PR (#469); absent from an older server: github. */
+  ci?: 'github' | 'none';
+}
+/** Which CI judges a PR; under No CI, what that means (said on the PR, land and Settings pages). */
+export interface CiMode {
+  kind: 'github' | 'none';
+  means: string | null;
 }
 export interface FirstRunRepoConfig {
   values: RepoConfigValues;
   owner: string;
   branch: string;
   repo: string;
+  /** The workers' models the engine supports (src/config-change.ts WORKER_MODELS) and its default; absent from older servers. */
+  models?: string[];
+  defaultModel?: string;
+  /** #468: the config's worker model is listed (an alias, or a full Anthropic model id); absent from older servers. */
+  modelListed?: boolean;
 }
 export interface ConfigChange {
   file: string;
@@ -1078,7 +1158,51 @@ export interface ConfigChange {
   to: unknown;
 }
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
+/** #468: the first-task form's picks (the repo's test files) and the template; `local` false on a server, with why. */
+export interface FirstTaskInfo {
+  local: boolean;
+  why: string | null;
+  template: { label: string; body: string };
+  tests: string[];
+}
+export type DoneWhenPick = { test: string } | { command: string; expect?: string };
+export interface FirstTaskValues {
+  title: string;
+  outcome: string;
+  done_when: DoneWhenPick[];
+  context?: string;
+}
+export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task');
+/** confirm false: the issue as it would be filed (checked with the coordinator's parser); true: filed, with `ready`. */
+export const fileFirstTask = (values: FirstTaskValues, confirm: boolean) => api<{ ok: boolean; title: string; body: string; number?: number; url?: string | null; labelCreated?: boolean; confirmed: boolean }>('/api/first-run/first-task', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/** #468: each open issue the harness isn't working on, and why. */
+export interface IgnoredIssue {
+  issue: number;
+  title: string;
+  url: string;
+  author: string;
+  labels: string[];
+  reasons: { kind: 'no-ready' | 'contract' | 'not-writer' | 'waiting' | 'blocked' | 'held'; text: string; fix: 'add-ready' | 'edit' | null }[];
+}
+export const getIgnored = () => api<{ at: number; issues: IgnoredIssue[]; error: string | null; canFix: boolean; local: boolean }>('/api/issues/ignored');
+export const addReady = (issue: number) => api<{ ok: boolean }>(`/api/issues/${issue}/ready`, { method: 'POST', body: '{}' });
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+/** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
+export interface StarterCi {
+  path: string;
+  check: string;
+  summary: string;
+  file: string;
+  placeholder: boolean;
+  command: string | null;
+  branch: string;
+  newFile: string;
+  onBranch: boolean;
+  firstRun: { state: 'none' | 'running' | 'done'; conclusion: string | null };
+  /** No CI: offered only where tests.yaml has test_run (`why` says why not); `means`, what it means. */
+  noCi: { offered: boolean; means: string; why: string | null };
+}
+export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
@@ -1121,7 +1245,7 @@ export type SetupFix =
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
   | { kind: 'signin'; label: string }
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
   | { kind: 'discord'; label: string };
 export interface SetupStepView {
@@ -1360,7 +1484,55 @@ export interface ClaudeAccountData {
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
+  /** The account profiles (src/claude-profiles.ts); absent from an older server. */
+  profiles?: ProfilesTable;
+  profileOps?: ProfileOp[];
+  /** The root script a staged profile is confirmed with, on the machine. */
+  confirmScript?: string;
+  /** This instance's relayed sign-in under way: the link only while it waits for the code. */
+  signin?: { profile: string; status: string; detail: string; waitingForCode: boolean; url: string | null } | null;
 }
+/** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
+export interface ProfileCell {
+  instance: string;
+  user: string | null;
+  active: boolean;
+  account: string | null;
+  subscription: string | null;
+  apiOk: boolean | null;
+  apiError: string | null;
+  checkedAt: string | null;
+}
+export interface ProfilesTable {
+  instances: string[];
+  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
+  active: Record<string, string>;
+  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
+  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
+}
+export interface FailoverSetting {
+  order: string[];
+  back: boolean;
+}
+export interface ProfileOp {
+  id: string;
+  op: 'profile-add' | 'use' | 'remove' | 'login';
+  profile: string;
+  for: string | null;
+  status: 'running' | 'done' | 'failed' | 'stalled';
+  startedAt: string;
+  endedAt: string | null;
+  detail: string;
+  steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
+}
+/** A new account profile from a setup token: the token in the body only, never the URL. */
+export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
+/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
+export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
+/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
+/** The one-time code Anthropic's sign-in page showed, for this instance's relayed sign-in: in the body only. */
+export const pasteLoginCode = (value: string) => api<{ ok: boolean }>('/api/claude-account/login-code', { method: 'POST', body: JSON.stringify({ value }) });
+export const claudeProfileAction = (action: 'use' | 'remove' | 'login', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
@@ -1442,11 +1614,65 @@ export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+
+/** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
+export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
+export interface ChatAttachmentLimits { maxFileMb: number; maxMessageMb: number; retentionDays: number; maxFiles: number; extensions: string[] }
+/** An upload's outcome: kept, or held back because it looks like it holds a secret (the kinds, never the value). */
+/** `scanned`: false for an image, PDF or Office file, which the secret scan can't read. */
+export type ChatUpload = { attachment: ChatAttachment; secretKinds: string[]; scanned?: boolean } | { secret: string[]; error: string };
+const chatPath = async (instance: string | null, path: string) => (instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path));
+export const chatAttachmentLimits = (instance: string | null) => chatCall<ChatAttachmentLimits>(instance, '/api/chat/attachments/limits');
+/** The name header: its last 200 characters (what the server keeps; whole code points, so it always encodes), encoded. */
+export const attachmentNameHeader = (name: string) => encodeURIComponent(Array.from(name).slice(-200).join(''));
+/** Upload one file as the request body (streamed; its name in a header, never the URL). `anyway`: past a secret warning. */
+export async function uploadChatAttachment(instance: string | null, file: Blob & { name: string }, anyway = false): Promise<ChatUpload> {
+  const headers: Record<string, string> = { ...(await authHeaders()), 'content-type': 'application/octet-stream', 'x-attachment-name': attachmentNameHeader(file.name), ...(anyway ? { 'x-attach-anyway': '1' } : {}) };
+  const res = await fetch(await chatPath(instance, '/api/chat/attachments'), { method: 'POST', body: file, headers });
+  if (res.status === 409) {
+    const b = (await res.json().catch(() => ({}))) as { error?: string; secret?: { kinds?: string[] } };
+    if (b.secret?.kinds) return { secret: b.secret.kinds, error: b.error ?? 'this file looks like it contains a secret' };
+    throw new ApiError(b.error ?? 'HTTP 409', 409);
+  }
+  return answer<ChatUpload>(res);
+}
+export const removeChatAttachment = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/attachments/${id}`, { method: 'DELETE' });
+/** An attachment's bytes, through the dashboard with the normal sign-in (never a link with a key in it). */
+export async function chatAttachmentBlob(instance: string | null, id: string): Promise<Blob> {
+  const res = await fetch(await chatPath(instance, `/api/chat/attachments/${id}`), { headers: await authHeaders() });
+  if (!res.ok) throw new ApiError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`, res.status);
+  return res.blob();
+}
 /** A fresh request key (works outside secure contexts too, where randomUUID is missing). */
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
 export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
+
+/** Chat conversations and Projects on one instance (src/chat-conversations.ts): owners' and writers' only. */
+export interface ConversationItem { id: string; title: string; project: string | null; updatedAt: string; createdAt: string }
+export interface ProjectItem { id: string; name: string; owner: string; shared: boolean; files: number; updatedAt: string; mine: boolean }
+/** A Project as the server shows it: its files as attachments (the ones still there). */
+export interface ChatProject { id: string; owner: string; name: string; instructions: string; files: ChatAttachment[]; shared: boolean; createdAt: string; updatedAt: string }
+export interface Conversation { id: string; owner: string; title: string; project: string | null; createdAt: string; updatedAt: string }
+/** A turn as the server shows it: the message and its files, and the answer file as the single-shot chat's (what this person may see of it). */
+export type ConversationTurnView = ChatAnswerFile & { by: string; text: string; attachments: ChatAttachment[]; filed?: { number: number } | null };
+export interface ConversationData { conversation: Conversation; project: { id: string; name: string } | null; turns: ConversationTurnView[] }
+export interface Paged<T> { items: T[]; next: string | null }
+const enc = encodeURIComponent;
+export const listConversations = (instance: string | null, cursor?: string | null) => chatCall<Paged<ConversationItem>>(instance, `/api/chat/conversations${cursor ? `?cursor=${enc(cursor)}` : ''}`);
+export const newConversation = (instance: string | null, project: string | null) => chatCall<{ conversation: Conversation }>(instance, '/api/chat/conversations', { method: 'POST', body: JSON.stringify({ project }) });
+export const getConversation = (instance: string | null, id: string) => chatCall<ConversationData>(instance, `/api/chat/conversations/${enc(id)}`);
+export const renameConversation = (instance: string | null, id: string, title: string) => chatCall<{ conversation: Conversation }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) });
+export const deleteConversation = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'DELETE' });
+/** The message goes in the body, never the URL; `key` makes a retried send the same turn. */
+export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}) }) });
+export const fileConversationDraft = (instance: string | null, id: string, turn: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/conversations/${enc(id)}/turns/${enc(turn)}/file-issue`, { method: 'POST', body: '{}' });
+export const listProjects = (instance: string | null, cursor?: string | null) => chatCall<Paged<ProjectItem>>(instance, `/api/chat/projects${cursor ? `?cursor=${enc(cursor)}` : ''}`);
+export const getProject = (instance: string | null, id: string) => chatCall<{ project: ChatProject }>(instance, `/api/chat/projects/${enc(id)}`);
+export const saveProject = (instance: string | null, id: string | null, p: { name: string; instructions: string; files: string[]; shared?: boolean }) =>
+  chatCall<{ project: ChatProject }>(instance, id ? `/api/chat/projects/${enc(id)}` : '/api/chat/projects', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(p) });
+export const deleteProject = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/projects/${enc(id)}`, { method: 'DELETE' });
 
 /** Intake (GET /api/intake): each report, redacted, and what became of it; and the numbers for the health panel. */
 export interface IntakeReport {
@@ -1662,6 +1888,8 @@ export interface WaitItem {
   sha?: string;
   /** A PR left to the owner as high-risk: each category it touches, plainly, with its first file ("changes the merge policy: src/merge-policy.ts"). */
   why?: { category: string; text: string }[];
+  /** A decision or a held plan: its id, for its detail page (/decisions/<id>). */
+  decision?: string;
 }
 /** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
 export interface MergedItem {
@@ -1722,7 +1950,8 @@ export interface BoardCard {
   since: string;
   checks?: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
   run?: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
-  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  /** `reasons`: each of a PR hold's reasons whole (merge.decided), for the owner and writers; null otherwise. */
+  waiting: { kind: WaitKind; label: string; detail: string | null; reasons?: string[] | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
   /** Its PR head with the PR batches: queued, being tested, passed or returned (absent from older servers). */
@@ -1789,7 +2018,7 @@ export interface Incident {
   id: string;
   kind: string;
   instance: string | null;
-  severity: 'red' | 'amber';
+  severity: 'red' | 'amber' | 'info';
   title: string;
   since: string;
   resolvedAt: string | null;

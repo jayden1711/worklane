@@ -15,6 +15,7 @@ import { replaceFileAtomically } from './os/index.js';
 import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
 import { ROUTING_ALIASES } from './routing.js';
+import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
 
@@ -80,6 +81,8 @@ export function settingsProblems(s: InstanceSettings, limits: Limits, policy?: P
     const v = s.intake?.[k];
     if (v !== undefined && v > limits.intake[k]) out.push(`intake.${k} ${v} is over ${limits.intake[k]} (machine limits)`);
   }
+  const att = attachmentCaps(s);
+  if (s.chat_attachments && att.max_message_mb < att.max_file_mb) out.push(`chat_attachments.max_message_mb ${att.max_message_mb} is under max_file_mb ${att.max_file_mb}: one file could never be sent`);
   return out;
 }
 
@@ -154,7 +157,7 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
   };
 }
 
-export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day', 'stuck_guard'] as const;
+export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day', 'stuck_guard', 'chat_attachments.max_file_mb', 'chat_attachments.max_message_mb', 'chat_attachments.retention_days'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
 /** A setting's value in effect: the instance's if set, else the repo's. */
@@ -183,6 +186,10 @@ export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey):
       return intakeCaps(s)[key.slice('intake.'.length) as keyof IntakeCaps];
     case 'stuck_guard':
       return stuckMode(s);
+    case 'chat_attachments.max_file_mb':
+    case 'chat_attachments.max_message_mb':
+    case 'chat_attachments.retention_days':
+      return attachmentCaps(s)[key.slice('chat_attachments.'.length) as 'max_file_mb' | 'max_message_mb' | 'retention_days'];
   }
 }
 

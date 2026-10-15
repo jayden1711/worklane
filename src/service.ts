@@ -14,6 +14,7 @@ import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { GITHUB_API } from './github-hosts.js';
 import { switchedOnto } from './claude-account.js';
+import { latestSwitch, profileLogin, profileSwitchedAt } from './claude-profiles.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
 import type { Backlog } from './backlog/types.js';
@@ -45,7 +46,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import type { ServiceSpec } from './os/index.js';
+import { stableNodePath, type ServiceSpec } from './os/index.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -68,10 +69,12 @@ export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.pro
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
  */
-export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env): ServiceSpec {
+export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env, node: string = stableNodePath().path): ServiceSpec {
   return {
     label: serviceLabel(cfg),
-    program: [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
+    // WHY (#468): Homebrew's stable $(brew --prefix)/bin/node when this node is Homebrew's, never its realpath in the
+    // Cellar, which `brew upgrade` deletes from under the service; never a `node` found on PATH.
+    program: [node, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
     // PATH reaches the prefix's bin, where local init installs tools (src/tool-path.ts), as `up` has always set it.
@@ -243,13 +246,16 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
   const ciMetrics = i.config.project.backlog === 'github' ? { api: new GitHubCiMetricsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // The machine watchdog (src/watchdog/): this instance's checks, and the machine's and the posting if elected.
-  const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(i.runAs ? { runAs: i.runAs } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
+  // The agents' Claude account profiles (src/claude-profiles.ts): each run's login is the instance's active profile, read as it starts.
+  const login = i.runAs ? profileLogin({ instance: i.name, agentUser: i.runAs.user }) : undefined;
+  const agentAs = i.runAs;
+  const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(agentAs && login ? { runAs: () => login.resolve(agentAs) } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
   // WHY: item 38. A build routed to another vendor's CLI (policy opt-in only) runs as the lane's agent user, never as this one.
   const lanes = laneRuns(i);
   const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
-  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile);
-  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => switchedOnto(i.name), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login);
+  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => latestSwitch(switchedOnto(i.name), profileSwitchedAt(i.name)), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /**
@@ -398,6 +404,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     log.append('coordinator.stopping', { instance: instanceId(), signal, pending: coordinator.pending() }, instanceId());
     watchdog?.stop();
     clearInterval(watch);
+    clearInterval(siriWatch);
     coordinator.stop();
     nap.wake();
     // Kept referenced: work that hangs on nothing the event loop holds still ends here, not in a silent exit.
@@ -428,6 +435,9 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     coordinator.checkIntake().catch(diskOnly);
   }, 5_000);
   watch.unref();
+  // Siri's questions: someone is listening, so they are looked for every second (a directory read when there are none).
+  const siriWatch = setInterval(() => coordinator.checkSiri().catch(diskOnly), 1_000);
+  siriWatch.unref();
   watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
@@ -450,6 +460,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
     clearInterval(watch);
+    clearInterval(siriWatch);
     watchdog?.stop();
     intake?.stop();
     ungateDisk();

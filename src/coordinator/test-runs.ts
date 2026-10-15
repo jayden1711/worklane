@@ -11,6 +11,7 @@ import type { RunHost } from '../testrun/host.js';
 import { ChecksPermissionMissing, type TestRunRequest, type TestRunResult } from '../testrun/index.js';
 import { SANDBOX_STEP } from '../testrun/run.js';
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
+import { GPU_NO_REPEAT, GPU_STEP, gpuCutOffLine, gpuRunsNotToRepeat } from '../testrun/gpu.js';
 
 /** A PR as the test runs need it. */
 export interface OpenPr {
@@ -59,6 +60,8 @@ export interface PrTestRunDeps {
   changed?: (pr: OpenPr) => string[];
   /** The sandbox's check, held and run again while it fails (src/testrun/sandbox-watch.ts); absent: nothing to wait for. */
   sandbox?: { readonly ok: boolean; stop(): void };
+  /** The fast tiers' names (tests.yaml test_run): what a cut-off GPU run's failing check is posted for. Absent: none posted. */
+  fastTiers?: () => string[];
 }
 
 interface InFlight {
@@ -97,27 +100,54 @@ export class PrTestRuns {
 
   constructor(private d: PrTestRunDeps) {
     const queued = new Map<string, EventPayload<'testrun.queued'>>();
-    for (const e of d.log.read(0, ['testrun.queued', 'testrun.finished'])) {
+    const events = d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished']);
+    // INVARIANT: a GPU run cut off (the coordinator or the machine stopped) or stopped at its cap is never run again by
+    // itself, whatever its outcome (src/testrun/gpu.ts): its head counts as finished.
+    const gpuNoRepeat = new Set(gpuRunsNotToRepeat(events));
+    for (const e of events) {
       if (e.type === 'testrun.queued') queued.set((e.payload as EventPayload<'testrun.queued'>).id, e.payload as EventPayload<'testrun.queued'>);
-      else {
+      else if (e.type === 'testrun.finished') {
         const p = e.payload as EventPayload<'testrun.finished'>;
         // An interrupted or errored run runs again; a cancelled one was superseded.
-        if (p.kind !== 'fast' || p.outcome !== 'done' || !queued.has(p.id)) continue;
+        if (p.kind !== 'fast' || (p.outcome !== 'done' && !gpuNoRepeat.has(p.id)) || !queued.has(p.id)) continue;
         for (const n of p.prs) this.finished.set(n, new Set([...(this.finished.get(n) ?? []), p.sha]));
       }
+    }
+    // A GPU run the coordinator stopped during has no testrun.finished until recover() writes one: its head too.
+    for (const id of gpuNoRepeat) {
+      const q = queued.get(id);
+      if (q?.kind === 'fast') for (const n of q.prs) this.finished.set(n, new Set([...(this.finished.get(n) ?? []), q.sha]));
     }
   }
 
   /** At start: wipe what a stopped coordinator's runs left, and record them as interrupted. */
   async recover(): Promise<string[]> {
     const ids = unfinishedRuns(this.d.log.read(0, ['testrun.started', 'testrun.finished']));
+    const gpu = new Set(gpuRunsNotToRepeat(this.d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished'])));
     for (const id of ids) {
       const queued = this.d.log.read(0, ['testrun.queued']).map((e) => e.payload as EventPayload<'testrun.queued'>).find((p) => p.id === id);
       const w = await this.d.host.wipe(id).catch((e: Error) => ({ ok: false, left: [e.message.slice(0, 200)] }));
       if (!w.ok) this.d.log.append('testrun.wipe_failed', { id, left: w.left.slice(0, 20) }, this.d.actor);
-      this.d.log.append('testrun.finished', { id, sha: queued?.sha ?? '0000000', kind: queued?.kind ?? 'fast', prs: queued?.prs ?? [], ok: false, outcome: 'interrupted', results: [], detail: 'the coordinator stopped during the run; wiped at start' }, this.d.actor);
+      this.d.log.append('testrun.finished', { id, sha: queued?.sha ?? '0000000', kind: queued?.kind ?? 'fast', prs: queued?.prs ?? [], ok: false, outcome: 'interrupted', results: [], detail: `the coordinator stopped during the run; wiped at start${gpu.has(id) ? `. ${GPU_NO_REPEAT}` : ''}` }, this.d.actor);
+      // INVARIANT: a PR's GPU fast run cut off by a stop gets a failing check on its head saying so, never a rerun: its
+      // head is never run again by itself (the constructor counts it finished), and without a check it would look pending.
+      if (gpu.has(id) && queued?.kind === 'fast' && queued.prs.length && /^[0-9a-f]{40}$/.test(queued.sha)) await this.postCutOff(id, queued.sha);
     }
     return ids;
+  }
+
+  /** The failing check on a cut-off GPU fast run's head: every fast tier, not run again (src/testrun/gpu.ts). */
+  private async postCutOff(id: string, sha: string): Promise<void> {
+    const tiers = this.d.fastTiers?.() ?? [];
+    if (!tiers.length) return;
+    const line = gpuCutOffLine('the coordinator or the machine stopping during it');
+    const result: TestRunResult = { id, sha, kind: 'fast', ok: false, outcome: 'error', tiers: tiers.map((tier) => ({ tier, ok: false, durationMs: 0, summary: line, logRef: '' })), setup: { step: GPU_STEP, detail: line, stderr: '' } };
+    try {
+      await this.d.post(sha, result);
+    } catch (e) {
+      // A missing permission is recorded (testrun.checks_failed) and shown in health; anything else is an error.
+      if (!(e instanceof ChecksPermissionMissing)) this.d.log.append('coordinator.error', { instance: this.d.actor, where: `the cut-off check of ${id}`, kind: 'error', message: (e as Error).message.slice(0, 500) }, this.d.actor);
+    }
   }
 
   private fetchPr(pr: OpenPr): string {

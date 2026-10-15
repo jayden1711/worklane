@@ -164,6 +164,27 @@ With `test_run` on and full tiers in it, the coordinator's test run is the full 
 - Direct landing (`land_mode: direct`) has no PR to carry the test run's checks, so its land gates are unchanged. `land.pre` steps aren't test runs. The nightly full run stays: it records main's baseline.
 - With `test_run` off, nothing changes.
 
+## GPU
+
+Off unless root turns it on, per instance. A tier asks with `gpu: true`; the sandbox gives it NVIDIA's device nodes only when root's own file lists the instance.
+
+```yaml
+test_run:
+  tiers:
+    - { name: cuda, command: "pytest tests/gpu", kind: fast, gpu: true, timeout_s: 900 }
+```
+
+**root**: `sudo bash scripts/setup/testrun-gpu.sh enable <name> [--devices 0[,1]] [--max-minutes 20]` (also `disable <name>` and `status`). It writes `/etc/worklane/testrun-gpu.json`, root:root 0644: which instances, which GPUs (`/dev/nvidia<N>`, 0 unless `--devices` says), and the longest one GPU command may run (`max_minutes`, 1 to 120, default 20, one value for the machine). It also writes `/etc/tmpfiles.d/worklane-gpu.conf`, so each listed GPU's lock (`/run/worklane/gpu/<N>.lock`, root:worklane-gpu 0640, in a root:worklane-gpu 0750 directory) is there from boot. A GPU driver fault can hang the whole machine: turn it on only once you mean to.
+
+- **Who decides.** The helper reads root's file itself, every time. Whether a run gets a GPU never comes from an argument, the repo, `policy.yaml` (the dashboard writes that) or anything else the coordinator or the dashboard can write. The tier's `gpu: true` only asks. The coordinator reads the file too, but only to plan (below) and to show it; the Machine page shows it read-only, with the root command that changes it.
+- **The sandbox.** A granted command keeps `PrivateDevices=yes` and every other setting above. `/dev/nvidiactl`, `/dev/nvidia-uvm` and the listed `/dev/nvidia<N>` are bound in (`BindPaths=`), and `DeviceAllow=` allows exactly those. `/dev/nvidia-uvm-tools`, `/dev/nvidia-modeset`, `/dev/nvidia-caps/*` and `/dev/dri/*` are never bound. Listed GPUs with no node are skipped, and the record says so. It needs systemd 255 or later (what CI's real-systemd job proves it on); on an older one, and without the driver's nodes, the command runs without the GPU and its record says why. `MemoryMax` doesn't cover GPU memory.
+- **One run per GPU.** The helper takes an exclusive `flock` on each granted GPU's lock (ascending order) and holds it, with the `systemd-run` it waits on, until the command ends; a TERM stops the unit before the lock goes. Commands that don't ask for the GPU never wait for it. The wait counts against the tier's `timeout_s`; a command still waiting at the end fails with `gpu <N>: still held after <s> s, the run's timeout (held by <instance>/<run id> since <time>; pid ...)`. The unit's cap is the smaller of what is left and `max_minutes`.
+- **Your own GPU jobs.** `worklane gpu hold [--gpu <N>]... -- <command>` runs a command under the same locks (every GPU the file lists, unless named), waiting while a test run has the GPU and saying who holds it. Nothing asks the driver (no `nvidia-smi`): only the lock.
+- **Who can hold a lock.** Only root (the helper) and the `worklane-gpu` group's one member: **root** `sudo bash scripts/setup/testrun-gpu.sh holder <your user>` (or `holder none`), then log in again. Anyone who can open a lock can keep the harness's GPU runs waiting, so the script refuses root, system users, every harness user (`wl-*`: coordinators, test users, agent users) and any user an instance's agents or evals run as (`instance.yaml` `run_as`); the helper also grants no GPU while a `wl-*` user is in the group. Anyone else is refused the lock (EACCES), and `gpu hold` says so.
+- **A cut-off run's check.** A PR's GPU fast run cut off by a stop gets, at the next start, a failing check on its head (`Cut off (GPU run): not rerun automatically`), never a rerun.
+- **The record.** The helper says on stderr, before the command, `worklane-testrun: gpu <N> (devices ...; max <s> s; waited <s> s)` or `worklane-testrun: gpu none (<why>)`. The coordinator takes that line out of the output and records it: each GPU tier's `testrun.tier` has `gpu` (granted or not, the devices, the line), and its check starts with `GPU: yes (...)` or `GPU: no (...)`.
+- **Never again by itself.** A run with a tier that asks for the GPU, on an instance root's file lists (or a file the coordinator can't read), is recorded as `gpu: planned` on `testrun.started`, before any of its commands. A GPU command that timed out or was killed marks the run `gpu_stopped`. Such a run, once stopped or cut off (the coordinator or the machine stopped during it), is never run again by itself: a PR's fast run isn't rerun at the next start, a batch is held (`gpu_held`; its PRs are told, and batched again only at a new head) rather than bisected or batched again, and the deploy gate gives that commit a red verdict. A new push runs it again.
+
 ## How many at once
 
 The default is 2 slots. For a machine with 24 cores and 30 GB running three instances (memory caps of 8G, 6G and 6G) and 6 agent slots:
