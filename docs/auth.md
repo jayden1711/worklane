@@ -32,6 +32,16 @@ Worklane has **no sign-in flow and never reads, stores, copies or relays credent
 
 **Account profiles (issue #464).** An agent user may hold several Claude logins side by side, each in its own `CLAUDE_CONFIG_DIR` under its home (`~/.claude-profiles/<name>/`, 0700, its own). The engine only passes the active profile's path to each run; it never reads, copies or moves a login between profiles or users. A profile is added from a `claude setup-token` token, installed by root as that user. Added from a dashboard, it is staged and unusable until a root admin confirms it on the machine (seeing the account, typing its name). It becomes active only after one minimal real call as every agent user on it is answered, and a dashboard can choose it only for its own instance (docs/dashboard.md, "Claude account profiles"). Every profile's credentials file is denied to agent commands.
 
+**The one exception: a relayed sign-in on a server (the owner's decision, 2026-10-15).** "The dashboard never runs `claude auth login` on a server" is lifted for this flow only: adding a Claude account profile from the Machine page. Only a machine owner who is an owner of the instance, signed in, on an allowed console device (or the owner's break-glass) may start one or give its code, and every request and refusal is audited. What happens:
+
+- The machine helper (`claude-account login <name>`, the instance from sudo, never an argument) runs `claude auth login` as that instance's agent user, on a new profile's own `CLAUDE_CONFIG_DIR`, with nothing for a browser to open.
+- Claude's sign-in link (Anthropic's page, whose redirect is Anthropic's own code page) goes to a file only that instance's coordinator user can read; the dashboard shows it to its machine owners and to nobody else. It is never in an event, a log line, a progress line or an argument.
+- The one-time code that page shows is pasted into the dashboard once. It is stored for the coordinator user only (0400), read once by the script as root, deleted, and written to `claude`'s stdin. A second code, or one after the first was taken, is refused; the code is never in an event, the audit, a response, a URL, an argument or a log line.
+- The login then gets one minimal real call, and the profile is **staged**: nothing may use it until a root admin runs `claude-account.sh confirm-profile <name>` on the machine, which shows the account email and org from a real call and needs the name typed back.
+- Every sign-in is an ops alert.
+
+`src/claude-signin.ts`'s refusal of pasted codes stays for every other path (the first-run wizard's local sign-in relays only a link that comes back to localhost).
+
 ## What the docs say
 
 **Scripted use of the CLI with a subscription is documented.**

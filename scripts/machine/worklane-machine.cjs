@@ -32,6 +32,7 @@
 //   worklane-machine claude-account profile-add <profile>
 //   worklane-machine claude-account use <profile>
 //   worklane-machine claude-account remove <profile>
+//   worklane-machine claude-account login <profile>
 //
 // the agents' Claude account profiles (issue #464; claude-account.sh's profile-add, use and remove), started the same
 // way as the switch, as worklane-claude-account.service (so one at a time, with the switch too): a real call per agent
@@ -40,6 +41,9 @@
 // for profile-add --token-from <that instance>: its dashboard stored the token before it asked). Every instance, or
 // another one, is a root admin's, with claude-account.sh at a root shell. A profile added this way is staged: nothing
 // may use it until an admin confirms it on the machine (claude-account.sh confirm-profile, never through here).
+// login is the relayed sign-in (the owner's approved exception, docs/auth.md): `claude auth login` as the asking
+// instance's agent user; its link goes to a file that instance's coordinator user alone reads, and the one-time code
+// comes back through that user's 0400 file. Staged like any account added from a dashboard.
 //
 //   worklane-machine claude-account failover <profile+profile+...|off> back|stay
 //
@@ -108,7 +112,7 @@ const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -202,7 +206,7 @@ const profileName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.tes
 function parseClaudeProfile(args) {
   if (args[0] !== 'claude-account' || args.length !== 3 || !profileName(args[2])) return null;
   const action = args[1];
-  if ((action === 'profile-add' || action === 'remove') && args[2] !== 'default') return { action, profile: args[2] };
+  if ((action === 'profile-add' || action === 'remove' || action === 'login') && args[2] !== 'default') return { action, profile: args[2] };
   if (action === 'use') return { action, profile: args[2] };
   return null;
 }
