@@ -274,14 +274,16 @@ export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests'>, n
  * The panel: loaded, and looked at again every few seconds while a switch or a request is under way. Hidden on
  * refusal; a look that fails otherwise keeps the last good data, and a token being pasted, on screen (web/src/refresh.tsx).
  */
-export function ClaudeAccountPanel() {
+export function ClaudeAccountPanel({ onLoaded }: { onLoaded?: () => void }) {
   const [loaded, setLoaded] = useState<Loaded<ClaudeAccountData>>(NOTHING_YET);
   const data = loaded.data;
   const load = () =>
-    getClaudeAccount().then(
-      (d) => setLoaded({ data: d, stale: null }),
-      (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
-    );
+    getClaudeAccount()
+      .then(
+        (d) => setLoaded({ data: d, stale: null }),
+        (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
+      )
+      .finally(() => onLoaded?.());
   useEffect(() => void load(), []);
   useRetry(loaded, () => void load());
   const active = !!data && accountBusy(data);
