@@ -142,8 +142,11 @@ test('the sudoers rule lists exactly the 34 commands, no patterns but add-projec
   // The account profile steps (issue #464): each argument a profile's or an instance's name, nothing else.
   // One profile name each, and no instance: the helper takes the asking coordinator's from SUDO_USER.
   const profiles = ['^claude-account profile-add [a-z][a-z0-9-]*$', '^claude-account remove [a-z][a-z0-9-]*$', '^claude-account use [a-z][a-z0-9-]*$', '^claude-account login [a-z][a-z0-9-]*$', '^claude-account failover [a-z][a-z0-9+-]* back$', '^claude-account failover [a-z][a-z0-9+-]* stay$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
-  const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, ...profiles, addProject];
-  assert.equal(want.length - 9, 34);
+  // The plugin steps: an id, an https URL and a commit, a digest and roles; never an instance, never confirm.
+  const plugins = ['^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$', '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$', '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$', '^plugin-withdraw [a-z0-9][a-z0-9-]*$', '^plugin-remove [a-z0-9][a-z0-9-]*$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
+  const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, ...profiles, ...plugins, addProject];
+  assert.equal(want.length - 9 - plugins.length, 34);
+  for (const p of plugins) assert.doesNotMatch(p, /confirm|--|,|:/, p);
   // No profile pattern takes a second word: never an instance, never every instance.
   for (const p of profiles) assert.doesNotMatch(p, /\* \[|(back|stay) /, p);
   // Never a comma inside a pattern: sudoers would read it as the end of the command.
@@ -159,7 +162,7 @@ test('the sudoers rule lists exactly the 34 commands, no patterns but add-projec
   assert.deepEqual([...r.stdout.matchAll(/ tailscale ([^,\\\n]*)/g)].map((m) => m[1]!.trim()), ['install', 'up', 'serve', 'public-url']);
   assert.deepEqual(cmds, want);
   // add-project's arguments are one anchored pattern (test/add-project.test.ts), the staged signer's two another (below); nothing else has any.
-  assert.doesNotMatch(profiles.reduce((t, p) => t.replace(p, ''), r.stdout.replace(addProject, '').replace(stage, '').replace(discard, '')), /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
+  assert.doesNotMatch([...profiles, ...plugins].reduce((t, p) => t.replace(p, ''), r.stdout.replace(addProject, '').replace(stage, '').replace(discard, '')), /[*?[\]^$]|ALL\s*$|\bsh\b|bash/m, 'no wildcards, patterns or shells');
   // No rule names the signers file's own commands, or main: a coordinator can't add or confirm a signer, or leave the release channel.
   assert.doesNotMatch(r.stdout, /add-update-signer|confirm-update-signer|set-update-channel main|allowed_signers/);
   assert.match(r.stdout, /^wl-alpha, wl-beta ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
@@ -447,7 +450,7 @@ test('a refused tailscale argument list runs nothing and logs nothing; a caller 
   for (const a of [['tailscale'], ['tailscale', 'up', '--auth-key=tskey-auth-x'], ['tailscale', 'serve', '4398'], ['tailscale', 'public-url', 'https://x.example.test'], ['tailscale', 'status']]) {
     const r = h.run(...a);
     assert.equal(r.status, 2, JSON.stringify(a));
-    assert.match(r.stderr, /usage: worklane-machine .*\| tailscale install\|up\|serve\|public-url\n$/);
+    assert.match(r.stderr, /usage: worklane-machine .*\| tailscale install\|up\|serve\|public-url \| plugin-fetch .*\| plugin-remove <id>\n$/);
   }
   assert.ok(!existsSync(h.log), 'nothing logged');
 });
@@ -460,21 +463,22 @@ function sudoersWithSudo(version: string | null) {
 }
 
 test('the pattern rules (add-project, stage-update-signer, discard-update-signer, the Claude account profile steps) are installed only for sudo 1.9.10 or later; below, they are left out, said so, and every other rule stays', { skip: !posix && 'bash' }, () => {
-  const k = /\^(stage-update-signer|discard-update-signer|add-project|claude-account [a-z-]+) /g;
+  const k = /\^(stage-update-signer|discard-update-signer|add-project|claude-account [a-z-]+|plugin-[a-z]+) /g;
   // The command lines alone, each without its list punctuation: what differs is which commands, not where the list ends.
   const commands = (rule: string) => rule.split('\n').filter((l) => !l.startsWith('#')).map((l) => l.replace(/,? \\$/, '').replace(/^Cmnd_Alias WORKLANE_MACHINE = /, '    ').trim()).filter(Boolean);
   for (const v of ['1.9.10', '1.9.10p1', '1.9.15p5', '1.9.17', '1.10.0', '2.0.0']) {
     const r = sudoersWithSudo(v);
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^claude-account profile-add', '^claude-account remove', '^claude-account use', '^claude-account login', '^claude-account failover', '^claude-account failover', '^add-project'], `sudo ${v}: every pattern rule`);
+    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^claude-account profile-add', '^claude-account remove', '^claude-account use', '^claude-account login', '^claude-account failover', '^claude-account failover', '^plugin-fetch', '^plugin-fetch', '^plugin-stage', '^plugin-withdraw', '^plugin-remove', '^add-project'], `sudo ${v}: every pattern rule`);
     assert.doesNotMatch(r.stdout, /^# Not here/m);
   }
-  const newer = commands(sudoersWithSudo('1.9.10').stdout).filter((l) => !/\^(stage-update-signer|discard-update-signer|add-project|claude-account [a-z-]+) /.test(l));
+  const newer = commands(sudoersWithSudo('1.9.10').stdout).filter((l) => !/\^(stage-update-signer|discard-update-signer|add-project|claude-account [a-z-]+|plugin-[a-z]+) /.test(l));
   for (const v of ['1.9.9', '1.9.9p2', '1.9.5p2', '1.8.31', '1.9.0', null]) {
     const r = sudoersWithSudo(v);
     assert.equal(r.status, 0, r.stderr);
     assert.equal((r.stdout.match(k) ?? []).length, 0, `sudo ${v}: no pattern rule`);
     assert.match(r.stdout, /^# Not here either, for the same reason: the claude-account profile commands \(profile-add, use, remove, login, failover\)\.$/m);
+    assert.match(r.stdout, /^# Nor the plugin steps \(plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove\): plugins\.sh at a root shell instead\.$/m);
     assert.match(r.stdout, new RegExp(`^# Not here: add-project, stage-update-signer and discard-update-signer\\. This sudo \\(${(v ?? '').replace(/p\d+$/, '')}\\) is older than 1\\.9\\.10 and would read their patterns as literal text\\.$`, 'm'));
     // Every other rule is there as on a newer sudo.
     assert.deepEqual(commands(r.stdout), newer, `sudo ${v}: the rest unchanged`);
@@ -487,7 +491,7 @@ test('the pattern rules (add-project, stage-update-signer, discard-update-signer
   // machine-helper.sh says which it did, refuses (to stderr) to install them on an older sudo, and records it for the dashboard.
   const sh = readFileSync(join(setup, 'machine-helper.sh'), 'utf8');
   assert.match(sh, /^if sudo_regex_ok; then\n  echo "sudo \$\(sudo_version\): \$SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are installed"\n  left_out='\[\]'\nelse\n  echo "REFUSED: the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are NOT installed\./m);
-  assert.match(sh, /left_out='\["add-project","stage-update-signer","discard-update-signer","claude-account-profiles"\]'/);
+  assert.match(sh, /left_out='\["add-project","stage-update-signer","discard-update-signer","claude-account-profiles","plugins"\]'/);
   assert.match(sh, /^mv -f "\$\(dirname "\$HELPER_RULES"\)\/\.helper-rules\.json\.tmp" "\$HELPER_RULES"$/m);
   assert.match(readFileSync(join(setup, 'lib.sh'), 'utf8'), /^HELPER_RULES=\/etc\/worklane\/helper-rules\.json$/m);
 });

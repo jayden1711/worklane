@@ -92,6 +92,22 @@
 // set-test-slots, set-updates, set-update-channel, install-updater, add-project, stage/discard-update-signer,
 // claude-account status) runs in a transient unit of its own, started with systemd-run once its arguments have
 // passed, because the coordinator's own sandbox (ProtectSystem=full) would make those paths read-only. See main().
+// Plugins for an instance's agents (scripts/setup/plugins.sh, src/plugins/), for the asking coordinator's instance
+// alone (from SUDO_USER, never an argument):
+//
+//   worklane-machine plugin-fetch <id> <https git URL> <40-hex commit> [<subdirectory>]
+//   worklane-machine plugin-stage <id> sha256:<64 hex> <role+role...>
+//   worklane-machine plugin-withdraw <id>
+//   worklane-machine plugin-remove <id>
+//
+// plugin-fetch starts plugins.sh fetch as its own unit (worklane-plugin-fetch-<instance>.service: one at a time per
+// instance, and at most 10 an hour): a throwaway user (DynamicUser) fetches that exact commit; root inspects it without
+// running any of it and leaves a preview. plugin-stage records an approval in /var/lib/worklane/plugins/pending.json,
+// only when the digest is what that preview and those roles make now; a staged approval is trusted for nothing.
+// Nothing in this helper adds or changes an entry in an instance's allowlist (/etc/worklane/plugins/<instance>.json):
+// an admin confirms a staged approval at a root shell (plugins.sh confirm, which refuses a coordinator's sudo).
+// plugin-remove only deletes an entry; plugin-withdraw takes a staged one back out.
+//
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -111,8 +127,11 @@ const TAILSCALE = '/opt/worklane/current/scripts/setup/tailscale.sh';
 const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
+const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
+const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id>';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -447,6 +466,62 @@ function readJson(file) {
   }
 }
 
+// ---------- plugins ----------
+
+const PLUGIN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+// An https git URL with no credentials, port, query or fragment (sudo's pattern allows the same, src/plugins/fetch.ts more).
+const PLUGIN_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~/-]+$/;
+const PLUGIN_SHA = /^[0-9a-f]{40}$/;
+const PLUGIN_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
+const PLUGIN_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const PLUGIN_ROLES = /^[a-z][a-z0-9-]{0,30}(?:\+[a-z][a-z0-9-]{0,30})*$/;
+
+/** The plugin step a list asks for, or null when it is anything else. */
+function parsePlugin(args) {
+  const [cmd, id] = args;
+  if (typeof id !== 'string' || !PLUGIN_ID.test(id)) return null;
+  if (cmd === 'plugin-fetch' && (args.length === 4 || args.length === 5)) {
+    const [, , url, sha, sub] = args;
+    if (!PLUGIN_URL.test(url) || !PLUGIN_SHA.test(sha)) return null;
+    if (sub !== undefined && (!PLUGIN_PATH.test(sub) || sub.split('/').some((p) => p === '.' || p === '..'))) return null;
+    return { action: 'fetch', id, url, sha, ...(sub !== undefined ? { path: sub } : {}) };
+  }
+  if (cmd === 'plugin-stage' && args.length === 4 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3])) return { action: 'stage', id, digest: args[2], roles: args[3] };
+  if (cmd === 'plugin-withdraw' && args.length === 2) return { action: 'withdraw', id };
+  if (cmd === 'plugin-remove' && args.length === 2) return { action: 'remove', id };
+  return null;
+}
+
+function plugin(p) {
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write(`plugin-${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/plugins.sh\n`);
+    return 2;
+  }
+  if (p.action === 'fetch') {
+    const real = rootScript(PLUGINS_SH);
+    if (!real) return 1;
+    const what = `plugins.${instance}.fetch`;
+    const args = [real, 'fetch', instance, p.id, p.url, p.sha, ...(p.path ? [p.path] : [])];
+    const r = spawnSync('systemd-run', ['--unit', `${PLUGIN_FETCH_UNIT}-${instance}`, '--collect', '--no-block', '--quiet', '--description', `worklane plugin fetch for ${instance}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
+    if (r.error || r.status !== 0) {
+      const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+      process.stderr.write(/already (exists|loaded|active)/i.test(text) ? `a plugin fetch for ${instance} is already running\n` : `couldn't start the fetch: ${text.split('\n')[0]}\n`);
+      logLine(what, null, `failed: ${p.id} ${p.url} ${p.sha}: not started`);
+      return 1;
+    }
+    logLine(what, null, `${p.id} ${p.url}${p.path ? ` (${p.path})` : ''} ${p.sha}`);
+    process.stdout.write(`started the fetch of ${p.id} as ${PLUGIN_FETCH_UNIT}-${instance}.service\n`);
+    return 0;
+  }
+  const cli = rootScript(ENGINE_CLI);
+  if (!cli) return 1;
+  const args = p.action === 'stage' ? ['--id', p.id, '--roles', p.roles, '--digest', p.digest] : ['--id', p.id];
+  // The engine's own root operations: the instance from sudo, `by` from SUDO_USER (kept in the environment).
+  const r = spawnSync(process.execPath, [cli, 'plugins', p.action, '--instance', instance, ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8', SUDO_USER: process.env.SUDO_USER }, stdio: 'inherit' });
+  return r.status === null ? 1 : r.status;
+}
+
 // ---------- where a step runs ----------
 //
 // The coordinator calls this helper through sudo from inside its own unit, whose sandbox (ProtectSystem=full) makes
@@ -466,6 +541,8 @@ function needsUnit(args) {
   if (parseSigner('stage-update-signer', args) || parseSigner('discard-update-signer', args)) return true; // its pending list, kept with the rest
   if (parseClaudeAccount(args) === 'status') return true; // claude-account.sh as root
   if (parseClaudeFailover(args)) return true; // claude-account.sh as root
+  const pl = parsePlugin(args);
+  if (pl && pl.action === 'remove') return true; // /etc/worklane/plugins
   return false;
 }
 
@@ -510,6 +587,8 @@ function main(argv) {
   if (discard) return discardSigner(discard);
   const ts = parseTailscale(args);
   if (ts) return tailscale(ts);
+  const pl = parsePlugin(args);
+  if (pl) return plugin(pl);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
@@ -541,4 +620,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePlugin, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

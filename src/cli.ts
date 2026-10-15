@@ -123,6 +123,8 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
+  plugins show --instance name     the instance's approved plugins (root's allowlist, checked);
+                                   fetch, stage, confirm and remove are root's (scripts/setup/plugins.sh)
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
@@ -668,6 +670,11 @@ async function main(argv: string[]): Promise<number> {
       }
       if (!jobs.length) console.log('no jobs');
       return 0;
+    }
+
+    case 'plugins': {
+      const { pluginsCommand } = await import('./plugins/cli.js');
+      return pluginsCommand(sub, rest, instanceOpt);
     }
 
     case 'slots': {

@@ -21,6 +21,9 @@
 #     against: a staged key becomes a signer only through updates.sh --confirm-signer <fingerprint>, as root.
 #     And `tailscale install|up|serve|public-url`, which start tailscale.sh with that one word as its own unit: the
 #     pinned, signed install; `tailscale up` with no auth key; https 443 to the hub's sign-in port; the hub's URL.
+#     And the plugin steps (plugins.sh): `plugin-fetch <id> <https url> <sha> [<path>]`, `plugin-stage <id> sha256:<hex>
+#     <role+role>`, `plugin-withdraw <id>` and `plugin-remove <id>`, for the asking coordinator's instance alone. Nothing
+#     in the helper adds or changes an approved plugin: an admin confirms a staged one with plugins.sh confirm.
 #   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
 #     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
 #     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
@@ -70,7 +73,7 @@ if sudo_regex_ok; then
   left_out='[]'
 else
   echo "REFUSED: the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
-  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles"]'
+  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles","plugins"]'
 fi
 # For the dashboard (0644, written whole): which of the helper's commands this machine's sudo rule leaves out, so a
 # page shows the root command for them instead of a button that would only fail.
@@ -121,6 +124,18 @@ for u in "${users[@]}"; do
     for bad in "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x" "login work alpha" "login work --for x" "login" "login Work" "failover work+default back ci" "failover off stay alpha" "failover work,default back" "failover work+Home back" "failover work maybe" "failover work+default back --for x"; do
       # shellcheck disable=SC2086 # each case is its words
       if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $bad >/dev/null 2>&1; then echo "FAIL: $u may run claude-account $bad" >&2; exit 1; fi
+    done
+  fi
+  if sudo_regex_ok; then
+    sha="$(printf '0%.0s' $(seq 1 40))" dig="sha256:$(printf 'a%.0s' $(seq 1 64))"
+    for ok in "plugin-fetch kit https://example.com/o/kit.git $sha" "plugin-fetch kit https://example.com/o/mono $sha plugins/kit" "plugin-stage kit $dig builder" "plugin-stage kit $dig builder+reviewer" "plugin-withdraw kit" "plugin-remove kit"; do
+      # shellcheck disable=SC2086 # each case is its words
+      sudo -n -l -U "$u" "$MACHINE_HELPER" $ok >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the $ok pattern, and $u can't run it" >&2; exit 1; }
+    done
+    for bad in "plugin-fetch kit http://example.com/o/kit $sha" "plugin-fetch kit https://example.com/o/kit main" "plugin-fetch Kit https://example.com/o/kit $sha" "plugin-fetch kit https://example.com/o/kit $sha a b" "plugin-fetch kit https://example.com/o/kit;id $sha" \
+      "plugin-stage kit $dig" "plugin-stage kit sha256:abc builder" "plugin-stage kit $dig Builder" "plugin-stage kit $dig builder alpha" "plugin-confirm kit $dig" "plugin-remove" "plugin-remove kit alpha" "plugin-withdraw kit --instance alpha" "plugin-add kit"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
     done
   fi
   if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then

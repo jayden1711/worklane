@@ -2201,6 +2201,61 @@ jobs:
           path=/api/tailscale; api > "$F/ts-view5.json"
           jq -e '.status.serve and .next==null and (.steps|map(.done)|all)' "$F/ts-view5.json"
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
+      - name: "plugins: through the helper as ci's coordinator, a throwaway user fetches this commit's fixture and root keeps a preview; a stage grants nothing; the coordinator can't confirm or write the allowlist; root confirms only with the id typed back; remove only deletes"
+        env:
+          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          url="https://github.com/${{ github.repository }}.git"
+          st=/var/lib/worklane/plugins/fetch-status/ci.json
+          E=/opt/worklane/current/dist/src/plugins
+          fetch() { # <id> <fixture>: through the helper, as the coordinator; waits for the fetch unit's result
+            sudo -u wl-ci sudo -n "$HELPER" plugin-fetch "$1" "$url" "$FIXTURE_SHA" "test/fixtures/plugins/$2"
+            for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done
+            sudo jq -c . "$st"
+          }
+          digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/approval.js'; import {readPreview, recordOf} from '$E/root-ops.js'; console.log(approvalDigest(recordOf(readPreview('ci', process.argv[1]), process.argv[2].split('+'))))" "$1" "$2"); }
+          fetch kit kit
+          [ "$(sudo jq -r .state "$st")" = done ]
+          p=/var/lib/worklane/plugins/previews/ci/kit
+          [ "$(stat -c '%U %a' "$p/preview.json")" = "root 644" ]
+          jq -e '.inspection.refusals == [] and .inspection.skills == ["review"] and .inspection.agents == ["reviewer"] and (.inspection.mcpServers | map(.name)) == ["notes"]' "$p/preview.json"
+          test ! -e "$p/tree/.mcp.json"   # the broker, never Claude Code, runs a plugin's MCP server
+          if find "$p" ! -user root | grep -q .; then echo "the preview isn't all root's" >&2; exit 1; fi
+          # Refused fixture: previewed with its reasons, and nothing can stage it.
+          fetch refused refused
+          jq -e '.materialized == null and (.inspection.refusals | any(test("allowed-tools")))' /var/lib/worklane/plugins/previews/ci/refused/preview.json
+          if sudo -u wl-ci sudo -n "$HELPER" plugin-stage refused "sha256:$(printf 'a%.0s' $(seq 64))" builder; then echo "a refused plugin was staged" >&2; exit 1; fi
+          # Stage: only the digest the preview and roles make now.
+          d="$(digest kit builder)"
+          if sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$(digest kit reviewer)" builder; then echo "a digest for other roles was staged" >&2; exit 1; fi
+          sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder
+          jq -e --arg d "$d" '.entries | any(.instance == "ci" and .id == "kit" and .digest == $d and .staged_by == "wl-ci")' /var/lib/worklane/plugins/pending.json
+          test ! -e /etc/worklane/plugins/ci.json   # staged is trusted for nothing
+          # The coordinator can't confirm: no helper command, plugins.sh refuses its sudo, and the allowlist isn't writable to it.
+          if sudo -n -l -U wl-ci "$HELPER" plugin-confirm kit "$d" > /dev/null 2>&1; then echo "the coordinator may confirm" >&2; exit 1; fi
+          if sudo -n -l -U wl-ci bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit "$d" > /dev/null 2>&1; then echo "the coordinator may run plugins.sh" >&2; exit 1; fi
+          if sudo env SUDO_USER=wl-ci bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit "$d" < /dev/null 2> "$F/pc.err"; then echo "plugins.sh confirmed for a coordinator" >&2; exit 1; fi
+          grep -q "a coordinator may only stage" "$F/pc.err"
+          sudo install -d -o root -g root -m 0755 /etc/worklane/plugins
+          if sudo -u wl-ci sh -c 'echo x > /etc/worklane/plugins/ci.json' 2> /dev/null; then echo "the coordinator wrote the allowlist" >&2; exit 1; fi
+          # Root at a terminal: a wrong id typed confirms nothing; the right one confirms.
+          printf 'kits\n' | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit $d" /dev/null > "$F/pc1.out" 2>&1 || true
+          grep -q 'not confirmed: nothing changed' "$F/pc1.out"
+          test ! -e /etc/worklane/plugins/ci.json
+          printf 'kit\n' | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit $d" /dev/null | tee "$F/pc2.out"
+          grep -q 'confirmed kit for ci' "$F/pc2.out"
+          grep -q "roles:      builder" "$F/pc2.out"
+          [ "$(stat -c '%U %G %a' /etc/worklane/plugins/ci.json)" = "root root 644" ]
+          tree="$(jq -r '.entries[0].record.tree' /etc/worklane/plugins/ci.json)"
+          s="/var/lib/worklane/plugins/store/ci/kit/${tree#wl-tree-v1:sha256:}"
+          if find "$s" ! -user root -o -perm /022 | grep -q .; then echo "the store copy isn't root's alone" >&2; exit 1; fi
+          (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {treeHash} from '$E/tree.js'; if (treeHash(process.argv[1]) !== process.argv[2]) process.exit(1)" "$s" "$tree")
+          sudo -u wl-ci /usr/local/bin/worklane plugins show --instance ci | grep -q "^kit "
+          tail -n 3 /var/lib/worklane/machine-changes.jsonl | grep -q '"what":"plugins.ci.confirmed"'
+          # Remove, through the helper: the entry goes; nothing else is touched.
+          sudo -u wl-ci sudo -n "$HELPER" plugin-remove kit
+          jq -e '.entries == []' /etc/worklane/plugins/ci.json
+          test -d "$s"   # runs in flight keep their copy
       - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
         run: sudo bash scripts/ci/disk-full-coordinator.sh ci
       - name: the units and the fake's log, on failure

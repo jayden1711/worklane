@@ -1,0 +1,6 @@
+{
+  "name": "kit",
+  "version": "1.0.0",
+  "description": "A fixture plugin for the real-host CI: one skill, one agent, one stdio MCP server inside it.",
+  "author": { "name": "fixture" }
+}
