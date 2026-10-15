@@ -62,6 +62,7 @@ async function protectionDetail(dir: string): Promise<string> {
         return { status: r.status, stdout: r.stdout, stderr: r.stderr };
       }
       const a = args.join(' ');
+      if (cmd === 'claude' && args[0] === '-p') return { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok"}', stderr: '' }; // the login's proof: a minimal real call, answered
       if (cmd === 'claude' && a === 'auth status') return { status: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}', stderr: '' };
       if (cmd === 'gh' && a === 'auth status') return { status: 0, stdout: '', stderr: '' };
       if (cmd === 'gh' && /--jq \.permissions\.push$/.test(a)) return { status: 0, stdout: 'true\n', stderr: '' };
