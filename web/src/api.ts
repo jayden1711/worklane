@@ -274,7 +274,8 @@ export interface State {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   /** Direct landing's batches (`land`) and PR mode's (`pr`, with its PRs); a viewer's have no tip or detail. */
   batches: { id: string; kind?: 'land' | 'pr'; issues: number[]; prs?: number[]; tip?: string; outcome: string; detail?: string; at: string }[];
-  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  /** The last hold or release; `banner` while held (absent from older servers). */
+  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string; banner?: HoldBanner | null } | null;
   /** The machine-wide emergency stop, read-only: in force now, and whether this coordinator has halted for it. */
   /** Open PRs, and those needing a person (waiting on review, or a CI fix that gave up). */
   prCounts?: { open: number; needYou: number };
@@ -378,7 +379,9 @@ export interface Settings {
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
-  governor: { max_load?: number; min_free_disk_pct: number };
+  governor: { max_load?: number; min_free_disk_pct: number; min_free_disk_gb?: number };
+  /** The disk floor on this machine now; null when it can't be measured (absent from older servers). */
+  diskFloor?: DiskFloor | null;
   agents: { budget: number; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
   /** INVARIANT: `from` null means the engine's default (item 32). */
   routing: { key: string; task: string; value: string | number | boolean | string[]; from: string | null }[];
@@ -979,6 +982,8 @@ export interface FirstRunStep {
   at: string | null;
 }
 export interface FirstRun {
+  /** The machine check: the disk floor now (null in setup mode or unmeasurable; absent from older servers). */
+  diskFloor?: DiskFloor | null;
   recorded: boolean;
   mode: 'local' | 'server' | null;
   steps: FirstRunStep[];
@@ -1704,6 +1709,27 @@ export interface BoardData {
   slots: { cap: number; running: number };
   /** The Landing column's PR batches (absent from older servers). */
   batches?: BoardBatch[];
+  /** Why dispatch holds now, with its numbers and fix (a viewer's without fix or link); null or absent when it doesn't. */
+  hold?: HoldBanner | null;
+}
+
+/** A governor hold as the Board and First run show it (src/governor-holds.ts holdBanner). */
+export interface HoldBanner {
+  kind: string;
+  title: string;
+  numbers: string | null;
+  /** When it ends on its own (ISO): shown as "wait until <local time>". */
+  wait: string | null;
+  fix: string | null;
+  link: { path: string; label: string } | null;
+  since: string;
+}
+
+/** The disk floor on this machine now (src/governor-holds.ts diskFloorCheck), as doctor checks it. */
+export interface DiskFloor {
+  level: 'ok' | 'warn';
+  detail: string;
+  room: { freeGb: number; totalGb: number; freePct: number; floorGb: number; estGb: number; afterGb: number; shortGb: number; held: boolean };
 }
 
 /**

@@ -19,7 +19,9 @@ import { writeLive } from '../console.js';
 import { allowedOnce } from '../domain-requests.js';
 import { type FileIndex } from '../hotspots.js';
 import { runIssue } from '../run-record.js';
-import { emergencyStop } from '../slots.js';
+import { emergencyStop, slotStatus } from '../slots.js';
+import { updateDrain } from '../update-drain.js';
+import { diskHold, diskRoom, nextUtcDay, type Hold } from '../governor-holds.js';
 import type { PushGuard } from '../push-guard.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
 import type { TestRuns } from './pr-batch.js';
@@ -298,19 +300,27 @@ export abstract class CoordinatorBase {
 
   private lastHold: string | null = null;
 
-  /** Why no new agent may start right now, or null. Load and disk are machine-wide. */
-  governorHold(): { reason: string; load: number | null; freeDiskPct: number | null } | null {
+  /** Why no new agent may start right now, or null. Load and disk are machine-wide. Each hold carries its numbers (src/governor-holds.ts). */
+  governorHold(): Hold | null {
     const m = this.d.machine ?? { load: machineLoad, disk: diskFree };
     const load = m.load();
     const disk = m.disk(this.d.repo);
     const est = this.d.cfg.tests.worktree.est_size_gb;
-    const freeAfter = disk.freePct - (est / Math.max(disk.totalGb, 1)) * 100;
     const maxLoad = this.d.cfg.project.governor.max_load ?? cpuCount() * 2;
-    const minFree = this.d.cfg.project.governor.min_free_disk_pct;
-    if (this.spentToday() >= this.d.cfg.agents.daily_budget_usd) return { reason: `daily budget $${this.d.cfg.agents.daily_budget_usd} reached`, load, freeDiskPct: disk.freePct };
-    if (load !== null && load > maxLoad) return { reason: `machine load ${load.toFixed(0)} > ${maxLoad}`, load, freeDiskPct: disk.freePct };
-    if (freeAfter < minFree) return { reason: `free disk would drop to ${freeAfter.toFixed(1)}% (< ${minFree}%) with another ${est} GB worktree`, load, freeDiskPct: disk.freePct };
-    return null;
+    const budget = this.d.cfg.agents.daily_budget_usd;
+    const spent = this.spentToday();
+    if (spent >= budget) return { kind: 'budget', reason: `daily budget $${budget} reached`, load, freeDiskPct: disk.freePct, facts: { spent_usd: spent, budget_usd: budget, until: nextUtcDay(Date.now()).toISOString() } }; // spentToday's day: UTC, by the wall clock
+    if (load !== null && load > maxLoad) return { kind: 'load', reason: `machine load ${load.toFixed(0)} > ${maxLoad}`, load, freeDiskPct: disk.freePct, facts: { load, max_load: maxLoad } };
+    // WHY: the floor is the larger of an absolute GB and a share of the disk (#470), not a flat share.
+    const room = diskRoom({ freeGb: disk.freeGb ?? (disk.freePct / 100) * disk.totalGb, totalGb: disk.totalGb }, this.d.cfg.project.governor, est);
+    return diskHold(room, this.d.cfg.project.governor, load);
+  }
+
+  /** The hold when no agent slot is free: the updater's drain, or the machine-wide cap with its numbers. */
+  protected slotHold(): Hold {
+    if (updateDrain(this.d.slotsDir)) return { kind: 'update_drain', reason: 'draining for an engine update: no new agent starts until it is installed', load: null, freeDiskPct: null };
+    const s = slotStatus(this.d.slotsDir);
+    return { kind: 'slots', reason: 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null, facts: { cap: s.cap, running: s.agents.length } };
   }
 
   /** The coordinator's clock, in ms (tests set `now`). */
@@ -449,11 +459,11 @@ export abstract class CoordinatorBase {
     return true;
   }
 
-  protected noteHold(h: ReturnType<CoordinatorBase['governorHold']>) {
+  protected noteHold(h: Hold | null) {
     const key = h?.reason.replace(/[\d.]+/g, '#') ?? null; // record changes of reason, not every reading
     if (key === this.lastHold) return;
     this.lastHold = key;
-    if (h) this.emit('governor.hold', { reason: h.reason, load: h.load, free_disk_pct: h.freeDiskPct });
+    if (h) this.emit('governor.hold', { reason: h.reason, load: h.load, free_disk_pct: h.freeDiskPct, kind: h.kind, ...(h.facts ? { facts: h.facts } : {}) });
     else this.emit('governor.release', { load: (this.d.machine?.load ?? machineLoad)(), free_disk_pct: null });
   }
 

@@ -3,7 +3,7 @@ import { useView, type Settings, type ViewerSettings } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
 import { Loading } from '../components/patterns';
-import { Badge, Card } from '../components/ui';
+import { Badge, Card, cx } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
 import { Header } from '../components/Header';
 import { VoiceSettings } from '../voice/VoiceSettings';
@@ -175,7 +175,18 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
 
             <Section title="Machine and tests">
               <Row k="Max load">{full.governor.max_load ?? '2 × cores'}</Row>
-              <Row k="Min free disk">{full.governor.min_free_disk_pct}%</Row>
+              <Row k="Disk floor">
+                <span data-testid="settings-disk-floor">
+                  the larger of {full.governor.min_free_disk_gb ?? 10} GB and {full.governor.min_free_disk_pct}% of the disk, free after another worktree (governor.min_free_disk_gb, governor.min_free_disk_pct in the repo config)
+                </span>
+              </Row>
+              {full.diskFloor && (
+                <Row k="This machine">
+                  <span className={cx(full.diskFloor.level === 'warn' && 'text-orange')} data-testid="settings-disk-machine" data-level={full.diskFloor.level}>
+                    {full.diskFloor.detail}
+                  </span>
+                </Row>
+              )}
               {Object.entries(full.tests.gates).map(([k, v]) => (
                 <Row key={k} k={`Gate: ${k}`}>
                   {list(v)}
