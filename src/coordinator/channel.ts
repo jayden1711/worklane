@@ -12,6 +12,7 @@
 //   notice with links only; with them, a thread that only they answer, naming its number ("approve 12"), through
 //   the same decide and merge checks as on the dashboard; the other owners are pinged in it once it's approved.
 // Every post is recorded before it is sent (discord.posting) and after (discord.posted), so none is sent twice.
+import { authHoldPost, authRecoveredPost } from '../claude-auth-failure.js';
 import type { EventPayload } from '../events/types.js';
 import { ASK_EVENTS, asksFrom, asks as askApi, AskError } from '../console/asks.js';
 import { answerDecision, auditWrite, firstAnswer, mergeApproval } from '../decide.js';
@@ -711,6 +712,14 @@ export abstract class Channel extends ResearchOnDemand {
     // The usage-limit pause in force: one notice for it, with its reset time.
     const pause = this.usagePause();
     if (pause && !posted.has(`usage-limit:${pause.id}`)) await this.channelSend(src, `usage-limit:${pause.id}`, { channel }, usagePausePost(pause, { dashboardUrl: o.dashboardUrl, instance: this.d.instance, now: this.nowMs() }));
+    // A Claude login the API refused: one notice when it is held, and one when it works again (src/claude-auth-failure.ts).
+    for (const h of this.authHolds()) {
+      if (!posted.has(`claude-auth:${h.id}`)) await this.channelSend(src, `claude-auth:${h.id}`, { channel }, { kind: 'notice', text: authHoldPost(h, { dashboardUrl: o.dashboardUrl ?? null, instance: this.d.instance }).slice(0, REPLY_CHARS) });
+    }
+    for (const e of this.d.log.read(0, ['claude_auth.recovered'])) {
+      const x = e.payload as EventPayload<'claude_auth.recovered'>;
+      if (posted.has(`claude-auth:${x.hold_id}`) && !posted.has(`claude-auth-ok:${x.hold_id}`)) await this.channelSend(src, `claude-auth-ok:${x.hold_id}`, { channel }, { kind: 'notice', text: authRecoveredPost(x.login, { instance: this.d.instance }).slice(0, REPLY_CHARS) });
+    }
     // Each new thread explained in plain language, once.
     await this.explainThreads(cfg, src);
     // Decided elsewhere (the dashboard, GitHub, the CLI): the thread says so, once.

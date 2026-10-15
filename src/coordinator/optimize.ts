@@ -62,7 +62,7 @@ export abstract class Optimizer extends PrHygiene {
   /** Start the pass when it is due (one at a time). */
   async checkOptimize(): Promise<void> {
     const o = this.d.cfg.project.optimize;
-    if (!o.enabled || this.optimizeBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) return;
+    if (!o.enabled || this.optimizeBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.authHeld() || this.diskHeld()) return;
     const now = this.d.now?.() ?? new Date();
     if (!optimizeDue(now, this.passes().at(-1)?.started_at ?? null, o)) return;
     this.optimizeBusy = true;

@@ -13,7 +13,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
 import { type ChangeFile } from '../review.js';
-import { DEFAULT_COMMIT_IDENTITY, type CommitIdentity, type RunResult } from '../runner.js';
+import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunRequest, type RunResult } from '../runner.js';
 import { writeLive } from '../console.js';
 import { allowedOnce } from '../domain-requests.js';
 import { type FileIndex } from '../hotspots.js';
@@ -27,7 +27,9 @@ import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
 import { stuckOption } from './stuck-guard.js';
-import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, ShuttingDown, UsagePaused } from './shared.js';
+import { type CoordinatorDeps, LOCK_WAIT_RECORDED_MS, RETRY_CAP, sh, StoppedByOwner, type LiveEntry, Halted, ShuttingDown, UsagePaused, AuthPaused } from './shared.js';
+import { AUTH_CHECK, AUTH_OWNER_RECHECK_MS, AUTH_RECHECK_MS, authHoldsOf, authIncidentKey, authIncidentText, DEFAULT_LOGIN_KEY, type AuthHold } from '../claude-auth-failure.js';
+import { takeAuthRecheck } from '../claude-auth-recheck.js';
 import { limitHit, pauseOf, resetWords, USAGE_INCIDENT, type LimitHit, type UsagePause } from '../usage-limit.js';
 import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
@@ -119,9 +121,13 @@ export abstract class CoordinatorBase {
   /** Open-model providers that hit their usage or rate limit, by label: skipped (their runs fall back) until then (ms). */
   protected providerLimited = new Map<string, number>();
 
+  /** The runner under the wrapper below: only the held-login check calls it directly (it must run while the login is held). */
+  private claudeRunner: AgentRunner;
+
   constructor(protected d: CoordinatorDeps) {
     // Every agent run carries the halt signal; a run after a halt never starts.
     const runner = d.runner;
+    this.claudeRunner = runner;
     this.d = {
       ...d,
       runner: {
@@ -140,6 +146,11 @@ export abstract class CoordinatorBase {
           // Paused on the Claude usage limit: no run on Anthropic starts until its reset (src/usage-limit.ts).
           const pause = req.provider ? null : this.usagePause();
           if (pause) throw new UsagePaused(pause.resetAt);
+          // A Claude login the API refused: no run on it starts until a call on it succeeds (src/claude-auth-failure.ts).
+          const loginKey = req.provider ? null : this.loginKeyOf(req);
+          const held = loginKey === null ? null : this.authHold(loginKey);
+          if (held) throw new AuthPaused(held.login, held.detail);
+          const startedMs = this.nowMs();
           // Waits on the Claude login and transient retries are recorded for every run, with its issue and role.
           const who = { issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model };
           // The console holds every live run's input: listed for the dashboard while it runs.
@@ -209,6 +220,11 @@ export abstract class CoordinatorBase {
             this.pauseOnLimit(hit, who, r.detail);
             throw new UsagePaused(hit.resetAt);
           }
+          if (loginKey !== null && r.reason === 'auth_failed') {
+            const h = this.holdLogin(loginKey, req, who, r);
+            throw new AuthPaused(h.login, h.detail);
+          }
+          if (loginKey !== null && r.reason === 'succeeded') this.loginWorks(loginKey, 'run', req.role, startedMs);
           return r;
         },
       },
@@ -312,6 +328,101 @@ export abstract class CoordinatorBase {
   /** The usage-limit pause in force (src/usage-limit.ts), from the log, or null. */
   protected usagePause(): UsagePause | null {
     return pauseOf(this.d.log.read(0, ['usage.paused', 'usage.resumed']));
+  }
+
+  /** The Claude login a run would use: the runner's own answer (its config dir), else the one login there is. */
+  protected loginKeyOf(req: Pick<RunRequest, 'lane' | 'provider'>): string {
+    return this.claudeRunner.loginOf?.(req) ?? DEFAULT_LOGIN_KEY;
+  }
+
+  /** Every Claude login held now (src/claude-auth-failure.ts), from the log. */
+  protected authHolds(): AuthHold[] {
+    return authHoldsOf(this.d.log.read(0, ['claude_auth.failed', 'claude_auth.checked', 'claude_auth.recovered']));
+  }
+
+  protected authHold(key: string): AuthHold | null {
+    return this.authHolds().find((h) => h.key === key) ?? null;
+  }
+
+  /**
+   * A held login, if any: nothing new is dispatched while one is (a task's runs span the instance's logins, its
+   * worker's and its evaluator's), and nothing that runs on its own (research, fix runs, evals) starts.
+   */
+  protected authHeld(): AuthHold | null {
+    return this.authHolds()[0] ?? null;
+  }
+
+  /** A run's login was refused: it is held (once; a second refusal while held keeps the hold), and the red incident raised. */
+  private holdLogin(key: string, req: RunRequest, who: { issue: number | null; role: string }, r: RunResult): AuthHold {
+    const was = this.authHold(key);
+    const login = r.login?.account ?? was?.login ?? (key === DEFAULT_LOGIN_KEY ? "this instance's Claude login" : `the Claude login in ${key}`);
+    this.emit('claude_auth.failed', { key, login, lane: req.lane ?? 'default', issue: who.issue, role: who.role, detail: r.detail.slice(0, 1000) });
+    const h = this.authHold(key)!;
+    if (!was) {
+      const t = authIncidentText(this.authHolds());
+      this.d.incidents?.raiseIncident('claude_auth', authIncidentKey(this.d.instance), t.detail, t.fix);
+    }
+    return h;
+  }
+
+  /** A call on a held login succeeded (a run that started after the hold began, or the check): the hold ends. */
+  private loginWorks(key: string, via: 'run' | 'check', role: string, startedMs: number): void {
+    const h = this.authHold(key);
+    if (!h || Date.parse(h.since) > startedMs) return;
+    this.emit('claude_auth.recovered', { key, login: h.login, via, role, held_ms: Math.max(0, Math.round(this.nowMs() - Date.parse(h.since))), hold_id: h.id });
+    if (!this.authHolds().length) this.d.incidents?.resolveIncident('claude_auth', authIncidentKey(this.d.instance));
+  }
+
+  /** When the owner's last re-check was taken (ms): one a minute at most. */
+  private ownerRecheckAt = -Infinity;
+
+  /**
+   * The way out of a held login (no run may start on it, so no run can succeed to end the hold): one tiny real call
+   * on it, as its own user, at most every AUTH_RECHECK_MS; at once after an account switch, and on the owner's
+   * re-check from the dashboard (one a minute at most). A refused call costs nothing; one that is answered ends the hold.
+   */
+  protected async checkHeldLogins(): Promise<number> {
+    const asked = takeAuthRecheck(this.d.stateDir);
+    if (this.stopped || this.halt.signal.aborted) return 0;
+    const holds = this.authHolds();
+    if (!holds.length) return 0;
+    const now = this.nowMs();
+    const owner = asked !== null && now - this.ownerRecheckAt >= AUTH_OWNER_RECHECK_MS;
+    if (owner) this.ownerRecheckAt = now;
+    const switched = this.d.accountSwitched?.() ?? null;
+    let checked = 0;
+    for (const h of holds) {
+      const last = h.lastCheck ? Date.parse(h.lastCheck.at) : Date.parse(h.since);
+      const by = owner ? 'owner' : switched !== null && Date.parse(switched) > last ? 'account_switch' : now - last >= AUTH_RECHECK_MS ? 'timer' : null;
+      if (!by) continue;
+      await this.checkLogin(h, by);
+      checked++;
+    }
+    return checked;
+  }
+
+  private async checkLogin(h: AuthHold, by: 'timer' | 'owner' | 'account_switch'): Promise<void> {
+    const startedMs = this.nowMs();
+    const r = await this.claudeRunner.run({
+      role: 'login-check',
+      prompt: AUTH_CHECK.prompt,
+      model: AUTH_CHECK.model,
+      cwd: this.d.repo,
+      allowedTools: [],
+      maxTurns: AUTH_CHECK.maxTurns,
+      maxBudgetUsd: AUTH_CHECK.maxBudgetUsd,
+      stallMs: AUTH_CHECK.stallMs,
+      timeoutMs: AUTH_CHECK.timeoutMs,
+      // Not an agent's run: it never waits behind one on the login's run lock, and it is the same user and login.
+      interactive: true,
+      ...(h.lane !== 'default' ? { lane: h.lane } : {}),
+      signal: this.halt.signal,
+    });
+    this.cost(null, 'login-check', r);
+    // Answered at all (a reply, the budget cap, a usage limit): the API took the login.
+    const ok = r.reason === 'succeeded' || r.reason === 'budget_exhausted' || r.reason === 'rate_limited';
+    this.emit('claude_auth.checked', { key: h.key, login: h.login, ok, by, detail: (ok ? 'Claude answered a minimal call on this login' : r.detail).slice(0, 1000), cost_usd: Math.max(0, r.costUsd) });
+    if (ok) this.loginWorks(h.key, 'check', 'login-check', startedMs);
   }
 
   /** Pause on a usage-limit hit: once (a hit while paused changes nothing), with the incident raised when there's a watchdog. */

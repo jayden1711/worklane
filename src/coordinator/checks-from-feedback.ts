@@ -27,7 +27,7 @@ export abstract class ChecksFromFeedback extends Optimizer {
   /** Start the next constraint's proposal, when one is due and none is running. */
   async checkFeedbackChecks(): Promise<void> {
     const cfg = this.d.cfg.project.checks_from_feedback;
-    if (!cfg.enabled || this.feedbackChecksBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) return;
+    if (!cfg.enabled || this.feedbackChecksBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.authHeld() || this.diskHeld()) return;
     const events = this.d.log.read();
     const constraints = clusterSightings(sightingsFromEvents(events, this.d.cfg.project.owners.writers));
     const plan = planProposals(constraints, proposalHistory(events), { minSightings: cfg.min_sightings, maxPerWeek: cfg.max_proposals_per_week, now: this.d.now?.() ?? new Date() });

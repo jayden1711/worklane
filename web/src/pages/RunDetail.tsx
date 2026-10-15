@@ -77,6 +77,17 @@ export function RunList({ issue, lastId, refused: known = null }: { issue: numbe
   );
 }
 
+/** Why a run that didn't succeed ended: Claude's error text or its stderr's tail, as its record keeps it (redacted). */
+export function RunWhy({ detail }: { detail?: string | undefined }) {
+  if (!detail) return null;
+  return (
+    <Card className="primitive-card-pad" data-testid="run-detail-why">
+      <div className="text-[12px] font-medium text-ink-3">Why it ended</div>
+      <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[12.5px] leading-relaxed text-ink">{detail}</div>
+    </Card>
+  );
+}
+
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
 export function RunDetail({ id, refused: known = null }: { id: string; refused?: string | null }) {
   const [run, setRun] = useState<RunRecord | null | undefined>(known ? null : undefined);
@@ -152,6 +163,7 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
               )}
             </Card>
             {run.role === 'researcher' && <RunResearch id={run.id} />}
+            <RunWhy detail={run.detail} />
             <Card className="primitive-card-pad" data-testid="run-final">
               <div className="text-[12px] font-medium text-ink-3">Final message</div>
               <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{run.final || <span className="text-ink-3">none</span>}</div>

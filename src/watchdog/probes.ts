@@ -12,6 +12,7 @@ import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
 import { asRoot } from '../os/system-paths.js';
+import { authHoldsOf, authIncidentKey, authIncidentText } from '../claude-auth-failure.js';
 
 export interface Finding {
   kind: WatchdogKind;
@@ -237,6 +238,10 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
     const why = probeOut ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${String((lastAuthFail!.payload as { detail: string }).detail).slice(0, 200)}`;
     out.push({ kind: 'claude_auth', key: i, instance: i, detail: why, fix: "Sign the instance's agent user in to Claude again (a new setup-token for that user), then check it with claude auth status as that user", tried: refreshes ? [`retried ${refreshes} run${refreshes === 1 ? '' : 's'} after a token refresh in the last hour`] : [] });
   }
+  // Claude: a login the API refused (a run ended auth_failed), until a call on that login succeeded. Not bound to the
+  // last hour: nothing may start on a held login, so no newer run says anything about it (src/claude-auth-failure.ts).
+  const holds = authHoldsOf(f.events);
+  if (holds.length) out.push({ kind: 'claude_auth', key: authIncidentKey(i), instance: i, ...authIncidentText(holds) });
   const exp = f.auth?.expiresAt ? Date.parse(f.auth.expiresAt) : NaN;
   if (f.auth?.loggedIn && Number.isFinite(exp) && exp - f.now <= LOGIN_EXPIRY_MS) {
     const days = Math.max(0, Math.floor((exp - f.now) / 86_400_000));
