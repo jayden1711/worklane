@@ -85,7 +85,13 @@ test("a picture comes only from GitHub's hosts, over https, as a PNG, JPEG, GIF 
 test('a fetch that never answers gives up at its timeout', async () => {
   const hang = ((_u: string, init?: RequestInit) => new Promise<Response>((_ok, fail) => init?.signal?.addEventListener('abort', () => fail(new Error('aborted'))))) as typeof fetch;
   const t0 = Date.now();
-  assert.equal(await fetchAvatar('example-owner', 40, { fetch: hang, timeoutMs: 200 }), null);
+  // AbortSignal.timeout's timer doesn't hold the process open (a server does, in the product); this does, here.
+  const hold = setInterval(() => {}, 1000);
+  try {
+    assert.equal(await fetchAvatar('example-owner', 40, { fetch: hang, timeoutMs: 200 }), null);
+  } finally {
+    clearInterval(hold);
+  }
   assert.ok(Date.now() - t0 < 5_000);
 });
 
@@ -161,20 +167,20 @@ test('kept on disk for a day, served with cache-control and an ETag (304 when th
   assert.equal(g.asked.length, 4);
   assert.equal((await serve('example-owner', '40')).status, 200);
   assert.equal(g.asked.length, 4, 'a miss is not asked again at once');
-  // Never kept: a 404, so the page shows initials.
-  assert.equal((await serve('example-collaborator', '40')).status, 404);
+  // Never kept: no content (not a 404, which Chrome logs as an error), so the page shows initials.
+  assert.equal((await serve('example-collaborator', '40')).status, 204);
   // Refused before anything is fetched: a bad login or size, someone not known.
   const before = g.asked.length;
   assert.equal((await serve('a/b', '40')).status, 400);
   assert.equal((await serve('example-owner', '41')).status, 400);
   const c2 = capture();
   await a.serve(c2.req, c2.res, 'stranger', '40', () => false);
-  assert.equal((await c2.done).status, 404);
+  assert.equal((await c2.done).status, 204);
   assert.equal(g.asked.length, before);
   // A kept file that isn't a picture of its type is never served.
   writeFileSync(join(dir, 'example-owner-80.json'), JSON.stringify({ type: 'image/png', etag: '"x"', at: clock.t, body: SVG.toString('base64') }));
   down = true;
-  assert.equal((await serve('example-owner', '80')).status, 404);
+  assert.equal((await serve('example-owner', '80')).status, 204);
 });
 
 /** An instance's own dashboard, its log naming example-owner (a decision) and example-collaborator (a task's owner). */
@@ -208,7 +214,7 @@ test("an instance's own dashboard serves people's pictures itself: with its key,
     }
     assert.ok(existsSync(join(dir, 'avatars', 'example-owner-80.json')), "kept in the instance's state dir");
     const asked = g.asked.length;
-    assert.equal((await fetch(`${base}/api/avatar/stranger?size=80`, { headers: key })).status, 404, 'not a person it knows');
+    assert.equal((await fetch(`${base}/api/avatar/stranger?size=80`, { headers: key })).status, 204, 'not a person it knows');
     assert.equal((await fetch(`${base}/api/avatar/example-owner?size=999`, { headers: key })).status, 400);
     assert.equal((await fetch(`${base}/api/avatar/a%2Fb?size=40`, { headers: key })).status, 400);
     assert.equal(g.asked.length, asked, 'none of those fetched');
@@ -280,7 +286,7 @@ test('the hub serves pictures itself, signed-in only and for people the instance
     assert.deepEqual(readdirSync(join(hubState, 'avatars')), ['example-collaborator-40.json'], "kept in the hub's state dir");
     assert.deepEqual(instGh.asked, [], 'the hub fetched it, not the instance');
     const asked = hubGh.asked.length;
-    assert.equal((await fetch(`${base}/api/i/a/avatar/stranger?size=40`, { headers: { cookie } })).status, 404, 'not a person the instance knows: never fetched');
+    assert.equal((await fetch(`${base}/api/i/a/avatar/stranger?size=40`, { headers: { cookie } })).status, 204, 'not a person the instance knows: never fetched');
     assert.equal((await fetch(`${base}/api/i/zz/avatar/example-owner?size=40`, { headers: { cookie } })).status, 403);
     assert.equal((await fetch(`${base}/api/i/a/avatar/example-owner?size=33`, { headers: { cookie } })).status, 400);
     assert.equal(hubGh.asked.length, asked);
@@ -292,7 +298,7 @@ test('the hub serves pictures itself, signed-in only and for people the instance
     const key = { authorization: `Bearer ${h.token}` };
     assert.equal((await fetch(`${glass}/api/i/a/avatar/example-owner?size=80`)).status, 401);
     assert.equal((await fetch(`${glass}/api/i/a/avatar/example-owner?size=80`, { headers: key })).status, 200);
-    assert.equal((await fetch(`${glass}/api/i/a/avatar/nobody-known?size=80`, { headers: key })).status, 404);
+    assert.equal((await fetch(`${glass}/api/i/a/avatar/nobody-known?size=80`, { headers: key })).status, 204);
     // The hub's page: the same CSP.
     assert.equal((await fetch(`${base}/`)).headers.get('content-security-policy'), PAGE_CSP);
   } finally {

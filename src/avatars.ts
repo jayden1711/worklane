@@ -188,16 +188,16 @@ export class Avatars {
 
   /**
    * GET /api/avatar/<login>?size=N, after the caller's own sign-in check: a bad login or size is refused before
-   * anything else, then anyone `known` doesn't name (no fetch for them), then the picture or a 404 (the page shows
-   * initials).
+   * anything else, then anyone `known` doesn't name (no fetch for them), then the picture, or 204 No Content (the page shows
+   * initials). WHY 204, not 404: Chrome logs every 4xx as a console error, and a person with no picture is no error.
    */
   async serve(req: IncomingMessage, res: ServerResponse, rawLogin: string, rawSize: string | null, known: (login: string) => boolean | Promise<boolean>): Promise<void> {
     const size = avatarSize(rawSize);
     if (!validLogin(rawLogin)) return answer(res, 400, { error: 'not a GitHub login' });
     if (size === null) return answer(res, 400, { error: `size: one of ${AVATAR_SIZES.join(', ')}` });
-    if (!(await known(rawLogin))) return answer(res, 404, { error: `no picture: @${rawLogin} isn't a person this dashboard knows` });
+    if (!(await known(rawLogin))) return none(res);
     const p = await this.picture(rawLogin, size);
-    if (!p) return answer(res, 404, { error: `no picture for @${rawLogin}` });
+    if (!p) return none(res);
     const maxAge = Math.max(0, Math.floor((p.at + AVATAR_TTL_MS - this.now()) / 1000));
     const headers = { 'cache-control': `private, max-age=${maxAge}`, etag: p.etag, 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" };
     const asked = String(req.headers['if-none-match'] ?? '').split(',').map((s) => s.trim());
@@ -208,6 +208,12 @@ export class Avatars {
     res.writeHead(200, { ...headers, 'content-type': p.type, 'content-length': String(p.body.length) });
     res.end(p.body);
   }
+}
+
+/** No picture to show (no such person known, or none to be had): the page shows initials. */
+function none(res: ServerResponse): void {
+  res.writeHead(204, { 'cache-control': 'no-store' });
+  res.end();
 }
 
 function answer(res: ServerResponse, status: number, body: unknown): void {
