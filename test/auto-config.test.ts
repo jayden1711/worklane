@@ -324,7 +324,7 @@ test('init: the questions in the checklist and on the First-run page with their 
   // The owner merges it on GitHub (here: the branch fast-forwarded into the bare repo's main).
   execFileSync('git', ['push', '-q', p.bare, `refs/heads/${SETUP_BRANCH}:refs/heads/main`], { cwd: p.bare });
   // The config is in, but names no required check: init doesn't finish until a CI is chosen (#469), saying how.
-  assert.equal(await initCommand(args(), io), 1);
+  assert.equal(await initCommand(args(), io), 5);
   const s3a = readInitState(localInitFile(p.root))!;
   assert.equal(s3a.steps['repo-config']!.status, 'failed');
   assert.match(s3a.steps['repo-config']!.detail, /required_checks is empty and no CI is chosen: no PR is ever marked ready.*Fix: .*starter CI/);

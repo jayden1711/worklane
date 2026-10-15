@@ -37,7 +37,9 @@ import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
+import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
@@ -54,7 +56,7 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, stableNodePath, type ServiceSpec } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
@@ -110,6 +112,9 @@ import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
+import { handleSiri, siriGatewayToken } from './siri/instance.js';
+import { siriDevicesRoute } from './siri/manage.js';
+import { RateLimits } from './siri/tokens.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -224,6 +229,8 @@ export interface DashboardOptions {
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
+  /** gitleaks over an uploaded chat attachment (src/chat-attachments.ts); null: the engine's patterns only. Tests set it. */
+  attachmentScan?: ((path: string) => Promise<string[]>) | null;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; updatesStatePath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
@@ -520,6 +527,9 @@ const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = 
   'intake.reports_per_sender_per_day': null,
   'intake.drafts_per_day': null,
   'intake.max_usd_per_day': null,
+  'chat_attachments.max_file_mb': null,
+  'chat_attachments.max_message_mb': null,
+  'chat_attachments.retention_days': null,
 };
 
 const defines = (obj: unknown, path: string[]): boolean => {
@@ -950,6 +960,15 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   send(res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(view ? { vary: 'accept-encoding' } : {}) }, Buffer.from(JSON.stringify(body)), view ? requestEncoding(req) : null);
 }
 
+/** The chat attachments' caps in force: the instance's policy settings, else the engine's defaults. */
+export function chatAttachmentCaps(o: Pick<DashboardOptions, 'policyFile'>): AttachmentCaps {
+  try {
+    return attachmentCaps(o.policyFile ? PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings : {});
+  } catch {
+    return attachmentCaps({});
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -969,6 +988,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
+  // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
+  const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
+  const siriLimits = new RateLimits();
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -1020,6 +1042,29 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(cfg), actionDeps());
   const setupRun = (): SetupRun => opts.setupMode?.run ?? ((cmd, args, o) => systemProbe().run(cmd, args, o));
   const draft = newDraftJob();
+  /**
+   * WHY (#468): the Issues page's "not picked up" list: ONE read of the open issues (Backlog.openIssues), kept two
+   * minutes for everyone (GitHub's rate limit is shared with the coordinator), with the reasons from the events.
+   */
+  let ignoredCache: { at: number; issues: IgnoredIssue[]; error: string | null } | null = null;
+  const ignoredNow = async (): Promise<{ at: number; issues: IgnoredIssue[]; error: string | null }> => {
+    if (ignoredCache && Date.now() - ignoredCache.at < 120_000) return ignoredCache;
+    const b = opts.backlog?.();
+    if (!b?.openIssues) return (ignoredCache = { at: Date.now(), issues: [], error: 'this dashboard has no backlog to list issues from' });
+    try {
+      const open = await b.openIssues();
+      ignoredCache = { at: Date.now(), issues: ignoredIssues(open, eventCache.all(), { repo }), error: null };
+    } catch (e) {
+      ignoredCache = { at: Date.now(), issues: ignoredCache?.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` };
+    }
+    return ignoredCache;
+  };
+  /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
+  const testFiles = (): string[] => {
+    const r = spawnSync('git', ['ls-files'], { cwd: opts.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    if (r.status !== 0) return [];
+    return r.stdout.split('\n').filter((f) => /(^|\/)(tests?|__tests__|spec)\/.+\.[a-z]+$|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$|(^|\/)test_[^/]+\.py$/.test(f)).slice(0, 300);
+  };
   const readSkips = (): string[] => {
     try {
       const j = JSON.parse(readFileSync(join(opts.stateDir, SKIPS_FILE), 'utf8')) as { skipped?: unknown };
@@ -1173,8 +1218,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, [token])) return;
+    if (refuseKeyInUrl(url, res, siriToken ? [token, siriToken] : [token])) return;
     try {
+      // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
+      // gateway token works there, and nothing under /api/siri falls through to any other route.
+      if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
+        if (!siriToken) return json(res, 404, { error: 'not found' });
+        return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
+      }
       // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
       // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
       if (url.pathname === PROOF_PATH && req.method === 'GET') {
@@ -1307,17 +1358,115 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, runsForIssue(opts.stateDir, issue));
         }
+        // WHY (#468): "Your first task": the form's picks (the repo's test files) and the template; and the form's issue,
+        // built and checked with the coordinator's own parser, then (confirmed) filed with `ready`. A checkout's only:
+        // on a server an issue filed here would be the App's, which the coordinator doesn't take as a writer's.
+        if (url.pathname === '/api/first-run/first-task') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('your first task is', who) });
+          const why = "on a server an issue filed from this page would be its GitHub App's, which the coordinator doesn't count as a writer's: file it on GitHub with the template, and add ready";
+          if (req.method === 'GET') return json(res, 200, { local: !opts.instance, why: opts.instance ? why : null, template: FIRST_TASK_TEMPLATE, tests: opts.instance ? [] : testFiles(), runner: opts.cfg.tests.runner });
+          if (req.method !== 'POST') return json(res, 405, { error: 'GET or POST' });
+          const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.first_task_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (opts.instance) return refused(400, `not from here: ${why}`);
+          if (!opts.backlog) return refused(400, 'this dashboard has no backlog to file to');
+          let issue: { title: string; body: string };
+          try {
+            issue = firstTaskBody((body.values && typeof body.values === 'object' ? body.values : {}) as Record<string, unknown>);
+          } catch (e) {
+            if (e instanceof FirstTaskError) return refused(400, e.message);
+            throw e;
+          }
+          if (body.confirm !== true) return json(res, 200, { ok: true, ...issue, label: 'ready', confirmed: false });
+          const b = opts.backlog();
+          const created = await b.ensureLabels([READY_LABEL]);
+          const number = await b.createIssue(issue.title, issue.body, ['ready']);
+          setupCache.delete('first-task');
+          ignoredCache = null;
+          audit(who, 'first_run.first_task_filed', { issue: number, label_created: created.includes('ready') });
+          return json(res, 200, { ok: true, number, url: opts.cfg.project.backlog === 'github' ? `https://github.com/${repo}/issues/${number}` : null, labelCreated: created.includes('ready'), confirmed: true });
+        }
+        // WHY (#468): why each open issue isn't being worked on (anyone may read it; the fix is a writer's, locally).
+        if (url.pathname === '/api/issues/ignored' && req.method === 'GET') {
+          const v = await ignoredNow();
+          return json(res, 200, { ...v, canFix: isWriter(who.role) && !opts.instance, local: !opts.instance });
+        }
+        const readyFix = url.pathname.match(/^\/api\/issues\/(\d+)\/ready$/);
+        if (readyFix && req.method === 'POST') {
+          const n = Number(readyFix[1]);
+          if (!isWriter(who.role)) return json(res, 403, { error: `only the project's writers may mark an issue ready; @${who.login} is a ${who.role}` });
+          // On a server the label would be added by the App, which the coordinator doesn't count as a writer's.
+          if (opts.instance) return json(res, 400, { error: "on a server, add ready on GitHub: added from here it would be the App's, which the coordinator doesn't count as a writer's" });
+          if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog' });
+          const b = opts.backlog();
+          await b.ensureLabels([READY_LABEL]);
+          await b.addLabels(n, ['ready']);
+          ignoredCache = null;
+          audit(who, 'issue.ready_added', { issue: n });
+          return json(res, 200, { ok: true, issue: n });
+        }
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
+        // Chat attachments (src/chat-attachments.ts): the owners' and writers' only, to upload, read or remove; a
+        // viewer is refused on every one, downloads included. The file streams to the instance's state, never a
+        // buffer; it is served with its allowlisted type, nosniff, and as a download unless it is an image.
+        const attachPath = url.pathname.match(/^\/api\/chat\/attachments(?:\/(limits|att-[a-f0-9]{32}))?$/);
+        if (attachPath) {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('chat attachments are', who) });
+          const caps = chatAttachmentCaps(opts);
+          const sub = attachPath[1];
+          if (sub === 'limits' && req.method === 'GET') return json(res, 200, { maxFileMb: caps.max_file_mb, maxMessageMb: caps.max_message_mb, retentionDays: caps.retention_days, maxFiles: MAX_ATTACHMENTS, extensions: ATTACHMENT_EXTENSIONS });
+          if (!sub && req.method === 'POST') {
+            let name = '';
+            try {
+              name = decodeURIComponent(String(req.headers['x-attachment-name'] ?? ''));
+            } catch {
+              return json(res, 400, { error: 'the file name header is not URI-encoded' });
+            }
+            const length = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
+            try {
+              const m = await storeUpload({ stateDir: opts.stateDir, name, body: req, declaredLength: Number.isFinite(length) ? length : null, caps, by: who.login, anyway: req.headers['x-attach-anyway'] === '1', ...(opts.attachmentScan !== undefined ? { gitleaks: opts.attachmentScan } : {}) });
+              // Only what the attachment is: never its content, nor (on a secret warning) what matched.
+              audit(who, 'chat.attachment_added', { id: m.id, name: redactString(m.name), type: m.kind, size: m.size, sha256: m.sha256 });
+              return json(res, 200, { attachment: attachmentView(m), secretKinds: m.secretKinds, scanned: SCANNED_KINDS.includes(m.kind) });
+            } catch (e) {
+              if (!(e instanceof AttachmentError)) throw e;
+              // Refused mid-stream: answer, then drop the connection rather than read the rest of the body.
+              if (!req.readableEnded) {
+                res.setHeader('connection', 'close');
+                res.on('finish', () => req.destroy());
+              }
+              return json(res, e.status, { error: e.message, ...(e.secretKinds.length ? { secret: { kinds: e.secretKinds } } : {}) });
+            }
+          }
+          const m = sub && sub !== 'limits' ? readAttachment(opts.stateDir, sub) : null;
+          if (sub && sub !== 'limits' && !m) return json(res, 404, { error: 'no such attachment (it may have expired)' });
+          if (m && req.method === 'GET') {
+            res.writeHead(200, downloadHeaders(m));
+            return void res.end(attachmentBytes(opts.stateDir, m.id));
+          }
+          if (m && req.method === 'DELETE') {
+            if (!isOwnerHere && m.by.toLowerCase() !== who.login.toLowerCase()) return json(res, 403, { error: 'only who attached it, or an owner, may remove an attachment' });
+            removeAttachment(opts.stateDir, m.id);
+            audit(who, 'chat.attachment_removed', { id: m.id });
+            return json(res, 200, { ok: true });
+          }
+          return json(res, 405, { error: 'not a method here' });
+        }
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string; key?: unknown };
+          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
           try {
+            const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts)).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}) });
-            audit(who, 'chat.asked', { id: asked.id });
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
+            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
             return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
+            if (e instanceof AttachmentError) return json(res, e.status, { error: e.message });
             throw e;
           }
         }
@@ -1954,7 +2103,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (plan.kind === 'owner-command') return refused(409, `not started from here: ${plan.why}`, { command: plan.command });
           if (plan.kind === 'unsupported') return refused(409, plan.why);
           if (body.confirm !== true) return refused(400, 'Start changes this machine: review the change it shows, then confirm it ({"confirm": true})');
-          const r = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          const started = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          // WHY (#468): said at install, when the only node is one an upgrade deletes.
+          const nodeWhy = stableNodePath().why;
+          const r = nodeWhy ? { ...started, detail: `${started.detail}; warning: ${nodeWhy}` } : started;
           setupCache.delete('service');
           audit(who, 'first_run.start', { label: plan.label, file: r.path, started: r.started, detail: r.detail.slice(0, 300) });
           return json(res, r.started ? 200 : 500, r.started ? { ok: true, ...r } : { error: `not started: ${r.detail}`, ...r });
@@ -2221,6 +2373,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
           audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
           return json(res, 200, { ok: true, id: voiceId });
+        }
+        // Settings, Siri devices (src/siri/manage.ts): the list, a new token (shown once), revoke and unbind.
+        if (url.pathname === '/api/siri-devices' || url.pathname.startsWith('/api/siri-devices/')) {
+          const body = req.method === 'POST' ? ((await readBody(req)) as Record<string, unknown>) : {};
+          const a = siriDevicesRoute(who, req.method ?? 'GET', url.pathname, body && typeof body === 'object' ? body : {}, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), audit: (action, detail) => audit(who, action, detail) });
+          if (a) return json(res, a.status, a.body);
         }
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);

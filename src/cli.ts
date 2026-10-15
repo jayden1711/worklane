@@ -61,7 +61,7 @@ import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
 import { intakeCheckCommand } from './intake/check.js';
-import { installService, uninstallService } from './os/index.js';
+import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -139,7 +139,7 @@ usage: ${BRAND.cli} <command> [options]
                                    the page asks for the key, kept in a file only you can read);
                                    --port 0: any free port, the same one again on a rerun
   dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
-            [--console-user admin --console-devices tag:x,node]
+            [--console-user admin --console-devices tag:x,node] [--siri-port n]
             [--client-id id --public-url https://<host> --signin-dir dir]
                                    one view over several instances' own dashboards; it forwards
                                    to each, so writes stay with that instance's server and user.
@@ -147,7 +147,8 @@ usage: ${BRAND.cli} <command> [options]
                                    secrets in --signin-dir); the token works on the break-glass
                                    port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
-                                   from the Tailscale devices --console-devices lists (none: refused)
+                                   from the Tailscale devices --console-devices lists (none: refused);
+                                   --siri-port: the Siri gateway's loopback port (4397; docs/siri.md)
   dashboard --hub-setup (--public-url https://<host> | --loopback) --signin-dir dir [--port n] [--service]
                                    the hub in setup mode, before sign-in exists (dashboards.sh --setup
                                    runs it): one page, unlocked by a one-time setup token from a 0600
@@ -710,6 +711,9 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadConfig(root);
       const r = installService(localServiceSpec(root, cfg));
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
+      // WHY (#468): said at install, when the only node is one an upgrade deletes.
+      const node = stableNodePath();
+      if (node.why) console.error(`warning: ${node.why}`);
       return r.started ? 0 : 1;
     }
 
@@ -766,10 +770,12 @@ async function main(argv: string[]): Promise<number> {
         const signinDir = option(opts, '--signin-dir');
         if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) } });
+        const siriOpt = option(opts, '--siri-port');
+        if (siriOpt !== undefined && !/^[0-9]{1,5}$/.test(siriOpt)) throw new Error('--siri-port: a port number');
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) }, ...(siriOpt !== undefined ? { siri: { port: Number(siriOpt) } } : {}) });
         // INVARIANT: the printed and opened URLs carry no key; the key's file is named, never the key (keyFileNote).
         const bg = `${h.breakGlassUrl} ${keyFileNote(h.keyFile)}`;
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}\n(loopback only)`);
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.siriUrl ? `\n  Siri gateway: ${h.siriUrl} (tailscale serve publishes it on 8443)` : ''}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;

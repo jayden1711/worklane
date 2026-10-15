@@ -187,6 +187,9 @@ TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
 # The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
 HUB_PORT=4399
 BREAK_GLASS_PORT=4398
+# The hub's Siri gateway (dashboards.sh --siri), and the tailnet HTTPS port tailscale.sh serve-siri publishes it on.
+SIRI_GATEWAY_PORT=4397
+SIRI_TAILNET_PORT=8443
 # How long `tailscale up` waits for the owner to log in, and `tailscale serve` for tailscaled, in seconds.
 TAILSCALE_UP_SECONDS=600 TAILSCALE_SERVE_SECONDS=30
 # The login link `tailscale up` prints, strictly: Tailscale's own login host and a short id. Anything else is not

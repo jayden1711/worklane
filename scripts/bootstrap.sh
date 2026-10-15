@@ -514,6 +514,16 @@ init_args=(init --mode "$MODE")
 [ "$YES" = 0 ] || init_args+=(--yes)
 status=0
 run "$CLI" "${init_args[@]}" ${ANSWERS[@]+"${ANSWERS[@]}"} "$REPO" || status=$?
+# WHY (#469): init stopped only for the CI choice (exit 5: the repo names no required check and no ci: none). That
+# choice is the wizard's (Required checks named: a starter CI, or No CI), so unattended too it ends at the wizard's
+# URL, as the interactive install does.
+if [ "$status" = 5 ] && [ "$WIZARD" = 1 ] && [ "$DRY" = 0 ]; then
+  echo
+  echo "init stopped only for the CI choice: make it in the wizard (Required checks named), then run this again"
+  path_note
+  open_wizard
+  exit $?
+fi
 if [ "$status" != 0 ]; then
   echo
   echo "init stopped (exit $status): fix what it says, then run this again; it picks up where it stopped"

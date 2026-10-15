@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useView, type Settings, type ViewerSettings } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
@@ -7,6 +7,7 @@ import { Badge, Card, cx } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
 import { Header } from '../components/Header';
 import { VoiceSettings } from '../voice/VoiceSettings';
+import { SiriDevices } from '../components/SiriDevices';
 import { InOrder, type PanelLoaded } from '../in-order';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -86,13 +87,19 @@ function RoutingSection({ routes, configDir }: { routes: Route[]; configDir: str
 }
 
 /**
- * A part of the page that is all there at once but for one answer inside it (the voice section's on-device check): it
- * mounts, so that answer is asked for, but shows only once it is in (an in-order panel shows while it waits).
+ * A part of the page that is all there at once but for `parts` answers inside it (the voice section's on-device check,
+ * the Siri devices): it mounts, so they are asked for, but shows only once every one is in (an in-order panel shows
+ * while it waits). `children` gets one callback per answer.
  */
-function HiddenUntil({ onLoaded, children }: { onLoaded: PanelLoaded; children: (ready: PanelLoaded) => ReactNode }) {
-  const [ready, setReady] = useState(false);
-  const mark = useCallback(() => (setReady(true), onLoaded()), [onLoaded]);
-  return <div className={ready ? 'contents' : 'hidden'}>{children(mark)}</div>;
+function HiddenUntil({ parts, onLoaded, children }: { parts: number; onLoaded: PanelLoaded; children: (ready: PanelLoaded[]) => ReactNode }) {
+  const [done, setDone] = useState<ReadonlySet<number>>(() => new Set());
+  const marks = useRef<PanelLoaded[]>([]);
+  for (let i = 0; i < parts; i++) marks.current[i] ??= () => setDone((d) => (d.has(i) ? d : new Set([...d, i])));
+  const ready = Array.from({ length: parts }, (_, i) => i).every((i) => done.has(i));
+  useEffect(() => {
+    if (ready) onLoaded();
+  }, [ready, onLoaded]);
+  return <div className={ready ? 'contents' : 'hidden'}>{children(marks.current.slice(0, parts))}</div>;
 }
 
 const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span className="text-muted-foreground">none</span>);
@@ -123,8 +130,9 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
           panels={[
             (loaded) => <InstanceSettings onLoaded={loaded} />,
             (loaded) => (
-              <HiddenUntil onLoaded={loaded}>
-                {(ready) => (
+              // The Siri devices are the owners' and writers' only (a viewer's page never asks for them).
+              <HiddenUntil parts={full ? 2 : 1} onLoaded={loaded}>
+                {([voiceReady, siriReady]) => (
                   <>
                     <div className="text-[12.5px] text-ink-2">
                       <div>
@@ -152,7 +160,10 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
                     </div>
                     <div className="grid gap-6 lg:grid-cols-2">
                       {/* The voice section waits for the browser's on-device check: its answer adds a line and a button (28 px). */}
-                      <VoiceSettings owner={owner} brand={brand} onLoaded={ready} />
+                      <VoiceSettings owner={owner} brand={brand} onLoaded={voiceReady} />
+                      {/* WHY: the owners' and writers' only; a viewer's page never asks for it. It waits too: answering
+                          late, it would push the Project card and everything after it along the grid. */}
+                      {full && <SiriDevices onLoaded={siriReady} />}
                       <Section title="Project">
                         <Row k="Name">{s.project.name}</Row>
                         <Row k="Repository">{s.project.repo}</Row>

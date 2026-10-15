@@ -70,15 +70,52 @@ export const REFLECTION_SCHEMA = {
   },
 } as const;
 
+/**
+ * The actors the evaluator answers the "compromised component" question for, on a change to a protected surface:
+ * each by its key and in plain words. Any further actor the change exposes it to answers as OTHER_ACTOR.
+ */
+export const COMPROMISED_ACTORS = [
+  ['agent-user', 'the agent user (the account agents run as)'],
+  ['coordinator', 'the coordinator user and its dashboard'],
+  ['other-instance', "another instance's coordinator"],
+  ['hub-viewer', 'a hub viewer'],
+  ['local-os-user', 'a local OS user'],
+] as const;
+export const OTHER_ACTOR = 'other';
+
 export const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['patch_correct', 'test_correct', 'confidence', 'advice', 'files_reviewed', 'design_change'],
+  required: ['patch_correct', 'test_correct', 'confidence', 'confidence_reason', 'advice', 'files_reviewed', 'design_change'],
   properties: {
     files_reviewed: { type: 'array', items: { type: 'string' }, description: 'Every changed file whose diff you read in full (repo-relative paths).' },
     patch_correct: { type: 'boolean', description: 'The change does what the issue and done_when ask, without breaking anything else you can see.' },
     test_correct: { type: 'boolean', description: 'The reproduction test checks the right behavior (false if the test itself is wrong).' },
-    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    confidence: {
+      type: 'string',
+      enum: ['high', 'medium', 'low'],
+      description:
+        "high: you read every changed file in full, the change does what the issue and done_when ask, the reproduction test and the coordinator's checks passed, and you see no risk outside the diff (a small change that meets all of this is high). medium: one specific thing is unverified. low: you found a likely problem.",
+    },
+    confidence_reason: {
+      type: 'string',
+      description: 'When confidence is not high: one sentence naming the specific unverified thing (medium) or the likely problem (low). A verdict without it is refused. Empty when high.',
+    },
+    compromised_component: {
+      type: 'array',
+      description: 'Only when the brief says the change touches a PROTECTED SURFACE: one answer per actor the brief lists, plus any other actor the change exposes it to.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['actor', 'can_do', 'acceptable', 'why'],
+        properties: {
+          actor: { type: 'string', enum: [...COMPROMISED_ACTORS.map(([k]) => k), OTHER_ACTOR] },
+          can_do: { type: 'string', description: 'What this actor can do through the change if it is compromised or hostile ("nothing: it cannot reach it", and why, if so).' },
+          acceptable: { type: 'boolean', description: 'Whether that is acceptable.' },
+          why: { type: 'string', description: 'Why it is acceptable, or what stops it; or why it is not.' },
+        },
+      },
+    },
     advice: { type: 'string', description: 'What is wrong and how to fix it (patch or test). Empty if nothing.' },
     design_change: {
       type: 'boolean',
@@ -230,6 +267,9 @@ Output: the verdict fields.
 - test_correct: does the reproduction test check the right behavior? You may conclude the TEST is wrong rather than the patch.
 - files_reviewed: every changed file whose diff you read in full. A review that leaves a changed file unread does not pass.
 - design_change: true if the change is design-level (a new top-level module or package, a public CLI or API surface or file format change, a new dependency, an architecture change), with design_reason. It is binding.
+- confidence, by this rubric. high: you read every changed file in full, the change does what the issue and done_when ask, the reproduction test and the checks passed, and you see no risk outside the diff. A small, fully verified change is high: size or general caution never lowers it. medium: one specific thing is unverified. low: you found a likely problem.
+- confidence_reason: whenever confidence isn't high, one sentence naming that specific unverified thing or problem. A verdict without it is refused and you're asked again. Empty when high.
+- compromised_component, when the brief says the change touches a PROTECTED SURFACE: for each actor it lists, what that actor can do through this change if it's compromised or hostile, whether that's acceptable, and why (or what stops it). A missing or unconvincing answer is a doubt: confidence not high, with that reason. Never a high pass.
 - advice: specific.
 - Added validation, defense or complexity (a guard, check, fallback, retry, wrapper) with none of these behind it: a failing test, an observed failure with its evidence, or a protected path (money path, auth, secrets, rulesets, CI, scripts/setup). Request the change: patch_correct false, and advice names what to remove and cites the rule (no defenses for hypothetical concerns). Don't ask for such defenses yourself either.
 Approval: a design change always waits for a human, however correct it is. When unsure, say design_change true.

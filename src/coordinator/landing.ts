@@ -322,7 +322,7 @@ export abstract class Landing extends Decisions {
       `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
       '',
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
-      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
+      `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.confidence_reason ? ` (${verdict.confidence_reason.slice(0, 1000)})` : verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
       ...evalLines(this.instructionResults(n)),
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),

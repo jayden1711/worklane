@@ -46,7 +46,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import type { ServiceSpec } from './os/index.js';
+import { stableNodePath, type ServiceSpec } from './os/index.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -69,10 +69,12 @@ export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.pro
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
  */
-export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env): ServiceSpec {
+export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env, node: string = stableNodePath().path): ServiceSpec {
   return {
     label: serviceLabel(cfg),
-    program: [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
+    // WHY (#468): Homebrew's stable $(brew --prefix)/bin/node when this node is Homebrew's, never its realpath in the
+    // Cellar, which `brew upgrade` deletes from under the service; never a `node` found on PATH.
+    program: [node, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
     // PATH reaches the prefix's bin, where local init installs tools (src/tool-path.ts), as `up` has always set it.
@@ -402,6 +404,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     log.append('coordinator.stopping', { instance: instanceId(), signal, pending: coordinator.pending() }, instanceId());
     watchdog?.stop();
     clearInterval(watch);
+    clearInterval(siriWatch);
     coordinator.stop();
     nap.wake();
     // Kept referenced: work that hangs on nothing the event loop holds still ends here, not in a silent exit.
@@ -432,6 +435,9 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     coordinator.checkIntake().catch(diskOnly);
   }, 5_000);
   watch.unref();
+  // Siri's questions: someone is listening, so they are looked for every second (a directory read when there are none).
+  const siriWatch = setInterval(() => coordinator.checkSiri().catch(diskOnly), 1_000);
+  siriWatch.unref();
   watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
@@ -454,6 +460,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
     clearInterval(watch);
+    clearInterval(siriWatch);
     watchdog?.stop();
     intake?.stop();
     ungateDisk();

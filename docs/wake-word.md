@@ -1,5 +1,7 @@
 # The wake word
 
+Parked: "Hey Siri, tell / ask" through a Siri Shortcut (docs/siri.md) replaces it for hands-free use.
+
 The dashboard can listen for "hey" plus the product's name (taken from `src/brand.ts`, as the server serves it) and,
 on hearing it, stop any read-aloud answer and start dictating into the Ask box. Dictation then works exactly like the
 mic button: on-device by default, into the box for review, never sent.

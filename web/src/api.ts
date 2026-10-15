@@ -1121,6 +1121,34 @@ export interface ConfigChange {
   to: unknown;
 }
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
+/** #468: the first-task form's picks (the repo's test files) and the template; `local` false on a server, with why. */
+export interface FirstTaskInfo {
+  local: boolean;
+  why: string | null;
+  template: { label: string; body: string };
+  tests: string[];
+}
+export type DoneWhenPick = { test: string } | { command: string; expect?: string };
+export interface FirstTaskValues {
+  title: string;
+  outcome: string;
+  done_when: DoneWhenPick[];
+  context?: string;
+}
+export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task');
+/** confirm false: the issue as it would be filed (checked with the coordinator's parser); true: filed, with `ready`. */
+export const fileFirstTask = (values: FirstTaskValues, confirm: boolean) => api<{ ok: boolean; title: string; body: string; number?: number; url?: string | null; labelCreated?: boolean; confirmed: boolean }>('/api/first-run/first-task', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/** #468: each open issue the harness isn't working on, and why. */
+export interface IgnoredIssue {
+  issue: number;
+  title: string;
+  url: string;
+  author: string;
+  labels: string[];
+  reasons: { kind: 'no-ready' | 'contract' | 'not-writer' | 'waiting' | 'blocked' | 'held'; text: string; fix: 'add-ready' | 'edit' | null }[];
+}
+export const getIgnored = () => api<{ at: number; issues: IgnoredIssue[]; error: string | null; canFix: boolean; local: boolean }>('/api/issues/ignored');
+export const addReady = (issue: number) => api<{ ok: boolean }>(`/api/issues/${issue}/ready`, { method: 'POST', body: '{}' });
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
 /** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
 export interface StarterCi {
@@ -1183,7 +1211,7 @@ export type SetupFix =
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
   | { kind: 'signin'; label: string }
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
   | { kind: 'discord'; label: string };
 export interface SetupStepView {
@@ -1546,7 +1574,36 @@ export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+
+/** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
+export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
+export interface ChatAttachmentLimits { maxFileMb: number; maxMessageMb: number; retentionDays: number; maxFiles: number; extensions: string[] }
+/** An upload's outcome: kept, or held back because it looks like it holds a secret (the kinds, never the value). */
+/** `scanned`: false for an image, PDF or Office file, which the secret scan can't read. */
+export type ChatUpload = { attachment: ChatAttachment; secretKinds: string[]; scanned?: boolean } | { secret: string[]; error: string };
+const chatPath = async (instance: string | null, path: string) => (instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path));
+export const chatAttachmentLimits = (instance: string | null) => chatCall<ChatAttachmentLimits>(instance, '/api/chat/attachments/limits');
+/** The name header: its last 200 characters (what the server keeps; whole code points, so it always encodes), encoded. */
+export const attachmentNameHeader = (name: string) => encodeURIComponent(Array.from(name).slice(-200).join(''));
+/** Upload one file as the request body (streamed; its name in a header, never the URL). `anyway`: past a secret warning. */
+export async function uploadChatAttachment(instance: string | null, file: Blob & { name: string }, anyway = false): Promise<ChatUpload> {
+  const headers: Record<string, string> = { ...(await authHeaders()), 'content-type': 'application/octet-stream', 'x-attachment-name': attachmentNameHeader(file.name), ...(anyway ? { 'x-attach-anyway': '1' } : {}) };
+  const res = await fetch(await chatPath(instance, '/api/chat/attachments'), { method: 'POST', body: file, headers });
+  if (res.status === 409) {
+    const b = (await res.json().catch(() => ({}))) as { error?: string; secret?: { kinds?: string[] } };
+    if (b.secret?.kinds) return { secret: b.secret.kinds, error: b.error ?? 'this file looks like it contains a secret' };
+    throw new ApiError(b.error ?? 'HTTP 409', 409);
+  }
+  return answer<ChatUpload>(res);
+}
+export const removeChatAttachment = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/attachments/${id}`, { method: 'DELETE' });
+/** An attachment's bytes, through the dashboard with the normal sign-in (never a link with a key in it). */
+export async function chatAttachmentBlob(instance: string | null, id: string): Promise<Blob> {
+  const res = await fetch(await chatPath(instance, `/api/chat/attachments/${id}`), { headers: await authHeaders() });
+  if (!res.ok) throw new ApiError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`, res.status);
+  return res.blob();
+}
 /** A fresh request key (works outside secure contexts too, where randomUUID is missing). */
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
@@ -1828,7 +1885,8 @@ export interface BoardCard {
   since: string;
   checks?: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
   run?: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
-  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  /** `reasons`: each of a PR hold's reasons whole (merge.decided), for the owner and writers; null otherwise. */
+  waiting: { kind: WaitKind; label: string; detail: string | null; reasons?: string[] | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
   /** Its PR head with the PR batches: queued, being tested, passed or returned (absent from older servers). */

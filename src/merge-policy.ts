@@ -10,6 +10,9 @@ export interface MergeVerdict {
   patch_correct: boolean;
   test_correct: boolean;
   confidence: 'high' | 'medium' | 'low';
+  /** Why the confidence isn't high (eval.verdict); absent on an older verdict. */
+  confidence_reason?: string | undefined;
+  advice?: string | undefined;
   unread?: string[] | undefined;
   design_change?: boolean | undefined;
   design_reason?: string | undefined;
@@ -119,6 +122,8 @@ export interface MergeDecision {
   reasons: string[];
   /** Each high-risk category it touches, said plainly with the first file in it (whyHighRisk); "Waiting on you" shows these. */
   why: WaitWhy[];
+  /** The evaluator's advice, when its verdict is one of the reasons it waits (the hold comment shows it). */
+  advice?: string;
 }
 
 /** One high-risk category a change touches, in plain words: e.g. "changes the merge policy: src/merge-policy.ts". */
@@ -229,17 +234,19 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   // Any doubt.
   const v = i.verdict;
   if (!v) reasons.push('doubt: no evaluator verdict');
-  else {
+  const before = reasons.length;
+  if (v) {
     if (!v.patch_correct) reasons.push('doubt: the evaluator did not approve the patch');
     if (!v.test_correct) reasons.push('doubt: the evaluator doubts the test');
-    if (v.confidence !== 'high') reasons.push(`doubt: evaluator confidence ${v.confidence}`);
+    if (v.confidence !== 'high') reasons.push(`doubt: evaluator confidence ${v.confidence}: ${v.confidence_reason?.trim() || 'no reason recorded'}`);
     if (v.unread?.length) reasons.push(`doubt: the evaluator did not read ${paths(v.unread)}`);
     if (v.design_change === undefined) reasons.push('doubt: the evaluator gave no design-change answer');
   }
+  const advice = reasons.length > before ? v?.advice?.trim() : undefined;
   if (i.ciFixRuns) reasons.push(`doubt: ${i.ciFixRuns} CI fix run(s) on this PR`);
   if (i.foreignPush) reasons.push('doubt: someone other than the harness pushed to the branch');
   if (i.pushLimitHit) reasons.push('doubt: the change hit a push limit');
   reasons.push(...(i.instructionEvals ?? []));
   reasons.push(...(i.outsidePlan ?? []));
-  return { auto: reasons.length === 0, reasons, why: whyHighRisk({ level: i.level, waitCategories: i.waitCategories }) };
+  return { auto: reasons.length === 0, reasons, why: whyHighRisk({ level: i.level, waitCategories: i.waitCategories }), ...(advice ? { advice } : {}) };
 }

@@ -7,7 +7,7 @@ export interface AuditEntry {
   at: string;
   login: string;
   role: 'owner' | 'writer' | 'viewer';
-  via: 'session' | 'break-glass';
+  via: 'session' | 'break-glass' | 'discord' | 'siri';
   instance: string | null;
   action: string;
   detail: Record<string, unknown>;
@@ -31,7 +31,7 @@ export function AuditLogView({ entries }: { entries: AuditEntry[] }) {
                 {ago(e.at)}
               </span>
               <span className="w-44 shrink-0 truncate font-medium text-ink-2">
-                @{e.login} <span className="font-normal text-ink-3">{e.via === 'break-glass' ? 'break-glass' : e.role}</span>
+                @{e.login} <span className="font-normal text-ink-3">{e.via === 'break-glass' ? 'break-glass' : e.via === 'siri' ? 'Siri' : e.role}</span>
               </span>
               <Badge>{e.action}</Badge>
               <span className="min-w-0 flex-1 truncate text-ink-3">{detailText(e.detail)}</span>

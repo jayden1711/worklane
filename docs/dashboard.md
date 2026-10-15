@@ -162,6 +162,13 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
 
+### Siri Shortcuts
+
+`dashboards.sh --siri` adds the hub's Siri gateway, a listener of its own on 127.0.0.1:4397 that `tailscale.sh
+serve-siri` publishes on the tailnet's port 8443: "Hey Siri, tell" leaves an idea in the Inbox and "Hey Siri, ask"
+answers aloud at a viewer's level, with a per-device token an owner makes in Settings, Siri devices. See
+[docs/siri.md](siri.md).
+
 ## The owner terminal
 
 The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
@@ -271,6 +278,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
 | The coordinator running | local | `worklane up` |
+| An issue ready for the harness | local | `gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>` |
 
 ## Tailscale and HTTPS from the dashboard
 
@@ -543,6 +551,51 @@ value under each. A figure whose source has recorded nothing yet says **not meas
 
 The weekly digest posts these after the trust numbers, with the slow-tests list (the weekly optimization pass's
 targets) in its own message.
+
+## Chat attachments
+
+In the Ask panel, the owners and the writers attach files to a question: drop them on the panel, paste them into
+the box, or use the paperclip next to the mic. Each shows as a chip (name, size, remove) and uploads at once to the
+instance being asked (on a hub, one instance: not "Every instance"). A viewer never sees the paperclip, and the
+server refuses a viewer every attachment route (403), downloads included. Code: `src/chat-attachments.ts`,
+`web/src/components/ChatAttachments.tsx`.
+
+- **Types:** images (png, jpeg, gif, webp), PDF, plain text and code (by extension, then checked to be valid UTF-8
+  with no NUL bytes), CSV, JSON, and Office files (docx, xlsx, pptx). The type comes from the extension, checked
+  against the bytes (an image's or a PDF's magic number, Office's zip header); the client's Content-Type is never
+  trusted. Anything else is refused with a reason (415), and macro-enabled Office files (docm, xlsm, pptm and the
+  rest) always are.
+- **Sizes:** 10 MB per file and 25 MB per question by default, at most 10 files. The per-file cap is enforced as the
+  body streams in (a declared length over it is refused before any of it is read; past it mid-stream, the upload
+  stops and the partial file is deleted); the per-question total is checked when the question is asked. Set them in
+  the instance settings (Settings, or `policy.yaml` `settings.chat_attachments.max_file_mb` and `max_message_mb`).
+- **Storage:** `<state>/chat-attachments/<id>`, file 0600 in a 0700 directory, under a random id (`att-` and 32
+  hex digits); the uploader's file name is kept only in the record beside it, for display and the download's name,
+  never as a path. Never in the repo, the logs, events or URLs (the name travels in the `X-Attachment-Name` header).
+  The audit event (`chat.attachment_added`) records only the id, name, type, size and sha256. Files are deleted
+  after 30 days by default (`settings.chat_attachments.retention_days`); the coordinator sweeps about once an hour,
+  and removes uploads left half-written.
+- **Secrets:** a text file is scanned on upload with the engine's secret patterns and, where it is installed,
+  gitleaks. A hit is not attached: the chip says which kinds it looks like (a GitHub token, a private key; never the
+  value) and offers **Attach anyway**. The matched value is never logged, echoed or stored anywhere but the file;
+  what the chat's model is given is redacted again. Images, PDFs and Office files aren't read by the scan (it reads
+  text only): their chip says "Not scanned for secrets".
+- **Download:** through the dashboard only, with the normal sign-in (fetched, never a link with a key in it). Each is
+  served with its allowlisted type, `X-Content-Type-Options: nosniff`, a sandboxing CSP, and
+  `Content-Disposition: attachment` unless it is an image (shown inline). HTML is served as text/plain; SVG is never
+  taken. Through a hub, every forwarded response gets the hub's own `default-src 'none'; sandbox` policy and nosniff,
+  whatever the instance sent, so not even a hostile instance can serve a page the browser runs on the hub's origin.
+  In the page, a fetched file becomes a blob: URL (the page's own origin, without the server's headers), so the
+  page decides again: only a png, jpeg, gif or webp opens in a tab; anything else downloads as opaque bytes.
+- **What the answer sees:** nothing runs from the chat. Text goes into the chat turn's prompt between markers that
+  carry a random nonce, redacted, framed as data from the asker and never instructions; images and PDFs are copied
+  into the turn's bundle for the Read tool to view, and deleted from it when the turn ends (the state keeps the only
+  copy, for its retention days); Office files are named and described, never unpacked or opened. Text the answer
+  reads, like the question itself, is part of the chat run's own Claude session.
+- **API:** `POST /api/chat/attachments` (the body is the file; `X-Attachment-Name`, URI-encoded; `X-Attach-Anyway: 1`
+  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or an owner),
+  `GET /api/chat/attachments/limits`, and `attachments: [<id>, ...]` on `POST /api/chat`. Anything that refers to a
+  file names only its id.
 
 ## Pull requests
 

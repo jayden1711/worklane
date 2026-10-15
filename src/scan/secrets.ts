@@ -65,10 +65,20 @@ export function scanCommit(cwd: string, includeUnstaged: boolean, binary = findT
  */
 export function scanRange(cwd: string, range: string, binary = findTool('gitleaks')): Promise<ScanResult> {
   if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
+  return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', range, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd);
+}
+
+/** Scan one file without blocking (a dashboard upload). Findings name the rule, never the secret (--redact). */
+export function scanFile(path: string, binary = findTool('gitleaks')): Promise<ScanResult> {
+  if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
+  return scanAsync(binary, (report) => ['dir', path, '--redact', '--no-banner', '--max-decode-depth', '2', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], undefined);
+}
+
+function scanAsync(binary: string, args: (report: string) => string[], cwd: string | undefined): Promise<ScanResult> {
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');
   return new Promise((resolve) => {
-    const child = spawn(binary, ['git', '--redact', '--no-banner', '--log-opts', range, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], { cwd, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'] });
     let err = '';
     child.stderr.on('data', (d: Buffer) => (err = (err + d.toString()).slice(-2000)));
     const done = (r: ScanResult) => {

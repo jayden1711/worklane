@@ -95,6 +95,12 @@ export class GitHubBacklog implements Backlog {
     return out;
   }
 
+  async openIssues(): Promise<Issue[]> {
+    // ONE request, whatever the count (the shared rate limit): the 100 most recently updated open issues.
+    const batch = await this.req<GhIssue[]>('GET', `/repos/${this.repo}/issues?state=open&sort=updated&direction=desc&per_page=100`);
+    return batch.filter((i) => !i.pull_request).map((i) => this.toIssue(i));
+  }
+
   async closedSince(since: string): Promise<number[]> {
     const out: number[] = [];
     for (let page = 1; page < 20; page++) {

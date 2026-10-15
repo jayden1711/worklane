@@ -54,7 +54,7 @@ function agents(edit: Edit, verdicts: ((req: RunRequest, files: string[]) => Fak
   });
 }
 
-const pass = (confidence = 'high') => (_: RunRequest, files: string[]): FakeResult => ({ structured: { patch_correct: true, test_correct: true, confidence, advice: '', files_reviewed: files, design_change: false } });
+const pass = (confidence = 'high') => (_: RunRequest, files: string[]): FakeResult => ({ structured: { patch_correct: true, test_correct: true, confidence, confidence_reason: confidence === 'high' ? '' : 'the totals test was not run on a zero quantity', advice: '', files_reviewed: files, design_change: false } });
 
 async function run(runner: FakeRunner, settings: InstanceSettings = {}) {
   const base = mkdtempSync(join(tmpdir(), 'eval-wire-'));

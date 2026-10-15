@@ -94,6 +94,9 @@ export class FileBacklog implements Backlog {
   async list(label: string) {
     return this.load().issues.filter((i) => !i.pr && i.state === 'open' && i.labels.includes(label)).map(strip);
   }
+  async openIssues() {
+    return this.load().issues.filter((i) => !i.pr && i.state === 'open').map(strip);
+  }
   /** No update times here: every closed issue (a superset, as the contract allows). */
   async closedSince(_since: string) {
     return this.load().issues.filter((i) => !i.pr && i.state === 'closed').map((i) => i.number);
