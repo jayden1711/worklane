@@ -27,6 +27,7 @@ import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { siriPass } from './coordinator/siri.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
 import { needsPlan, PLAN_DISALLOWED, PLAN_TOOLS, planBrief, type Plan } from './plan-mode.js';
@@ -405,6 +406,38 @@ export class Coordinator extends HarnessEvals {
       if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);
       refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
     }
+  }
+
+  private siriQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Siri's spoken questions (src/siri/ask.ts, src/coordinator/siri.ts), called every second: each answered by a
+   * tool-less run in the research lane from a viewer's view of the instance, one at a time. Off unless intake.yaml
+   * siri.enabled; every refusal is spoken.
+   */
+  checkSiri(): Promise<void> {
+    const at = this.d.agentTasks;
+    this.siriQueue = siriPass(
+      {
+        stateDir: this.d.stateDir,
+        instance: this.d.instance,
+        log: this.d.log,
+        runner: this.d.runner,
+        intake: () => this.d.intake?.config() ?? null,
+        instanceRoot: dirname(this.d.repo),
+        gid: at?.gid ?? process.getgid?.() ?? 0,
+        budgetLeft: () => this.d.cfg.agents.daily_budget_usd - this.spentToday(),
+        held: () => {
+          if (this.halt.signal.aborted || this.stopped) return 'agents are stopped';
+          if (this.usagePause()) return 'the Claude usage limit';
+          if (this.authHold(this.loginKeyOf({}))) return 'the Claude sign-in is held';
+          return this.diskHeld();
+        },
+        cost: (r) => this.cost(null, 'siri', r),
+      },
+      this.siriQueue,
+    );
+    return this.siriQueue;
   }
 
   checkConsole(): void {
