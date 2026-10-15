@@ -79,6 +79,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
   const [count, setCount] = useState(c.values.workers_count);
   const [model, setModel] = useState(c.values.workers_model);
+  const [ci, setCi] = useState<'github' | 'none'>(c.values.ci ?? 'github');
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
   const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
@@ -93,7 +94,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
       .finally(() => setSeenLoaded(true));
   }, []);
   const edited = () => (setChanges(null), setMsg(null));
-  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model });
+  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model, ...(ci !== (c.values.ci ?? 'github') ? { ci } : {}) });
   const send = async (confirm: boolean) => {
     setBusy(true);
     setMsg(null);
@@ -214,7 +215,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
       )}
       {canEdit && msg?.ok && prNumber(msg.url) && <MergePanel number={prNumber(msg.url)!} initialPlan={initialMergePlan} {...(onMerged ? { onDone: onMerged } : {})} />}
       {/* #469: no checks chosen yet. Last in the form, so a late answer moves nothing above it. */}
-      {!c.values.required_checks.length && <StarterCi canEdit={canEdit} initialView={initialStarter} initialOpen={initialStarterOpen} onCheckRan={(name) => !checks.includes(name) && (setChecks((now) => (now.includes(name) ? now : [...now, name])), edited())} />}
+      {!c.values.required_checks.length && c.values.ci !== 'none' && <StarterCi canEdit={canEdit} initialView={initialStarter} initialOpen={initialStarterOpen} noCiChosen={ci === 'none'} onCheckRan={(name) => !checks.includes(name) && (setChecks((now) => (now.includes(name) ? now : [...now, name])), edited())} onChooseNoCi={() => (setCi('none'), setChecks([]), edited())} />}
     </div>
   );
 }

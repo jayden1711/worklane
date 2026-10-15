@@ -15,7 +15,7 @@ const withValue = (base: string, file: string) => `${base}&value=${encodeURIComp
  * `inForm`: inside the Repo config form (local mode), which selects the check once it ran; outside it (a server's
  * instance, whose config changes through its repo's own PRs), the step says what to name in config.yaml instead.
  */
-export function StarterCi({ canEdit, initialView = null, initialOpen = false, inForm = true, onCheckRan }: { canEdit: boolean; initialView?: View | null; initialOpen?: boolean; inForm?: boolean; onCheckRan?: (check: string) => void }) {
+export function StarterCi({ canEdit, initialView = null, initialOpen = false, inForm = true, noCiChosen = false, onCheckRan, onChooseNoCi }: { canEdit: boolean; initialView?: View | null; initialOpen?: boolean; inForm?: boolean; noCiChosen?: boolean; onCheckRan?: (check: string) => void; onChooseNoCi?: () => void }) {
   const [view, setView] = useState<View | null>(initialView);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(initialOpen);
@@ -86,6 +86,46 @@ export function StarterCi({ canEdit, initialView = null, initialOpen = false, in
               : `Confirm opens GitHub's new-file page with this file in it: you commit it and open the PR as yourself; nothing here writes a workflow.`}
           </p>
         </div>
+      )}
+      <NoCi view={view} inForm={inForm} chosen={noCiChosen} {...(onChooseNoCi ? { onChoose: onChooseNoCi } : {})} />
+    </div>
+  );
+}
+
+/**
+ * "No CI" (#469): offered only where tests.yaml has test_run, else refused with why (add the starter CI). In the form,
+ * choosing it sets ci: none for Review and Propose; a server's instance gets the config lines to commit through a PR.
+ */
+function NoCi({ view, inForm, chosen, onChoose }: { view: View; inForm: boolean; chosen: boolean; onChoose?: () => void }) {
+  const noCi = view.noCi;
+  if (!noCi) return null;
+  return (
+    <div className="space-y-1.5 border-t border-line pt-2" data-testid="no-ci" data-offered={noCi.offered ? 'true' : 'false'}>
+      {!noCi.offered ? (
+        <p className="text-[12px] text-ink-3" data-testid="no-ci-refused">
+          No CI isn't offered here: {noCi.why}
+        </p>
+      ) : (
+        <>
+          <p className="text-[12.5px] text-ink" data-testid="no-ci-means">
+            Or choose {noCi.means}.
+          </p>
+          {inForm ? (
+            chosen ? (
+              <p className="text-[12px] text-green" data-testid="no-ci-chosen">
+                No CI chosen: Review the change above (ci: none, no required checks), then propose it.
+              </p>
+            ) : (
+              <button type="button" className={cx(btn, 'bg-surface text-ink shadow-btn hover:bg-hover')} onClick={() => onChoose?.()} data-testid="no-ci-choose">
+                Choose No CI
+              </button>
+            )
+          ) : (
+            <pre className="rounded-lg bg-field p-2 font-mono text-[12px] text-ink shadow-hairline" data-testid="no-ci-lines">
+              {'# config.yaml, through a PR:\nci: none\nrequired_checks: []'}
+            </pre>
+          )}
+        </>
       )}
     </div>
   );

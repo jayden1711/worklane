@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { starterCiView } from './starter-ci.js';
+import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+
+/** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
+const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
 import { GITHUB_API } from './github-hosts.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
@@ -126,7 +130,7 @@ export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>)
 export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
-    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
+    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime, ci: ciMode(cfg) },
     owners: cfg.project.owners,
     reports: cfg.project.reports,
     governor: cfg.project.governor,
@@ -1072,7 +1076,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       setupMode: !!opts.setupMode,
-      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
+      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode, ci: ciMode(opts.cfg) },
       user: who.login,
       role: who.role,
       via: who.via,
@@ -1604,7 +1608,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/first-run/starter-ci' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
           const gh = actionDeps().gh;
-          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, gh: (args) => gh(args) }));
+          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, testRun: !!liveCfg().tests.test_run, gh: (args) => gh(args) }));
         }
         // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
         // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.

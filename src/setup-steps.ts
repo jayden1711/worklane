@@ -30,6 +30,7 @@ import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
+import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -688,6 +689,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       if (isErr(cfg)) return no('no valid config yet');
       const r = cfg.project.required_checks;
       if (r.length) return ok(`required: ${r.join(', ')}`);
+      if (ciIsNone(cfg.project)) return ok(`${CI_NONE_MEANS}. Required: ${requiredFor(cfg.project, cfg.tests).join(', ')}`);
       // WHY (#469): never a silent empty list; the step is blocked with the fix (src/ci-choice.ts).
       return no(ciChoiceProblem(cfg.project) ?? 'required_checks is empty: nothing is ever marked ready');
     },

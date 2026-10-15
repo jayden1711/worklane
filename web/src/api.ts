@@ -230,7 +230,7 @@ export interface State {
   canReadRuns?: boolean;
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
-  project: { name: string; repo: string; landMode: string };
+  project: { name: string; repo: string; landMode: string; ci?: CiMode };
   /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
   /** Their role on this instance, read by its server from their permission on the repo; absent from an older server. */
@@ -375,7 +375,7 @@ export interface Settings {
   /** Whether this dashboard has the First run page's Discord step (a server instance's). */
   discordSetup?: boolean;
   configDir: string;
-  project: { name: string; repo: string; landMode: string; runtime: unknown };
+  project: { name: string; repo: string; landMode: string; runtime: unknown; ci?: CiMode };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number };
@@ -1028,6 +1028,13 @@ export interface RepoConfigValues {
   daily_budget_usd: number;
   workers_count: number;
   workers_model: string;
+  /** Which CI judges a PR (#469); absent from an older server: github. */
+  ci?: 'github' | 'none';
+}
+/** Which CI judges a PR; under No CI, what that means (said on the PR, land and Settings pages). */
+export interface CiMode {
+  kind: 'github' | 'none';
+  means: string | null;
 }
 export interface FirstRunRepoConfig {
   values: RepoConfigValues;
@@ -1055,6 +1062,8 @@ export interface StarterCi {
   newFile: string;
   onBranch: boolean;
   firstRun: { state: 'none' | 'running' | 'done'; conclusion: string | null };
+  /** No CI: offered only where tests.yaml has test_run (`why` says why not); `means`, what it means. */
+  noCi: { offered: boolean; means: string; why: string | null };
 }
 export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */

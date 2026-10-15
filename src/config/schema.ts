@@ -93,6 +93,13 @@ export const ProjectConfig = z.strictObject({
    */
   required_checks: z.array(z.string().min(1)).default([]),
   /**
+   * WHY (#469): which CI judges a PR. `github` (absent: the same): the required_checks above, as GitHub reports them.
+   * `none`: GitHub runs nothing a PR waits on; a PR is ready when this machine's own test runs (tests.yaml test_run,
+   * every tier, in the test-run sandbox) passed on its exact head, read only from this instance's event log, and the
+   * evaluator approved that head. Needs tests.yaml test_run, and required_checks empty (src/config/load.ts).
+   */
+  ci: z.enum(['github', 'none']).optional(),
+  /**
    * The default branch's protection as the harness recommends it (src/branch-protection.ts; advice only, never
    * applied). `strict`: whether a PR must be up to date with the default branch before it merges. Off by default:
    * post-merge CI and the main watch catch what strict would have, without PRs queueing to merge main in and rerun CI.

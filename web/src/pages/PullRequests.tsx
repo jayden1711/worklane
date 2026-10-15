@@ -4,6 +4,7 @@ import { navigate } from '../App';
 import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, useEntrance, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
+import { CiNote } from '../components/CiNote';
 
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink' };
 const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; mark: MarkState }> = {
@@ -390,6 +391,7 @@ export function PullRequests({ state }: { state: State }) {
   return (
     <div data-testid="page-prs">
       <Header title="Pull requests" sub={c ? `${c.open} open · ${c.needYou} need you` : undefined} />
+      <CiNote ci={state.project.ci} />
       {error && !data ? <div className="p-8 text-[13px] text-red">Can't load pull requests: {error}</div> : data ? <PullRequestsView view={data} /> : <Loading />}
     </div>
   );

@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { BRAND } from './brand.js';
 import { detectProject, NO_TESTS, type Detection } from './auto-config.js';
 import { GITHUB_WEB } from './github-hosts.js';
+import { CI_NONE_MEANS, CI_NONE_NEEDS_TEST_RUN } from './ci-none.js';
 
 /** Where the starter workflow goes, and its one job: the job's name is the check name a PR waits on. */
 export const STARTER_CI_PATH = '.github/workflows/ci.yml';
@@ -156,6 +157,11 @@ export interface StarterCiView extends StarterCi {
    * finished with its conclusion. Finished: its name is offered for required_checks (a config change to confirm).
    */
   firstRun: { state: 'none' | 'running' | 'done'; conclusion: string | null };
+  /**
+   * No CI (config.yaml ci: none, src/ci-none.ts): offered only where tests.yaml has test_run; `why` says why not. `means`:
+   * what it means, as the step states it.
+   */
+  noCi: { offered: boolean; means: string; why: string | null };
 }
 
 type Run = (cmd: string, args: string[], cwd: string) => { status: number | null; stdout: string; stderr: string };
@@ -168,7 +174,7 @@ const realRun: Run = (cmd, args, cwd) => {
  * The step's view: the draft from origin/<branch>'s files (as fetched here), whether that branch has the workflow,
  * and the starter check's run on its tip. `gh` reads GitHub (the dashboard's own gh); nothing is written anywhere.
  */
-export function starterCiView(o: { root: string; repo: string; branch: string; configured: string | null; gh: (args: string[]) => { status: number | null; stdout: string; stderr: string }; run?: Run }): StarterCiView {
+export function starterCiView(o: { root: string; repo: string; branch: string; configured: string | null; testRun?: boolean; gh: (args: string[]) => { status: number | null; stdout: string; stderr: string }; run?: Run }): StarterCiView {
   const run = o.run ?? realRun;
   const ref = `origin/${o.branch}`;
   const files = run('git', ['ls-tree', '-r', '--name-only', ref], o.root);
@@ -183,5 +189,6 @@ export function starterCiView(o: { root: string; repo: string; branch: string; c
     if (rows.some(([s]) => s !== 'completed')) firstRun = { state: 'running', conclusion: null };
     else if (rows.length) firstRun = { state: 'done', conclusion: rows[0]![1] || null };
   }
-  return { ...draft, branch: o.branch, newFile: newFileUrl(o.repo, o.branch), onBranch, firstRun };
+  const noCi = { offered: !!o.testRun, means: CI_NONE_MEANS, why: o.testRun ? null : CI_NONE_NEEDS_TEST_RUN };
+  return { ...draft, branch: o.branch, newFile: newFileUrl(o.repo, o.branch), onBranch, firstRun, noCi };
 }

@@ -395,7 +395,7 @@ async function tailscale(c: InitContext): Promise<StepResult> {
  * safe). A choice in either counts: one merged on GitHub and fetched, or one pulled into the checkout. Empty: nothing
  * readable here.
  */
-function projectsForCiChoice(c: InitContext): Pick<ProjectConfig, 'land_mode' | 'required_checks'>[] {
+function projectsForCiChoice(c: InitContext): Pick<ProjectConfig, 'land_mode' | 'required_checks' | 'ci'>[] {
   const root = c.mode === 'local' ? c.root : c.instance && c.repo ? srvCheckoutPath(c.instance, c.repo.split('/')[1]!) : null;
   if (!root || !existsSync(join(root, BRAND.configDir, 'config.yaml'))) return [];
   const out: ProjectConfig[] = [];

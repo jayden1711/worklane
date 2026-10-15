@@ -3074,7 +3074,7 @@ test("the Repo config form: no input moves when GitHub's checks answer arrives a
 test("the Repo config form with no required check (#469): the starter CI, last in the form; its summary and file; Confirm is GitHub's new-file page with the file; once it ran on main, the step says its check is selected", () => {
   const c = { values: { writers: ['example-owner'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
   const file = 'name: ci\njobs:\n  test:\n    name: test\n';
-  const view: StarterCiView = { path: '.github/workflows/ci.yml', check: 'test', summary: 'Runs `npm test` on Node 22 for every PR and every push to main, as the check `test`, with read-only permissions.', file, placeholder: false, command: 'npm test', branch: 'main', newFile: 'https://github.com/example-org/example-shop/new/main?filename=.github%2Fworkflows%2Fci.yml', onBranch: false, firstRun: { state: 'none', conclusion: null } };
+  const view: StarterCiView = { path: '.github/workflows/ci.yml', check: 'test', summary: 'Runs `npm test` on Node 22 for every PR and every push to main, as the check `test`, with read-only permissions.', file, placeholder: false, command: 'npm test', branch: 'main', newFile: 'https://github.com/example-org/example-shop/new/main?filename=.github%2Fworkflows%2Fci.yml', onBranch: false, firstRun: { state: 'none', conclusion: null }, noCi: { offered: false, means: 'No CI (ci: none): …', why: 'needs test_run: add the starter CI' } };
   const closed = r.renderRepoConfigForm(c, { starter: view });
   assert.match(closed, /data-testid="starter-ci-add"/);
   assert.doesNotMatch(closed, /starter-ci-preview/);
