@@ -37,6 +37,7 @@ import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
@@ -224,6 +225,8 @@ export interface DashboardOptions {
   backlog?: () => Backlog;
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
+  /** gitleaks over an uploaded chat attachment (src/chat-attachments.ts); null: the engine's patterns only. Tests set it. */
+  attachmentScan?: ((path: string) => Promise<string[]>) | null;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; updatesStatePath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
@@ -520,6 +523,9 @@ const REPO_PLACE: Record<SettingKey, { file: string; path: string[] } | null> = 
   'intake.reports_per_sender_per_day': null,
   'intake.drafts_per_day': null,
   'intake.max_usd_per_day': null,
+  'chat_attachments.max_file_mb': null,
+  'chat_attachments.max_message_mb': null,
+  'chat_attachments.retention_days': null,
 };
 
 const defines = (obj: unknown, path: string[]): boolean => {
@@ -950,6 +956,15 @@ export function json(res: ServerResponse, status: number, body: unknown) {
   send(res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(view ? { vary: 'accept-encoding' } : {}) }, Buffer.from(JSON.stringify(body)), view ? requestEncoding(req) : null);
 }
 
+/** The chat attachments' caps in force: the instance's policy settings, else the engine's defaults. */
+export function chatAttachmentCaps(o: Pick<DashboardOptions, 'policyFile'>): AttachmentCaps {
+  try {
+    return attachmentCaps(o.policyFile ? PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings : {});
+  } catch {
+    return attachmentCaps({});
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -1309,15 +1324,63 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
+        // Chat attachments (src/chat-attachments.ts): the owners' and writers' only, to upload, read or remove; a
+        // viewer is refused on every one, downloads included. The file streams to the instance's state, never a
+        // buffer; it is served with its allowlisted type, nosniff, and as a download unless it is an image.
+        const attachPath = url.pathname.match(/^\/api\/chat\/attachments(?:\/(limits|att-[a-f0-9]{32}))?$/);
+        if (attachPath) {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('chat attachments are', who) });
+          const caps = chatAttachmentCaps(opts);
+          const sub = attachPath[1];
+          if (sub === 'limits' && req.method === 'GET') return json(res, 200, { maxFileMb: caps.max_file_mb, maxMessageMb: caps.max_message_mb, retentionDays: caps.retention_days, maxFiles: MAX_ATTACHMENTS, extensions: ATTACHMENT_EXTENSIONS });
+          if (!sub && req.method === 'POST') {
+            let name = '';
+            try {
+              name = decodeURIComponent(String(req.headers['x-attachment-name'] ?? ''));
+            } catch {
+              return json(res, 400, { error: 'the file name header is not URI-encoded' });
+            }
+            const length = req.headers['content-length'] !== undefined ? Number(req.headers['content-length']) : null;
+            try {
+              const m = await storeUpload({ stateDir: opts.stateDir, name, body: req, declaredLength: Number.isFinite(length) ? length : null, caps, by: who.login, anyway: req.headers['x-attach-anyway'] === '1', ...(opts.attachmentScan !== undefined ? { gitleaks: opts.attachmentScan } : {}) });
+              // Only what the attachment is: never its content, nor (on a secret warning) what matched.
+              audit(who, 'chat.attachment_added', { id: m.id, name: redactString(m.name), type: m.kind, size: m.size, sha256: m.sha256 });
+              return json(res, 200, { attachment: attachmentView(m), secretKinds: m.secretKinds, scanned: SCANNED_KINDS.includes(m.kind) });
+            } catch (e) {
+              if (!(e instanceof AttachmentError)) throw e;
+              // Refused mid-stream: answer, then drop the connection rather than read the rest of the body.
+              if (!req.readableEnded) {
+                res.setHeader('connection', 'close');
+                res.on('finish', () => req.destroy());
+              }
+              return json(res, e.status, { error: e.message, ...(e.secretKinds.length ? { secret: { kinds: e.secretKinds } } : {}) });
+            }
+          }
+          const m = sub && sub !== 'limits' ? readAttachment(opts.stateDir, sub) : null;
+          if (sub && sub !== 'limits' && !m) return json(res, 404, { error: 'no such attachment (it may have expired)' });
+          if (m && req.method === 'GET') {
+            res.writeHead(200, downloadHeaders(m));
+            return void res.end(attachmentBytes(opts.stateDir, m.id));
+          }
+          if (m && req.method === 'DELETE') {
+            if (!isOwnerHere && m.by.toLowerCase() !== who.login.toLowerCase()) return json(res, 403, { error: 'only who attached it, or an owner, may remove an attachment' });
+            removeAttachment(opts.stateDir, m.id);
+            audit(who, 'chat.attachment_removed', { id: m.id });
+            return json(res, 200, { ok: true });
+          }
+          return json(res, 405, { error: 'not a method here' });
+        }
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string; key?: unknown };
+          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
           try {
+            const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts)).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}) });
-            audit(who, 'chat.asked', { id: asked.id });
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
+            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
             return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
+            if (e instanceof AttachmentError) return json(res, e.status, { error: e.message });
             throw e;
           }
         }

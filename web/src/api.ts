@@ -1546,7 +1546,36 @@ export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+
+/** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
+export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
+export interface ChatAttachmentLimits { maxFileMb: number; maxMessageMb: number; retentionDays: number; maxFiles: number; extensions: string[] }
+/** An upload's outcome: kept, or held back because it looks like it holds a secret (the kinds, never the value). */
+/** `scanned`: false for an image, PDF or Office file, which the secret scan can't read. */
+export type ChatUpload = { attachment: ChatAttachment; secretKinds: string[]; scanned?: boolean } | { secret: string[]; error: string };
+const chatPath = async (instance: string | null, path: string) => (instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path));
+export const chatAttachmentLimits = (instance: string | null) => chatCall<ChatAttachmentLimits>(instance, '/api/chat/attachments/limits');
+/** The name header: its last 200 characters (what the server keeps; whole code points, so it always encodes), encoded. */
+export const attachmentNameHeader = (name: string) => encodeURIComponent(Array.from(name).slice(-200).join(''));
+/** Upload one file as the request body (streamed; its name in a header, never the URL). `anyway`: past a secret warning. */
+export async function uploadChatAttachment(instance: string | null, file: Blob & { name: string }, anyway = false): Promise<ChatUpload> {
+  const headers: Record<string, string> = { ...(await authHeaders()), 'content-type': 'application/octet-stream', 'x-attachment-name': attachmentNameHeader(file.name), ...(anyway ? { 'x-attach-anyway': '1' } : {}) };
+  const res = await fetch(await chatPath(instance, '/api/chat/attachments'), { method: 'POST', body: file, headers });
+  if (res.status === 409) {
+    const b = (await res.json().catch(() => ({}))) as { error?: string; secret?: { kinds?: string[] } };
+    if (b.secret?.kinds) return { secret: b.secret.kinds, error: b.error ?? 'this file looks like it contains a secret' };
+    throw new ApiError(b.error ?? 'HTTP 409', 409);
+  }
+  return answer<ChatUpload>(res);
+}
+export const removeChatAttachment = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/attachments/${id}`, { method: 'DELETE' });
+/** An attachment's bytes, through the dashboard with the normal sign-in (never a link with a key in it). */
+export async function chatAttachmentBlob(instance: string | null, id: string): Promise<Blob> {
+  const res = await fetch(await chatPath(instance, `/api/chat/attachments/${id}`), { headers: await authHeaders() });
+  if (!res.ok) throw new ApiError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`, res.status);
+  return res.blob();
+}
 /** A fresh request key (works outside secure contexts too, where randomUUID is missing). */
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
