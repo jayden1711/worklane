@@ -179,7 +179,21 @@ function gpuScript() {
     chmodSync(join(bin, n), 0o755);
   };
   const real = (t: string) => ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].map((d) => join(d, t)).find((p) => existsSync(p));
-  stub('id', `[ "$1" = -u ] && [ "$#" -eq 1 ] && { echo 0; exit 0; }; [ "$1" = -u ] && [ "$2" = wl-test-shop ] && exit 0; [ "$1" = -u ] && exit 1; exit 0`);
+  // The users: root, a system user, the owner, harness users, and a user an instance's agents run as (its instance.yaml
+  // in its coordinator's home says so).
+  const users: Record<string, number> = { root: 0, svc: 999, 'example-owner': 1000, 'wl-test-shop': 1001, 'wl-shop': 1002, 'wl-shop-agent': 1003, gpuagent: 1004 };
+  stub('id', `[ "$1" = -u ] && [ "$#" -eq 1 ] && { echo 0; exit 0; }
+[ "$1" = -u ] && case "$2" in ${Object.entries(users).map(([u, n]) => `${u}) echo ${n}; exit 0 ;;`).join(' ')} *) exit 1 ;; esac
+exit 0`);
+  const coordHome = join(dir, 'home', 'wl-shop');
+  mkdirSync(join(coordHome, '.local', 'state', 'worklane', 'instances', 'shop'), { recursive: true });
+  writeFileSync(join(coordHome, '.local', 'state', 'worklane', 'instances', 'shop', 'instance.yaml'), 'name: shop\nrun_as:\n  agent_user: gpuagent\n  agent_home: /home/example\n');
+  stub('getent', `case "$1" in
+  passwd) ${Object.entries(users).map(([u, n]) => `echo '${u}:x:${n}:${n}::${u === 'wl-shop' ? coordHome : `/home/${u}`}:/bin/bash';`).join(' ')} ;;
+  group) [ -f '${dir}/group' ] && cat '${dir}/group' || exit 2 ;;
+esac`);
+  stub('groupadd', `[ -f '${dir}/group' ] || echo 'worklane-gpu:x:990:' > '${dir}/group'`);
+  stub('gpasswd', `[ "$1" = -M ] && echo "worklane-gpu:x:990:$2" > '${dir}/group'`);
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
   stub('systemd-tmpfiles', `printf '%s\\n' "$*" >> "${dir}/tmpfiles.calls"`);
   for (const t of ['cat', 'mv', 'rm', 'sed', 'sort', 'cut', 'tr', 'paste', 'dirname', 'basename', 'chmod', 'grep', 'head']) {
@@ -202,7 +216,8 @@ function gpuScript() {
   }
   writeFileSync(join(setup, 'testrun-gpu.sh'), src);
   const run = (...args: string[]) => spawnSync('/bin/bash', [join(setup, 'testrun-gpu.sh'), ...args], { encoding: 'utf8', env: { PATH: bin } });
-  return { dir, file, tmpfiles, run, done: () => rmSync(dir, { recursive: true, force: true }) };
+  const group = () => (existsSync(join(dir, 'group')) ? readFileSync(join(dir, 'group'), 'utf8').trim() : null);
+  return { dir, file, tmpfiles, run, group, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 test('testrun-gpu.sh: enable and disable write exactly the form the helper and the engine read, root 0644, and the boot-time locks; bad arguments change nothing', { skip: !posix && 'bash' }, () => {
@@ -221,13 +236,17 @@ test('testrun-gpu.sh: enable and disable write exactly the form the helper and t
     assert.deepEqual(readGpuFile(s.file, uid), { maxMinutes: 15, instances: { shop: [0, 1] } }, 'the engine reads what it wrote');
     assert.equal(spawnSync('stat', process.platform === 'darwin' ? ['-f', '%Lp', s.file] : ['-c', '%a', s.file], { encoding: 'utf8' }).stdout.trim(), '644');
     assert.equal(readFileSync(s.tmpfiles, 'utf8'), [
-      '# Written by scripts/setup/testrun-gpu.sh: the GPU test runs\' locks (one per GPU), root\'s, readable by all.',
+      '# Written by scripts/setup/testrun-gpu.sh: the GPU test runs\' locks (one per GPU), root\'s, group worklane-gpu only.',
       'd /run/worklane 0755 root root -',
-      'd /run/worklane/gpu 0755 root root -',
-      'f /run/worklane/gpu/0.lock 0644 root root -',
-      'f /run/worklane/gpu/1.lock 0644 root root -',
+      'd /run/worklane/gpu 0750 root worklane-gpu -',
+      'z /run/worklane/gpu 0750 root worklane-gpu -',
+      'f /run/worklane/gpu/0.lock 0640 root worklane-gpu -',
+      'z /run/worklane/gpu/0.lock 0640 root worklane-gpu -',
+      'f /run/worklane/gpu/1.lock 0640 root worklane-gpu -',
+      'z /run/worklane/gpu/1.lock 0640 root worklane-gpu -',
       '',
     ].join('\n'));
+    assert.equal(s.group(), 'worklane-gpu:x:990:', 'the locks\' group made, with nobody in it');
     assert.match(r.stdout, /GPU test runs: on for 1 instance\(s\); max 15 min per GPU command\n {2}shop: GPU 0,1/);
     // Default GPU 0; the cap kept; disable leaves the others.
     assert.equal(s.run('enable', 'shop').status, 0);
@@ -240,6 +259,34 @@ test('testrun-gpu.sh: enable and disable write exactly the form the helper and t
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /not in the form this script writes/);
     assert.equal(readFileSync(s.file, 'utf8'), '{"version": 1}\n');
+  } finally {
+    s.done();
+  }
+});
+
+test('testrun-gpu.sh holder: the GPU group gets exactly the one owner; never root, a system user, a harness user or a user agents run as', { skip: !posix && 'bash' }, () => {
+  const s = gpuScript();
+  try {
+    for (const [u, why] of [
+      ['root', /refused: root is root or a system user \(uid 0\)/],
+      ['svc', /refused: svc is root or a system user \(uid 999\)/],
+      ['wl-test-shop', /refused: wl-test-shop is a harness user \(wl-\*\)/],
+      ['wl-shop', /refused: wl-shop is a harness user/],
+      ['wl-shop-agent', /refused: wl-shop-agent is a harness user/],
+      ['gpuagent', /refused: gpuagent is a user an instance's agents or evals run as/],
+      ['nobody-here', /refused: no user nobody-here/],
+    ] as const) {
+      const r = s.run('holder', u);
+      assert.equal(r.status, 1, u);
+      assert.match(r.stderr, why, u);
+      assert.equal(s.group(), null, `${u}: no group made, nobody added`);
+    }
+    assert.equal(s.run('holder', 'Bad Name').status, 2);
+    const ok = s.run('holder', 'example-owner');
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(s.group(), 'worklane-gpu:x:990:example-owner');
+    assert.equal(s.run('holder', 'none').status, 0);
+    assert.equal(s.group(), 'worklane-gpu:x:990:', 'nobody');
   } finally {
     s.done();
   }
@@ -258,6 +305,30 @@ test('gpu hold: the arguments; refused when no GPU test runs are on (nothing to 
     assert.match(said.at(-1)!, /no lock file for GPU 0/);
     assert.ok(!existsSync(marker));
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('gpu hold: a user who can\'t open the lock (not in the GPU group) is told so, and nothing runs', { skip: (!posix && 'POSIX modes') || (uid === 0 && 'root opens everything') }, async () => {
+  const dir = tmp('gpu-hold-');
+  const said: string[] = [];
+  try {
+    const lock = (i: number) => join(dir, 'gpu', `${i}.lock`);
+    mkdirSync(join(dir, 'gpu'));
+    writeFileSync(lock(0), '');
+    chmodSync(lock(0), 0o000);
+    const marker = join(dir, 'ran');
+    assert.equal(await gpuHoldCommand(['--gpu', '0', '--', 'touch', marker], { lockPath: lock, err: (l) => void said.push(l) }), 2);
+    assert.match(said.at(-1)!, /^gpu hold: only a member of the worklane-gpu group may hold a GPU, and this user can't open \S+0\.lock\. Root makes the owner its one member: sudo bash \S+testrun-gpu\.sh holder <your user>; then log in again\. Agent, test and coordinator users never can\.$/);
+    // The directory closed to this user too (0750, not its group): the same, not "no lock file".
+    chmodSync(lock(0), 0o640);
+    chmodSync(join(dir, 'gpu'), 0o000);
+    assert.equal(await gpuHoldCommand(['--gpu', '0', '--', 'touch', marker], { lockPath: lock, err: (l) => void said.push(l) }), 2);
+    assert.match(said.at(-1)!, /only a member of the worklane-gpu group/);
+    chmodSync(join(dir, 'gpu'), 0o700);
+    assert.ok(!existsSync(marker));
+  } finally {
+    chmodSync(join(dir, 'gpu'), 0o700);
     rmSync(dir, { recursive: true, force: true });
   }
 });

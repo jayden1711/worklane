@@ -10,11 +10,19 @@
 #         unit capped at the file's max_minutes. The other instance (not listed) still gets nothing.
 #   lock: two GPU runs at once run one after the other; one that can't get the GPU by its timeout fails saying who
 #         holds it; a run that doesn't ask never waits; `worklane gpu hold` takes the same lock, both ways.
+#   group: the locks are root:worklane-gpu (0750 directory, 0640 locks); the root script makes the owner (this
+#         runner's user) the group's one member and refuses the test user, the coordinator user and a user an
+#         instance's agents run as; each of those, and any other non-member, is refused the lock (EACCES), and
+#         `worklane gpu hold` tells a non-member so; the member opens and flocks it.
 # Usage: bash scripts/ci/testrun-gpu-real-systemd.sh <other instance>   (as the runner user, with sudo)
 set -euo pipefail
 I2="${1:?the other instance (not opted in)}"
 H=/usr/local/libexec/worklane-testrun
 CLI="$PWD/dist/src/cli.js"
+NODE="$(command -v node)"
+me="$(id -un)"
+# As this user again through sudo, so a group added since this job's login applies (sudo sets the user's groups anew).
+as_me() { sudo -u "$me" "$@"; }
 t="$(mktemp -d)"
 chmod 0755 "$t"
 made=()
@@ -29,6 +37,9 @@ cleanup() {
   sudo rm -rf /run/worklane/gpu
   sudo rmdir /run/worklane 2>/dev/null || true
   [ "$etc_was" = 1 ] || sudo rmdir /etc/worklane 2>/dev/null || true
+  sudo rm -f "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/instance.yaml"
+  for u in gpuagent gpuother; do sudo userdel -r "$u" 2>/dev/null || true; done
+  sudo groupdel worklane-gpu 2>/dev/null || true
   rm -rf "$t"
 }
 trap cleanup EXIT
@@ -119,7 +130,52 @@ for id in gpu-off-ask gpu-off-plain; do wipe ci "$id"; done
 echo "== on for ci, GPU 0, at most 5 min a GPU command (root's script)"
 sudo bash scripts/setup/testrun-gpu.sh enable ci --devices 0 --max-minutes 5
 [ "$(stat -c '%U:%G %a' /etc/worklane/testrun-gpu.json)" = 'root:root 644' ] || fail "the root file isn't root:root 0644"
-[ "$(stat -c '%U:%G %a' /run/worklane/gpu/0.lock)" = 'root:root 644' ] || fail "GPU 0's lock isn't root:root 0644"
+[ "$(sudo stat -c '%U:%G %a' /run/worklane/gpu)" = 'root:worklane-gpu 750' ] || fail "the locks' directory isn't root:worklane-gpu 0750: $(sudo stat -c '%U:%G %a' /run/worklane/gpu)"
+[ "$(sudo stat -c '%U:%G %a' /run/worklane/gpu/0.lock)" = 'root:worklane-gpu 640' ] || fail "GPU 0's lock isn't root:worklane-gpu 0640"
+
+echo "== the locks' group: the owner alone; never an agent, test or coordinator user"
+sudo useradd --create-home --shell /bin/bash gpuagent
+sudo useradd --create-home --shell /bin/bash gpuother
+# An instance whose agents run as gpuagent (instance.yaml run_as, where the coordinator keeps it).
+ch="$(getent passwd wl-ci | cut -d: -f6)"
+for d in .local .local/state .local/state/worklane .local/state/worklane/instances .local/state/worklane/instances/ci; do sudo install -d -o wl-ci -g wl-ci "$ch/$d"; done
+printf 'name: ci\nrun_as:\n  agent_user: gpuagent\n  agent_home: %s\n' "$(getent passwd gpuagent | cut -d: -f6)" | sudo tee "$ch/.local/state/worklane/instances/ci/instance.yaml" > /dev/null
+for u in wl-test-ci wl-ci gpuagent root; do
+  if out="$(sudo bash scripts/setup/testrun-gpu.sh holder "$u" 2>&1)"; then fail "the script added $u to the GPU group: $out"; fi
+  echo "  holder $u: $out"
+  grep -q '^refused: ' <<<"$out" || fail "holder $u: $out"
+done
+[ -z "$(getent group worklane-gpu | cut -d: -f4)" ] || fail "the GPU group has members: $(getent group worklane-gpu)"
+sudo bash scripts/setup/testrun-gpu.sh holder "$me"
+[ "$(getent group worklane-gpu | cut -d: -f4)" = "$me" ] || fail "the GPU group isn't just $me: $(getent group worklane-gpu)"
+# What each user gets trying the lock: open it read-only, then an exclusive flock without waiting.
+try_py='import errno, fcntl, os, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY)
+except OSError as e:
+    print(errno.errorcode.get(e.errno, str(e.errno))); sys.exit(0)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print("LOCKED")
+except OSError as e:
+    print("open, flock", errno.errorcode.get(e.errno, str(e.errno)))'
+for u in wl-test-ci wl-ci gpuagent gpuother; do
+  got="$(sudo -u "$u" python3 -c "$try_py" /run/worklane/gpu/0.lock)"
+  echo "  $u tries GPU 0's lock: $got"
+  [ "$got" = EACCES ] || fail "$u got $got, not EACCES"
+done
+got="$(as_me python3 -c "$try_py" /run/worklane/gpu/0.lock)"
+echo "  $me (the group's member) tries GPU 0's lock: $got"
+[ "$got" = LOCKED ] || fail "the member got $got"
+# The CLI where another user can run it (this job's checkout is in the runner's own home): the build, its
+# dependencies and node, world-readable.
+cli_dir="$(mktemp -d /tmp/wl-gpu-cli-XXXXXX)"
+cp -r dist package.json node_modules "$cli_dir/"
+cp "$NODE" "$cli_dir/node"
+chmod -R a+rX "$cli_dir"
+rc=0; sudo -u gpuother env -i PATH=/usr/bin:/bin HOME="$(getent passwd gpuother | cut -d: -f6)" sh -c 'cd / && exec "$1/node" "$1/dist/src/cli.js" gpu hold -- true' _ "$cli_dir" 2> "$t/hold-other.err" || rc=$?
+rm -rf "$cli_dir"
+echo "  gpu hold as gpuother: exit $rc: $(cat "$t/hold-other.err")"
+[ "$rc" = 2 ] && grep -q '^gpu hold: only a member of the worklane-gpu group may hold a GPU' "$t/hold-other.err" || fail "gpu hold as a non-member"
 for id in gpu-on-ask gpu-on-plain; do mkrun ci "$id"; done
 mkrun "$I2" gpu-on-other
 ex ci gpu-on-ask 600 --gpu -- "$probe"
@@ -135,15 +191,15 @@ for p in "${GRANTED[@]}" "${NEVER[@]}"; do expect gpu-on-plain "$p" ENOENT; done
 if grep -q 'worklane-testrun: gpu' "$t/gpu-on-plain.err"; then fail "a run that didn't ask got a GPU line"; fi
 head -n 1 "$t/gpu-on-other.err" | grep -qx "worklane-testrun: gpu none (not on for $I2 in /etc/worklane/testrun-gpu.json)" || { cat "$t/gpu-on-other.err" >&2; fail "the other instance's line"; }
 for p in "${GRANTED[@]}" "${NEVER[@]}"; do expect gpu-on-other "$p" ENOENT; done
-[ -z "$(cat /run/worklane/gpu/0.lock)" ] || fail "the lock's note was left"
+[ -z "$(sudo cat /run/worklane/gpu/0.lock)" ] || fail "the lock's note was left"
 wipe ci gpu-on-ask; wipe ci gpu-on-plain; wipe "$I2" gpu-on-other
 
 echo "== one GPU command per GPU"
 for id in gpu-lock-a gpu-lock-b gpu-lock-c gpu-lock-d; do mkrun ci "$id"; done
 ex ci gpu-lock-a 120 --gpu -- 'sleep 8; date +%s' &
 pa=$!
-for _ in $(seq 50); do grep -q . /run/worklane/gpu/0.lock && break; sleep 0.2; done
-grep -q '^ci/gpu-lock-a since ' /run/worklane/gpu/0.lock || fail "A's note isn't in the lock: $(cat /run/worklane/gpu/0.lock)"
+for _ in $(seq 50); do sudo grep -q . /run/worklane/gpu/0.lock && break; sleep 0.2; done
+sudo grep -q '^ci/gpu-lock-a since ' /run/worklane/gpu/0.lock || fail "A's note isn't in the lock: $(sudo cat /run/worklane/gpu/0.lock)"
 ex ci gpu-lock-b 60 --gpu -- 'date +%s' &
 pb=$!
 ex ci gpu-lock-c 60 -- 'date +%s'
@@ -164,7 +220,7 @@ for id in gpu-lock-a gpu-lock-b gpu-lock-c gpu-lock-d; do wipe ci "$id"; done
 
 echo "== worklane gpu hold takes the same lock"
 for id in gpu-hold-e gpu-hold-f; do mkrun ci "$id"; done
-node "$CLI" gpu hold -- bash -c "sleep 6; date +%s > $t/hold.end" 2> "$t/hold.err" &
+as_me "$NODE" "$CLI" gpu hold -- bash -c "sleep 6; date +%s > $t/hold.end" 2> "$t/hold.err" &
 ph=$!
 for _ in $(seq 100); do grep -q 'holding GPU 0' "$t/hold.err" 2>/dev/null && break; sleep 0.2; done
 grep -q 'gpu hold: holding GPU 0' "$t/hold.err" || { cat "$t/hold.err" >&2; fail "gpu hold didn't take GPU 0"; }
@@ -175,8 +231,8 @@ wait "$ph"
 # And the other way: a GPU run holds it; gpu hold waits, saying who, then runs.
 ex ci gpu-hold-f 60 --gpu -- 'sleep 6; date +%s' &
 pf=$!
-for _ in $(seq 50); do grep -q . /run/worklane/gpu/0.lock && break; sleep 0.2; done
-node "$CLI" gpu hold -- bash -c "date +%s > $t/hold2.start" 2> "$t/hold2.err"
+for _ in $(seq 50); do sudo grep -q . /run/worklane/gpu/0.lock && break; sleep 0.2; done
+as_me "$NODE" "$CLI" gpu hold -- bash -c "date +%s > $t/hold2.start" 2> "$t/hold2.err"
 wait "$pf"
 f_end="$(tail -n 1 "$t/gpu-hold-f.out")"
 grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f since " "$t/hold2.err" || { cat "$t/hold2.err" >&2; fail "gpu hold didn't say who held the GPU"; }
