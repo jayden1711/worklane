@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // CI's stand-in for `claude auth status --json` (the real-systemd job, scripts/setup/claude-account.sh): signed in when
-// the calling user's own ~/.claude/.credentials.json holds a setup token, unless that user is listed in
+// the calling user's own login holds a setup token ($CLAUDE_CONFIG_DIR/.credentials.json, as the real claude reads it:
+// an account profile's; else ~/.claude/.credentials.json), unless that user is listed in
 // /etc/ci-claude-fail (one user per line), which a test writes to make a check fail. It names the account by the
 // token's last 4 characters, never the token. The login's proof (issue #463: one minimal real call, `-p "Reply with the
 // single word: ok" ...`) is answered when signed in, unless the token's last 4 characters are listed in
@@ -20,7 +21,7 @@ if (!proof && (args[0] !== 'auth' || args[1] !== 'status')) {
 const user = os.userInfo().username;
 let token = '';
 try {
-  token = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', '.credentials.json'), 'utf8')).claudeAiOauth.accessToken || '';
+  token = JSON.parse(fs.readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), '.credentials.json'), 'utf8')).claudeAiOauth.accessToken || '';
 } catch {
   // no login stored
 }

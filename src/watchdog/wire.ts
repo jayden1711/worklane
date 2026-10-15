@@ -63,7 +63,8 @@ export function watchdogForInstance(o: {
   stateDir: string;
   log: { read(after?: number): StoredEvent[] };
   env: NodeJS.ProcessEnv;
-  runAs?: RunAs;
+  /** The agent user, on the login its runs use now (a function: an account profile switch changes it). */
+  runAs?: RunAs | (() => RunAs);
   tokens?: () => Promise<string>;
   intake?: () => IntakeConfig | null;
   discordTokenFile?: string;
@@ -75,7 +76,7 @@ export function watchdogForInstance(o: {
     stop: () => readStop(o.stateDir),
     emergency: () => !!emergencyStop(),
     auth: () => {
-      const s = claudeAuthStatusJson(o.env, o.runAs);
+      const s = claudeAuthStatusJson(o.env, typeof o.runAs === 'function' ? o.runAs() : o.runAs);
       return s ? { loggedIn: s.loggedIn, ...(typeof s.expiresAt === 'string' ? { expiresAt: s.expiresAt } : {}) } : null;
     },
     // The same token source the coordinator's GitHub clients use: a call of theirs that succeeds is seen here.

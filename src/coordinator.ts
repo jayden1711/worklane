@@ -26,6 +26,8 @@ import { compareInstructions, engineRoleCases, instructionTargets, parseCases, r
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
+import { recordProfileSwitches } from './claude-profiles.js';
+import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
@@ -40,6 +42,7 @@ import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
 import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
+import { CI_CHOICE_FIX, ciChoiceProblem } from './ci-choice.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
@@ -116,6 +119,10 @@ export class Coordinator extends HarnessEvals {
     await step('claude sign-in', () => this.checkHeldLogins(), 0);
     // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
+    // A Claude account profile switch this dashboard asked for, once the root script has finished it: account.switched.
+    await step('account profiles', () => recordProfileSwitches(this.d.log, this.d.instance), 0);
+    // Auto-failover between account profiles on a usage limit, when it is on (src/claude-failover.ts). Never on an auth failure.
+    await step('account failover', () => failoverStep({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}), ...(this.d.incidents ? { incidents: this.d.incidents } : {}) }), null);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
@@ -475,18 +482,18 @@ export class Coordinator extends HarnessEvals {
     }
     if (r.kind === 'confirmed') {
       // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     if (r.kind === 'recovered') {
       this.emit('config.recovered', { sha: r.sha });
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     this.repoCfg = r.cfg;
     this.d.cfg = this.d.settings ? applySettings(r.cfg, this.d.settings().settings) : r.cfg;
     this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
-    this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+    this.configLoads();
     if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
   }
 
@@ -497,6 +504,16 @@ export class Coordinator extends HarnessEvals {
     if (now - this.attachmentsSweptAt < 3_600_000) return;
     this.attachmentsSweptAt = now;
     sweepAttachments(this.d.stateDir, attachmentCaps(this.d.settings?.().settings ?? {}).retention_days, new Date(now));
+  }
+
+  /**
+   * The config on the default branch loads: the config_invalid incident is resolved, unless it can never mark a PR
+   * ready (src/ci-choice.ts, #469). That config still runs (the loader accepts it), but the incident names why.
+   */
+  private configLoads(): void {
+    const problem = ciChoiceProblem(this.repoCfg.project);
+    if (problem) this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch}: ${problem.split(' Fix: ')[0]}`, `Fix: ${CI_CHOICE_FIX}.`);
+    else this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
   }
 
   refreshSettings(): void {

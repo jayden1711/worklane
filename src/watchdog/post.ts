@@ -36,7 +36,7 @@ export function postText(x: Incident, what: 'raised' | 'resolved', o: { dashboar
   const link = incidentLink(o.dashboardUrl, x.id);
   const lines =
     what === 'raised'
-      ? [`**${x.severity === 'red' ? 'Incident' : 'Warning'}** on ${where}: ${x.title}`, x.detail, ...(x.tried.length ? [`Already tried: ${x.tried.join('; ')}`] : []), `Fix: ${x.fix}`, ...(link ? [link] : [])]
+      ? [`**${x.severity === 'red' ? 'Incident' : x.severity === 'info' ? 'Notice' : 'Warning'}** on ${where}: ${x.title}`, x.detail, ...(x.tried.length ? [`Already tried: ${x.tried.join('; ')}`] : []), `Fix: ${x.fix}`, ...(link ? [link] : [])]
       : [`**Resolved** on ${where}: ${x.title} (open ${span(Date.parse(x.resolvedAt!) - Date.parse(x.since))})`, ...(link ? [link] : [])];
   const text = scrub(lines.join('\n'), o.secrets);
   return text.length > MAX_CHARS ? `${text.slice(0, MAX_CHARS - 1)}…` : text;

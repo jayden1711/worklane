@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
 import { BRAND } from '../brand.js';
+import { ciNoneProblems } from '../ci-none.js';
 import { optimizeProblems, type BenchmarksConfig } from '../optimize.js';
 import { FILES, type AgentsConfig, type AppConfig, type DeployConfig, type GuardrailsConfig, type ProjectConfig, type ReviewConfig, type TestsConfig } from './schema.js';
 
@@ -134,4 +135,5 @@ function crossCheck(out: Record<string, unknown>, errors: ConfigError[]) {
     }
   });  // Every optimize target names a declared benchmark (or the slowest test, with a command to run one).
   for (const e of optimizeProblems(project.optimize, out['benchmarks.yaml'] as BenchmarksConfig | undefined)) errors.push({ file: 'config.yaml', ...e });
+  for (const e of ciNoneProblems(project, out['tests.yaml'] as TestsConfig)) errors.push({ file: 'config.yaml', ...e });
 }

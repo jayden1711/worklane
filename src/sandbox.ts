@@ -53,6 +53,22 @@ export function allowedDomainsOf(settings: unknown): string[] {
   return ((settings as { sandbox?: { network?: { allowedDomains?: string[] } } } | undefined)?.sandbox?.network?.allowedDomains ?? []).slice();
 }
 
+/**
+ * A copy of a run's settings that also denies these paths to its commands and to the Read tool (for one run; the
+ * lane is unchanged). Settings with no sandbox get the Read rules only.
+ */
+export function withDeniedReads<T extends object>(settings: T, paths: readonly string[]): T {
+  const add = paths.map(abs);
+  if (!add.length) return settings;
+  const s = settings as T & { sandbox?: { filesystem?: { denyRead?: string[] } }; permissions?: { deny?: string[] } };
+  const deny = [...new Set([...(s.permissions?.deny ?? []), ...add.map((p) => `Read(/${p}/**)`), ...add.map((p) => `Read(/${p})`)])];
+  return {
+    ...s,
+    ...(s.sandbox ? { sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyRead: [...new Set([...(s.sandbox.filesystem?.denyRead ?? []), ...add])] } } } : {}),
+    permissions: { ...s.permissions, deny },
+  };
+}
+
 /** A copy of a run's settings whose commands may also reach `hosts` (for one run; the lane is unchanged). */
 export function withAllowedDomains<T extends object>(settings: T, hosts: string[]): T {
   const s = settings as T & { sandbox?: { network?: { allowedDomains?: string[] } } };

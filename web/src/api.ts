@@ -272,7 +272,7 @@ export interface State {
   canReadRuns?: boolean;
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
-  project: { name: string; repo: string; landMode: string };
+  project: { name: string; repo: string; landMode: string; ci?: CiMode };
   /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
   /** Their role on this instance, read by its server from their permission on the repo; absent from an older server. */
@@ -418,7 +418,7 @@ export interface Settings {
   /** Whether this dashboard has the First run page's Discord step (a server instance's). */
   discordSetup?: boolean;
   configDir: string;
-  project: { name: string; repo: string; landMode: string; runtime: unknown };
+  project: { name: string; repo: string; landMode: string; runtime: unknown; ci?: CiMode };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
   governor: { max_load?: number; min_free_disk_pct: number; min_free_disk_gb?: number };
@@ -1100,6 +1100,13 @@ export interface RepoConfigValues {
   daily_budget_usd: number;
   workers_count: number;
   workers_model: string;
+  /** Which CI judges a PR (#469); absent from an older server: github. */
+  ci?: 'github' | 'none';
+}
+/** Which CI judges a PR; under No CI, what that means (said on the PR, land and Settings pages). */
+export interface CiMode {
+  kind: 'github' | 'none';
+  means: string | null;
 }
 export interface FirstRunRepoConfig {
   values: RepoConfigValues;
@@ -1115,6 +1122,22 @@ export interface ConfigChange {
 }
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+/** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
+export interface StarterCi {
+  path: string;
+  check: string;
+  summary: string;
+  file: string;
+  placeholder: boolean;
+  command: string | null;
+  branch: string;
+  newFile: string;
+  onBranch: boolean;
+  firstRun: { state: 'none' | 'running' | 'done'; conclusion: string | null };
+  /** No CI: offered only where tests.yaml has test_run (`why` says why not); `means`, what it means. */
+  noCi: { offered: boolean; means: string; why: string | null };
+}
+export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
 /** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
 export const mergeRepoConfig = (number: number, confirm: boolean) =>
@@ -1397,7 +1420,51 @@ export interface ClaudeAccountData {
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
+  /** The account profiles (src/claude-profiles.ts); absent from an older server. */
+  profiles?: ProfilesTable;
+  profileOps?: ProfileOp[];
+  /** The root script a staged profile is confirmed with, on the machine. */
+  confirmScript?: string;
 }
+/** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
+export interface ProfileCell {
+  instance: string;
+  user: string | null;
+  active: boolean;
+  account: string | null;
+  subscription: string | null;
+  apiOk: boolean | null;
+  apiError: string | null;
+  checkedAt: string | null;
+}
+export interface ProfilesTable {
+  instances: string[];
+  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
+  active: Record<string, string>;
+  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
+  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
+}
+export interface FailoverSetting {
+  order: string[];
+  back: boolean;
+}
+export interface ProfileOp {
+  id: string;
+  op: 'profile-add' | 'use' | 'remove';
+  profile: string;
+  for: string | null;
+  status: 'running' | 'done' | 'failed' | 'stalled';
+  startedAt: string;
+  endedAt: string | null;
+  detail: string;
+  steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
+}
+/** A new account profile from a setup token: the token in the body only, never the URL. */
+export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
+/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
+export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
+/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
+export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
@@ -1857,7 +1924,7 @@ export interface Incident {
   id: string;
   kind: string;
   instance: string | null;
-  severity: 'red' | 'amber';
+  severity: 'red' | 'amber' | 'info';
   title: string;
   since: string;
   resolvedAt: string | null;
