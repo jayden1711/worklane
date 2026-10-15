@@ -103,6 +103,14 @@ export const InstanceSettings = z.strictObject({
       max_usd_per_day: z.number().min(0).optional(),
     })
     .optional(),
+  /** The dashboard chat's attachments (src/chat-attachments.ts): size caps in MB and days kept. Absent: the engine's defaults. */
+  chat_attachments: z
+    .strictObject({
+      max_file_mb: z.number().positive().max(100).optional(),
+      max_message_mb: z.number().positive().max(250).optional(),
+      retention_days: z.number().int().min(1).max(365).optional(),
+    })
+    .optional(),
 });
 export type InstanceSettings = z.infer<typeof InstanceSettings>;
 

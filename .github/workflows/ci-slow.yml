@@ -1566,6 +1566,99 @@ jobs:
           s=/var/lib/worklane/claude-account
           if grep -qFf "$F/claude-token4" "$F/switch4.jsonl" "$F/switch4.err" || sudo grep -qFf "$F/claude-token4" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token4"; then echo "the token was echoed" >&2; exit 1; fi
           sudo rm -f /etc/ci-claude-refuse
+      - name: "claude-account profiles (#464), real users and real sudo: profile-add in each agent user's own profile dir, proven by a real call there; use refused by the API changes nothing; remove refused while in use; a coordinator can't name another instance or every one; its add is staged until a root confirm"
+        run: |
+          s=/var/lib/worklane/claude-account
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token5"); unset t
+          sudo bash scripts/setup/claude-account.sh profile-add work --json < "$F/claude-token5" > "$F/prof1.jsonl" 2> "$F/prof1.err" || { cat "$F/prof1.jsonl" "$F/prof1.err"; exit 1; }
+          cat "$F/prof1.jsonl"
+          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="done") | .user]' "$F/prof1.jsonl")" = '["wl-beta-agent","wl-ci-agent"]' ]
+          for u in wl-ci-agent wl-beta-agent; do
+            h="$(getent passwd "$u" | cut -d: -f6)"
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles")" = "$u 700" ] || { sudo stat -c '%U %a' "$h/.claude-profiles"; exit 1; }
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work")" = "$u 700" ]
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work/.credentials.json")" = "$u 600" ]
+            sudo grep -qFf "$F/claude-token5" "$h/.claude-profiles/work/.credentials.json"
+            # The login it had is untouched.
+            if sudo grep -qFf "$F/claude-token5" "$h/.claude/.credentials.json"; then echo "$u: ~/.claude changed" >&2; exit 1; fi
+          done
+          sudo test ! -e "$(getent passwd wl-beta-eval | cut -d: -f6)/.claude-profiles/work"
+          [ "$(sudo stat -c '%U %a' "$s/profiles.json")" = "root 644" ]
+          # The API refuses the profile: use is refused, nothing changes.
+          tr -d '[:space:]' < "$F/claude-token5" | tail -c 4 | sudo tee /etc/ci-claude-refuse >/dev/null
+          set +e
+          sudo bash scripts/setup/claude-account.sh use work --json > "$F/prof2.jsonl" 2> "$F/prof2.err"
+          rc=$?
+          set -e
+          cat "$F/prof2.jsonl"
+          [ "$rc" = 1 ]
+          jq -se 'last | .step=="use" and .state=="failed" and (.detail|test("^refused: .*HTTP 401"))' "$F/prof2.jsonl"
+          sudo jq -e '.active == {}' "$s/profiles.json"
+          sudo rm -f /etc/ci-claude-refuse
+          sudo bash scripts/setup/claude-account.sh use work beta --json > "$F/prof3.jsonl" 2> "$F/prof3.err" || { cat "$F/prof3.jsonl" "$F/prof3.err"; exit 1; }
+          sudo jq -e '.active.beta.profile == "work" and (.active.ci == null)' "$s/profiles.json"
+          set +e
+          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof4.jsonl" 2> "$F/prof4.err"
+          rc=$?
+          set -e
+          [ "$rc" = 1 ] && jq -se 'last | (.detail|test("refused: beta use profile work"))' "$F/prof4.jsonl"
+          sudo bash scripts/setup/claude-account.sh use default beta --json > /dev/null
+          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof5.jsonl" 2> "$F/prof5.err" || { cat "$F/prof5.jsonl" "$F/prof5.err"; exit 1; }
+          for u in wl-ci-agent wl-beta-agent; do sudo test ! -e "$(getent passwd "$u" | cut -d: -f6)/.claude-profiles/work"; done
+          # Through the machine helper, as a coordinator (wl-ci): real sudo takes no instance at all, so another instance,
+          # or every one, can't even be asked for; the helper takes the instance from SUDO_USER.
+          for bad in "use work beta" "use default beta" "use work all" "use work ci" "profile-add work beta" "remove work beta" "confirm-profile work" "use work --for beta"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
+          done
+          if sudo -u wl-ci sudo -n bash scripts/setup/claude-account.sh use work beta < /dev/null 2>/dev/null; then echo "wl-ci may run the script itself" >&2; exit 1; fi
+          ends() { sudo grep -cE "\"op\":\"$1\",\"profile\":\"$2\",\"step\":\"$1\",\"state\":\"(done|failed)\".*\"for\":\"ci\"" "$s/profile-ops.jsonl" || true; }
+          ask() { # <op> <profile> <done|failed>: as wl-ci through the helper; waits for that step's own end, which must be the one given
+            local n
+            n="$(ends "$1" "$2")"
+            sudo -u wl-ci sudo -n "$HELPER" claude-account "$1" "$2" < /dev/null | tee -a "$F/helper-ops.txt"
+            for _ in $(seq 1 60); do [ "$(ends "$1" "$2")" -gt "$n" ] && break; sleep 2; done
+            sudo grep -E "\"op\":\"$1\",\"profile\":\"$2\",\"step\":\"$1\",\"state\":\"(done|failed)\".*\"for\":\"ci\"" "$s/profile-ops.jsonl" | tail -n 1 | grep -q "\"state\":\"$3\"" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; return 1; }
+          }
+          # use, from ci's dashboard: ci alone (beta keeps what it has).
+          sudo bash scripts/setup/claude-account.sh profile-add shared --json < "$F/claude-token5" > /dev/null
+          sudo bash scripts/setup/claude-account.sh use shared beta --json > /dev/null
+          ask use default done
+          grep -q 'started claude-account use default as worklane-claude-account.service' "$F/helper-ops.txt"
+          sudo jq -e '.active.beta.profile == "shared" and .active.ci == null' "$s/profiles.json"
+          # remove, from ci's dashboard: never a profile another instance uses, nor one ci wasn't given.
+          ask remove shared failed
+          sudo test -e "$(getent passwd wl-beta-agent | cut -d: -f6)/.claude-profiles/shared"
+          sudo bash scripts/setup/claude-account.sh use default beta --json > /dev/null
+          # profile-add, from ci's dashboard: ci's agent user only, STAGED; unusable until a root admin confirms it.
+          sudo -u wl-ci bash -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/claude-profile-token"; chmod 0400 "$d/claude-profile-token"' < "$F/claude-token5"
+          ask profile-add mine done
+          sudo jq -e '.profiles.mine.staged == true and .profiles.mine.instance == "ci" and (.profiles.mine.users | keys) == ["wl-ci-agent"]' "$s/profiles.json"
+          sudo test ! -e "$(getent passwd wl-beta-agent | cut -d: -f6)/.claude-profiles/mine"
+          sudo -u wl-ci test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-profile-token"
+          ask use mine failed
+          sudo jq -e '.active.ci == null' "$s/profiles.json"
+          # Confirm, at a root shell: it shows the account, and only the name typed back confirms it.
+          set +e
+          printf 'wrong\n' | sudo bash scripts/setup/claude-account.sh confirm-profile mine 2> "$F/confirm1.err"
+          rc=$?
+          set -e
+          [ "$rc" = 1 ] && grep -q "nothing was confirmed" "$F/confirm1.err" && grep -q "Claude account agents-" "$F/confirm1.err"
+          printf 'mine\n' | sudo bash scripts/setup/claude-account.sh confirm-profile mine 2> "$F/confirm2.err" || { cat "$F/confirm2.err"; exit 1; }
+          ask use mine done
+          sudo jq -e '.active.ci.profile == "mine" and .active.beta == null' "$s/profiles.json"
+          ask use default done
+          # The failover setting, from ci's dashboard: real sudo takes the order joined by + (never a comma) and no instance.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+mine back < /dev/null
+          sudo jq -e '.failover.instances.ci == {"order": ["default", "mine"], "back": true} and .failover.machine == null' "$s/profiles.json"
+          for bad in "failover default+mine back beta" "failover off stay beta" "failover default,mine back"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
+          done
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover off stay < /dev/null
+          # Every add, confirm, use and remove is an ops alert line in the machine change log; no token in any.
+          sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged mine for ci") and (map(select(startswith("confirmed mine as agents-"))) | length == 1) and any(. == "use mine for ci")' /var/lib/worklane/machine-changes.jsonl
+          if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err "$F"/confirm*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi
       - name: "claude-account from the dashboard: the coordinator starts it through the helper, in a unit of its own; the token from the instance's secrets"
         run: |
           sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"
@@ -1676,7 +1769,7 @@ jobs:
           # #469: auto-config's config names no required check (PR mode): init never finishes on it, and says why and the fix.
           set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1; code=$?; set -e
           cat "$F2/init2.log"
-          [ "$code" = 1 ] || { echo "init finished with no CI chosen (exit $code)" >&2; exit 1; }
+          [ "$code" = 5 ] || { echo "init did not stop for the CI choice (exit $code; 5 expected)" >&2; exit 1; }
           grep -q "but required_checks is empty and no CI is chosen: no PR is ever marked ready, so nothing ever merges. Fix: on the dashboard's First-run page" "$F2/init2.log"
           grep -q 'stopped at Repo config' "$F2/init2.log"
           # The owner's choice merged on main (its CI's check named), and the checkout brought up to it as add-project does.

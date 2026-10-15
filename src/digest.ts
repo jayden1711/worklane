@@ -58,6 +58,8 @@ export interface WaitItem {
   title: string | null;
   /** Why it waits, in a line. */
   detail: string;
+  /** For a PR the merge policy left to the owner: each of its reasons whole (merge.decided), one per chip on the Board. */
+  reasons?: string[];
   /** For a failed deploy: the commit. */
   sha?: string;
   /** For a PR left to the owner as high-risk: each category it touches, plainly, with its first file (merge-policy.ts whyHighRisk). */
@@ -192,17 +194,17 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
   for (const [issue, h] of planHeld) add('plan_held', h.ts, issue, null, h.reasons.length ? h.reasons.join('; ') : 'held for your approval', h.decision ? { decision: h.decision } : {});
 
   // PRs left for the owner to review and merge: not merged automatically, or a conflict fix gave up.
-  const needsOwner = new Map<number, { ts: string; issue: number; detail: string; why?: { category: string; text: string }[] }>();
+  const needsOwner = new Map<number, { ts: string; issue: number; detail: string; reasons?: string[]; why?: { category: string; text: string }[] }>();
   const ciGaveUp = new Map<number, { ts: string; issue: number; reason: string }>();
   for (const e of evs) {
     const p = e.payload as Record<string, unknown>;
     const n = Number(p.number);
-    if (e.type === 'merge.decided' && p.auto === false && !needsOwner.has(n)) needsOwner.set(n, { ts: e.ts, issue: Number(p.issue), detail: (p.reasons as string[]).join('; ') || 'left to you', ...(Array.isArray(p.why) && p.why.length ? { why: p.why as { category: string; text: string }[] } : {}) });
+    if (e.type === 'merge.decided' && p.auto === false && !needsOwner.has(n)) needsOwner.set(n, { ts: e.ts, issue: Number(p.issue), detail: (p.reasons as string[]).join('; ') || 'left to you', ...((p.reasons as string[]).length ? { reasons: [...(p.reasons as string[])] } : {}), ...(Array.isArray(p.why) && p.why.length ? { why: p.why as { category: string; text: string }[] } : {}) });
     if (e.type === 'conflict_fix.finished' && p.outcome === 'gave_up' && p.waits_owner === true && !needsOwner.has(n)) needsOwner.set(n, { ts: e.ts, issue: Number(p.issue), detail: `conflicts with its base; no conflict fix: ${String(p.detail).split('\n')[0]!.slice(0, 160)}` });
     if (e.type === 'ci_fix.gave_up') ciGaveUp.set(n, { ts: e.ts, issue: Number(p.issue), reason: String(p.reason) });
     if (e.type === 'ci_fix.started' || e.type === 'pr.ready') ciGaveUp.delete(n);
   }
-  for (const [n, w] of needsOwner) if (!closed.has(n)) add('needs_owner', w.ts, w.issue, n, w.detail, w.why ? { why: w.why } : {});
+  for (const [n, w] of needsOwner) if (!closed.has(n)) add('needs_owner', w.ts, w.issue, n, w.detail, { ...(w.why ? { why: w.why } : {}), ...(w.reasons ? { reasons: w.reasons } : {}) });
   for (const [n, w] of ciGaveUp) if (!closed.has(n)) add('ci_fix_gave_up', w.ts, w.issue, n, w.reason);
 
   // Blocked tasks, of either kind: blocked on someone (issue.blocked), or a landing that failed.

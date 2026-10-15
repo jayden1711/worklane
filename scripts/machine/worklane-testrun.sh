@@ -73,11 +73,13 @@ SLICE=worklane-test.slice
 DOCKER=/opt/worklane-test/docker/docker
 LABEL=worklane.test-run
 PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /etc/sudoers.d /root /run/docker.sock /var/run/docker.sock)
-# GPU (above). Root's opt-in, the per-GPU locks (root's 0755 directory under /run, which the coordinator's unit shares
-# with PID 1; each lock root's 0644: anyone may flock it read-only, as `worklane gpu hold` does), where the nodes are,
+# GPU (above). Root's opt-in, the per-GPU locks (root:$GPU_GROUP 0750 under /run, which the coordinator's unit shares
+# with PID 1; each lock root:$GPU_GROUP 0640: only root and the group's members, the owner alone, can open one, as
+# `worklane gpu hold` does; never an agent, test or coordinator user), the locks' group, where the nodes are,
 # and the oldest systemd a GPU run is proven on (CI's real-systemd job). Below it a run asking for the GPU runs without.
 GPU_FILE=/etc/worklane/testrun-gpu.json
 GPU_LOCK_DIR=/run/worklane/gpu
+GPU_GROUP=worklane-gpu
 DEV=/dev
 GPU_MIN_SYSTEMD=255
 
@@ -400,16 +402,26 @@ gpu_holder() {
 # The GPU's lock directory and one lock file in it, root's own (never a symlink, never anyone else's); made here, and
 # by scripts/setup/testrun-gpu.sh's tmpfiles.d entry at each boot (/run is a tmpfs).
 gpu_lock_file() {
-  local f="$GPU_LOCK_DIR/$1.lock" d got
-  for d in "$(dirname "$GPU_LOCK_DIR")" "$GPU_LOCK_DIR"; do
-    if [ -L "$d" ]; then die "$d is a symlink"; fi
-    [ -d "$d" ] || mkdir -m 0755 -- "$d" 2>/dev/null || [ -d "$d" ] || die "can't make $d"
-    got="$(stat -c '%U %a' -- "$d")"; [ "$got" = "$(id -un) 755" ] || die "$d is $got, not $(id -un)'s and 0755"
-  done
+  local f="$GPU_LOCK_DIR/$1.lock" up got me
+  me="$(id -un)"
+  up="$(dirname "$GPU_LOCK_DIR")"
+  if [ -L "$up" ]; then die "$up is a symlink"; fi
+  [ -d "$up" ] || mkdir -m 0755 -- "$up" 2>/dev/null || [ -d "$up" ] || die "can't make $up"
+  got="$(stat -c '%U %a' -- "$up")"; [ "$got" = "$me 755" ] || die "$up is $got, not $me's and 0755"
+  # The locks' directory and each lock: root's, group $GPU_GROUP, nothing for anyone else. Only this helper (as root)
+  # and the group's members (the owner, for `worklane gpu hold`) can open a lock; no agent, test or coordinator user.
+  # This helper's own: its group and mode are set here every time (a helper before the group made them 0755/0644).
+  if [ -L "$GPU_LOCK_DIR" ]; then die "$GPU_LOCK_DIR is a symlink"; fi
+  [ -d "$GPU_LOCK_DIR" ] || mkdir -m 0750 -- "$GPU_LOCK_DIR" 2>/dev/null || [ -d "$GPU_LOCK_DIR" ] || die "can't make $GPU_LOCK_DIR"
+  [ "$(stat -c %U -- "$GPU_LOCK_DIR")" = "$me" ] || die "$GPU_LOCK_DIR is not $me's"
+  chgrp "$GPU_GROUP" "$GPU_LOCK_DIR" && chmod 0750 "$GPU_LOCK_DIR" || die "can't set $GPU_LOCK_DIR to $me:$GPU_GROUP 0750"
+  got="$(stat -c '%U %G %a' -- "$GPU_LOCK_DIR")"; [ "$got" = "$me $GPU_GROUP 750" ] || die "$GPU_LOCK_DIR is $got, not $me:$GPU_GROUP 0750"
   if [ -L "$f" ]; then die "$f is a symlink"; fi
-  [ -e "$f" ] || ( umask 022; set -C; : > "$f" ) 2>/dev/null || [ -f "$f" ] || die "can't make $f"
+  [ -e "$f" ] || ( umask 077; set -C; : > "$f" ) 2>/dev/null || [ -f "$f" ] || die "can't make $f"
   [ -f "$f" ] && [ ! -L "$f" ] || die "$f is not a regular file"
-  got="$(stat -c '%U %a' -- "$f")"; [ "$got" = "$(id -un) 644" ] || die "$f is $got, not $(id -un)'s and 0644"
+  [ "$(stat -c %U -- "$f")" = "$me" ] || die "$f is not $me's"
+  chgrp "$GPU_GROUP" "$f" && chmod 0640 "$f" || die "can't set $f to $me:$GPU_GROUP 0640"
+  got="$(stat -c '%U %G %a' -- "$f")"; [ "$got" = "$me $GPU_GROUP 640" ] || die "$f is $got, not $me:$GPU_GROUP 0640"
   printf '%s' "$f"
 }
 
@@ -424,6 +436,11 @@ gpu_decide() {
   gpu_opt_in || return 0
   [[ "$sd" =~ ^[0-9]+$ ]] && [ "$sd" -ge "$GPU_MIN_SYSTEMD" ] || { GPU_WHY="systemd ${sd:-?} is older than $GPU_MIN_SYSTEMD, the first this helper's GPU sandbox is proven on"; return 0; }
   command -v flock >/dev/null 2>&1 || { GPU_WHY="no flock on this machine (util-linux), so no GPU lock"; return 0; }
+  # The locks' group: there, and no harness user in it (scripts/setup/testrun-gpu.sh refuses them; this checks again).
+  local members
+  members="$(getent group "$GPU_GROUP" 2>/dev/null)" || { GPU_WHY="no $GPU_GROUP group (scripts/setup/testrun-gpu.sh makes it)"; return 0; }
+  members="${members##*:}"
+  case ",$members," in *,wl-*) GPU_WHY="the $GPU_GROUP group has a harness user ($members): only the owner may hold a GPU"; return 0 ;; esac
   for n in nvidiactl nvidia-uvm; do is_char "$DEV/$n" || { GPU_WHY="no $DEV/$n: the NVIDIA driver isn't loaded"; return 0; }; done
   local idx=()
   for i in "${GPU_IDX[@]}"; do if is_char "$DEV/nvidia$i"; then idx+=("$i"); else skipped+=("$DEV/nvidia$i"); fi; done

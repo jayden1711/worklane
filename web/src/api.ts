@@ -1420,7 +1420,51 @@ export interface ClaudeAccountData {
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
+  /** The account profiles (src/claude-profiles.ts); absent from an older server. */
+  profiles?: ProfilesTable;
+  profileOps?: ProfileOp[];
+  /** The root script a staged profile is confirmed with, on the machine. */
+  confirmScript?: string;
 }
+/** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
+export interface ProfileCell {
+  instance: string;
+  user: string | null;
+  active: boolean;
+  account: string | null;
+  subscription: string | null;
+  apiOk: boolean | null;
+  apiError: string | null;
+  checkedAt: string | null;
+}
+export interface ProfilesTable {
+  instances: string[];
+  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
+  active: Record<string, string>;
+  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
+  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
+}
+export interface FailoverSetting {
+  order: string[];
+  back: boolean;
+}
+export interface ProfileOp {
+  id: string;
+  op: 'profile-add' | 'use' | 'remove';
+  profile: string;
+  for: string | null;
+  status: 'running' | 'done' | 'failed' | 'stalled';
+  startedAt: string;
+  endedAt: string | null;
+  detail: string;
+  steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
+}
+/** A new account profile from a setup token: the token in the body only, never the URL. */
+export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
+/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
+export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
+/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
+export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
@@ -1502,7 +1546,36 @@ export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+
+/** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
+export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
+export interface ChatAttachmentLimits { maxFileMb: number; maxMessageMb: number; retentionDays: number; maxFiles: number; extensions: string[] }
+/** An upload's outcome: kept, or held back because it looks like it holds a secret (the kinds, never the value). */
+/** `scanned`: false for an image, PDF or Office file, which the secret scan can't read. */
+export type ChatUpload = { attachment: ChatAttachment; secretKinds: string[]; scanned?: boolean } | { secret: string[]; error: string };
+const chatPath = async (instance: string | null, path: string) => (instance ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(instance)}/`) : apiPath(path));
+export const chatAttachmentLimits = (instance: string | null) => chatCall<ChatAttachmentLimits>(instance, '/api/chat/attachments/limits');
+/** The name header: its last 200 characters (what the server keeps; whole code points, so it always encodes), encoded. */
+export const attachmentNameHeader = (name: string) => encodeURIComponent(Array.from(name).slice(-200).join(''));
+/** Upload one file as the request body (streamed; its name in a header, never the URL). `anyway`: past a secret warning. */
+export async function uploadChatAttachment(instance: string | null, file: Blob & { name: string }, anyway = false): Promise<ChatUpload> {
+  const headers: Record<string, string> = { ...(await authHeaders()), 'content-type': 'application/octet-stream', 'x-attachment-name': attachmentNameHeader(file.name), ...(anyway ? { 'x-attach-anyway': '1' } : {}) };
+  const res = await fetch(await chatPath(instance, '/api/chat/attachments'), { method: 'POST', body: file, headers });
+  if (res.status === 409) {
+    const b = (await res.json().catch(() => ({}))) as { error?: string; secret?: { kinds?: string[] } };
+    if (b.secret?.kinds) return { secret: b.secret.kinds, error: b.error ?? 'this file looks like it contains a secret' };
+    throw new ApiError(b.error ?? 'HTTP 409', 409);
+  }
+  return answer<ChatUpload>(res);
+}
+export const removeChatAttachment = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/attachments/${id}`, { method: 'DELETE' });
+/** An attachment's bytes, through the dashboard with the normal sign-in (never a link with a key in it). */
+export async function chatAttachmentBlob(instance: string | null, id: string): Promise<Blob> {
+  const res = await fetch(await chatPath(instance, `/api/chat/attachments/${id}`), { headers: await authHeaders() });
+  if (!res.ok) throw new ApiError(((await res.json().catch(() => ({}))) as { error?: string }).error ?? `HTTP ${res.status}`, res.status);
+  return res.blob();
+}
 /** A fresh request key (works outside secure contexts too, where randomUUID is missing). */
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
@@ -1784,7 +1857,8 @@ export interface BoardCard {
   since: string;
   checks?: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
   run?: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
-  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  /** `reasons`: each of a PR hold's reasons whole (merge.decided), for the owner and writers; null otherwise. */
+  waiting: { kind: WaitKind; label: string; detail: string | null; reasons?: string[] | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
   /** Its PR head with the PR batches: queued, being tested, passed or returned (absent from older servers). */
@@ -1851,7 +1925,7 @@ export interface Incident {
   id: string;
   kind: string;
   instance: string | null;
-  severity: 'red' | 'amber';
+  severity: 'red' | 'amber' | 'info';
   title: string;
   since: string;
   resolvedAt: string | null;

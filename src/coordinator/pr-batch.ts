@@ -30,6 +30,8 @@ export interface TestRunRequest {
   changedFiles?: string[];
   /** 1-based: index 1..total. */
   shard?: { index: number; total: number };
+  /** Only these tiers, of either kind, unsharded (src/testrun/run.ts; No CI's post-merge run, the deploy gate's). */
+  tiers?: string[];
 }
 export interface TierResult {
   tier: string;

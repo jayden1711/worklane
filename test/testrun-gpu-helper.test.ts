@@ -44,12 +44,16 @@ sleep "$(cat '${dir}/sleep' 2>/dev/null || echo 0)"
 date +%s > "${sd}/$n.end"
 echo ran`,
   );
-  for (const t of ['systemctl', 'getent', 'chown']) stub(t, 'exit 0');
+  for (const t of ['systemctl', 'chown']) stub(t, 'exit 0');
+  // getent: the GPU group as the file named group says (absent: no group); nothing else.
+  stub('getent', `[ "$1" = group ] && [ -f '${dir}/group' ] && { cat '${dir}/group'; exit 0; }; [ "$1" = group ] && exit 2; exit 0`);
+  const myGroup = spawnSync('id', ['-gn'], { encoding: 'utf8' }).stdout.trim();
+  writeFileSync(join(dir, 'group'), `${myGroup}:x:1234:example-owner\n`);
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
   const gnuStat = spawnSync(real('stat')!, ['--version']).status === 0;
-  stub('stat', gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`);
+  stub('stat', gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`);
   // flock(1): the real one where there is one (Linux); else the same call through perl on the inherited fd.
   if (real('flock')) symlinkSync(real('flock')!, join(bin, 'flock'));
   else
@@ -58,7 +62,7 @@ echo ran`,
       `w=-1; while [ "$#" -gt 1 ]; do case "$1" in -x) shift ;; -n) w=0; shift ;; -w) w="$2"; shift 2 ;; *) break ;; esac; done
 exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $end = time + $ARGV[1]; until (flock($f, LOCK_EX | LOCK_NB)) { exit 1 if $ARGV[1] >= 0 && time >= $end; select(undef, undef, undef, 0.1); } exit 0' "$1" "$w"`,
     );
-  for (const t of ['git', 'cp', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'perl', 'rm']) {
+  for (const t of ['chgrp', 'chmod', 'git', 'cp', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'perl', 'rm']) {
     const p = real(t);
     if (p && !existsSync(join(bin, t))) symlinkSync(p, join(bin, t));
   }
@@ -81,6 +85,8 @@ exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $
     [/^user="wl-test-\$name"$/m, `user=${me}`],
     [/^GPU_FILE=\S+$/m, `GPU_FILE=${file}`],
     [/^GPU_LOCK_DIR=\S+$/m, `GPU_LOCK_DIR=${lockDir}`],
+    // The locks' group: this user's own primary group here (only root can chgrp to another).
+    [/^GPU_GROUP=\S+$/m, `GPU_GROUP=${myGroup}`],
     [/^DEV=\S+$/m, `DEV=${dev}`],
     // A stand-in node is a plain file here (only root makes device nodes); CI's real-systemd job uses real ones.
     [/^is_char\(\) \{.*$/m, 'is_char() { [ ! -L "$1" ] && [ -e "$1" ]; }'],
@@ -143,7 +149,8 @@ exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $
   };
   /** The systemd-run call of run <id>. */
   const call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop-${id}-`)))!;
-  return { dir, dev, file, lockDir, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), done: () => rmSync(dir, { recursive: true, force: true }) };
+  const setGroup = (line: string | null) => (line === null ? rmSync(join(dir, 'group'), { force: true }) : writeFileSync(join(dir, 'group'), `${line.replace('<g>', myGroup)}\n`));
+  return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 type Call = { argv: string[]; start: number; end: number; lock: string };
@@ -306,6 +313,41 @@ test('the helper refuses --gpu anywhere but right before --', { skip: !posix && 
       assert.equal(r.status, 2, bad.join(' '));
     }
     assert.equal(h.calls().length, 0);
+  } finally {
+    h.done();
+  }
+});
+
+test('the GPU locks are root\'s and the GPU group\'s alone (0750 directory, 0640 locks), set so even when an older helper made them open; no group, or a harness user in it: no GPU', { skip: !posix && 'bash' }, () => {
+  const h = gpuHelper();
+  const mode = (p: string) => spawnSync('stat', process.platform === 'darwin' ? ['-f', '%Lp %Sg', p] : ['-c', '%a %G', p], { encoding: 'utf8' }).stdout.trim();
+  try {
+    h.nodes('nvidiactl', 'nvidia-uvm', 'nvidia0');
+    h.optIn({ shop: [0] });
+    // As the helper before the group left them: the directory 0755, the lock 0644.
+    mkdirSync(h.lockDir, { recursive: true, mode: 0o755 });
+    chmodSync(join(h.lockDir, '..'), 0o755);
+    chmodSync(h.lockDir, 0o755);
+    writeFileSync(join(h.lockDir, '0.lock'), '');
+    chmodSync(join(h.lockDir, '0.lock'), 0o644);
+    const r = h.exec('fast-a-1', 60, true);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr.split('\n')[0]!, /^worklane-testrun: gpu 0 \(devices /);
+    assert.equal(mode(h.lockDir), `750 ${h.myGroup}`);
+    assert.equal(mode(join(h.lockDir, '0.lock')), `640 ${h.myGroup}`);
+    // A new lock is made that way too.
+    rmSync(join(h.lockDir, '0.lock'));
+    assert.equal(h.exec('fast-a-2', 60, true).status, 0);
+    assert.equal(mode(join(h.lockDir, '0.lock')), `640 ${h.myGroup}`);
+    for (const [group, why] of [[null, /^worklane-testrun: gpu none \(no \S+ group \(scripts\/setup\/testrun-gpu\.sh makes it\)\)$/], ['<g>:x:1234:example-owner,wl-test-shop', /^worklane-testrun: gpu none \(the \S+ group has a harness user \(example-owner,wl-test-shop\): only the owner may hold a GPU\)$/]] as const) {
+      h.setGroup(group);
+      const n = h.exec('fast-a-3', 60, true);
+      assert.equal(n.status, 0, n.stderr);
+      assert.match(n.stderr.split('\n')[0]!, why);
+      assert.deepEqual(deviceProps(h.call('fast-a-3').argv), []);
+      rmSync(join(h.dir, 'sd'), { recursive: true });
+      mkdirSync(join(h.dir, 'sd'));
+    }
   } finally {
     h.done();
   }

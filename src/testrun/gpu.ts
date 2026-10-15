@@ -29,6 +29,7 @@ export const gpuCommands = (instance: string) => ({
   enable: `sudo bash ${GPU_SCRIPT} enable ${instance} --devices 0 --max-minutes ${GPU_MAX_MINUTES.default}`,
   disable: `sudo bash ${GPU_SCRIPT} disable ${instance}`,
   status: `sudo bash ${GPU_SCRIPT} status`,
+  holder: `sudo bash ${GPU_SCRIPT} holder <your user>`,
 });
 
 export interface GpuFile {
@@ -178,3 +179,10 @@ export function gpuRunsNotToRepeat(events: readonly StoredEvent[], sha: string |
 
 /** What a GPU run that must not repeat says, for the record and the check. */
 export const GPU_NO_REPEAT = 'a GPU run that timed out, was killed or was cut off (the coordinator or the machine stopped) is never run again by itself: push a new commit to run it again';
+
+/** The setup step a cut-off GPU run's posted check names (./checks.ts gives it its own title). */
+export const GPU_STEP = 'gpu';
+/** What that check says: the run was cut off and is not run again by itself. */
+export const gpuCutOffLine = (reason: string) => `cut off (GPU run ended by ${reason}): not rerun automatically; push again to run it`;
+/** The group whose members may hold a GPU's lock (`<cli> gpu hold`): the owner only, never an agent, test or coordinator user. */
+export const GPU_GROUP = `${BRAND.cli}-gpu`;

@@ -18,7 +18,7 @@ import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
-import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
+import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 
@@ -456,13 +456,25 @@ export class CliRunner implements AgentRunner {
      * through apiKeyHelper in --settings, which claude runs as the agent user; the key is never in an environment.
      */
     private apiKeyFile?: string,
+    /**
+     * The Claude login a run as this user uses, read when each run starts (src/claude-profiles.ts: the instance's
+     * active account profile), and every login's credentials file that user has, which no agent command may read.
+     * Unset: the user's own claudeConfigDir, as always.
+     */
+    private login?: { resolve: (r: RunAs) => RunAs; credentialFiles: (r: RunAs) => string[] },
   ) {}
+
+  /** The lane's user, on the login its runs use now. */
+  private userOf(lane: string): RunAs | undefined {
+    const l = this.lanes?.[lane];
+    const r = l ? l.runAs : this.runAs;
+    return r && this.login ? this.login.resolve(r) : r;
+  }
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
   loginOf(req: Pick<RunRequest, 'lane' | 'provider'>): string {
     if (req.provider) return `provider:${req.provider.name}`;
-    const lane = this.lanes?.[req.lane ?? 'default'];
-    const runAs = lane ? lane.runAs : this.runAs;
+    const runAs = this.userOf(req.lane ?? 'default');
     if (runAs) return runAs.claudeConfigDir ?? posix.join(runAs.home, '.claude');
     return this.base.CLAUDE_CONFIG_DIR ?? join(this.base.HOME ?? this.base.USERPROFILE ?? '', '.claude');
   }
@@ -533,7 +545,7 @@ export class CliRunner implements AgentRunner {
     const lane = this.lanes?.[laneName];
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
     if (req.resume !== undefined && !SESSION_ID.test(req.resume)) return { reason: 'failed', detail: `not a session id: ${JSON.stringify(req.resume.slice(0, 80))}; not starting`, costUsd: 0, turns: 0, model: req.model };
-    const runAs = lane ? lane.runAs : this.runAs;
+    const runAs = this.userOf(laneName);
     const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint } : env;
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
     // could loosen them.
@@ -574,7 +586,9 @@ export class CliRunner implements AgentRunner {
     // The live view of the same run, under the record's id: redacted and capped, ended when the run ends.
     const feed = record && req.stateDir ? new RunFeed(req.stateDir, { run: record.id, issue: req.issue ?? runIssue(req.cwd, req.taskFile), role: req.role, model: req.model, cwd: req.cwd }) : null;
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
-    const laneSettings = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    const allowed = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
+    // Every account profile's login file for this user, whichever it runs on: denied to its commands like its own.
+    const laneSettings = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
     const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),

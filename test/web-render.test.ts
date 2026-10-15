@@ -1677,6 +1677,33 @@ test("the Board's Landing column shows the PR batches, and a card where its PR s
   assert.doesNotMatch(clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, batches: [] }, error: null }])), /data-testid="board-batches"/, 'no batches: no strip');
 });
 
+test("#471: a card's waiting reasons show in full, one chip each, wrapping inside the card; never cut off", () => {
+  const long = [
+    'doubt: evaluator confidence medium: the change was not run against the zero-quantity line the issue names, so done_when passing does not show that case is handled',
+    'high-risk: migration (migrations/001_orders.sql, migrations/002_order_lines.sql, migrations/003_order_index.sql and 4 more)',
+    `eval: role evaluator-verdict scored lower, 7/10 → 6/10 (~$1.20): case 9 "A planted problem that the checks miss": pass → fail; ${'x'.repeat(120)}`,
+  ];
+  const card = { ...boards.owner.cards[0]!, column: 'waiting', waiting: { kind: 'needs_owner', label: 'PRs waiting for you to review and merge', detail: long.join('; '), reasons: long, since: '2026-01-01T00:00:00Z' } };
+  const html = clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, cards: [card] }, error: null }]));
+  const chips = [...html.matchAll(/<li class="([^"]*)" data-testid="board-card-reason">([^<]*)<\/li>/g)];
+  assert.equal(chips.length, 3, 'one chip per reason');
+  const unescape = (t: string) => t.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+  assert.deepEqual(chips.map((m) => unescape(m[2]!)), long, 'every reason whole');
+  for (const [, cls] of chips) {
+    assert.doesNotMatch(cls!, /truncate|line-clamp|text-ellipsis|nowrap/, 'nothing cuts a chip off');
+    assert.match(cls!, /wrap-anywhere/, 'a long word wraps instead of overflowing');
+  }
+  assert.match(html, /<ul class="[^"]*flex-wrap[^"]*" data-testid="board-card-reasons"/, 'chips wrap onto new lines');
+  const wait = /data-testid="board-card-wait">([\s\S]*?)<\/ul><\/div>/.exec(html)![1]!;
+  assert.doesNotMatch(wait, /truncate|line-clamp|text-ellipsis/, 'nothing in the wait cuts a reason off');
+  // No reasons (a viewer, or a wait with only a line): the line in full, unclamped.
+  const plain = clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, cards: [{ ...card, waiting: { ...card.waiting, reasons: null, detail: long[0] } }] }, error: null }]));
+  assert.doesNotMatch(plain, /board-card-reason/);
+  const line = /data-testid="board-card-wait">([\s\S]*?)<\/div><\/div>/.exec(plain)![1]!;
+  assert.ok(line.includes(long[0]!), 'the whole line');
+  assert.doesNotMatch(line, /truncate|line-clamp|text-ellipsis/, 'unclamped');
+});
+
 test('each role sees only its actions on the Board: viewers none; writers Watch, Steer and Answer what they may; the owner also Approves', () => {
   const html = (role: 'owner' | 'writer' | 'viewer') => clean(() => r.renderBoard([{ name: null, data: boards[role], error: null }]));
   const count = (h: string, id: string) => (h.match(new RegExp(`data-testid="${id}"`, 'g')) ?? []).length;
@@ -3108,7 +3135,7 @@ test("the Repo config form with no required check (#469): the starter CI, last i
   // A config already on No CI has no starter CI to offer.
   assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, ci: 'none' } }, { starter: offered }), /starter-ci/);
   // The PR and Land pages' note, only under No CI.
-  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs\.</);
+  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs, and every tier runs on each merge commit on main, which is judged by them\.</);
   assert.equal(r.renderCiNote({ kind: 'github', means: null }), '');
   assert.equal(r.renderCiNote(undefined), '');
   // A config that names a check has nothing to add: no starter CI.

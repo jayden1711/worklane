@@ -134,6 +134,38 @@ export function signerFindings(changes: readonly MachineChange[], now: number): 
   return [...out.values()];
 }
 
+/** How long a Claude account profile change stays an open alert: posted once when seen, resolved after this. */
+export const PROFILE_NOTICE_MS = 24 * 60 * 60_000;
+
+/**
+ * Every Claude account profile added, staged, confirmed, chosen or removed in the last day (scripts/setup/
+ * claude-account.sh writes one machine change line each, what: claude_account.profile): one alert each, naming what
+ * happened, the instances and who asked. The account's email or org appears only in a confirmation (a root admin saw
+ * it); the line carries no token. A staged one says how it is confirmed, or removed if nobody asked for it.
+ */
+export function profileFindings(changes: readonly MachineChange[], now: number): Finding[] {
+  const out: Finding[] = [];
+  for (const c of changes) {
+    if (c.what !== 'claude_account.profile' || typeof c.to !== 'string') continue;
+    const age = now - Date.parse(c.at);
+    if (!(age >= 0 && age < PROFILE_NOTICE_MS)) continue;
+    const to = c.to.slice(0, 300);
+    const inst = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(c.by);
+    const staged = /^staged ([a-z][a-z0-9-]{0,20}) for /.exec(to);
+    out.push({
+      kind: 'claude_profile_changed',
+      key: `${c.at} ${to}`,
+      instance: inst ? inst[1]! : null,
+      detail: `Claude account profile: ${to}, by ${c.by}${inst ? ` (instance ${inst[1]}'s dashboard)` : ''} at ${c.at}${staged ? '. Staged: nothing may use it until an admin confirms it on the machine' : ''}`,
+      fix: staged
+        ? `If you added it, confirm it on the machine (it shows the account and asks you to type the name): sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} confirm-profile ${staged[1]}. If you didn't, remove it there: sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} remove ${staged[1]}`
+        : `Nothing, if you or your failover did it. If not: choose the account back on the Machine page, and find out who asked. This notice closes by itself after a day`,
+      tried: [],
+    });
+  }
+  return out;
+}
+
 const SIGNER_STAGED = /^staged ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
 
 /**
