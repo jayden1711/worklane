@@ -123,7 +123,7 @@ test(
         assert.equal(seen.toggle, 'Show more', `${page}: Show more`);
         assert.ok(/\s$/.test(seen.shown) || /^\s$/.test(seen.next), `${page}: the fourth line ends between words, not inside one ("…${seen.shown}" then "${seen.next}")`);
 
-        await click(cdp, `${card}.querySelector('[data-testid="decision-recommendation-toggle"]')`);
+        await click(cdp, `${card}.querySelector('[data-testid="decision-recommendation-toggle"]')`, `the ${page} page, decision d-old-prose`);
         const open = await js<{ clamp: string; overflows: boolean; toggle: string | null; expanded: string | null }>(
           cdp,
           `(() => { const card = ${card}; const p = card.querySelector('[data-testid="decision-recommendation-text"]'); const t = card.querySelector('[data-testid="decision-recommendation-toggle"]'); return { clamp: getComputedStyle(p).webkitLineClamp, overflows: p.scrollHeight > p.clientHeight + 1, toggle: t?.textContent ?? null, expanded: t?.getAttribute('aria-expanded') ?? null }; })()`,
@@ -198,8 +198,14 @@ async function js<T>(cdp: Cdp, expression: string): Promise<T> {
  * animations on it or an ancestor (a card's entrance moves it) are awaited first, inside the one evaluate the command
  * timeout already bounds; endless ones (a pulse, a spinner) are not. Then the point is hit-tested: a press that would
  * land on something else fails at once, naming what is under the cursor, rather than waiting out a click that never lands.
+ *
+ * A press that was hit-tested but still never lands (main went red on it once, and it never failed again in 20 runs)
+ * fails after the same 5 s, now saying what happened: `what` (the page and decision), what the press reached, the
+ * toggle's aria-expanded and its card's identity at the press and now, every change to the card since the press, any
+ * scroll, and whether the click reached the toggle. All of it is recorded by listeners the test adds to the page;
+ * nothing in the product changes.
  */
-async function click(cdp: Cdp, element: string) {
+async function click(cdp: Cdp, element: string, what: string = element) {
   const at = await js<{ x: number; y: number; hit: string | null }>(
     cdp,
     `(async () => {
@@ -214,10 +220,59 @@ async function click(cdp: Cdp, element: string) {
       const x = r.x + r.width / 2, y = r.y + r.height / 2;
       const h = document.elementFromPoint(x, y);
       const name = (n) => n ? '<' + n.tagName.toLowerCase() + [...n.attributes].map((a) => ' ' + a.name + '="' + a.value.slice(0, 60) + '"').join('') + '>' : 'nothing';
-      return { x, y, hit: h === e || (h && e.contains(h)) ? null : name(h) };
+      const hit = h === e || (h && e.contains(h)) ? null : name(h);
+      if (!hit) {
+        // What the press does, for the timeout's message: recorded from here on, by the test's own listeners.
+        const t0 = performance.now();
+        const ms = () => Math.round(performance.now() - t0);
+        const card = e.closest('[data-decision]') ?? e.parentElement;
+        const scrollers = [document.scrollingElement, ...document.querySelectorAll('main')].filter(Boolean);
+        const rec = { t0, toggle: e, card, x, y, ariaAtPress: e.getAttribute('aria-expanded'), cardAtPress: card ? name(card) : 'nothing', scrollAtPress: scrollers.map((s) => s.scrollTop), events: [], mutations: [], scrolls: [] };
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+          document.addEventListener(type, (ev) => rec.events.push(type + '@' + ms() + 'ms on ' + name(ev.target) + (ev.target === e || e.contains(ev.target) ? ' (the toggle)' : ' (not the toggle)')), true);
+        }
+        if (card) new MutationObserver((list) => {
+          for (const m of list) rec.mutations.push(ms() + 'ms ' + (m.type === 'attributes' ? m.attributeName + ' on ' + name(m.target) + ' (was ' + JSON.stringify(m.oldValue) + ')' : m.type === 'childList' ? (m.addedNodes.length ? '+' + m.addedNodes.length : '') + (m.removedNodes.length ? '-' + m.removedNodes.length : '') + ' children of ' + name(m.target) : 'text in ' + name(m.target.parentElement)));
+        }).observe(card, { subtree: true, childList: true, attributes: true, attributeOldValue: true, characterData: true });
+        for (const s of scrollers) (s === document.scrollingElement ? window : s).addEventListener('scroll', () => rec.scrolls.push(ms() + 'ms ' + (s === document.scrollingElement ? 'window' : 'main') + ' to ' + s.scrollTop), { passive: true });
+        window.__clickRecord = rec;
+      }
+      return { x, y, hit };
     })()`,
   );
   if (at.hit) throw new Error(`the click at (${Math.round(at.x)}, ${Math.round(at.y)}) would land on ${at.hit}, not on ${element}`);
   for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
-  await until('the click to land', () => js<boolean>(cdp, `${element}?.getAttribute('aria-expanded') === 'true'`), 5_000);
+  try {
+    await until('the click to land', () => js<boolean>(cdp, `${element}?.getAttribute('aria-expanded') === 'true'`), 5_000);
+  } catch (err) {
+    throw new Error(`${(err as Error).message} (${what})\n${await clickRecord(cdp, element).catch((e: Error) => `(no record: ${e.message})`)}`);
+  }
+}
+
+/** What the page recorded from the press on (click() above), as lines for a failure message. */
+async function clickRecord(cdp: Cdp, element: string): Promise<string> {
+  return js<string>(
+    cdp,
+    `(() => {
+      const rec = window.__clickRecord;
+      if (!rec) return 'nothing recorded at the press';
+      const name = (n) => n ? '<' + n.tagName.toLowerCase() + [...n.attributes].map((a) => ' ' + a.name + '="' + a.value.slice(0, 60) + '"').join('') + '>' : 'nothing';
+      const now = ${element};
+      const card = now ? now.closest('[data-decision]') ?? now.parentElement : null;
+      const scrollers = [document.scrollingElement, ...document.querySelectorAll('main')].filter(Boolean);
+      const reached = rec.events.some((x) => x.startsWith('click@') && x.endsWith('(the toggle)'));
+      const list = (xs, max = 25) => xs.length ? xs.slice(0, max).map((x) => '    ' + x).join('\\n') + (xs.length > max ? '\\n    … and ' + (xs.length - max) + ' more' : '') : '    none';
+      return [
+        '  pressed at (' + Math.round(rec.x) + ', ' + Math.round(rec.y) + '); under the pointer now: ' + name(document.elementFromPoint(rec.x, rec.y)),
+        '  the click reached the toggle: ' + (reached ? 'yes' : 'no') + " (React's handler is not visible from here; had it run, aria-expanded would show among the card's changes)",
+        '  aria-expanded: at the press ' + JSON.stringify(rec.ariaAtPress) + ', on the toggle pressed now ' + JSON.stringify(rec.toggle.getAttribute('aria-expanded')) + ', on the toggle found now ' + JSON.stringify(now ? now.getAttribute('aria-expanded') : null),
+        '  the toggle found now is ' + (now === rec.toggle ? 'the one pressed' : now ? 'another element (the one pressed is ' + (rec.toggle.isConnected ? 'still in the page' : 'gone from the page') + ')' : 'missing'),
+        '  card at the press ' + rec.cardAtPress + '; now ' + name(card) + (card === rec.card ? ' (the same element)' : ' (another element; the one pressed is ' + (rec.card && rec.card.isConnected ? 'still in the page' : 'gone from the page') + ')'),
+        '  scroll at the press ' + JSON.stringify(rec.scrollAtPress) + ', now ' + JSON.stringify(scrollers.map((s) => s.scrollTop)) + (rec.scrolls.length ? '' : ' (no scroll event)'),
+        '  pointer events since the press:', list(rec.events),
+        '  changes to the card since the press (' + rec.mutations.length + '):', list(rec.mutations),
+        ...(rec.scrolls.length ? ['  scrolls since the press:', list(rec.scrolls)] : []),
+      ].join('\\n');
+    })()`,
+  );
 }
