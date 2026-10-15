@@ -10,7 +10,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { defaultAppPrefix, SETUP_COOKIE, SETUP_MAX_TRIES, SETUP_TOKEN_FILE, SetupOver, startSetupHub, type SetupHubOptions } from '../src/hub-setup.js';
+import { defaultAppPrefix, HTTPS_SCREEN, SETUP_COOKIE, SETUP_LOOPBACK_COOKIE, SETUP_MAX_TRIES, SETUP_TOKEN_FILE, SetupOver, startSetupHub, type SetupHubOptions } from '../src/hub-setup.js';
 import { APP_SECRET, fakeGitHub } from './fake-github.js';
 import { engineCli, repoRoot } from './helpers.js';
 import { serviceModeEnv } from './isolate.js';
@@ -30,12 +30,14 @@ async function hub(over: Partial<SetupHubOptions> = {}, gh?: { api: string; web:
   const h = await startSetupHub({ ...d, publicUrl: `${ORIGIN}/`, appPrefix: 'box', nextCommand: 'sudo bash dashboards.sh', checkMs: 30, ...(gh ? { github: gh } : {}), ...over });
   const port = Number(new URL(h.url).port);
   const token = readFileSync(h.tokenFile, 'utf8').trim();
-  const call = (method: string, path: string, o: { body?: string; cookie?: string; origin?: string | null } = {}) =>
+  const loopback = over.publicUrl === null;
+  const cookieName = loopback ? SETUP_LOOPBACK_COOKIE : SETUP_COOKIE;
+  const call = (method: string, path: string, o: { body?: string; cookie?: string; origin?: string | null; headers?: Record<string, string> } = {}) =>
     new Promise<{ status: number; body: string; headers: Record<string, string | string[] | undefined> }>((done, fail) => {
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...o.headers };
       if (o.body !== undefined) headers['content-type'] = 'application/x-www-form-urlencoded';
       if (o.cookie) headers.cookie = o.cookie;
-      if (o.origin !== null) headers.origin = o.origin ?? ORIGIN;
+      if (o.origin !== null) headers.origin = o.origin ?? (loopback ? `http://127.0.0.1:${port}` : ORIGIN);
       const r = request({ host: '127.0.0.1', port, path, method, headers }, (res) => {
         let body = '';
         res.setEncoding('utf8');
@@ -47,7 +49,7 @@ async function hub(over: Partial<SetupHubOptions> = {}, gh?: { api: string; web:
     });
   const unlock = async (t = token) => {
     const r = await call('POST', '/setup/unlock', { body: `token=${encodeURIComponent(t)}` });
-    const set = ([] as string[]).concat(r.headers['set-cookie'] ?? []).find((c) => c.startsWith(`${SETUP_COOKIE}=`));
+    const set = ([] as string[]).concat(r.headers['set-cookie'] ?? []).find((c) => c.startsWith(`${cookieName}=`));
     return { ...r, cookie: set ? set.split(';')[0]! : null, setCookie: set ?? null };
   };
   return { ...d, h, port, token, call, unlock };
@@ -224,6 +226,75 @@ test('setup mode listens on loopback only, and takes only an https origin', { sk
   assert.equal(defaultAppPrefix('1234'), 'hub');
 });
 
+test('loopback mode (no https origin yet): the same one-time gate, then the App step says https comes first and sends the owner to screen 7; GitHub is never asked', { skip: !posix && 'POSIX modes' }, async () => {
+  const gh = await fakeGitHub({ repo: 'example/alpha', permissions: {} });
+  const s = await hub({ publicUrl: null, tailscaleScript: '/opt/e/scripts/setup/tailscale.sh', rerunCommand: 'sudo bash /opt/e/scripts/bootstrap.sh --hardened <name> <owner/repo>' }, { api: gh.url, web: gh.url });
+  try {
+    assert.equal(s.h.url, `http://127.0.0.1:${s.port}/`);
+    const first = await s.call('GET', '/', { origin: null });
+    assert.equal(first.status, 200);
+    assert.match(first.body, /type="password"/, 'the token gate, as with an origin');
+    assert.match(first.body, new RegExp(`waits for screen ${HTTPS_SCREEN}, Tailscale and HTTPS`));
+    // WHY: under no-referrer a browser sends `Origin: null` on the page's own form POST, which fromHere refuses (found in
+    // real Chrome by the wizard e2e's walk); same-origin sends this page's origin to itself only.
+    assert.equal(first.headers['referrer-policy'], 'same-origin');
+    assert.equal((await s.call('POST', '/setup/unlock', { body: `token=${s.token}`, origin: 'null' })).status, 403, 'an opaque origin is still refused');
+    // Before the session: nothing past the gate.
+    assert.equal((await s.call('POST', '/setup/signin-app', { body: 'owner=example' })).status, 401);
+    const ok = await s.unlock();
+    assert.equal(ok.status, 303);
+    // Plain http on loopback: no Secure cookie to give, so no __Host- name; Strict, since nothing comes back from GitHub.
+    assert.match(ok.setCookie!, new RegExp(`^${SETUP_LOOPBACK_COOKIE}=[A-Za-z0-9_-]{43}; Path=/; HttpOnly; SameSite=Strict; Max-Age=7200$`));
+    assert.equal(existsSync(s.h.tokenFile), false, 'the token works once here too');
+    const page = await s.call('GET', '/', { cookie: ok.cookie!, origin: null });
+    assert.equal(page.status, 200);
+    assert.match(page.body, new RegExp(`data-testid="signin-app-needs-https" data-next-screen="${HTTPS_SCREEN}"`));
+    assert.match(page.body, /Screen 7 first: Tailscale and HTTPS/);
+    for (const step of ['install', 'up', 'serve']) assert.match(page.body, new RegExp(`sudo bash /opt/e/scripts/setup/tailscale\\.sh ${step}[\n<]`));
+    assert.match(page.body, /sudo bash \/opt\/e\/scripts\/bootstrap\.sh --hardened &lt;name&gt; &lt;owner\/repo&gt;/, 'then the install command again');
+    assert.doesNotMatch(page.body, /name="owner"|Continue to GitHub/, 'no App form');
+    // The App step itself, its start page and GitHub's redirect back: each the same https-first answer, nothing started.
+    for (const [m, p] of [
+      ['POST', '/setup/signin-app'],
+      ['GET', '/setup/app-manifest/start/amf-000000000000000000000000'],
+      ['GET', '/setup/app-manifest/callback?state=x&code=y'],
+    ] as const) {
+      const r = await s.call(m, p, m === 'POST' ? { body: 'owner=example', cookie: ok.cookie! } : { cookie: ok.cookie!, origin: null });
+      assert.equal(r.status, 409, `${m} ${p}`);
+      assert.match(r.body, /data-testid="signin-app-needs-https"/);
+    }
+    assert.equal(gh.state.conversions, 0, 'no code converted');
+    assert.equal(existsSync(join(s.signinDir, 'client-secret')), false);
+  } finally {
+    await s.h.close();
+    await gh.close();
+  }
+});
+
+test('loopback mode answers only this machine: never through a proxy, never to another name, and a form only from the page itself', { skip: !posix && 'POSIX modes' }, async () => {
+  const s = await hub({ publicUrl: null });
+  try {
+    for (const h of ['x-forwarded-for', 'tailscale-user-login', 'forwarded', 'via']) {
+      const r = await s.call('GET', '/', { origin: null, headers: { [h]: 'x' } });
+      assert.equal(r.status, 403, h);
+      assert.doesNotMatch(r.body, /type="password"/);
+    }
+    // DNS rebinding: a name that points at 127.0.0.1 is still not a loopback name.
+    assert.equal((await s.call('GET', '/', { origin: null, headers: { host: `evil.example:${s.port}` } })).status, 403);
+    assert.equal((await s.call('GET', '/', { origin: null, headers: { host: `localhost:${s.port}` } })).status, 200);
+    // An ssh tunnel on another local port: the page is the same origin as its Host.
+    assert.equal((await s.call('GET', '/', { origin: null, headers: { host: '127.0.0.1:14399' } })).status, 200);
+    const cross = await s.call('POST', '/setup/unlock', { body: `token=${s.token}`, origin: 'https://evil.example' });
+    assert.equal(cross.status, 403);
+    assert.equal((await s.call('POST', '/setup/unlock', { body: `token=${s.token}`, origin: ORIGIN })).status, 403, 'not the https origin either: it has none');
+    assert.ok(existsSync(s.h.tokenFile), 'still unused');
+    assert.equal((await s.unlock()).status, 303);
+  } finally {
+    await s.h.close();
+  }
+  await assert.rejects(startSetupHub({ ...dirs(), publicUrl: null, host: '0.0.0.0' }), /loopback only/);
+});
+
 test('the CLI: dashboard --hub-setup prints where the token is, never the token; once the secret exists it says setup mode is off and exits 0', { skip: !posix && 'POSIX modes' }, async () => {
   const d = dirs();
   const env = serviceModeEnv({ ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: join(d.stateDir, '..', 'cli-state') });
@@ -249,6 +320,30 @@ test('the CLI: dashboard --hub-setup prints where the token is, never the token;
   const again = spawnSync(process.execPath, [engineCli, 'dashboard', '--hub-setup', '--port', '0', '--public-url', ORIGIN, '--signin-dir', d.signinDir], { env, encoding: 'utf8', timeout: 20_000 });
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /setup mode is off/);
+  // Exactly one of --public-url and --loopback.
+  for (const args of [['--public-url', ORIGIN, '--loopback'], []]) {
+    const bad = spawnSync(process.execPath, [engineCli, 'dashboard', '--hub-setup', '--port', '0', ...args, '--signin-dir', d.signinDir], { env, encoding: 'utf8', timeout: 20_000 });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /one of --public-url https:\/\/<host> or --loopback/);
+  }
+});
+
+test('the CLI: dashboard --hub-setup --loopback serves on 127.0.0.1 and says so; the token file named, never the token', { skip: !posix && 'POSIX modes' }, async () => {
+  const d = dirs();
+  const env = serviceModeEnv({ ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: join(d.stateDir, '..', 'cli-state') });
+  const p = spawn(process.execPath, [engineCli, 'dashboard', '--hub-setup', '--service', '--port', '0', '--loopback', '--signin-dir', d.signinDir], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (c: Buffer) => (out += c.toString()));
+  p.stderr.on('data', (c: Buffer) => (out += c.toString()));
+  try {
+    for (let i = 0; i < 150 && !out.includes('turns itself off'); i++) await new Promise((r) => setTimeout(r, 100));
+    assert.match(out, /open: http:\/\/127\.0\.0\.1:\d+\/ on this machine, or through an ssh tunnel to it \(no https origin yet: the sign-in App waits for one\)/);
+    const file = /the one-time setup token is in (\S+)/.exec(out)?.[1];
+    assert.ok(file, out);
+    assert.ok(!out.includes(readFileSync(file!, 'utf8').trim()), 'the token is never printed');
+  } finally {
+    p.kill();
+  }
 });
 
 test('dashboards.sh --setup: the hub in setup mode as the viewer, refused once the secret exists, a fresh token each run, its path printed and never the token', () => {
@@ -257,7 +352,9 @@ test('dashboards.sh --setup: the hub in setup mode as the viewer, refused once t
   const to = sh.indexOf('\nfi\n', from);
   const setup = sh.slice(from, to);
   assert.ok(from > 0 && to > from);
-  assert.match(setup, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub-setup --service --public-url \$public_url --signin-dir \$signin_dir\n/, 'no token in its arguments');
+  assert.match(setup, /ExecStart=\/usr\/local\/bin\/worklane dashboard --hub-setup --service \$\{loopback:\+--loopback\}\$\{public_url:\+--public-url \$public_url\} --signin-dir \$signin_dir\n/, 'no token in its arguments');
+  assert.match(setup, /\[ -z "\$public_url" \] \|\| \[ -z "\$loopback" \]/, 'never both --public-url and --loopback');
+  assert.match(setup, /^ {4}echo "setup-mode hub, loopback only: http:\/\/127\.0\.0\.1:4399\/"$/m);
   assert.match(setup, /User=\$viewer\n/);
   assert.match(setup, /ProtectHome=read-only\nReadWritePaths=\$\(home_of "\$viewer"\)/);
   assert.ok(setup.indexOf('test -e "$signin_dir/client-secret"') < setup.indexOf('put "$setup_unit"'), 'refused before anything is installed once the secret exists');
@@ -265,7 +362,7 @@ test('dashboards.sh --setup: the hub in setup mode as the viewer, refused once t
   assert.match(setup, /stat -c '%U %a' "\$hub_state\/setup-token"\)" = "\$viewer 600"/, "checked: the viewer's, 0600");
   assert.match(setup, /echo "  the one-time setup token, for the page: sudo cat \$hub_state\/setup-token"/);
   assert.doesNotMatch(setup, /\$\(cat [^)]*setup-token|echo[^\n]*\$token/, 'never read into the output');
-  assert.match(setup, /^ {2}echo "setup-mode hub: \$public_url"$/m, 'the line the install prints the hub URL from');
+  assert.match(setup, /^ {4}echo "setup-mode hub: \$public_url"$/m, 'the line the install prints the hub URL from');
   // The real hub: the setup unit goes first, and the client id and URL default to what setup mode stored.
   const rest = sh.slice(to);
   assert.ok(rest.indexOf('systemctl disable --now "$setup_unit"') > 0 && rest.indexOf('systemctl disable --now "$setup_unit"') < rest.indexOf('put worklane-dashboard-hub.service hub_unit'));

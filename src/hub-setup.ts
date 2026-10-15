@@ -10,6 +10,14 @@
 // a URL, a log, an argument or a cookie. It works once: the page's browser then holds a setup session (an HttpOnly,
 // Secure cookie, 2 hours at most), and the token file is deleted. Ten wrong tries lock the page until the next start.
 //
+// Before the machine has an https origin (no Tailscale name yet, no --public-url), it runs in loopback mode instead
+// (--loopback): the same gate and page on 127.0.0.1, reached on the machine or through an ssh tunnel to it. GitHub's
+// manifest flow needs an origin GitHub can send the browser back to, so in loopback mode the App step never starts it:
+// it says the https origin comes first (the wizard's screen 7, Tailscale and HTTPS) and how, and the install command,
+// run again once the origin exists, restarts setup mode at that origin. Loopback mode answers only a request made on
+// this machine to a loopback name, never one through a proxy (the break-glass's rule), and its session cookie is
+// SameSite=Strict, with no Secure (the page is plain http on loopback).
+//
 // What it can change: it writes the sign-in App's client secret, a session secret, the App's client id and the hub's
 // public URL into the hub user's sign-in directory (0700; each file 0400), as that user. Nothing else: no root, no
 // instance, no key (the App's private key GitHub returns is dropped, as runAppManifest drops it).
@@ -20,7 +28,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { GITHUB_WEB } from './github-hosts.js';
-import { assertLoopbackHost, parseCookies } from './dashboard-auth.js';
+import { assertLoopbackHost, breakGlassAllowed, parseCookies } from './dashboard-auth.js';
 import { fileAccess, installOwnerOnlySecret, ownerOnlyDir, writeOwnerOnly } from './os/index.js';
 import { FlowError, GITHUB_LOGIN, INSTANCE_NAME, MANIFEST_CALLBACK_PATH, MANIFEST_START_PATH, ManifestFlows } from './setup/app-manifest.js';
 
@@ -29,6 +37,12 @@ export const SETUP_TOKEN_FILE = 'setup-token';
 export const SIGNIN_SECRET_FILE = 'client-secret';
 /** __Host-: Secure, Path=/, no Domain: only this origin, only over https. */
 export const SETUP_COOKIE = '__Host-setup';
+/** Loopback mode's session cookie: plain http on loopback has no Secure cookie to give, so no __Host- prefix either. */
+export const SETUP_LOOPBACK_COOKIE = 'setup-loopback';
+/** The wizard's screen that gives the machine its https origin: Tailscale and HTTPS. */
+export const HTTPS_SCREEN = 7;
+/** Loopback mode's Host header: a loopback name, any port (an ssh tunnel may use another local port). */
+const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/;
 export const SETUP_SESSION_MS = 2 * 60 * 60_000;
 export const SETUP_MAX_TRIES = 10;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -38,8 +52,14 @@ export interface SetupHubOptions {
   stateDir: string;
   /** Where the sign-in secrets go (credentials.sh dashboard-signin's directory). */
   signinDir: string;
-  /** The hub's https origin, as browsers reach it (tailscale serve): GitHub sends the browser back here. */
-  publicUrl: string;
+  /**
+   * The hub's https origin, as browsers reach it (tailscale serve): GitHub sends the browser back here. null: loopback
+   * mode, before the machine has one (the App step then waits for screen 7).
+   */
+  publicUrl: string | null;
+  /** Loopback mode: the root script for screen 7's steps (scripts/setup/tailscale.sh) and the command to run after them. */
+  tailscaleScript?: string;
+  rerunCommand?: string;
   port?: number;
   host?: string;
   /** The App's name starts with this (`<name>-<cli>-signin`); this machine's short host name by default. */
@@ -115,10 +135,13 @@ pre{font:13px ui-monospace,monospace;background:var(--bg);border:1px solid var(-
 <main><h1>${esc(title)}</h1>${body}</main></html>`;
 }
 
+// WHY same-origin, not no-referrer: under no-referrer a browser sends `Origin: null` on every form POST, its own page's
+// included (the Fetch standard), so fromHere refused the page's own unlock form in a real browser. same-origin sends the
+// origin to this page only; anything cross-site (GitHub, Tailscale's admin link) still gets neither origin nor referrer.
 const headers = (type: string, extra: Record<string, string | string[]> = {}) => ({
   'content-type': type,
   'cache-control': 'no-store',
-  'referrer-policy': 'no-referrer',
+  'referrer-policy': 'same-origin',
   'x-frame-options': 'DENY',
   'x-content-type-options': 'nosniff',
   ...extra,
@@ -129,14 +152,19 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
   const host = o.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   if (setupOver(o.signinDir)) throw new SetupOver(`the sign-in App's secret is in ${o.signinDir} already: setup mode is off; start the hub with dashboards.sh <name>...`);
-  let origin: string;
-  try {
-    const u = new URL(o.publicUrl);
-    if (u.protocol !== 'https:' || u.pathname !== '/' || u.search || u.hash) throw new Error();
-    origin = u.origin;
-  } catch {
-    throw new Error(`--public-url: the hub's https origin as browsers reach it (https://<machine>.<tailnet>.ts.net), not ${o.publicUrl}`);
+  /** The https origin; null in loopback mode. */
+  let origin: string | null = null;
+  if (o.publicUrl !== null) {
+    try {
+      const u = new URL(o.publicUrl);
+      if (u.protocol !== 'https:' || u.pathname !== '/' || u.search || u.hash) throw new Error();
+      origin = u.origin;
+    } catch {
+      throw new Error(`--public-url: the hub's https origin as browsers reach it (https://<machine>.<tailnet>.ts.net), not ${o.publicUrl}`);
+    }
   }
+  const loopback = origin === null;
+  const cookieName = loopback ? SETUP_LOOPBACK_COOKIE : SETUP_COOKIE;
   const now = o.now ?? Date.now;
   const prefix = o.appPrefix ?? defaultAppPrefix();
   const tok = setupToken(o.stateDir);
@@ -164,12 +192,12 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
     res.end();
   };
   const sessionOk = (req: IncomingMessage) => {
-    const c = parseCookies(req.headers.cookie)[SETUP_COOKIE];
+    const c = parseCookies(req.headers.cookie)[cookieName];
     if (!session || !c || now() >= session.until) return false;
     return same(sha(c), session.hash);
   };
   /** A write from this page: the browser says it came from this origin (or says nothing), and, with a session, its CSRF token. */
-  const fromHere = (req: IncomingMessage) => req.headers.origin === undefined || req.headers.origin === origin;
+  const fromHere = (req: IncomingMessage) => req.headers.origin === undefined || req.headers.origin === (origin ?? `http://${req.headers.host ?? ''}`);
   const readForm = async (req: IncomingMessage): Promise<URLSearchParams> => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -191,7 +219,8 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
 <pre>sudo cat ${esc(tok.file)}</pre>
 <form method="post" action="/setup/unlock"><label for="token">Setup token (works once)</label><input id="token" name="token" type="password" autocomplete="off" required>
 <button type="submit">Continue</button></form>${note ? `<p class="bad">${esc(note)}</p>` : ''}</div>
-<p class="mut">The token goes only into this form: never into a link. By hand instead: make the App on GitHub, then <code>credentials.sh dashboard-signin</code> and <code>dashboards.sh --client-id &lt;id&gt; --public-url ${esc(origin)} &lt;name&gt;...</code></p>`,
+${loopback ? `<p class="mut">This machine has no https origin yet, so this page answers on the machine only (or through an ssh tunnel to it), and the sign-in App waits for screen ${HTTPS_SCREEN}, Tailscale and HTTPS: the page shows how once you are in.</p>` : ''}
+<p class="mut">The token goes only into this form: never into a link. By hand instead: make the App on GitHub, then <code>credentials.sh dashboard-signin</code> and <code>dashboards.sh --client-id &lt;id&gt; --public-url ${esc(origin ?? 'https://<machine>.<tailnet>.ts.net')} &lt;name&gt;...</code></p>`,
     );
 
   const appPage = (res: ServerResponse, note = '') =>
@@ -202,8 +231,25 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
       `<p>People sign in to the dashboard with GitHub, through a GitHub App of its own. It has no permissions and no webhook: it only names who signs in.</p>
 <div class="card"><form method="post" action="/setup/signin-app"><input type="hidden" name="csrf" value="${esc(session!.csrf)}">
 <label for="owner">The GitHub account or organization that owns the App</label><input id="owner" name="owner" required pattern="[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}" autocomplete="off" placeholder="your GitHub login">
-<p class="mut">GitHub shows the App before it makes it, then sends you back here. Its callback is ${esc(origin)}/auth/callback.</p>
+<p class="mut">GitHub shows the App before it makes it, then sends you back here. Its callback is ${esc(origin ?? '')}/auth/callback.</p>
 <button type="submit">Continue to GitHub</button></form>${note ? `<p class="bad">${esc(note)}</p>` : ''}</div>`,
+    );
+
+  // INVARIANT: loopback mode never starts GitHub's manifest flow: it has no origin for GitHub to send the browser back to.
+  const ts = o.tailscaleScript ?? 'scripts/setup/tailscale.sh';
+  const httpsFirstPage = (res: ServerResponse, status = 200) =>
+    send(
+      res,
+      status,
+      'Connect GitHub: https first',
+      `<p>People sign in to the dashboard with GitHub, through a GitHub App of its own. GitHub makes that App in a few clicks, then sends your browser back to the hub at its https address. This machine has none yet: this page answers only here, through your ssh tunnel.</p>
+<div class="card" data-testid="signin-app-needs-https" data-next-screen="${HTTPS_SCREEN}"><p><strong>Screen ${HTTPS_SCREEN} first: Tailscale and HTTPS.</strong> It gives this machine its https address on your tailnet (never the public internet). With no project here yet, its steps run as root on this machine, one at a time:</p>
+<pre>sudo bash ${esc(ts)} install
+sudo bash ${esc(ts)} up
+sudo bash ${esc(ts)} serve</pre>
+<p class="mut">install: Tailscale's signed package. up: prints a login link; open it and approve this machine. serve: https on this machine's tailnet name to the hub, and to nothing else. Turn on MagicDNS and HTTPS certificates in <a href="https://login.tailscale.com/admin/dns" rel="noreferrer">Tailscale's DNS settings</a> before serve. The same steps are the Machine page's Tailscale and HTTPS panel once a project is here.</p>
+<p>Then run the install command again. It finds this machine's tailnet name, restarts this page at that https address with a new setup token, and the App step goes on there:</p>
+<pre>${esc(o.rerunCommand ?? 'sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>')}</pre></div>`,
     );
 
   const finish = (why: string) => {
@@ -217,13 +263,17 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     try {
+      // INVARIANT: loopback mode is the owner's on this machine: from loopback, to a loopback name, never through a proxy.
+      if (loopback && !(breakGlassAllowed(req) && LOOPBACK_HOST.test(req.headers.host ?? ''))) {
+        return send(res, 403, 'Refused', '<p>With no https origin yet, setup mode answers on this machine only (or through an ssh tunnel to it): never through a proxy or another name.</p>');
+      }
       if (over || setupOver(o.signinDir)) {
         send(res, 410, 'Setup mode is off', `<p>The sign-in App is set up. Start the hub with it: <code>${esc(o.nextCommand ?? 'dashboards.sh <name>...')}</code></p>`);
         return void setImmediate(() => finish(over ?? 'the sign-in secret exists'));
       }
       // INVARIANT: the token is never taken from a URL: a link that carries it is refused, not used.
       if (url.searchParams.has('token') || url.searchParams.has('t')) return send(res, 400, 'Not in a link', '<p>The setup token is pasted into the page, never put in a link. Open the page without it.</p>');
-      if (url.pathname === '/' && req.method === 'GET') return sessionOk(req) ? appPage(res) : unlockPage(res);
+      if (url.pathname === '/' && req.method === 'GET') return sessionOk(req) ? (loopback ? httpsFirstPage(res) : appPage(res)) : unlockPage(res);
       if (url.pathname === '/setup/unlock' && req.method === 'POST') {
         if (!fromHere(req)) return send(res, 403, 'Refused', '<p>A form from another site is refused.</p>');
         if (!tokenHash) return send(res, 410, 'The token is used', `<p>The setup token works once, and it was used. For a new one, run <code>dashboards.sh --setup</code> again.</p>`);
@@ -238,9 +288,11 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
         const cookie = randomBytes(32).toString('base64url');
         session = { hash: sha(cookie), csrf: randomBytes(24).toString('base64url'), until: now() + SETUP_SESSION_MS };
         // Lax, so GitHub's redirect back (a top-level GET from github.com) carries it; every write also checks the origin and the CSRF token.
+        if (loopback) return seeOther(res, '/', [`${SETUP_LOOPBACK_COOKIE}=${cookie}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${SETUP_SESSION_MS / 1000}`]);
         return seeOther(res, '/', [`${SETUP_COOKIE}=${cookie}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SETUP_SESSION_MS / 1000}`]);
       }
       if (!sessionOk(req)) return unlockPage(res, 401, url.pathname === '/' ? '' : 'Unlock setup mode first, in this browser.');
+      if (loopback) return httpsFirstPage(res, 409);
       if (url.pathname === '/setup/signin-app' && req.method === 'POST') {
         const form = await readForm(req);
         if (!fromHere(req) || !same(sha(form.get('csrf') ?? ''), sha(session!.csrf))) return send(res, 403, 'Refused', '<p>Missing or wrong form token: reload the page.</p>');
@@ -262,6 +314,7 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
         return void res.end(p.body);
       }
       if (url.pathname === MANIFEST_CALLBACK_PATH && req.method === 'GET') {
+        if (origin === null) return httpsFirstPage(res, 409);
         const r = await flows.callback(url.searchParams.get('state'), url.searchParams.get('code'), null);
         if (r.status !== 200 || !pending) return send(res, r.status === 200 ? 409 : r.status, 'Not made', `<p class="bad">${esc(r.body)}</p><p><a href="/">Start again</a></p>`);
         const v = await flows.wait(pending.id, 0);

@@ -21,6 +21,7 @@
 #     4398 (the token, on this machine only), which it never forwards.
 #
 #   bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net      (first, once)
+#   bash scripts/setup/dashboards.sh --setup --loopback          (first, before the machine has an https origin)
 #   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
 #
 #   --setup: before the sign-in App exists (the hub can't start without it). Starts the hub in setup mode
@@ -30,6 +31,9 @@
 #     a 0600 file of wl-dash's, which this prints the path of (sudo cat it; it is never printed, logged or put in a
 #     URL). Refused once the sign-in secret exists. Then run this again without --setup: --client-id and --public-url
 #     default to what setup mode stored. By hand instead: credentials.sh dashboard-signin, then --client-id.
+#     --loopback instead of --public-url: no https origin yet (no Tailscale name). The same page and token on
+#     127.0.0.1:4399, for this machine or an ssh tunnel to it (never through a proxy); its App step can't run without an
+#     origin, so it shows Tailscale and HTTPS (the wizard's screen 7) first. Run --setup --public-url once there is one.
 #
 #   --no-instances: the hub alone, with no instance yet, for a machine's first project: add-project.sh runs it before
 #     its App step, because GitHub's manifest flow comes back to the hub, and an instance's dashboard can't start
@@ -52,12 +56,13 @@
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
-client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances=""
+usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --setup) setup=1; shift ;;
     --no-instances) no_instances=1; shift ;;
+    --loopback) loopback=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
@@ -88,8 +93,9 @@ setup_unit=worklane-dashboard-hub-setup.service
 url_ok() { [[ "$1" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin, as browsers reach it through tailscale serve (https://<machine>.<tailnet>.ts.net)" >&2; exit 2; }; }
 
 if [ -n "$setup" ]; then
-  [ "$#" -eq 0 ] && [ -n "$public_url" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances" ] || { echo "$usage" >&2; exit 2; }
-  url_ok "$public_url"
+  # Exactly one of --public-url and --loopback.
+  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
+  [ -n "$loopback" ] || url_ok "$public_url"
   [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
   say "viewer user $viewer (runs the hub; holds no credential)"
   ensure_user "$viewer"
@@ -112,7 +118,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub-setup --service --public-url $public_url --signin-dir $signin_dir
+ExecStart=/usr/local/bin/worklane dashboard --hub-setup --service ${loopback:+--loopback}${public_url:+--public-url $public_url} --signin-dir $signin_dir
 Restart=on-failure
 RestartSec=10
 UMask=0077
@@ -134,8 +140,14 @@ EOF
   sudo -u "$viewer" test -s "$hub_state/setup-token" || { echo "no setup token after 30 s; see journalctl -u $setup_unit" >&2; exit 1; }
   [ "$(stat -c '%U %a' "$hub_state/setup-token")" = "$viewer 600" ] || { echo "the setup token file isn't $viewer's 0600: stopping setup mode" >&2; systemctl stop "$setup_unit"; exit 1; }
   echo
-  echo "setup-mode hub: $public_url"
-  echo "  open it there: tailscale serve --bg --https=443 http://127.0.0.1:4399 first (GitHub sends the browser back to that URL)"
+  if [ -n "$loopback" ]; then
+    echo "setup-mode hub, loopback only: http://127.0.0.1:4399/"
+    echo "  open it on this machine, or from your computer through: ssh -L 4399:127.0.0.1:4399 <you>@<this machine>"
+    echo "  no https origin yet: the sign-in App waits for one (the page shows Tailscale and HTTPS first); then: --setup --public-url"
+  else
+    echo "setup-mode hub: $public_url"
+    echo "  open it there: tailscale serve --bg --https=443 http://127.0.0.1:4399 first (GitHub sends the browser back to that URL)"
+  fi
   echo "  the one-time setup token, for the page: sudo cat $hub_state/setup-token"
   echo "  it makes the sign-in App with GitHub, then turns itself off; then: dashboards.sh [--machine-owner <login>] <name>..."
   exit 0

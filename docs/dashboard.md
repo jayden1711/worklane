@@ -90,6 +90,16 @@ sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<ta
 - Setup mode then turns itself off: the process exits, and nothing answers on 4399 until the real hub starts. It also turns off if the client secret appears some other way (`credentials.sh dashboard-signin`). It won't start again while the secret exists: `--setup` is refused.
 - Then run `dashboards.sh <name>...` as above. It removes the setup-mode unit and starts the real hub with the stored client id and URL. The setup page shows the exact command.
 
+**No https origin yet.** Before Tailscale is set up, `--setup --loopback` takes the place of `--public-url` (the install command does this by itself when it finds no origin):
+
+```bash
+sudo bash scripts/setup/dashboards.sh --setup --loopback
+```
+
+- The same unit, page and one-time token, on `http://127.0.0.1:4399/`. From your own computer, `ssh -L 4399:127.0.0.1:4399 <you>@<server>` first, then open that URL.
+- It answers only a request made on the machine itself (through the tunnel) to a loopback name: anything carrying a proxy's headers (`tailscale serve` adds them) or another `Host` is refused, as on the break-glass port. Its session cookie is `setup-loopback` (HttpOnly, SameSite=Strict; not Secure, since the page is plain http on loopback).
+- The sign-in App step never starts GitHub's manifest flow here: GitHub sends the browser back to an https address, and there isn't one. The page shows Tailscale and HTTPS (the wizard's screen 7) first, as root commands: `scripts/setup/tailscale.sh install`, `up` and `serve`. Then run the install command (or `--setup --public-url https://<name>`) again: setup mode restarts at the origin with a new token, and the App step goes on there.
+
 The first-run page's "Dashboard sign-in (GitHub App)" step shows the `--setup` command, and says when the hub is in setup mode.
 
 **A machine's first project.** The agents' App is made through the manifest flow, which comes back to the hub, and add-project starts the hub in its last step (an instance's own dashboard can't start before its checkout exists, and the checkout needs the App). So when the machine has no hub yet, add-project's App step starts the hub alone first, with `dashboards.sh --no-instances` and what setup mode stored, then goes on; its last step adds the instance to the hub as before. The order for a first project is: `dashboards.sh --setup`, the sign-in App, `add-project.sh <name> <owner/repo>` (which starts the hub, then asks for the two GitHub clicks). If there is no sign-in App yet, the App step stops and names the `--setup` command. `--no-instances` takes no names and is refused once the hub serves an instance. A second project is unchanged: the hub is there, and is never started alone.

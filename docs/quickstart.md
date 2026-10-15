@@ -91,8 +91,9 @@ sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
    If the repo's setup PR isn't merged yet, the command says "waiting" and exits 3. Merge the PR and run the command again; it picks up where it stopped.
 4. **One URL, last, and only one that answers.** It asks each URL first (HTTP 200) and prints only one that answered:
    - **A fresh machine (no dashboard sign-in App yet):** it starts the hub's setup mode and prints `https://<the machine's https name>/`. On that page you make the sign-in App with GitHub (Connect GitHub; GitHub's manifest flow, two clicks, nothing to copy). The page asks for a one-time setup token: run `sudo cat` on the file it names. The token is never printed, logged or put in a link. Setup mode turns itself off once the App exists.
+   - **A fresh machine with no https origin yet:** it starts setup mode on loopback only (`dashboards.sh --setup --loopback`) and prints `http://127.0.0.1:4399/`, with the line to run from your own computer first: `ssh -L 4399:127.0.0.1:4399 <you>@<server>` (it fills in who ran `sudo` and the server's host name). The page asks for the same one-time setup token. Its sign-in App step can't start GitHub's manifest flow yet, because that needs an https address GitHub can send your browser back to. So it shows **Tailscale and HTTPS** (screen 7) first, as three root commands (`scripts/setup/tailscale.sh install`, `up`, `serve`). Run the install command again after them: it finds the tailnet name, moves setup mode to `https://<the machine's https name>/` with a new token, and the App step goes on there.
    - **The sign-in App made, no hub yet:** it starts the hub (`dashboards.sh --no-instances`).
-   - **A hub running:** `https://<the machine's https name>/first-run`. Sign in with GitHub as the machine owner.
+   - **A hub running:** `https://<the machine's https name>/first-run`. Sign in with GitHub as the machine owner. While that origin doesn't reach the hub, it prints `http://127.0.0.1:4398/first-run` instead, the owner's break-glass on the server, with the line to run from your own computer first: `ssh -L 4398:127.0.0.1:4398 <you>@<server>`.
 
 **The https origin.** Setup mode and sign-in need the machine's https name. That's its Tailscale name, with MagicDNS and HTTPS certificates turned on in Tailscale's admin console, and the hub served on it:
 
@@ -102,7 +103,7 @@ sudo tailscale serve --bg --https=443 http://127.0.0.1:4399
 
 You can also give an https origin of your own with `--public-url https://<host>`. [dashboard.md](dashboard.md#tailscale-https-the-owners-step) has the details. Once the hub is up, the Machine page's **Tailscale and HTTPS** card walks you through these steps from the browser.
 
-**The current limit: a fresh server with no https origin gets no URL.** If the machine has no Tailscale name and you gave no `--public-url`, the command can't start setup mode. It prints no URL. It says why ("the sign-in App is made through the hub's setup mode, which needs this machine's https origin, and there is none yet"), prints the command that fixes it, and exits 4. It does the same (no URL, the reason, the fix, exit 4) whenever nothing answers yet, for example when the origin doesn't reach the hub. Fix what it says and run the same command again. The installed parts stay as they are.
+**When nothing answers.** If what it started doesn't answer (for example, the origin doesn't reach the hub), it prints no URL. It says why, prints the command that fixes it, and exits 4. Fix what it says and run the same command again. The installed parts stay as they are.
 
 ### Unattended
 

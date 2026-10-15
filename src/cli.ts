@@ -148,7 +148,7 @@ usage: ${BRAND.cli} <command> [options]
                                    port only, on this machine (docs/dashboard.md);
                                    --console-user: the admin user the owner terminal runs as
                                    from the Tailscale devices --console-devices lists (none: refused)
-  dashboard --hub-setup --public-url https://<host> --signin-dir dir [--port n] [--service]
+  dashboard --hub-setup (--public-url https://<host> | --loopback) --signin-dir dir [--port n] [--service]
                                    the hub in setup mode, before sign-in exists (dashboards.sh --setup
                                    runs it): one page, unlocked by a one-time setup token from a 0600
                                    file, makes the sign-in App through GitHub's manifest flow, stores
@@ -721,21 +721,32 @@ async function main(argv: string[]): Promise<number> {
       const service = flag(opts, '--service');
       if (flag(opts, '--hub-setup')) {
         // The hub in setup mode (src/hub-setup.ts): one page that makes the sign-in App, then exits (dashboards.sh --setup).
+        // --loopback: no https origin yet; the page answers on this machine (or an ssh tunnel), and its App step waits for one.
         const publicUrl = option(opts, '--public-url');
+        const loopback = flag(opts, '--loopback');
         const signinDir = option(opts, '--signin-dir');
-        if (!publicUrl || !signinDir) throw new Error('--hub-setup needs --public-url https://<host> and --signin-dir <dir>');
+        if (!signinDir || !!publicUrl === loopback) throw new Error('--hub-setup needs --signin-dir <dir> and one of --public-url https://<host> or --loopback');
         const portOpt = option(opts, '--port');
         const next = `sudo bash ${join(engineRoot(), 'scripts', 'setup', 'dashboards.sh')}`;
         let h: Awaited<ReturnType<typeof startSetupHub>>;
         try {
-          h = await startSetupHub({ stateDir: join(stateDir(), 'dashboard-hub'), signinDir, publicUrl, port: portOpt ? Number(portOpt) : HUB_PORT, nextCommand: next });
+          h = await startSetupHub({
+            stateDir: join(stateDir(), 'dashboard-hub'),
+            signinDir,
+            publicUrl: publicUrl ?? null,
+            port: portOpt ? Number(portOpt) : HUB_PORT,
+            nextCommand: next,
+            tailscaleScript: join(engineRoot(), 'scripts', 'setup', 'tailscale.sh'),
+            rerunCommand: `sudo bash ${join(engineRoot(), 'scripts', 'bootstrap.sh')} --hardened <name> <owner/repo>`,
+          });
         } catch (e) {
           if (!(e instanceof SetupOver)) throw e;
           console.log(e.message);
           return 0;
         }
         // INVARIANT: never the token itself: only the file it is in.
-        console.log(`${BRAND.name} dashboard hub, setup mode (served on ${h.url}, loopback only)\n  open: ${new URL(publicUrl).origin}\n  the one-time setup token is in ${h.tokenFile} (sudo cat it on this machine; it works once)\n  it turns itself off once the sign-in App is made`);
+        const open = publicUrl ? new URL(publicUrl).origin : `${h.url} on this machine, or through an ssh tunnel to it (no https origin yet: the sign-in App waits for one)`;
+        console.log(`${BRAND.name} dashboard hub, setup mode (served on ${h.url}, loopback only)\n  open: ${open}\n  the one-time setup token is in ${h.tokenFile} (sudo cat it on this machine; it works once)\n  it turns itself off once the sign-in App is made`);
         console.log(`setup mode off: ${await h.closed}`);
         return 0;
       }
