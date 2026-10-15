@@ -320,11 +320,34 @@ export const IntakeConfig = z.strictObject({
 export type IntakeConfig = z.infer<typeof IntakeConfig>;
 
 /**
- * May this sender's message be taken at all? Discord: only the allowed senders. Checked on the sender id alone,
- * before anything of the message is read or stored. In-product reports have no allow-list.
+ * May this sender's message be taken at all? Checked on the sender id alone, before anything of the message is read
+ * or stored.
+ *
+ * INVARIANT: one case per source and no default. A source added to SOURCES without its own case here doesn't compile
+ * (this function would end without a return) and fails test/intake-allowed.test.ts (it would answer undefined): a new
+ * source is never let in by omission.
  */
 export function isAllowed(sender: Sender, cfg: IntakeConfig): boolean {
-  return sender.source === 'discord' ? cfg.discord.allowed_senders.includes(sender.id) : true;
+  switch (sender.source) {
+    case 'discord':
+      // Only the allowed senders (discord.allowed_senders); empty means nobody.
+      return cfg.discord.allowed_senders.includes(sender.id);
+    case 'bug-store':
+      // WHY allowed: rows come only from the owner's own fixed read-only query on the production read path (deploy.yaml
+      // prod_read); every reporter is untrusted unless trusted.bug-store names them, so a draft waits for an owner.
+      return true;
+    case 'alerts':
+      // WHY allowed: the owner's own read-only alerts query; the "sender" is an alert kind, not a person.
+      return true;
+    case 'github':
+      // WHY allowed: issues are public by design; each is triaged untrusted (an Inbox decision) unless trusted.github
+      // names its author, and only the intake label brings it here.
+      return true;
+    case 'voice':
+      // WHY allowed: an owner of the instance spoke and confirmed it on the dashboard (or a device token an owner made,
+      // for Siri); never trusted, so it always waits for an owner's approval.
+      return true;
+  }
 }
 
 /** What the config allows that is probably not meant, for the start-up check. */
