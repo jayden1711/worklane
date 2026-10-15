@@ -160,11 +160,19 @@ export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirmi
           )}
         </div>
       )}
-      {draft && (draft.running || draft.lines.length > 0) && (
+      {/* WHY (#468): while it runs, its log; once finished, folded away: its questions are the choices above, not asked
+          again in the terminal's words. */}
+      {draft && draft.running && (
         <div className="space-y-1" data-testid="setup-draft-log">
-          <div className="text-[12px] text-ink-3">{draft.running ? 'Running…' : `Finished${draft.result ? `: ${draft.result.detail}` : ''}`}</div>
+          <div className="text-[12px] text-ink-3">Running…</div>
           <code className={cx(code, 'max-h-56 overflow-y-auto')}>{draft.lines.slice(-40).join('\n')}</code>
         </div>
+      )}
+      {draft && !draft.running && draft.lines.length > 0 && (
+        <details className="space-y-1" data-testid="setup-draft-log">
+          <summary className="cursor-pointer select-none text-[12px] text-ink-3">{`What the draft did${draft.result ? ` (${draft.result.status})` : ''}`}</summary>
+          <code className={cx(code, 'mt-1 max-h-56 overflow-y-auto')}>{draft.lines.slice(-40).join('\n')}</code>
+        </details>
       )}
       {!canEdit && <p className="text-[12.5px] text-ink-3">Only the owners can set this checkout up.</p>}
       {act.note}

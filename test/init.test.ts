@@ -113,7 +113,7 @@ test('init, local mode: the checklist in order; stopped at the Claude login, a r
   assert.match(s2.steps.github!.detail, /gh signed in; you can push to example-org\/example-shop/);
   assert.match(s2.steps['repo-config']!.detail, /\.worklane\/ valid \(example-org\/example-shop\), hooks installed/);
   assert.ok(existsSync(join(root, '.claude', 'settings.json')), 'the hooks for local runs, as `install` writes them');
-  assert.match(s2.steps.protection!.detail, /GitHub doesn't protect main \(HTTP 404\)[\s\S]*reported only/);
+  assert.match(s2.steps.protection!.detail, /main isn't protected on GitHub yet[\s\S]*reported only/);
   assert.ok(s2.finishedAt);
   assert.match(again.out(), /not in local mode: separate OS users: local mode runs the agents as you/);
   // A third run: everything done earlier, the optional step skipped earlier stays skipped (not asked again).

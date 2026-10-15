@@ -78,6 +78,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
   const [count, setCount] = useState(c.values.workers_count);
   const [model, setModel] = useState(c.values.workers_model);
+  const models = c.models ?? [c.values.workers_model];
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
   const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
@@ -168,8 +169,26 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
         </label>
         <label className="flex items-center gap-2">
           <span>Worker model</span>
-          <input value={model} disabled={!canEdit || busy} onChange={(e) => (setModel(e.target.value), edited())} className={cx(field, 'w-32')} spellCheck={false} data-testid="repo-config-workers-model" />
+          {/* WHY (#468): the engine's own list (the server's), the default marked; a hand-edited value not in it is shown,
+              with a warning, never replaced behind the person's back. */}
+          <select value={model} disabled={!canEdit || busy} onChange={(e) => (setModel(e.target.value), edited())} className={cx(field, 'w-40 font-sans')} data-testid="repo-config-workers-model">
+            {!models.includes(model) && (
+              <option value={model} data-testid="repo-config-model-unknown">
+                {model} (not supported)
+              </option>
+            )}
+            {models.map((m) => (
+              <option key={m} value={m}>
+                {m === c.defaultModel ? `${m} (default)` : m}
+              </option>
+            ))}
+          </select>
         </label>
+        {!models.includes(model) && (
+          <p className="basis-full text-[12px] text-orange" data-testid="repo-config-model-warning">
+            The config names a worker model the engine doesn't list ({model}): it is kept as it is unless you pick another ({models.join(', ')}).
+          </p>
+        )}
       </div>
       {!canEdit ? (
         <p className="text-[12.5px] text-ink-3" data-testid="repo-config-refused">

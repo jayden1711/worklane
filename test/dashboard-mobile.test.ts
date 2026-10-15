@@ -15,7 +15,8 @@ const dir = join(repoRoot, 'scripts', 'dev');
 const fm = (await import(pathToFileURL(join(dir, 'feature-map.mjs')).href)) as { loadFeatureMap: () => { pages: { id: string; route: string; sidebar: string | null }[] } };
 const ctl = (await import(pathToFileURL(join(dir, 'control-dashboard.mjs')).href)) as { findChrome: (given?: string) => string | null };
 const map = fm.loadFeatureMap();
-const sidebarPages = map.pages.filter((p) => p.sidebar).length;
+// First run is the sidebar's one row in setup mode only (#468); this instance is configured, so it has every other one.
+const sidebarPages = map.pages.filter((p) => p.sidebar && p.id !== 'first-run').length;
 
 /** In the page: how wide it is against the screen, and every visible control smaller than 44 x 44 px (a link inside a sentence aside). */
 const MEASURE = `(() => {

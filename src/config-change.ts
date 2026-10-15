@@ -11,6 +11,8 @@ import { configFrom, loadConfig, type Config } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
 import { checkedPush } from './push-check.js';
+import { MODEL_TIERS } from './model-routing.js';
+import { ROUTING } from './routing.js';
 import { withToolPath } from './tool-path.js';
 
 const HANDLE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -33,8 +35,15 @@ const WHERE: Record<keyof RepoConfigValues, { file: string; path: string[] }> = 
 };
 const KEYS = Object.keys(WHERE) as (keyof RepoConfigValues)[];
 
+/**
+ * WHY (#468): the models the form offers the workers, from the engine's own list (the tiers routing and the model cap
+ * know), and the one the engine builds with by default; the page reads both from here, never a copy of its own.
+ */
+export const WORKER_MODELS: readonly string[] = MODEL_TIERS;
+export const DEFAULT_WORKER_MODEL: string = ROUTING.build.default;
+
 export function repoConfigValues(cfg: Config): RepoConfigValues {
-  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? 'sonnet' };
+  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? DEFAULT_WORKER_MODEL };
 }
 
 export interface RepoConfigForm {
@@ -43,9 +52,12 @@ export interface RepoConfigForm {
   /** The default branch the change is proposed against. */
   branch: string;
   repo: string;
+  /** The workers' models the form offers, and the engine's default among them. */
+  models: readonly string[];
+  defaultModel: string;
 }
 
-export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo });
+export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo, models: WORKER_MODELS, defaultModel: DEFAULT_WORKER_MODEL });
 
 export class ConfigChangeError extends Error {}
 
@@ -94,6 +106,8 @@ function edited(root: string, cfg: Config, values: Partial<Record<keyof RepoConf
   const now = repoConfigValues(cfg);
   for (const k of KEYS) {
     if (v[k] === undefined || JSON.stringify(v[k]) === JSON.stringify(now[k])) continue;
+    // INVARIANT (#468): the form proposes only a model the engine lists; a hand-edited one is kept as it is unless changed.
+    if (k === 'workers_model' && !WORKER_MODELS.includes(v.workers_model!)) throw new ConfigChangeError(`worker model: not one the engine supports: ${v.workers_model!.slice(0, 80)} (one of ${WORKER_MODELS.join(', ')})`);
     const { file, path } = WHERE[k];
     if (!docs.has(file)) {
       const text = show(file);

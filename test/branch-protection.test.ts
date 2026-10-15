@@ -84,6 +84,6 @@ async function protectionDetail(dir: string): Promise<string> {
 }
 
 test("init's Protection step recommends not strict by default, and strict when the repo opts in", async () => {
-  assert.match(await protectionDetail(exampleProject().dir), /GitHub doesn't protect main \(HTTP 404\)[^;]*; recommended: require your CI checks \(config\.yaml required_checks is empty\), not strict/);
+  assert.match(await protectionDetail(exampleProject().dir), /main isn't protected on GitHub yet: Protect requires your checks[^;]*; recommended: require your CI checks \(config\.yaml required_checks is empty\), not strict/);
   assert.match(await protectionDetail(withConfig((y) => `${y}\nprotection: { strict: true }\n`)), /recommended: require your CI checks \(config\.yaml required_checks is empty\), strict \(PRs must be up to date first/);
 });

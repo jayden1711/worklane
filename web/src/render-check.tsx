@@ -14,7 +14,7 @@ import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
-import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
 import { Header } from './components/Header';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
@@ -165,7 +165,7 @@ export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage 
 export const renderKeyPage = (help: { file: string; copy: string | null } | null = null) => renderToStaticMarkup(<KeyPage help={help} />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
 export { needsKey, tryKey } from './api';
-export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
+export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>, o: { hubPage?: boolean } = {}) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} hubPage={!!o.hubPage} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], now?: number) => renderToStaticMarkup(<BoardView boards={boards} {...(now !== undefined ? { now } : {})} />);
@@ -200,6 +200,8 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     </NavMenu.Provider>,
   );
 };
+export const renderSetupModeHidden = (path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
+export { nextStep } from './pages/FirstRun';
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 
