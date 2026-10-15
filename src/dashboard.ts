@@ -1039,7 +1039,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const gh = ghNow();
     const base = baseNow();
     const approver = approverOf(who, gh);
-    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver, gh });
+    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver, gh, setupPr: readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.pr?.number ?? null });
     const then = `then this checkout's ${base} is fast-forwarded to origin's (only a fast-forward: refused if it has local changes or diverged)`;
     if (!confirm) return { status: 200, body: { ok: true, number: plan.number, url: plan.url, merged: plan.merged, command: plan.command.join(' '), then, confirmed: false } };
     if (!plan.merged) {

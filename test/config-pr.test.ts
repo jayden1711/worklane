@@ -206,3 +206,16 @@ test("#468 the dashboard's own key: the approver is the gh login merging it now,
     await s.d.close();
   }
 });
+
+test('#468 a PR from the setup branch merges from here only as the setup PR this checkout proposed', async () => {
+  const { planConfigPrMerge } = await import('../src/config-pr.js');
+  const { SETUP_BRANCH } = await import('../src/auto-config.js');
+  const gh = (args: string[]): RunResult => {
+    const a = args.join(' ');
+    if (a.startsWith('pr view 9 ')) return { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefName: SETUP_BRANCH, baseRefName: 'main', url: `https://github.com/${REPO}/pull/9`, title: 't' }), stderr: '' };
+    if (a.startsWith(`api repos/${REPO} --jq [`)) return { status: 0, stdout: 'true,true,false\n', stderr: '' };
+    return { status: 1, stdout: '', stderr: 'no stand-in' };
+  };
+  for (const setupPr of [null, 4]) assert.throws(() => planConfigPrMerge({ repo: REPO, base: 'main', number: 9, approver: 'example-owner', gh, setupPr }), /isn't the setup PR this checkout proposed/);
+  assert.equal(planConfigPrMerge({ repo: REPO, base: 'main', number: 9, approver: 'example-owner', gh, setupPr: 9 }).number, 9);
+});
