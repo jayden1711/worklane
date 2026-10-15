@@ -596,10 +596,12 @@ server refuses a viewer every attachment route (403), downloads included. Code: 
   copy, for its retention days); Office files are named and described, never unpacked or opened. Text the answer
   reads, like the question itself, is part of the chat run's own Claude session.
 - **Who opens one:** its uploader, or someone who can see a chat Project that holds it. Anyone else is refused (403)
-  even knowing its id, an owner included. A question, a conversation message or a Project takes only its sender's
+  even knowing its id, an owner included. Deleting one is the same: its uploader, or the creator of a Project that
+  holds it; the sweeps still remove what they remove. A question, a conversation message or a Project takes only its sender's
   own uploads; someone else's id reads as unknown.
 - **API:** `POST /api/chat/attachments` (the body is the file; `X-Attachment-Name`, URI-encoded; `X-Attach-Anyway: 1`
-  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or an owner),
+  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or the creator of a Project holding it;
+  nobody else, owners included),
   `GET /api/chat/attachments/limits`, and `attachments: [<id>, ...]` on `POST /api/chat`. Anything that refers to a
   file names only its id.
 

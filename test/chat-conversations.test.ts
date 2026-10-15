@@ -1,7 +1,7 @@
 // Chat conversations and Projects (src/chat-conversations.ts, src/chat-routes.ts): multi-turn context as fenced
 // data, Project instructions as data (never the system prompt), who may see what (a conversation its creator's only;
 // a Project its creator's until an owner shares it), attachments only through #499's store and only one's own,
-// downloads only for who can see a holder, Project files kept past retention until taken off, people who lose their
+// downloads and deletes only for who may (an owner can't delete a writer's file), Project files kept past retention until taken off, people who lose their
 // role (out of reach at once, deleted after 30 days), and rule 4: nothing runs from a conversation.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -351,6 +351,22 @@ test("downloads: only for who can see a holder; a writer who can't is refused (4
     await s.call('alice', 'POST', `/api/chat/conversations/${c}/messages`, { text: 'see', attachments: [af.id] });
     assert.equal((await s.call('bob', 'GET', `/api/chat/attachments/${af.id}`)).status, 403);
     assert.equal((await s.call('example-owner', 'GET', `/api/chat/attachments/${af.id}`)).status, 403, 'owners included');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("deletes: an owner gets 403 deleting a writer's file held in the writer's private conversation; the uploader may", async () => {
+  const s = await dashboard();
+  try {
+    const af = await upload(s.stateDir, 'alice', 'a.txt', 'alice notes');
+    const c = (await s.call('alice', 'POST', '/api/chat/conversations', {})).body.conversation.id as string;
+    assert.equal((await s.call('alice', 'POST', `/api/chat/conversations/${c}/messages`, { text: 'see', attachments: [af.id] })).status, 200);
+    assert.equal((await s.call('example-owner', 'DELETE', `/api/chat/attachments/${af.id}`)).status, 403, 'owners included');
+    assert.equal((await s.call('bob', 'DELETE', `/api/chat/attachments/${af.id}`)).status, 403);
+    assert.ok(readAttachment(s.stateDir, af.id), 'still there');
+    assert.equal((await s.call('alice', 'DELETE', `/api/chat/attachments/${af.id}`)).status, 200, 'its uploader may');
+    assert.equal(readAttachment(s.stateDir, af.id), null);
   } finally {
     await s.d.close();
   }

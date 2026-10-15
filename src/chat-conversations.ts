@@ -14,7 +14,8 @@
 //   - a Project is its creator's until an OWNER shares it, with all the instance's owners and writers, who can then
 //     read it and start their own (still private) conversations in it. Only its creator edits or deletes it; a
 //     writer can't share one. A shared Project stays shared only while its creator is still an owner;
-//   - an attachment downloads only for its uploader, or someone who can see a Project that holds it;
+//   - an attachment downloads only for its uploader, or someone who can see a Project that holds it; it is deleted
+//     only by its uploader or the creator of a Project holding it (owners included: nobody else);
 //   - viewers get nothing (the routes refuse them).
 // When a person loses their role on the instance, everything of theirs is out of reach at once (every route asks
 // their role; a shared Project needs its creator to be an owner), and is deleted after REMOVED_MEMBER_DAYS
@@ -211,6 +212,14 @@ export function projectFileIds(stateDir: string): Set<string> {
  */
 export function mayDownload(stateDir: string, m: AttachmentMeta, by: string, sharer: SharerCheck): boolean {
   return same(m.by, by) || allProjects(stateDir).some((p) => p.files.includes(m.id) && sees(p, by, sharer));
+}
+
+/**
+ * Whether this person may delete an attachment: its uploader, or the creator of a Project that holds it. Nobody
+ * else, owners included, may delete a file in someone else's conversation or Project (the sweeps still run).
+ */
+export function mayRemove(stateDir: string, m: AttachmentMeta, by: string): boolean {
+  return same(m.by, by) || allProjects(stateDir).some((p) => p.files.includes(m.id) && same(p.owner, by));
 }
 
 /** Files taken off a Project (or with it) are deleted, unless another Project still holds them. */

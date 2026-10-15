@@ -38,7 +38,7 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswer, type ChatAnswerFile } from './chat.js';
 import { handleConversationRoute } from './chat-routes.js';
-import { mayDownload, sharers } from './chat-conversations.js';
+import { mayDownload, mayRemove, sharers } from './chat-conversations.js';
 import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
@@ -1454,7 +1454,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return void res.end(attachmentBytes(opts.stateDir, m.id));
           }
           if (m && req.method === 'DELETE') {
-            if (!isOwnerHere && m.by.toLowerCase() !== who.login.toLowerCase()) return json(res, 403, { error: 'only who attached it, or an owner, may remove an attachment' });
+            // Its uploader, or the creator of a Project holding it: nobody else, owners included (src/chat-conversations.ts).
+            if (!mayRemove(opts.stateDir, m, who.login)) return json(res, 403, { error: 'only who attached it, or the creator of a project that holds it, may remove an attachment' });
             removeAttachment(opts.stateDir, m.id);
             audit(who, 'chat.attachment_removed', { id: m.id });
             return json(res, 200, { ok: true });

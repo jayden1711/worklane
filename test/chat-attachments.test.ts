@@ -222,11 +222,12 @@ test('only the owners and the writers: a viewer is refused (403) on upload, down
     assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-owner') })).status, 403, 'an owner who can see no Project holding it may not');
     const limits = (await (await fetch(`${s.base}/api/chat/attachments/limits`, { headers: s.h('example-collaborator') })).json()) as { maxFileMb: number; maxMessageMb: number; retentionDays: number };
     assert.deepEqual([limits.maxFileMb, limits.maxMessageMb, limits.retentionDays], [10, 25, 30]);
-    // Removal: who attached it, or an owner.
+    // Removal: who attached it (or the creator of a Project holding it: test/chat-conversations.test.ts); not an owner.
     const mine = ((await (await s.upload('example-owner', 'o.txt', 'x')).json()) as { attachment: { id: string } }).attachment.id;
     assert.equal((await fetch(`${s.base}/api/chat/attachments/${mine}`, { method: 'DELETE', headers: s.h('example-collaborator') })).status, 403);
-    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { method: 'DELETE', headers: s.h('example-owner') })).status, 200);
-    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-owner') })).status, 404);
+    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { method: 'DELETE', headers: s.h('example-owner') })).status, 403, 'an owner may not delete a writer\'s file');
+    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { method: 'DELETE', headers: s.h('example-collaborator') })).status, 200);
+    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-collaborator') })).status, 404);
   } finally {
     await s.d.close();
   }
