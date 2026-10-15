@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# Build output (a release commit holds dist/) is stored byte for byte: a rebuild of a signed tag must match it (#458).
+/dist/** -text

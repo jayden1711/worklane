@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { changelogSection, prNumbers, scrubTitle, sectionFor, withSection } from './lib/changelog.mjs';
 import { loadRules, scanText } from './lib/denylist.mjs';
+import { treeDifferences } from './lib/release-tree.mjs';
 import { releaseSigners, signingProblem } from './lib/signing.mjs';
 
 const args = process.argv.slice(2);
@@ -130,6 +131,9 @@ try {
   git('add', '-f', 'dist/src', 'dist/web');
   git('commit', '-q', '-s', '-m', `Release ${tag} (with built dist/)`);
   release = git('rev-parse', 'HEAD');
+  // INVARIANT: the release commit is the built tree byte for byte, so a rebuild of the tag reproduces it (#458).
+  const differs = treeDifferences({ dir: '.', commit: release, prefixes: ['dist/src', 'dist/web'] });
+  if (differs.length) throw new Error(`refusing to tag ${tag}: the release commit isn't the built dist/ byte for byte (a rebuild of the tag wouldn't match it):\n  ${differs.join('\n  ')}`);
   // WHY: `git tag -s` can leave an unsigned tag and still exit 0 (#457: a passphrase prompt answered with Enter).
   git('tag', '-s', tag, '-m', `${tag}\n\n${notes}`);
   git(...(signers.file ? ['-c', `gpg.ssh.allowedSignersFile=${signers.file}`] : []), 'tag', '-v', tag);

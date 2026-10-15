@@ -445,7 +445,7 @@ How each level is cleared:
     - The protocol is documented in `docs/slots.md` so other harnesses on the box can join with about 20 lines of code.
     - The cap is per machine (e.g. 4 on a dedicated box, 2 on a laptop). A `full-run` slot kind is exclusive.
   - **Admission checks before starting an agent or test run:**
-    - free disk after a new worktree (size estimated per project) stays above 15%
+    - free disk after a new worktree (size estimated per project) stays at or above the larger of 10 GB and 5% of the disk (`governor.min_free_disk_gb`, `governor.min_free_disk_pct`)
     - load per core is below a threshold, using a CPU% adapter on Windows
     - other heavy workloads on the box (e.g. GPU jobs) are not observed directly; the cap is the guard
   - **Project preconditions on tiers.** For example, a tier can refuse to start above a disk-usage threshold. These are expressed in `tests.yaml`, not in engine code.

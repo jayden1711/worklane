@@ -6,6 +6,7 @@
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
+import { HoldStrip } from '../components/HoldBanner';
 import { instanceStream, liveStream, onInstance, scopeNowOrNull, viewUrl, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import type { Stream } from '../sse';
@@ -346,6 +347,7 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
           {slots ? ` · ${slots.running} of ${slots.cap} agent slots in use on this machine` : ''}
         </span>
       </div>
+      <HoldStrip holds={boards.map((b) => ({ instance: b.name, hold: b.data?.hold }))} now={now} testId="board-hold" />
       {failed.map((b) => (
         <div key={b.name ?? ''} className="text-[12.5px] text-red" data-testid="board-instance-error">
           {b.name ? `${b.name}: ` : ''}can't load its board: {b.error}

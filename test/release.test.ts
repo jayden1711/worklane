@@ -172,3 +172,20 @@ test('regression: a release from a worktree created detached (no previous checko
   assert.equal(spawnSync('git', ['symbolic-ref', '-q', 'HEAD'], { cwd: wt }).status, 1, 'still detached, as it started');
   assert.equal(git('rev-parse', 'v1.2.3^{commit}^'), start);
 });
+
+test('regression (#458): a release commit that isn\'t the built dist/ byte for byte (git converted its line endings) is refused before tagging', { skip }, () => {
+  const { dir, git } = repo();
+  // As v0.5.0: `* text=auto eol=lf`, and a build output with CRLF in it (tslib's license in licenses.txt).
+  writeFileSync(join(dir, '.gitattributes'), '* text=auto eol=lf\n');
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  pkg.scripts['build:web'] = `node -e "require('fs').mkdirSync('dist/web',{recursive:true});require('fs').writeFileSync('dist/web/licenses.txt','MIT\\r\\nline two\\r\\n')"`;
+  writeFileSync(join(dir, 'package.json'), JSON.stringify(pkg));
+  git('add', '.gitattributes', 'package.json');
+  git('commit', '-q', '-m', 'a CRLF build');
+  const r = run(dir);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /refusing to tag v1\.2\.3: the release commit isn't the built dist\/ byte for byte \(a rebuild of the tag wouldn't match it\):\n {2}differs from the signed tree: dist\/web\/licenses\.txt/);
+  assert.equal(git('tag', '-l'), '', 'no tag');
+  assert.doesNotMatch(r.stdout, /push with|signed and verified/);
+  assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'main');
+});
