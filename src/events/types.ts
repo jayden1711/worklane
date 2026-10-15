@@ -957,6 +957,50 @@ export const EventSchemas = {
    * A harness eval run: every task replayed `samples` times within `budget_usd`. `trigger`: weekly, a change to the
    * engine's src/ (`engine`, and `pr`, the PR whose merge it is), or by hand. `stopped`: the budget ran out first.
    */
+  // Experiment studies (src/experiments/, docs/experiments.md): one session proposes one job; the coordinator writes
+  // every entry of the study's research log from these, and the agent never writes the log itself.
+  /** A session (or a confirm run) begins entry `n` of `study` at `version`, from `parent` (null: the study's own commit). */
+  'experiment.session': z.strictObject({ study: z.string(), version: z.string(), session: z.string(), n: z.number().int().positive(), kind: z.enum(['baseline', 'exploit', 'explore', 'confirm']), parent: z.number().int().positive().nullable(), of: z.number().int().positive().optional() }),
+  /** The session's one proposal, checked: its change committed at `commit` (a local ref, never pushed). `approval`: why an owner approves it first (empty: none). */
+  'experiment.proposed': z.strictObject({
+    study: z.string(),
+    version: z.string(),
+    session: z.string(),
+    n: z.number().int().positive(),
+    job: z.string(),
+    hypothesis: z.string().max(200),
+    motivation: z.string().max(600),
+    expected_effect: z.string().max(200),
+    config: z.record(z.string(), z.union([z.string(), z.number()])),
+    commit: sha,
+    files: z.array(z.string()).max(200),
+    lockfile: z.boolean(),
+    approval: z.array(z.string().max(200)).max(10),
+  }),
+  /** The session's output was refused before any job: why, in the code's words. */
+  'experiment.refused': z.strictObject({ study: z.string(), version: z.string(), session: z.string(), n: z.number().int().positive(), why: z.string().max(500) }),
+  /** An owner's answer to a job waiting for approval. */
+  'experiment.approval': z.strictObject({ study: z.string(), job: z.string(), answer: z.enum(['approve', 'decline']), by: z.string() }),
+  /** The helper was asked to run the job; `gpu: planned` before any GPU command, so a cut-off job is never run again by itself. */
+  'experiment.job_started': z.strictObject({ study: z.string(), job: z.string(), n: z.number().int().positive(), gpu: z.literal('planned') }),
+  /** The job's run record, and the decision judged from it. */
+  'experiment.recorded': z.strictObject({
+    study: z.string(),
+    version: z.string(),
+    job: z.string(),
+    n: z.number().int().positive(),
+    outcome: z.enum(['scored', 'crashed', 'stopped']),
+    score: z.number().nullable(),
+    step: z.string().max(40).nullable(),
+    gpu_minutes: z.number().nonnegative(),
+    waited_s: z.number().int().nonnegative(),
+    tail: z.string().max(2000),
+    decision: z.enum(['keep', 'discard', 'crash', 'stopped', 'pending_confirm']),
+    value: z.number().nullable(),
+    why: z.string().max(500),
+  }),
+  /** A person's change to a study through the dashboard's Review -> Confirm. */
+  'experiment.changed': z.strictObject({ study: z.string(), action: z.enum(['start', 'pause', 'resume', 'stop_job', 'caps', 'archive', 'promote', 'prune']), by: z.string(), role: z.string(), detail: z.string().max(1000) }),
   'harness_eval.run': z.strictObject({
     id: z.string(),
     trigger: z.enum(['weekly', 'change', 'manual']),
