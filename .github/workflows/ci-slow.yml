@@ -2165,10 +2165,16 @@ jobs:
           # write through it), and the real one in node's prefix becomes the stand-in too, so no PATH reaches Anthropic.
           sudo rm -f /usr/local/bin/claude
           sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
-          for c in /opt/node-*/bin/claude; do if [ -e "$c" ] || [ -L "$c" ]; then sudo ln -sfn /usr/local/bin/claude "$c"; fi; done
-          # #463: the login's proof (one real call) must reach the stand-in, never the real CLI (a random token is refused there).
-          out="$(cd / && sudo -H -u wl-ci-agent timeout 60 claude -p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json || true)"
-          printf '%s\n' "$out" | grep -q '"result":"Invalid API key · Please run /login"' || { echo "the real claude answered, not the stand-in: $out" >&2; sudo sh -c 'command -v claude; ls -l /usr/local/bin/claude /opt/node-*/bin/claude' >&2; exit 1; }
+          # Every other claude root or the agent user could reach (node's prefix, anything else on their PATH) is the stand-in too.
+          for c in /opt/node-*/bin/claude $(sudo sh -c 'which -a claude' 2>/dev/null) $(cd / && sudo -H -u wl-ci-agent sh -c 'which -a claude' 2>/dev/null); do
+            if [ "$c" != /usr/local/bin/claude ] && { [ -e "$c" ] || [ -L "$c" ]; }; then echo "the stand-in also at $c (was $(readlink -f "$c"))"; sudo ln -sfn /usr/local/bin/claude "$c"; fi
+          done
+          # #463: the login's proof (one real call) must reach the stand-in, never the real CLI, which refuses a random token.
+          # --version tells them apart (the stand-in answers only auth status and the proof, so it names itself here).
+          for u in root wl-ci-agent; do
+            v="$(cd / && sudo -H -u "$u" timeout 60 claude --version 2>&1 || true)"
+            case "$v" in *"claude stand-in"*) ;; *) echo "as $u, the real claude answers: $v" >&2; sudo -H -u "$u" sh -c 'echo "PATH=$PATH"; which -a claude' >&2; exit 1 ;; esac
+          done
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
