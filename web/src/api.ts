@@ -710,6 +710,31 @@ export async function apiPath(path: string): Promise<string> {
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
 }
 
+/** The sizes the server fetches people's pictures at (src/avatars.ts AVATAR_SIZES; test/avatars.test.ts keeps them the same). */
+export const AVATAR_SIZES = [40, 80, 160];
+const avatarUrls = new Map<string, Promise<string | null>>();
+
+/**
+ * A person's picture for a box of `box` px, as a blob: URL the page shows, or null (the page shows initials). Read from
+ * this page's own server with the page's own auth, never from GitHub (#462): an <img> can't send the key in a header.
+ * Asked once per picture while the page is open, whatever the answer (initials until a reload when there was none).
+ */
+export async function avatarSrc(login: string, box: number): Promise<string | null> {
+  const size = AVATAR_SIZES.find((s) => s >= box * 2) ?? AVATAR_SIZES[AVATAR_SIZES.length - 1]!;
+  const url = await apiPath(`/api/avatar/${encodeURIComponent(login)}?size=${size}`);
+  let p = avatarUrls.get(url);
+  if (!p) {
+    p = (async () => {
+      await me;
+      const r = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!r.ok || !/^image\/(?:png|jpeg|gif|webp)$/.test(r.headers.get('content-type') ?? '')) return null;
+      return URL.createObjectURL(await r.blob());
+    })().catch(() => null);
+    avatarUrls.set(url, p);
+  }
+  return p;
+}
+
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
   return request<T>(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), init);

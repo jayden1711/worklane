@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { GITHUB_API } from './github-hosts.js';
+import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
@@ -234,6 +235,8 @@ export interface DashboardOptions {
    * cli.js, by absolute path.
    */
   discordListing?: DiscordListingStandIn;
+  /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
+  avatars?: AvatarOptions;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -803,6 +806,13 @@ export function tokenGiven(req: IncomingMessage, _url: URL, token: string): bool
 /** The marker a hub puts on the page it serves, so the UI asks for the hub's instances only there (else /api/hub is a 404). */
 export const HUB_MARKER = '<meta name="dashboard-hub" content="1">';
 
+/**
+ * The dashboard page's content security policy, on the hub and on an instance's own server: everything from this
+ * origin only. People's pictures come from this server too (src/avatars.ts), read with the page's own auth and shown
+ * from a blob: URL the page made; no outside host is in any directive (#462).
+ */
+export const PAGE_CSP = "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
 export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts: { hub?: boolean } = {}): void {
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
   let file = resolve(webDir, rel);
@@ -821,6 +831,7 @@ export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts:
   const enc = compressibleType(type) ? requestEncoding(res.req) : null;
   if (compressibleType(type)) headers.vary = 'accept-encoding';
   if (html) {
+    headers['content-security-policy'] = PAGE_CSP;
     const page = readFileSync(file, 'utf8');
     const body = Buffer.from(opts.hub ? (page.includes('</head>') ? page.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${page}`) : page);
     return send(res, 200, headers, body, enc);
@@ -947,6 +958,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   let lastId = eventCache.lastId();
 
   const owners = opts.cfg.project.owners;
+  const avatars = new Avatars(join(opts.stateDir, 'avatars'), opts.avatars);
+  /** Whether a person is one this instance knows (so their picture may be fetched): its people, the asker, a machine owner. */
+  const knowsPerson = (login: string, who: Who) => {
+    const l = login.toLowerCase();
+    if (l === who.login.toLowerCase() || isMachineOwner(login, opts.machineOwnersFile ?? MACHINE_OWNERS_FILE)) return true;
+    const today = localDay();
+    const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
+    return peopleOf({ owners: opts.cfg.project.owners, tasks: p.tasks, decisions: p.decisions }).has(l);
+  };
   const repo = opts.cfg.project.project.repo;
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
@@ -1182,6 +1202,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // A person's picture from this server, never from GitHub in the browser (#462); and, for the hub, whether a
+        // login is a person this instance knows, so the hub fetches only theirs.
+        const avatar = url.pathname.match(AVATAR_ROUTE);
+        if (avatar && req.method === 'GET') return void (await avatars.serve(req, res, avatar[1]!, url.searchParams.get('size'), (l) => knowsPerson(l, who)));
+        const person = url.pathname.match(/^\/api\/people\/([^/]+)$/);
+        if (person && req.method === 'GET') return json(res, 200, { known: validLogin(person[1]) && knowsPerson(person[1]!, who) });
         // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
         // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
         // Each action is refused again by the route it calls (decide, the console).

@@ -51,12 +51,6 @@ export function realChromeTests(): void {
 // MAP * covers IP literals too, so each loopback form is excluded by name (::1 without brackets; with them it isn't).
 export const OFFLINE_CHROME_ARGS = ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1'];
 
-/**
- * Outside URLs a page may still ask for (they fail at once, never reaching the network) until the product stops
- * asking: a person's GitHub picture, until the dashboard serves them from its own origin (#462, option B).
- */
-export const KNOWN_OUTSIDE: RegExp[] = [/^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\.png(?:\?[^#]*)?$/];
-
 /** Outside URLs pages asked for since the last test ended; realChromeTests' afterEach fails on any. */
 const outsideRequests: string[] = [];
 
@@ -68,13 +62,14 @@ export const isOutside = (url: string): boolean => /^(?:https?|wss?):/i.test(url
 
 /**
  * The only way a test starts a real Chrome (test/offline-chrome.test.ts keeps it so): launchChrome with no host but
- * localhost resolving, and every request its page makes watched. One outside the machine that isn't KNOWN_OUTSIDE, or
- * `allow` for this test (one it answers itself with Fetch, say), fails the test, named.
+ * localhost resolving, and every request its page makes watched. One outside the machine that isn't in `allow` for this
+ * test (one it answers itself with Fetch, say), fails the test, named. No outside URL is allowed for every test: the
+ * dashboard serves people's pictures from its own origin (#462).
  */
 export async function launchTestChrome(chrome: string, o: Parameters<typeof launchChrome>[1] & { allow?: RegExp[] } = {}): Promise<Browser> {
   const { allow = [], ...launch } = o;
   const b = await launchChrome(chrome, { ...launch, extraArgs: [...OFFLINE_CHROME_ARGS, ...(launch.extraArgs ?? [])] });
-  const known = [...KNOWN_OUTSIDE, ...allow];
+  const known = [...allow];
   b.cdp.on('Network.requestWillBeSent', (p) => {
     const url = String((p.request as { url?: unknown } | undefined)?.url ?? '');
     if (isOutside(url) && !known.some((r) => r.test(url))) outsideRequests.push(url);
