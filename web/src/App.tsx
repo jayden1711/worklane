@@ -1,8 +1,9 @@
+import { ExtendPage } from './pages/Extend';
 import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
+import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type Role, type State } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
@@ -140,7 +141,17 @@ export function pageKey(e: KeyboardEvent) {
   return !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey && Date.now() >= chordUntil;
 }
 
-export const NAV = [
+/** A sidebar page. `roles`: only these see it (in the sidebar, the command menu and the chords); absent: everyone. */
+export interface NavItem {
+  to: string;
+  label: string;
+  icon: typeof Bot;
+  chord: string;
+  testId: string;
+  roles?: readonly Role[];
+}
+
+export const NAV: NavItem[] = [
   { to: '/', label: 'Board', icon: SquareKanban, chord: 'b', testId: 'nav-board' },
   { to: '/overview', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
   { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
@@ -152,6 +163,8 @@ export const NAV = [
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
   { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
+  // Automations (and Plugins, as another tab): what an instance does beyond its issues. Owners and writers only.
+  { to: '/extend', label: 'Extend', icon: Puzzle, chord: 'x', testId: 'nav-extend', roles: ['owner', 'writer'] },
   { to: '/activity', label: 'Activity', icon: History, chord: 'e', testId: 'nav-activity' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
@@ -168,7 +181,7 @@ export const FIRST_RUN_NAV = { to: '/first-run', label: 'First run', icon: ListC
  * WHY (#468): in setup mode (no config yet) nothing but First run has anything to show, so the sidebar, the command
  * menu and the `g` chords offer First run alone. (The Setup console is a server's; setup mode is a checkout's only.)
  */
-export const navFor = (state: Pick<State, 'setupMode'> | null) => (state?.setupMode ? [FIRST_RUN_NAV] : NAV);
+export const navFor = (state: Pick<State, 'setupMode' | 'role'> | null): NavItem[] => (state?.setupMode ? [FIRST_RUN_NAV] : NAV.filter((n) => !n.roles || (!!state?.role && n.roles.includes(state.role))));
 
 /** Setup mode, at the address of a page that isn't shown yet: what it needs, and the way to First run. */
 export function SetupModeHidden({ path }: { path: string }) {
@@ -469,6 +482,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/land') page = <Landing state={state} />;
   else if (path === '/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
+  else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
   else if (path === '/activity') page = <ActivityPage state={state} />;
   else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;
