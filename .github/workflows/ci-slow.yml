@@ -1571,6 +1571,33 @@ jobs:
           ask use mine done
           sudo jq -e '.active.ci.profile == "mine" and .active.beta == null' "$s/profiles.json"
           ask use default done
+          # The relayed sign-in (the owner's approved exception), from ci's dashboard: the link for wl-ci alone, the one-time
+          # code through wl-ci's 0400 file onto claude's stdin, the account staged; neither the link nor the code kept anywhere.
+          code="$(openssl rand -hex 12)#$(openssl rand -hex 12)"; echo "::add-mask::$code"
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token6"; printf '%s\n' "$code" > "$F/login-code"); unset t
+          printf '%s %s\n' "$code" "$(cat "$F/claude-token6")" | sudo tee /etc/ci-claude-login > /dev/null
+          unset code
+          if sudo -u wl-ci sudo -n "$HELPER" claude-account login rel beta < /dev/null 2>/dev/null; then echo "wl-ci may sign in for beta" >&2; exit 1; fi
+          n="$(ends login rel)"
+          sudo -u wl-ci sudo -n "$HELPER" claude-account login rel < /dev/null | tee -a "$F/helper-ops.txt"
+          for _ in $(seq 1 60); do sudo test -e "$s/login-url" && break; sleep 2; done
+          [ "$(sudo stat -c '%U %a' "$s/login-url")" = "wl-ci 400" ] || { sudo stat -c '%U %a' "$s/login-url"; exit 1; }
+          sudo -u wl-ci grep -q '^https://claude.ai/oauth/authorize?.*redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' "$s/login-url"
+          if sudo -u wl-beta cat "$s/login-url" 2>/dev/null; then echo "another instance's coordinator can read the link" >&2; exit 1; fi
+          sudo -u wl-ci bash -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/claude-login-code"; chmod 0400 "$d/claude-login-code"' < "$F/login-code"
+          for _ in $(seq 1 60); do [ "$(ends login rel)" -gt "$n" ] && break; sleep 2; done
+          sudo grep -E '"op":"login","profile":"rel","step":"login","state":"done".*"for":"ci"' "$s/profile-ops.jsonl" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
+          sudo test ! -e "$s/login-url"
+          sudo -u wl-ci test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-login-code"
+          sudo jq -e '.profiles.rel.staged == true and .profiles.rel.kind == "login" and (.profiles.rel.users | keys) == ["wl-ci-agent"]' "$s/profiles.json"
+          h="$(getent passwd wl-ci-agent | cut -d: -f6)"
+          [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/rel/.credentials.json")" = "wl-ci-agent 600" ]
+          ask use rel failed
+          sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged rel for ci (signed in from the dashboard)")' /var/lib/worklane/machine-changes.jsonl
+          # The code is single-use: claude has it; a second one is never read (the step is over), and the account is still staged.
+          if grep -qFf "$F/login-code" "$F"/helper-ops.txt || sudo grep -qFf "$F/login-code" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/login-code"; then echo "the code was echoed" >&2; exit 1; fi
+          if sudo journalctl --no-pager | grep -q 'ci-relayed-link-4s7'; then echo "the sign-in link was logged" >&2; exit 1; fi
+          sudo rm -f /etc/ci-claude-login
           # Every add, confirm, use and remove is an ops alert line in the machine change log; no token in any.
           sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged mine for ci") and (map(select(startswith("confirmed mine as agents-"))) | length == 1) and any(. == "use mine for ci")' /var/lib/worklane/machine-changes.jsonl
           if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err "$F"/confirm*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi

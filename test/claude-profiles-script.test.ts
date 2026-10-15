@@ -6,7 +6,7 @@
 // is active; the token is in no output, file or command line.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,6 +20,9 @@ const SECRET = `${randomBytes(16).toString('hex')}_new-${randomBytes(6).toString
 const TOKEN = `sk-ant-oat01-${SECRET}`;
 const leaked = (text: string) => Array.from({ length: SECRET.length - 7 }, (_, i) => SECRET.slice(i, i + 8)).some((w) => text.includes(w));
 const OLD = `sk-ant-oat01-${'O'.repeat(40)}`;
+// The one-time code Anthropic's page would show, random: any part of it anywhere is a leak.
+const CODE = `${randomBytes(12).toString('hex')}#${randomBytes(12).toString('hex')}`;
+const codeLeaked = (text: string) => [CODE.slice(0, 12), CODE.slice(-12)].some((w) => text.includes(w));
 
 /** Two instances, alpha (agent and eval users) and beta (agent only), each agent user on its old login in ~/.claude. */
 function machine() {
@@ -38,6 +41,10 @@ home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ]; }
 MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" CLAUDE_ACCOUNT_DIR="$T/var" CLAUDE_ACCOUNT_LOCK="$T/lock" MACHINE_CHANGES="$T/changes.jsonl"
+MINUTE=1 SWITCH_POLL=0.05
+# The test's files are its own: no other owner to give them to.
+# (Its mode before its name, as the real put_file does with install and mv: never visible half-made.)
+put_file() { cat > "$4.tmp"; chmod "$3" "$4.tmp"; mv -f "$4.tmp" "$4"; }
 `,
   );
   const exe = (name: string, body: string) => {
@@ -63,6 +70,20 @@ fs.appendFileSync(T + '/claude-calls', process.env.USER + ' ' + dir + ' ' + proc
 let tok = '';
 try { tok = JSON.parse(fs.readFileSync(dir + '/.credentials.json', 'utf8')).claudeAiOauth.accessToken; } catch {}
 const ok = /^sk-ant-oat01-/.test(tok);
+// claude auth login, as the real one runs headless: the link whose redirect is Anthropic's code page, then the pasted
+// code on stdin. The right code (CODE) stores a login in CLAUDE_CONFIG_DIR; anything else is refused.
+if (process.argv[2] === 'auth' && process.argv[3] === 'login') {
+  process.stdout.write('Opening browser to sign in… If the browser didn\\'t open, visit: https://claude.ai/oauth/authorize?code=true&client_id=x&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=st4te\\nPaste code here if prompted > ');
+  let line = '';
+  const b = Buffer.alloc(1);
+  for (;;) { let n = 0; try { n = fs.readSync(0, b, 0, 1, null); } catch (e) { if (e.code === 'EAGAIN') continue; break; } if (!n || b[0] === 10) break; line += String.fromCharCode(b[0]); }
+  fs.appendFileSync(T + '/login-codes', line === ${JSON.stringify(CODE)} ? 'right\\n' : 'wrong\\n');
+  if (line !== ${JSON.stringify(CODE)}) { process.stdout.write('\\nInvalid code\\n'); process.exit(1); }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(dir + '/.credentials.json', JSON.stringify({ claudeAiOauth: { accessToken: ${JSON.stringify(TOKEN)}, refreshToken: 'r' } }), { mode: 0o600 });
+  process.stdout.write('\\nLogin successful.\\n');
+  process.exit(0);
+}
 if (process.argv[2] === '-p') {
   const refused = !ok || (tok.includes('_new-') && fs.existsSync(T + '/refuse-new')) || fs.existsSync(T + '/refuse-' + process.env.USER);
   if (!refused) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' })); process.exit(0); }
@@ -99,7 +120,31 @@ process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.a
     writeFileSync(join(d, 'claude-profile-token'), token, { mode: 0o400 });
     return join(d, 'claude-profile-token');
   };
-  return { T, run, pdir, outputs, claudeCalls, changes, pasted };
+  /** claude-account.sh login, in the background: the dashboard's half is the test's (reading the link, pasting the code). */
+  const login = (args: string[]) => {
+    const c = spawn('bash', [join(s, 'claude-account.sh'), 'login', ...args], { env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } });
+    let stdout = '';
+    let stderr = '';
+    c.stdout.on('data', (d) => (stdout += d));
+    c.stderr.on('data', (d) => (stderr += d));
+    const done = new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => c.on('close', (status) => res({ status, stdout, stderr })));
+    return { done };
+  };
+  const until = async (f: () => boolean, ms = 15_000) => {
+    const end = Date.now() + ms;
+    while (!f()) {
+      if (Date.now() > end) throw new Error('timed out waiting');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  };
+  /** The code, pasted where the dashboard stores it for the asking coordinator. */
+  const pasteCode = (inst: string, code = CODE) => {
+    const d = join(T, 'homes', `wl-${inst}`, '.config', `${inst}-secrets`);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'claude-login-code'), code, { mode: 0o400 });
+    return join(d, 'claude-login-code');
+  };
+  return { T, run, pdir, outputs, claudeCalls, changes, pasted, login, until, pasteCode, read };
 }
 
 test('profile-add: the token in each agent user own profile dir (0700/0600), proven by a real call there; the eval user and ~/.claude untouched', { skip: !posix }, () => {
@@ -309,4 +354,65 @@ test('names are checked before anything runs', { skip: !posix }, () => {
     assert.equal(r.status, 2, args.join(' '));
   }
   assert.ok(!existsSync(join(m.T, 'var', 'profile-ops.jsonl')));
+});
+
+test('login (the relayed sign-in): the link for the asking dashboard only, the code read once and given to claude on stdin, the account staged; nothing of either kept', { skip: !posix }, async () => {
+  const m = machine();
+  const l = m.login(['work', '--json', '--for', 'alpha']);
+  const urlFile = join(m.T, 'var', 'login-url');
+  await m.until(() => existsSync(urlFile));
+  assert.equal(statSync(urlFile).mode & 0o777, 0o400, "the link is the asking coordinator user's alone");
+  assert.match(readFileSync(urlFile, 'utf8'), /^https:\/\/claude\.ai\/oauth\/authorize\?.*redirect_uri=https%3A%2F%2Fplatform\.claude\.com%2Foauth%2Fcode%2Fcallback/);
+  const codeFile = m.pasteCode('alpha');
+  const r = await l.done;
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.ok(!existsSync(codeFile), 'the code is read once and deleted');
+  assert.ok(!existsSync(urlFile), 'the link is gone');
+  assert.equal(m.read(join(m.T, 'login-codes')), 'right\n', 'claude got the code once, on stdin');
+  const p = readProfiles(join(m.T, 'var'));
+  assert.deepEqual([p.profiles.work!.kind, p.profiles.work!.staged, p.profiles.work!.instance, Object.keys(p.profiles.work!.users)], ['login', true, 'alpha', ['wl-alpha-agent']]);
+  assert.ok(!existsSync(m.pdir('wl-beta-agent', 'work')), "never another instance's agent user");
+  // Staged: unusable until a root admin confirms it.
+  assert.equal(m.run(['use', 'work', '--json', '--for', 'alpha']).status, 1);
+  assert.ok(m.changes().some((c) => c.by === 'wl-alpha' && c.to === 'staged work for alpha (signed in from the dashboard)'), 'an ops alert on the add');
+  // The code and the link: in no output, progress line, profile, alert, or command line.
+  const all = m.outputs(r) + m.read(join(m.T, 'calls'));
+  assert.ok(!codeLeaked(all), 'the code is nowhere');
+  assert.ok(!all.includes('st4te'), 'the link is nowhere');
+  assert.equal(m.run(['confirm-profile', 'work'], 'work\n').status, 0);
+  assert.equal(m.run(['use', 'work', '--json', '--for', 'alpha']).status, 0);
+});
+
+test('login: a code claude refuses, or none in time, signs nothing in, keeps nothing, and the next sign-in starts over (the code is single-use)', { skip: !posix }, async () => {
+  const m = machine();
+  const urlFile = join(m.T, 'var', 'login-url');
+  const bad = m.login(['work', '--json', '--for', 'alpha']);
+  await m.until(() => existsSync(urlFile));
+  m.pasteCode('alpha', 'not-the-right-code1#abcdefghij');
+  const r = await bad.done;
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /didn't finish .*the code is single-use, so start again/);
+  assert.ok(!existsSync(m.pdir('wl-alpha-agent', 'work')), 'the half-made dir is removed');
+  assert.equal(readProfiles(join(m.T, 'var')).profiles.work, undefined);
+  // None in time (1 "minute" here).
+  const late = m.login(['late', '--json', '--for', 'alpha', '--token-timeout', '1']);
+  const rl = await late.done;
+  assert.equal(rl.status, 1);
+  assert.match(rl.stdout, /no code came/);
+  assert.ok(!existsSync(urlFile) && !existsSync(m.pdir('wl-alpha-agent', 'late')));
+  // A code left over from before is never taken: the step clears it before it starts.
+  m.pasteCode('alpha');
+  const again = m.login(['work', '--json', '--for', 'alpha', '--token-timeout', '1']);
+  const ra = await again.done;
+  assert.equal(ra.status, 1, 'an old code is not this sign-in\'s');
+  assert.ok(!m.read(join(m.T, 'login-codes')).includes('right'), 'claude never got it');
+});
+
+test('login is a dashboard\'s only, for its own instance; never default, never a name that exists', { skip: !posix }, () => {
+  const m = machine();
+  assert.equal(m.run(['login', 'work', '--json']).status, 1, 'at a root shell: add a setup token instead');
+  assert.equal(m.run(['login', 'work', 'beta', '--for', 'alpha']).status, 2);
+  assert.equal(m.run(['login', 'default', '--for', 'alpha']).status, 2);
+  assert.equal(m.run(['profile-add', 'work', '--json'], `${TOKEN}\n`).status, 0);
+  assert.equal(m.run(['login', 'work', '--json', '--for', 'alpha']).status, 1);
 });

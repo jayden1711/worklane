@@ -12,7 +12,7 @@
 // The engine reads "active" when each run starts (resolveLogin): a switch needs no pause, and a run already going
 // finishes on the login it started on. A profile becomes active only after a minimal real call as every agent user it
 // is for was answered on it; a refused call changes nothing.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import type { Role } from './console/asks.js';
 import { installOwnerOnlySecret } from './os/index.js';
@@ -35,10 +35,14 @@ export const PROFILE_NAME = /^[a-z][a-z0-9-]{0,20}$/;
 export const PROFILES_DIRNAME = '.claude-profiles';
 /** The new profile's token in the asking instance's secrets dir (lib.sh's CLAUDE_PROFILE_CREDENTIAL). */
 export const CLAUDE_PROFILE_CREDENTIAL = 'claude-profile-token';
+/** A relayed sign-in's one-time code in the asking instance's secrets dir (lib.sh's CLAUDE_LOGIN_CREDENTIAL). */
+export const CLAUDE_LOGIN_CREDENTIAL = 'claude-login-code';
+/** The code Anthropic's sign-in page shows to paste (claude-account.sh login checks the same shape). */
+export const LOGIN_CODE = /^[A-Za-z0-9_-]{8,}(#[A-Za-z0-9_-]{8,})?$/;
 /** A profile step with no new line for this long has stopped (its unit ended without a last line). */
 export const PROFILE_OP_STALE_MS = 30 * 60_000;
 
-export const PROFILE_ACTIONS = ['profile-add', 'use', 'remove'] as const;
+export const PROFILE_ACTIONS = ['profile-add', 'use', 'remove', 'login'] as const;
 export type ProfileAction = (typeof PROFILE_ACTIONS)[number];
 
 /** One agent user's last real call on a profile. */
@@ -277,10 +281,10 @@ const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'runn
 export function requestProfileOp(log: EventLog, r: { action: unknown; profile: unknown; who: { role: Role | null; requester: MachineRequester }; dir?: string; ownersFile?: string; now?: number }): MachineRequest {
   const why = claudeAccountGate(r.who, r.ownersFile ? { ownersFile: r.ownersFile } : {});
   if (why) throw new MachineRequestError(why, 403);
-  if (!(PROFILE_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError('action is profile-add, use or remove');
+  if (!(PROFILE_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError('action is profile-add, login, use or remove');
   const action = r.action as ProfileAction;
   if (typeof r.profile !== 'string' || !PROFILE_NAME.test(r.profile)) throw new MachineRequestError("a profile's name: lowercase letters, digits and dashes, starting with a letter, at most 21");
-  if (action !== 'use' && r.profile === DEFAULT_PROFILE) throw new MachineRequestError('default is the login each agent user already has: it is never added or removed');
+  if (action !== 'use' && r.profile === DEFAULT_PROFILE) throw new MachineRequestError('default is the login each agent user already has: it is never added, signed in or removed');
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x));
   if (pending) throw new MachineRequestError(`a claude-account ${pending.args.slice(1).join(' ')} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
   if (readProfileOps(r.dir, r.now).some((o) => o.status === 'running')) throw new MachineRequestError('a Claude account profile change is running on this machine; wait for it to end', 409);
@@ -340,7 +344,61 @@ export function recordProfileSwitches(log: EventLog, instance: string, dir = CLA
 }
 
 /** The panel's profile data: the accounts × instances table and the last few profile steps (newest first). */
-export function profilesView(dir = CLAUDE_ACCOUNT_DIR, now = Date.now()) {
-  // A staged profile's confirmation, at a root shell on the machine (never through the dashboard).
-  return { profiles: profilesTable({ dir }), profileOps: readProfileOps(dir, now).slice(-5).reverse(), confirmScript: CLAUDE_ACCOUNT_SCRIPT };
+export function profilesView(dir = CLAUDE_ACCOUNT_DIR, now = Date.now(), instance?: string) {
+  // A staged profile's confirmation, at a root shell on the machine (never through the dashboard). The relayed
+  // sign-in under way, for this instance (its link only while it waits for the code).
+  return { profiles: profilesTable({ dir }), profileOps: readProfileOps(dir, now).slice(-5).reverse(), confirmScript: CLAUDE_ACCOUNT_SCRIPT, signin: instance ? signinView({ dir, instance, now }) : null };
+}
+
+/**
+ * The link a relayed sign-in waits on (claude-account.sh login wrote it for this coordinator's user only): Anthropic's
+ * sign-in page whose redirect is its own code page, and nothing else. null when there is none, or it is anything else.
+ */
+export function readSigninUrl(dir = CLAUDE_ACCOUNT_DIR): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, 'login-url'), 'utf8').trim();
+  } catch {
+    return null;
+  }
+  let u: URL;
+  try {
+    u = new URL(text);
+  } catch {
+    return null;
+  }
+  if (text.length > 4000 || u.protocol !== 'https:' || u.port || u.username || u.password) return null;
+  if (!['claude.ai', 'claude.com', 'platform.claude.com', 'console.anthropic.com'].includes(u.hostname) || !/\/oauth\/authorize$/.test(u.pathname)) return null;
+  return u.searchParams.get('redirect_uri') === 'https://platform.claude.com/oauth/code/callback' ? u.toString() : null;
+}
+
+/** This instance's relayed sign-in under way: its profile, whether it waits for the code, and (then) the link. */
+export function signinView(o: { dir?: string; instance: string; now?: number }) {
+  const op = [...readProfileOps(o.dir, o.now)].reverse().find((x) => x.op === 'login' && x.for === o.instance) ?? null;
+  if (!op || op.status !== 'running') return op ? { profile: op.profile, status: op.status, detail: op.detail, waitingForCode: false, url: null } : null;
+  const last = op.steps.at(-1);
+  const waiting = last?.step === 'link' && last.state === 'ask';
+  return { profile: op.profile, status: op.status, detail: op.detail, waitingForCode: waiting, url: waiting ? readSigninUrl(o.dir) : null };
+}
+
+/**
+ * Store the code a machine owner pasted for this instance's relayed sign-in, for its coordinator user only (0400), for
+ * claude-account.sh login to read once, as root, and delete. Only while that sign-in waits for it, only one (a code is
+ * single-use: once one is stored or taken, another is refused), only a code's shape. Every error is a fixed text,
+ * never the value. Returns the file's path.
+ */
+export function storeLoginCode(o: { value: unknown; instance: string; who: { role: Role | null; requester: MachineRequester }; dir?: string; home?: string; ownersFile?: string; now?: number }): string {
+  const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
+  if (why) throw new ClaudeTokenError(why, 403);
+  const s = signinView({ instance: o.instance, ...(o.dir ? { dir: o.dir } : {}), ...(o.now ? { now: o.now } : {}) });
+  if (!s || !s.waitingForCode) throw new ClaudeTokenError("no sign-in from this dashboard is waiting for a code (a code is used once: start the sign-in again)", 409);
+  const file = join(secretsDir(o.instance, o.home), CLAUDE_LOGIN_CREDENTIAL);
+  if (existsSync(file)) throw new ClaudeTokenError('a code for this sign-in was given already: it is used once', 409);
+  const value = typeof o.value === 'string' ? o.value.trim() : '';
+  if (value.length > 512 || !LOGIN_CODE.test(value)) throw new ClaudeTokenError("that isn't the code Anthropic's sign-in page shows; nothing stored");
+  try {
+    return installOwnerOnlySecret(secretsDir(o.instance, o.home), CLAUDE_LOGIN_CREDENTIAL, value);
+  } catch (e) {
+    throw new ClaudeTokenError(`couldn't store the code: ${String((e as Error).message).split('\n')[0]}`);
+  }
 }

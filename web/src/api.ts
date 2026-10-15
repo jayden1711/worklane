@@ -1330,6 +1330,8 @@ export interface ClaudeAccountData {
   profileOps?: ProfileOp[];
   /** The root script a staged profile is confirmed with, on the machine. */
   confirmScript?: string;
+  /** This instance's relayed sign-in under way: the link only while it waits for the code. */
+  signin?: { profile: string; status: string; detail: string; waitingForCode: boolean; url: string | null } | null;
 }
 /** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
 export interface ProfileCell {
@@ -1349,7 +1351,7 @@ export interface ProfilesTable {
 }
 export interface ProfileOp {
   id: string;
-  op: 'profile-add' | 'use' | 'remove';
+  op: 'profile-add' | 'use' | 'remove' | 'login';
   profile: string;
   for: string | null;
   status: 'running' | 'done' | 'failed' | 'stalled';
@@ -1361,7 +1363,9 @@ export interface ProfileOp {
 /** A new account profile from a setup token: the token in the body only, never the URL. */
 export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
 /** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
-export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
+/** The one-time code Anthropic's sign-in page showed, for this instance's relayed sign-in: in the body only. */
+export const pasteLoginCode = (value: string) => api<{ ok: boolean }>('/api/claude-account/login-code', { method: 'POST', body: JSON.stringify({ value }) });
+export const claudeProfileAction = (action: 'use' | 'remove' | 'login', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });

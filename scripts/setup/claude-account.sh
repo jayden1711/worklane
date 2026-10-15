@@ -8,6 +8,7 @@
 #   sudo bash scripts/setup/claude-account.sh use <profile> [<instance>] [--json]
 #   sudo bash scripts/setup/claude-account.sh remove <profile> [--json]
 #   sudo bash scripts/setup/claude-account.sh confirm-profile <profile>
+#   claude-account.sh login <profile> --for <instance>       (the machine helper's, for a dashboard)
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -45,6 +46,11 @@
 #                user's new profile dir is removed. At a root shell (stdin): every agent user, usable at once. From a
 #                dashboard (the machine helper's --token-from <its instance>): that instance's agent user only, and
 #                STAGED: nothing may use it until a root admin confirms it with confirm-profile.
+#   login        a dashboard's (--for <its instance>), the owner's approved exception (docs/auth.md): `claude auth
+#                login` as that instance's agent user on the new profile's dir. Claude's sign-in link goes to a file
+#                only that instance's coordinator user reads (its dashboard shows it to a machine owner); the code the
+#                owner pastes back comes in that user's 0400 file, read once, deleted, written to claude's stdin. Then
+#                one real call on it, and the profile is STAGED, like any account added from a dashboard.
 #   confirm-profile  a root admin's, on the machine, never through the helper: one real call as each user the profile
 #                was added for, showing the account email, org and plan Claude reports, then the profile's name typed
 #                back. Only then may anything use it (the same pattern as updates.sh --confirm-signer).
@@ -64,7 +70,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | login <profile> --for <instance> | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
@@ -83,11 +89,11 @@ while [ "$#" -gt 0 ]; do
     *) names+=("$1"); shift ;;
   esac
 done
-case "$cmd" in switch | status | profile-add | use | remove | confirm-profile) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$cmd" in switch | status | profile-add | login | use | remove | confirm-profile) ;; *) echo "$usage" >&2; exit 2 ;; esac
 [ -z "$for_inst" ] || instance_name_ok "$for_inst" || { echo "--for: an instance name" >&2; exit 2; }
 # A profile's name: lowercase letters, digits and dashes (default: the login each agent user had, never added or removed).
 profile="" asker=""
-if [[ "$cmd" == profile-add || "$cmd" == use || "$cmd" == remove || "$cmd" == confirm-profile ]]; then
+if [[ "$cmd" == profile-add || "$cmd" == login || "$cmd" == use || "$cmd" == remove || "$cmd" == confirm-profile ]]; then
   profile="${names[0]:-}"
   names=(${names[@]+"${names[@]:1}"})
   [[ "$profile" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "a profile's name: lowercase letters, digits and dashes, starting with a letter, at most 21" >&2; exit 2; }
@@ -410,6 +416,94 @@ process.stdout.write(JSON.stringify({ instance, user, account: s(a.email), org: 
   while read -r n user cfg; do rows+=("$n $user $cfg"); done < <(agents)
   pemit "$cmd" started "" "" "profile $profile, ${#rows[@]} agent user(s)${asker:+, asked from the dashboard of $asker (its own agent user only)}"
   [ "${#rows[@]}" -gt 0 ] || { pemit "$cmd" failed "" "" "no agent users found (no instances on this machine, or none of those named)"; exit 1; }
+
+  if [ "$cmd" = login ]; then
+    # A sign-in relayed from a dashboard (the owner's approved exception, docs/auth.md): `claude auth login` as the
+    # asking instance's agent user, on this profile's dir. Claude's sign-in link (the one that ends in a code to paste)
+    # goes to a file only that instance's coordinator user reads, for its dashboard to show a machine owner; the code
+    # the owner pastes there comes back in that user's 0400 file, is read once, deleted, and written to claude's stdin.
+    # The link and the code are never in a log line, an argument, an event or a progress line. The login is STAGED,
+    # like any account added from a dashboard: nothing may use it until a root admin confirms it on the machine.
+    [ -n "$asker" ] || { pemit login failed "" "" "login is a dashboard's (--for <its instance>); at a root shell add an account with profile-add and a setup token"; exit 1; }
+    if pedit has; then pemit login failed "" "" "there is a profile $profile already: remove it first, or sign in under another name"; exit 1; fi
+    read -r n user cfg <<< "${rows[0]}"
+    d="$(pdir "$user" "$cfg")"
+    if (cd / && sudo -H -u "$user" test -e "$d"); then pemit login failed "$n" "$user" "$d is there already: nothing done"; exit 1; fi
+    codefile="$(home_of "wl-$asker")/.config/$asker-secrets/$CLAUDE_LOGIN_CREDENTIAL"
+    urlfile="$CLAUDE_ACCOUNT_DIR/login-url"
+    rm -f "$urlfile" "$codefile"
+    work="$(mktemp -d)"
+    chmod 0700 "$work"
+    mkfifo -m 0600 "$work/in"
+    : > "$work/out"
+    chmod 0600 "$work/out"
+    (cd / && sudo -H -u "$user" mkdir -p -m 0700 "$(dirname "$d")" "$d" && sudo -H -u "$user" chmod 0700 "$(dirname "$d")" "$d")
+    # claude's own output goes to a root-only file, read here for the link and never shown; BROWSER opens nothing.
+    (cd / && exec sudo -H -u "$user" env "CLAUDE_CONFIG_DIR=$d" BROWSER=/bin/true claude auth login < "$work/in" > "$work/out" 2>&1) &
+    child=$!
+    exec 7> "$work/in"
+    finish() { # <state> <detail>: claude stopped, the link and any code gone, a failed sign-in's dir removed
+      exec 7>&- 2>/dev/null || true
+      kill "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      rm -rf "$work" "$urlfile" "$codefile"
+      if [ "$1" = failed ]; then (cd / && sudo -H -u "$user" rm -rf -- "$d") || true; fi
+      pemit login "$1" "$n" "$user" "$2"
+    }
+    # The link: Anthropic's sign-in page whose redirect is its own code page (the code to paste), and nothing else.
+    url=""
+    until_t=$((SECONDS + 60))
+    while [ "$SECONDS" -lt "$until_t" ] && [ -z "$url" ]; do
+      url="$("$(command -v node)" -e '
+const t = require("node:fs").readFileSync(process.argv[1], "utf8");
+for (const m of t.matchAll(/https:\/\/[^\s"<>]+/g)) {
+  let u;
+  try { u = new URL(m[0]); } catch { continue; }
+  if (!["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"].includes(u.hostname) || u.port || u.username || u.password) continue;
+  if (!/\/oauth\/authorize$/.test(u.pathname) || u.searchParams.get("redirect_uri") !== "https://platform.claude.com/oauth/code/callback") continue;
+  process.stdout.write(u.toString());
+  break;
+}
+' "$work/out" 2>/dev/null || true)"
+      [ -n "$url" ] || { kill -0 "$child" 2>/dev/null || break; sleep "$SWITCH_POLL"; }
+    done
+    if [ -z "$url" ]; then finish failed "claude auth login gave no sign-in link to relay: nothing signed in"; exit 1; fi
+    printf '%s\n' "$url" | put_file "wl-$asker" root 0400 "$urlfile"
+    url=""
+    pemit link ask "$n" "$user" "the sign-in link is in $asker's dashboard (a machine owner's, there only); paste the code Anthropic shows there, within $token_timeout min"
+    # The code: read once, deleted, written to claude's stdin. Never anywhere else.
+    code=""
+    until_t=$((SECONDS + token_timeout * MINUTE))
+    while [ "$SECONDS" -lt "$until_t" ] && ! [ -e "$codefile" ]; do kill -0 "$child" 2>/dev/null || break; sleep "$SWITCH_POLL"; done
+    if [ -e "$codefile" ]; then
+      if file_owned_by "$codefile" "wl-$asker"; then IFS= read -r code < "$codefile" || true; fi
+      rm -f "$codefile"
+    fi
+    rm -f "$urlfile"
+    code="$(printf '%s' "$code" | tr -d '[:space:]')"
+    if ! [[ "${#code}" -le 512 && "$code" =~ ^[A-Za-z0-9_-]{8,}(#[A-Za-z0-9_-]{8,})?$ ]]; then
+      code=""
+      finish failed "no code came (or not one of Anthropic's): nothing signed in"
+      exit 1
+    fi
+    printf '%s\n' "$code" >&7
+    code=""
+    exec 7>&-
+    pemit code done "$n" "$user" "received once and passed to claude auth login; kept nowhere"
+    until_t=$((SECONDS + 120))
+    while [ "$SECONDS" -lt "$until_t" ] && kill -0 "$child" 2>/dev/null; do sleep "$SWITCH_POLL"; done
+    rc=0
+    if kill -0 "$child" 2>/dev/null; then rc=124; else wait "$child" || rc=$?; fi
+    if [ "$rc" != 0 ]; then finish failed "claude auth login didn't finish (exit $rc): nothing signed in; the code is single-use, so start again"; exit 1; fi
+    rec="$(pcheck "$n" "$user" "$d")"
+    if ! printf '%s' "$rec" | grep -q '"api_ok":true'; then finish failed "signed in, but the API refused it: $(field "$rec" api_error); nothing kept"; exit 1; fi
+    pemit check done "$n" "$user" "the API answered a minimal call on this profile"
+    pedit add login "[$rec]" 1 "$asker"
+    rm -rf "$work"
+    pemit login done "$n" "$user" "profile $profile signed in and staged for $asker: nothing may use it until an admin confirms it on this machine with sudo bash $here/claude-account.sh confirm-profile $profile"
+    mlog "staged $profile for $asker (signed in from the dashboard)"
+    exit 0
+  fi
 
   if [ "$cmd" = profile-add ]; then
     if pedit has; then pemit profile-add failed "" "" "there is a profile $profile already: remove it first, or add this one under another name"; exit 1; fi

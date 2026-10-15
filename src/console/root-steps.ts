@@ -38,7 +38,7 @@ export function profileStepOk(a: readonly string[]): boolean {
   const name = (s: string | undefined) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
   if (!name(a[1])) return false;
   // Never an instance: the helper takes the asking coordinator's from sudo (SUDO_USER).
-  if ((a[0] === 'profile-add' || a[0] === 'remove') && a.length === 2) return a[1] !== 'default';
+  if ((a[0] === 'profile-add' || a[0] === 'remove' || a[0] === 'login') && a.length === 2) return a[1] !== 'default';
   return a[0] === 'use' && a.length === 2;
 }
 
@@ -71,7 +71,7 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'claude-account',
     what: "the agents' Claude account: refresh each agent user's account and expiry (status), or switch every agent on the machine to another account (switch)",
-    usage: 'claude-account status|switch | claude-account profile-add|remove|use <profile>',
+    usage: 'claude-account status|switch | claude-account profile-add|remove|use|login <profile>',
     allows: (a) => (a.length === 1 && (a[0] === 'status' || a[0] === 'switch')) || profileStepOk(a),
     run: (a, exec) => (a.length === 1 ? claudeAccount(a[0] as 'status' | 'switch', exec) : claudeProfile(a, exec)),
   },
