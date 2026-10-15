@@ -1,10 +1,10 @@
 # Getting started
 
-Worklane runs on your machine, against a repo you have checked out, with the Claude Code CLI you sign in to yourself. You run one install command. It prints one URL, and every setup step after that happens on the page it opens: the dashboard's first-run wizard.
+Worklane runs on your machine, against a repo you have checked out, with the Claude Code CLI you sign in to yourself. You install it from npm and run one command in your repo. That command prints one URL, and every setup step after that happens on the page it opens: the dashboard's first-run wizard.
 
 You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
-- git, and a checkout of this repo (the install command is in it);
+- git, and Node.js 22.13 or newer with npm (on a server, the install script installs Node for you);
 - a GitHub repo you can push to;
 - a Claude login. The wizard has **Sign in to Claude**, or run `claude auth login` yourself. See [auth.md](auth.md).
 
@@ -19,7 +19,7 @@ You choose where it runs.
 | GitHub | your `gh` login | a GitHub App per project, made through GitHub's manifest flow |
 | Who signs in to the dashboard | you, with its key | each person, with their own GitHub account |
 | Always on | while your machine is | yes |
-| Install command | `bash scripts/bootstrap.sh <repo>` | `sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>` |
+| Install command | `npm i -g @worklane/cli`, then `worklane dashboard --detach` in the repo (or `bash scripts/bootstrap.sh <repo>`) | `sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>`, from a checkout of this repo |
 
 Local mode can't do three things. `worklane doctor` and the first-run page both list them, each with the reason:
 - **separate OS users**: the agents run as you, with your files and logins;
@@ -28,9 +28,27 @@ Local mode can't do three things. `worklane doctor` and the first-run page both 
 
 ## The install command
 
-### Local
+### Local, from npm
 
-From a checkout of this repo:
+```sh
+npm i -g @worklane/cli
+cd ~/code/your-repo
+worklane dashboard --detach
+```
+
+The first command installs the engine. The last starts the repo's dashboard in the background and prints one URL, last:
+
+```
+http://127.0.0.1:4317/first-run
+```
+
+It also prints where its log is and which file holds the dashboard key. Run it again whenever you like: if the dashboard already answers, it changes nothing and prints the same URL. `--no-open` keeps it from opening a browser; `--port <n>` picks another port. The wizard's **Tools** screen installs what the agents need (Claude Code, gitleaks, gh) from pinned, checksummed downloads.
+
+**Without a global install,** run `npx @worklane/cli init` in the repo. Run from npx's cache, which npm may clear, it first installs the engine under `~/.local` (and says so if `~/.local/bin` isn't on your PATH), then walks the wizard's steps in the terminal ([below](#the-checklist-in-a-terminal-worklane-init)).
+
+### Local, with the install script
+
+From a checkout of this repo, if you'd rather have the script install the tools at pinned versions first:
 
 ```sh
 bash scripts/bootstrap.sh ~/code/your-repo
@@ -99,7 +117,7 @@ The keys are `mode=local|server`, `answer=<question id>=<choice>` (repeatable: a
 
 ### The engine it installs
 
-The command installs the signed engine release pinned in `scripts/bootstrap.sh` (`ENGINE_TAG`), checked by its release commit (`ENGINE_COMMIT`). To try an unreleased change instead, install the engine from a build of this checkout:
+The command installs the signed engine release pinned in `scripts/bootstrap.sh` (`ENGINE_TAG`), checked by its release commit (`ENGINE_COMMIT`). That's v0.5.0, the same engine `npm i -g @worklane/cli` installs. To try an unreleased change instead, install the engine from a build of this checkout:
 
 ```sh
 npm ci --ignore-scripts && npm run build && npm run build:web && npm pack
@@ -156,7 +174,7 @@ Some steps have no button, because they can't be one:
    The harness picks up only issues opened or labelled by the repo's writers (`owners.writers` in `.worklane/config.yaml`).
 3. Watch it on the Board. A worker takes the issue in its own worktree, and an independent evaluator checks the change. It then lands or opens a PR, depending on `land_mode`.
 
-To set up another repo on the same machine, run the install command again with that repo, or run `worklane init <repo>`.
+To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
 **On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only), and you paste the agents' Claude token into a password box. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
 
