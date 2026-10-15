@@ -13,12 +13,12 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findChrome, freePort, launchChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, freePort, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { startHub } from '../src/dashboard-hub.js';
 import { EventLog } from '../src/events/log.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { exampleProject, exampleRoles } from './helpers.js';
 import { writeSyntheticLog } from './synthetic-events.js';
 
@@ -216,7 +216,7 @@ const list = (xs: number[]) => `${xs.map(Math.round).join(', ')} ms (median ${Ma
 
 /** A fresh Chrome (empty cache), as the owner's break-glass, with `instance` selected, over `link`. */
 async function browser(link: Link, instance: string, o: { cache?: boolean; firstUseful?: string } = {}) {
-  const b = await launchChrome(chrome!, { width: 1280, height: 900 });
+  const b = await launchTestChrome(chrome!, { width: 1280, height: 900 });
   const cdp = b.cdp;
   await cdp.send('Page.enable');
   await cdp.send('Runtime.enable');
