@@ -57,6 +57,13 @@ export interface AccountUser {
   expiresAt: string | null;
   installedAt: string | null;
   error: string | null;
+  /**
+   * Whether the API took the login on one minimal real call as that user (issue #463: claude auth status says a
+   * credential is configured, not that it works); null when no call was made (signed out, or an older record).
+   */
+  apiOk: boolean | null;
+  /** What Claude said when the API refused it (redacted by the script), else null. */
+  apiError: string | null;
 }
 
 export interface AccountStatus {
@@ -132,6 +139,8 @@ export function readAccountStatus(dir = CLAUDE_ACCOUNT_DIR): AccountStatus | nul
       expiresAt: str(u.expires_at, 40),
       installedAt: str(u.installed_at, 40),
       error: str(u.error, 300),
+      apiOk: typeof u.api_ok === 'boolean' ? u.api_ok : null,
+      apiError: str(u.api_error, 500),
     }));
   return { at: str(o.at, 40) ?? '', users };
 }

@@ -229,6 +229,23 @@ test("regression (bug B): server, after add-project installed the agents' token,
   assert.match(failed.detail, /wl-shop-agent: claude auth status says it is not logged in, per claude auth status as that user/);
 });
 
+test("issue #463: server, the agents' Claude login step is not done when the API refused the login on claude-account status's minimal real call, whatever claude auth status said", () => {
+  const f = fixture();
+  const facts = { home: f.home, credentials: { github: { kind: 'app' as const, key_path: join(f.home, 'app.pem') } } };
+  mkdirSync(f.machine.claudeAccountDir, { recursive: true });
+  const agent = { instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', token_id: '0123abcd' };
+  const step = (u: object) => {
+    writeFileSync(join(f.machine.claudeAccountDir, 'status.json'), JSON.stringify({ at: '2026-10-15T10:00:00Z', users: [u] }));
+    return stepIn(checkSetup(f.ctx('server', { instanceFacts: () => facts, handoff: { 'claude-token': 'done' } }), probeFor(world())), 'claude-token')!;
+  };
+  const refused = step({ ...agent, api_ok: false, api_error: 'HTTP 401: Invalid API key · Please run /login' });
+  assert.equal(refused.done, false);
+  assert.match(refused.detail, /^wl-shop-agent is signed in per claude auth status, but the API refused the login on a minimal real call at 2026-10-15T10:00:00Z: HTTP 401: Invalid API key · Please run \/login$/);
+  const answered = step({ ...agent, api_ok: true });
+  assert.equal(answered.done, true);
+  assert.match(answered.detail, /^wl-shop-agent is signed in \(claude\.ai\), per claude auth status as that user at 2026-10-15T10:00:00Z; token 0123abcd$/);
+});
+
 test('a step for the other mode is not shown; linger only where loginctl answers', () => {
   const f = fixture();
   const local = checkSetup(f.ctx('local'), probeFor(world()));

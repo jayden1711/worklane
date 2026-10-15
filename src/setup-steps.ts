@@ -231,6 +231,8 @@ function agentLogin(k: Checking): Detected | null {
   const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
   if (!s || !u) return null;
   const when = s.at ? ` at ${s.at}` : '';
+  // WHY (#463): signed in per claude auth status is not proof the API takes the login; the real call is, when made.
+  if (u.loggedIn && u.apiOk === false) return no(`${u.user} is signed in per claude auth status, but the API refused the login on a minimal real call${when}: ${u.apiError ?? 'no answer'}`);
   if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
   return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
 }
