@@ -280,7 +280,7 @@ roles:
 | Role | Step | Context / tools | Output |
 |---|---|---|---|
 | worker | 2 (1), 4 (N) | its worktree, read/write | `propose_change`, lesson |
-| evaluator | 2 | **fresh context, read-only**, clean worktree at `base_sha` | frozen repro test, verdict `{patch_correct, test_correct, confidence, advice}` |
+| evaluator | 2 | **fresh context, read-only**, clean worktree at `base_sha` | frozen repro test, verdict `{patch_correct, test_correct, confidence, confidence_reason, advice}` (plus `compromised_component` for a change to a protected surface) |
 | pm | 2 | read-only + issue tools | issues with done_when, size, dedupe |
 | chief_of_staff | 5 | read-only, the event log | routing, reports, decisions (only real ones) |
 | researcher | 5 | open web (WebSearch/WebFetch only) minus a domain blocklist, daily caps; no repo access unless the instance's owner turns it on (then read-only) | a report with every source linked, as an issue comment or a docs/research/ PR |

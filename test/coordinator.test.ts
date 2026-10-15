@@ -29,6 +29,7 @@ import { globToRegExp } from '../src/guardrails/glob.js';
 import { isProtectedPath } from '../src/guardrails/engine.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
 import { PLAN_GATE_REASON, type PlanGate } from '../src/plan-mode.js';
+import { COMPROMISED_ACTORS } from '../src/roles.js';
 
 const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -1837,8 +1838,13 @@ test('logTail: the last lines of a job log, runner timestamps stripped, bounded'
 
 // ---- merge policy
 
-/** A diligent evaluator that approves with high confidence and answers the design question. */
-const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}) });
+/** Every actor's answer to the compromised-component question: it can do nothing it couldn't before. */
+const harmless = () => COMPROMISED_ACTORS.map(([actor]) => ({ actor, can_do: 'nothing it could not do before', acceptable: true, why: 'the change gives it no new reach' }));
+/**
+ * A diligent evaluator that approves with high confidence and answers the design question, and the
+ * compromised-component question when the brief names a protected surface (#471).
+ */
+const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}), ...(/PROTECTED SURFACE/.test(req.prompt) ? { compromised_component: harmless() } : {}) });
 
 /** Required check green on the PR's head, then one poll. */
 async function green(t: Awaited<ReturnType<typeof openPr>>) {
@@ -1888,7 +1894,7 @@ test('claims receipts: an unbacked claim keeps a clean PR from auto-merging (eva
   const t = await openPr({ worker: workerSaying('Fixed it. Verified by hand in the browser.'), 'evaluator-verdict': approve() }, { autoMerge: () => true });
   await green(t);
   assert.equal(reasonsOf(t).auto, false);
-  assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium'), reasonsOf(t).reasons.join('; '));
+  assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium: lowered: 1 unverified claim(s)'), reasonsOf(t).reasons.join('; '));
   assert.ok(!t.pr().merged);
 
   const ok = await openPr({ worker: workerSaying('Fixed it. The price tests pass.'), 'evaluator-verdict': approve() }, { autoMerge: () => true });
@@ -1896,6 +1902,68 @@ test('claims receipts: an unbacked claim keeps a clean PR from auto-merging (eva
   assert.match(ok.pr().body, /### NOT VERIFIED\n- nothing/);
   await green(ok);
   assert.ok(ok.pr().merged, 'backed claims: merges as before');
+});
+
+test('#471: a medium verdict with no reason is asked once more; its reason is on the verdict, the merge hold and the PR comment, with its advice', { skip }, async () => {
+  let asked = 0;
+  const unsure = (req: RunRequest) => ({ ...approve()(req), confidence: 'medium', advice: 'add a test for a zero quantity', ...(asked++ ? { confidence_reason: 'the zero-quantity case is not covered by any test' } : {}) });
+  const t = await openPr({ 'evaluator-verdict': unsure }, { autoMerge: () => true });
+  const briefs = t.runner.calls.filter((r) => r.role === 'evaluator-verdict').map((r) => r.prompt);
+  assert.equal(briefs.length, 2, 'refused once, asked once more');
+  assert.match(briefs[1]!, /Your verdict was refused: confidence medium needs confidence_reason/);
+  const v = lastOf(t.f.log, 'eval.verdict') as { confidence: string; confidence_reason?: string };
+  assert.deepEqual([v.confidence, v.confidence_reason], ['medium', 'the zero-quantity case is not covered by any test']);
+  assert.match(t.pr().body, /confidence medium \(the zero-quantity case is not covered by any test\): add a test for a zero quantity/);
+  await green(t);
+  assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium: the zero-quantity case is not covered by any test'), reasonsOf(t).reasons.join('; '));
+  const hold = (await t.f.backlog.comments(t.opened.number)).map((x) => x.body).find((b) => /waits for you/.test(b))!;
+  assert.match(hold, /- doubt: evaluator confidence medium: the zero-quantity case is not covered by any test/);
+  assert.match(hold, /\*\*Evaluator's advice:\*\* add a test for a zero quantity/);
+
+  // Asked again and still no reason: recorded as such, never a blank doubt.
+  const mute = await openPr({ 'evaluator-verdict': (req) => ({ ...approve()(req), confidence: 'medium' }) }, { autoMerge: () => true });
+  assert.equal(mute.runner.calls.filter((r) => r.role === 'evaluator-verdict').length, 2, 'asked once more, not again and again');
+  assert.equal((lastOf(mute.f.log, 'eval.verdict') as { confidence_reason?: string }).confidence_reason, 'the evaluator gave no reason for confidence medium, even when asked again');
+
+  // A high verdict is never asked again.
+  const sure = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  assert.equal(sure.runner.calls.filter((r) => r.role === 'evaluator-verdict').length, 1);
+  assert.equal((lastOf(sure.f.log, 'eval.verdict') as { confidence_reason?: string }).confidence_reason, undefined);
+});
+
+test('#471: a change to a protected surface gets the compromised-component question; an unanswered actor is a doubt with that reason, on the decision record too', { skip }, async () => {
+  const migration = (req: RunRequest) => {
+    mkdirSync(join(req.cwd, 'migrations'), { recursive: true });
+    writeFileSync(join(req.cwd, 'migrations', '001_orders.sql'), 'CREATE TABLE orders (id int);\n');
+    commitAll(req.cwd, 'orders migration');
+    return { summary: 'added the migration' };
+  };
+  const landing = async (verdict: (req: RunRequest) => object) => {
+    const f = fixture();
+    f.backlog.open({ title: 'Add an orders table', body: 'Add the orders migration.\n\n```done_when\n- command: node --test\n```\n', author: 'example-owner', labels: ['ready'] });
+    const runner = agents({ worker: migration, 'evaluator-verdict': verdict });
+    const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+    await c.tick();
+    await c.idle();
+    await c.tick();
+    const brief = runner.calls.find((r) => r.role === 'evaluator-verdict')!.prompt;
+    const v = lastOf(f.log, 'eval.verdict') as { confidence: string; confidence_reason?: string };
+    const ctx = (f.log.read(0, ['decision.asked']).at(-1)?.payload as { context?: { verdict?: { confidence: string; confidence_reason?: string } } } | undefined)?.context;
+    return { brief, v, ctx };
+  };
+  const silent = await landing((req) => ({ ...approve()(req), compromised_component: undefined }));
+  assert.match(silent.brief, /PROTECTED SURFACE: this change changes a database migration: migrations\/001_orders\.sql/);
+  assert.match(silent.brief, /hub-viewer: a hub viewer/);
+  assert.equal(silent.v.confidence, 'medium', 'the evaluator said high; an unanswered question is never a high pass');
+  assert.match(silent.v.confidence_reason!, /^compromised component: no answer for the agent user .*a local OS user$/);
+  assert.deepEqual([silent.ctx?.verdict?.confidence, silent.ctx?.verdict?.confidence_reason], [silent.v.confidence, silent.v.confidence_reason], 'the decision record carries the reason');
+
+  const answers = (acceptable: (actor: string) => boolean) => ['agent-user', 'coordinator', 'other-instance', 'hub-viewer', 'local-os-user'].map((actor) => ({ actor, can_do: actor === 'agent-user' ? 'drop the orders table' : 'nothing: it cannot reach the migration', acceptable: acceptable(actor), why: 'migrations run only after the owner merges' }));
+  const answered = await landing((req) => ({ ...approve()(req), compromised_component: answers(() => true) }));
+  assert.deepEqual([answered.v.confidence, answered.v.confidence_reason], ['high', undefined]);
+  const unacceptable = await landing((req) => ({ ...approve()(req), compromised_component: answers((a) => a !== 'agent-user') }));
+  assert.equal(unacceptable.v.confidence, 'medium');
+  assert.match(unacceptable.v.confidence_reason!, /^compromised component: the agent user \(the account agents run as\) can drop the orders table, which is not acceptable/);
 });
 
 test('auto-merge: a clean ready PR is merged with a merge commit pinned to the evaluated head', { skip }, async () => {
