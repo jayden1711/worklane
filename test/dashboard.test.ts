@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { localDay } from '../src/local-day.js';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -267,13 +268,27 @@ test('spend by role counts today only, like spend today; costs are labelled as e
   log.append('run.cost', { issue: 1, role: 'worker', model: 'm', usd: 2, turns: 1 }, 'c');
   log.append('run.cost', { issue: 1, role: 'evaluator', model: 'm', usd: 1, turns: 1 }, 'c');
   const events = log.read();
-  const today = events[0]!.ts.slice(0, 10);
-  const yesterday = project(events.map((e) => ({ ...e, ts: e.ts.replace(today, '2000-01-01') })), today);
+  // "Today" is the machine's local day (src/local-day.ts), never the UTC date in the timestamp: in an evening west of
+  // UTC those differ, and a UTC slice here made this fail on a release machine in America/Chicago after 19:00.
+  const today = localDay(events[0]!.ts);
+  const dayBefore = (ts: string) => new Date(Date.parse(ts) - 86_400_000).toISOString();
+  const yesterday = project(events.map((e) => ({ ...e, ts: dayBefore(e.ts) })), today);
   assert.equal(yesterday.spendToday, 0);
   assert.deepEqual(yesterday.spendByRole, {}, 'yesterday\'s runs are not today\'s spend by role');
   const now = project(events, today);
   assert.deepEqual(now.spendByRole, { worker: 2, evaluator: 1 });
   assert.equal(now.spendToday, 3);
+  // Pinned: 19:34 in Chicago is already the next day in UTC, and still counts as that evening's day.
+  const tz = process.env.TZ;
+  process.env.TZ = 'America/Chicago';
+  try {
+    const evening = events.map((e) => ({ ...e, ts: '2026-10-15T00:34:00.000Z' }));
+    assert.equal(localDay(evening[0]!.ts), '2026-10-14');
+    assert.deepEqual(project(evening, localDay(evening[0]!.ts)).spendByRole, { worker: 2, evaluator: 1 }, 'an evening west of UTC is that day');
+  } finally {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  }
   const s = await server();
   try {
     const st = (await (await fetch(`${s.base}/api/state`, { headers: s.h })).json()) as { costBasis: string };
