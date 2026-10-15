@@ -145,7 +145,7 @@ export function usageByDay(events: StoredEvent[], days = 14): UsageDay[] {
         break;
       case 'run.finished':
         if (p.reason === 'rate_limited') day(e.ts).rateLimited++;
-        if (p.reason === 'auth_mismatch') day(e.ts).authProblems++;
+        if (p.reason === 'auth_mismatch' || p.reason === 'auth_failed') day(e.ts).authProblems++;
         break;
       case 'run.transient_retry': {
         const u = day(e.ts);

@@ -54,7 +54,8 @@ export const EventSchemas = {
   'run.finished': z.strictObject({
     issue,
     role: z.string(),
-    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'stopped', 'stuck']),
+    reason: z.enum(['succeeded', 'failed', 'timed_out', 'stalled', 'rate_limited', 'canceled_by_reconciliation', 'budget_exhausted', 'auth_mismatch', 'auth_failed', 'stopped', 'stuck']),
+    /** Why it ended: Claude's error text or its stderr's tail for a failure (redacted on write, like every payload). */
     detail: z.string(),
     /** The claude session the run was: a fix run on the issue's PR resumes the latest one (src/coordinator/fix-runs.ts). */
     session: z.string().max(200).optional(),
@@ -230,6 +231,16 @@ export const EventSchemas = {
   'usage.paused': z.strictObject({ reset_at: z.string(), source: z.enum(['claude', 'default']), kind: z.string().nullable(), issue: issue.nullable(), role: z.string(), detail: z.string() }),
   /** The pause ended: its reset time passed. */
   'usage.resumed': z.strictObject({ reset_at: z.string(), paused_ms: z.number().int().nonnegative(), reason: z.enum(['reset', 'account switched']).optional() }),
+  /**
+   * A run's Claude login was refused by the API (401/403, an invalid or expired key or token; src/claude-auth-failure.ts):
+   * no new Claude run starts on the login (`key`, its config dir) until a call on it succeeds. `login` is the account as
+   * claude auth status names it, never a token; `detail` is Claude's message, redacted.
+   */
+  'claude_auth.failed': z.strictObject({ key: z.string().max(500), login: z.string().max(300), lane: z.string().max(100), issue: issue.nullable(), role: z.string(), detail: z.string().max(1000) }),
+  /** A minimal real call on a held login: `by` the periodic check, the owner's re-check, or an account switch. */
+  'claude_auth.checked': z.strictObject({ key: z.string().max(500), login: z.string().max(300), ok: z.boolean(), by: z.enum(['timer', 'owner', 'account_switch']), detail: z.string().max(1000), cost_usd: z.number().nonnegative() }),
+  /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
+  'claude_auth.recovered': z.strictObject({ key: z.string().max(500), login: z.string().max(300), via: z.enum(['run', 'check']), role: z.string(), held_ms: z.number().int().nonnegative(), hold_id: z.number().int().nonnegative() }),
   /**
    * A failed worker run's earliest failed stage (stage-label.ts), for the weekly report. `by` code: set from the
    * run's events and record, no model asked; judge: one capped judge call. A label changes nothing by itself.

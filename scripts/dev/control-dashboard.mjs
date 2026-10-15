@@ -25,7 +25,8 @@
 //
 // Options: --engine <built checkout> (default: this one), --chrome <path> (or CHROME), --theme light|dark,
 // --with-prs (add pull-request history for the PR views), --with-usage-pause (pause the demo on the Claude usage
-// limit, resetting in 2 h: the banner and the Overview's usage line), --with-incidents (watchdog incidents for
+// limit, resetting in 2 h: the banner and the Overview's usage line), --with-signin-failed (Claude refused the agents'
+// login: the sign-in banner with its Re-check, and the seeded run ended auth_failed with its why), --with-incidents (watchdog incidents for
 // Health: two open, one resolved, in a slot directory of its own under the temporary directory), --with-learnings
 // (failed-run notes for the Learnings panel on Reports: one cause seen 3 times, one seen once), --with-stage-labels
 // (earliest-failed-stage labels for the report preview's stage section on Reports, plan and review among them), --with-goal
@@ -55,6 +56,8 @@ const positional = argv.filter((a, i) => !a.startsWith('--') && !VALUE_OPTIONS.i
 const [command = 'help', ...rest] = positional;
 const engine = resolve(option('--engine', fileURLToPath(new URL('../..', import.meta.url))));
 const theme = option('--theme', 'light');
+/** --with-signin-failed: Claude's words for the refused login, as the runner keeps them. */
+const SIGNIN_DETAIL = 'claude\'s login was refused (HTTP 401): Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}';
 /** --viewport <width>x<height>: the page's size (default 1440x1000); under 768 wide it is emulated as a phone. */
 const viewport = (() => {
   const m = /^(\d{3,4})x(\d{3,4})$/.exec(option('--viewport', '1440x1000'));
@@ -134,6 +137,7 @@ async function start() {
     const run = await seedRun(root, issue);
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
     if (flag('--with-usage-pause')) await seedUsagePause(root, issue);
+    if (flag('--with-signin-failed')) await seedSigninFailed(root, issue);
     if (flag('--with-incidents')) await seedIncidents(process.env.AGENT_SLOTS_DIR);
     if (flag('--with-learnings')) await seedLearnings(root, state.tasks.map((t) => t.issue));
     if (flag('--with-stage-labels')) await seedStageLabels(root, state.tasks.map((t) => t.issue));
@@ -172,7 +176,9 @@ async function seedRun(root, issue) {
   r.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'a', is_error: true, content: 'Exit code 1\nnot ok 3 - totals round to the cent' }] } });
   r.line({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b', name: 'Edit', input: { file_path: join(wt, 'src', 'totals.js') } }] } });
   r.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', content: 'edited' }] } });
-  r.finish({ reason: 'succeeded', costUsd: 0.42, turns: 4, model: 'sonnet', final: 'Totals round half-up to the cent now.' });
+  // --with-signin-failed: the run Claude refused the login on, with its why (the run page's "Why it ended").
+  if (flag('--with-signin-failed')) r.finish({ reason: 'auth_failed', costUsd: 0, turns: 1, model: 'sonnet', detail: SIGNIN_DETAIL });
+  else r.finish({ reason: 'succeeded', costUsd: 0.42, turns: 4, model: 'sonnet', final: 'Totals round half-up to the cent now.' });
   return r.id;
 }
 
@@ -318,6 +324,22 @@ async function seedIncidents(dir) {
   raiseIncident('disk_full', 'data', 'the data volume is 91% full', 'free space on that volume', { dir, severity: 'amber', now: at(1) });
   raiseIncident('github_auth', 'app', 'GitHub refused the token', 'check the GitHub App', { dir, now: at(30) });
   resolveIncident('github_auth', 'app', { dir, now: at(29) });
+}
+
+/** --with-signin-failed: Claude refused the agents' login (issue #463): the login is held, with one failed check. */
+async function seedSigninFailed(root, issue) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  if (!existsSync(logMod) || !existsSync(svc)) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const log = new EventLog(logPath(root));
+  try {
+    log.append('claude_auth.failed', { key: 'claude', login: 'agents@example.com', lane: 'default', issue: issue ?? null, role: 'worker', detail: SIGNIN_DETAIL }, 'demo');
+    log.append('claude_auth.checked', { key: 'claude', login: 'agents@example.com', ok: false, by: 'timer', detail: SIGNIN_DETAIL, cost_usd: 0 }, 'demo');
+  } catch (e) {
+    console.error(`--with-signin-failed: not recorded (${e.message.split('\n')[0]})`);
+  }
 }
 
 /** --with-usage-pause: a run hit the Claude usage limit and the instance is paused until 2 h from now. */

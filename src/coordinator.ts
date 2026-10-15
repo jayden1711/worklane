@@ -56,7 +56,8 @@ import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { HarnessEvals } from './coordinator/harness-evals.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
-import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
+import { AUTH_FAILED_CHAT_TEXT } from './claude-auth-failure.js';
 import { resetWords } from './usage-limit.js';
 import { stuckFeedback } from './coordinator/stuck-guard.js';
 import { budgetState, checksFingerprint, DEFAULT_MAX_ATTEMPTS, failureFingerprint, identicalStreak, IDENTICAL_FAILURES, reassigned, reflectionBrief, reflectionFeedback, sinceReset, TASK_BUDGET_INCIDENT, taskUsage, timeLeftMs, type FailureKind } from './coordinator/loop-control.js';
@@ -107,6 +108,9 @@ export class Coordinator extends HarnessEvals {
     await step('settings', () => this.refreshSettings(), undefined);
     // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
     await step('usage', () => this.resumeIfDue(), false);
+    // A Claude login the API refused is checked with one tiny real call (every 10 min at most, at once on the owner's
+    // re-check or after an account switch): the only way its hold can end while no run may start on it.
+    await step('claude sign-in', () => this.checkHeldLogins(), 0);
     // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
@@ -264,6 +268,8 @@ export class Coordinator extends HarnessEvals {
       if (e.type === 'issue.blocked' || e.type === 'decision.asked') used = 0;
       // A worker run the usage limit cut off (or a provider's limit sent to its fallback) wasn't an attempt at the task.
       else if (e.type === 'usage.limit_hit' && (e.payload as { role: string }).role === 'worker') used = Math.max(0, used - 1);
+      // Nor was one Claude refused the login on (src/claude-auth-failure.ts): the task is requeued, the login held.
+      else if (e.type === 'claude_auth.failed' && (e.payload as { role: string }).role === 'worker') used = Math.max(0, used - 1);
       // A run resumed after research it asked for continues its attempt; it isn't another one.
       else if (e.type === 'run.started' && (e.payload as { role: string }).role === 'worker' && !(e.payload as { resumed?: string }).resumed) used++;
     }
@@ -361,6 +367,7 @@ export class Coordinator extends HarnessEvals {
       if (this.halt.signal.aborted || this.stopped) return refuse('agents are stopped');
       const paused = this.usagePause();
       if (paused) return refuse(`paused on the Claude usage limit until ${resetWords(paused.resetAt, this.nowMs())}; it resumes on its own then`);
+      if (this.authHold(this.loginKeyOf({}))) return refuse(AUTH_FAILED_CHAT_TEXT);
       const disk = this.diskHeld();
       if (disk) return refuse(`paused: ${disk}; it resumes on its own once there is room`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
@@ -393,6 +400,7 @@ export class Coordinator extends HarnessEvals {
       writeChatAnswer(this.d.stateDir, q.id, { answer: a });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
     } catch (e) {
+      if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);
       refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
     }
   }
@@ -496,6 +504,12 @@ export class Coordinator extends HarnessEvals {
     const paused = this.usagePause();
     if (paused) {
       this.noteHold({ reason: `paused on the Claude usage limit until ${paused.resetAt}`, load: null, freeDiskPct: null });
+      return 0;
+    }
+    // A Claude login the API refused: nothing starts until a call on it succeeds (the tick's sign-in step checks it).
+    const refused = this.authHeld();
+    if (refused) {
+      this.noteHold({ reason: `Claude sign-in failed (${refused.login}): no new runs until a call on that login succeeds`, load: null, freeDiskPct: null });
       return 0;
     }
     // WHY: a full disk, or one below its floor (src/disk-guard.ts): nothing new starts until there is room.
@@ -960,6 +974,14 @@ export class Coordinator extends HarnessEvals {
       // Stopped from the console: the task waits for the owner, saying who stopped it.
       if (e instanceof StoppedByOwner) return await this.block(n, owner, e.message);
       // The usage limit: requeued, not failed or blocked, with no attempt counted; dispatch holds until the reset.
+      // A refused Claude login: requeued the same way, no attempt counted; dispatch holds until the login works.
+      if (e instanceof AuthPaused) {
+        this.releaseClaim(n, 'Claude sign-in failed; requeued');
+        await this.d.backlog.removeLabel(n, 'agent:working');
+        await this.d.backlog.addLabels(n, ['ready']);
+        await this.d.backlog.comment(n, `[${BRAND.cli}] Claude sign-in failed on this machine (the owner has been told): requeued, and it starts again on its own once the login works. Nothing to do here.`);
+        return;
+      }
       if (e instanceof UsagePaused) {
         this.releaseClaim(n, 'paused on the Claude usage limit; requeued');
         await this.d.backlog.removeLabel(n, 'agent:working');

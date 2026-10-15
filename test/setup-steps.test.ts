@@ -43,6 +43,8 @@ test('the registry covers every row of the first-run audit (1-33), each step onc
 interface World {
   tools: Set<string>;
   claudeIn: boolean;
+  /** What the API says to the login's proof (a minimal real call): it answers, or refuses the login (401). */
+  claudeApi: 'ok' | '401';
   ghIn: boolean;
   push: boolean;
   protectedMain: boolean;
@@ -51,6 +53,9 @@ interface World {
   units: Set<string>;
   linger: boolean | null;
 }
+
+/** Each minimal real call the login's proof made (its arguments). */
+const calls: string[] = [];
 
 function probeFor(w: World): SetupProbe {
   return {
@@ -61,6 +66,12 @@ function probeFor(w: World): SetupProbe {
         return { status: r.status, stdout: r.stdout, stderr: r.stderr };
       }
       const a = args.join(' ');
+      if (cmd === 'claude' && args[0] === '-p') {
+        calls.push(a);
+        return w.claudeApi === 'ok'
+          ? { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0.02}', stderr: '' }
+          : { status: 1, stdout: '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login"}', stderr: 'Authorization: Bearer sk-ant-oat01-AAAAAAAAAAAAAAAAAAAAAAAAAAAA' };
+      }
       if (cmd === 'claude' && a === 'auth status') return w.claudeIn ? { status: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}', stderr: '' } : { status: 1, stdout: '{"loggedIn": false}', stderr: '' };
       if (cmd === 'gh' && a === 'auth status') return { status: w.ghIn ? 0 : 1, stdout: '', stderr: '' };
       if (cmd === 'gh' && a.endsWith('--jq .permissions.push')) return { status: 0, stdout: `${w.push}\n`, stderr: '' };
@@ -74,7 +85,7 @@ function probeFor(w: World): SetupProbe {
   };
 }
 
-const world = (over: Partial<World> = {}): World => ({ tools: new Set(['git', 'gitleaks', 'claude', 'gh']), claudeIn: true, ghIn: true, push: true, protectedMain: true, tailscale: null, service: false, units: new Set(), linger: null, ...over });
+const world = (over: Partial<World> = {}): World => ({ tools: new Set(['git', 'gitleaks', 'claude', 'gh']), claudeIn: true, claudeApi: 'ok', ghIn: true, push: true, protectedMain: true, tailscale: null, service: false, units: new Set(), linger: null, ...over });
 
 /** A checkout with the example config committed, an origin, origin/main at HEAD and its hooks installed; plus a machine's files and an instance. */
 function fixture() {
@@ -256,6 +267,39 @@ test('the poll cache: local checks reused within their time, GitHub ones longer,
   assert.equal(stepIn(later, 'claude-login')!.done, false, 'a local step is checked again after 10 s');
   checkSetup(f.ctx('local'), counting, { cache, localMs: 10_000, netMs: 120_000, now: at, fresh: true });
   assert.equal(calls, 2, 'Re-check asks GitHub again');
+});
+
+test("issue #463: 'Signed in to Claude' proves the login with one minimal real call (cheap model, one turn, a hard budget cap); a 401 fails the step with Claude's message, never a token", () => {
+  const f = fixture();
+  const w = world({ claudeApi: '401' });
+  calls.length = 0;
+  const refused = stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'claude-login')!;
+  assert.equal(refused.done, false, 'claude auth status says signed in, but the API refused the login');
+  assert.match(refused.detail, /signed in \(claude\.ai\), per `claude auth status`, but the API refused it: claude's login was refused \(HTTP 401\): Invalid API key · Please run \/login/);
+  assert.doesNotMatch(refused.detail, /sk-ant-oat01-A/, 'no token, even one claude printed');
+  assert.equal(calls.length, 1, 'one call');
+  assert.match(calls[0]!, /^-p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0\.05 --output-format json$/);
+  w.claudeApi = 'ok';
+  const works = stepIn(checkSetup(f.ctx('local'), probeFor(w)), 'claude-login')!;
+  assert.equal(works.done, true);
+  assert.match(works.detail, /signed in \(claude\.ai\), per `claude auth status`; a minimal real call was answered/);
+  // The dashboard's poll never makes the call each time: a refusal is kept 10 minutes, a success 6 hours; Re-check calls again.
+  const cache = new Map();
+  let t = 1_000_000;
+  const o = { cache, localMs: 10_000, netMs: 120_000, now: () => t };
+  calls.length = 0;
+  w.claudeApi = '401';
+  checkSetup(f.ctx('local'), probeFor(w), o);
+  t += 5 * 60_000;
+  checkSetup(f.ctx('local'), probeFor(w), o);
+  assert.equal(calls.length, 1, 'a refusal is kept for 10 minutes');
+  w.claudeApi = 'ok';
+  const rechecked = checkSetup(f.ctx('local'), probeFor(w), { ...o, fresh: true });
+  assert.equal(calls.length, 2, 'Re-check calls again');
+  assert.equal(stepIn(rechecked, 'claude-login')!.done, true);
+  t += 5 * 3600_000;
+  checkSetup(f.ctx('local'), probeFor(w), o);
+  assert.equal(calls.length, 2, 'a success is kept for hours');
 });
 
 /** A dashboard on the fixture, with stand-ins for the machine and for installing the service. */

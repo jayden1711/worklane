@@ -78,6 +78,8 @@ export interface RunRecord {
   otherTools: number;
   final: string;
   truncated: boolean;
+  /** Why a run that didn't succeed ended: Claude's error text or its stderr's tail (redacted). Absent in older records. */
+  detail?: string;
 }
 
 /** An issue's runs without their steps (GET /api/runs?issue=n). */
@@ -562,6 +564,10 @@ export interface UsageInfo {
   paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
   today: { runs: number; limitHits: number };
   lastHit: string | null;
+  /** Claude logins the API refused (no new runs on them until a call succeeds): the account and Claude's words, never a token. */
+  signinFailed?: { login: string; detail: string; since: string; lastCheck: { at: string; ok: boolean; detail: string } | null }[];
+  /** This viewer may ask the coordinator to re-check a refused login now. */
+  canRecheckSignin?: boolean;
 }
 
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */

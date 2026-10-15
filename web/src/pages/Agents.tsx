@@ -6,7 +6,7 @@ import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd } from '../components/ui'
 import { Header } from '../components/Header';
 import { runsRefusal, RunsRefused } from './RunDetail';
 
-const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger' };
+const REASON_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'neutral'> = { succeeded: 'ok', error: 'danger', stalled: 'danger', timeout: 'danger', rate_limited: 'warn', budget_exhausted: 'warn', auth_mismatch: 'danger', auth_failed: 'danger' };
 
 export function Agents({ state, live: given }: { state: State; live?: LiveList | null }) {
   const g = state.governor;

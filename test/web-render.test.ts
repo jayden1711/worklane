@@ -74,6 +74,7 @@ interface Render {
   renderRunResearch(data: unknown): string;
   renderStopBanner(state: State): string;
   renderUsageBanner(usage: unknown[], now: number): string;
+  renderRunWhy(detail?: string): string;
   renderUsageLines(usage: unknown[], now: number): string;
   renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
   countdown(resetAt: string, now: number): string;
@@ -981,6 +982,22 @@ test('the usage-limit pause: a banner per paused instance counting down to its r
   assert.doesNotMatch(banner, /default wait/, 'claude named the reset');
   assert.match(r.renderUsageBanner([{ ...paused, paused: { ...paused.paused, source: 'default' } }], now), /default wait/);
   assert.match(r.renderUsageBanner([paused], now + 3 * 3600_000), />resuming now</);
+  // Issue #463: a Claude login the API refused: a red banner naming the login and Claude's words, with the owner's
+  // re-check; none while every login works.
+  const refused = { ...running, signinFailed: [{ login: 'agents@example.com', detail: "claude's login was refused (HTTP 401): Invalid API key", since: '2026-10-13T09:00:00Z', lastCheck: { at: '2026-10-13T09:50:00Z', ok: false, detail: 'still 401' } }], canRecheckSignin: true };
+  const signin = r.renderUsageBanner([refused], now);
+  assert.equal((signin.match(/data-testid="signin-banner"/g) ?? []).length, 1);
+  assert.match(signin, /Claude sign-in failed: no new runs/);
+  assert.match(signin, /agents@example\.com/);
+  assert.match(signin, /Claude said: claude&#x27;s login was refused \(HTTP 401\): Invalid API key/);
+  assert.match(signin, /data-testid="signin-recheck"/);
+  assert.match(signin, /Last checked .*still 401/);
+  assert.doesNotMatch(r.renderUsageBanner([{ ...refused, canRecheckSignin: false }], now), /signin-recheck/, 'only the owner re-checks');
+  assert.equal(r.renderUsageBanner([{ ...running, signinFailed: [] }], now), '');
+  assert.match(r.renderUsageLines([refused], now), /data-testid="usage-line-status"[^>]*>Claude sign-in failed: no new runs</);
+  // A failed run's why, on its run detail.
+  assert.match(r.renderRunWhy('error_during_execution: sandbox required but unavailable'), /data-testid="run-detail-why"[\s\S]*Why it ended[\s\S]*sandbox required but unavailable/);
+  assert.equal(r.renderRunWhy(undefined), '');
   // The Overview: a line per instance, running or paused, with today's runs and limit hits.
   const lines = r.renderUsageLines([running, paused], now);
   assert.equal((lines.match(/data-testid="usage-line"/g) ?? []).length, 2);

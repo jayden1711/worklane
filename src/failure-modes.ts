@@ -163,7 +163,7 @@ export function classifyRuns(events: StoredEvent[], since: Date, until: Date, re
       else if (reason === 'timed_out') [outcome, cause] = ['timed out', 'the run hit its time limit'];
       else if (reason === 'stalled') [outcome, cause] = ['timed out', 'no output from the agent for the stall limit (stalled)'];
       else if (reason === 'budget_exhausted') [outcome, cause] = ['budget reached', 'per-run budget reached'];
-      else if (reason === 'auth_mismatch') [outcome, cause] = ['auth problem', normalizeCause(detail)];
+      else if (reason === 'auth_mismatch' || reason === 'auth_failed') [outcome, cause] = ['auth problem', normalizeCause(detail)];
       else if (reason === 'canceled_by_reconciliation') [outcome, cause] = ['canceled', 'stopped by the coordinator'];
       else if (reason === 'stuck') [outcome, cause] = ['stuck', normalizeCause(detail)];
       else if (reason === 'failed' && !committed && (startupEvent || seconds < STARTUP_SECS)) [outcome, cause] = ['startup failure', normalizeCause(detail)];

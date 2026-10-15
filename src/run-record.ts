@@ -18,6 +18,8 @@ const MAX_COMMAND = 400;
 const MAX_OUTPUT_LINES = 6;
 const MAX_OUTPUT = 800;
 const MAX_FINAL = 4000;
+/** A failed run's why (Claude's error text or its stderr's tail), as kept in its record. */
+export const MAX_DETAIL = 2000;
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
 export interface RunStep {
@@ -63,6 +65,11 @@ export interface RunRecord {
   sessionId?: string;
   /** The earlier session this run continued (claude --resume). */
   resumed?: string;
+  /**
+   * Why a run that didn't succeed ended: Claude's error text or its stderr's tail, as the runner read it (redacted
+   * like the whole record, and capped). Absent for a success, and in older records.
+   */
+  detail?: string;
 }
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
@@ -188,9 +195,10 @@ export class RunRecorder {
   }
 
   /** Write the record when the run ends; keeps only the newest KEEP_RUNS. Never throws. */
-  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck']; sessionId?: string }, now = new Date()): string | null {
+  finish(end: { reason: string; costUsd: number; turns: number; model: string; final?: string; stuck?: RunRecord['stuck']; sessionId?: string; detail?: string }, now = new Date()): string | null {
     try {
       Object.assign(this.rec, { endedAt: now.toISOString(), reason: end.reason, costUsd: end.costUsd, turns: end.turns, model: end.model });
+      if (end.detail?.trim() && end.reason !== 'succeeded') this.rec.detail = clip(end.detail.trim(), MAX_DETAIL);
       if (end.sessionId) this.rec.sessionId = end.sessionId;
       if (end.stuck && end.stuck.repeats > 1) this.rec.stuck = { ...end.stuck };
       // The session's own result text is its final message; else the last thing it said.

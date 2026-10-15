@@ -41,6 +41,8 @@ import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
 import { usageView } from './usage-limit.js';
+import { authHoldsOf } from './claude-auth-failure.js';
+import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
 import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
@@ -1438,7 +1440,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
         if (url.pathname === '/api/usage' && req.method === 'GET') {
           const v = usageView(eventCache.all());
-          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
+          // Logins the API refused (src/claude-auth-failure.ts): the account as Claude names it and Claude's message
+          // (redacted), never a token; the owner may ask for a re-check.
+          const signin = authHoldsOf(eventCache.all()).map((h) => ({ login: h.login, detail: h.detail, since: h.since, lastCheck: h.lastCheck }));
+          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null, signinFailed: signin, canRecheckSignin: isOwnerHere });
+        }
+        // The owner's re-check of a refused Claude login: recorded for the coordinator (which runs the one tiny call as
+        // the agent user), never run here. One a minute at most, however often it is asked.
+        if (url.pathname === '/api/claude-auth/recheck' && req.method === 'POST') {
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may re-check the Claude sign-in; @${who.login} is a ${who.role}` });
+          requestAuthRecheck(opts.stateDir, who.login);
+          audit(who, 'claude_auth.recheck', {});
+          return json(res, 202, { ok: true, note: 'the coordinator checks the login on its next tick, with one minimal real call' });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;

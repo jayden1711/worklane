@@ -55,6 +55,7 @@ function world(over: Partial<World> & { download?: InitIo['download']; plan?: In
         return { status: r.status, stdout: r.stdout, stderr: r.stderr };
       }
       const a = args.join(' ');
+      if (cmd === 'claude' && args[0] === '-p') return { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok"}', stderr: '' }; // the login's proof: a minimal real call, answered
       if (cmd === 'claude' && a === 'auth status') return w.claudeIn ? { status: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}', stderr: '' } : { status: 1, stdout: '{"loggedIn": false}', stderr: '' };
       if (cmd === 'gh' && a === 'auth status') return { status: w.ghIn ? 0 : 1, stdout: '', stderr: '' };
       if (cmd === 'gh' && /^api repos\/[^/]+\/[^/]+ --jq \.permissions\.push$/.test(a)) return { status: 0, stdout: `${w.push}\n`, stderr: '' };
