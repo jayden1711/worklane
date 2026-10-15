@@ -183,6 +183,6 @@ export const GPU_NO_REPEAT = 'a GPU run that timed out, was killed or was cut of
 /** The setup step a cut-off GPU run's posted check names (./checks.ts gives it its own title). */
 export const GPU_STEP = 'gpu';
 /** What that check says: the run was cut off and is not run again by itself. */
-export const gpuCutOffLine = (reason: string) => `cut off (GPU run ended by ${reason}): not rerun automatically; push again to run it (a new head runs it), or rerun it by hand`;
+export const gpuCutOffLine = (reason: string) => `cut off (GPU run ended by ${reason}): not rerun automatically; push again to run it`;
 /** The group whose members may hold a GPU's lock (`<cli> gpu hold`): the owner only, never an agent, test or coordinator user. */
 export const GPU_GROUP = `${BRAND.cli}-gpu`;
