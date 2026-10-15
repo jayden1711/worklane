@@ -102,11 +102,15 @@ function watchRequests(cdp: Cdp) {
  * Answers each of `routes`' requests (that path exactly, any query) with its answer, or lets the server's through
  * (null); one held (hold) waits until let through (release).
  */
-async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<typeof json>) | null>) {
+export async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<typeof json>) | null>) {
   const at = new Map(Object.keys(routes).map((path) => [path, { holding: false, paused: [] as string[] }]));
   // Every answer on its way, so stop() can wait for them before the browser closes (one still being sent when it
   // closed failed a test on CI: "Fetch.fulfillRequest: the DevTools connection closed").
   const sending = new Set<Promise<unknown>>();
+  // WHY: stop() used to turn interception off first, then wait: an answer still on its way, or a request paused just
+  // before, then went to a Fetch domain already off ("Fetch.fulfillRequest: Fetch domain is not enabled", #514's CI).
+  // Once stopping, nothing new is answered here: Fetch.disable lets every request still paused through to the server.
+  let stopping = false;
   const send = (p: Promise<unknown>) => {
     sending.add(p);
     void p.finally(() => sending.delete(p)).catch(() => {});
@@ -117,6 +121,7 @@ async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<type
     return send(answer ? cdp.send('Fetch.fulfillRequest', { requestId, ...answer() }) : cdp.send('Fetch.continueRequest', { requestId }));
   };
   cdp.on('Fetch.requestPaused', (p) => {
+    if (stopping) return;
     const requestId = p.requestId as string;
     const path = new URL((p.request as { url: string }).url).pathname;
     const s = at.get(path);
@@ -131,12 +136,15 @@ async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<type
     release: async (path: string) => {
       const s = at.get(path)!;
       s.holding = false;
+      if (stopping) return;
       for (const requestId of s.paused.splice(0)) await reply(path, requestId);
     },
     /** Stop answering: every answer on its way is sent, and the page's requests go to the server again. */
     stop: async () => {
+      stopping = true;
+      // Every answer already on its way is sent while the domain is still on; only then is it turned off.
+      while (sending.size) await Promise.allSettled([...sending]);
       await cdp.send('Fetch.disable');
-      await Promise.all([...sending]);
     },
   };
 }
@@ -349,3 +357,26 @@ test(
     }
   },
 );
+
+test('intercept: stop() sends every answer on its way before turning interception off, and answers nothing after (#514 CI)', async () => {
+  // A stand-in DevTools connection: Fetch.* after Fetch.disable fails as Chrome's does; each answer resolves a tick later.
+  let enabled = false;
+  const late: string[] = [];
+  let paused: ((p: Record<string, unknown>) => void) | null = null;
+  const fake = {
+    on: (method: string, fn: (p: Record<string, unknown>) => void) => void (method === 'Fetch.requestPaused' && (paused = fn)),
+    send: async (method: string) => {
+      if (method === 'Fetch.enable') return void (enabled = true);
+      if (method === 'Fetch.disable') return void (enabled = false);
+      await new Promise((r) => setTimeout(r, 5));
+      if (!enabled) late.push(method);
+      return {};
+    },
+  } as unknown as Cdp;
+  const i = await intercept(fake, { '/api/x': () => json({ ok: true }) });
+  paused!({ requestId: 'a', request: { url: 'http://127.0.0.1/api/x' } }); // its answer is on its way
+  const stopped = i.stop();
+  paused!({ requestId: 'b', request: { url: 'http://127.0.0.1/api/x' } }); // paused just as stop() began
+  await stopped;
+  assert.deepEqual(late, [], 'no Fetch call reached Chrome after interception was turned off');
+});
