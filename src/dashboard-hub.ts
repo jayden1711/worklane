@@ -34,6 +34,7 @@ import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/t
 import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
+import { Avatars, type AvatarOptions } from './avatars.js';
 
 export interface HubInstance {
   name: string;
@@ -71,8 +72,13 @@ export interface HubOptions {
    * bases (a fake GitHub in tests; the sign-in's, else GitHub's, by default).
    */
   appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
+  /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
+  avatars?: AvatarOptions;
   now?: () => number;
 }
+
+/** A person's picture through the hub: /api/i/<instance>/avatar/<login>, served by the hub itself (#462). */
+const HUB_AVATAR = /^\/api\/i\/([^/]+)\/avatar\/([^/]+)$/;
 
 /** The hub's port: next to the instances' range (4400-4899). */
 export const HUB_PORT = 4399;
@@ -178,6 +184,34 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   req.pipe(up);
 }
 
+/**
+ * Whether `who` is a person instance `i` knows (its events and config name them), as that instance says when asked
+ * as `asker` (null: the break-glass); false when it can't say.
+ */
+function instanceKnows(i: HubInstance, who: string, asker: string | null): Promise<boolean> {
+  const token = readToken(i);
+  if (!token) return Promise.resolve(false);
+  return new Promise((done) => {
+    const r = request({ host: '127.0.0.1', port: i.port, path: `/api/people/${who}`, headers: { authorization: `Bearer ${token}`, ...(asker ? { [LOGIN_HEADER]: asker } : {}) }, timeout: 3000, agent: upstream }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (c: string) => {
+        if (body.length + c.length <= 4096) body += c;
+      });
+      res.on('end', () => {
+        try {
+          done(res.statusCode === 200 && (JSON.parse(body) as { known?: unknown }).known === true);
+        } catch {
+          done(false);
+        }
+      });
+    });
+    r.on('timeout', () => r.destroy(new Error('timed out')));
+    r.on('error', () => done(false));
+    r.end();
+  });
+}
+
 /** Whether an instance's own server answers, as the hub sees it, and the person's role there (owner for the break-glass). */
 function probe(i: HubInstance, login: string | null): Promise<{ up: boolean; error: string | null; role: Role | null }> {
   const token = readToken(i);
@@ -234,6 +268,20 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const signIn = opts.signIn ?? null;
   const sessions = signIn ? new Sessions({ secret: signIn.sessionSecret, file: join(opts.stateDir, 'sessions.json'), now }) : null;
   const states = new SignInStates(now);
+  const avatars = new Avatars(join(opts.stateDir, 'avatars'), { now, ...opts.avatars });
+  // Who each instance said it knows, per asker, kept as long as a role is.
+  const knownCache = new Map<string, { known: boolean; until: number }>();
+  /** Whether the hub may fetch `who`'s picture for `asker` on instance `i`: themselves, a machine owner, or a person `i` knows. */
+  const mayShow = async (i: HubInstance, who: string, asker: string | null) => {
+    if ((asker && who.toLowerCase() === asker.toLowerCase()) || (am.isMachineOwner ?? ((l: string) => isMachineOwner(l)))(who)) return true;
+    const k = `${i.name}\n${asker ?? ''}\n${who.toLowerCase()}`;
+    const c = knownCache.get(k);
+    if (c && now() < c.until) return c.known;
+    const known = await instanceKnows(i, who, asker);
+    if (knownCache.size >= 10_000) knownCache.clear();
+    knownCache.set(k, { known, until: now() + ROLE_CACHE_MS });
+    return known;
+  };
   const origin = signIn ? new URL(signIn.publicUrl).origin : null;
   const am = opts.appManifest ?? {};
   const appApi = am.api ?? signIn?.api;
@@ -335,6 +383,12 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
           const listed = all.map((i) => (i.up ? i : { ...i, role: knownRole(i.name, session.login)?.role ?? null }));
           return json(res, 200, { instances: listed.filter((i) => i.role) });
         }
+        const av = url.pathname.match(HUB_AVATAR);
+        if (av && req.method === 'GET') {
+          const inst = byName.get(av[1]!);
+          if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${av[1]}` });
+          return await avatars.serve(req, res, av[2]!, url.searchParams.get('size'), (l) => mayShow(inst, l, session.login));
+        }
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
         if (m) {
           const inst = byName.get(m[1]!);
@@ -367,6 +421,12 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (url.pathname === '/api/hub' && req.method === 'GET') {
           const instances = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, null)) })));
           return json(res, 200, { instances });
+        }
+        const av = url.pathname.match(HUB_AVATAR);
+        if (av && req.method === 'GET') {
+          const inst = byName.get(av[1]!);
+          if (!inst) return json(res, 404, { error: `no instance ${av[1]} in this hub` });
+          return await avatars.serve(req, res, av[2]!, url.searchParams.get('size'), (l) => mayShow(inst, l, null));
         }
         // /api/i/<instance>/<path> is that instance's /api/<path>.
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
