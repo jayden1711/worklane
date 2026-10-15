@@ -61,7 +61,7 @@ import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
 import { intakeCheckCommand } from './intake/check.js';
-import { installService, uninstallService } from './os/index.js';
+import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -694,18 +694,23 @@ async function main(argv: string[]): Promise<number> {
         }
         const r = installService({
           label: instanceServiceLabel(i.name),
-          program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
+          program: [stableNodePath().path, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
           workingDir: i.home,
           logFile: join(i.stateDir, 'coordinator.log'),
           // Only what's needed to find tools and the instance; its credentials come from the instance itself.
           env: { PATH: toolPath(), HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
         });
         console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
+        const node = stableNodePath();
+        if (node.why) console.error(`warning: ${node.why}`);
         return r.started ? 0 : 1;
       }
       const cfg = loadConfig(root);
       const r = installService(localServiceSpec(root, cfg));
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
+      // WHY (#468): said at install, when the only node is one an upgrade deletes.
+      const node = stableNodePath();
+      if (node.why) console.error(`warning: ${node.why}`);
       return r.started ? 0 : 1;
     }
 

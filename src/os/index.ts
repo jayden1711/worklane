@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn } from 'node:child_process';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
@@ -414,6 +414,65 @@ export function which(cmd: string, path: string = process.env.PATH ?? ''): strin
   return null;
 }
 
+/**
+ * Directories a version manager (or Homebrew) puts one node version in, and deletes on an upgrade or uninstall:
+ * Homebrew's Cellar, nvm, fnm, asdf, volta, mise. A service that runs node by such a path stops at its next restart.
+ */
+const VERSIONED_NODE_DIRS: readonly RegExp[] = [/\/Cellar\/node(@\d+)?\//, /\/\.nvm\/versions\//, /\/\.fnm\/|\/fnm\/node-versions\//, /\/\.asdf\/installs\//, /\/\.volta\/tools\/image\//, /\/mise\/installs\//];
+export const inVersionedNodeDir = (path: string): boolean => VERSIONED_NODE_DIRS.some((re) => re.test(path));
+
+/**
+ * WHY (#468): the node a service (launchd plist, systemd user unit) or a git credential helper line should name: the
+ * `node` on PATH (as the shell finds it, a symlink such as /opt/homebrew/bin/node kept as it is, never its realpath)
+ * when it is this very node; else this process's own path. `versioned`: the only path found is under a versioned
+ * directory, which an upgrade deletes; `why` then says so and what to do.
+ */
+export function stableNodePath(o: { execPath?: string; path?: string; real?: (p: string) => string } = {}): { path: string; versioned: boolean; why: string | null } {
+  const exec = o.execPath ?? process.execPath;
+  const real = o.real ?? ((p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  });
+  const target = real(exec);
+  for (const dir of (o.path ?? process.env.PATH ?? '').split(delimiter)) {
+    if (!dir || !dir.startsWith('/')) continue;
+    const candidate = join(dir, process.platform === 'win32' ? 'node.exe' : 'node');
+    if (!existsSync(candidate) || inVersionedNodeDir(candidate)) continue;
+    if (real(candidate) === target) return { path: candidate, versioned: false, why: null };
+  }
+  if (!inVersionedNodeDir(exec)) return { path: exec, versioned: false, why: null };
+  return { path: exec, versioned: true, why: `node is only found at ${exec}, inside a versioned directory (Homebrew's Cellar, nvm, fnm, asdf, volta or mise): the next upgrade deletes it and the service stops at its next restart. Put a stable node on PATH (a symlink such as /opt/homebrew/bin/node or /usr/local/bin/node) and run this again` };
+}
+
+/** What is wrong with the node a service runs, if anything: gone, or inside a versioned directory. */
+export function nodePathProblem(node: string, exists: (p: string) => boolean = existsSync): string | null {
+  if (!exists(node)) return `runs node at ${node}, which no longer exists (an upgrade removed it): the service fails at its next start`;
+  if (inVersionedNodeDir(node)) return `runs node at ${node}, inside a versioned directory: the next upgrade deletes it`;
+  return null;
+}
+
+/** A per-user service's program as its file has it (launchd's ProgramArguments, or systemd's ExecStart): the file and its first argument. */
+export function serviceProgram(label: string, read: (file: string) => string | null = (f) => (existsSync(f) ? readFileSync(f, 'utf8') : null)): { file: string; node: string } | null {
+  const file = serviceChange(label)?.path;
+  if (!file) return null;
+  const text = read(file);
+  if (text === null) return null;
+  const node = programOf(text);
+  return node ? { file, node } : null;
+}
+
+/** The first program argument of a launchd plist or a systemd unit's text. */
+export function programOf(text: string): string | null {
+  const plist = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]*)<\/string>/.exec(text);
+  if (plist) return plist[1]!.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  const unit = /^ExecStart=("((?:[^"\\]|\\.)*)"|(\S+))/m.exec(text);
+  if (unit) return unit[2] !== undefined ? unit[2].replace(/\\(["\\])/g, '$1') : (unit[3] ?? null);
+  return null;
+}
+
 /** True if a process with this pid exists (signal 0 probes without killing). */
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -762,13 +821,11 @@ export function lingerEnabled(user = userInfo().username): boolean | null {
   }
 }
 
-/** Install and start a per-user service that restarts on failure and survives logout of any session. */
-export function installService(spec: ServiceSpec): { path: string; started: boolean; detail: string } {
-  if (process.platform === 'darwin') {
-    const path = join(homedir(), 'Library', 'LaunchAgents', `${spec.label}.plist`);
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const envXml = Object.entries(spec.env ?? {}).map(([k, v]) => `<key>${esc(k)}</key><string>${esc(v)}</string>`).join('');
-    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+/** The launchd agent's plist for a service spec (what installService writes on macOS). */
+export function launchdPlist(spec: ServiceSpec): string {
+  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const envXml = Object.entries(spec.env ?? {}).map(([k, v]) => `<key>${esc(k)}</key><string>${esc(v)}</string>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>${esc(spec.label)}</string>
@@ -782,20 +839,12 @@ export function installService(spec: ServiceSpec): { path: string; started: bool
 <key>EnvironmentVariables</key><dict>${envXml}</dict>
 </dict></plist>
 `;
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, plist);
-    const uid = process.getuid?.() ?? 0;
-    try {
-      execFileSync('launchctl', ['bootout', `gui/${uid}/${spec.label}`], { stdio: 'ignore' });
-    } catch {
-      // not loaded yet
-    }
-    return { path, ...launch(['bootstrap', `gui/${uid}`, path]) };
-  }
-  if (process.platform === 'linux') {
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
-    const q = (s: string) => `"${s.replace(/(["\\])/g, '\\$1')}"`;
-    const unit = `[Unit]
+}
+
+/** The systemd user unit for a service spec (what installService writes on Linux). */
+export function systemdUserUnit(spec: ServiceSpec): string {
+  const q = (s: string) => `"${s.replace(/(["\\])/g, '\\$1')}"`;
+  return `[Unit]
 Description=${spec.label}
 
 [Service]
@@ -812,6 +861,26 @@ ${Object.entries(spec.env ?? {}).map(([k, v]) => `Environment=${q(`${k}=${v}`)}`
 [Install]
 WantedBy=default.target
 `;
+}
+
+/** Install and start a per-user service that restarts on failure and survives logout of any session. */
+export function installService(spec: ServiceSpec): { path: string; started: boolean; detail: string } {
+  if (process.platform === 'darwin') {
+    const path = join(homedir(), 'Library', 'LaunchAgents', `${spec.label}.plist`);
+    const plist = launchdPlist(spec);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, plist);
+    const uid = process.getuid?.() ?? 0;
+    try {
+      execFileSync('launchctl', ['bootout', `gui/${uid}/${spec.label}`], { stdio: 'ignore' });
+    } catch {
+      // not loaded yet
+    }
+    return { path, ...launch(['bootstrap', `gui/${uid}`, path]) };
+  }
+  if (process.platform === 'linux') {
+    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
+    const unit = systemdUserUnit(spec);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
     try {

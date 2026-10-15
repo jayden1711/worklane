@@ -46,7 +46,7 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, stableNodePath, type ServiceSpec } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
@@ -1869,7 +1869,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (plan.kind === 'owner-command') return refused(409, `not started from here: ${plan.why}`, { command: plan.command });
           if (plan.kind === 'unsupported') return refused(409, plan.why);
           if (body.confirm !== true) return refused(400, 'Start changes this machine: review the change it shows, then confirm it ({"confirm": true})');
-          const r = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          const started = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+          // WHY (#468): said at install, when the only node is one an upgrade deletes.
+          const nodeWhy = stableNodePath().why;
+          const r = nodeWhy ? { ...started, detail: `${started.detail}; warning: ${nodeWhy}` } : started;
           setupCache.delete('service');
           audit(who, 'first_run.start', { label: plan.label, file: r.path, started: r.started, detail: r.detail.slice(0, 300) });
           return json(res, r.started ? 200 : 500, r.started ? { ok: true, ...r } : { error: `not started: ${r.detail}`, ...r });

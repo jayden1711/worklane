@@ -45,7 +45,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import type { ServiceSpec } from './os/index.js';
+import { stableNodePath, type ServiceSpec } from './os/index.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -68,10 +68,12 @@ export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.pro
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
  */
-export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env): ServiceSpec {
+export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env, node: string = stableNodePath({ path: env.PATH ?? '' }).path): ServiceSpec {
   return {
     label: serviceLabel(cfg),
-    program: [process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
+    // WHY (#468): node by the path the shell finds (a symlink such as /opt/homebrew/bin/node), never its realpath in a
+    // versioned directory (Homebrew's Cellar, nvm...), which an upgrade deletes from under the service.
+    program: [node, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
     // PATH reaches the prefix's bin, where local init installs tools (src/tool-path.ts), as `up` has always set it.
@@ -128,7 +130,8 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
     // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
     env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-    git.push(['credential.helper', ''], ['credential.helper', `!"${process.execPath}" "${cli}" git-credential`]);
+    // WHY (#468): the same stable node as the service's: a versioned path breaks every fetch and push after an upgrade.
+    git.push(['credential.helper', ''], ['credential.helper', `!"${stableNodePath({ path: base.PATH ?? '' }).path}" "${cli}" git-credential`]);
   }
   env.GIT_CONFIG_COUNT = String(git.length);
   git.forEach(([k, v], n) => {
