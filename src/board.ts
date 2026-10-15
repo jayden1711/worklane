@@ -12,6 +12,7 @@ import type { LiveRun } from './console.js';
 import type { ProcessGroupUsage } from './os/stats.js';
 import { batchState, batchSummaries, prBatchStatusIn, type BatchStatus } from './coordinator/pr-batch.js';
 import { localDay } from './local-day.js';
+import { bannerForViewer, type HoldBanner } from './governor-holds.js';
 
 export const BOARD_COLUMNS = ['planning', 'building', 'verifying', 'waiting', 'landing'] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
@@ -95,6 +96,8 @@ export interface BoardView {
   slots: { cap: number; running: number };
   /** The Landing column's PR batches: those running, then the last few, newest first; `detail` not for viewers. */
   batches: BoardBatch[];
+  /** Why dispatch holds now (the last `governor.hold`, until its release), with its numbers and fix; null when it doesn't. */
+  hold: HoldBanner | null;
 }
 
 export interface BoardBatch {
@@ -261,7 +264,7 @@ export function boardView(i: BoardInput): BoardView {
   cards.sort((a, b) => BOARD_COLUMNS.indexOf(a.column) - BOARD_COLUMNS.indexOf(b.column) || a.since.localeCompare(b.since) || a.issue - b.issue);
   const summaries = batchSummaries(i.events).filter((b) => b.prs.length);
   const batches = [...summaries.filter((b) => b.open).reverse(), ...summaries.filter((b) => !b.open).slice(-RECENT_BATCHES).reverse()].map((b) => ({ id: b.id, status: b.status, prs: b.prs.map((x) => x.number), issues: b.prs.map((x) => x.issue), at: b.at, detail: b.detail }));
-  return { instance: i.instance, role: i.role, at: now.toISOString(), columns: BOARD_COLUMNS.map((id) => ({ id, label: COLUMN_LABEL[id] })), cards, slots: i.slots, batches };
+  return { instance: i.instance, role: i.role, at: now.toISOString(), columns: BOARD_COLUMNS.map((id) => ({ id, label: COLUMN_LABEL[id] })), cards, slots: i.slots, batches, hold: p.governor?.held ? p.governor.banner : null };
 }
 
 /**
@@ -275,7 +278,7 @@ export const VIEWER_CARD_FIELDS: readonly string[] = Object.freeze(['instance', 
 const VIEWER_PR_FIELDS: readonly string[] = Object.freeze(['number', 'url']);
 const VIEWER_WAIT_FIELDS: readonly string[] = Object.freeze(['kind', 'label', 'since']);
 const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'question', 'options', 'recommendation']);
-export const VIEWER_BOARD_KEYS: readonly string[] = Object.freeze(['instance', 'role', 'at', 'columns', 'cards', 'slots', 'batches']);
+export const VIEWER_BOARD_KEYS: readonly string[] = Object.freeze(['instance', 'role', 'at', 'columns', 'cards', 'slots', 'batches', 'hold']);
 /** A PR batch as a viewer sees it: its status (src/viewer-events.ts), not what happened in it. */
 const VIEWER_BOARD_BATCH_FIELDS: readonly string[] = Object.freeze(['id', 'status', 'prs', 'issues', 'at']);
 const VIEWER_CARD_BATCH_FIELDS: readonly string[] = Object.freeze(['status', 'id']);
@@ -294,5 +297,7 @@ export function boardForViewer(b: BoardView): Record<string, unknown> {
     return { ...v, actions: { watch: null, steer: false, answer: false, approve: null } };
   });
   out.batches = (b.batches ?? []).map((x) => pick(x, VIEWER_BOARD_BATCH_FIELDS));
+  // Why work is held, never the way to change it.
+  out.hold = b.hold ? bannerForViewer(b.hold) : null;
   return out;
 }

@@ -46,7 +46,8 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
@@ -106,6 +107,15 @@ import { refuseKeyInUrl } from './dashboard-key-url.js';
  * happens in the project's config folder, through review like any change.
  */
 /** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+/** The disk floor on this machine now (src/governor-holds.ts), as doctor checks it: Settings' and First run's numbers; null when it can't be measured. */
+export function diskFloorNow(o: Pick<DashboardOptions, 'root' | 'cfg'>, measure: (path: string) => { freeGb: number; totalGb: number } = diskFree) {
+  try {
+    return diskFloorCheck(measure(o.root), o.cfg.project.governor, o.cfg.tests.worktree.est_size_gb);
+  } catch {
+    return null;
+  }
+}
+
 export function settingsForViewer(cfg: Config) {
   const v = settingsView(cfg);
   return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
@@ -153,6 +163,8 @@ export function drainView(dir?: string, now = Date.now()): UpdatesDrain | null {
 export interface DashboardOptions {
   root: string;
   cfg: Config;
+  /** The disk's free and total GB at a path, for the disk floor's numbers (tests stand in for it); absent: the real one. */
+  diskFree?: (path: string) => { freeGb: number; totalGb: number };
   eventsDb: string;
   stateDir: string;
   /** The login recorded for the break-glass (the token used on this machine with no person named): the owner's. */
@@ -1212,7 +1224,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
         // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome, diskFloor: diskFloorNow(opts, opts.diskFree) } : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = eventCache.after(Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
@@ -1536,7 +1548,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             }
           }
           const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, ...setup });
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, diskFloor: opts.setupMode ? null : diskFloorNow(opts, opts.diskFree), ...setup });
         }
         // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
         // without confirm, what it would do; every run and refusal audited.

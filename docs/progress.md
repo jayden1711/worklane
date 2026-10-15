@@ -26,7 +26,7 @@ Features later removed keep their history here, marked **Removed in cfef4b4**: o
 ## Step 4: parallel workers, governor, tiered tests, batched landing (2026-10-08)
 
 - **Parallel workers:** each tick fills every free worker (`workers.count`), each in its own worktree. Project commands run async, so one long test run can't stall other agents' streams.
-- **Governor:** before each start it checks the daily budget, sustained load (higher of the 5- and 15-minute averages; `governor.max_load`, default 2 x cores), free disk after another worktree (`min_free_disk_pct`, default 15%) and the machine-wide slot cap shared with other harnesses. Holds are recorded when the reason changes.
+- **Governor:** before each start it checks the daily budget, sustained load (higher of the 5- and 15-minute averages; `governor.max_load`, default 2 x cores), free disk after another worktree (at least the larger of `min_free_disk_gb`, default 10 GB, and `min_free_disk_pct`, default 5%) and the machine-wide slot cap shared with other harnesses. Holds are recorded when the reason changes, with their kind and numbers; the Board and First run show the current one as a banner with its fix, and doctor warns under the disk floor.
 - **Tiered gates** (`tests.yaml gates`): `land` (e.g. `changed`) for every batch; `money_path` (e.g. `full`) added when a batch touches money paths. Exclusive tiers take the machine-wide full-run slot; a busy slot defers the batch, it never fails it. Every gate is judged against main's baseline and retried once for flakes.
 - **Batched landing:**
   - Seed with the oldest; add non-overlapping changes up to `land.batch_max` (default 4), at most one L3.

@@ -15,7 +15,6 @@ import { conflictBrief, conflictFixesUsed, conflictVerdictSchema, conflictWaitRe
 import { mergeBaseInto } from '../merge-base.js';
 import { type Readiness } from '../pr-watch.js';
 import { tryAgentSlot } from '../slots.js';
-import { updateDrain } from '../update-drain.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
@@ -147,7 +146,7 @@ export abstract class FixRuns extends Landing {
     }
     const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} CI fix`, this.d.slotsDir);
     if (!slot) {
-      this.noteHold({ reason: updateDrain(this.d.slotsDir) ? 'draining for an engine update: no new agent starts until it is installed' : 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      this.noteHold(this.slotHold());
       return;
     }
     const p = this.fixRun(w, pr, { kind: 'ci', failed, logs }, runs + 1)
@@ -233,7 +232,7 @@ export abstract class FixRuns extends Landing {
     if (hold) return;
     const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} review fix`, this.d.slotsDir);
     if (!slot) {
-      this.noteHold({ reason: updateDrain(this.d.slotsDir) ? 'draining for an engine update: no new agent starts until it is installed' : 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      this.noteHold(this.slotHold());
       return;
     }
     const p = this.fixRun(w, pr, { kind: 'review', reviews }, runs + 1)
@@ -446,7 +445,7 @@ export abstract class FixRuns extends Landing {
     if (hold) return;
     const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${n} conflict fix`, this.d.slotsDir);
     if (!slot) {
-      this.noteHold({ reason: updateDrain(this.d.slotsDir) ? 'draining for an engine update: no new agent starts until it is installed' : 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+      this.noteHold(this.slotHold());
       return;
     }
     const p = this.conflictRun(w, pr, baseRef, baseSha, used + 1)

@@ -10,6 +10,7 @@ import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin'
 import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from '../components/Header';
+import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
@@ -629,6 +630,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           <WithoutThisPage command={f.command} />
         </Card>
       )}
+      {f.diskFloor && <DiskFloorCheck d={f.diskFloor} />}
       {!!f.unavailable.length && (
         <section aria-label={`Not available in ${f.mode} mode`} data-testid="first-run-unavailable">
           <div className="mb-1.5 text-[13px] font-medium text-ink">Not available in {f.mode} mode</div>
@@ -689,6 +691,7 @@ export function FirstRunPage({ state }: { state: State }) {
     <div data-testid="page-first-run">
       <Header title="First run" sub={f && 'setup' in f && f.setup ? `${f.setup.done} of ${f.setup.total} steps done` : 'the guided setup, step by step'} />
       <div className="mx-auto max-w-3xl space-y-4 p-4 sm:p-6">
+        <HoldStrip holds={[{ instance: null, hold: state.governor?.held ? state.governor.banner : null }]} testId="first-run-hold" />
         {refused ? (
           <div className="text-[13px] text-ink-3" data-testid="first-run-refused">
             {refused.replace(/^the/, 'The')}.

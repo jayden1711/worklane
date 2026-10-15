@@ -245,8 +245,12 @@ export const ProjectConfig = z.strictObject({
     .strictObject({
       /** Sustained load (max of 5/15-min averages) above which no new agent starts. Default: 2 x cores. */
       max_load: z.number().positive().optional(),
-      /** Free disk that must remain after another worktree. */
-      min_free_disk_pct: z.number().min(1).max(90).default(15),
+      /**
+       * The disk floor (src/governor-holds.ts): free disk after another worktree must stay at or above the larger of
+       * min_free_disk_gb GB and min_free_disk_pct % of the disk. Defaults: 10 GB and 5% (the owner's choice, #470).
+       */
+      min_free_disk_pct: z.number().min(1).max(90).default(5),
+      min_free_disk_gb: z.number().min(0).max(100_000).default(10),
     })
     .prefault({}),
   /**

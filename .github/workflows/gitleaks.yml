@@ -10,7 +10,10 @@ permissions:
   contents: read
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    # A push to main runs on the self-hosted runner while vars.CI_SELF_HOSTED is 'on' (docs/ci-runners.md); everything
+    # else, pull requests and forks included, on GitHub's. Same check name either way. test/self-hosted-guard.test.ts
+    # keeps the routed jobs to the ones that need no root, Chrome, Docker, loopback, gh, jq or secrets.
+    runs-on: ${{ vars.CI_SELF_HOSTED == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","trusted-main"]') || 'ubuntu-latest' }}
     env:
       GITLEAKS_VERSION: 8.30.1
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
