@@ -142,7 +142,8 @@ test('#468 in a real Chrome: setup mode shows First run alone; a deep link to a 
     assert.deepEqual(nav, ['nav-first-run']);
     await pressSteady(cdp, q('[data-testid="setup-mode-hidden-link"]'), 'Open First run');
     await until('the first-run page', () => js<boolean>(cdp, `location.pathname === '/first-run' && !!${q('[data-testid="page-first-run"]')}`), 15_000, 100);
-    // The one primary button here too: setup mode's first step left.
+    // The one primary button here too: setup mode's first step left (once the checklist has loaded).
+    await until('the checklist', () => js<boolean>(cdp, `!!${q('[data-testid="first-run-step"]')}`), 15_000, 100);
     assert.equal(await js<number>(cdp, `document.querySelectorAll('[data-primary="true"]').length`), 1);
   } finally {
     await b.close();

@@ -1654,6 +1654,13 @@ test('#468 first run: exactly one primary button, on the first required step not
   }
   assert.deepEqual(seen, order, 'every required step not done, each once, in screen order');
   assert.ok(seen.length >= 3);
+  // Where Start has no button here (a server: the owner's root command), the coordinator step's own button is the primary.
+  const srv = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop', start: { kind: 'owner-command', unit: 'u', command: 'c', why: 'w' } });
+  const onlyCoordinator = { ...srv, setup: { ...srv.setup!, groups: srv.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((x) => (x.id === 'coordinator' ? { ...x, done: false, skipped: false } : { ...x, done: true })) })) } };
+  assert.equal(r.nextStep(onlyCoordinator)!.id, 'coordinator');
+  const srvHtml = r.renderFirstRun(onlyCoordinator);
+  assert.equal([...srvHtml.matchAll(/data-primary="true"/g)].length, 1, 'still exactly one');
+  assert.match(srvHtml.match(/data-step="coordinator"[\s\S]*?<\/li>/)![0], /data-testid="first-run-fix"[^>]*data-primary="true"/);
   // A skipped required step is passed over.
   const g = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
   const first = r.nextStep(g)!;

@@ -521,6 +521,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
     setOpened((o) => (o.includes(s.id) ? o.filter((x) => x !== s.id) : [...o, s.id]));
   };
   const next = nextStep(f);
+  // WHY (#468): Start's own button is the primary only where it has one (a checkout's owner); else the step's row.
+  const startPressable = f.start.kind === 'local' && !!f.canStart;
   return (
     <div className="space-y-5">
       {f.setupMode && (
@@ -581,7 +583,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   open={opened.includes(s.id)}
                   onFix={() => fix(s)}
                   rerun={rerun === s.id}
-                  primary={next?.id === s.id && s.fix.kind !== 'start'}
+                  primary={next?.id === s.id && !(s.fix.kind === 'start' && startPressable)}
                   {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
                   action={
                     s.fix.kind === 'action' ? (
@@ -630,7 +632,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           Your first task: open an issue on GitHub with a ```done_when block and the ready label. There is no form for it on a server: an issue filed from this page would be the App's, which the coordinator doesn't count as a writer's.
         </p>
       )}
-      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start'} />
+      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
       {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
