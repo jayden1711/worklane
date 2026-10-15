@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { boardView, checkState, columnOf, VIEWER_CARD_FIELDS, type BoardView } from '../src/board.js';
+import { boardForViewer, boardView, checkState, columnOf, VIEWER_CARD_FIELDS, type BoardView } from '../src/board.js';
 import { asks } from '../src/console/asks.js';
 import { terminalRefusal } from '../src/console/terminal.js';
 import { loadConfig } from '../src/config/load.js';
@@ -141,6 +141,22 @@ test('a high-risk PR left to the owner: Merge on GitHub, for the owner only; a p
   assert.equal(columnOf({ status: 'in_review' }, { waits: false, pr: { phase: 'ready', state: 'open' }, runRole: null }), 'landing');
   assert.equal(columnOf({ status: 'building' }, { waits: false, pr: null, runRole: 'planner' }), 'planning');
   assert.equal(columnOf({ status: 'triage' }, { waits: false, pr: null, runRole: null }), null);
+});
+
+test("#471: a PR left to the owner carries each of the merge policy's reasons whole, for the owner and writers only", () => {
+  const s = seed();
+  const reasons = ['doubt: evaluator confidence medium: the zero-quantity case is not covered by any test', 'high-risk: migration (migrations/001_orders.sql)', 'big: 512 changed lines (over 400)'];
+  s.log.append('pr.status', { issue: 7, number: 70, head: B, ready: true, reasons: [], checks: [{ name: 'ci', outcome: 'pass' }] }, 'c');
+  s.log.append('merge.decided', { issue: 7, number: 70, head: B, auto: false, reasons }, 'c');
+  for (const role of ['owner', 'writer'] as const) {
+    const w = card(view(s, role), 7).waiting!;
+    assert.deepEqual(w.reasons, reasons, `${role}: every reason, whole and separate`);
+    assert.equal(w.detail, reasons.join('; '));
+  }
+  assert.deepEqual([card(view(s, 'viewer'), 7).waiting!.reasons, card(view(s, 'viewer'), 7).waiting!.detail], [null, null], 'a viewer gets why it waits by kind only');
+  const forViewer = boardForViewer(view(s, 'owner')).cards as { issue: number; waiting: { reasons?: unknown; detail?: unknown } | null }[];
+  assert.deepEqual([forViewer.find((c) => c.issue === 7)!.waiting!.reasons, forViewer.find((c) => c.issue === 7)!.waiting!.detail], [null, null], 'and the viewer allowlist drops them');
+  assert.equal(card(view(s, 'owner'), 4).waiting!.reasons, null, 'a decision has its question, not merge reasons');
 });
 
 test('check state: any failure fails, then anything unfinished is pending', () => {
