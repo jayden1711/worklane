@@ -13,6 +13,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
 import { type ChangeFile } from '../review.js';
+import type { DecisionContext } from '../decision-context.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunRequest, type RunResult } from '../runner.js';
 import { writeLive } from '../console.js';
 import { allowedOnce } from '../domain-requests.js';
@@ -571,11 +572,12 @@ export abstract class CoordinatorBase {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[]): Promise<string> {
+  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[], context?: DecisionContext): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     // The recommendation is one of the options or nothing: prose (an agent's reasoning) moves into the detail.
     const { recommendation, receipts } = settleRecommendation(options, recommended, detail);
-    this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts });
+    // What it rests on (src/decision-context.ts), for the dashboard's detail view: never a viewer's (src/viewer-events.ts).
+    this.emit('decision.asked', { id, kind, issue, owner, question, options, recommendation, receipts, ...(context ? { context } : {}) });
     if (issue === null) return id; // not tied to an issue: answered from the dashboard or CLI
     await this.d.backlog.addLabels(issue, ['needs:decision']);
     await this.d.backlog.comment(
