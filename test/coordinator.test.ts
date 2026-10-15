@@ -17,7 +17,8 @@ import type { InstanceSettings } from '../src/instance.js';
 import { liveRuns, sendMessage, stopRun } from '../src/console.js';
 import { askChat, chatAnswer } from '../src/chat.js';
 import { EventLog } from '../src/events/log.js';
-import type { StoredEvent } from '../src/events/types.js';
+import type { EventPayload, StoredEvent } from '../src/events/types.js';
+import { boardView } from '../src/board.js';
 import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { childEnv, which } from '../src/os/index.js';
 import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
@@ -1076,15 +1077,92 @@ test('the governor holds dispatch on high load or low disk, and records it once,
   assert.equal(holds.length, 1, 'recorded once');
   assert.match((holds[0]!.payload as { reason: string }).reason, /machine load 500 > /);
   load = 1;
-  freePct = 15.5; // a 1 GB worktree on 100 GB would leave 14.5%
+  // #470: the floor is the larger of 10 GB and 5%: on 100 GB that's 10 GB, so 10.5 GB free leaves 9.5 GB after a 1 GB worktree.
+  freePct = 10.5;
   await c.tick();
   assert.equal(runner.calls.length, 0);
-  assert.match((f.log.read(0, ['governor.hold']).at(-1)!.payload as { reason: string }).reason, /free disk would drop to 14\.5%/);
+  assert.match((f.log.read(0, ['governor.hold']).at(-1)!.payload as { reason: string }).reason, /free disk would drop to 9\.5 GB with another 1 GB worktree, under the 10 GB floor/);
   freePct = 80;
   await c.tick();
   await c.idle();
   assert.ok(runner.calls.length > 0, 'starts once the machine has room');
   assert.equal(f.log.read(0, ['governor.release']).length, 1);
+});
+
+test('#470: every governor hold records its kind and numbers, the Board shows it as a banner with its fix, and it clears when the hold ends', { skip }, async () => {
+  const f = fixture();
+  f.backlog.open(easyIssue('Add a.js', 'a.js'));
+  let load = 1;
+  let disk = { freePct: 80, totalGb: 500 };
+  let current: { settings: InstanceSettings; error: string | null } = { settings: {}, error: null };
+  const runner = parallelAgents(Promise.resolve(), { now: 0, max: 0 });
+  const now = new Date(2026, 9, 10, 12, 0);
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: { load: () => load, disk: () => disk }, settings: () => current, now: () => now });
+  const last = () => f.log.read(0, ['governor.hold']).at(-1)!.payload as EventPayload<'governor.hold'>;
+  const banner = () => boardView({ events: f.log.read(), instance: 'alice', role: 'owner', canReadDigest: true, live: [], slots: { cap: 2, running: 0 } }).hold;
+
+  // Disk, on a big disk where 5% (23 GB of 460 GB) beats 10 GB: 22 GB free leaves 21 GB after a 1 GB worktree.
+  disk = { freePct: (22 / 460) * 100, totalGb: 460 };
+  await c.tick();
+  assert.equal(last().kind, 'disk');
+  assert.deepEqual({ ...last().facts, free_gb: Math.round(last().facts!.free_gb! * 1000) / 1000 }, { free_gb: 22, total_gb: 460, floor_gb: 23, floor_min_gb: 10, floor_pct: 5, est_gb: 1 });
+  let h = banner()!;
+  assert.equal(h.kind, 'disk');
+  assert.equal(h.numbers, '22 GB free of 460 GB (4.8%); the floor is 23 GB (the larger of 10 GB and 5% of the disk); one more worktree needs ~1 GB');
+  assert.equal(h.fix, 'Free ~2 GB on this disk, or change the floor in Settings.');
+  assert.deepEqual(h.link, { path: '/settings', label: 'Settings' });
+
+  // Load.
+  disk = { freePct: 80, totalGb: 500 };
+  load = 500;
+  await c.tick();
+  assert.equal(last().kind, 'load');
+  h = banner()!;
+  assert.match(h.numbers!, /^load 500\.0; the limit is \d+$/);
+
+  // A run window: it waits until the next window opens (local time).
+  load = 1;
+  current = { settings: { run_windows: [{ from: '08:00', to: '09:00' }] }, error: null };
+  await c.tick();
+  assert.equal(last().kind, 'run_window');
+  h = banner()!;
+  assert.equal(h.numbers, 'run windows: 08:00-09:00');
+  assert.equal(h.wait, new Date(2026, 9, 11, 8, 0).toISOString());
+  assert.equal(h.fix, 'or change the run windows in Settings.');
+
+  // The daily budget: it waits for the next day (UTC).
+  f.log.append('run.cost', { issue: null, role: 'x', model: 'm', usd: 1, turns: 1 }, 'alice');
+  current = { settings: { daily_budget_usd: 0.5 }, error: null };
+  await c.tick();
+  assert.equal(last().kind, 'budget');
+  h = banner()!;
+  assert.equal(h.numbers, '$1.00 spent today (UTC) of the $0.5 daily budget');
+  assert.ok(h.wait && Date.parse(h.wait) > Date.now() && Date.parse(h.wait) - Date.now() <= 86_400_000, 'until the next UTC day');
+
+  // The machine-wide agent cap: both slots held by other harnesses.
+  current = { settings: {}, error: null };
+  const held = [tryAgentSlot('other harness 1', f.slotsDir)!, tryAgentSlot('other harness 2', f.slotsDir)!];
+  await c.tick();
+  assert.equal(last().kind, 'slots');
+  h = banner()!;
+  assert.equal(h.numbers, '2 of 2 agent slots in use (every instance and harness on this machine)');
+  assert.deepEqual(h.link, { path: '/machine', label: 'Machine page' });
+  for (const l of held) l.release();
+
+  // The Claude usage limit: it waits until the reset.
+  const reset = '2026-10-11T18:00:00.000Z';
+  f.log.append('usage.paused', { reset_at: reset, source: 'claude', kind: 'five_hour', issue: null, role: 'worker', detail: 'limit' }, 'alice');
+  await c.tick();
+  assert.equal(last().kind, 'usage_limit');
+  assert.equal(banner()!.wait, reset);
+
+  // Every hold over: dispatch resumes, the release is recorded, and the banner is gone.
+  f.log.append('usage.resumed', { reset_at: reset, paused_ms: 1, reason: 'reset' }, 'alice');
+  await c.tick();
+  await c.idle();
+  assert.ok(runner.calls.length > 0, 'work starts');
+  assert.equal(f.log.read().filter((e) => e.type === 'governor.hold' || e.type === 'governor.release').at(-1)!.type, 'governor.release');
+  assert.equal(banner(), null, 'the banner clears on resume');
 });
 
 /** Workers that write a given file; optionally one that also adds a failing test. */
