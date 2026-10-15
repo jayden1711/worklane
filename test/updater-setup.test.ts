@@ -25,6 +25,7 @@ import { openIncidents, readIncidents } from '../src/watchdog/incidents.js';
 import { SIGNER_NOTICE_MS, signerFindings, stagedSignerFindings } from '../src/watchdog/probes.js';
 import { Watchdog, type WatchdogDeps } from '../src/watchdog/watchdog.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const require_ = createRequire(import.meta.url);
 const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
@@ -78,7 +79,7 @@ test('the engine allows exactly what the helper takes: install-updater, the rele
   for (const a of lists) assert.equal(machineRefusal(a) === null, allowed.includes(a), `a machine request for ${JSON.stringify(a)}`);
   assert.ok(signerPrincipalOk('owner@example.com') && signerKeyOk(k));
   assert.equal(signerFingerprint(k), helper.fingerprint(k), 'the page and the helper name a key the same way');
-  assert.deepEqual([PENDING_SIGNERS, PENDING_MAX, PENDING_TTL_MS], [helper.PENDING, helper.PENDING_MAX, helper.PENDING_TTL_MS], 'and read the same pending list, with the same limits');
+  assert.deepEqual([onRealMachine(PENDING_SIGNERS), PENDING_MAX, PENDING_TTL_MS], [helper.PENDING, helper.PENDING_MAX, helper.PENDING_TTL_MS], 'and read the same pending list, with the same limits');
 });
 
 test('what an owner types becomes one exact signer: a .pub line loses only its comment; anything else is refused with why', () => {
@@ -239,7 +240,7 @@ test('looking and reviewing change nothing: no request, no audit line, the files
     for (const body of [{ step: 'install' }, { step: 'release' }, { step: 'stage', principal: 'second@example.com', key: k }, { step: 'discard', principal: 'staged@example.com', key: staged }]) {
       const r = await x.post('/review', body);
       assert.equal(r.status, 200, JSON.stringify(r.body));
-      assert.match(r.body.plan!.command, /^\/usr\/local\/libexec\/worklane-machine (install-updater|set-update-channel release|stage-update-signer second@example\.com ssh-ed25519 |discard-update-signer staged@example\.com ssh-ed25519 )/);
+      assert.match(r.body.plan!.command.replace(MACHINE_HELPER, onRealMachine(MACHINE_HELPER)), /^\/usr\/local\/libexec\/worklane-machine (install-updater|set-update-channel release|stage-update-signer second@example\.com ssh-ed25519 |discard-update-signer staged@example\.com ssh-ed25519 )/);
       // And the change itself, sent without the confirming click: refused.
       const unconfirmed = await x.post('', body);
       assert.equal(unconfirmed.status, 400);

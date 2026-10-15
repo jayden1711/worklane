@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONSOLE_SHELL } from '../src/console/terminal.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 const setup = join(repoRoot, 'scripts', 'setup');
@@ -15,7 +16,7 @@ test('the console sudoers rule: the viewer may run exactly the console shell che
   const r = sudoers('wl-dash', 'adminx');
   assert.equal(r.status, 0, r.stderr);
   const rules = r.stdout.split('\n').filter((l) => l && !l.startsWith('#'));
-  assert.deepEqual(rules, [`wl-dash ALL=(adminx) NOPASSWD: ${CONSOLE_SHELL} check, ${CONSOLE_SHELL} shell`]);
+  assert.deepEqual(rules, [`wl-dash ALL=(adminx) NOPASSWD: ${onRealMachine(CONSOLE_SHELL)} check, ${onRealMachine(CONSOLE_SHELL)} shell`]);
   for (const bad of [['wl-dash', 'root'], ['wl-dash', 'wl-dash'], ['adminx', 'adminx'], ['wl-dash', 'ALL'], ['wl-dash', 'a b'], ['wl-dash']]) assert.notEqual(sudoers(...bad).status, 0, JSON.stringify(bad));
   if (spawnSync('visudo', ['--version']).status === 0) {
     const f = join(mkdtempSync(join(tmpdir(), 'sudoers-')), 'rule');
@@ -34,7 +35,7 @@ test('console-shell.sh: refuses a NOPASSWD admin, installs the shell root-owned 
   assert.match(sh, /FAIL: \$viewer may run the console shell as root/);
   const lib = readFileSync(join(setup, 'lib.sh'), 'utf8');
   assert.match(lib, /tmp="\/etc\/sudoers\.d\/\.\$1\.tmp"[\s\S]*visudo -cf "\$tmp"[\s\S]*mv -f "\$tmp"/, 'a dotted temp name, validated, then moved');
-  assert.match(lib, new RegExp(`^CONSOLE_SHELL=${CONSOLE_SHELL.replace(/[/.]/g, '\\$&')}$`, 'm'), 'the scripts and the engine name the same shell');
+  assert.match(lib, new RegExp(`^CONSOLE_SHELL=${onRealMachine(CONSOLE_SHELL).replace(/[/.]/g, '\\$&')}$`, 'm'), 'the scripts and the engine name the same shell');
 });
 
 test('dashboards.sh: the hub gets --console-user only when set, and only then drops its sandbox', () => {

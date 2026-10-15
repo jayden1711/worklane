@@ -8,11 +8,14 @@
 // defaults, a test read and wrote the person's own state dir (~/.local/state/<cli>, ~/Library/Application Support/<cli>),
 // the machine's slot directory (/var/lib/<cli>/agent-slots when it exists, with its STOP file and cap) and whatever
 // <PREFIX>_* the shell had set, so a live instance could change a test's result and a test could change the instance's
-// state. Here those all point into a fresh temporary directory, whatever the shell said.
+// state. Here those all point into a fresh temporary directory, whatever the shell said. So do the machine's own
+// locations (src/os/system-paths.ts: /etc/<cli>, /var/lib/<cli>, the root helpers in /usr/local/libexec, /opt/<cli>,
+// /run/lock): on a live machine a test read the real machine owners, helper, updates log and settings.
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { BRAND } from '../src/brand.js';
+import { SYSTEM_ROOT_VAR } from '../src/os/system-paths.js';
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
@@ -41,6 +44,7 @@ export const isolatedEnv: Readonly<Record<string, string>> = Object.freeze({
   [`${BRAND.envPrefix}_STATE_DIR`]: join(testMachine, 'state'),
   [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(testMachine, 'machine-init'),
   AGENT_SLOTS_DIR: join(testMachine, 'agent-slots'),
+  [SYSTEM_ROOT_VAR]: join(testMachine, 'root'),
 });
 for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });
@@ -57,6 +61,16 @@ export function restoreIsolated(...keys: string[]): void {
     if (v === undefined) throw new Error(`${k} is not one of the isolated variables`);
     process.env[k] = v;
   }
+}
+
+/**
+ * A machine location as a real machine has it (/etc/<cli>/…), from the one this process uses (inside the test's
+ * system root): for the checks that the engine and the root scripts name the same file.
+ */
+export function onRealMachine(p: string): string {
+  const r = relative(isolatedEnv[SYSTEM_ROOT_VAR]!, p);
+  if (r === '' || r.startsWith('..') || isAbsolute(r)) throw new Error(`${p} is not inside the test's system root`);
+  return `/${r.split(sep).join('/')}`;
 }
 
 process.on('exit', () => {

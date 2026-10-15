@@ -13,9 +13,10 @@ import { BRAND } from './brand.js';
 import type { EventLog, WriteFailure } from './events/log.js';
 import { diskFree } from './os/index.js';
 import { raiseIncident, resolveIncident, type Severity } from './watchdog/incidents.js';
+import { testRunBasePath } from './os/system-paths.js';
 
 /** Where the sandbox keeps test runs' workspaces and stores (scripts/setup/test-user.sh). */
-export const TEST_RUN_BASE = `/var/lib/${BRAND.cli}-test`;
+export const TEST_RUN_BASE = testRunBasePath();
 /** The default floor: the larger of this many GiB and this share of the filesystem, free. */
 export const FLOOR_GB = 10;
 export const FLOOR_PCT = 5;

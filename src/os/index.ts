@@ -9,6 +9,7 @@ import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
+import { devSlotsPath, etcPath, varLibPath } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -655,14 +656,14 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
  * days), which would drop the cap and lock files of a long-running machine.
  */
-export const SYSTEM_SLOTS = { dir: `/var/lib/${BRAND.cli}/agent-slots`, config: `/etc/${BRAND.cli}/slots.json` };
+export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('slots.json') };
 
 /**
  * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
  * directory it is in root's /var/lib/<cli>, beside the updater's other files, so no coordinator can write or remove
  * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
  */
-export const UPDATE_DRAIN_FILE = `/var/lib/${BRAND.cli}/update-drain.json`;
+export const UPDATE_DRAIN_FILE = varLibPath('update-drain.json');
 export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
   return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
 }
@@ -671,7 +672,7 @@ export function slotsDir(system = SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
   if (existsSync(system.dir)) return system.dir;
-  return '/var/tmp/agent-slots'; // single-user and development machines
+  return devSlotsPath(); // single-user and development machines
 }
 
 /**

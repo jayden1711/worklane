@@ -17,8 +17,25 @@ import { machineInitDir } from '../src/init.js';
 import { instancesDir } from '../src/instance.js';
 import { childEnv, slotsDir, stateDir } from '../src/os/index.js';
 import { toolPrefix } from '../src/tool-path.js';
+import { CLAUDE_ACCOUNT_DIR } from '../src/claude-account.js';
+import { TEST_RUN_BASE } from '../src/disk-guard.js';
+import { HELPER_RULES, MACHINE_CHANGES, MACHINE_HELPER } from '../src/machine.js';
+import { MACHINE_OWNERS_FILE } from '../src/machine-owners.js';
+import { NETWORK_FILE } from '../src/network.js';
+import { SYSTEM_SLOTS, UPDATE_DRAIN_FILE } from '../src/os/index.js';
+import { devSlotsPath, SYSTEM_ROOT_VAR } from '../src/os/system-paths.js';
+import { LIMITS_PATH } from '../src/settings.js';
+import { MACHINE_PATHS } from '../src/setup-steps.js';
+import { TAILSCALE_DIR, TAILSCALE_SCRIPT } from '../src/tailscale-setup.js';
+import { SANDBOX_HELPER } from '../src/testrun/host.js';
+import { FULL_RUN_LOCK } from '../src/testrun/run.js';
+import { CONSOLE_SHELL } from '../src/console/terminal.js';
+import { ALLOWED_SIGNERS, PENDING_SIGNERS } from '../src/updater-setup.js';
+import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
+import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
+import { refusedPort } from './held-port.js';
 import { repoRoot } from './helpers.js';
-import { homeMoved, isolatedEnv, TEST_PRELOAD, testMachine } from './isolate.js';
+import { homeMoved, isolatedEnv, onRealMachine, TEST_PRELOAD, testMachine } from './isolate.js';
 
 const testDir = join(repoRoot, 'test');
 const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
@@ -142,6 +159,84 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
   assert.deepEqual(leaked, [], 'no engine setting from the shell');
 });
 
+/** Every machine location the engine opens or runs, by name (src/os/system-paths.ts builds each). */
+const machineLocations = (): [string, string][] => [
+  ['MACHINE_OWNERS_FILE', MACHINE_OWNERS_FILE],
+  ['NETWORK_FILE', NETWORK_FILE],
+  ['UPDATES_CONFIG', UPDATES_CONFIG],
+  ['UPDATES_LOG', UPDATES_LOG],
+  ['ENGINE_CURRENT', ENGINE_CURRENT],
+  ['LIMITS_PATH', LIMITS_PATH],
+  ['WATCHDOG_CONFIG', WATCHDOG_CONFIG],
+  ['MACHINE_HELPER', MACHINE_HELPER],
+  ['MACHINE_CHANGES', MACHINE_CHANGES],
+  ['HELPER_RULES', HELPER_RULES],
+  ['CLAUDE_ACCOUNT_DIR', CLAUDE_ACCOUNT_DIR],
+  ['TEST_RUN_BASE', TEST_RUN_BASE],
+  ['TAILSCALE_DIR', TAILSCALE_DIR],
+  ['TAILSCALE_SCRIPT', TAILSCALE_SCRIPT],
+  ['SANDBOX_HELPER', SANDBOX_HELPER],
+  ['CONSOLE_SHELL', CONSOLE_SHELL],
+  ['FULL_RUN_LOCK', FULL_RUN_LOCK],
+  ['SYSTEM_SLOTS.dir', SYSTEM_SLOTS.dir],
+  ['SYSTEM_SLOTS.config', SYSTEM_SLOTS.config],
+  ['UPDATE_DRAIN_FILE', UPDATE_DRAIN_FILE],
+  ['ALLOWED_SIGNERS', ALLOWED_SIGNERS],
+  ['PENDING_SIGNERS', PENDING_SIGNERS],
+  ['machineInitDir()', machineInitDir()],
+  ['devSlotsPath()', devSlotsPath()],
+  ...Object.entries(MACHINE_PATHS)
+    .filter(([k]) => k !== 'enginePackage')
+    .map(([k, v]): [string, string] => [`MACHINE_PATHS.${k}`, v]),
+];
+
+test("in a test process, every machine location the engine reads or runs is inside the test's own root: /etc/<cli>, /var/lib/<cli>, the root helpers, /opt/<cli>, /run/lock", () => {
+  const root = isolatedEnv[SYSTEM_ROOT_VAR]!;
+  assert.ok(inside(root), `${SYSTEM_ROOT_VAR} is inside ${testMachine}`);
+  const outside = machineLocations().filter(([k, p]) => !inside(p) || (k !== 'machineInitDir()' && relative(root, p).startsWith('..')));
+  assert.deepEqual(outside, [], "under the preload, a test never reads or runs the machine's own");
+  // Each is still the machine's path, one root down: what a real machine reads (the scripts check the same names).
+  const real = machineLocations()
+    .filter(([k]) => k !== 'machineInitDir()')
+    .filter(([, p]) => !/^\/(etc|var\/lib|var\/tmp|usr\/local\/libexec|opt|run\/lock)\//.test(onRealMachine(p)));
+  assert.deepEqual(real, [], 'each is a machine path under the root');
+  assert.equal(onRealMachine(MACHINE_OWNERS_FILE), `/etc/${BRAND.cli}/machine-owners.json`);
+  assert.equal(onRealMachine(MACHINE_HELPER), `/usr/local/libexec/${BRAND.cli}-machine`);
+  assert.equal(onRealMachine(UPDATES_LOG), `/var/lib/${BRAND.cli}/updates.jsonl`);
+});
+
+test("src/ names a machine location only in src/os/system-paths.ts: nothing can read the machine's own around the test root", () => {
+  // A system root as code would spell it: /etc/<cli>, /var/lib/<cli>, /opt/<cli>, a root helper, /run/lock, a unit, /var/tmp.
+  const machine = /\/(?:etc|var\/lib|opt)\/\$\{BRAND\.cli\}|\/usr\/local\/libexec|\/run\/lock\/|\/etc\/systemd\/|\/var\/tmp\/|['"`]\/(?:etc|var|run|opt)['"`]/;
+  assert.ok(machine.test("`/etc/${BRAND.cli}/x.json`") && machine.test("join('/etc', BRAND.cli)") && machine.test("'/usr/local/libexec/helper'"), 'the check sees each spelling');
+  const src = join(repoRoot, 'src');
+  const bad: string[] = [];
+  for (const f of walk(src).filter((x) => x.endsWith('.ts') && relative(src, x) !== join('os', 'system-paths.ts'))) {
+    readFileSync(f, 'utf8')
+      .split('\n')
+      .forEach((l, i) => {
+        if (!/^\s*(\/\/|\/?\*)/.test(l) && machine.test(l)) bad.push(`${relative(repoRoot, f)}:${i + 1}: ${l.trim()}`);
+      });
+  }
+  assert.deepEqual(bad, [], 'build it with src/os/system-paths.ts (etcPath, varLibPath, libexecPath, ...), or asRoot for a command shown for a root shell');
+});
+
+test('a refused port is held: a connection there is refused, and nothing else can listen on it until it is closed', async () => {
+  const p = await refusedPort();
+  const other = createServer();
+  try {
+    await assert.rejects(fetch(p.url), (e: Error & { cause?: { code?: string } }) => e.cause?.code === 'ECONNREFUSED');
+    // Linux (CI, and the release machine): a listener can't bind a port an open connection holds. macOS's
+    // SO_REUSEADDR lets one bind it on purpose; nothing there is handed it by listen(0), which is what took it.
+    const bound = new Promise<void>((ok, fail) => (other.once('error', fail), other.listen(p.port, '127.0.0.1', () => ok())));
+    if (process.platform === 'linux') await assert.rejects(bound, /EADDRINUSE/);
+    else await bound.catch(() => undefined);
+  } finally {
+    if (other.listening) await new Promise<void>((r) => other.close(() => r()));
+    await p.close();
+  }
+});
+
 /** Hold each port as a live dashboard would (401 to a token not its own); one already taken is taken already. */
 async function holdPorts(ports: number[]): Promise<Server[]> {
   return Promise.all(
@@ -162,8 +257,8 @@ async function holdPorts(ports: number[]): Promise<Server[]> {
 const filesUnder = (d: string): string[] => walk(d).map((f) => relative(d, f).split(sep).join('/')).sort();
 
 test(
-  "regression (#312): with a live machine's environment and its dashboard ports taken, the hub and hook tests give the same results and write nothing of the machine's",
-  { timeout: 180_000 },
+  "regression (#312): with a live machine's environment, its own /etc, /var/lib and root helpers, and its dashboard ports taken, the tests that failed on one give the same results and write nothing of the machine's",
+  { timeout: 300_000 },
   async () => {
     // The machine: the owner's home and state dir, its slot directory with an emergency stop in force, and the
     // engine settings a coordinator's shell has.
@@ -172,6 +267,26 @@ test(
     for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
     writeFileSync(join(dirs.slots, 'STOP'), JSON.stringify({ by: 'owner', at: new Date().toISOString(), reason: 'the live machine is stopped' }));
     writeFileSync(join(dirs.slots, 'config.json'), JSON.stringify({ max_agents: 1 }));
+    // Its own machine locations, as a live server has them (src/os/system-paths.ts), under a root of its own: another
+    // machine owner, the root helper, an outbound proxy, engine updates on with a log naming another project's items,
+    // a change log, a slot cap, a hub unit. On the release machine a test read these and failed (#312): the machine
+    // view carried that machine's owners, helper and update log.
+    const sys = join(live, 'system');
+    const put = (p: string, text: string, mode = 0o644) => {
+      mkdirSync(join(sys, p, '..'), { recursive: true });
+      writeFileSync(join(sys, p), text, { mode });
+    };
+    const cli = BRAND.cli;
+    put(`etc/${cli}/machine-owners.json`, JSON.stringify({ owners: ['live-owner'] }));
+    put(`etc/${cli}/network.json`, JSON.stringify({ proxy: 'http://127.0.0.1:9', no_proxy: 'localhost' }));
+    put(`etc/${cli}/updates.json`, JSON.stringify({ enabled: true, channel: 'main', branch: 'main', required_checks: ['live-check'] }));
+    put(`etc/${cli}/slots.json`, JSON.stringify({ max_agents: 1 }));
+    put(`etc/${cli}/watchdog.json`, JSON.stringify({ stall_hours: 1 }));
+    put(`etc/${cli}/allowed_signers`, 'live@example.com ssh-ed25519 AAAA\n');
+    put(`etc/systemd/system/${cli}-dashboard-hub.service`, '[Service]\n');
+    put(`var/lib/${cli}/updates.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: 'waiting', to: '9201', reason: 'beta-proj #9201 wl-beta@host tr-beta-1 Beta-only' })}\n`);
+    put(`var/lib/${cli}/machine-changes.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), by: 'wl-beta@host', what: 'slots.max_agents', from: 9201, to: 9270 })}\n`);
+    put(`usr/local/libexec/${cli}-machine`, `#!/bin/sh\necho ran >> "${join(live, 'helper-ran')}"\n`, 0o755);
     const before = filesUnder(live);
     const env: NodeJS.ProcessEnv = {
       ...childEnv(),
@@ -183,11 +298,13 @@ test(
       [`${BRAND.envPrefix}_INSTANCE`]: 'shop',
       [`${BRAND.envPrefix}_USER`]: 'live-owner',
       [`${BRAND.envPrefix}_ROLE`]: 'coordinator',
+      // What the engine takes as the machine's own root: the live one above, unless the isolation moves it.
+      [SYSTEM_ROOT_VAR]: sys,
     };
     // Its fixed ports: a checkout's dashboard, the hub's two, every instance's.
     const servers = await holdPorts([LOCAL_DASHBOARD_PORT, HUB_PORT, HUB_BREAK_GLASS_PORT, ...Array.from({ length: 500 }, (_, i) => 4400 + i)]);
     try {
-      const files = ['dashboard-hub', 'push-hook-guard', 'frozen-guard'].map((n) => join(repoRoot, 'dist', 'test', `${n}.test.js`));
+      const files = ['dashboard-hub', 'push-hook-guard', 'frozen-guard', 'dashboard-auth', 'dashboard-detach', 'watchdog', 'bootstrap'].map((n) => join(repoRoot, 'dist', 'test', `${n}.test.js`));
       // As npm test and CI run them: with the preload.
       const { code, out } = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', ...files], env);
       const failed = out.split('\n').filter((l) => /^\s*not ok\b/.test(l));
@@ -197,6 +314,6 @@ test(
     } finally {
       await Promise.all(servers.map((s) => new Promise<void>((r) => (s.listening ? s.close(() => r()) : r()))));
     }
-    assert.deepEqual(filesUnder(live), before, "nothing written to the machine's home, state or slots");
+    assert.deepEqual(filesUnder(live), before, "nothing written to the machine's home, state, slots or system files, and its helper never ran");
   },
 );
