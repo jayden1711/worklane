@@ -21,6 +21,7 @@ import { createWorkspace, runEnv } from './workspace.js';
 import { configBehind, missingReferencedPath, oldHeadFailure, type Predates } from './predates.js';
 import type { Plan } from './affected.js';
 import { importsPlan, selectMode, testsArg } from './select.js';
+import { runLockPath } from '../os/system-paths.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -78,7 +79,7 @@ export const SANDBOX_OFF =
   "test runs are off on this instance: the test sandbox failed its own check, so no test run starts. The coordinator checks it again by itself (every 5 minutes at most) and runs this commit's tests once it passes: nothing to restart, and this check is replaced then. An admin can see every line with `sudo bash scripts/setup/test-user.sh check <name>`";
 
 /** The machine-wide full-run lock: test runs take it shared, agents' and other full runs exclusive. */
-export const FULL_RUN_LOCK = `/run/lock/${BRAND.cli}-full-run.lock`;
+export const FULL_RUN_LOCK = runLockPath('full-run.lock');
 
 export interface TestRunDeps {
   config: TestRunConfig;

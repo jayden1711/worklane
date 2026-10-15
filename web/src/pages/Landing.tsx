@@ -1,7 +1,7 @@
 import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const BATCH_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'info' | 'neutral'> = { landed: 'ok', green: 'ok', red: 'danger', split: 'warn', bisecting: 'warn', deferred: 'warn', abandoned: 'warn', started: 'info', testing: 'info' };
 const REVIEW = new Set(['verifying', 'evaluating', 'awaiting_decision']);

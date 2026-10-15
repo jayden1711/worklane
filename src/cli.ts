@@ -2,6 +2,8 @@
 // INVARIANT: first, so node:sqlite's experimental warning never reaches stderr (quiet-sqlite.ts). Every node process
 // the engine starts with engine code in it (the coordinator service, the dashboard, queued jobs, hooks) is this file.
 import './quiet-sqlite.js';
+// INVARIANT: before any engine module: a <PREFIX>_SYSTEM_ROOT not honoured here stops the CLI before anything starts.
+import './os/system-root-guard.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
@@ -34,7 +36,7 @@ import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
-import { DetachError, detachDashboard, detachedLines } from './dashboard-detach.js';
+import { DetachError, detachDashboard, detachedLines, writeDashboardPort } from './dashboard-detach.js';
 import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { keyFileNote } from './dashboard-key-url.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
@@ -77,8 +79,8 @@ usage: ${BRAND.cli} <command> [options]
                                    when not given. local: this checkout (default: here), as you; server:
                                    <owner/repo>, as root, through scripts/setup/add-project.sh (--timeout:
                                    how long it waits for a GitHub click or the setup PR's merge). --yes
-                                   installs missing tools as shown. To install from scratch, run
-                                   bash scripts/bootstrap.sh <repo> in a checkout (docs/quickstart.md)
+                                   installs missing tools as shown. Run through npx (npx ${BRAND.pkg} init),
+                                   local mode first installs the engine under ~/.local, then goes on from there
   export [--instance name] [--out file]
                                    one file with this checkout's (or instance's) config and history (the
                                    event log, init's checklist, findings); never secrets, locks or logs
@@ -134,7 +136,8 @@ usage: ${BRAND.cli} <command> [options]
   dashboard --detach [--port n] [--no-open]
                                    the checkout's dashboard in the background, unless it already
                                    answers; prints its first-run wizard URL last (no key in it:
-                                   the page asks for the key, kept in a file only you can read)
+                                   the page asks for the key, kept in a file only you can read);
+                                   --port 0: any free port, the same one again on a rerun
   dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
             [--console-user admin --console-devices tag:x,node]
             [--client-id id --public-url https://<host> --signin-dir dir]
@@ -204,13 +207,23 @@ usage: ${BRAND.cli} <command> [options]
 options: --root <dir> (default: nearest folder with ${BRAND.configDir}/, else cwd)`;
 
 /** One command's lines of USAGE (its synopsis and description). */
-function commandUsage(name: string, usage = USAGE): string {
+function commandUsage(name: string, usage = USAGE, every = false): string {
   const lines = usage.split('\n');
-  const at = lines.findIndex((l) => l.startsWith(`  ${name} `) || l === `  ${name}`);
-  if (at < 0) return usage;
-  const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
-  return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)].join('\n');
+  const heads = lines.flatMap((l, i) => (l.startsWith(`  ${name} `) || l === `  ${name}` ? [i] : []));
+  if (!heads.length) return usage;
+  return (every ? heads : heads.slice(0, 1))
+    .flatMap((at) => {
+      const end = lines.findIndex((l, i) => i > at && !/^ {4,}\S/.test(l));
+      return [`usage: ${BRAND.cli} ${lines[at]!.trim()}`, ...lines.slice(at + 1, end < 0 ? undefined : end)];
+    })
+    .join('\n');
 }
+
+/**
+ * The commands whose `--help` (or `-h`) prints their usage and runs nothing: each would otherwise go on and run
+ * (`dashboard --help` started a dashboard, `doctor --help` ran the checks). The installed-package test runs each.
+ */
+const HELP_COMMANDS = ['init', 'doctor', 'dashboard'] as const;
 
 function flag(args: string[], name: string): boolean {
   const i = args.indexOf(name);
@@ -238,6 +251,11 @@ async function main(argv: string[]): Promise<number> {
   const instanceOpt = option(args, '--instance');
   const root = resolve(rootOpt ?? findProjectRoot(process.cwd()) ?? process.cwd());
   const [cmd, sub, ...rest] = args;
+
+  if ((HELP_COMMANDS as readonly (string | undefined)[]).includes(cmd) && (args.includes('--help') || args.includes('-h'))) {
+    console.log(commandUsage(cmd!, USAGE, true));
+    return 0;
+  }
 
   switch (cmd) {
     case undefined:
@@ -328,10 +346,6 @@ async function main(argv: string[]): Promise<number> {
     }
 
     case 'init': {
-      if (flag(args, '--help') || flag(args, '-h')) {
-        console.log(commandUsage('init'));
-        return 0;
-      }
       const modeOpt = option(args, '--mode');
       if (modeOpt !== undefined && !(MODES as readonly string[]).includes(modeOpt)) {
         console.error('init: --mode is local or server');
@@ -762,14 +776,16 @@ async function main(argv: string[]): Promise<number> {
           return 2;
         }
         const portOpt = option(opts, '--port');
-        if (portOpt !== undefined && !/^[1-9][0-9]{0,4}$/.test(portOpt)) {
-          console.error('dashboard: --port is a port number');
+        // --port 0: any port, the dashboard's own choice (src/dashboard-detach.ts detachAnyPort).
+        if (portOpt !== undefined && (!/^(0|[1-9][0-9]{0,4})$/.test(portOpt) || Number(portOpt) > 65_535)) {
+          console.error('dashboard: --port is a port number (0: any)');
           return 2;
         }
-        const port = portOpt ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
+        const port = portOpt !== undefined ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
+        const portFile = join(projectStateDir(root), 'dashboard.port');
         const where = { root, tokenFile: join(projectStateDir(root), 'dashboard-token'), logFile: join(projectStateDir(root), 'dashboard.log') };
         try {
-          const d = await detachDashboard({ ...where, port, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--service', '--root', root, '--port', String(port)] });
+          const d = await detachDashboard({ ...where, port, portFile, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--service', '--root', root, '--port', String(port), ...(port === 0 ? ['--port-file', portFile] : [])] });
           console.log(detachedLines(d, where).join('\n'));
           if (!flag(opts, '--no-open')) openUrl(d.url);
           return 0;
@@ -781,6 +797,9 @@ async function main(argv: string[]): Promise<number> {
       }
       const instance = instanceOpt;
       const portOpt = option(opts, '--port');
+      // --port-file (dashboard --detach --port 0): where to say which port it got; setup mode's, then the same one.
+      const portFile = option(opts, '--port-file');
+      let samePort: number | undefined;
       let fromSetup = false;
       if (needsSetupMode(root, instance)) {
         // WHY: no config yet: the first-run page alone (src/setup-mode.ts) until the checkout's config loads, then the dashboard.
@@ -795,7 +814,9 @@ async function main(argv: string[]): Promise<number> {
         const port = portOpt ? Number(portOpt) : LOCAL_DASHBOARD_PORT;
         const d = await startDashboard({ root, cfg, eventsDb: logPath(root), stateDir: projectStateDir(root), user: login || cfg.project.owners.default, port, setupMode: {} });
         // INVARIANT: the dashboard's key is never in a URL this prints or opens: the page asks for it once (src/dashboard-detach.ts).
-        const shown = setupModeLines(root, port);
+        samePort = Number(new URL(d.url).port);
+        if (portFile) writeDashboardPort(portFile, samePort);
+        const shown = setupModeLines(root, samePort);
         console.log(shown.lines.join('\n'));
         if (!flag(opts, '--no-open') && !service) openUrl(shown.url);
         while (!configReady(root)) await new Promise((r) => setTimeout(r, 2_000));
@@ -819,7 +840,8 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       user = user || cfg.project.owners.default;
-      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: portOpt ? Number(portOpt) : site.port, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(instance ? { instance } : {}) });
+      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: samePort ?? (portOpt ? Number(portOpt) : site.port), ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(instance ? { instance } : {}) });
+      if (portFile) writeDashboardPort(portFile, Number(new URL(d.url).port));
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url} ${keyFileNote(d.keyFile)}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
       if (app) {

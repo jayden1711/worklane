@@ -24,9 +24,10 @@ import { secretsDir } from './console/secrets.js';
 import type { Role } from './console/asks.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
+import { varLibPath } from './os/system-paths.js';
 
 /** Where claude-account.sh writes status.json, switch.jsonl and paused (root's, 0644; lib.sh's CLAUDE_ACCOUNT_DIR). */
-export const CLAUDE_ACCOUNT_DIR = `/var/lib/${BRAND.cli}/claude-account`;
+export const CLAUDE_ACCOUNT_DIR = varLibPath('claude-account');
 /** The pasted token's file in this instance's secrets directory (lib.sh's CLAUDE_ACCOUNT_CREDENTIAL). */
 export const CLAUDE_ACCOUNT_CREDENTIAL = 'claude-account-token';
 /** A token from `claude setup-token` (lib.sh's claude_token_ok, install_claude_token's check). */
@@ -56,6 +57,13 @@ export interface AccountUser {
   expiresAt: string | null;
   installedAt: string | null;
   error: string | null;
+  /**
+   * Whether the API took the login on one minimal real call as that user (issue #463: claude auth status says a
+   * credential is configured, not that it works); null when no call was made (signed out, or an older record).
+   */
+  apiOk: boolean | null;
+  /** What Claude said when the API refused it (redacted by the script), else null. */
+  apiError: string | null;
 }
 
 export interface AccountStatus {
@@ -131,6 +139,8 @@ export function readAccountStatus(dir = CLAUDE_ACCOUNT_DIR): AccountStatus | nul
       expiresAt: str(u.expires_at, 40),
       installedAt: str(u.installed_at, 40),
       error: str(u.error, 300),
+      apiOk: typeof u.api_ok === 'boolean' ? u.api_ok : null,
+      apiError: str(u.api_error, 500),
     }));
   return { at: str(o.at, 40) ?? '', users };
 }

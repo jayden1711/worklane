@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readAccountStatus, readSwitchLines, switchView } from '../src/claude-account.js';
+import { readAccountStatus, readSwitchLines, switchedOnto, switchView } from '../src/claude-account.js';
 import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -88,6 +88,8 @@ case "$1" in
 esac
 `);
   // claude auth status --json: signed in when this user's credentials hold a setup token, unless fail-auth-<user> exists.
+  // claude -p (the login's proof, one minimal real call): answered, unless the API refuses the login: refuse-new (the new
+  // token, for every user) or refuse-api-<user> exists; then a 401 as claude prints it, with the token on stderr too.
   exe('claude', `#!/usr/bin/env node
 const fs = require('node:fs');
 const T = ${JSON.stringify(T)};
@@ -95,6 +97,13 @@ fs.appendFileSync(T + '/claude-calls', process.env.USER + ' ' + process.argv.sli
 let tok = '';
 try { tok = JSON.parse(fs.readFileSync(process.env.HOME + '/.claude/.credentials.json', 'utf8')).claudeAiOauth.accessToken; } catch {}
 const ok = /^sk-ant-oat01-/.test(tok) && !fs.existsSync(T + '/fail-auth-' + process.env.USER);
+if (process.argv[2] === '-p') {
+  const refused = !ok || (tok.includes('_new-') && fs.existsSync(T + '/refuse-new')) || fs.existsSync(T + '/refuse-api-' + process.env.USER);
+  if (!refused) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.02 })); process.exit(0); }
+  process.stderr.write('request with Authorization: Bearer ' + tok + '\\n');
+  process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, api_error_status: 401, result: 'Invalid API key · Please run /login (' + tok + ')' }));
+  process.exit(1);
+}
 process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.ai', email: tok.includes('_new-') ? 'new@example.com' : 'old@example.com', orgName: 'Example', subscriptionType: 'max' } : { loggedIn: false, authMethod: 'none' }, null, 2));
 `);
   const user = (u: string) => {
@@ -161,8 +170,11 @@ test('switch pauses every instance, installs the token for each agent and eval u
     assert.equal(statSync(m.cred(u)).mode & 0o777, 0o600, `${u}: 0600`);
     assert.equal(statSync(join(m.T, 'homes', u, '.claude')).mode & 0o777, 0o700, `${u}: ~/.claude 0700`);
   }
-  // claude auth status, as each user.
-  assert.deepEqual(readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n').slice(0, 3), AGENTS.map((u) => `${u} auth status --json`));
+  // claude auth status, as each user; and the login's proof, one minimal real call as each user (#463).
+  const claudeCalls = readFileSync(join(m.T, 'claude-calls'), 'utf8').trim().split('\n');
+  assert.deepEqual(claudeCalls.filter((c) => c.includes(' auth status')).slice(0, 3), AGENTS.map((u) => `${u} auth status --json`));
+  assert.deepEqual(claudeCalls.filter((c) => c.includes(' -p ')), AGENTS.map((u) => `${u} -p Reply with the single word: ok --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json`));
+  assert.match(r.events.find((e) => e.step === 'check' && e.user === 'wl-beta-agent')!.detail, /the API answered a minimal call/);
   assert.match(r.events.find((e) => e.step === 'check' && e.user === 'wl-beta-agent')!.detail, /signed in as new@example\.com \(claude\.ai\)/);
   // The token is in no output, no progress line, no status, and no command line (it goes through stdin).
   assert.ok(!leaked(m.outputs(r)), 'the token is never echoed');
@@ -309,6 +321,54 @@ test("status <instance>: only that instance's records are found again; every oth
   const after = readAccountStatus(join(m.T, 'var'))!;
   assert.deepEqual(after.users.map((u) => [u.user, u.loggedIn]).sort(), [['wl-alpha-agent', false], ['wl-alpha-eval', true], ['wl-beta-agent', true]], "beta's record kept as it was, not asked again");
   assert.ok(!m.outputs(r).includes(OLD), 'never the token');
+});
+
+test('issue #463: the API refuses the new login: the switch is refused, every agent user is put back on its previous login byte for byte, Claude\'s message is shown (never the token), and the instances resume on the old login', { skip: !posix }, () => {
+  const m = machine();
+  writeFileSync(join(m.T, 'refuse-new'), '');
+  const before = AGENTS.map((u) => readFileSync(m.cred(u), 'utf8'));
+  const r = m.run(['switch', '--json']);
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  // Each user: installed, then its check failed with Claude's words, then rolled back.
+  for (const u of AGENTS) {
+    const mine = r.events.filter((e) => e.user === u).map((e) => `${e.step} ${e.state}`);
+    assert.deepEqual(mine, ['install done', 'check failed', 'install failed'], u);
+    assert.match(r.events.find((e) => e.user === u && e.step === 'check')!.detail, /claude auth status says signed in as new@example\.com, but the API refused the login: HTTP 401: Invalid API key · Please run \/login/);
+    assert.match(r.events.filter((e) => e.user === u && e.step === 'install').at(-1)!.detail, /rolled back: the API refused the new login/);
+  }
+  assert.deepEqual(AGENTS.map((u) => readFileSync(m.cred(u), 'utf8')), before, 'every login exactly as it was');
+  for (const u of AGENTS) assert.equal(statSync(m.cred(u)).mode & 0o777, 0o600, u);
+  const end = r.events.at(-1)!;
+  assert.deepEqual([end.step, end.state], ['switch', 'failed']);
+  assert.match(end.detail, /^refused: the API refused the new login \(Claude said: HTTP 401: Invalid API key · Please run \/login .*\)\. Every agent user is back on its previous login\. Make a new token/);
+  // Back on the old login, as before the switch: resumed; the coordinator's account-switched hook sees no switch.
+  assert.deepEqual(r.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'done']]);
+  assert.ok(m.active('alpha') && m.active('beta'));
+  const lines = readSwitchLines(join(m.T, 'var'));
+  assert.equal(switchedOnto('alpha', lines), null, 'no account switched');
+  assert.equal(switchView(lines)!.status, 'failed');
+  // Claude's message is shown; the token (which the stand-in even put in its message and on stderr) is not.
+  assert.ok(!leaked(m.outputs(r)), 'the new token is never echoed');
+  assert.ok(!m.outputs(r).includes(OLD), 'nor the old one');
+});
+
+test('issue #463: with no token, an instance whose current login the API refuses is not resumed; status records the refusal (and fails), and the first-run step reads it', { skip: !posix }, () => {
+  const m = machine();
+  writeFileSync(join(m.T, 'refuse-api-wl-beta-agent'), '');
+  const r = m.run(['switch', '--json'], '');
+  assert.equal(r.status, 1);
+  assert.match(r.events.find((e) => e.step === 'check' && e.user === 'wl-beta-agent')!.detail, /but the API refused the login: HTTP 401/);
+  assert.deepEqual(r.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'failed']]);
+  assert.ok(!r.events.some((e) => e.step === 'install'), 'nothing installed, nothing rolled back');
+  const st = m.run(['status', '--json']);
+  assert.equal(st.status, 1, 'status fails while the API refuses a login');
+  const users = (JSON.parse(st.stdout) as { users: { user: string; logged_in: boolean; api_ok: boolean | null; api_error: string | null }[] }).users;
+  assert.deepEqual(users.map((u) => [u.user, u.logged_in, u.api_ok]), [['wl-alpha-agent', true, true], ['wl-alpha-eval', true, true], ['wl-beta-agent', true, false]]);
+  assert.match(users[2]!.api_error!, /^HTTP 401: Invalid API key · Please run \/login \(sk-\[REDACTED\]\)$/);
+  const rec = readAccountStatus(join(m.T, 'var'))!.users.find((u) => u.user === 'wl-beta-agent')!;
+  assert.deepEqual([rec.loggedIn, rec.apiOk], [true, false]);
+  assert.match(rec.error!, /the API refused the login/);
+  assert.ok(!m.outputs(st).includes(OLD), 'never the token');
 });
 
 test('bad arguments are refused before anything runs', { skip: !posix }, () => {

@@ -20,7 +20,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../wo
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { buildRoute } from './model-routing.js';
-import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
 import { storageFailure } from '../events/log.js';
 import { SESSION_ID, type RunRequest, type RunResult } from '../runner.js';
 import { resumeFailed, reviewBrief, reviewFeedback, type ReviewFeedback } from '../review-feedback.js';
@@ -124,7 +124,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFix(w: EventPayload<'pr.opened'>, pr: PullRequest, r: Readiness) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld() || this.fixGaveUp(number)) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.authHeld() || this.diskHeld() || this.fixGaveUp(number)) return;
     const failed = r.failed.map((c) => c.name);
     const give = (reason: string) => this.giveUpFix(w, pr.headSha, reason, failed);
     const ours = this.ourHead(number);
@@ -194,7 +194,7 @@ export abstract class FixRuns extends Landing {
    */
   async watchReviewFixes(): Promise<void> {
     const role = this.d.cfg.agents.roles.ci_repair;
-    if (!role?.enabled || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld()) return;
+    if (!role?.enabled || this.stopped || this.halt.signal.aborted || this.usagePause() || this.authHeld() || this.diskHeld()) return;
     const now = Date.now();
     if (now - this.reviewFixesPolledAt < (this.d.reviewPollMs ?? REVIEW_FIX_POLL_MS)) return;
     this.reviewFixesPolledAt = now;
@@ -415,7 +415,7 @@ export abstract class FixRuns extends Landing {
    */
   protected async maybeFixConflict(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const { issue: n, number } = w;
-    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.diskHeld()) return;
+    if (this.active.has(n) || this.stopped || this.halt.signal.aborted || this.usagePause() || this.authHeld() || this.diskHeld()) return;
     const baseRef = pr.base || this.branch;
     this.git(this.d.repo, 'fetch', '-q', this.remote, baseRef);
     const baseSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
@@ -601,7 +601,7 @@ export abstract class FixRuns extends Landing {
       await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
     } catch (e) {
       if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
-      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner || e instanceof UsagePaused || e instanceof ShuttingDown ? e.message : 'stopped by an emergency stop' };
+      finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner || e instanceof UsagePaused || e instanceof AuthPaused || e instanceof ShuttingDown ? e.message : 'stopped by an emergency stop' };
     } finally {
       clearInterval(heartbeat);
       release(n, leaseSha, { repo: this.d.repo, remote: this.remote });

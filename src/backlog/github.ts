@@ -4,6 +4,7 @@
 import { execFileSync } from 'node:child_process';
 import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
+import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
 
 export class GitHubError extends Error {
@@ -51,6 +52,8 @@ export class GitHubBacklog implements Backlog {
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    // GitHub took the token: the watchdog's sign that GitHub access works (src/watchdog/probes.ts, github_auth).
+    if (res.ok) noteGitHubOk(this.token);
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     if (raw && res.ok) return text as T;

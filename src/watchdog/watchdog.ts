@@ -10,6 +10,7 @@ import type { StoredEvent } from '../events/types.js';
 import { tryLock, type Lock } from '../locks.js';
 import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
+import { isNetworkFailure } from '../github/errors.js';
 import { incidentsDir } from './incidents.js';
 import { postPending, type Poster } from './post.js';
 import { diskFindings, INSTANCE_KINDS, instanceFindings, reconcile, signerFindings, stagedSignerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
@@ -32,8 +33,10 @@ export interface WatchdogDeps {
   emergency: () => boolean;
   /** The agent user's Claude sign-in (claude auth status, never the token); null when it can't be asked. */
   auth?: () => { loggedIn: boolean; expiresAt?: string | null } | null;
-  /** Mints (or reads) the instance's GitHub token: a throw is a GitHub access failure. */
+  /** Mints (or reads) the instance's GitHub token: a throw is a GitHub access failure, unless GitHub wasn't reached. */
   githubToken?: () => Promise<string>;
+  /** When a GitHub call with the instance's token last succeeded (src/github/seen.ts); unset: not known. */
+  githubOkAt?: () => number | null;
   /** The machine checks' inputs. */
   instances: () => string[];
   units: (units: string[]) => UnitState[] | null;
@@ -56,6 +59,10 @@ export class Watchdog {
   /** When the probe first said signed out, of the probes in a row that say so; null while it says signed in. */
   private authFailingSince: number | null = null;
   private running = false;
+  /** Why GitHub last refused the instance's token; kept while GitHub can't be reached, since no answer says it's fixed. */
+  private tokenRefused: string | null = null;
+  /** The passes in a row whose token request never reached GitHub; null once one does. */
+  private unreachable: { passes: number; since: number; detail: string } | null = null;
 
   /** Stopped (its coordinator is shutting down): it never takes a role again, even from a pass already under way. */
   private stopped = false;
@@ -118,15 +125,24 @@ export class Watchdog {
       if (value || !this.auth) this.auth = { at: now.getTime(), value };
       if (value) this.authFailingSince = value.loggedIn ? null : (this.authFailingSince ?? now.getTime());
     }
-    let githubTokenError: string | null = null;
     if (this.d.githubToken) {
       try {
         await this.d.githubToken();
+        this.tokenRefused = null;
+        this.unreachable = null;
       } catch (e) {
-        githubTokenError = (e as Error).message.split('\n')[0]!.slice(0, 300);
+        const why = errorLine(e);
+        if (isNetworkFailure(e)) {
+          // GitHub never answered: not an auth failure. A refusal seen before stands (nothing says it's fixed).
+          this.unreachable = { passes: (this.unreachable?.passes ?? 0) + 1, since: this.unreachable?.since ?? now.getTime(), detail: why };
+        } else {
+          this.tokenRefused = why;
+          this.unreachable = null;
+        }
       }
     }
-    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, ...(this.authFailingSince !== null ? { authFailingSince: this.authFailingSince } : {}), githubTokenError, emergency: this.d.emergency() };
+    const okAt = this.d.githubOkAt?.() ?? null;
+    const facts: InstanceFacts = { instance: this.d.instance, events: this.d.events(), now: now.getTime(), stallHours: cfg.stallHours, stop: this.d.stop(), auth: this.auth?.value ?? null, ...(this.authFailingSince !== null ? { authFailingSince: this.authFailingSince } : {}), githubTokenError: this.tokenRefused, githubUnreachable: this.unreachable, githubOkAt: okAt, emergency: this.d.emergency() };
     // A login's expiry is this probe's to resolve only when it knows one (another module may report it otherwise).
     const kinds = facts.auth?.expiresAt ? INSTANCE_KINDS : INSTANCE_KINDS.filter((k) => k !== 'claude_login_expiring');
     reconcile(instanceFindings(facts), { kinds, instance: this.d.instance }, opts);
@@ -155,6 +171,13 @@ export class Watchdog {
     this.postLock?.release();
     this.machineLock = this.postLock = null;
   }
+}
+
+/** An error's first line, with the code of what it was caused by (fetch's "fetch failed" says why only there). */
+function errorLine(e: unknown): string {
+  const first = String((e as Error)?.message ?? e).split('\n')[0]!;
+  const code = (e as { cause?: { code?: unknown } })?.cause?.code;
+  return (typeof code === 'string' && !first.includes(code) ? `${first} (${code})` : first).slice(0, 300);
 }
 
 /** Run a watchdog on its own timer until stopped; a failed pass is logged and the next one tries again. */

@@ -55,9 +55,11 @@ GITLEAKS_SHA256_DARWIN_X64=dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a180
 GITLEAKS_SHA256_DARWIN_ARM64=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
 CLAUDE_VERSION=2.1.296
 # The engine: a release tag, installed by its commit (the tag's commit carries the built dist/), from the repo
-# this script ships in (package.json's repository, beside it or one level up).
-ENGINE_TAG=v0.4.1
-ENGINE_COMMIT=9c24a10eb91ffac894e24f0b0a54d8407f23d423
+# this script ships in (package.json's repository, beside it or one level up). Both lines are written by
+# `node scripts/pin-engine.mjs <tag>` once the signed tag exists: it checks the tag's signature and that its commit
+# is a release commit, then writes them. Never by hand: an empty or partial ENGINE_COMMIT is refused below.
+ENGINE_TAG=v0.5.0
+ENGINE_COMMIT=3cfd04876b41c052f6bef9df4be4bd5e2bce6a1d
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
@@ -443,6 +445,8 @@ else
   for f in "$here/package.json" "$here/../package.json"; do [ -f "$f" ] && { pkg="$f"; break; }; done
   engine_repo="$([ -n "$pkg" ] && sed -n 's#.*"url": *"[^"]*github\.com/\([^/"]*/[^/".]*\).*#\1#p' "$pkg" | head -1 || true)"
   [ -n "$engine_repo" ] || die "can't tell the engine's repo (no package.json with a GitHub repository next to this script); pass --engine <spec>"
+  # WHY: the commit is the engine's only checksum; without a full one there is nothing to check a fetch against.
+  [[ "$ENGINE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "the pinned engine $ENGINE_TAG has no release commit in this script yet (ENGINE_COMMIT is '$ENGINE_COMMIT', not a full commit id): use a copy of this script from after it was pinned, or pass --engine <spec>"
   spec="" id="release:$ENGINE_TAG:$ENGINE_COMMIT"
 fi
 if [ "$(cat "$marker" 2>/dev/null || true)" = "$id" ] && command -v "$CLI" >/dev/null 2>&1; then

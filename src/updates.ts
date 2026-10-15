@@ -4,15 +4,16 @@
 import { readFileSync, readlinkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { asRoot, etcPath, optPath, varLibPath } from './os/system-paths.js';
 
-export const UPDATES_CONFIG = `/etc/${BRAND.cli}/updates.json`;
-export const UPDATES_LOG = `/var/lib/${BRAND.cli}/updates.jsonl`;
+export const UPDATES_CONFIG = etcPath('updates.json');
+export const UPDATES_LOG = varLibPath('updates.jsonl');
 /** The engine the machine's services run: a link to /opt/<cli>/<sha>. */
-export const ENGINE_CURRENT = `/opt/${BRAND.cli}/current`;
+export const ENGINE_CURRENT = optPath('current');
 
 /** held: a commit that was rolled back, skipped until a newer one or until an admin releases it at a root shell (updates.sh --release-hold). */
 /** The root command that releases a hold; nothing a coordinator or the dashboard can do releases one. */
-export const RELEASE_HOLD = `sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --release-hold`;
+export const RELEASE_HOLD = `sudo bash ${asRoot.opt('current/scripts/setup/updates.sh')} --release-hold`;
 /** chose: an older commit than main's tip is being installed (the tip, and every newer one, failed or held). */
 /** signers_changed: the release signers file changed outside updates.sh --signer or --confirm-signer; release installs are held until acknowledged. */
 export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | 'signers_changed' | CanaryEvent;

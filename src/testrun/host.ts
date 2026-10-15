@@ -16,8 +16,9 @@ import { SPARSE_MAX, sparseDirProblem } from '../checkout.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
+import { libexecPath } from '../os/system-paths.js';
 
-export const SANDBOX_HELPER = `/usr/local/libexec/${BRAND.cli}-testrun`;
+export const SANDBOX_HELPER = libexecPath('testrun');
 /** The label on every container a run starts: wipe removes whatever carries its run's. */
 export const RUN_LABEL = `${BRAND.cli}.test-run`;
 

@@ -45,6 +45,7 @@ const probe: SetupProbe = {
       const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.status, stdout: r.stdout, stderr: r.stderr };
     }
+    if (cmd === 'claude' && args[0] === '-p') return { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok"}', stderr: '' }; // the login's proof: a minimal real call, answered
     if (cmd === 'claude') return { status: 0, stdout: '{"loggedIn": true}', stderr: '' };
     if (cmd === 'gh' && args.join(' ').endsWith('--jq .permissions.push')) return { status: 0, stdout: 'true\n', stderr: '' };
     if (cmd === 'gh' && args.join(' ') === 'auth status') return { status: 0, stdout: '', stderr: '' };

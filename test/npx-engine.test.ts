@@ -132,10 +132,10 @@ test('init: local mode hands over before any step; server mode never does', asyn
   assert.equal(handed, 1);
 });
 
-test('--help never tells people to run the package through npx while it is not published', () => {
+test('--help tells people they can run init through npx, now the package is on npm', () => {
   const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), '--help'], { encoding: 'utf8', timeout: 20_000 });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /usage:/);
-  assert.equal(r.stdout.includes(`npx ${BRAND.pkg}`), false, 'help suggests npx for a package not on npm');
-  assert.match(r.stdout, /bash scripts\/bootstrap\.sh <repo>/);
+  assert.ok(r.stdout.includes(`Run through npx (npx ${BRAND.pkg} init)`), "help doesn't name the npx way in");
+  assert.equal(r.stdout.includes('bash scripts/bootstrap.sh <repo>'), false, 'help points a local install at a checkout instead of npm');
 });

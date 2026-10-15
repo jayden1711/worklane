@@ -21,8 +21,9 @@ import { appendFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
 import { ptyCommand } from '../os/index.js';
 import type { ConsoleSession } from './session.js';
+import { libexecPath } from '../os/system-paths.js';
 
-export const CONSOLE_SHELL = `/usr/local/libexec/${BRAND.cli}-console-shell`;
+export const CONSOLE_SHELL = libexecPath('console-shell');
 export const IDLE_MS = 10 * 60_000;
 /** A Unix login name, as useradd takes it. */
 export const CONSOLE_USER = /^[a-z_][a-z0-9_-]{0,31}$/;

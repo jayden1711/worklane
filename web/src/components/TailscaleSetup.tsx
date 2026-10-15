@@ -229,7 +229,7 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
  * The panel: loaded, and looked at again every few seconds while a step or a request is under way. Hidden on refusal;
  * a look that fails otherwise keeps the last good data, and a step being confirmed, on screen (web/src/refresh.tsx).
  */
-export function TailscaleSetupPanel() {
+export function TailscaleSetupPanel({ onLoaded }: { onLoaded?: () => void }) {
   const [loaded, setLoaded] = useState<Loaded<TailscaleData>>(NOTHING_YET);
   const data = loaded.data;
   const el = useRef<HTMLDivElement>(null);
@@ -244,7 +244,7 @@ export function TailscaleSetupPanel() {
         if (ended) void load(true);
       },
       (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
-    );
+    ).finally(() => onLoaded?.());
   useEffect(() => void load(), []);
   useRetry(loaded, () => void load());
   const active = !!data && tailscaleBusy(data);

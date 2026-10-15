@@ -10,7 +10,7 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { freePort, until } from '../src/browser/cdp.js';
+import { until } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { startHub, type HubInstance } from '../src/dashboard-hub.js';
@@ -149,7 +149,7 @@ test('`dashboard` prints a URL without the key, and names the file the key is in
     if (prev === undefined) delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
     else process.env[`${BRAND.envPrefix}_STATE_DIR`] = prev;
   });
-  const p = spawn(process.execPath, [engineCli, 'dashboard', '--root', demo.root, '--user', 'example-owner', '--no-open', '--port', String(await freePort())], { env: { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: state }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const p = spawn(process.execPath, [engineCli, 'dashboard', '--root', demo.root, '--user', 'example-owner', '--no-open', '--port', '0'], { env: { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: state }, stdio: ['ignore', 'pipe', 'pipe'] });
   let printed = '';
   p.stdout.on('data', (c) => (printed += c));
   p.stderr.on('data', (c) => (printed += c));

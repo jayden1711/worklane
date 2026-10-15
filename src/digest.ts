@@ -7,6 +7,7 @@ import { project } from './projection.js';
 import { heldUpdate, RELEASE_HOLD, updateLog, type UpdateEntry } from './updates.js';
 import { batchSummaries, type BatchSummary } from './coordinator/pr-batch.js';
 import type { StoredEvent } from './events/types.js';
+import { localDay } from './local-day.js';
 
 interface Ev {
   type: string;
@@ -203,7 +204,7 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
   for (const [n, w] of ciGaveUp) if (!closed.has(n)) add('ci_fix_gave_up', w.ts, w.issue, n, w.reason);
 
   // Blocked tasks, of either kind: blocked on someone (issue.blocked), or a landing that failed.
-  const p = project(evs as Parameters<typeof project>[0], now.toISOString().slice(0, 10));
+  const p = project(evs as Parameters<typeof project>[0], localDay(now));
   const blockedAt = new Map<number, { ts: string; landing: boolean }>();
   for (const e of evs) {
     const q = e.payload as Record<string, unknown>;

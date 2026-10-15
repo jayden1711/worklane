@@ -108,6 +108,8 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['scripts/setup/machine.sh', 'the machine setup'],
     ['scripts/machine/worklane-machine.cjs'.replace('worklane', BRAND.cli), 'the machine setup'],
     ['.github/workflows/ci.yml', 'the CI workflows'],
+    ['.github/release-signers', 'who may sign a release'],
+    ['scripts/verify-release-tag.mjs', 'who may sign a release'],
     ['src/dashboard-auth.ts', 'sign-in, credentials or secrets'],
     ['src/github-app.ts', 'sign-in, credentials or secrets'],
     ['src/console/secrets.ts', 'sign-in, credentials or secrets'],
@@ -154,6 +156,31 @@ test('regression: a harness PR touching any self-modification file waits for the
   assert.ok(n >= 40, `${n} files checked`);
   // review.yaml can't loosen it either (gradual delegation).
   assert.deepEqual(loosenedProblems({ ...review, merge: { ...review.merge, loosened: [SELF_MODIFICATION] } }), [`merge.loosened: ${SELF_MODIFICATION} is high-risk or a safety floor and can never be loosened`]);
+});
+
+test('regression: a PR touching only .github/release-signers is L3, waits for the owner and never auto-merges (this repo, the example, and a review.yaml that drops it)', () => {
+  const path = '.github/release-signers';
+  const own = loadConfig(repoRoot).review!;
+  const loose = {
+    ...own,
+    categories: { 'release-signing': [] as string[], 'release-config': [] as string[], engine: [] as string[], 'ci-config': [] as string[] },
+    levels: { ...own.levels, L3_human: { ...own.levels.L3_human, when: [] as string[] } },
+    merge: { ...own.merge, wait_categories: [] as string[] },
+  };
+  for (const [name, rc] of [['this repo', own], ['the example', review], ['loosened', loose]] as const) {
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [] }, rc);
+    assert.equal(lvl.level, 'L3', name);
+    assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], name);
+    const d = mergeDecision(clean({ level: lvl, lines: 2, waitCategories: waitCategoriesOf(rc) }));
+    assert.equal(d.auto, false, name);
+    assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${name}: ${d.reasons.join(' | ')}`);
+    assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes who may sign a release: ${path}` }, name);
+  }
+  // This repo's review.yaml names it too, at L3 and waiting.
+  const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [] }, own);
+  assert.deepEqual(lvl.categories['release-signing'], [path]);
+  assert.deepEqual(lvl.categories['release-config'], [path]);
+  assert.ok(own.levels.L3_human.when.includes('release-signing') && own.merge.wait_categories.includes('release-signing'));
 });
 
 test('merge policy: why a high-risk PR waits, plainly, naming the category and its first file', () => {

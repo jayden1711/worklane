@@ -15,10 +15,11 @@ import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 import { runHook } from '../src/hook.js';
 import { researchLanes, type Instance } from '../src/instance.js';
-import { CHAT_LANE, CHAT_REFUSED_TEXT, CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal, secretLike } from '../src/intake/chat.js';
+import { CHAT_FAILED_TEXT, CHAT_LANE, CHAT_REFUSED_TEXT, CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal, secretLike } from '../src/intake/chat.js';
 import { DiscordIntake, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
-import { FakeRunner, type RunRequest } from '../src/runner.js';
+import { FakeRunner, type FakeResult, type RunRequest } from '../src/runner.js';
+import { AUTH_FAILED_CHAT_TEXT } from '../src/claude-auth-failure.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -70,7 +71,7 @@ function fakeChat() {
   return src;
 }
 
-function setup(o: { reply?: (req: RunRequest) => unknown; cfg?: IntakeConfig; costUsd?: number; budget?: number } = {}) {
+function setup(o: { reply?: (req: RunRequest) => unknown; cfg?: IntakeConfig; costUsd?: number; budget?: number; result?: (req: RunRequest) => FakeResult | undefined } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'chan-chat-'));
   const repo = join(base, 'checkout');
   cpSync(join(repoRoot, 'examples', 'basic'), repo, { recursive: true });
@@ -87,7 +88,7 @@ function setup(o: { reply?: (req: RunRequest) => unknown; cfg?: IntakeConfig; co
   const slotsDir = join(base, 'slots');
   mkdirSync(slotsDir);
   const chat = fakeChat();
-  const runner = new FakeRunner((req) => ({ structured: req.role === CHAT_ROLE ? o.reply?.(req) ?? { reply: 'Sure: it lives in src/app.ts.' } : { kind: 'needs_info' }, ...(o.costUsd !== undefined ? { costUsd: o.costUsd } : {}) }));
+  const runner = new FakeRunner((req) => o.result?.(req) ?? ({ structured: req.role === CHAT_ROLE ? o.reply?.(req) ?? { reply: 'Sure: it lives in src/app.ts.' } : { kind: 'needs_info' }, ...(o.costUsd !== undefined ? { costUsd: o.costUsd } : {}) }));
   const intakeCfg = o.cfg ?? config();
   const c = new Coordinator({
     cfg,
@@ -163,6 +164,21 @@ test('chat: a mapped admin or writer gets a reply to every message, with no ment
   }
   assert.deepEqual(t.log.read(0, ['discord.chat']).map((e) => (e.payload as { outcome: string }).outcome), ['answered', 'answered']);
   assert.ok(t.log.read(0, ['run.cost']).some((e) => (e.payload as { role: string }).role === CHAT_ROLE), 'counted against the daily budget');
+});
+
+test("issue #463: when Claude refuses the login, the chat says so (never the generic failure text); while the login is held it starts no run and says the same", async () => {
+  const t = setup({ result: (req) => (req.role === CHAT_ROLE ? { reason: 'auth_failed', detail: "claude's login was refused (HTTP 401): Invalid API key", turns: 0, costUsd: 0 } : undefined) });
+  await t.pass(said(OWNER_ID, 'how do refunds work?'));
+  const inChat = () => t.chat.posts.filter((p) => p.where === CHAT);
+  assert.deepEqual(inChat().map((p) => [p.where, p.text]), [[CHAT, AUTH_FAILED_CHAT_TEXT]]);
+  assert.equal(AUTH_FAILED_CHAT_TEXT, 'Claude sign-in failed on this machine; the owner has been told.');
+  assert.notEqual(AUTH_FAILED_CHAT_TEXT, CHAT_FAILED_TEXT);
+  assert.equal(t.chatRuns().length, 1);
+  // Held now: the next message gets the same answer, and no run starts.
+  await t.pass(said(TEAMMATE_ID, 'and exports?'));
+  assert.deepEqual(inChat().map((p) => p.text), [AUTH_FAILED_CHAT_TEXT, AUTH_FAILED_CHAT_TEXT]);
+  assert.equal(t.chatRuns().length, 1, 'no run while the login is held');
+  assert.deepEqual(t.log.read(0, ['discord.chat']).map((e) => (e.payload as { outcome: string; why: string | null }).why), ['claude sign-in failed', 'claude sign-in failed']);
 });
 
 test('chat: the conversation is kept per channel, and the state the coordinator has is in the prompt', async () => {

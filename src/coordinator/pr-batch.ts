@@ -237,7 +237,11 @@ export function batchSummaries(events: StoredEvent[]): BatchSummary[] {
 
 /** Where one PR head stands with the batches: queued, in a batch being tested, passed, returned, or not in them. */
 export function prBatchStatus(events: StoredEvent[], number: number, head: string): { status: 'queued' | 'testing' | 'passed' | 'returned'; batch: string | null } | null {
-  const st = batchState(events);
+  return prBatchStatusIn(batchState(events), number, head);
+}
+
+/** prBatchStatus on a batch state already folded (WHY: the Board asks it for every open PR; one fold serves them all). */
+export function prBatchStatusIn(st: BatchState, number: number, head: string): { status: 'queued' | 'testing' | 'passed' | 'returned'; batch: string | null } | null {
   const k = key(number, head);
   const posted = st.posted.get(k);
   if (posted) return { status: 'passed', batch: posted };

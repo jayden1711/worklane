@@ -14,7 +14,9 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   repoFromUrl(url: string): { owner: string; repo: string } | null;
   fastForward(c: unknown): { ok: boolean; reason?: string };
   evaluateChecks(runs: Run[], required: string[]): { ok: boolean; final?: boolean; reason?: string };
-  quiet(e: { name: string; pid: number | null }[], alive: (p: number) => boolean): { quiet: boolean; why?: string };
+  quiet(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { quiet: boolean; why?: string };
+  inFlight(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { tests: unknown[]; agents: unknown[] };
+  slotPid(v: unknown): number | null;
   parseUnits(s: string): string[];
   health(samples: { at: number; states: Record<string, string | { state: string; sub: string; restarts: number; result: string }> }[], start: number, now: number): string;
   parseShow(s: string): { state: string; sub: string; restarts: number; result: string };
@@ -77,6 +79,21 @@ test('quiet only with no live agent or full-run lock and no emergency stop', () 
   assert.deepEqual(u.quiet([{ name: 'test-0.lock', pid: 42 }], alive), { quiet: false, why: 'a test run is going' });
   assert.equal(u.quiet([{ name: 'test-0.lock', pid: 7 }], alive).quiet, true, 'a dead test-run holder doesn\'t count');
   assert.equal(u.quiet([{ name: 'STOP', pid: null }], alive).quiet, false);
+});
+
+test('a slot pid below 2, or not a whole number, is no holder: a corrupt slot file never holds updates off for good', () => {
+  // kill(pid, 0) answers for a process group (0, negative) or init (1) whatever runs, so "alive" would never end.
+  const alive = () => true;
+  for (const pid of [0, 1, -1, -42, 1.5, '42', null, undefined, Number.NaN]) {
+    assert.equal(u.slotPid(pid), null, `slotPid(${String(pid)})`);
+    for (const name of ['agent-0.lock', 'test-0.lock', 'full-run.lock']) {
+      assert.deepEqual(u.quiet([{ name, pid }], alive), { quiet: true }, `${name} with pid ${String(pid)} counted as a holder`);
+      assert.deepEqual(u.inFlight([{ name, pid }], alive), { tests: [], agents: [] }, `${name} with pid ${String(pid)} counted in flight`);
+    }
+  }
+  assert.equal(u.slotPid(2), 2);
+  assert.equal(u.quiet([{ name: 'agent-0.lock', pid: 2 }], alive).quiet, false, 'a real pid still counts');
+  assert.equal(u.inFlight([{ name: 'test-0.lock', pid: 4242 }], alive).tests.length, 1);
 });
 
 test('the services an update restarts: every worklane service but the updater and the build', () => {

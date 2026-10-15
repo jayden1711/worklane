@@ -1,4 +1,5 @@
 // `export` / `import` (src/instance-move.ts): a laptop's config and history, carried to another machine as one file.
+import { restoreIsolated } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -102,7 +103,7 @@ test('export / import through the CLI: a laptop checkout to another machine, no 
   // Some history on the laptop.
   process.env[`${BRAND.envPrefix}_STATE_DIR`] = laptopState;
   const dir = projectStateDir(root);
-  delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
+  restoreIsolated(`${BRAND.envPrefix}_STATE_DIR`);
   mkdirSync(dir, { recursive: true });
   const log = new EventLog(join(dir, 'events.db'));
   log.append('issue.seen', { issue: 7, title: 'Seven', labels: ['ready'], author: 'o', owner: 'example-owner', actionable: true, why: '' }, 'coordinator');
@@ -117,7 +118,7 @@ test('export / import through the CLI: a laptop checkout to another machine, no 
   assert.match(i.stdout, /imported \d+ state files into /);
   process.env[`${BRAND.envPrefix}_STATE_DIR`] = serverState;
   const there = projectStateDir(root);
-  delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
+  restoreIsolated(`${BRAND.envPrefix}_STATE_DIR`);
   const ev = new EventLog(join(there, 'events.db'));
   assert.deepEqual(ev.read(0).map((x: { payload: unknown }) => (x.payload as { issue: number }).issue), [7]);
   ev.close();

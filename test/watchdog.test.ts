@@ -1,9 +1,11 @@
 // The machine watchdog (src/watchdog/): every trigger raises its incident once and resolves it once; posts are
 // rate-limited, carry no secret and link to the incident on the Health page; one coordinator posts per machine;
 // GET /api/health/incidents gives a viewer the allowlisted fields only.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -11,7 +13,11 @@ import type { StoredEvent } from '../src/events/types.js';
 import type { UnitState } from '../src/os/stats.js';
 import { parseUnitState, unitStates } from '../src/os/stats.js';
 import { which } from '../src/os/index.js';
-import { unitFindings } from '../src/watchdog/probes.js';
+import { GITHUB_UNREACHABLE_PASSES, unitFindings } from '../src/watchdog/probes.js';
+import { mintInstallationToken } from '../src/github-app.js';
+import { isNetworkFailure } from '../src/github/errors.js';
+import { githubOkAt } from '../src/github/seen.js';
+import { GitHubBacklog } from '../src/backlog/github.js';
 import type { UpdateEntry } from '../src/updates.js';
 import { KINDS, raiseIncident, readIncidents, resolveIncident, REOPEN_MS, healthStatus } from '../src/watchdog/incidents.js';
 import { incidentSink } from '../src/watchdog/wire.js';
@@ -24,6 +30,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { VIEWER_INCIDENT_FIELDS } from '../src/viewer-events.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { refusedPort } from './held-port.js';
 
 const DASH = 'https://dash.example.test';
 // Planted fakes, in a Discord bot token's shape: assembled at run time so no token-shaped literal is committed.
@@ -449,4 +456,205 @@ test("the usage-limit pause raises a real incident through the coordinator's sin
   const bad = join(dir, 'not-a-dir');
   writeFileSync(bad, 'x');
   assert.doesNotThrow(() => incidentSink('demo', bad).raiseIncident(USAGE_INCIDENT, 'k', 'd', 'f'));
+});
+
+// ------------------------------------------------------------------ GitHub access: refused vs not reached
+
+// The installation token the stand-in mints: assembled at run time, and asserted absent from everything stored or posted.
+const MINTED = `ghs_${'Zy9Xw8Vu7T'.repeat(4)}`;
+
+/** A stand-in GitHub on loopback that answers the App's token mint with `status` (or never answers: 'hang'). */
+async function standInGitHub() {
+  const state = { status: 201 as number | 'hang', jwts: [] as string[] };
+  const server = createServer((req, res) => {
+    state.jwts.push(String(req.headers.authorization ?? '').replace(/^Bearer /, ''));
+    req.resume();
+    if (state.status === 'hang') return; // never answers
+    res.writeHead(state.status, { 'content-type': 'application/json' });
+    res.end(state.status === 201 ? JSON.stringify({ token: MINTED, expires_at: new Date(Date.now() + 3_600_000).toISOString() }) : JSON.stringify({ message: 'A JSON web token could not be decoded' }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as { port: number }).port;
+  return {
+    state,
+    api: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise<void>((r) => {
+        server.closeAllConnections();
+        server.close(() => r());
+      }),
+  };
+}
+
+/**
+ * A loopback URL where a connection is refused (ECONNREFUSED), held until the test ends (test/held-port.ts). WHY: a
+ * port found free and closed was taken back by the stand-in's own listen(0) or another process on a busy machine, and
+ * the "unreachable" passes then reached it (#312).
+ */
+async function deadPort(t: TestContext): Promise<string> {
+  const p = await refusedPort();
+  t.after(() => p.close());
+  return p.url;
+}
+
+const appKey = () => {
+  const f = join(mkdtempSync(join(tmpdir(), 'app-key-')), 'key.pem');
+  writeFileSync(f, generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString(), { mode: 0o400 });
+  return f;
+};
+
+/** A watchdog whose GitHub token is minted for real (src/github-app.ts) from `api` each pass, with a short timeout. */
+function mintingWorld(api: () => string) {
+  const wd = world();
+  const creds = { appId: 7, installationId: 42, keyPath: appKey() };
+  wd.deps.githubToken = async () => (await mintInstallationToken(creds, ['example-org/example-shop'], fetch, api(), Date.now(), 300)).token;
+  const gh = () => readIncidents(wd.w.dir).incidents.filter((x) => x.kind === 'github_auth');
+  return { ...wd, gh };
+}
+
+test(`regression: GitHub not reached while minting the token is no red github_auth; ${GITHUB_UNREACHABLE_PASSES} passes in a row raise one amber "GitHub not reachable", resolved once it answers`, async (t) => {
+  const dead = await deadPort(t);
+  const up = await standInGitHub();
+  let api = dead;
+  const { w, pass, gh } = mintingWorld(() => api);
+  try {
+    for (let i = 1; i < GITHUB_UNREACHABLE_PASSES; i++) {
+      await pass(1);
+      assert.deepEqual(gh(), [], `pass ${i}: a refused connection is not an auth failure, and too early to report`);
+    }
+    // The other way GitHub isn't reached: it never answers (the mint's timeout): the same, not a refusal.
+    api = up.api;
+    up.state.status = 'hang';
+    await pass(1);
+    const open = gh().filter((x) => !x.resolvedAt);
+    assert.equal(open.length, 1, 'one incident');
+    assert.equal(open[0]!.key, 'alpha:network', 'under its own key, never the red one');
+    assert.equal(open[0]!.severity, 'amber');
+    assert.match(open[0]!.detail, new RegExp(`^GitHub not reachable: .*in ${GITHUB_UNREACHABLE_PASSES} passes in a row.*timeout`, 'i'));
+    up.state.status = 201;
+    await pass(1);
+    assert.deepEqual(gh().filter((x) => !x.resolvedAt), [], 'GitHub answered with a token: resolved');
+    assert.equal(w.posts.length, 2, 'posted once, and once resolved');
+    const all = JSON.stringify(readIncidents(w.dir)) + w.posts.join('\n');
+    assert.ok(up.state.jwts.filter(Boolean).length > 0, 'the stand-in saw the App JWT');
+    for (const secret of [MINTED, ...up.state.jwts.filter(Boolean)]) assert.ok(!all.includes(secret), 'no token or App JWT in an incident or a post');
+  } finally {
+    await up.close();
+  }
+});
+
+test('a real refusal of the App token (401 on the mint) is red on the first pass, and stays red while GitHub then cannot be reached', async (t) => {
+  const up = await standInGitHub();
+  const dead = await deadPort(t);
+  let api = up.api;
+  const { w, pass, gh } = mintingWorld(() => api);
+  try {
+    up.state.status = 401;
+    await pass(1);
+    let open = gh().filter((x) => !x.resolvedAt);
+    assert.equal(open.length, 1, 'red at once');
+    assert.equal(open[0]!.key, 'alpha');
+    assert.equal(open[0]!.severity, 'red');
+    assert.match(open[0]!.detail, /GitHub 401 minting/);
+    // GitHub then can't be reached: no answer says the refusal is fixed, so it stays red (never quieter).
+    api = dead;
+    for (let i = 0; i < 3; i++) await pass(1);
+    open = gh().filter((x) => !x.resolvedAt);
+    assert.deepEqual(
+      open.map((x) => [x.key, x.severity]),
+      [['alpha', 'red']],
+    );
+    api = up.api;
+    up.state.status = 201;
+    await pass(1);
+    assert.deepEqual(gh().filter((x) => !x.resolvedAt), [], 'a token minted: resolved');
+    const all = JSON.stringify(readIncidents(w.dir)) + w.posts.join('\n');
+    for (const secret of [MINTED, ...up.state.jwts.filter(Boolean)]) assert.ok(!all.includes(secret), 'no token or App JWT in an incident or a post');
+  } finally {
+    await up.close();
+  }
+});
+
+test('regression: a refused token (401) a coordinator call hit resolves once a GitHub call with the token succeeds after it, not an hour later', async () => {
+  const { w, pass, deps } = world();
+  let okAt: number | null = null;
+  deps.githubOkAt = () => okAt;
+  const open = () => readIncidents(w.dir).incidents.filter((x) => x.kind === 'github_auth' && !x.resolvedAt);
+  await pass();
+  okAt = w.now.getTime() - 60_000; // a success before the failure proves nothing
+  w.events.push(ev('coordinator.error', { instance: 'alpha', where: 'reconcile', kind: 'unauthenticated', message: 'GitHub 401 unauthenticated: Bad credentials' }, w.now.toISOString()));
+  await pass(1);
+  assert.equal(open().length, 1, 'red while no call has succeeded since');
+  assert.equal(open()[0]!.severity, 'red');
+  await pass(5);
+  assert.equal(open().length, 1, 'still red: nothing has succeeded since');
+  okAt = w.now.getTime();
+  await pass(1);
+  assert.deepEqual(open(), [], 'a call with the token succeeded after the 401: resolved within the hour');
+  // A newer refusal after that success raises it again at once.
+  w.events.push(ev('coordinator.error', { instance: 'alpha', where: 'prs', kind: 'unauthenticated', message: 'GitHub 401 unauthenticated: Bad credentials' }, new Date(w.now.getTime() + 30_000).toISOString()));
+  await pass(1);
+  assert.equal(open().length, 1);
+});
+
+test('a refused permission (403 on one call) is not cleared by another call succeeding, and an older one still stands after a cleared 401', async () => {
+  const { w, pass, deps } = world();
+  let okAt: number | null = null;
+  deps.githubOkAt = () => okAt;
+  const open = () => readIncidents(w.dir).incidents.filter((x) => x.kind === 'github_auth' && !x.resolvedAt);
+  await pass();
+  w.events.push(ev('coordinator.error', { instance: 'alpha', where: 'land', kind: 'insufficient_role', message: 'GitHub 403 insufficient_role: Resource not accessible by integration' }, w.now.toISOString()));
+  w.events.push(ev('coordinator.error', { instance: 'alpha', where: 'reconcile', kind: 'unauthenticated', message: 'GitHub 401 unauthenticated: Bad credentials' }, new Date(w.now.getTime() + 1000).toISOString()));
+  okAt = w.now.getTime() + 2000;
+  await pass(1);
+  assert.equal(open().length, 1, 'the 403 still stands');
+  assert.match(open()[0]!.detail, /insufficient_role/);
+  assert.equal(open()[0]!.severity, 'red');
+});
+
+test('isNetworkFailure: no answer from GitHub (fetch failed, a timeout, a network code) is one; an answer (401, 403) or a bad key is not', async (t) => {
+  const dead = await deadPort(t);
+  const refused = await fetch(dead).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(isNetworkFailure(refused), 'a real refused connection (undici: TypeError fetch failed, ECONNREFUSED in its cause)');
+  const timedOut = await fetch(dead, { signal: AbortSignal.timeout(0) }).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(isNetworkFailure(timedOut), 'AbortSignal.timeout');
+  for (const code of ['ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT']) assert.ok(isNetworkFailure(new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code }) })), code);
+  assert.ok(isNetworkFailure(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })));
+  assert.ok(!isNetworkFailure(new Error('GitHub 401 minting an installation token for App 7')), 'GitHub answered: an auth failure');
+  assert.ok(!isNetworkFailure(new Error('GitHub 403 minting an installation token for App 7')));
+  assert.ok(!isNetworkFailure(Object.assign(new Error("ENOENT: no such file or directory, open '/keys/app.pem'"), { code: 'ENOENT' })), 'a missing key is not the network');
+  assert.ok(!isNetworkFailure(new Error('fetch failed: ECONNRESET')), 'never read from message text alone');
+  assert.ok(!isNetworkFailure(new TypeError('Invalid URL')));
+});
+
+test("the coordinator's GitHub client notes a success against its token source, and only a success", async () => {
+  let status = 200;
+  const server = createServer((req, res) => {
+    req.resume();
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(status === 200 ? JSON.stringify({ number: 1, title: 't', body: '', labels: [], state: 'open', user: { login: 'x' } }) : JSON.stringify({ message: 'Bad credentials' }));
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const api = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const refused = async () => 'refused-token';
+  const accepted = async () => 'accepted-token';
+  try {
+    status = 401;
+    await assert.rejects(new GitHubBacklog('example-org/example-shop', refused, fetch, api).get(1), /401/);
+    assert.equal(githubOkAt(refused), null, 'a refusal is no success');
+    status = 200;
+    const before = Date.now();
+    await new GitHubBacklog('example-org/example-shop', accepted, fetch, api).get(1);
+    assert.ok((githubOkAt(accepted) ?? 0) >= before, 'a success is noted against that token source');
+    assert.equal(githubOkAt(refused), null, 'and only that one');
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
 });

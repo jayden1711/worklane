@@ -16,9 +16,10 @@ import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
 import { ROUTING_ALIASES } from './routing.js';
 import type { StuckMode } from './stuck.js';
+import { etcPath } from './os/system-paths.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
-export const LIMITS_PATH = `/etc/${BRAND.cli}/limits.json`;
+export const LIMITS_PATH = etcPath('limits.json');
 
 export const Limits = z.strictObject({
   workers: z.strictObject({ min: z.number().int().min(0), max: z.number().int().min(0) }).default({ min: 1, max: 8 }),

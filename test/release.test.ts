@@ -51,6 +51,9 @@ test('release signs the tag, on a commit holding dist/, and returns to the branc
   const notes = /--notes-file (\S+)/.exec(r.stdout)![1]!;
   assert.match(readFileSync(notes, 'utf8'), /^## v1\.2\.3 \(2026-10-12\)[\s\S]*Round totals \(#7\)/);
   assert.match(r.stdout, /gh release create v1\.2\.3 --verify-tag/);
+  // The push it suggests runs only behind the verify; npm gets a staged version the owner approves.
+  assert.match(r.stdout, /^push with \(only behind the verify, as its own step\): git tag -v v1\.2\.3 && git push origin v1\.2\.3$/m);
+  assert.match(r.stdout, /^CI then stages it on npm; approve it on npmjs\.com with 2FA \(docs\/releasing\.md\)$/m);
 });
 
 test('without a signing key the release is refused before anything is built or tagged, with the exact setup commands', { skip }, () => {

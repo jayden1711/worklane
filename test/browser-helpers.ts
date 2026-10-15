@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { BRAND } from '../src/brand.js';
-import { liveProcesses } from '../src/browser/cdp.js';
+import { liveProcesses, type Cdp } from '../src/browser/cdp.js';
 
 /** Per real-Chrome test: room for scaled launches, a retry and teardown on a loaded runner. */
 export const REAL_CHROME_TIMEOUT = 300_000;
@@ -169,4 +169,47 @@ export async function takeChromeLock(lock = CHROME_LOCK): Promise<() => void> {
 export async function oneChromeAtATime(t: TestContext): Promise<void> {
   const release = await takeChromeLock();
   t.after(release);
+}
+
+/** How far (CSS px) a target may drift between the read and the press: sub-pixel layout rounding, nothing more. */
+export const STEADY_PX = 0.5;
+
+/**
+ * Where to press `element` (an in-page expression): its centre, scrolled to the middle of the view, read, then read
+ * again two frames later, just before the press. A target that moved in between (a panel answering late above it)
+ * fails here at once, saying where it was, where it went and what the press would have reached, never a press that
+ * silently lands on something else and a wait that times out later (#453: Install moved 208 px onto a heading).
+ */
+export async function steadyCentre(cdp: Cdp, element: string, what: string = element): Promise<{ x: number; y: number }> {
+  const r = await cdp.send<{ result: { value: { a: { x: number; y: number }; b: { x: number; y: number }; connected: boolean; under: string } | null }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', {
+    expression: `(async () => {
+      const e = ${element};
+      if (!e) return null;
+      e.scrollIntoView({ block: 'center' });
+      const at = () => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; };
+      const a = at();
+      // Two frames (at most 250 ms, should frames not come): long enough for a late answer's render to land.
+      await Promise.race([new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))), new Promise((ok) => setTimeout(ok, 250))]);
+      const b = at();
+      const h = document.elementFromPoint(a.x, a.y);
+      const under = h === e || (h && e.contains(h)) ? 'the target' : h ? '<' + h.tagName.toLowerCase() + [...h.attributes].map((x) => ' ' + x.name + '="' + x.value.slice(0, 60) + '"').join('') + '>' + (h.textContent || '').trim().slice(0, 60) : 'nothing';
+      return { a, b, connected: e.isConnected, under };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
+  const v = r.result.value;
+  if (!v) throw new Error(`${what}: not in the page at the press`);
+  const p = (q: { x: number; y: number }) => `(${Math.round(q.x)}, ${Math.round(q.y)})`;
+  if (!v.connected || Math.abs(v.a.x - v.b.x) > STEADY_PX || Math.abs(v.a.y - v.b.y) > STEADY_PX) {
+    throw new Error(`${what} moved between the read and the press: from ${p(v.a)} to ${v.connected ? p(v.b) : 'out of the page'}; a press at ${p(v.a)} would reach ${v.under}`);
+  }
+  return v.b;
+}
+
+/** A real mouse press and release at a steady target's centre (steadyCentre above). */
+export async function pressSteady(cdp: Cdp, element: string, what: string = element): Promise<void> {
+  const at = await steadyCentre(cdp, element, what);
+  for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
 }

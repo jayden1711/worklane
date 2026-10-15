@@ -1464,6 +1464,31 @@ jobs:
           sudo bash scripts/setup/claude-account.sh status | tee "$F/status.txt"
           [ "$(grep -c ' signed in ' "$F/status.txt")" = 3 ] && ! grep -q 'NOT signed in' "$F/status.txt"
           if grep -qFf "$F/claude-token2" "$F/switch2.jsonl" "$F/switch2.err" "$F/switch3.jsonl" "$F/switch3.err" "$F/status.txt"; then echo "the token was echoed" >&2; exit 1; fi
+      - name: "claude-account (#463): the API refuses the new login on the real call: the switch is refused, every agent user back on its previous login byte for byte, both instances resumed on it, the token never echoed"
+        run: |
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token4"); unset t
+          # The stand-in's API refuses a token by its last 4 characters (never the token in /etc).
+          tr -d '[:space:]' < "$F/claude-token4" | tail -c 4 | sudo tee /etc/ci-claude-refuse >/dev/null
+          users="wl-beta-agent wl-beta-eval wl-ci-agent"
+          for u in $users; do sudo sha256sum "$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json" | cut -d' ' -f1 > "$F/before-$u"; done
+          set +e
+          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 < "$F/claude-token4" > "$F/switch4.jsonl" 2> "$F/switch4.err"
+          rc=$?
+          set -e
+          cat "$F/switch4.jsonl"
+          [ "$rc" = 1 ]
+          jq -se 'last | .step=="switch" and .state=="failed" and (.detail | test("^refused: the API refused the new login \\(Claude said: HTTP 401: Invalid API key"))' "$F/switch4.jsonl"
+          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="failed") | .user]' "$F/switch4.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
+          [ "$(jq -sc '[.[] | select(.step=="install" and .state=="failed" and (.detail | test("^rolled back"))) | .user]' "$F/switch4.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
+          for u in $users; do
+            c="$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"
+            [ "$(sudo sha256sum "$c" | cut -d' ' -f1)" = "$(cat "$F/before-$u")" ] || { echo "$u is not on its previous login" >&2; exit 1; }
+            [ "$(sudo stat -c '%U %a' "$c")" = "$u 600" ] || { sudo stat -c '%U %a' "$c"; exit 1; }
+          done
+          for n in ci beta; do jq -se --arg n "$n" 'map(select(.step=="resume" and .instance==$n and .state=="done")) | length == 1' "$F/switch4.jsonl"; systemctl is-active "worklane-$n.service"; done
+          s=/var/lib/worklane/claude-account
+          if grep -qFf "$F/claude-token4" "$F/switch4.jsonl" "$F/switch4.err" || sudo grep -qFf "$F/claude-token4" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token4"; then echo "the token was echoed" >&2; exit 1; fi
+          sudo rm -f /etc/ci-claude-refuse
       - name: "claude-account from the dashboard: the coordinator starts it through the helper, in a unit of its own; the token from the instance's secrets"
         run: |
           sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"
@@ -2249,12 +2274,18 @@ jobs:
           d="$(getent passwd wl-dash | cut -d: -f6)/.config/dashboard-signin"
           for x in client-secret session-secret client-id public-url; do [ "$(sudo stat -c '%U %a' "$d/$x")" = "wl-dash 400" ]; done
           (umask 077; sudo cat "$d/client-secret" > "$F/client-secret")
+      # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token), pinned
+      # here, after the last bootstrap that runs tools.sh (which links /usr/local/bin/claude to the real CLI again). The
+      # real CLI refuses CI's random token on the login's proof (#463). Every later step that relies on it checks it first.
+      - name: "server: the stand-in claude, pinned after the last tools.sh, for root and the agent user"
+        run: bash scripts/ci/claude-stand-in-pin.sh pin wl-ci-agent
       # Screens 5 and 2 (server): the machine's first project. add-project.sh as root (the Setup console's Add project
       # needs a running coordinator to run it, and a fresh machine has none): the agents' App through the manifest flow,
       # approved by the machine owner's browser (scripts/ci/manifest-browser.mjs) on a hub stand-in, since the real hub
       # signs people in at github.com only; the Claude token pasted on stdin.
       - name: "server, screens 5 and 2: the first project: the agents' App through the manifest flow, the Claude token, the checkout, the services"
         run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
           t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
           dd=/etc/systemd/system/worklane-dashboard-hub.service.d
           printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
@@ -2279,6 +2310,7 @@ jobs:
       # (tailscale serve's stand-in goes), and the same command must then print the break-glass URL, which the walk opens.
       - name: "server mode: the install command again: the hub's wizard at its https origin; with the origin gone, the break-glass, which the walk uses"
         run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
           boot() { sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash "$BOOT/scripts/bootstrap.sh" --hardened --after-credentials --yes ci example/alpha > "$F/$1" 2>&1 || { cat "$F/$1"; exit 1; }; tail -n 12 "$F/$1"; }
           one_url() { closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/$1")"; [ "$(grep -c '://' <<< "$closing")" = 1 ]; }
           boot server-install2.log
@@ -2295,7 +2327,9 @@ jobs:
           [ "$u" = http://127.0.0.1:4398/first-run ]
           echo "SERVER_URL=$u" >> "$GITHUB_ENV"
       - name: "server mode, in the browser through the hub: Claude, Protect, the policy, Discord skipped, Tailscale, the updater, every automation line, rerun from Settings, the project's dashboard (screens 2, 6-9, 11)"
-        run: node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
+        run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
+          node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
       - name: "the first project's dashboard: the hub lists it, reachable, the coordinator running"
         run: |
           (umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$F/hub-key")" > "$F/hub-auth")
@@ -2364,6 +2398,10 @@ jobs:
           journalctl --user --no-pager -n 60 || true
           tail -n 60 "$F"/*.err "$FK/server.log" 2>/dev/null || true
           cat "$HOME"/.local/state/worklane/projects/*/dashboard.log 2>/dev/null | tail -n 60 || true
+          # The local coordinator unit's own output: its stdout and stderr go to coordinator.log (StandardOutput=append:),
+          # not the journal, which has only systemd's lines (e.g. "exited, status=2").
+          systemctl --user status --no-pager 'dev.worklane.*' 2>/dev/null || true
+          tail -n 80 "$HOME"/.local/state/worklane/projects/*/coordinator.log 2>/dev/null || true
       - name: the browser's screenshots
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -5,7 +5,7 @@ import { navigate } from '../App';
 import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { LiveRun } from '../components/LiveRun';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
@@ -13,8 +13,7 @@ const markFor = (reason: string | null): MarkState => (reason === null ? 'runnin
 export const runsRefused = (message: string) => (/^agent runs are for /.test(message) ? message : null);
 
 /** For a viewer the state says may not read runs, the refusal the server would give; null for the owner and writers. */
-export const runsRefusal = (state: Pick<State, 'canReadRuns' | 'owners' | 'user' | 'role'>) =>
-  state.canReadRuns === false ? `agent runs are for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
+export { runsRefusal } from '../refusals';
 
 /** Agent runs are the owner's and the writers': anyone else is told so, not shown an empty list. */
 export function RunsRefused({ message }: { message: string }) {
@@ -74,6 +73,17 @@ export function RunList({ issue, lastId, refused: known = null }: { issue: numbe
       ) : (
         <div className="p-4 text-[13px] text-ink-3">No recorded runs.</div>
       )}
+    </Card>
+  );
+}
+
+/** Why a run that didn't succeed ended: Claude's error text or its stderr's tail, as its record keeps it (redacted). */
+export function RunWhy({ detail }: { detail?: string | undefined }) {
+  if (!detail) return null;
+  return (
+    <Card className="primitive-card-pad" data-testid="run-detail-why">
+      <div className="text-[12px] font-medium text-ink-3">Why it ended</div>
+      <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[12.5px] leading-relaxed text-ink">{detail}</div>
     </Card>
   );
 }
@@ -153,6 +163,7 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
               )}
             </Card>
             {run.role === 'researcher' && <RunResearch id={run.id} />}
+            <RunWhy detail={run.detail} />
             <Card className="primitive-card-pad" data-testid="run-final">
               <div className="text-[12px] font-medium text-ink-3">Final message</div>
               <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{run.final || <span className="text-ink-3">none</span>}</div>

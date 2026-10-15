@@ -398,5 +398,7 @@ export function withCliAgents(claude: AgentRunner, agents: Partial<Record<CliAge
       const a = agents[req.provider.agent];
       return a ? a.run(req) : Promise.resolve({ reason: 'failed', detail: `no ${req.provider.name} runner on this instance; not starting`, costUsd: 0, turns: 0, model: req.model });
     },
+    // Claude's runs keep their login (a held login is held by it: src/claude-auth-failure.ts).
+    ...(claude.loginOf ? { loginOf: (req: Parameters<NonNullable<AgentRunner['loginOf']>>[0]) => claude.loginOf!(req) } : {}),
   };
 }
