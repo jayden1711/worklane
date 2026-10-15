@@ -1024,10 +1024,22 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
    * login in the merge commit's subject and in the audit), then bring this checkout to it. Already merged elsewhere:
    * nothing to run, the checkout is brought to it all the same. Without confirm, what it would run.
    */
+  /**
+   * Who approves a merge from here: the signed-in person; on this machine with the dashboard's key, the gh login that
+   * merges it, as GitHub has it now. WHY (#468): setup mode records the key's login when it starts, before Connect
+   * GitHub, so it can be the template's placeholder.
+   */
+  const approverOf = (who: Who, gh: Gh): string => {
+    if (who.via !== 'break-glass') return who.login;
+    const r = gh(['api', 'user', '--jq', '.login']);
+    const login = r.status === 0 ? r.stdout.trim() : '';
+    return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login) ? login : who.login;
+  };
   const mergeConfigPrHere = (who: Who, number: unknown, confirm: boolean): { status: number; body: Record<string, unknown> } => {
     const gh = ghNow();
     const base = baseNow();
-    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver: who.login, gh });
+    const approver = approverOf(who, gh);
+    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver, gh });
     const then = `then this checkout's ${base} is fast-forwarded to origin's (only a fast-forward: refused if it has local changes or diverged)`;
     if (!confirm) return { status: 200, body: { ok: true, number: plan.number, url: plan.url, merged: plan.merged, command: plan.command.join(' '), then, confirmed: false } };
     if (!plan.merged) {
@@ -1037,7 +1049,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const kind = readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.pr?.number === plan.number ? 'setup' : 'config';
     const before = trackConfigPr(opts.stateDir, { number: plan.number, url: plan.url, kind, base });
     const after = settle(who, before, refreshConfigPr({ ...before, synced: false }, { repo: repoNow(), gh, git: checkoutGit() }));
-    audit(who, 'first_run.config_merged', { number: plan.number, approver: who.login, here: !plan.merged, method: plan.command[6]?.replace(/^--/, '') ?? null, synced: after.synced, detail: (after.synced ? mergedLine(after) : (after.why ?? '')).slice(0, 300) });
+    audit(who, 'first_run.config_merged', { number: plan.number, approver, here: !plan.merged, method: plan.command[6]?.replace(/^--/, '') ?? null, synced: after.synced, detail: (after.synced ? mergedLine(after) : (after.why ?? '')).slice(0, 300) });
     setupCache.clear();
     return { status: 200, body: { ok: true, number: plan.number, merged: true, synced: after.synced, detail: after.synced ? mergedLine(after) : after.why, record: after, confirmed: true } };
   };

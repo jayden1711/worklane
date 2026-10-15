@@ -55,6 +55,7 @@ function github(f: ReturnType<typeof fixture>) {
     const a = args.join(' ');
     if (a.startsWith('pr view 7 ')) return { status: 0, stdout: JSON.stringify({ state: pr.state, headRefName: f.head, baseRefName: 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: pr.mergedAt, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null }), stderr: '' };
     if (a.startsWith(`api repos/${REPO} --jq [`)) return { status: 0, stdout: 'true,true,false\n', stderr: '' };
+    if (a === 'api user --jq .login') return { status: 0, stdout: 'example-owner\n', stderr: '' };
     if (a.startsWith('pr merge 7 ')) {
       mergeElsewhere('example-owner');
       return { status: 0, stdout: '', stderr: '' };
@@ -124,15 +125,16 @@ test('#468 merged, but this checkout diverged: nothing touched, by how many comm
 
 const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
 
-async function dashboard(dir: string, gh: (args: string[]) => RunResult) {
+async function dashboard(dir: string, gh: (args: string[]) => RunResult, user = 'example-owner') {
   const stateDir = projectStateDir(dir);
   mkdirSync(stateDir, { recursive: true });
-  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'cp-slots-')), webDir: mkdtempSync(join(tmpdir(), 'cp-web-')), setupProbe: probe, setupActions: { gh } });
+  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user, roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'cp-slots-')), webDir: mkdtempSync(join(tmpdir(), 'cp-web-')), setupProbe: probe, setupActions: { gh } });
   const base = d.url.split('/?')[0]!;
   const h = (user: string) => ({ authorization: `Bearer ${d.token}`, ...asPerson(user), 'content-type': 'application/json' });
   const get = async () => (await (await fetch(`${base}/api/first-run?fresh=1`, { headers: h('example-owner') })).json()) as { configPrs: ConfigPrRecord[] };
-  const post = async (path: string, user: string, body: unknown) => {
-    const r = await fetch(`${base}${path}`, { method: 'POST', headers: h(user), body: JSON.stringify(body) });
+  const post = async (path: string, user: string | null, body: unknown) => {
+    // null: the dashboard's own key on this machine, no person named (the break-glass).
+    const r = await fetch(`${base}${path}`, { method: 'POST', headers: user ? h(user) : { authorization: `Bearer ${d.token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
   };
   const audit = () => {
@@ -185,5 +187,22 @@ test('#468 through the page: Merge here (the one path) merges as the approver an
     assert.ok(t.audit().some((x) => x.action === 'first_run.config_pr_synced'));
   } finally {
     await t.d.close();
+  }
+});
+
+test("#468 the dashboard's own key: the approver is the gh login merging it now, never the login recorded at start (setup mode's placeholder)", async () => {
+  const f = fixture();
+  const g = github(f);
+  const s = await dashboard(f.dir, g.gh, 'your-github-handle');
+  try {
+    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main' });
+    const plan = await s.post('/api/first-run/config-pr', null, { number: 7, action: 'merge' });
+    assert.equal(plan.status, 200, JSON.stringify(plan.body));
+    assert.match(String(plan.body.command), /--subject .* \(#7\), approved by example-owner on the first-run page --body $/);
+    assert.doesNotMatch(String(plan.body.command), /your-github-handle/);
+    assert.equal((await s.post('/api/first-run/config-pr', null, { number: 7, action: 'merge', confirm: true })).status, 200);
+    assert.equal(s.audit().find((e) => e.action === 'first_run.config_merged')!.detail.approver, 'example-owner');
+  } finally {
+    await s.d.close();
   }
 });
