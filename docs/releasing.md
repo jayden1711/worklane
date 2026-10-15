@@ -23,6 +23,8 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
    npm view @worklane/cli version dist-tags
    ```
 8. **Pin the bootstrap** for its PR: `node scripts/pin-engine.mjs vX.Y.Z --allowed-signers .github/release-signers`.
+9. **After it installs on each release-channel machine** (the updater takes the new tag): when the release changes the machine helper's sudoers rules, rerun them as root, once, with every instance on that machine: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`. Until then, coordinators can't run the helper's new commands (sudo refuses them), and nothing else changes. Not before the install: the rules must match the installed helper.
+   - **0.5.1:** yes. It adds the Claude account profile commands (`claude-account profile-add|remove|use <profile>`, `failover … back|stay`, and `login <profile>` if #495 is in).
 
 ## Publishing by hand
 
