@@ -38,9 +38,14 @@ export function useNow(on: boolean): number {
 /**
  * Every instance's usage this page can read: shown at once from what was kept (web/src/cache.ts), re-read every 30 s,
  * and the instance shown's again whenever its event log moves (`lastId`; the others' logs don't move with it).
- * `answered`: every instance's first answer (or failure) is in, or was kept: until then the page waits, so a banner
- * never appears above controls already on screen (#455: a pause's banner answering last moved every page 83 px).
+ * `answered`: every instance's first answer (or failure) is in, or was kept, or USAGE_WAIT_MS has passed: until then
+ * the page waits, so a banner never appears above controls already on screen (#455: a pause's banner answering last
+ * moved every page 83 px). The bound keeps a usage request that hangs from holding every page on Loading; an answer
+ * after it may still add the banner late.
  */
+/** The longest a page waits for the usage's first answer before it shows anyway. */
+export const USAGE_WAIT_MS = 3_000;
+
 export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answered: boolean } {
   const names = (): (string | null)[] => {
     const h = hubNow();
@@ -61,9 +66,11 @@ export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answ
     gone.current = false;
     void load(names());
     const t = window.setInterval(() => void load(names()), 30_000);
+    const bound = window.setTimeout(() => setAnswered(true), USAGE_WAIT_MS);
     return () => {
       gone.current = true;
       window.clearInterval(t);
+      window.clearTimeout(bound);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

@@ -417,7 +417,8 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
   // The page waits for the usage's first answer too: a pause's banner goes above it, and appearing after the page
-  // would move every control on it (#455: 83 px). The usage is asked for at the same time as the state.
+  // would move every control on it (#455: 83 px). The usage is asked for at the same time as the state; a usage that
+  // hasn't answered in USAGE_WAIT_MS (3 s) no longer holds the page.
   else if (!usageAnswered) page = <Loading />;
   // WHY: setup mode (no config yet) serves the first-run page alone, whatever the address.
   else if (state.setupMode) page = <FirstRunPage state={state} />;

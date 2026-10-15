@@ -9,7 +9,7 @@
 // screen is, let it through, and none may have moved; then a control is pressed where it is (pressSteady).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -19,7 +19,10 @@ import { startDashboard } from '../src/dashboard.js';
 import { seedDemo } from '../src/demo.js';
 import { EventLog } from '../src/events/log.js';
 import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, STEADY_PX, webUiSkip } from './browser-helpers.js';
-import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
+import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
+
+/** How long a page waits for the usage's first answer (web/src/components/Usage.tsx USAGE_WAIT_MS; checked below). */
+const USAGE_WAIT_MS = 3_000;
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
@@ -258,11 +261,44 @@ test(
         net.restart();
         await cdp.send('Page.navigate', { url: `${d.url}/${page}` });
         await until('/api/usage held', async () => answers.held('/api/usage'), 20_000);
-        await noMoveWhenLast(cdp, net, `/api/usage (paused) on ${page}`, '/api/usage', () => answers.release('/api/usage'));
+        const heldAt = Date.now();
+        // Past USAGE_WAIT_MS the page shows without the usage (the test below), and a banner after that may move it.
+        await noMoveWhenLast(cdp, net, `/api/usage (paused) on ${page}`, '/api/usage', async () => {
+          assert.ok(Date.now() - heldAt < USAGE_WAIT_MS, `the usage was held ${Date.now() - heldAt} ms, past the page's ${USAGE_WAIT_MS} ms wait for it`);
+          await answers.release('/api/usage');
+        });
         await until('the banner', () => js<boolean>(cdp, `!!${q('usage-banner')}`), 5_000);
         await until(`the ${page} page`, () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-${page}"] [data-decision="d-old-prose"]')`), 5_000);
         await pressShowMore(cdp, page);
       }
+      await answers.stop();
+    } finally {
+      await b.close();
+      await d.close();
+    }
+  },
+);
+
+test(
+  'in a real Chrome: a /api/usage that never answers holds no page: it shows within the wait for the usage',
+  { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
+  async (ctx) => {
+    await oneChromeAtATime(ctx);
+    assert.match(readFileSync(join(repoRoot, 'web', 'src', 'components', 'Usage.tsx'), 'utf8'), /export const USAGE_WAIT_MS = 3_000;/, "the test's bound is the page's");
+    const { d } = await demoWithDecisions();
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
+    try {
+      const cdp = b.cdp;
+      await openTab(cdp, d.token);
+      const answers = await intercept(cdp, { '/api/usage': null });
+      answers.hold('/api/usage');
+      await cdp.send('Page.navigate', { url: `${d.url}/inbox` });
+      await until('/api/usage asked for', async () => answers.held('/api/usage'), 20_000);
+      const asked = Date.now();
+      // Never let through: the page shows anyway, once the wait is up (and a loaded runner's slack).
+      await until('the Inbox, with the usage still unanswered', () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-inbox"] [data-decision="d-old-prose"]')`), USAGE_WAIT_MS + 5_000, 100);
+      assert.ok(answers.held('/api/usage'), 'the usage request is still unanswered');
+      assert.ok(Date.now() - asked >= USAGE_WAIT_MS - 500, `the page waited for the usage (${Date.now() - asked} ms)`);
       await answers.stop();
     } finally {
       await b.close();
