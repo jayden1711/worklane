@@ -296,6 +296,17 @@ export const EventSchemas = {
   'claude_auth.failed': z.strictObject({ key: z.string().max(500), login: z.string().max(300), lane: z.string().max(100), issue: issue.nullable(), role: z.string(), detail: z.string().max(1000) }),
   /** A minimal real call on a held login: `by` the periodic check, the owner's re-check, or an account switch. */
   'claude_auth.checked': z.strictObject({ key: z.string().max(500), login: z.string().max(300), ok: z.boolean(), by: z.enum(['timer', 'owner', 'account_switch']), detail: z.string().max(1000), cost_usd: z.number().nonnegative() }),
+  /**
+   * An instance's Claude account profile switch, as the root script recorded it (src/claude-profiles.ts, issue #464):
+   * `op` its id, `to` the profile asked for, `from` each instance's profile before, `by` who asked (a GitHub login, or
+   * `terminal`), `ok` whether every agent user's real call on it was answered (if not, nothing changed). Never a token.
+   */
+  'account.switched': z.strictObject({ op: z.string().max(80), to: z.string().max(40), from: z.record(z.string().max(40), z.string().max(40)), instances: z.array(z.string().max(40)).max(200), by: z.string().max(100), ok: z.boolean(), detail: z.string().max(1000) }),
+  /**
+   * A Claude account profile request the dashboard refused before it knew who asked (no session, or no role here):
+   * the path, the login the hub named if any, and why. Nothing was read from the body or started.
+   */
+  'claude_account.refused': z.strictObject({ path: z.string().max(100), login: z.string().max(100).nullable(), status: z.number().int(), why: z.string().max(300) }),
   /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
   'claude_auth.recovered': z.strictObject({ key: z.string().max(500), login: z.string().max(300), via: z.enum(['run', 'check']), role: z.string(), held_ms: z.number().int().nonnegative(), hold_id: z.number().int().nonnegative() }),
   /**

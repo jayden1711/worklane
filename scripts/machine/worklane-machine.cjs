@@ -29,6 +29,18 @@
 // instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
 // admin switches from a terminal with claude-account.sh itself.
 //
+//   worklane-machine claude-account profile-add <profile>
+//   worklane-machine claude-account use <profile>
+//   worklane-machine claude-account remove <profile>
+//
+// the agents' Claude account profiles (issue #464; claude-account.sh's profile-add, use and remove), started the same
+// way as the switch, as worklane-claude-account.service (so one at a time, with the switch too): a real call per agent
+// user runs longer than the asking coordinator waits. Each is for the asking instance alone, which comes from sudo's
+// SUDO_USER and never from an argument: the helper takes no instance, and passes the script --for <that instance> (and
+// for profile-add --token-from <that instance>: its dashboard stored the token before it asked). Every instance, or
+// another one, is a root admin's, with claude-account.sh at a root shell. A profile added this way is staged: nothing
+// may use it until an admin confirms it on the machine (claude-account.sh confirm-profile, never through here).
+//
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
 //   worklane-machine install-updater
@@ -91,7 +103,7 @@ const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -176,6 +188,20 @@ function parseClaudeAccount(args) {
   return args.length === 2 && args[0] === 'claude-account' && (args[1] === 'status' || args[1] === 'switch') ? args[1] : null;
 }
 
+/** A profile's name (claude-account.sh's check): default is the login each agent user had, never added or removed. */
+const profileName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
+/**
+ * The profile step a list asks for: profile-add|remove|use <profile>, for the asking instance alone; null for anything
+ * else. No instance is ever taken from the arguments (a coordinator could name any): it comes from SUDO_USER.
+ */
+function parseClaudeProfile(args) {
+  if (args[0] !== 'claude-account' || args.length !== 3 || !profileName(args[2])) return null;
+  const action = args[1];
+  if ((action === 'profile-add' || action === 'remove') && args[2] !== 'default') return { action, profile: args[2] };
+  if (action === 'use') return { action, profile: args[2] };
+  return null;
+}
+
 /** The instance whose coordinator user this is (wl-<name>), or null for anyone else. */
 const coordinatorInstance = (user) => {
   const m = /^wl-(.+)$/.exec(user || '');
@@ -208,6 +234,29 @@ function claudeAccount(action) {
   }
   logLine('claude-account', null, `switch (token from ${instance}'s dashboard)`);
   process.stdout.write(`started the Claude account switch as ${CLAUDE_ACCOUNT_UNIT}.service; it waits for the token in ${instance}'s dashboard\n`);
+  return 0;
+}
+
+function claudeProfile(p) {
+  const real = rootScript(CLAUDE_ACCOUNT);
+  if (!real) return 1;
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write(`claude-account ${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh ${p.action}\n`);
+    return 2;
+  }
+  const what = `${p.action} ${p.profile} for ${instance} (asked from ${instance}'s dashboard)`;
+  // The instance is sudo's, never the caller's: the script also refuses any other one than --for names.
+  const args = [real, p.action, p.profile, ...(p.action === 'use' ? [instance] : []), '--json', p.action === 'profile-add' ? '--token-from' : '--for', instance];
+  const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account profile', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
+  if (r.error || r.status !== 0) {
+    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch or profile change is already running (worklane-claude-account.service)\n' : `couldn't start ${p.action}: ${text.split('\n')[0]}\n`);
+    logLine('claude-account', null, `failed: ${what}: not started`);
+    return 1;
+  }
+  logLine('claude-account', null, what);
+  process.stdout.write(`started claude-account ${p.action} ${p.profile} as ${CLAUDE_ACCOUNT_UNIT}.service\n`);
   return 0;
 }
 
@@ -415,6 +464,8 @@ function main(argv) {
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
   if (account) return claudeAccount(account);
+  const profile = parseClaudeProfile(args);
+  if (profile) return claudeProfile(profile);
   if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
   const stage = parseSigner('stage-update-signer', args);
   if (stage) return stageSigner(stage);
@@ -453,4 +504,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

@@ -52,6 +52,9 @@ export const KINDS = {
   update_signer_added: { title: 'A release signer was added for engine updates', severity: 'amber' },
   // A notice too: someone staged a signer from a dashboard (trusted for nothing until confirmed at a root shell).
   update_signer_staged: { title: 'A release signer was staged for engine updates', severity: 'amber' },
+  // A notice too (scripts/setup/claude-account.sh, through the machine change log): an agents' Claude account profile
+  // was added, staged, confirmed, chosen or removed. Closes by itself a day later.
+  claude_profile_changed: { title: "The agents' Claude account changed", severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
