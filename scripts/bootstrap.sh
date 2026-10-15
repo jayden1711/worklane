@@ -137,10 +137,11 @@ case "$OS" in Darwin | Linux) ;; *) die "unsupported system $OS (macOS and Linux
 
 sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
-# Download $1 to $2 and refuse it unless its sha256 is $3.
+# Download $1 to $2 and refuse it unless its sha256 is $3. --retry: a CDN's passing 5xx (a 504 from GitHub's release
+# host failed main's bootstrap job, 2026-10-15) is tried again, up to 3 times; the checksum below decides either way.
 fetch_checked() {
   local url="$1" out="$2" want="$3" got
-  curl -fsSL -o "$out" "$url"
+  curl -fsSL --retry 3 -o "$out" "$url"
   got="$(sha256_of "$out")"
   [ "$got" = "$want" ] || { rm -f "$out"; die "checksum mismatch for $url: got $got, want $want"; }
 }
