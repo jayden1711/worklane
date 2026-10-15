@@ -334,6 +334,27 @@ The switch:
 
 From the dashboard, the Machine page's **Claude account** card shows the same status. It's visible only to machine owners: the server refuses everyone else its data (`GET /api/claude-account`, `src/claude-account.ts`). **Refresh** and **Switch account** are the machine requests `claude-account status` and `claude-account switch`, gated like any machine change (an owner here who is a machine owner, signed in, on an allowed device). The machine helper starts the switch as its own unit, `worklane-claude-account.service`, because the switch stops that coordinator too. The card follows the switch step by step from the script's progress file, `/var/lib/worklane/claude-account/switch.jsonl`. When the switch asks for the token, a password box appears in the dashboard of the instance that started it. The pasted token is stored for that instance's coordinator user only (0400). The script reads it once, as root, and deletes it. The token is never in an event, a response or the audit, which records only that a token was stored. The machine helper's sudoers rule needs rerunning once to allow `claude-account` (`machine-helper.sh` with every instance).
 
+## Claude account profiles
+
+Several Claude accounts can be signed in side by side for each instance's agent user (issue #464). Each lives in its own `CLAUDE_CONFIG_DIR`, `<agent home>/.claude-profiles/<name>/`, 0700, that user's own. The login the agent user always had (`~/.claude`, or `instance.yaml`'s `claude_config_dir`) is the profile named `default`. The eval user keeps its own login.
+
+```sh
+sudo bash scripts/setup/claude-account.sh profile-add work          # the token claude setup-token prints, at a hidden prompt
+sudo bash scripts/setup/claude-account.sh use work [<instance>]     # every instance, or one
+sudo bash scripts/setup/claude-account.sh use default [<instance>]  # back to the login each had
+sudo bash scripts/setup/claude-account.sh remove work               # refused while any instance uses it
+```
+
+- **profile-add** installs the token as every agent user in that profile's dir, then makes one minimal real call as each user on it (Haiku, "Reply with the single word: ok", one turn, `--max-budget-usd 0.05`). If the API refuses it for any user, nothing is kept: each user's new profile dir is removed, as that user.
+- **use** makes the same real call as each agent user it's for, on that profile. Only when every one is answered does `profiles.json` name it active. If one is refused, nothing changes: each instance stays on the profile it had. There's no pause: the engine reads the active profile when each run starts, so runs already going finish on the login they started on, and every new one starts on the checked one.
+- **remove** deletes each agent user's dir of that profile, as that user (never as root: the dir is in the user's home). It's refused while any instance uses the profile.
+
+What they keep, in `/var/lib/worklane/claude-account/` (root's, 0644, never a token): `profiles.json` (each profile, each agent user's last real call on it, and which profile each instance uses) and `profile-ops.jsonl` (each step). A profile switch counts as an account switch for the rest of the engine: it ends a usage-limit pause, and rechecks a held login (below). A refused login is held per profile: its key is the profile's dir, so a refused account pauses runs on that profile only.
+
+No agent command may read any profile's `.credentials.json`, whichever profile it runs on: every one is added to each run's sandbox and Read deny list.
+
+From the dashboard, the Machine page's **Claude account** card has an **Accounts** table: each account against each instance, which one is active, and whether its agent user's last real call on it was answered (with the account and plan Claude names, and when). **Use here** (one instance), **Use everywhere**, **Remove** and **Add account** (a name and the setup token, in a password field) are machine requests, `claude-account use <name> [<instance>]`, `claude-account remove <name>` and `claude-account profile-add <name>`, gated like any machine change: an owner here who is a machine owner, signed in, on an allowed device. Every refusal is audited, a request with no session's too (`claude_account.refused`), and starts nothing: no token is read or stored, no request recorded. A new account's token is stored for the coordinator user only (0400) before the request; profile-add reads it once, as root, and deletes it, and a refused request deletes it. The helper starts each step as `worklane-claude-account.service`, so one at a time, with the switch too. A finished switch is recorded once in the asking instance's log as `account.switched`, with from, to, who asked and the result. The machine helper's sudoers rule needs rerunning once to allow the four profile patterns (sudo 1.9.10 or later, like add-project).
+
 ## When Claude refuses the login
 
 `claude auth status` only says a credential is configured, not that Anthropic's API accepts it. A login can look signed in while every request comes back 401. So the runner reads Claude's own answer. A run that ends on an API authentication failure (HTTP 401 or 403, `authentication_error`, an invalid or expired API key or OAuth token, in claude's result or its stderr) ends `auth_failed`, not `failed`, with Claude's message (redacted) as its detail (`src/claude-auth-failure.ts`). A usage limit stays `rate_limited`, a token refresh that failed stays a transient error, and any other failure stays `failed`: none of them pauses anything.

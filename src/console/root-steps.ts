@@ -6,7 +6,7 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -28,6 +28,17 @@ export interface RootStepRule {
 export function slotCeiling(): number {
   const max = SLOTS_MAX as unknown as number | (() => number);
   return typeof max === 'function' ? max() : max;
+}
+
+/**
+ * An account profile step (src/claude-profiles.ts), as the helper and its sudoers patterns take it: profile-add|remove
+ * <profile> (never default), use <profile> [<instance>].
+ */
+export function profileStepOk(a: readonly string[]): boolean {
+  const name = (s: string | undefined) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
+  if (!name(a[1])) return false;
+  if ((a[0] === 'profile-add' || a[0] === 'remove') && a.length === 2) return a[1] !== 'default';
+  return a[0] === 'use' && (a.length === 2 || (a.length === 3 && addProjectNameOk(a[2])));
 }
 
 /** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, tailscale install|up|serve|public-url, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release, stage-update-signer and discard-update-signer <principal> ssh-ed25519 <public key>. Nothing else: nothing here adds a release signer or follows main. */
@@ -59,9 +70,9 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'claude-account',
     what: "the agents' Claude account: refresh each agent user's account and expiry (status), or switch every agent on the machine to another account (switch)",
-    usage: 'claude-account status|switch',
-    allows: (a) => a.length === 1 && (a[0] === 'status' || a[0] === 'switch'),
-    run: (a, exec) => claudeAccount(a[0] as 'status' | 'switch', exec),
+    usage: 'claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> [<instance>]',
+    allows: (a) => (a.length === 1 && (a[0] === 'status' || a[0] === 'switch')) || profileStepOk(a),
+    run: (a, exec) => (a.length === 1 ? claudeAccount(a[0] as 'status' | 'switch', exec) : claudeProfile(a, exec)),
   },
   {
     command: 'tailscale',

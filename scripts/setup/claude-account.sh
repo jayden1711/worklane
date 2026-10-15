@@ -4,6 +4,9 @@
 #
 #   sudo bash scripts/setup/claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...]
 #   sudo bash scripts/setup/claude-account.sh status [--json] [<instance>...]
+#   sudo bash scripts/setup/claude-account.sh profile-add <profile> [--json]
+#   sudo bash scripts/setup/claude-account.sh use <profile> [<instance>] [--json]
+#   sudo bash scripts/setup/claude-account.sh remove <profile> [--json]
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -31,31 +34,57 @@
 # and credentials.sh name theirs once its token is in, before the machine helper lists it), only their records are
 # found again; status.json keeps every other instance's as it was.
 #
+# Account profiles (issue #464): several Claude accounts side by side for each instance's agent user, each in its own
+# CLAUDE_CONFIG_DIR, <agent home>/.claude-profiles/<profile> (0700, that user's own). The agent user's login as it was
+# (~/.claude, or instance.yaml's claude_config_dir) is the profile named default. Which profile each instance's runs
+# use is profiles.json's "active" (root's, 0644: names, accounts and check results, never a token); the engine reads
+# it when each run starts, so a switch needs no pause and a run already going finishes on the login it started on.
+#   profile-add  a token from `claude setup-token` (stdin, or the asking instance's dashboard: --token-from), installed
+#                as every agent user in that profile's dir, then one minimal real call as each user on it. If the API
+#                refuses it for any user, nothing is kept: every user's new profile dir is removed.
+#   use          one minimal real call as each agent user (of the instance named, or every instance) on that profile;
+#                only when every one is answered does profiles.json name it active for them. Otherwise nothing
+#                changes: the previous profile stays active. `use default` goes back to the login each user had.
+#   remove       each agent user's dir of that profile, removed as that user (never as root: the dir is the user's);
+#                refused while any instance has it active.
+# Every file step under an agent user's home is done as that user. Each step is a JSON line in profile-ops.jsonl.
+#
 # Output: plain lines, or with --json one JSON line per step change (switch) or one JSON object (status). Either way
 # the switch's lines go to $CLAUDE_ACCOUNT_DIR/switch.jsonl and what status found to status.json, root's 0644, for the
 # dashboard. Exit 0 when every instance it paused was resumed (switch) or every user is signed in (status).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
 
 cmd="${1:-}"
 [ "$#" -ge 1 ] && shift
-timeout=30 token_timeout=30 token_from="" json="" names=()
+timeout=30 token_timeout=30 token_from="" for_inst="" json="" names=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --timeout) timeout="${2:-}"; shift 2 ;;
     --token-timeout) token_timeout="${2:-}"; shift 2 ;;
     --token-from) token_from="${2:-}"; shift 2 ;;
+    --for) for_inst="${2:-}"; shift 2 ;;
     --json) json=1; shift ;;
     -*) echo "$usage" >&2; exit 2 ;;
     *) names+=("$1"); shift ;;
   esac
 done
-case "$cmd" in switch | status) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$cmd" in switch | status | profile-add | use | remove) ;; *) echo "$usage" >&2; exit 2 ;; esac
+# A profile's name: lowercase letters, digits and dashes (default: the login each agent user had, never added or removed).
+profile=""
+if [[ "$cmd" == profile-add || "$cmd" == use || "$cmd" == remove ]]; then
+  profile="${names[0]:-}"
+  names=(${names[@]+"${names[@]:1}"})
+  [[ "$profile" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "a profile's name: lowercase letters, digits and dashes, starting with a letter, at most 21" >&2; exit 2; }
+  if [ "$cmd" != use ] && [ "$profile" = default ]; then echo "default is the login each agent user already has: it can't be added or removed" >&2; exit 2; fi
+  if [ "$cmd" = use ]; then [ "${#names[@]}" -le 1 ] || { echo "$usage" >&2; exit 2; }; else [ "${#names[@]}" -eq 0 ] || { echo "$usage" >&2; exit 2; }; fi
+fi
+[ -z "$for_inst" ] || instance_name_ok "$for_inst" || { echo "--for: an instance name" >&2; exit 2; }
 [[ "$timeout" =~ ^[0-9]{1,3}$ ]] || { echo "--timeout: minutes, 0 to 999" >&2; exit 2; }
 [[ "$token_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--token-timeout: minutes, 1 to 999" >&2; exit 2; }
 [ -z "$token_from" ] || instance_name_ok "$token_from" || { echo "--token-from: an instance name" >&2; exit 2; }
@@ -135,7 +164,7 @@ process.stdout.write(JSON.stringify(r));
 ' "$@"
 }
 # The real call as this user, as account_record takes it: ok, or Claude's message.
-api_result() { local said; if said="$(claude_api_check "$1")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
+api_result() { local said; if said="$(claude_api_check "$1" "${2:-}")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
 # Every agent user's record, as a JSON array; written to status.json (root's, 0644) for the dashboard. With `api`, each
 # user claude auth status calls signed in is also checked with one minimal real call (a switch's end has just made it).
 collect_status() {
@@ -191,6 +220,209 @@ if [ "$cmd" = status ]; then
   if [ -n "$json" ]; then printf '{"users":%s}\n' "$recs"; else show_status "$recs"; fi
   # Exit 1 when any user isn't signed in, or the API refused its login.
   if printf '%s' "$recs" | grep -q '"logged_in":false\|"api_ok":false'; then exit 1; fi
+  exit 0
+fi
+
+# --- account profiles (issue #464)
+
+if [ -n "$profile" ]; then
+  exec 3>&1
+  [ -z "$json" ] || exec 1>&2
+  install -d -m 0755 "$CLAUDE_ACCOUNT_DIR"
+  ops="$CLAUDE_ACCOUNT_DIR/profile-ops.jsonl" pfile="$CLAUDE_ACCOUNT_DIR/profiles.json"
+  op_id="op-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  # One progress line: pemit <step> <state> <instance or ""> <user or ""> <detail> [<"from": JSON object>]. To
+  # profile-ops.jsonl, and to stdout: JSON with --json, else as text.
+  pemit() {
+    local line
+    line="{\"at\":$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)"),\"id\":$(json_str "$op_id"),\"op\":$(json_str "$cmd"),\"profile\":$(json_str "$profile"),\"step\":$(json_str "$1"),\"state\":$(json_str "$2")"
+    [ -z "$3" ] || line="$line,\"instance\":$(json_str "$3")"
+    [ -z "$4" ] || line="$line,\"user\":$(json_str "$4")"
+    [ -z "$for_inst$token_from" ] || line="$line,\"for\":$(json_str "${for_inst:-$token_from}")"
+    [ -z "${6:-}" ] || line="$line,\"from\":$6"
+    line="$line,\"detail\":$(json_str "$5")}"
+    printf '%s\n' "$line" >> "$ops"
+    chmod 0644 "$ops"
+    if [ -n "$json" ]; then printf '%s\n' "$line" >&3; else printf '%-8s %-8s %-14s %s\n' "$1" "$2" "${3:--}" "$5${4:+ ($4)}" >&3; fi
+  }
+  # profiles.json, read and written whole by node (root's, 0644, by a rename): pedit <action> <args...>
+  #   add <kind> <records>       this profile, with each user's check record (a JSON array)
+  #   checked <records>          each user's latest check on this profile
+  #   use <at> <instance>...     this profile active for these instances (default: the entry taken out)
+  #   remove                     this profile's entry
+  #   users-of                   prints the instances that have this profile active, one a line
+  #   has                        exits 0 when this profile has been added
+  #   active-json <instance>...  prints each one's active profile, as a JSON object
+  pedit() {
+    "$(command -v node)" -e '
+const fs = require("node:fs");
+const [file, profile, action, ...a] = process.argv.slice(1);
+let p = {};
+try { p = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+p.version = 1;
+p.profiles = p.profiles && typeof p.profiles === "object" ? p.profiles : {};
+p.active = p.active && typeof p.active === "object" ? p.active : {};
+const recs = (s) => Object.fromEntries(JSON.parse(s).map((r) => [r.user, r]));
+if (action === "active-json") {
+  process.stdout.write(JSON.stringify(Object.fromEntries(a.map((i) => [i, (p.active[i] && p.active[i].profile) || "default"]))));
+  process.exit(0);
+}
+if (action === "has") process.exit(p.profiles[profile] && p.profiles[profile].kind !== "existing" ? 0 : 1);
+if (action === "users-of") {
+  for (const [i, x] of Object.entries(p.active)) if (x && x.profile === profile) console.log(i);
+  process.exit(0);
+}
+if (action === "add") p.profiles[profile] = { kind: a[0], added_at: new Date().toISOString(), users: recs(a[1]) };
+else if (action === "checked") {
+  const e = (p.profiles[profile] ||= { kind: profile === "default" ? "existing" : "unknown", added_at: null, users: {} });
+  Object.assign((e.users ||= {}), recs(a[0]));
+} else if (action === "use") {
+  for (const i of a.slice(1)) {
+    if (profile === "default") delete p.active[i];
+    else p.active[i] = { profile, since: a[0] };
+  }
+  p.switched_at = { ...(p.switched_at || {}), ...Object.fromEntries(a.slice(1).map((i) => [i, a[0]])) };
+} else if (action === "remove") delete p.profiles[profile];
+const tmp = `${file}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, JSON.stringify(p) + "\n", { mode: 0o644 });
+fs.chmodSync(tmp, 0o644);
+fs.renameSync(tmp, file);
+' "$pfile" "$profile" "$@"
+  }
+  # The agent user of each instance (never the eval user: its lane keeps its own login), as "<instance> <user> <default dir>".
+  agents() {
+    local n kind user cfg
+    for n in $(instances); do
+      while read -r kind user cfg; do
+        [ "$kind" = agent ] && [ -n "$user" ] && echo "$n $user $cfg"
+      done < <(users_of "$n")
+    done
+    return 0
+  }
+  # This profile's dir for a user (default: the dir its login was always in).
+  pdir() { if [ "$profile" = default ]; then echo "$2"; else echo "$(home_of "$1")/.claude-profiles/$profile"; fi; }
+  # One user's check on this profile: claude auth status and one minimal real call, both on that dir, as that user.
+  # Prints the record (account and plan as Claude names them, whether the API answered, Claude's words when it didn't).
+  pcheck() { # <instance> <user> <dir>
+    local auth api=""
+    auth="$(claude_status_json "$2" "$3")"
+    if printf '%s' "$auth" | grep -q '"loggedIn": *true'; then api="$(api_result "$2" "$3")"; else api="claude auth status says it is not signed in on this profile"; fi
+    "$(command -v node)" -e '
+const [instance, user, auth, api] = process.argv.slice(1);
+let a = {};
+try { a = JSON.parse(auth) || {}; } catch {}
+const s = (v) => (typeof v === "string" ? v.slice(0, 200) : null);
+process.stdout.write(JSON.stringify({ instance, user, account: s(a.email), org: s(a.orgName), subscription: s(a.subscriptionType), auth_method: s(a.authMethod), api_ok: api === "ok", api_error: api === "ok" ? null : api.slice(0, 500), checked_at: new Date().toISOString() }));
+' "$1" "$2" "$auth" "$api"
+  }
+  if command -v flock >/dev/null 2>&1; then
+    install -d -m 0755 "$(dirname "$CLAUDE_ACCOUNT_LOCK")"
+    exec 9> "$CLAUDE_ACCOUNT_LOCK"
+    flock -n 9 || { echo "another Claude account switch or profile change is running on this machine; wait for it to finish" >&2; exit 1; }
+  fi
+  rows=()
+  while read -r n user cfg; do rows+=("$n $user $cfg"); done < <(agents)
+  pemit "$cmd" started "" "" "profile $profile, ${#rows[@]} agent user(s)${for_inst:+, asked from the dashboard of $for_inst}${token_from:+, the token from the dashboard of $token_from}"
+  [ "${#rows[@]}" -gt 0 ] || { pemit "$cmd" failed "" "" "no agent users found (no instances on this machine, or none of those named)"; exit 1; }
+
+  if [ "$cmd" = profile-add ]; then
+    if pedit has; then pemit profile-add failed "" "" "there is a profile $profile already: remove it first, or add this one under another name"; exit 1; fi
+    # The token: on stdin, or from the asking instance's dashboard, which stored it before it asked (read once, deleted).
+    token=""
+    if [ -n "$token_from" ]; then
+      f="$(home_of "wl-$token_from")/.config/$token_from-secrets/$CLAUDE_PROFILE_CREDENTIAL"
+      if [ -e "$f" ]; then
+        if file_owned_by "$f" "wl-$token_from"; then IFS= read -r token < "$f" || true; fi
+        rm -f "$f"
+      fi
+    elif [ -t 0 ]; then
+      read -rsp "Paste the token from claude setup-token for profile $profile, then Enter (it is not shown): " token || true
+      echo >&2
+    else
+      IFS= read -r token || true
+    fi
+    token="$(printf '%s' "$token" | tr -d '[:space:]')"
+    if ! claude_token_ok "$token"; then
+      token=""
+      pemit profile-add failed "" "" "no token from claude setup-token (sk-ant-oat01-...) came: nothing added"
+      exit 1
+    fi
+    pemit token done "" "" "received; stored nowhere but each agent user's own profile dir"
+    recs="" bad="" added=()
+    for row in "${rows[@]}"; do
+      read -r n user cfg <<< "$row"
+      d="$(pdir "$user" "$cfg")"
+      if printf '%s' "$token" | install_claude_token "$user" "$d" >/dev/null 2>&1; then
+        added+=("$user $d")
+        pemit install done "$n" "$user" "stored in $d, 0600, that user's own"
+      else
+        pemit install failed "$n" "$user" "couldn't store the token in $d"
+        bad="${bad:-could not store the token for $user}"
+        continue
+      fi
+      rec="$(pcheck "$n" "$user" "$d")"
+      recs="${recs:+$recs,}$rec"
+      if printf '%s' "$rec" | grep -q '"api_ok":true'; then
+        pemit check done "$n" "$user" "the API answered a minimal call on this profile"
+      else
+        said="$(printf '%s' "$rec" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).api_error||"")')"
+        pemit check failed "$n" "$user" "the API refused it: $said"
+        bad="${bad:-$said}"
+      fi
+    done
+    token=""
+    if [ -n "$bad" ]; then
+      # Nothing half-added: each user's new profile dir goes, as that user.
+      for a in ${added[@]+"${added[@]}"}; do
+        read -r user d <<< "$a"
+        (cd / && sudo -H -u "$user" rm -rf -- "$d") || true
+      done
+      pemit profile-add failed "" "" "refused: $bad. Nothing was added; every agent user is on the login it had"
+      exit 1
+    fi
+    pedit add setup-token "[$recs]"
+    pemit profile-add done "" "" "profile $profile added for ${#rows[@]} agent user(s); no instance uses it until it is chosen"
+    exit 0
+  fi
+
+  if [ "$cmd" = use ]; then
+    [ "$profile" = default ] || pedit has || { pemit use failed "" "" "there is no profile $profile on this machine: add it first"; exit 1; }
+    recs="" bad="" targets=()
+    for row in "${rows[@]}"; do
+      read -r n user cfg <<< "$row"
+      targets+=("$n")
+      d="$(pdir "$user" "$cfg")"
+      rec="$(pcheck "$n" "$user" "$d")"
+      recs="${recs:+$recs,}$rec"
+      if printf '%s' "$rec" | grep -q '"api_ok":true'; then
+        pemit check done "$n" "$user" "the API answered a minimal call on profile $profile"
+      else
+        said="$(printf '%s' "$rec" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).api_error||"")')"
+        pemit check failed "$n" "$user" "the API refused profile $profile: $said"
+        bad="${bad:-$user: $said}"
+      fi
+    done
+    pedit checked "[$recs]"
+    was="$(pedit active-json "${targets[@]}")"
+    if [ -n "$bad" ]; then
+      pemit use failed "" "" "refused: $bad. Nothing changed: each instance stays on the profile it had" "$was"
+      exit 1
+    fi
+    pedit use "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${targets[@]}"
+    pemit use done "" "" "${targets[*]} on profile $profile; each run from now on starts on it" "$was"
+    exit 0
+  fi
+
+  # remove
+  inuse="$(pedit users-of | tr '\n' ' ')"
+  if [ -n "${inuse// /}" ]; then pemit remove failed "" "" "refused: ${inuse% } use profile $profile; choose another profile for them first"; exit 1; fi
+  for row in "${rows[@]}"; do
+    read -r n user cfg <<< "$row"
+    d="$(pdir "$user" "$cfg")"
+    if (cd / && sudo -H -u "$user" rm -rf -- "$d"); then pemit remove done "$n" "$user" "removed $d"; else pemit remove failed "$n" "$user" "couldn't remove $d"; fi
+  done
+  pedit remove
+  pemit remove done "" "" "profile $profile removed"
   exit 0
 fi
 

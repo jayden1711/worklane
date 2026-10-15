@@ -30,6 +30,8 @@ The helper is given only to runs as the instance's agent user. A lane that runs 
 
 Worklane has **no sign-in flow and never reads, stores, copies or relays credentials.** `credentials.sh` (run by the owner, as root) installs them; the engine only passes paths.
 
+**Account profiles (issue #464).** An agent user may hold several Claude logins side by side, each in its own `CLAUDE_CONFIG_DIR` under its home (`~/.claude-profiles/<name>/`, 0700, its own). The engine only passes the active profile's path to each run; it never reads, copies or moves a login between profiles or users. A profile is added from a `claude setup-token` token, installed by root as that user, and becomes active only after one minimal real call as every agent user on it is answered (docs/dashboard.md, "Claude account profiles"). Every profile's credentials file is denied to agent commands.
+
 ## What the docs say
 
 **Scripted use of the CLI with a subscription is documented.**

@@ -70,6 +70,14 @@ export function claudeAccount(action: 'status' | 'switch', exec: Exec = defaultE
   return runHelper(['claude-account', action], exec);
 }
 
+/**
+ * A Claude account profile step through the helper (src/claude-profiles.ts): profile-add|remove <profile>, or use
+ * <profile> [<instance>]. The helper starts it as its own unit and returns at once; the caller checked the shape.
+ */
+export function claudeProfile(args: readonly string[], exec: Exec = defaultExec): MachineResult {
+  return runHelper(['claude-account', ...args], exec);
+}
+
 /** What the engine updater follows (scripts/machine/, the updater): signed release tags, or main's green commits. */
 export const UPDATE_CHANNELS = ['release', 'main'] as const;
 export type UpdateChannelName = (typeof UPDATE_CHANNELS)[number];
