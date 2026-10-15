@@ -1489,6 +1489,52 @@ jobs:
           s=/var/lib/worklane/claude-account
           if grep -qFf "$F/claude-token4" "$F/switch4.jsonl" "$F/switch4.err" || sudo grep -qFf "$F/claude-token4" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token4"; then echo "the token was echoed" >&2; exit 1; fi
           sudo rm -f /etc/ci-claude-refuse
+      - name: "claude-account profiles (#464), real users: profile-add in each agent user's own profile dir, proven by a real call there; use refused by the API changes nothing; use; remove refused while in use, then as each user"
+        run: |
+          s=/var/lib/worklane/claude-account
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token5"); unset t
+          sudo bash scripts/setup/claude-account.sh profile-add work --json < "$F/claude-token5" > "$F/prof1.jsonl" 2> "$F/prof1.err" || { cat "$F/prof1.jsonl" "$F/prof1.err"; exit 1; }
+          cat "$F/prof1.jsonl"
+          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="done") | .user]' "$F/prof1.jsonl")" = '["wl-beta-agent","wl-ci-agent"]' ]
+          for u in wl-ci-agent wl-beta-agent; do
+            h="$(getent passwd "$u" | cut -d: -f6)"
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles")" = "$u 700" ] || { sudo stat -c '%U %a' "$h/.claude-profiles"; exit 1; }
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work")" = "$u 700" ]
+            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work/.credentials.json")" = "$u 600" ]
+            sudo grep -qFf "$F/claude-token5" "$h/.claude-profiles/work/.credentials.json"
+            # The login it had is untouched.
+            if sudo grep -qFf "$F/claude-token5" "$h/.claude/.credentials.json"; then echo "$u: ~/.claude changed" >&2; exit 1; fi
+          done
+          sudo test ! -e "$(getent passwd wl-beta-eval | cut -d: -f6)/.claude-profiles/work"
+          [ "$(sudo stat -c '%U %a' "$s/profiles.json")" = "root 644" ]
+          # The API refuses the profile: use is refused, nothing changes.
+          tr -d '[:space:]' < "$F/claude-token5" | tail -c 4 | sudo tee /etc/ci-claude-refuse >/dev/null
+          set +e
+          sudo bash scripts/setup/claude-account.sh use work --json > "$F/prof2.jsonl" 2> "$F/prof2.err"
+          rc=$?
+          set -e
+          cat "$F/prof2.jsonl"
+          [ "$rc" = 1 ]
+          jq -se 'last | .step=="use" and .state=="failed" and (.detail|test("^refused: .*HTTP 401"))' "$F/prof2.jsonl"
+          sudo jq -e '.active == {}' "$s/profiles.json"
+          sudo rm -f /etc/ci-claude-refuse
+          sudo bash scripts/setup/claude-account.sh use work beta --json > "$F/prof3.jsonl" 2> "$F/prof3.err" || { cat "$F/prof3.jsonl" "$F/prof3.err"; exit 1; }
+          sudo jq -e '.active.beta.profile == "work" and (.active.ci == null)' "$s/profiles.json"
+          set +e
+          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof4.jsonl" 2> "$F/prof4.err"
+          rc=$?
+          set -e
+          [ "$rc" = 1 ] && jq -se 'last | (.detail|test("refused: beta use profile work"))' "$F/prof4.jsonl"
+          sudo bash scripts/setup/claude-account.sh use default beta --json > /dev/null
+          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof5.jsonl" 2> "$F/prof5.err" || { cat "$F/prof5.jsonl" "$F/prof5.err"; exit 1; }
+          for u in wl-ci-agent wl-beta-agent; do sudo test ! -e "$(getent passwd "$u" | cut -d: -f6)/.claude-profiles/work"; done
+          # Through the machine helper, as the coordinator would: a unit of its own; a shape it doesn't take is refused.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account use default ci < /dev/null | tee "$F/helper-use.txt"
+          grep -q 'started claude-account use default as worklane-claude-account.service' "$F/helper-use.txt"
+          for _ in $(seq 1 60); do sudo grep -q '"op":"use","profile":"default","step":"use","state":"done".*"for":"ci"' "$s/profile-ops.jsonl" && break; sleep 2; done
+          sudo grep -q '"op":"use","profile":"default","step":"use","state":"done".*"for":"ci"' "$s/profile-ops.jsonl" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
+          if sudo -u wl-ci sudo -n "$HELPER" claude-account use work ci extra < /dev/null 2>/dev/null; then echo "the helper took an extra argument" >&2; exit 1; fi
+          if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi
       - name: "claude-account from the dashboard: the coordinator starts it through the helper, in a unit of its own; the token from the instance's secrets"
         run: |
           sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"

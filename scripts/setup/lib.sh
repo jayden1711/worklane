@@ -141,13 +141,14 @@ machine_sudoers() {
   cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
   if sudo_regex_ok; then
     cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
-    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
     for n in "${PROFILE_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
+    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
   else
     signer_rules=0
   fi
   printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
-  [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer, discard-update-signer and the claude-account profile commands. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
+  [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
+  [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove).\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
