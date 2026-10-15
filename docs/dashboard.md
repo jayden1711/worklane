@@ -663,8 +663,14 @@ viewer never sees the picker, and the server refuses a viewer every chat POST (4
   what's left of the conversation's cap and what's left of the day's budget. A conversation (above) counts over its
   whole life, under the id the server keeps for it (never one the client sends). Quick single-shot questions share
   one stream per instance, counted over the machine's local day.
+- **Per person:** anyone but an owner may spend at most `settings.chat.person_daily_usd` (the instance's
+  policy.yaml, which only the owner edits; default $10) on chat answers in a local day, across all their
+  conversations and quick questions. Owners are exempt. The person is the signed-in login the dashboard names,
+  never anything in the request body. The coordinator checks it before every answer, before any model call. At
+  the cap, the question is refused with the cap and when it resets (local midnight). Each answer's cap is also at
+  most what is left of it.
 - **Cost:** each answer shows its estimated cost, the model it ran on, and the conversation's spend against its cap.
-  Each answer's `run.cost` event carries its conversation.
+  Each answer's `run.cost` event carries its conversation and its asker's login.
 - **API:** `GET /api/chat/options` (what this person may pick: models, efforts, the default, the cap) and
   `pick: { model?, effort? }` on `POST /api/chat` and on a conversation's `POST …/messages`. The coordinator checks the pick again before the answer runs.
 

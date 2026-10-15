@@ -2890,6 +2890,47 @@ test('chat: a conversation turn is answered into its conversation with the earli
   assert.deepEqual(lastOf(f.log, 'chat.turn'), { id: second.id, by: 'example-owner', read_only: false, citations: 0, draft: 'none', actions: 0, cost_usd: 0.1, refused: null });
   assert.doesNotMatch(JSON.stringify(f.log.read()), /first one|and then\?|first answer/, 'no message text in the event log');
 });
+/** A coordinator whose chat answers cost $0.4 each, with a $1 per-person daily chat cap (policy.yaml settings.chat). */
+function personCapped() {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [] }, costUsd: 0.4 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, settings: () => ({ settings: { chat: { person_daily_usd: 1 } }, error: null }) });
+  /** One turn in a brand-new conversation of `by`'s: its state and why. */
+  const fresh = async (by: string) => {
+    const conv = createConversation({ stateDir: f.stateDir, by, sharer: () => true });
+    const t = askInConversation({ stateDir: f.stateDir, id: conv.id, by, caps: ATTACHMENT_DEFAULT_CAPS, text: 'q' });
+    await c.checkChat();
+    const turn = conversationTurns(f.stateDir, conv.id).find((x) => x.id === t.id)!;
+    return [turn.state, turn.why ?? null] as const;
+  };
+  return { f, runner, fresh };
+}
+
+test('chat per-person cap: a writer spreading turns over several new conversations is stopped at the cap for the day', { skip }, async () => {
+  const s = personCapped();
+  const got = [];
+  for (let i = 0; i < 4; i++) got.push(await s.fresh('example-collaborator'));
+  assert.deepEqual(got.map((g) => g[0]), ['answered', 'answered', 'answered', 'refused']);
+  assert.match(got[3]![1]!, /per-person cap \(\$1; \$1\.20 spent\); it resets at local midnight/);
+  assert.equal(s.runner.calls.length, 3);
+});
+
+test('chat per-person cap: an owner is not stopped by it', { skip }, async () => {
+  const s = personCapped();
+  const got = [];
+  for (let i = 0; i < 4; i++) got.push(await s.fresh('example-owner'));
+  assert.deepEqual(got.map((g) => g[0]), ['answered', 'answered', 'answered', 'answered']);
+});
+
+test('chat per-person cap: checked before the model call: a writer at the cap gets a refusal and no run starts', { skip }, async () => {
+  const s = personCapped();
+  s.f.log.append('run.cost', { issue: null, role: 'chat', model: 'm', usd: 1, turns: 1, conversation: 'default', by: 'example-collaborator' }, 'alice');
+  const [state, why] = await s.fresh('example-collaborator');
+  assert.equal(state, 'refused');
+  assert.match(why!, /per-person cap \(\$1/);
+  assert.equal(s.runner.calls.length, 0);
+});
+
 test("chat: someone who isn't the owner gets a read-only answer; a spent budget or a disabled chat is refused", { skip }, async () => {
   const f = fixture();
   const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [], actions: [{ kind: 'pause' }] } } : {}));

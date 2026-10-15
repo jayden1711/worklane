@@ -33,6 +33,13 @@ export const MAIN_CONVERSATION = 'default';
  */
 export const DEFAULT_CONVERSATION_CAP_USD = 5;
 
+/**
+ * What one person who isn't an owner may spend on chat in a local day, across all their conversations, when
+ * policy.yaml settings.chat.person_daily_usd sets nothing. WHY $10: two conversations at their default cap; owners
+ * are exempt (they hold the daily budget anyway).
+ */
+export const DEFAULT_PERSON_DAILY_USD = 10;
+
 export type Picker = 'owner' | 'writer' | 'viewer';
 export interface ChatPick {
   model?: string;
@@ -98,13 +105,29 @@ export function conversationSpentUsd(costs: { ts: string; payload: unknown }[], 
   }, 0);
 }
 
+/** What a person has spent on chat answers today (the machine's local day), in any conversation or none. */
+export function personSpentUsd(costs: { ts: string; payload: unknown }[], by: string, now = new Date()): number {
+  const day = localDay(now);
+  const who = by.toLowerCase();
+  return costs.reduce((s, e) => {
+    const p = e.payload as { role?: unknown; by?: unknown; usd?: unknown };
+    if (p.role !== 'chat' || typeof p.by !== 'string' || p.by.toLowerCase() !== who || typeof p.usd !== 'number' || localDay(e.ts) !== day) return s;
+    return s + p.usd;
+  }, 0);
+}
+
+/** When today's local day ends, in words, for a refusal: the next local midnight. */
+export function nextLocalMidnight(now = new Date()): Date {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+}
+
 export type ChatRunOptions = { ok: true; model: string; effort?: ChatEffort; maxBudgetUsd: number; conversation: string; capUsd: number; spentUsd: number } | { ok: false; why: string };
 
 /**
  * The one seam: what this answer runs on and may spend, or why it may not run. Called by the coordinator before
  * every answer (the dashboard checks the pick too, to refuse early); `picker` is the role the dashboard read.
  */
-export function chatRunOptions(o: { agents: Agents; picker: Picker; pick?: ChatPick; conversation: string; spentUsd: number; dailyLeftUsd: number }): ChatRunOptions {
+export function chatRunOptions(o: { agents: Agents; picker: Picker; pick?: ChatPick; conversation: string; spentUsd: number; dailyLeftUsd: number; person?: { capUsd: number; spentUsd: number; resets: Date } | null }): ChatRunOptions {
   if (!o.conversation) return { ok: false, why: 'no conversation' };
   const refused = pickRefusal(o.agents, o.picker, o.pick);
   if (refused) return { ok: false, why: refused };
@@ -112,12 +135,15 @@ export function chatRunOptions(o: { agents: Agents; picker: Picker; pick?: ChatP
   const convLeft = capUsd - o.spentUsd;
   if (convLeft <= 0) return { ok: false, why: `this conversation's budget ($${capUsd}) is spent ($${o.spentUsd.toFixed(2)})` };
   if (o.dailyLeftUsd <= 0) return { ok: false, why: "today's budget is spent" };
+  // Per person (anyone but an owner; null for an owner): today's chat spend across all their conversations.
+  const personLeft = o.person ? o.person.capUsd - o.person.spentUsd : Infinity;
+  if (o.person && personLeft <= 0) return { ok: false, why: `your chat spend today has reached the per-person cap ($${o.person.capUsd}; $${o.person.spentUsd.toFixed(2)} spent); it resets at local midnight (${o.person.resets.toString().slice(0, 21)})` };
   const roleCap = o.agents.roles.chief_of_staff?.budget_usd ?? 1;
   return {
     ok: true,
     model: o.pick?.model ?? chatDefaultModel(o.agents),
     ...(o.pick?.effort ? { effort: o.pick.effort } : {}),
-    maxBudgetUsd: Math.min(roleCap, convLeft, o.dailyLeftUsd),
+    maxBudgetUsd: Math.min(roleCap, convLeft, o.dailyLeftUsd, personLeft),
     conversation: o.conversation,
     capUsd,
     spentUsd: o.spentUsd,
