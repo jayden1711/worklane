@@ -25,6 +25,7 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
 8. **Pin the bootstrap** for its PR: `node scripts/pin-engine.mjs vX.Y.Z --allowed-signers .github/release-signers`.
 9. **After it installs on each release-channel machine** (the updater takes the new tag): when the release changes the machine helper's sudoers rules, rerun them as root, once, with every instance on that machine: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`. Until then, coordinators can't run the helper's new commands (sudo refuses them), and nothing else changes. Not before the install: the rules must match the installed helper.
    - **0.5.1:** yes. It adds the Claude account profile commands (`claude-account profile-add|remove|use <profile>`, `failover … back|stay`, and `login <profile>` if #495 is in).
+10. **GPU test runs, after it installs on a release-channel machine that has an NVIDIA GPU** (0.5.1 adds the `worklane-gpu` group): if you'll use `worklane gpu hold`, make yourself the GPU lock's holder once, then log in again: `sudo bash /opt/worklane/current/scripts/setup/testrun-gpu.sh holder <your user>`. Not before the install. Turning GPU runs on for an instance (`testrun-gpu.sh enable …`) is separate, and needs the owner's go per machine.
 
 ## Publishing by hand
 
