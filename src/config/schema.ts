@@ -93,6 +93,13 @@ export const ProjectConfig = z.strictObject({
    */
   required_checks: z.array(z.string().min(1)).default([]),
   /**
+   * WHY (#469): which CI judges a PR. `github` (absent: the same): the required_checks above, as GitHub reports them.
+   * `none`: GitHub runs nothing a PR waits on; a PR is ready when this machine's own test runs (tests.yaml test_run,
+   * every tier, in the test-run sandbox) passed on its exact head, read only from this instance's event log, and the
+   * evaluator approved that head. Needs tests.yaml test_run, and required_checks empty (src/config/load.ts).
+   */
+  ci: z.enum(['github', 'none']).optional(),
+  /**
    * The default branch's protection as the harness recommends it (src/branch-protection.ts; advice only, never
    * applied). `strict`: whether a PR must be up to date with the default branch before it merges. Off by default:
    * post-merge CI and the main watch catch what strict would have, without PRs queueing to merge main in and rerun CI.
@@ -245,8 +252,12 @@ export const ProjectConfig = z.strictObject({
     .strictObject({
       /** Sustained load (max of 5/15-min averages) above which no new agent starts. Default: 2 x cores. */
       max_load: z.number().positive().optional(),
-      /** Free disk that must remain after another worktree. */
-      min_free_disk_pct: z.number().min(1).max(90).default(15),
+      /**
+       * The disk floor (src/governor-holds.ts): free disk after another worktree must stay at or above the larger of
+       * min_free_disk_gb GB and min_free_disk_pct % of the disk. Defaults: 10 GB and 5% (the owner's choice, #470).
+       */
+      min_free_disk_pct: z.number().min(1).max(90).default(5),
+      min_free_disk_gb: z.number().min(0).max(100_000).default(10),
     })
     .prefault({}),
   /**

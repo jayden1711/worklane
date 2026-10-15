@@ -101,6 +101,8 @@ jobs:
         run: |
           ex="$RUNNER_TEMP/example"
           cp -r examples/basic "$ex" && git -C "$ex" init -q
+          # Its CI's check named: init finishes only with a CI chosen (#469; the refusal is add-project's job's).
+          printf 'required_checks: [test]\n' >> "$ex/.worklane/config.yaml"
           git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$RUNNER_TEMP"/*.tgz)"
           bash scripts/bootstrap.sh --dry-run --mode local --engine "$tgz" "$ex"
@@ -241,6 +243,8 @@ jobs:
           . /etc/wl-ci.env
           ex="$H/example"
           cp -r "$WS/examples/basic" "$ex" && git -C "$ex" init -q
+          # Its CI's check named: init finishes only with a CI chosen (#469; the refusal is add-project's job's).
+          printf 'required_checks: [test]\n' >> "$ex/.worklane/config.yaml"
           git -C "$ex" remote add origin https://github.com/example-org/example-shop.git
           tgz="$(ls "$H"/*.tgz)"
           bash "$WS/scripts/bootstrap.sh" --dry-run --mode local --engine "$tgz" "$ex"
@@ -369,6 +373,8 @@ jobs:
             grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo "$I2" || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
+      - name: "GPU test runs on real systemd, stand-in NVIDIA nodes (no GPU here): off, absent; on, present and past the cgroup check (ENXIO/ENODEV, never EPERM/EACCES); uvm-tools, modeset, caps and other devices never; one GPU command per GPU; gpu hold takes the same lock"
+        run: bash scripts/ci/testrun-gpu-real-systemd.sh "$I2"
       - name: systemd-run leaves a command's ${...} to bash, on this systemd (the flag) and as an older one needs it ($$)
         run: |
           # The helper's own systemd_command, against real systemd-run. Unescaped, systemd blanks a shell-only ${x}
@@ -1040,6 +1046,77 @@ jobs:
           sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta
           if sudo -n -l -U wl-ci "$HELPER" add-project beta example/beta extra; then echo "the rule passes extra arguments" >&2; exit 1; fi
           if sudo -n -l -U wl-dash "$HELPER" add-project beta example/beta; then echo "wl-dash may add a project" >&2; exit 1; fi
+      - name: "No CI (#469): the agent user can't write the event log a test run's tier results are read from; only the coordinator records one, and only that one counts"
+        run: |
+          home="$(getent passwd wl-ci | cut -d: -f6)"
+          state="$home/.local/state/worklane/instances/ci/state"
+          db="$state/events.db"
+          sudo test -f "$db"
+          sudo stat -c '%U:%G %a %n' "$home" "$home/.local" "$state" "$db"* | tee "$F/log-modes.txt"
+          # The home, the state and the log are the coordinator's, in its own private group, with nothing for others
+          # (the engine keeps its state 0770/0660, src/os/index.ts groupOnly; the home was found 0770 here too).
+          for p in "$home" "$home/.local" "$state" "$db"; do
+            [ "$(sudo stat -c '%U:%G' "$p")" = "wl-ci:wl-ci" ] || { echo "$p isn't wl-ci:wl-ci" >&2; exit 1; }
+            m="$(sudo stat -c '%a' "$p")" && [ "${m: -1}" = 0 ] || { echo "$p gives others access ($m)" >&2; exit 1; }
+          done
+          # So the group is what keeps everyone else out: wl-ci is its only member, and no other user has it as theirs.
+          getent group wl-ci
+          [ -z "$(getent group wl-ci | cut -d: -f4)" ] || { echo "wl-ci's group has members" >&2; exit 1; }
+          gid="$(getent group wl-ci | cut -d: -f3)"
+          [ "$(getent passwd | awk -F: -v g="$gid" '$4 == g {print $1}')" = wl-ci ] || { echo "another user has wl-ci's group" >&2; exit 1; }
+          for u in wl-ci-agent wl-dash; do if id -nG "$u" | tr ' ' '\n' | grep -qx wl-ci; then echo "$u is in the coordinator's group" >&2; exit 1; fi; done
+          # No ACL anywhere on the way gives the agent user or the work group anything.
+          sudo getfacl -p "$home" "$home/.local" "$home/.local/state" "$state" "$db" > "$F/log-acl.txt"
+          cat "$F/log-acl.txt"
+          if grep -E '^(user|group):(wl-ci-agent|wl-ci-work):' "$F/log-acl.txt"; then echo "an ACL grants the agent user or the work group" >&2; exit 1; fi
+          # wl-dash's ACLs: traverse (--x) on the way to the dashboard token, never on the log itself.
+          if sudo getfacl -p "$db" | grep -E '^(user|group):wl-dash:'; then echo "an ACL grants wl-dash the event log" >&2; exit 1; fi
+          # What a tier result is, as the engine records it, and how many there are now (as the coordinator, read-only).
+          sha=4690000000000000000000000000000000000469
+          # In /tmp, which every user can read (the runner's temp is not).
+          pr=/tmp/wl-log-probe-469.mjs
+          cat > "$pr" <<'JS'
+          import { EventLog } from '/opt/worklane/current/dist/src/events/log.js';
+          import { openReadOnly } from '/opt/worklane/current/dist/src/events/read-only.js';
+          import { localRunChecks } from '/opt/worklane/current/dist/src/ci-none.js';
+          const [what, db, sha] = process.argv.slice(2);
+          const tests = { test_run: { tiers: [{ name: 'unit', kind: 'fast' }], checks: {} } };
+          if (what === 'append') {
+            const log = new EventLog(db);
+            log.append('testrun.finished', { id: `probe-${process.getuid()}`, sha, kind: 'fast', prs: [469], ok: true, outcome: 'done', results: [{ tier: 'unit', ok: true }], detail: 'the #469 probe' }, 'probe');
+            log.close();
+            console.log('appended');
+          } else {
+            const d = openReadOnly(db);
+            const rows = d.prepare("SELECT type, payload FROM events WHERE type IN ('testrun.queued', 'testrun.finished')").all().map((r) => ({ type: r.type, payload: JSON.parse(r.payload) }));
+            d.close();
+            console.log(JSON.stringify({ finished: rows.filter((r) => r.type === 'testrun.finished' && r.payload.sha === sha).length, checks: localRunChecks(rows, sha, tests) }));
+          }
+          JS
+          chmod 0644 "$pr"
+          probe() { (cd / && sudo -u "$1" /usr/local/bin/node "$pr" "$2" "$db" "$sha"); }
+          before="$(probe wl-ci count)"
+          echo "before: $before"
+          [ "$before" = '{"finished":0,"checks":[]}' ]
+          sum="$(sudo sha256sum "$db" | cut -d' ' -f1)"
+          # As the agent user, and as the hub's viewer user (it may traverse to the dashboard token, nothing else):
+          # every way at the file is refused: through the engine's own log, a plain append, a truncate, a new file
+          # beside it, a rename, reading it, and listing its directory.
+          for who in wl-ci-agent wl-dash; do
+            if probe "$who" append > "$F/append-$who.log" 2>&1; then cat "$F/append-$who.log"; echo "$who appended to the event log" >&2; exit 1; fi
+            cat "$F/append-$who.log"
+            grep -Eq 'EACCES|permission denied|unable to open database|SQLITE_CANTOPEN' "$F/append-$who.log"
+            for how in 'printf x >> "$1"' ': > "$1"' 'touch "$(dirname "$1")/events.db.new"' 'mv "$1" "$1.moved"' 'cat "$1" > /dev/null' 'ls "$(dirname "$1")"' 'test -w "$1"'; do
+              if (cd / && sudo -u "$who" sh -c "$how" _ "$db") 2>/dev/null; then echo "$who could: $how" >&2; exit 1; fi
+            done
+          done
+          [ "$(sudo sha256sum "$db" | cut -d' ' -f1)" = "$sum" ] || { echo "the log changed under the agent user's attempts" >&2; exit 1; }
+          [ "$(probe wl-ci count)" = "$before" ] || { echo "a tier result appeared" >&2; exit 1; }
+          # As the coordinator, the engine side: the same append works, and only now is the tier's check there, passed.
+          probe wl-ci append
+          after="$(probe wl-ci count)"
+          echo "after: $after"
+          [ "$after" = '{"finished":1,"checks":[{"name":"test-run/unit","source":"check_run","status":"completed","conclusion":"success"}]}' ]
       - name: "regression (bug B): after add-project installed the agents' token, the first-run step reads it done, from claude-account's status.json (never the token, never the cached email)"
         run: |
           s=/var/lib/worklane/claude-account/status.json
@@ -1598,6 +1675,14 @@ jobs:
           if grep -qFf "$F/login-code" "$F"/helper-ops.txt || sudo grep -qFf "$F/login-code" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/login-code"; then echo "the code was echoed" >&2; exit 1; fi
           if sudo journalctl --no-pager | grep -q 'ci-relayed-link-4s7'; then echo "the sign-in link was logged" >&2; exit 1; fi
           sudo rm -f /etc/ci-claude-login
+          # The failover setting, from ci's dashboard: real sudo takes the order joined by + (never a comma) and no instance.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+mine back < /dev/null
+          sudo jq -e '.failover.instances.ci == {"order": ["default", "mine"], "back": true} and .failover.machine == null' "$s/profiles.json"
+          for bad in "failover default+mine back beta" "failover off stay beta" "failover default,mine back"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
+          done
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover off stay < /dev/null
           # Every add, confirm, use and remove is an ops alert line in the machine change log; no token in any.
           sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged mine for ci") and (map(select(startswith("confirmed mine as agents-"))) | length == 1) and any(. == "use mine for ci")' /var/lib/worklane/machine-changes.jsonl
           if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err "$F"/confirm*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi
@@ -1708,9 +1793,21 @@ jobs:
           cat "$F2/boot3.log"
           sudo test -f /srv/worklane/gamma/gamma/.worklane/config.yaml
           systemctl is-active worklane-gamma.service
-          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1 || { cat "$F2/init2.log"; exit 1; }
+          # #469: auto-config's config names no required check (PR mode): init never finishes on it, and says why and the fix.
+          set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1; code=$?; set -e
           cat "$F2/init2.log"
-          grep -q 'all 8 steps done or skipped' "$F2/init2.log"
+          [ "$code" = 1 ] || { echo "init finished with no CI chosen (exit $code)" >&2; exit 1; }
+          grep -q "but required_checks is empty and no CI is chosen: no PR is ever marked ready, so nothing ever merges. Fix: on the dashboard's First-run page" "$F2/init2.log"
+          grep -q 'stopped at Repo config' "$F2/init2.log"
+          # The owner's choice merged on main (its CI's check named), and the checkout brought up to it as add-project does.
+          c="$F2/choice" && git clone -q "$F2/git/example/gamma.git" "$c"
+          if grep -q '^required_checks:' "$c/.worklane/config.yaml"; then sed -i 's/^required_checks:.*/required_checks: [test]/' "$c/.worklane/config.yaml"; else printf 'required_checks: [test]\n' >> "$c/.worklane/config.yaml"; fi
+          git -C "$c" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q -am 'name the CI check'
+          git -C "$c" push -q origin main
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 bash scripts/setup/checkout.sh gamma example/gamma > "$F2/checkout2.log" 2>&1 || { cat "$F2/checkout2.log"; exit 1; }
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init3.log" 2>&1 || { cat "$F2/checkout2.log" "$F2/init3.log"; exit 1; }
+          cat "$F2/init3.log"
+          grep -q 'all 8 steps done or skipped' "$F2/init3.log"
           set +e; sudo -H -u wl-gamma worklane doctor --mode server --instance gamma --root /srv/worklane/gamma/gamma > "$F2/doctor2.log" 2>&1; set -e
           cat "$F2/doctor2.log"
           for s in tools claude github repo-config coordinator protection; do grep -q "^ok    setup $s: " "$F2/doctor2.log"; done

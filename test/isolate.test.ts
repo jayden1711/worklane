@@ -25,6 +25,7 @@ import { HELPER_RULES, MACHINE_CHANGES, MACHINE_HELPER } from '../src/machine.js
 import { MACHINE_OWNERS_FILE } from '../src/machine-owners.js';
 import { NETWORK_FILE } from '../src/network.js';
 import { SYSTEM_SLOTS, UPDATE_DRAIN_FILE } from '../src/os/index.js';
+import { gpuFilePath, gpuLockPath } from '../src/testrun/gpu.js';
 import { devSlotsPath, serviceModeRefusal, SYSTEM_ROOT_VAR, systemRootRefusal, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 import { LIMITS_PATH } from '../src/settings.js';
 import { MACHINE_PATHS } from '../src/setup-steps.js';
@@ -187,6 +188,8 @@ const machineLocations = (): [string, string][] => [
   ['PENDING_SIGNERS', PENDING_SIGNERS],
   ['machineInitDir()', machineInitDir()],
   ['devSlotsPath()', devSlotsPath()],
+  ['gpuFilePath()', gpuFilePath()],
+  ['gpuLockPath(0)', gpuLockPath(0)],
   ...Object.entries(MACHINE_PATHS)
     .filter(([k]) => k !== 'enginePackage')
     .map(([k, v]): [string, string] => [`MACHINE_PATHS.${k}`, v]),
@@ -200,7 +203,7 @@ test("in a test process, every machine location the engine reads or runs is insi
   // Each is still the machine's path, one root down: what a real machine reads (the scripts check the same names).
   const real = machineLocations()
     .filter(([k]) => k !== 'machineInitDir()')
-    .filter(([, p]) => !/^\/(etc|var\/lib|var\/tmp|usr\/local\/libexec|opt|run\/lock)\//.test(onRealMachine(p)));
+    .filter(([, p]) => !new RegExp(`^/(etc|var/lib|var/tmp|usr/local/libexec|opt|run/lock|run/${BRAND.cli})/`).test(onRealMachine(p)));
   assert.deepEqual(real, [], 'each is a machine path under the root');
   assert.equal(onRealMachine(MACHINE_OWNERS_FILE), `/etc/${BRAND.cli}/machine-owners.json`);
   assert.equal(onRealMachine(MACHINE_HELPER), `/usr/local/libexec/${BRAND.cli}-machine`);

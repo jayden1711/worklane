@@ -5,6 +5,7 @@ import { batchSummaries } from './coordinator/pr-batch.js';
 import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
 import { DIRECT_LAND_REFUSED } from './direct-land.js';
 import { localDay } from './local-day.js';
+import { holdBanner, type HoldBanner, type HoldFacts } from './governor-holds.js';
 
 export type TaskStatus =
   | 'triage'
@@ -100,7 +101,8 @@ export interface Projection {
    */
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   batches: { id: string; kind: 'land' | 'pr'; issues: number[]; prs: number[]; tip: string; outcome: string; detail: string; at: string }[];
-  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  /** The last hold or release; `banner` while held: the reason, numbers and fix the Board and First run show (src/governor-holds.ts). */
+  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string; banner: HoldBanner | null } | null;
   /** This coordinator's own record of emergency stops: the last time it halted for one, and the last time it resumed. */
   emergency: { lastStop: { at: string; by: string; reason: string; running: number } | null; lastResume: string | null };
   reports: { day: string; slot: string; issue: number | null; at: string }[];
@@ -530,10 +532,10 @@ export function project(events: StoredEvent[], today = localDay()): Projection {
         break;
       }
       case 'governor.hold':
-        governor = { held: true, reason: String(p.reason), load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
+        governor = { held: true, reason: String(p.reason), load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts, banner: holdBanner({ kind: p.kind as string | undefined, reason: String(p.reason), facts: p.facts as HoldFacts | undefined }, e.ts) };
         break;
       case 'governor.release':
-        governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts };
+        governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts, banner: null };
         break;
       case 'emergency.stop':
         emergency.lastStop = { at: e.ts, by: String(p.by), reason: String(p.reason), running: Number(p.running) };

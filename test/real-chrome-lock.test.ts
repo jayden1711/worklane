@@ -8,7 +8,7 @@ import { globSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { takeChromeLock } from './browser-helpers.js';
+import { launchTestChrome, takeChromeLock } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 const helpers = pathToFileURL(join(import.meta.dirname, 'browser-helpers.js')).href;
@@ -63,25 +63,60 @@ test('a lock left by a process that has exited is taken over; one a live process
   }
 });
 
-test('every test that drives a real Chrome takes the lock first', () => {
-  const files = globSync('test/**/*.test.ts', { cwd: repoRoot }).map((f) => f.split('\\').join('/'));
+/** The test( heads in a file (top level or inside a loop) and whether each opens with `await oneChromeAtATime(..)`. */
+export function chromeTestHeads(src: string): { head: string; realChrome: boolean; locks: boolean }[] {
+  return [...src.matchAll(/^[ \t]*test\(([\s\S]*?)(?:async )?\((?:t|ctx)?\) => \{\n/gm)].map((m) => ({
+    head: m[1]!,
+    // Options that name a real Chrome: the real-Chrome timeout, the web-UI skip, or a skip for no Chrome.
+    realChrome: /REAL_CHROME_TIMEOUT|webUiSkip\(chrome\)|!chrome &&/.test(m[1]!),
+    locks: /^\s*await oneChromeAtATime\((?:t|ctx)\);$/.test(src.slice(m.index! + m[0].length).split('\n', 1)[0]!),
+  }));
+}
+
+// WHY no pinned count: one number every browser-test PR edited forced a main merge and a new CI run on the others.
+// What the count guarded, that this scan really sees the tests (a pattern that stops matching passes vacuously), is
+// checked per file from two independent readings: every `await oneChromeAtATime(` in a file opens a test head the
+// scan found, and every real-Chrome head opens with it. And launchTestChrome refuses at run time without the lock.
+test('every test that drives a real Chrome takes the lock first, and the scan sees every test that takes it', () => {
+  const files = globSync('test/**/*.test.ts', { cwd: repoRoot }).map((f) => f.split('\\').join('/')).filter((f) => !f.endsWith('/real-chrome-lock.test.ts'));
   const missing: string[] = [];
+  const unseen: string[] = [];
   let found = 0;
   for (const f of files) {
     const src = readFileSync(join(repoRoot, f), 'utf8');
-    // A test( call whose options name a real Chrome: the real-Chrome timeout, the web-UI skip, or a skip for no Chrome.
-    for (const m of src.matchAll(/^test\(([\s\S]*?)(?:async )?\((?:t|ctx)?\) => \{\n/gm)) {
-      const head = m[1]!;
-      if (!/REAL_CHROME_TIMEOUT|webUiSkip\(chrome\)|!chrome &&/.test(head)) continue;
+    const heads = chromeTestHeads(src);
+    for (const h of heads.filter((x) => x.realChrome)) {
       found++;
-      const next = src.slice(m.index + m[0].length).split('\n', 1)[0]!;
-      if (!/^\s*await oneChromeAtATime\((?:t|ctx)\);$/.test(next)) missing.push(`${f}: ${head.slice(0, 80).replace(/\s+/g, ' ')}`);
+      if (!h.locks) missing.push(`${f}: ${h.head.slice(0, 80).replace(/\s+/g, ' ')}`);
     }
+    const calls = (src.match(/await oneChromeAtATime\(/g) ?? []).length;
+    const seen = heads.filter((x) => x.locks).length;
+    if (calls !== seen) unseen.push(`${f}: ${calls} lock call(s), ${seen} opening a test the scan found`);
   }
-  // 15 on main, plus #414's two (machine cards) and #418's one (web-key-in-url), the dashboard speed test's five, and
-  // offline-chrome's two (#462).
-  assert.ok(found === 25, `found the real-Chrome tests (${found})`);
+  assert.ok(found > 0, 'the scan found no real-Chrome test at all');
+  assert.deepEqual(unseen, [], 'a lock call outside any test head the scan recognises: the scan no longer sees that test');
   assert.deepEqual(missing, [], 'start with `await oneChromeAtATime(ctx);`');
+});
+
+test('the scan: top-level and looped tests, the markers, and a lock call it can\'t place', () => {
+  const src = [
+    "test('a', { timeout: REAL_CHROME_TIMEOUT }, async (ctx) => {",
+    '  await oneChromeAtATime(ctx);',
+    '});',
+    "for (const x of xs) {",
+    "  test(`b ${x}`, { skip: webUiSkip(chrome) }, async (t) => {",
+    '    await oneChromeAtATime(t);',
+    '  });',
+    '}',
+    "test('c', () => {",
+    '  assert.ok(true);',
+    '});',
+    "test('d', { skip: !chrome && 'no Chrome' }, async () => {",
+    '  await go();',
+    '});',
+    '',
+  ].join('\n');
+  assert.deepEqual(chromeTestHeads(src).map((h) => [h.realChrome, h.locks]), [[true, true], [true, true], [false, false], [true, false]]);
 });
 
 /**
@@ -141,6 +176,19 @@ test('a lock whose owner cannot be read is waited for, never taken over while it
     (await waiting)();
     assert.equal(taken, true);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('launchTestChrome refuses to start a Chrome without the real-Chrome lock, before starting anything', async () => {
+  await assert.rejects(launchTestChrome('/nonexistent/chrome'), /launchTestChrome without the real-Chrome lock: start the test with `await oneChromeAtATime\(ctx\);`/);
+  // A lock file of a test's own (the lock's own tests) is not the real-Chrome lock.
+  const dir = mkdtempSync(join(tmpdir(), 'chrome-lock-own-'));
+  const release = await takeChromeLock(join(dir, 'lock'));
+  try {
+    await assert.rejects(launchTestChrome('/nonexistent/chrome'), /without the real-Chrome lock/);
+  } finally {
+    release();
     rmSync(dir, { recursive: true, force: true });
   }
 });

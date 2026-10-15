@@ -60,7 +60,7 @@ async function serve() {
   writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 2, max_test_runs: 3 }));
   writeFileSync(join(slots, 'test-0.lock'), JSON.stringify({ pid: process.pid, owner: 'wl-site test run full-r', acquiredAt: new Date().toISOString() }));
   const cfg = loadConfig(root);
-  cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+  cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
   const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slots, actor: 'wl-site', pollMs: 50, testRunLock: join(dir, 'full-run.lock') });
   const base = d.url.split('/?')[0]!;
   const get = async <T>(path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<T>;
@@ -135,6 +135,20 @@ test('the Machine page\'s test runs: queue, the running slot and its holder, who
   assert.match(board, /data-testid="test-runs-live"/);
   assert.doesNotMatch(board, /test-runs-slots|test-runs-tier-stats/);
   assert.match(r.renderTestRuns({ configured: false, viewer: false, cap: 2, inUse: 0, queue: [], running: [], recent: [] }), /data-configured="no"[^>]*>Test runs: off/);
+});
+
+test('the Machine page\'s test runs: root\'s GPU opt-in, read-only with the root command; a GPU tier says whether it got the GPU; none of it on the Board', () => {
+  const gpuTier = { tier: 'cuda', ok: true, durationMs: 9000, gpu: { granted: true, devices: ['/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia0'], detail: 'GPU 0; max 1200 s; waited 0 s' } };
+  const noGpu = { tier: 'cuda2', ok: true, durationMs: 9000, gpu: { granted: false, devices: [], detail: 'not on for shop' } };
+  const data = { ...writerData, recent: [{ ...writerData.recent[0]!, tiers: [gpuTier, noGpu] }], gpu: { state: 'on', devices: [0], maxMinutes: 20, change: 'sudo bash /opt/worklane/current/scripts/setup/testrun-gpu.sh disable shop', status: 'x' } };
+  const html = r.renderTestRuns(data);
+  assert.match(html, /data-testid="test-runs-gpu" data-state="on"[^>]*>[\s\S]*GPU for test runs: [\s\S]*on: GPU 0, at most 20 min a GPU command, one run per GPU[\s\S]*Only root changes it: [\s\S]*data-testid="test-runs-gpu-command"[^>]*>sudo bash \/opt\/worklane\/current\/scripts\/setup\/testrun-gpu\.sh disable shop</);
+  assert.match(html, /title="GPU: \/dev\/nvidiactl \/dev\/nvidia-uvm \/dev\/nvidia0; GPU 0; max 1200 s; waited 0 s" data-testid="test-run-tier-gpu" data-granted="yes">GPU</);
+  assert.match(html, /title="no GPU: not on for shop" data-testid="test-run-tier-gpu" data-granted="no">no GPU</);
+  const off = r.renderTestRuns({ ...writerData, gpu: { state: 'off', why: 'GPU test runs are off on this machine (no root opt-in file)', change: 'sudo bash x enable shop --devices 0 --max-minutes 20', status: 'x' } });
+  assert.match(off, /data-state="off"[\s\S]*off \(GPU test runs are off on this machine \(no root opt-in file\)\)[\s\S]*sudo bash x enable shop/);
+  assert.doesNotMatch(r.renderTestRuns(data, true), /test-runs-gpu"/, 'not on the Board');
+  assert.doesNotMatch(r.renderTestRuns(writerData), /test-runs-gpu"/, 'nothing without the field');
 });
 
 test('a viewer\'s test runs show each tier\'s pass or fail and nothing more', () => {

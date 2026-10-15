@@ -9,6 +9,7 @@
 #   sudo bash scripts/setup/claude-account.sh remove <profile> [--json]
 #   sudo bash scripts/setup/claude-account.sh confirm-profile <profile>
 #   claude-account.sh login <profile> --for <instance>       (the machine helper's, for a dashboard)
+#   sudo bash scripts/setup/claude-account.sh failover <profile+profile+...|off> back|stay [<instance>]
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -61,7 +62,14 @@
 #   remove       each agent user's dir of that profile, removed as that user (never as root: the dir is the user's);
 #                refused while any instance has it active. From a dashboard: only its own agent user's, and only a
 #                profile added for it.
-# Every add, confirm, use and remove is a line in the machine change log, which the watchdog posts to the ops channel.
+#   failover     auto-failover on a usage limit (off by default): the order of profiles to move through (names joined
+#                by +: sudoers reads a comma as the end of a command), and whether to move back once the limit resets
+#                (back) or not (stay); machine-wide, or for one instance (which then goes by its own, off included).
+#                From a dashboard (--for <its instance>): its own instance only. Only written to profiles.json: the
+#                coordinator moves, each move a `use` for its own instance, so each is proven by a real call first. A
+#                staged profile can't be in an order. Never on an auth failure (issue #463 holds those).
+# Every add, confirm, use, remove and failover setting is a line in the machine change log, which the watchdog posts
+# to the ops channel.
 # Every file step under an agent user's home is done as that user. Each step is a JSON line in profile-ops.jsonl.
 #
 # Output: plain lines, or with --json one JSON line per step change (switch) or one JSON object (status). Either way
@@ -70,7 +78,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | login <profile> --for <instance> | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | login <profile> --for <instance> | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json] | failover <profile+profile+...|off> back|stay [<instance>] [--for <instance>]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
@@ -89,7 +97,7 @@ while [ "$#" -gt 0 ]; do
     *) names+=("$1"); shift ;;
   esac
 done
-case "$cmd" in switch | status | profile-add | login | use | remove | confirm-profile) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$cmd" in switch | status | profile-add | login | use | remove | confirm-profile | failover) ;; *) echo "$usage" >&2; exit 2 ;; esac
 [ -z "$for_inst" ] || instance_name_ok "$for_inst" || { echo "--for: an instance name" >&2; exit 2; }
 # A profile's name: lowercase letters, digits and dashes (default: the login each agent user had, never added or removed).
 profile="" asker=""
@@ -110,6 +118,49 @@ if [[ "$cmd" == profile-add || "$cmd" == login || "$cmd" == use || "$cmd" == rem
   fi
   # A coordinator user never confirms, even through sudo of its own.
   if [ "$cmd" = confirm-profile ] && [[ "${SUDO_USER:-}" =~ ^wl- ]]; then echo "confirm-profile is a root admin's: not $SUDO_USER's" >&2; exit 2; fi
+fi
+if [ "$cmd" = failover ]; then
+  order="${names[0]:-}" back="${names[1]:-}" inst="${names[2]:-}"
+  [ "${#names[@]}" -le 3 ] && [[ "$back" == back || "$back" == stay ]] || { echo "$usage" >&2; exit 2; }
+  [ -z "$inst" ] || instance_name_ok "$inst" || { echo "instance name $inst: lowercase letters, digits and dashes" >&2; exit 2; }
+  # From a dashboard (--for, which the machine helper passes from SUDO_USER): its own instance only, never the machine's.
+  if [ -n "$for_inst" ]; then
+    [ -z "$inst" ] || [ "$inst" = "$for_inst" ] || { echo "asked from $for_inst's dashboard: only $for_inst's own setting, never $inst's" >&2; exit 2; }
+    inst="$for_inst"
+  fi
+  if [ "$order" != off ]; then
+    [[ "$order" =~ ^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$ ]] || { echo "failover: an order of 2 to 8 profiles, joined by + (or off)" >&2; exit 2; }
+  fi
+  install -d -m 0755 "$CLAUDE_ACCOUNT_DIR"
+  "$(command -v node)" -e '
+const fs = require("node:fs");
+const [file, order, back, inst] = process.argv.slice(1);
+let p = {};
+try { p = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+p.version = 1;
+p.profiles = p.profiles && typeof p.profiles === "object" ? p.profiles : {};
+const list = order === "off" ? [] : order.split("+");
+if (new Set(list).size !== list.length) { console.error("failover: a profile named twice in the order"); process.exit(2); }
+const missing = list.filter((n) => n !== "default" && !(p.profiles[n] && p.profiles[n].kind !== "existing"));
+if (missing.length) { console.error(`failover: no profile ${missing.join(", ")} on this machine: add it first`); process.exit(1); }
+const staged = list.filter((n) => p.profiles[n] && p.profiles[n].staged === true);
+if (staged.length) { console.error(`failover: ${staged.join(", ")} is staged, not confirmed: an admin confirms it on this machine first`); process.exit(1); }
+const f = (p.failover = p.failover && typeof p.failover === "object" ? p.failover : {});
+const v = { order: list, back: back === "back" };
+if (inst) (f.instances = f.instances && typeof f.instances === "object" ? f.instances : {})[inst] = v;
+else f.machine = v;
+const tmp = `${file}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, JSON.stringify(p) + "\n", { mode: 0o644 });
+fs.chmodSync(tmp, 0o644);
+fs.renameSync(tmp, file);
+console.log(list.length ? `failover ${inst ? `for ${inst}` : "machine-wide"}: ${list.join(" > ")}, ${back === "back" ? "moving back after the reset" : "staying after the reset"}` : `failover off ${inst ? `for ${inst}` : "machine-wide"}`);
+' "$CLAUDE_ACCOUNT_DIR/profiles.json" "$order" "$back" "$inst"
+  # The ops alert, as for every profile change (the machine change log; the watchdog posts it).
+  if [ -n "$for_inst" ]; then by="wl-$for_inst"; else by="${SUDO_USER:-root}"; fi
+  install -d -m 0755 "$(dirname "$MACHINE_CHANGES")"
+  printf '{"at":%s,"by":%s,"what":"claude_account.profile","from":"","to":%s}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "$by")" "$(json_str "failover $order $back for ${inst:-every instance}")" >> "$MACHINE_CHANGES"
+  chmod 0644 "$MACHINE_CHANGES"
+  exit 0
 fi
 [[ "$timeout" =~ ^[0-9]{1,3}$ ]] || { echo "--timeout: minutes, 0 to 999" >&2; exit 2; }
 [[ "$token_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--token-timeout: minutes, 1 to 999" >&2; exit 2; }

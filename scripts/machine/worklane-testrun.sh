@@ -4,6 +4,16 @@
 # <name> only, so an instance reaches its own test user and nothing else. Every other argument is checked here,
 # before anything is read or written. docs/test-runs.md has the why of each choice.
 #
+# GPU (docs/test-runs.md "GPU"): a tier that asks (exec --gpu) gets NVIDIA's device nodes only when root's own file,
+# $GPU_FILE (root:root 0644, written by scripts/setup/testrun-gpu.sh), lists this instance. This helper reads that
+# file itself: whether a run gets a GPU never comes from an argument, the repo or anything the coordinator or the
+# dashboard can write. A granted run keeps PrivateDevices=yes and gets /dev/nvidiactl, /dev/nvidia-uvm and the listed
+# /dev/nvidia<N> bound in, with DeviceAllow= for exactly those (never nvidia-uvm-tools, nvidia-modeset, nvidia-caps or
+# dri). One GPU run per GPU: a flock on $GPU_LOCK_DIR/<N>.lock, held by this helper (and the systemd-run it waits on)
+# for the whole command; the wait counts against the run's timeout, and the unit's cap is the smaller of what is left
+# and the file's max_minutes. On stderr, before the command: "worklane-testrun: gpu <N>[,<N>...] (devices ...; max
+# <s> s; waited <s> s)" or "worklane-testrun: gpu none (<why>)". No nvidia-smi, no driver call: nodes and locks only.
+#
 #   worklane-testrun <name> create <id> <branch> <head> <base> <head sha> <base sha> [<dir>]...
 #                                                             a new run: what the bundle on stdin carries goes into the
 #                                                             object store, then a workspace reading it, <dir>s left out
@@ -13,8 +23,9 @@
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
 #   worklane-testrun <name> db-start <id> <image> <db> <ready_s> <max_connections>
 #                                                             the run's own Postgres: prints "<port> <password>"
-#   worklane-testrun <name> exec <id> <timeout_s> -- <command>
-#                                                             the run's variables on stdin, each NAME=value then a NUL
+#   worklane-testrun <name> exec <id> <timeout_s> [--gpu] -- <command>
+#                                                             the run's variables on stdin, each NAME=value then a NUL;
+#                                                             --gpu asks for the GPU, which root's file may grant (GPU below)
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
 #   worklane-testrun <name> version                           this helper's protocol version (an integer)
@@ -48,7 +59,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=7
+PROTOCOL=8
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -62,6 +73,13 @@ SLICE=worklane-test.slice
 DOCKER=/opt/worklane-test/docker/docker
 LABEL=worklane.test-run
 PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /etc/sudoers.d /root /run/docker.sock /var/run/docker.sock)
+# GPU (above). Root's opt-in, the per-GPU locks (root's 0755 directory under /run, which the coordinator's unit shares
+# with PID 1; each lock root's 0644: anyone may flock it read-only, as `worklane gpu hold` does), where the nodes are,
+# and the oldest systemd a GPU run is proven on (CI's real-systemd job). Below it a run asking for the GPU runs without.
+GPU_FILE=/etc/worklane/testrun-gpu.json
+GPU_LOCK_DIR=/run/worklane/gpu
+DEV=/dev
+GPU_MIN_SYSTEMD=255
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
@@ -318,12 +336,151 @@ systemd_command() {
   if [ "$v" -ge 254 ]; then printf -- '--expand-environment=no\n%s' "$c"; else printf '\n%s' "${c//\$/\$\$}"; fi
 }
 
+# A character device node (never a symlink): what the GPU's nodes must be to be bound in.
+is_char() { [ ! -L "$1" ] && [ -c "$1" ]; }
+
+# Root's GPU opt-in for this instance, read from $GPU_FILE alone. Sets GPU_IDX (the listed indices) and GPU_MAX_S (the
+# file's max_minutes in seconds) and returns 0; or sets GPU_WHY to why not and returns 1. The file is root's, 0644, a regular
+# file, in a directory only root writes, and exactly in the form scripts/setup/testrun-gpu.sh writes (and
+# src/testrun/gpu.ts reads): anything else is no GPU, never a guess.
+GPU_IDX=()
+GPU_MAX_S=0
+gpu_opt_in() {
+  local got lines=() i n entry=() m
+  if [ ! -e "$GPU_FILE" ] && [ ! -L "$GPU_FILE" ]; then GPU_WHY="GPU test runs are off on this machine (no $GPU_FILE)"; return 1; fi
+  if [ -L "$GPU_FILE" ] || [ ! -f "$GPU_FILE" ]; then GPU_WHY="$GPU_FILE is not a regular file"; return 1; fi
+  got="$(stat -c '%U %a' -- "$GPU_FILE")"
+  [ "$got" = "$(id -un) 644" ] || { GPU_WHY="$GPU_FILE is $got, not $(id -un)'s and 0644"; return 1; }
+  got="$(stat -c '%U %a' -- "$(dirname "$GPU_FILE")")"
+  [[ "$got" =~ ^$(id -un)\ [0-7][0145][0145]$ ]] || { GPU_WHY="$(dirname "$GPU_FILE") is $got: only $(id -un) may write it"; return 1; }
+  while IFS= read -r m || [ -n "$m" ]; do lines+=("$m"); done < "$GPU_FILE"
+  n="${#lines[@]}"
+  local bad="$GPU_FILE is not in the form scripts/setup/testrun-gpu.sh writes; rewrite it with that script"
+  [ "$n" -ge 5 ] && [ "$n" -le 70 ] && [ "${lines[0]}" = '{' ] && [ "${lines[1]}" = '  "version": 1,' ] && [ "${lines[$((n - 1))]}" = '}' ] || { GPU_WHY="$bad"; return 1; }
+  [[ "${lines[2]}" =~ ^\ \ \"max_minutes\":\ ([1-9][0-9]{0,2}),$ ]] && [ "${BASH_REMATCH[1]}" -le 120 ] || { GPU_WHY="$bad (max_minutes: 1 to 120)"; return 1; }
+  m="${BASH_REMATCH[1]}"
+  if [ "$n" -eq 5 ]; then
+    [ "${lines[3]}" = '  "instances": {}' ] || { GPU_WHY="$bad"; return 1; }
+  else
+    [ "${lines[3]}" = '  "instances": {' ] && [ "${lines[$((n - 2))]}" = '  }' ] || { GPU_WHY="$bad"; return 1; }
+    for ((i = 4; i < n - 2; i++)); do
+      [[ "${lines[$i]}" =~ ^\ \ \ \ \"([a-z][a-z0-9-]{0,20})\":\ \{\ \"devices\":\ \[([0-9]{1,2}(,\ [0-9]{1,2}){0,15})\]\ \}(,?)$ ]] || { GPU_WHY="$bad (line $((i + 1)))"; return 1; }
+      # A comma after every entry but the last.
+      if [ "$i" -lt $((n - 3)) ]; then [ "${BASH_REMATCH[4]}" = , ]; else [ -z "${BASH_REMATCH[4]}" ]; fi || { GPU_WHY="$bad (line $((i + 1)))"; return 1; }
+      if [ "${BASH_REMATCH[1]}" = "$name" ]; then
+        [ "${#entry[@]}" -eq 0 ] || { GPU_WHY="$bad ($name is listed twice)"; return 1; }
+        IFS=', ' read -r -a entry <<<"${BASH_REMATCH[2]}"
+      fi
+    done
+  fi
+  GPU_MAX_S=$((m * 60))
+  [ "${#entry[@]}" -gt 0 ] || { GPU_WHY="not on for $name in $GPU_FILE"; return 1; }
+  # Ascending and each once: the locks are taken in this order, so two runs never wait on each other's.
+  GPU_IDX=()
+  while IFS= read -r i; do GPU_IDX+=("$i"); done < <(printf '%s\n' "${entry[@]}" | sed 's/^0*\([0-9]\)/\1/' | sort -n -u)
+  return 0
+}
+
+# Who holds a GPU's lock, for the message of a run that waited its whole timeout: the note the holding helper wrote
+# (instance/run since time); with none (a `worklane gpu hold` writes none), the holder's pid and user from /proc/locks.
+# WHY not both: a flock's pid in /proc/locks is the process that took it, here flock(1), long gone.
+gpu_holder() {
+  local f="$1" note ino pid
+  note="$(head -c 200 -- "$f" 2>/dev/null | tr -cd '[:alnum:] ._:/+-' || true)"
+  if [ -n "$note" ]; then printf '%s' "$note"; return 0; fi
+  ino="$(stat -c %i -- "$f" 2>/dev/null || true)"
+  pid="$(awk -v ino="$ino" '$2 == "FLOCK" && $4 == "WRITE" && $6 ~ (":" ino "$") { print $5; exit }' /proc/locks 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$pid" ]; then
+    printf 'pid %s (%s: %s)' "$pid" "$(stat -c %U "/proc/$pid" 2>/dev/null || echo '?')" "$(tr -cd '[:alnum:] ._/-' < "/proc/$pid/comm" 2>/dev/null || echo '?')"
+  else
+    printf 'a holder this helper cannot name'
+  fi
+}
+
+# The GPU's lock directory and one lock file in it, root's own (never a symlink, never anyone else's); made here, and
+# by scripts/setup/testrun-gpu.sh's tmpfiles.d entry at each boot (/run is a tmpfs).
+gpu_lock_file() {
+  local f="$GPU_LOCK_DIR/$1.lock" d got
+  for d in "$(dirname "$GPU_LOCK_DIR")" "$GPU_LOCK_DIR"; do
+    if [ -L "$d" ]; then die "$d is a symlink"; fi
+    [ -d "$d" ] || mkdir -m 0755 -- "$d" 2>/dev/null || [ -d "$d" ] || die "can't make $d"
+    got="$(stat -c '%U %a' -- "$d")"; [ "$got" = "$(id -un) 755" ] || die "$d is $got, not $(id -un)'s and 0755"
+  done
+  if [ -L "$f" ]; then die "$f is a symlink"; fi
+  [ -e "$f" ] || ( umask 022; set -C; : > "$f" ) 2>/dev/null || [ -f "$f" ] || die "can't make $f"
+  [ -f "$f" ] && [ ! -L "$f" ] || die "$f is not a regular file"
+  got="$(stat -c '%U %a' -- "$f")"; [ "$got" = "$(id -un) 644" ] || die "$f is $got, not $(id -un)'s and 0644"
+  printf '%s' "$f"
+}
+
+# Decide a GPU run (GPU_ON, with GPU_IDX, GPU_MAX_S and the unit's properties GPU_PROPS) or not (GPU_WHY), from root's
+# file, systemd's version and the nodes present. Never takes a lock.
+GPU_ON=0
+GPU_WHY=
+GPU_PROPS=()
+GPU_NODES=()
+gpu_decide() {
+  local sd="$1" i n skipped=()
+  gpu_opt_in || return 0
+  [[ "$sd" =~ ^[0-9]+$ ]] && [ "$sd" -ge "$GPU_MIN_SYSTEMD" ] || { GPU_WHY="systemd ${sd:-?} is older than $GPU_MIN_SYSTEMD, the first this helper's GPU sandbox is proven on"; return 0; }
+  command -v flock >/dev/null 2>&1 || { GPU_WHY="no flock on this machine (util-linux), so no GPU lock"; return 0; }
+  for n in nvidiactl nvidia-uvm; do is_char "$DEV/$n" || { GPU_WHY="no $DEV/$n: the NVIDIA driver isn't loaded"; return 0; }; done
+  local idx=()
+  for i in "${GPU_IDX[@]}"; do if is_char "$DEV/nvidia$i"; then idx+=("$i"); else skipped+=("$DEV/nvidia$i"); fi; done
+  [ "${#idx[@]}" -gt 0 ] || { GPU_WHY="none of the listed GPUs' nodes exist (${skipped[*]})"; return 0; }
+  GPU_IDX=("${idx[@]}")
+  GPU_NODES=("$DEV/nvidiactl" "$DEV/nvidia-uvm")
+  for i in "${GPU_IDX[@]}"; do GPU_NODES+=("$DEV/nvidia$i"); done
+  GPU_PROPS=()
+  for n in "${GPU_NODES[@]}"; do GPU_PROPS+=(-p "BindPaths=$n" -p "DeviceAllow=$n rw"); done
+  GPU_ON=1
+  GPU_WHY="${skipped[*]:+skipped ${skipped[*]} (no node)}"
+}
+
+# Take each granted GPU's lock for run <id>, in ascending order, waiting at most until the run's deadline (epoch seconds). Each
+# lock's fd stays open in this helper (and the systemd-run it starts) until it exits. On a wait that reaches the
+# deadline: the line saying who holds it, and exit 1, with nothing started.
+GPU_FDS=()
+GPU_LOCKS=()
+gpu_lock() {
+  local id="$1" deadline="$2" started="$3" i f fd=19 left
+  for i in "${GPU_IDX[@]}"; do
+    f="$(gpu_lock_file "$i")" || exit 2
+    # A fixed fd per lock (20 and up; at most 16 GPUs), opened read-only: the number alone goes through eval.
+    fd=$((fd + 1))
+    eval "exec $fd<\"\$f\""
+    left=$((deadline - $(date +%s)))
+    if [ "$left" -lt 1 ] || ! flock -x -w "$left" "$fd"; then
+      if [ "$left" -lt 1 ] && flock -x -n "$fd"; then :; else
+        echo "worklane-testrun: gpu $i: still held after $(($(date +%s) - started)) s, the run's timeout (held by $(gpu_holder "$f"))" >&2
+        exit 1
+      fi
+    fi
+    GPU_FDS+=("$fd"); GPU_LOCKS+=("$f")
+    # The note a waiting run's message names. Root's file: only this helper writes it; it is emptied again at the end.
+    printf '%s/%s since %s\n' "$name" "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
+  done
+}
+gpu_unlock() {
+  local f
+  for f in ${GPU_LOCKS[@]+"${GPU_LOCKS[@]}"}; do : > "$f" 2>/dev/null || true; done
+}
+
+# What exec leaves behind on any exit: the run's variables file, and the notes in the GPU locks it held.
+exec_cleanup() {
+  if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
+  gpu_unlock
+}
+
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0
-  local -a envfile=() noexpand=()
-  [ "$#" -eq 4 ] && [ "$3" = -- ] || die "usage: exec <id> <timeout_s> -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 started locking waited runtime unit pid
+  local -a envfile=() noexpand=() gpuprops=()
+  if [ "$#" -eq 5 ] && [ "$3" = --gpu ] && [ "$4" = -- ]; then gpu=1; set -- "$1" "$2" -- "$5"; fi
+  [ "$#" -eq 4 ] && [ "$3" = -- ] || die "usage: exec <id> <timeout_s> [--gpu] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
   valid_id "$id"; shift 2
   [[ "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || die "timeout_s: seconds, got $timeout"
+  # A GPU command's clock starts here: its wait for the GPU counts against its timeout.
+  if [ "$gpu" -eq 1 ]; then started="$(date +%s)"; fi
   d="$(run_dir "$id")"
   [ -d "$d/work" ] || die "no run $id"
   # WHY: systemd binds the TMPDIR in as root, following a symlink: only the test user's own 0700 directory goes in.
@@ -332,8 +489,29 @@ exec_run() {
   cmd="$(systemd_command "$(systemd_version)" "$2")"
   flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
   [ -z "$flag" ] || noexpand=("$flag")
-  inaccessible="-$sock_dir -$root/docker -$root/docker-home"
+  # The GPU locks too: a run (GPU or not) can't flock one and keep a GPU run waiting.
+  inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
+  unit="worklane-test-$name-$id-$$"
+  trap exec_cleanup EXIT
+  runtime="$timeout"
+  # GPU (above): only when asked, and only as root's file says. The lock's wait counts against the run's timeout; the
+  # unit gets what is left, at most the file's max_minutes.
+  if [ "$gpu" -eq 1 ]; then
+    gpu_decide "$(systemd_version)"
+    if [ "$GPU_ON" -eq 1 ]; then
+      locking="$(date +%s)"
+      gpu_lock "$id" $((started + timeout)) "$started"
+      waited=$(($(date +%s) - locking))
+      runtime=$((timeout - ($(date +%s) - started)))
+      [ "$runtime" -ge 1 ] || { echo "worklane-testrun: gpu $(IFS=,; echo "${GPU_IDX[*]}"): still held after $(($(date +%s) - started)) s, the run's timeout (no time left to run)" >&2; exit 1; }
+      [ "$runtime" -le "$GPU_MAX_S" ] || runtime="$GPU_MAX_S"
+      gpuprops=("${GPU_PROPS[@]}")
+      echo "worklane-testrun: gpu $(IFS=,; echo "${GPU_IDX[*]}") (devices ${GPU_NODES[*]}; max $runtime s; waited $waited s${GPU_WHY:+; $GPU_WHY})" >&2
+    else
+      echo "worklane-testrun: gpu none ($GPU_WHY)" >&2
+    fi
+  fi
   # The run's variables (RUN_ENV), for systemd to read from a file of root's only: never on systemd-run's argv nor in
   # the unit's Environment= (the INVARIANT above). Only the run's own processes get them.
   if [ "${#RUN_ENV[@]}" -gt 0 ]; then
@@ -342,7 +520,6 @@ exec_run() {
     p="$(stat -c '%U %a' -- "$ENV_DIR")"; [ "$p" = "$(id -un) 700" ] || die "$ENV_DIR is $p, not $(id -un)'s and 0700"
     # Dots: no name or id has one, so wipe's "<name>.<id>.*" is this run's alone.
     ENV_FILE="$ENV_DIR/$name.$id.$$"
-    trap 'rm -f -- "$ENV_FILE"' EXIT
     ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
     envfile=(-p "EnvironmentFile=$ENV_FILE")
   fi
@@ -350,18 +527,32 @@ exec_run() {
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
   # the run's stdout as its own and reads systemd-run's summary only as the final block of stderr.
-  systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} ${envfile[@]+"${envfile[@]}"} \
-    --unit="worklane-test-$name-$id-$$" --slice="$SLICE" --uid="$user" --gid="$user" \
-    -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
-    -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
-    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
-    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d" \
-    -p TemporaryFileSystem="$TMP_BASE:ro" -p BindPaths="$t" -p ReadWritePaths="$t" \
-    -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible" \
-    --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin \
-    --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user" \
-    /bin/bash -o pipefail -c "$cmd" || rc=$?
-  if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
+  local -a run=(systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} ${envfile[@]+"${envfile[@]}"}
+    --unit="$unit" --slice="$SLICE" --uid="$user" --gid="$user"
+    -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$runtime" -p KillMode=control-group -p UMask=0077
+    -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes
+    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
+    ${gpuprops[@]+"${gpuprops[@]}"}
+    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d"
+    -p TemporaryFileSystem="$TMP_BASE:ro" -p BindPaths="$t" -p ReadWritePaths="$t"
+    -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible"
+    --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin
+    --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user"
+    /bin/bash -o pipefail -c "$cmd")
+  if [ "${#gpuprops[@]}" -eq 0 ]; then
+    "${run[@]}" || rc=$?
+  else
+    # WHY: the GPU's lock must never be let go while the unit runs. bash runs a trap only once a foreground child
+    # ends, so systemd-run goes in the background and is waited for: a TERM (sudo passes the coordinator's on) stops
+    # the unit first, and the locks go with this helper after it. systemd-run keeps the lock fds open too.
+    trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
+    "${run[@]}" &
+    pid=$!
+    wait "$pid" || rc=$?
+    trap - TERM INT HUP
+  fi
+  exec_cleanup
+  ENV_FILE=
   return "$rc"
 }
 

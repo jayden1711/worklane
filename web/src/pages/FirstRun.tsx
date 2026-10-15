@@ -10,8 +10,10 @@ import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin'
 import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from '../components/Header';
+import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
+import { StarterCi } from '../components/StarterCi';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
@@ -534,6 +536,12 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
                       <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
+                    ) : s.id === 'required-checks' && !s.done && !f.repoConfig && !f.setupMode ? (
+                      // #469: a server's instance has no Repo config form; the starter CI is offered here all the same.
+                      <div className="space-y-2">
+                        <FixPanel s={s} />
+                        <StarterCi canEdit={!!f.canAct} inForm={false} />
+                      </div>
                     ) : (
                       <FixPanel s={s} />
                     )
@@ -560,6 +568,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           <code className={code}>{f.command}</code>
         </Card>
       )}
+      {f.diskFloor && <DiskFloorCheck d={f.diskFloor} />}
       {!!f.unavailable.length && (
         <section aria-label={`Not available in ${f.mode} mode`} data-testid="first-run-unavailable">
           <div className="mb-1.5 text-[13px] font-medium text-ink">Not available in {f.mode} mode</div>
@@ -620,6 +629,7 @@ export function FirstRunPage({ state }: { state: State }) {
     <div data-testid="page-first-run">
       <Header title="First run" sub={f && 'setup' in f && f.setup ? `${f.setup.done} of ${f.setup.total} steps done` : 'the guided setup, step by step'} />
       <div className="mx-auto max-w-3xl space-y-4 p-4 sm:p-6">
+        <HoldStrip holds={[{ instance: null, hold: state.governor?.held ? state.governor.banner : null }]} testId="first-run-hold" />
         {refused ? (
           <div className="text-[13px] text-ink-3" data-testid="first-run-refused">
             {refused.replace(/^the/, 'The')}.

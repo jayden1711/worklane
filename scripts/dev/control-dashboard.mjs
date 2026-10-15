@@ -135,6 +135,8 @@ async function start() {
     const state = await (await fetch(`${direct}/api/state`, { headers: { authorization: `Bearer ${token}` } })).json();
     const issue = state.tasks.find((t) => t.status === 'awaiting_decision')?.issue ?? state.tasks[0]?.issue;
     const run = await seedRun(root, issue);
+    // A decision for the decision page (/decisions/<decision>): the open one the demo asks, else any.
+    const decision = (state.decisions ?? []).find((x) => !x.answer)?.id ?? state.decisions?.[0]?.id ?? 'none';
     if (flag('--with-prs')) await seedPrs(root, state.tasks.map((t) => t.issue));
     if (flag('--with-usage-pause')) await seedUsagePause(root, issue);
     if (flag('--with-signin-failed')) await seedSigninFailed(root, issue);
@@ -156,7 +158,7 @@ async function start() {
     });
     for (const note of browser.notes) process.stderr.write(`control-dashboard: ${note}\n`);
     const cdp = browser.cdp;
-    return { cdp, base, token: hub ? null : token, signIn: !!hub, issue, run, stop, work };
+    return { cdp, base, token: hub ? null : token, signIn: !!hub, issue, run, decision, stop, work };
   } catch (e) {
     await stop();
     throw e;
@@ -388,7 +390,7 @@ class Controller {
     return r.result.value;
   }
   params(page) {
-    return { n: this.issue, id: this.run ?? '' };
+    return { n: this.issue, id: this.run ?? '', decision: this.decision ?? 'none' };
   }
   async open(which) {
     // A path the map doesn't have yet (a page being added) opens too; it's ready once it shows any heading.

@@ -22,6 +22,7 @@ import { configBehind, missingReferencedPath, oldHeadFailure, type Predates } fr
 import type { Plan } from './affected.js';
 import { importsPlan, selectMode, testsArg } from './select.js';
 import { runLockPath } from '../os/system-paths.js';
+import { gpuPlanned, gpuRecord, gpuStopped, gpuSummaryLine, type GpuOptIn } from './gpu.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -43,6 +44,8 @@ export interface TierResult {
   logRef: string;
   /** The PR's head is older than the test-run config and can't run this tier as configured (./predates.ts). */
   predates?: Predates;
+  /** Only for a tier that asked for the GPU: whether it got it, the nodes, and the helper's line (./gpu.ts). */
+  gpu?: { granted: boolean; devices: string[]; detail: string };
 }
 export interface TestRunResult {
   id: string;
@@ -63,6 +66,10 @@ export interface TestRunResult {
   setup?: SetupFailure;
   /** A line the posted check adds under the result (the coordinator's: its disk is full and the run's events wait). */
   note?: string;
+  /** Recorded as a GPU run before it started (testrun.started gpu=planned). */
+  gpuPlanned?: boolean;
+  /** A granted GPU command of it timed out or was killed: never run again by itself (./gpu.ts). */
+  gpuStopped?: boolean;
 }
 
 export interface SetupFailure {
@@ -105,6 +112,11 @@ export interface TestRunDeps {
   plan?: (repo: string, sha: string, changed: readonly string[]) => Plan;
   /** Directories left out of the workspace (tests.yaml checkout.sparse_exclude), unless a tier of the run sets full_checkout. */
   sparseExclude?: readonly string[];
+  /**
+   * Root's GPU opt-in for this instance (./gpu.ts gpuOptIn), read when a run with a GPU tier starts: for planning and
+   * the record only, never as the permission (the helper reads root's file itself). Absent: never planned.
+   */
+  gpuOptIn?: () => GpuOptIn;
 }
 
 /** What a run's workspace leaves out: the project's sparse_exclude, or nothing when one of its tiers needs a full checkout. */
@@ -221,13 +233,18 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   let outcome: TestRunResult['outcome'] = 'done';
   let detail = '';
   let setup: SetupFailure | undefined;
+  let gpuRun = false;
+  let stoppedGpu = false;
   // The step in progress, for a failure that doesn't name its own.
   let stage = 'slot';
   try {
     slot = await waitTestSlot(`${d.actor} test run ${id}`, { ...(d.slotsDir ? { dir: d.slotsDir } : {}), ...(d.slotPollMs ? { pollMs: d.slotPollMs } : {}), ...(o.signal ? { signal: o.signal } : {}), limitMs: runLimitMs(d.config, tiers) });
     const waitFrom = now();
     lock = await (d.lock ?? ((p, s) => holdFlock(p, 'shared', s)))(d.lockPath ?? FULL_RUN_LOCK, o.signal);
-    emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom) });
+    // INVARIANT: a run that may use the GPU says so before any command of it runs (./gpu.ts: never run again by itself
+    // once cut off). A file that can't be read counts as on.
+    gpuRun = tiers.some((t) => t.gpu) && !!d.gpuOptIn && gpuPlanned(d.gpuOptIn());
+    emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom), ...(gpuRun ? { gpu: 'planned' as const } : {}) });
     created = true;
     stage = 'create';
     await createWorkspace(d.host, d.repo, req.sha, id, workspaceExclude(tiers, d.sparseExclude));
@@ -292,17 +309,22 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
         continue;
       }
       const start = now();
-      const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal);
+      const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal, t.gpu ? { gpu: true } : {});
       const logRef = `${id}/${t.name}.log`;
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
+      const gpu = gpuRecord(t.gpu, r.gpu ?? null);
+      if (gpuStopped(r.gpu ?? null, r, !!o.signal?.aborted)) stoppedGpu = true;
       // WHY: the sandbox's unit stopped at its RuntimeMaxSec exits non-zero like any failure; only systemd-run's result
-      // says it was the tier's own cap, and the check names the tier and that cap.
-      const out = r.timedOut ? `${timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run')}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
-      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: selects ? `${selection.line}\n${out}` : out, logRef };
+      // says it was the tier's own cap, and the check names the tier and that cap (a GPU command's may be the GPU's).
+      const g = r.gpu?.granted ? r.gpu : null;
+      const cap = g && g.maxS + g.waitedS < t.timeout_s ? timedOutLine(`tier ${t.name}`, g.maxS, `the GPU runs' max_minutes in root's testrun-gpu.json, after ${g.waitedS} s waiting for the GPU`) : timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run');
+      const out = r.timedOut ? `${cap}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
+      const said = [...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : [])];
+      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: said.length ? `${said.join('\n')}\n${out}` : out, logRef, ...(gpu ? { gpu } : {}) };
       const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
       if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
       results.push(tr);
-      emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null });
+      emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null, ...(gpu ? { gpu } : {}) });
       // Its per-test durations, for the metrics' slow tests (src/test-durations.ts): names and times only, never output.
       const durations = recordable(r.out);
       emit('testrun.durations', { id, tier: t.name, tests: durations.tests, parsed: durations.parsed });
@@ -327,8 +349,8 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   }
   const ok = outcome === 'done' && tiers.length > 0 && results.length === tiers.length && results.every((r) => r.ok);
   if (!tiers.length) detail = `no ${req.kind} tiers in tests.yaml test_run`;
-  emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok, outcome, results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail });
-  return { id, sha: req.sha, kind: req.kind, ok, tiers: results, outcome, ...(setup ? { setup } : {}) };
+  emit('testrun.finished', { id, sha: req.sha, kind: req.kind, prs: req.prs, ok, outcome, results: results.map((r) => ({ tier: r.tier, ok: r.ok })), detail, ...(stoppedGpu ? { gpu_stopped: true } : {}) });
+  return { id, sha: req.sha, kind: req.kind, ok, tiers: results, outcome, ...(setup ? { setup } : {}), ...(gpuRun ? { gpuPlanned: true } : {}), ...(stoppedGpu ? { gpuStopped: true } : {}) };
 }
 
 /** A sharded full run's shards as one result: each tier passes only if it passed in every shard that ran it. */
@@ -345,9 +367,11 @@ export function mergeShards(results: readonly TestRunResult[]): TestRunResult {
     summary: ts.filter((t) => !t.ok).map((t) => t.summary).join('\n---\n') || ts[0]!.summary,
     logRef: ts.map((t) => t.logRef).filter(Boolean).join(' '),
     ...(ts.find((t) => t.predates) ? { predates: ts.find((t) => t.predates)!.predates! } : {}),
+    ...(ts.find((t) => t.gpu) ? { gpu: ts.find((t) => t.gpu)!.gpu! } : {}),
   }));
   // Any shard without a verdict leaves the whole run without one.
   const outcome = results.find((r) => r.outcome !== 'done')?.outcome ?? 'done';
   const setup = results.find((r) => r.setup)?.setup;
-  return { id: results.map((r) => r.id).join('+'), sha: first.sha, kind: first.kind, ok: results.every((r) => r.ok), tiers, outcome, ...(setup ? { setup } : {}) };
+  const gpu = { ...(results.some((r) => r.gpuPlanned) ? { gpuPlanned: true } : {}), ...(results.some((r) => r.gpuStopped) ? { gpuStopped: true } : {}) };
+  return { id: results.map((r) => r.id).join('+'), sha: first.sha, kind: first.kind, ok: results.every((r) => r.ok), tiers, outcome, ...(setup ? { setup } : {}), ...gpu };
 }

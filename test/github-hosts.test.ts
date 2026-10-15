@@ -90,8 +90,8 @@ function envReads(file: string, text: string): string[] {
   return [...names];
 }
 
-test('the hosts are two constants, and the module that holds them reads nothing', () => {
-  assert.deepEqual({ ...hosts }, { GITHUB_API: 'https://api.github.com', GITHUB_WEB: 'https://github.com' });
+test('the hosts are constants (the API, the site, and where people\'s pictures come from), and the module that holds them reads nothing', () => {
+  assert.deepEqual({ ...hosts }, { GITHUB_API: 'https://api.github.com', GITHUB_WEB: 'https://github.com', GITHUB_AVATARS: 'https://avatars.githubusercontent.com' });
   assert.doesNotMatch(read('src/github-hosts.ts'), /process\.env|readFileSync|import /);
 });
 

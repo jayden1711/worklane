@@ -12,7 +12,7 @@
 import type { IncomingMessage } from 'node:http';
 import { rmSync } from 'node:fs';
 import { ClaudeTokenError } from './claude-account.js';
-import { PROFILE_NAME, requestProfileOp, storeLoginCode, storeProfileToken } from './claude-profiles.js';
+import { PROFILE_NAME, requestFailoverSetting, requestProfileOp, storeLoginCode, storeProfileToken } from './claude-profiles.js';
 import type { Role } from './console/asks.js';
 import { AskError } from './console/asks.js';
 import { readSecretBody } from './console/secrets.js';
@@ -122,12 +122,26 @@ export async function handleProfileRoute(req: IncomingMessage, url: URL, who: Pr
     }
     return record({ action: 'profile-add', profile }, () => rmSync(file, { force: true }));
   }
-  const body = ((await d.readBody(req)) ?? {}) as { action?: unknown; profile?: unknown; instance?: unknown };
-  const action = body.action === 'use' || body.action === 'remove' || body.action === 'login' ? body.action : null;
+  const body = ((await d.readBody(req)) ?? {}) as { action?: unknown; profile?: unknown; instance?: unknown; order?: unknown; back?: unknown };
+  const action = body.action === 'use' || body.action === 'remove' || body.action === 'login' || body.action === 'failover' ? body.action : null;
   if (who.role !== 'owner') return refuse(403, `only the instance's owners (admin on ${d.repo}) who are machine owners may switch or remove a Claude account; @${who.login} is a ${who.role}`, { action: action ?? 'not an action' });
-  if (!action) return refuse(400, 'action is use, remove or login (adding one by its token: profile-add)', { action: 'not an action' });
+  if (!action) return refuse(400, 'action is use, remove, login or failover (adding one by its token: profile-add)', { action: 'not an action' });
   // Never another instance, nor every one: a dashboard's step is for its own instance (a root admin's otherwise).
   if (body.instance !== undefined && body.instance !== null && body.instance !== d.instance) return refuse(403, `a step from ${d.instance}'s dashboard is for ${d.instance} alone; another instance, or every one, is a root admin's on the machine (claude-account.sh)`, { action });
+  if (action === 'failover') {
+    const log = new EventLog(d.eventsDb);
+    let r: MachineRequest;
+    try {
+      r = requestFailoverSetting(log, { order: body.order, back: body.back, who: gateWho, ...(d.ownersFile ? { ownersFile: d.ownersFile } : {}) });
+    } catch (e) {
+      if (e instanceof MachineRequestError) return refuse(e.status, e.message, { action });
+      throw e;
+    } finally {
+      log.close();
+    }
+    d.audit(who, 'machine.claude_profile', { action, order: r.args[2], back: r.args[3], request: r.id });
+    return { status: 200, body: { ok: true, pending: true, request: r } };
+  }
   return record({ action, profile: body.profile });
 }
 

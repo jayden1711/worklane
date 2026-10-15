@@ -15,7 +15,13 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
+import { starterCiView } from './starter-ci.js';
+import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+
+/** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
+const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
 import { GITHUB_API } from './github-hosts.js';
+import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
@@ -36,8 +42,10 @@ import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
 import { readRun, runsForIssue } from './run-record.js';
+import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
+import { gpuFilePath, gpuOptIn } from './testrun/gpu.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
@@ -46,7 +54,8 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
@@ -108,6 +117,15 @@ import { refuseKeyInUrl } from './dashboard-key-url.js';
  * happens in the project's config folder, through review like any change.
  */
 /** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+/** The disk floor on this machine now (src/governor-holds.ts), as doctor checks it: Settings' and First run's numbers; null when it can't be measured. */
+export function diskFloorNow(o: Pick<DashboardOptions, 'root' | 'cfg'>, measure: (path: string) => { freeGb: number; totalGb: number } = diskFree) {
+  try {
+    return diskFloorCheck(measure(o.root), o.cfg.project.governor, o.cfg.tests.worktree.est_size_gb);
+  } catch {
+    return null;
+  }
+}
+
 export function settingsForViewer(cfg: Config) {
   const v = settingsView(cfg);
   return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
@@ -127,7 +145,7 @@ export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>)
 export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
-    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
+    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime, ci: ciMode(cfg) },
     owners: cfg.project.owners,
     reports: cfg.project.reports,
     governor: cfg.project.governor,
@@ -155,6 +173,8 @@ export function drainView(dir?: string, now = Date.now()): UpdatesDrain | null {
 export interface DashboardOptions {
   root: string;
   cfg: Config;
+  /** The disk's free and total GB at a path, for the disk floor's numbers (tests stand in for it); absent: the real one. */
+  diskFree?: (path: string) => { freeGb: number; totalGb: number };
   eventsDb: string;
   stateDir: string;
   /** The login recorded for the break-glass (the token used on this machine with no person named): the owner's. */
@@ -190,6 +210,9 @@ export interface DashboardOptions {
    */
   actor?: string;
   /** The full-run lock whose holders the test-runs view shows (tests). */
+  /** Root's GPU opt-in file and the uid that must own it (tests: their own; src/testrun/gpu.ts). */
+  gpuFile?: string;
+  gpuFileUid?: number;
   testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
@@ -236,6 +259,8 @@ export interface DashboardOptions {
    * cli.js, by absolute path.
    */
   discordListing?: DiscordListingStandIn;
+  /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
+  avatars?: AvatarOptions;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -805,6 +830,13 @@ export function tokenGiven(req: IncomingMessage, _url: URL, token: string): bool
 /** The marker a hub puts on the page it serves, so the UI asks for the hub's instances only there (else /api/hub is a 404). */
 export const HUB_MARKER = '<meta name="dashboard-hub" content="1">';
 
+/**
+ * The dashboard page's content security policy, on the hub and on an instance's own server: everything from this
+ * origin only. People's pictures come from this server too (src/avatars.ts), read with the page's own auth and shown
+ * from a blob: URL the page made; no outside host is in any directive (#462).
+ */
+export const PAGE_CSP = "default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+
 export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts: { hub?: boolean } = {}): void {
   const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
   let file = resolve(webDir, rel);
@@ -823,6 +855,7 @@ export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts:
   const enc = compressibleType(type) ? requestEncoding(res.req) : null;
   if (compressibleType(type)) headers.vary = 'accept-encoding';
   if (html) {
+    headers['content-security-policy'] = PAGE_CSP;
     const page = readFileSync(file, 'utf8');
     const body = Buffer.from(opts.hub ? (page.includes('</head>') ? page.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${page}`) : page);
     return send(res, 200, headers, body, enc);
@@ -947,8 +980,19 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
   const eventCache = new EventCache(opts.eventsDb);
   let lastId = eventCache.lastId();
+  // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
+  const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
 
   const owners = opts.cfg.project.owners;
+  const avatars = new Avatars(join(opts.stateDir, 'avatars'), opts.avatars);
+  /** Whether a person is one this instance knows (so their picture may be fetched): its people, the asker, a machine owner. */
+  const knowsPerson = (login: string, who: Who) => {
+    const l = login.toLowerCase();
+    if (l === who.login.toLowerCase() || isMachineOwner(login, opts.machineOwnersFile ?? MACHINE_OWNERS_FILE)) return true;
+    const today = localDay();
+    const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
+    return peopleOf({ owners: opts.cfg.project.owners, tasks: p.tasks, decisions: p.decisions }).has(l);
+  };
   const repo = opts.cfg.project.project.repo;
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
@@ -1073,7 +1117,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       setupMode: !!opts.setupMode,
-      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
+      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode, ci: ciMode(opts.cfg) },
       user: who.login,
       role: who.role,
       via: who.via,
@@ -1193,6 +1237,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
         if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role)) return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
         if (url.pathname === '/api/state' && req.method === 'GET') return json(res, 200, state(who));
+        // A person's picture from this server, never from GitHub in the browser (#462); and, for the hub, whether a
+        // login is a person this instance knows, so the hub fetches only theirs.
+        const avatar = url.pathname.match(AVATAR_ROUTE);
+        if (avatar && req.method === 'GET') return void (await avatars.serve(req, res, avatar[1]!, url.searchParams.get('size'), (l) => knowsPerson(l, who)));
+        const person = url.pathname.match(/^\/api\/people\/([^/]+)$/);
+        if (person && req.method === 'GET') return json(res, 200, { known: validLogin(person[1]) && knowsPerson(person[1]!, who) });
         // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
         // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
         // Each action is refused again by the route it calls (decide, the console).
@@ -1204,7 +1254,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
         if (url.pathname === '/api/test-runs' && req.method === 'GET') {
           const held = testSlotsHeld(opts.slotsDir);
-          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
+          // Root's GPU opt-in for this instance, read-only (src/testrun/gpu.ts): only a root shell changes it.
+          const name = opts.instance ?? opts.cfg.project.project.name;
+          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) }, gpu: gpuOptIn(name, opts.gpuFile ?? gpuFilePath(), opts.gpuFileUid ?? 0), instance: name }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
@@ -1223,7 +1275,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
         // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome, diskFloor: diskFloorNow(opts, opts.diskFree) } : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = eventCache.after(Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
@@ -1467,6 +1519,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             log.close();
           }
         }
+        // A decision's (or held PR's) detail, asked when its page opens (src/decision-detail.ts): a viewer gets only a
+        // viewer's fields; …/diff is the owners' (from this checkout's git), …/pr the owners' and writers' (the PR body).
+        if (url.pathname.startsWith('/api/decisions/') && req.method === 'GET') {
+          const [raw = '', part, ...more] = url.pathname.slice('/api/decisions/'.length).split('/');
+          if (more.length || (part !== undefined && part !== 'diff' && part !== 'pr')) return json(res, 404, { error: 'no such view' });
+          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
+          if (!detail) return json(res, 404, { error: 'no such decision' });
+          if (part === undefined) return json(res, 200, detail);
+          if (part === 'diff') {
+            if (!isOwnerHere) return json(res, 403, { error: `a change's diff is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+            const c = detail.change;
+            return json(res, 200, c?.base && c.head ? await decisionDiff(opts.root, c.base, c.head) : { diff: null, why: 'no commits recorded for this change' });
+          }
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly("a PR's body is", who) });
+          const pr = detail.pr;
+          if (!pr) return json(res, 200, { pr: null, failWithout: null, never: null, why: 'no PR' });
+          if (!opts.backlog) return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: 'this dashboard has no backlog to read the PR from' });
+          const kept = prBodies.get(pr.number);
+          const body = kept && Date.now() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
+          if (body !== kept?.body) prBodies.set(pr.number, { at: Date.now(), body });
+          try {
+            return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
+          } catch (e) {
+            prBodies.delete(pr.number);
+            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR: ${(e as Error).message}` });
+          }
+        }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
@@ -1547,7 +1626,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             }
           }
           const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, ...setup });
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, diskFloor: opts.setupMode ? null : diskFloorNow(opts, opts.diskFree), ...setup });
         }
         // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
         // without confirm, what it would do; every run and refusal audited.
@@ -1608,6 +1687,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (runs.status !== 0 && statuses.status !== 0) return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
           const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
           return json(res, 200, { checks, sha });
+        }
+        // The starter CI (src/starter-ci.ts, #469): a drafted workflow and GitHub's new-file page for it, and its first
+        // run on the default branch. Read only: the person commits the workflow on GitHub, never the engine.
+        if (url.pathname === '/api/first-run/starter-ci' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          const gh = actionDeps().gh;
+          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, testRun: !!liveCfg().tests.test_run, gh: (args) => gh(args) }));
         }
         // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
         // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.

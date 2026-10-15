@@ -193,6 +193,12 @@ export async function stopTree(p: ChildProcess, kill: () => void = () => killTre
 /** Chrome never opened its DevTools port in time: worth one more start (a loaded machine), unlike a crash. */
 class PortTimeout extends Error {}
 
+/**
+ * Every Chrome this engine starts keeps its passwords and cookies' key in its own profile, never in the OS keychain:
+ * on macOS a headless Chrome otherwise asks for the login keychain ("A keychain cannot be found to store Chrome").
+ */
+export const CHROME_NO_KEYCHAIN_ARGS = ['--use-mock-keychain', '--password-store=basic'] as const;
+
 type LaunchOptions = { width?: number; height?: number; noSandbox?: boolean; extraArgs?: string[]; profileRoot?: string; launchMs?: number };
 
 /**
@@ -222,6 +228,7 @@ async function startChrome(chrome: string, o: LaunchOptions): Promise<Browser> {
       `--user-data-dir=${profile}`,
       '--no-first-run',
       '--no-default-browser-check',
+      ...CHROME_NO_KEYCHAIN_ARGS,
       '--disable-gpu',
       '--hide-scrollbars',
       `--window-size=${o.width ?? 1440},${o.height ?? 1000}`,

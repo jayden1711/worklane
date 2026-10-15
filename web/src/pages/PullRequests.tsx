@@ -4,6 +4,7 @@ import { navigate } from '../App';
 import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, useEntrance, type MarkState } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
+import { CiNote } from '../components/CiNote';
 
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink' };
 const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; mark: MarkState }> = {
@@ -136,7 +137,10 @@ function WaitingCard({ pr }: { pr: PrView }) {
           head <span className="font-mono">{short(pr.head)}</span>
           {pr.fixes.length ? ` · ${pr.fixes.length} fix run(s)` : ''}
         </span>
-        <a href={pr.url} {...ext} className="ml-auto inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="pr-review-link">
+        <a href={`/decisions/pr-${pr.number}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/pr-${pr.number}`))} className="ml-auto inline-flex h-7 items-center rounded-full bg-surface px-3 text-[12.5px] font-medium text-ink shadow-btn hover:bg-hover" data-testid="pr-details">
+          Details
+        </a>
+        <a href={pr.url} {...ext} className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="pr-review-link">
           Review on GitHub
         </a>
       </div>
@@ -390,6 +394,7 @@ export function PullRequests({ state }: { state: State }) {
   return (
     <div data-testid="page-prs">
       <Header title="Pull requests" sub={c ? `${c.open} open · ${c.needYou} need you` : undefined} />
+      <CiNote ci={state.project.ci} />
       {error && !data ? <div className="p-8 text-[13px] text-red">Can't load pull requests: {error}</div> : data ? <PullRequestsView view={data} /> : <Loading />}
     </div>
   );

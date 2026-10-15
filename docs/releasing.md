@@ -24,6 +24,20 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
    ```
 8. **Pin the bootstrap** for its PR: `node scripts/pin-engine.mjs vX.Y.Z --allowed-signers .github/release-signers`.
 
+## Publishing by hand
+
+Only if CI can't stage it. Publish only the signed tree: in a clean checkout of the tag, build and pack, and stop if the tarball isn't the tag's commit byte for byte (what `release.yml` checks before staging, #458):
+
+```sh
+git tag -v vX.Y.Z && git checkout --detach vX.Y.Z
+npm ci && npm run build && npm run build:web
+git status --porcelain -- dist/src dist/web    # must print nothing
+npm pack --pack-destination /tmp/release-pack
+node scripts/verify-release-tree.mjs /tmp/release-pack/*-X.Y.Z.tgz --commit vX.Y.Z
+```
+
+Publish that tarball (`npm publish /tmp/release-pack/<file>.tgz`), never a rebuild made after the check.
+
 ## Rotating the release key
 
 `.github/release-signers` is in ssh-keygen's allowed-signers format, one key per line under the principal `release-signer`. CI reads it from main, never from the tagged commit, and a change to it always waits for the owner (src/review.ts). To rotate: add the new key's line in a PR, sign the next tag with it, then remove the old line in a later PR.

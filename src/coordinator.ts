@@ -27,6 +27,7 @@ import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
 import { recordProfileSwitches } from './claude-profiles.js';
+import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
@@ -40,10 +41,11 @@ import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
 import { applySettings, inRunWindow } from './settings.js';
 import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
+import { CI_CHOICE_FIX, ciChoiceProblem } from './ci-choice.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
-import { updateDrain } from './update-drain.js';
+import { nextRunWindowStart } from './governor-holds.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
@@ -117,6 +119,8 @@ export class Coordinator extends HarnessEvals {
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
     // A Claude account profile switch this dashboard asked for, once the root script has finished it: account.switched.
     await step('account profiles', () => recordProfileSwitches(this.d.log, this.d.instance), 0);
+    // Auto-failover between account profiles on a usage limit, when it is on (src/claude-failover.ts). Never on an auth failure.
+    await step('account failover', () => failoverStep({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}), ...(this.d.incidents ? { incidents: this.d.incidents } : {}) }), null);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
@@ -475,19 +479,29 @@ export class Coordinator extends HarnessEvals {
     }
     if (r.kind === 'confirmed') {
       // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     if (r.kind === 'recovered') {
       this.emit('config.recovered', { sha: r.sha });
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     this.repoCfg = r.cfg;
     this.d.cfg = this.d.settings ? applySettings(r.cfg, this.d.settings().settings) : r.cfg;
     this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
-    this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+    this.configLoads();
     if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
+  }
+
+  /**
+   * The config on the default branch loads: the config_invalid incident is resolved, unless it can never mark a PR
+   * ready (src/ci-choice.ts, #469). That config still runs (the loader accepts it), but the incident names why.
+   */
+  private configLoads(): void {
+    const problem = ciChoiceProblem(this.repoCfg.project);
+    if (problem) this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch}: ${problem.split(' Fix: ')[0]}`, `Fix: ${CI_CHOICE_FIX}.`);
+    else this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
   }
 
   refreshSettings(): void {
@@ -507,23 +521,27 @@ export class Coordinator extends HarnessEvals {
     // Paused on the Claude usage limit: nothing starts until its reset (the tick's usage step ends the pause).
     const paused = this.usagePause();
     if (paused) {
-      this.noteHold({ reason: `paused on the Claude usage limit until ${paused.resetAt}`, load: null, freeDiskPct: null });
+      this.noteHold({ kind: 'usage_limit', reason: `paused on the Claude usage limit until ${paused.resetAt}`, load: null, freeDiskPct: null, facts: { until: paused.resetAt } });
       return 0;
     }
     // A Claude login the API refused: nothing starts until a call on it succeeds (the tick's sign-in step checks it).
     const refused = this.authHeld();
     if (refused) {
-      this.noteHold({ reason: `Claude sign-in failed (${refused.login}): no new runs until a call on that login succeeds`, load: null, freeDiskPct: null });
+      this.noteHold({ kind: 'sign_in', reason: `Claude sign-in failed (${refused.login}): no new runs until a call on that login succeeds`, load: null, freeDiskPct: null });
       return 0;
     }
     // WHY: a full disk, or one below its floor (src/disk-guard.ts): nothing new starts until there is room.
     const disk = this.diskHeld();
     if (disk) {
-      this.noteHold({ reason: `paused: ${disk}`, load: null, freeDiskPct: null });
+      this.noteHold({ kind: 'disk_full', reason: `paused: ${disk}`, load: null, freeDiskPct: null });
       return 0;
     }
-    if (!inRunWindow(this.d.cfg.project.agent_runtime.run_windows, this.d.now?.() ?? new Date())) {
-      this.noteHold({ reason: `outside the run windows (${this.d.cfg.project.agent_runtime.run_windows.map((w) => `${w.from}-${w.to}`).join(', ')})`, load: null, freeDiskPct: null });
+    const windows = this.d.cfg.project.agent_runtime.run_windows;
+    const now = this.d.now?.() ?? new Date();
+    if (!inRunWindow(windows, now)) {
+      const list = windows.map((w) => `${w.from}-${w.to}`).join(', ');
+      const next = nextRunWindowStart(windows, now);
+      this.noteHold({ kind: 'run_window', reason: `outside the run windows (${list})`, load: null, freeDiskPct: null, facts: { windows: list, ...(next ? { until: next.toISOString() } : {}) } });
       return 0;
     }
     let started = 0;
@@ -580,7 +598,7 @@ export class Coordinator extends HarnessEvals {
       }
       const slot = tryAgentSlot(`${BRAND.cli} ${this.d.cfg.project.project.name} #${issue.number}`, this.d.slotsDir);
       if (!slot) {
-        this.noteHold({ reason: updateDrain(this.d.slotsDir) ? 'draining for an engine update: no new agent starts until it is installed' : 'machine-wide agent cap reached (all harnesses)', load: null, freeDiskPct: null });
+        this.noteHold(this.slotHold());
         break; // try again next tick
       }
       this.endHotspotHold(issue.number, true);

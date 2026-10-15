@@ -70,3 +70,47 @@ test('the guard check: GitHub-hosted labels pass; self-hosted ones, or any other
   // A GitHub-hosted job may use secrets as before.
   assert.deepEqual(guard.workflowProblems(wf("runs-on: ubuntu-latest\nenv: { T: '${{ secrets.X }}' }")), []);
 });
+
+// The jobs this repo sends to its own self-hosted runner (docs/ci-runners.md): trusted pushes to main only, behind
+// the CI_SELF_HOSTED switch, falling back to GitHub's runners for everything else. That runner has no root, no
+// Chrome, no gh or jq, no secrets, and refuses loopback (so nothing a job serves on 127.0.0.1 itself, and no Docker
+// port): a job that needs any of these would fail or, worse, skip proof there, so it stays on GitHub. The test
+// shards (real Chrome, local servers), desktop (apt as root) and the slow real-systemd jobs are never routed.
+// This repo's id (gh api repos/<owner>/<repo> --jq .id): a fork's copy never has it, and it survives a rename.
+const REPO_ID = '1409507019';
+const ROUTED: Record<string, string[]> = { 'ci.yml': ['agentshield', 'push-gate', 'denylist'], 'gitleaks.yml': ['scan'] };
+const NEEDS_WHAT_THE_RUNNER_LACKS = /\bsecrets\.|\bsudo\b|apt-get|\bdocker\b|services:|container:|continue-on-error|CI_REQUIRE_WEB|chrom|\bgh (api|pr|run|release|variable)\b|\bjq\b|127\.0\.0\.1|localhost|build:web|node --test|npm (run )?test\b/i;
+
+test('the routed jobs: exactly these, each behind the documented trusted-push guard, needing nothing that runner lacks', async () => {
+  const { parse } = await import('yaml');
+  // The runner's own label (docs/ci-runners.md, --label at install): one, the same on every routed job, never a
+  // GitHub-hosted one.
+  const labels = new Set<string>();
+  const want = (label: string) => `\${{ vars.CI_SELF_HOSTED == 'on' && github.repository_id == '${REPO_ID}' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","${label}"]') || 'ubuntu-latest' }}`;
+  // The checks a merge and the engine updater require, by the names GitHub gives them.
+  const required = (parse(readFileSync(join(repoRoot, '.worklane', 'config.yaml'), 'utf8')) as { required_checks: string[] }).required_checks;
+  const dir = join(repoRoot, '.github', 'workflows');
+  const found: Record<string, string[]> = {};
+  for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x)).sort()) {
+    const jobs = (parse(readFileSync(join(dir, f), 'utf8')) as { jobs: Record<string, Record<string, unknown>> }).jobs;
+    for (const [id, job] of Object.entries(jobs)) {
+      if (!/self-hosted/.test(JSON.stringify(job['runs-on'] ?? ''))) continue;
+      (found[f] ??= []).push(id);
+      const label = /fromJSON\('\["self-hosted","([a-z0-9-]+)"\]'\)/.exec(String(job['runs-on']))?.[1] ?? '';
+      labels.add(label);
+      assert.equal(job['runs-on'], want(label), `${f} ${id}: runs-on is the documented guard with a GitHub-hosted fallback`);
+      assert.equal(guard.guardProblem(want(label).replace(/^\$\{\{\s*|\s*&& fromJSON[\s\S]*$/g, '')), null, `${f} ${id}`);
+      // Its check keeps its name (the job id, no name: of its own), and a required check stays required by that name.
+      assert.equal(job.name, undefined, `${f} ${id}: no name: of its own, so the check is still called ${id}`);
+      const hit = NEEDS_WHAT_THE_RUNNER_LACKS.exec(JSON.stringify({ ...job, 'runs-on': undefined }));
+      assert.equal(hit, null, `${f} ${id} uses ${hit?.[0]}, which the self-hosted runner lacks or forbids: keep it on GitHub`);
+      // Every tool it downloads is pinned and checked, and a download that fails fails the step (curl -f).
+      const runs = JSON.stringify(job.steps);
+      if (/curl /.test(runs)) assert.match(runs, /curl -sSfL[\s\S]*sha256sum -c -/, `${f} ${id}: a download is checked`);
+    }
+  }
+  assert.deepEqual(found, ROUTED);
+  assert.equal(labels.size, 1, `one runner label on every routed job: ${[...labels].join(', ')}`);
+  assert.doesNotMatch([...labels][0] ?? '', /^$|^(ubuntu|windows|macos)-|^(self-hosted|linux|x64)$/i);
+  for (const id of Object.values(ROUTED).flat()) assert.ok(required.includes(id), `${id} is a required check under that name`);
+});

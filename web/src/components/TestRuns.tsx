@@ -11,6 +11,8 @@ export interface TestRunTierRow {
   ok: boolean;
   durationMs?: number | null;
   summary?: string;
+  /** Only for a tier that asked for the GPU: whether the sandbox granted it. */
+  gpu?: { granted: boolean; devices: string[]; detail: string };
 }
 export interface TestRunRowData {
   id: string;
@@ -25,7 +27,10 @@ export interface TestRunRowData {
   slot?: string | null;
   lockWaitMs?: number | null;
   shard?: { index: number; total: number } | null;
+  gpu?: 'planned' | null;
 }
+/** Root's GPU opt-in for this instance (src/testrun/status.ts gpuView): read-only; `change` is the root command. */
+export type TestRunsGpu = { state: 'on'; devices: number[]; maxMinutes: number; change: string; status: string } | { state: 'off' | 'unknown'; why: string; change: string; status: string };
 export interface TestRunsData {
   configured: boolean;
   viewer: boolean;
@@ -38,6 +43,7 @@ export interface TestRunsData {
   lock?: { path: string; holders: { pid: number; mode: 'shared' | 'exclusive' }[] | null };
   tierStats?: { tier: string; runs: number; medianMs: number; peakMemMb: number | null; maxCpuS: number | null }[];
   problems?: string[];
+  gpu?: TestRunsGpu;
 }
 
 const STATE_TONE: Record<TestRunRowData['state'], 'green' | 'red' | 'orange' | 'ink'> = { queued: 'ink', running: 'orange', passed: 'green', failed: 'red', cancelled: 'ink', interrupted: 'red' };
@@ -51,10 +57,29 @@ function Tiers({ tiers }: { tiers: TestRunTierRow[] }) {
       {tiers.map((t) => (
         <span key={t.tier} title={t.summary ? t.summary.split('\n').slice(-3).join('\n') : undefined} className={cx('rounded-full px-1.5 text-[11.5px] font-medium shadow-hairline', t.ok ? 'text-green' : 'text-red')} data-testid="test-run-tier" data-ok={t.ok ? 'yes' : 'no'}>
           {t.ok ? '✓' : '✗'} {t.tier}
+          {t.gpu ? (
+            <span className="ml-1 text-ink-3" title={t.gpu.granted ? `GPU: ${t.gpu.devices.join(' ')}; ${t.gpu.detail}` : `no GPU: ${t.gpu.detail}`} data-testid="test-run-tier-gpu" data-granted={t.gpu.granted ? 'yes' : 'no'}>
+              {t.gpu.granted ? 'GPU' : 'no GPU'}
+            </span>
+          ) : null}
           {t.durationMs ? <span className="ml-1 text-ink-3 tabular-nums">{secs(t.durationMs)}</span> : null}
         </span>
       ))}
     </span>
+  );
+}
+
+/** Root's GPU opt-in, read-only: only root changes it, with the command shown (docs/test-runs.md "GPU"). */
+function GpuOptIn({ gpu }: { gpu: TestRunsGpu }) {
+  return (
+    <div className="text-[12px] text-ink-3" data-testid="test-runs-gpu" data-state={gpu.state}>
+      <span className="text-ink-2">GPU for test runs: </span>
+      {gpu.state === 'on' ? `on: GPU ${gpu.devices.join(', ')}, at most ${gpu.maxMinutes} min a GPU command, one run per GPU` : `${gpu.state === 'off' ? 'off' : 'unknown'} (${gpu.why})`}
+      <span>. Only root changes it: </span>
+      <code className="font-mono text-[11.5px] text-ink-2" data-testid="test-runs-gpu-command">
+        {gpu.change}
+      </code>
+    </div>
   );
 }
 
@@ -110,6 +135,7 @@ export function TestRunsView({ data, compact = false }: { data: TestRunsData; co
           {data.lock ? ` · ${lockLine(data.lock)}` : ''}
         </span>
       </div>
+      {!compact && data.gpu ? <GpuOptIn gpu={data.gpu} /> : null}
       {data.problems?.map((p) => (
         <div key={p} className="rounded-control bg-[var(--red-tint)] px-2.5 py-2 text-[12.5px] text-ink" data-testid="test-runs-problem">
           {p}

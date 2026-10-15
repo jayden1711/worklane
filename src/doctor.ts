@@ -14,12 +14,14 @@ import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, fileAccess, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
+import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
@@ -50,7 +52,7 @@ export function apiKeyCheck(file: string, agentUser: string | null, access = fil
   return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo; /** For tests: the disk's free and total GB at a path. */ disk?: (path: string) => { freeGb: number; totalGb: number } } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -89,6 +91,17 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
       const what = p.policy ? 'within the policy' : 'policy unreadable';
       if (!errs.length) add(`policy ${p.name}`, 'ok', what);
       else add(`policy ${p.name}`, 'fail', errs.map((e) => `${e.file}${e.path ? ` at ${e.path}` : ''}: ${e.message}`).join('\n'));
+    }
+  }
+
+  // The disk floor (src/governor-holds.ts): under it, or under it after one more worktree, the coordinator starts
+  // nothing, so doctor says so with the same numbers and fix the Board's banner gives.
+  if (cfg) {
+    try {
+      const c = diskFloorCheck((opts.disk ?? diskFree)(root), cfg.project.governor, cfg.tests.worktree.est_size_gb);
+      add('disk floor', c.level, c.detail);
+    } catch (e) {
+      add('disk floor', 'warn', `can't measure the free disk at ${root}: ${(e as Error).message}`);
     }
   }
 
@@ -206,8 +219,30 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   out.push(...setupChecks(root, opts));
+  const gpu = gpuCheck();
+  if (gpu) out.push(gpu);
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * GPU test runs (docs/test-runs.md "GPU"): nothing while root's file is absent (off). On for some instance but a node
+ * its runs need is missing (the driver not loaded, a GPU index that isn't there): a warning, since each of those runs
+ * then runs without the GPU. A file the helper would refuse: a warning too, saying so.
+ */
+export function gpuCheck(file = gpuFilePath(), present: (path: string) => boolean = (p) => existsSync(p), rootUid = 0, nodes: (indices: number[]) => string[] = (i) => nvidiaNodes(i)): DoctorCheck | null {
+  const f = readGpuFile(file, rootUid);
+  if ('state' in f) {
+    if (f.state === 'off' && f.why.startsWith('GPU test runs are off')) return null;
+    return { name: 'gpu test runs', level: 'warn', detail: `${f.why}; fix it with ${gpuCommands('<name>').status} (and enable/disable)` };
+  }
+  const names = Object.keys(f.instances);
+  if (!names.length) return null;
+  const need = nodes(gpuIndices(f));
+  const missing = need.filter((n) => !present(n));
+  const on = `on for ${names.join(', ')} (GPU ${gpuIndices(f).join(', ')}; at most ${f.maxMinutes} min a GPU command)`;
+  if (missing.length) return { name: 'gpu test runs', level: 'warn', detail: `${on}, but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing: those runs run without the GPU until ${missing.length === 1 ? 'it exists' : 'they exist'} (the NVIDIA driver loaded, the GPU present)` };
+  return { name: 'gpu test runs', level: 'ok', detail: on };
 }
 
 /**
