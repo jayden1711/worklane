@@ -7,6 +7,8 @@ name: release
 # (the switch), through npm's trusted publishing (OIDC: no npm token, no secret), and only after
 # scripts/verify-release-tag.mjs passed: the tag is signed by a key in .github/release-signers as committed on
 # main, and points at the commit this run built. Anything else is a dry run (npm stage publish --dry-run).
+# On a tag, every file in the tarball must also be byte for byte the one the signed commit holds
+# (scripts/verify-release-tree.mjs, #458): a rebuild that differs from the signed tree is never staged.
 # The checklist the owner follows for a release: docs/releasing.md.
 on:
   push:
@@ -26,6 +28,10 @@ on:
       - scripts/verify-release-tag.mjs
       - scripts/ci/npm-stage-dry-run.sh
       - test/verify-release-tag.test.ts
+      - scripts/verify-release-tree.mjs
+      - scripts/lib/release-tree.mjs
+      - scripts/web-licenses.mjs
+      - test/release-tree.test.ts
 permissions:
   contents: read
 env:
@@ -79,6 +85,10 @@ jobs:
             require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
             console.log(lines.slice(0, 3).join("\n"));
           ' "$RUNNER_TEMP/pack.json"
+      # Early, so a tree that isn't the signed one fails the build; the publish job checks the very tarball it stages.
+      - name: on a tag, the tarball is the signed tree byte for byte (the rebuild reproduced it)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/verify-release-tree.mjs "$(ls "$RUNNER_TEMP"/pack/*.tgz)" --commit "$GITHUB_SHA"
       - name: the tarball, installed into an empty folder and run (no build, no install scripts)
         run: |
           tgz="$(ls "$RUNNER_TEMP"/pack/*.tgz)"
@@ -185,6 +195,14 @@ jobs:
           git fetch --no-tags --depth=1 origin '+refs/heads/main:refs/remotes/origin/main' "+refs/tags/${GITHUB_REF_NAME}:refs/tags/${GITHUB_REF_NAME}"
           node scripts/verify-release-tag.mjs "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --signers-ref refs/remotes/origin/main
           echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      # The tarball to be staged, file by file against the signed commit (git blob ids, raw bytes): a file that differs
+      # or isn't in it fails closed, listing each one (#458).
+      - name: the tarball is the signed tree byte for byte
+        id: tree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          node scripts/verify-release-tree.mjs "$(ls "$RUNNER_TEMP"/pack/*.tgz)" --commit "$GITHUB_SHA"
+          echo "commit=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
       - name: install npm (pinned)
         run: |
           npm install -g "npm@${NPM_VERSION}"
@@ -193,6 +211,7 @@ jobs:
         env:
           REAL: ${{ vars.NPM_PUBLISH == 'true' && startsWith(github.ref, 'refs/tags/v') }}
           VERIFIED: ${{ steps.verify.outputs.commit }}
+          SAME_TREE: ${{ steps.tree.outputs.commit }}
         run: |
           # npm 11.15.0 is the first with `npm stage`, and staging needs Node 22.14.0 or newer.
           node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); process.exit(a>11||(a===11&&(b>15||(b===15&&c>=0)))?0:1)' "$(npm --version)" \
@@ -207,6 +226,7 @@ jobs:
           fi
           # Only behind the tag check, for this very commit.
           [ "$VERIFIED" = "$GITHUB_SHA" ] || { echo "the release tag check did not pass for ${GITHUB_SHA}: nothing staged" >&2; exit 1; }
+          [ "$SAME_TREE" = "$GITHUB_SHA" ] || { echo "the tarball is not the signed tree at ${GITHUB_SHA}: nothing staged" >&2; exit 1; }
           # Trusted publishing only: never a token from anywhere.
           [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || { echo "no OIDC token for this run (id-token: write)" >&2; exit 1; }
           [ -z "${NODE_AUTH_TOKEN:-}${NPM_TOKEN:-}" ] || { echo "an npm token is set: this workflow stages through OIDC only" >&2; exit 1; }
