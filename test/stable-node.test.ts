@@ -73,15 +73,16 @@ test('#468 a `node` earlier on PATH is never what gets written: the local servic
   assert.notEqual(spec.program[0], join(planted, 'node'), 'never the PATH node');
   assert.equal(spec.program[0], stableNodePath().path, "Homebrew's bin/node or this node's own path");
   for (const text of [launchdPlist(spec), systemdUserUnit(spec)]) assert.equal(programOf(text), spec.program[0]);
-  // With a Homebrew whose bin/node is this node: that symlink, never the realpath, in the plist and the unit.
-  const b = brew(realpathSync(process.execPath));
-  const viaBrew = localServiceSpec(root, loadConfig(root), env, stableNodePath({ brewPrefixes: [b.prefix] }).path);
+  // With a Homebrew whose bin/node is the node installing: that symlink, never the realpath, in the plist and the unit.
+  // (A Homebrew of its own: the runner's real node may sit where others can write, which the rule rightly refuses.)
+  const b = brew();
+  const viaBrew = localServiceSpec(root, loadConfig(root), env, stableNodePath({ execPath: b.real, brewPrefixes: [b.prefix] }).path);
   assert.equal(viaBrew.program[0], b.link);
   assert.equal(programOf(launchdPlist(viaBrew)), b.link);
   assert.equal(programOf(systemdUserUnit(viaBrew)), b.link);
   // The checkout's pre-push hook: the same node, never the PATH one.
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git'], { cwd: root });
-  const hook = readFileSync(installCheckoutPrePush(root, ['main'], '/opt/engine/dist/src/cli.js', stableNodePath({ brewPrefixes: [b.prefix] }).path), 'utf8');
+  const hook = readFileSync(installCheckoutPrePush(root, ['main'], '/opt/engine/dist/src/cli.js', stableNodePath({ execPath: b.real, brewPrefixes: [b.prefix] }).path), 'utf8');
   assert.match(hook, re(b.link));
   assert.doesNotMatch(hook, re(join(planted, 'node')));
   assert.doesNotMatch(readFileSync(installCheckoutPrePush(root, ['main'], '/opt/engine/dist/src/cli.js'), 'utf8'), re(join(planted, 'node')));
@@ -98,11 +99,12 @@ test("#468 a server instance keeps its root-controlled absolute path: the creden
 });
 
 test("#468 Homebrew's bin/node is named only if no other user can redirect it", { skip: posix }, () => {
-  const b = brew(realpathSync(process.execPath));
+  const b = brew();
   assert.equal(ownedPath(b.link), true);
+  assert.equal(stableNodePath({ execPath: b.real, brewPrefixes: [b.prefix] }).path, b.link);
   chmodSync(join(b.prefix, 'bin'), 0o777);
   assert.equal(ownedPath(b.link), false, 'a bin/ anyone may write');
-  assert.equal(stableNodePath({ brewPrefixes: [b.prefix] }).path, process.execPath);
+  assert.equal(stableNodePath({ execPath: b.real, brewPrefixes: [b.prefix] }).path, b.real, 'passed over: this node\'s own path');
   assert.equal(ownedPath('/x/node', { uid: 501, lstat: ((p: string) => ({ uid: p === '/x/node' ? 777 : 0, gid: 0, mode: 0o755, isSymbolicLink: () => false })) as never }), false, "another user's file");
   const groupDir = (gid: number) => ((p: string) => ({ uid: 0, gid: p === '/x' ? gid : 0, mode: p === '/x' ? 0o775 : 0o755, isSymbolicLink: () => false })) as never;
   assert.equal(ownedPath('/x/node', { uid: 501, lstat: groupDir(4242) }), false, 'a directory any member of an ordinary group may write');
