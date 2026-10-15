@@ -13,7 +13,7 @@ import type { UpdateEntry } from '../updates.js';
 import { isNetworkFailure } from '../github/errors.js';
 import { incidentsDir } from './incidents.js';
 import { postPending, type Poster } from './post.js';
-import { diskFindings, INSTANCE_KINDS, instanceFindings, reconcile, signerFindings, stagedSignerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
+import { diskFindings, INSTANCE_KINDS, instanceFindings, profileFindings, reconcile, signerFindings, stagedSignerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
 import type { MachineChange } from '../machine.js';
 import type { WatchdogConfig } from './config.js';
 
@@ -161,6 +161,8 @@ export class Watchdog {
     if (this.d.machineChanges) reconcile(signerFindings(this.d.machineChanges(), now.getTime()), { kinds: ['update_signer_added'], instance: null }, opts);
     // A signer staged from a dashboard: an alert each too, open for a day.
     if (this.d.machineChanges) reconcile(stagedSignerFindings(this.d.machineChanges(), now.getTime()), { kinds: ['update_signer_staged'], instance: 'any' }, opts);
+    // A Claude account profile added, staged, confirmed, chosen or removed (claude-account.sh): an alert each, open for a day.
+    if (this.d.machineChanges) reconcile(profileFindings(this.d.machineChanges(), now.getTime()), { kinds: ['claude_profile_changed'], instance: 'any' }, opts);
     const disks = this.d.disks();
     reconcile(diskFindings(disks, cfg.diskPct), { kinds: ['disk_full'], instance: null, keys: new Set(disks.map((x) => x.path)) }, opts);
   }

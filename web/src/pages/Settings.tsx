@@ -135,6 +135,9 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
           <Row k="Name">{s.project.name}</Row>
           <Row k="Repository">{s.project.repo}</Row>
           <Row k="Land mode">{s.project.landMode}</Row>
+          <Row k="CI">
+            <span data-testid="settings-ci">{s.project.ci?.kind === 'none' ? s.project.ci.means : 'GitHub: config.yaml required_checks'}</span>
+          </Row>
           <Row k="Default owner">@{s.owners.default}</Row>
           <Row k="Writers">{list(s.owners.writers.map((w) => `@${w}`))}</Row>
           <Row k="Areas">

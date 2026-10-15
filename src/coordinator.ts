@@ -26,6 +26,8 @@ import { compareInstructions, engineRoleCases, instructionTargets, parseCases, r
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
+import { recordProfileSwitches } from './claude-profiles.js';
+import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
 import { pushProblems } from './push-check.js';
@@ -36,9 +38,13 @@ import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, r
 import { changedFiles } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
-import { claimsOf, lowerConfidence, unbackedClaims, type CheckRecord } from './receipts.js';
+import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
+import { calibrated, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
+import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
+import type { ReviewConfig } from './config/schema.js';
 import { applySettings, inRunWindow } from './settings.js';
 import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
+import { CI_CHOICE_FIX, ciChoiceProblem } from './ci-choice.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
@@ -114,6 +120,10 @@ export class Coordinator extends HarnessEvals {
     await step('claude sign-in', () => this.checkHeldLogins(), 0);
     // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
+    // A Claude account profile switch this dashboard asked for, once the root script has finished it: account.switched.
+    await step('account profiles', () => recordProfileSwitches(this.d.log, this.d.instance), 0);
+    // Auto-failover between account profiles on a usage limit, when it is on (src/claude-failover.ts). Never on an auth failure.
+    await step('account failover', () => failoverStep({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}), ...(this.d.incidents ? { incidents: this.d.incidents } : {}) }), null);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);
@@ -472,19 +482,29 @@ export class Coordinator extends HarnessEvals {
     }
     if (r.kind === 'confirmed') {
       // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     if (r.kind === 'recovered') {
       this.emit('config.recovered', { sha: r.sha });
-      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      this.configLoads();
       return;
     }
     this.repoCfg = r.cfg;
     this.d.cfg = this.d.settings ? applySettings(r.cfg, this.d.settings().settings) : r.cfg;
     this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
-    this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+    this.configLoads();
     if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
+  }
+
+  /**
+   * The config on the default branch loads: the config_invalid incident is resolved, unless it can never mark a PR
+   * ready (src/ci-choice.ts, #469). That config still runs (the loader accepts it), but the incident names why.
+   */
+  private configLoads(): void {
+    const problem = ciChoiceProblem(this.repoCfg.project);
+    if (problem) this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch}: ${problem.split(' Fix: ')[0]}`, `Fix: ${CI_CHOICE_FIX}.`);
+    else this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
   }
 
   refreshSettings(): void {
@@ -968,7 +988,7 @@ export class Coordinator extends HarnessEvals {
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
         if (lvl.level === 'L3') {
-          await this.ask('land', n, owner, `Approve landing #${n} (${lvl.level})?`, ['approve', 'reject'], verdict.patch_correct ? 'approve' : 'reject', [`head ${head.slice(0, 8)}`, ...lvl.reasons, `evaluator: ${verdict.confidence}; ${verdict.advice || 'no concerns'}`], changeContext({ base, head, files: change.files, level: lvl, verdict, checks, tampered: change.tampered }));
+          await this.ask('land', n, owner, `Approve landing #${n} (${lvl.level})?`, ['approve', 'reject'], verdict.patch_correct ? 'approve' : 'reject', [`head ${head.slice(0, 8)}`, ...lvl.reasons, `evaluator: ${verdict.confidence}${verdict.confidence_reason ? ` (${verdict.confidence_reason})` : ''}; ${verdict.advice || 'no concerns'}`], changeContext({ base, head, files: change.files, level: lvl, verdict, checks, tampered: change.tampered }));
         } else {
           this.emit('land.queued', { issue: n, head, level: lvl.level });
         }
@@ -1489,15 +1509,18 @@ export class Coordinator extends HarnessEvals {
     const role = this.d.cfg.agents.roles.evaluator!;
     const changed = files.map((f) => f.path);
     const unverified = this.unverifiedClaims(n, checks);
+    // A change to a protected surface: the evaluator answers the compromised-component question for each actor.
+    const surface = this.protectedSurface(issue, files);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
       ...(unverified.length ? [`NOT VERIFIED (the worker claimed these; no recorded command or check backs them, so they are not evidence): ${unverified.map((c) => `"${c}"`).join('; ')}`] : []),
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
+      ...(surface.length ? [protectedBrief(surface)] : []),
       ...(opts.extra ?? []),
     ];
-    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; confidence_reason?: string; compromised_component?: unknown; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
     // The model is chosen in code from the change's level; a cheap verdict that isn't a confident pass is judged
     // once more by the evaluator role's model. What the run read comes from its record, not from its own list.
     const judged = await judge({
@@ -1510,6 +1533,7 @@ export class Coordinator extends HarnessEvals {
       run: async (model, costRole) => {
         // Research the evaluator asked for instead of guessing: answered, then it judges again with the answer.
         let brief = extra;
+        let refused = false;
         for (let researched = 0; ; researched++) {
           let runId: string | null = null;
           const r = await this.d.runner.run({
@@ -1531,6 +1555,14 @@ export class Coordinator extends HarnessEvals {
           });
           this.cost(n, costRole, r);
           const asked = r.reason === 'succeeded' ? (r.structured as { research_request?: unknown } | undefined)?.research_request : undefined;
+          // A confidence other than high with no reason is refused: asked once more, saying why.
+          const refusal = !asked && r.reason === 'succeeded' && !refused ? verdictRefusal(r.structured as Out) : null;
+          if (refusal) {
+            refused = true;
+            researched--;
+            brief = [...brief, '', refusal];
+            continue;
+          }
           if (!asked || researched >= MAX_REQUESTS_PER_TASK) return { r, runId };
           brief = [...brief, '', await this.answerResearch(issue, asked, path, 'evaluator')];
         }
@@ -1542,17 +1574,39 @@ export class Coordinator extends HarnessEvals {
     const unread = judged.unread;
     // No verdict is a failed verdict, never a pass.
     // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
+    // A confidence other than high always carries its reason; a protected surface's unanswered or unacceptable actor is a doubt.
+    const ok = r.reason === 'succeeded';
+    const conf = calibrated({
+      confidence: (ok && s?.confidence) || 'low',
+      reason: ok ? s?.confidence_reason : `evaluator run ${r.reason}`,
+      unverified: unverified.length,
+      compromised: ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : [],
+    });
     const v = {
-      patch_correct: r.reason === 'succeeded' && s?.patch_correct === true,
-      test_correct: r.reason === 'succeeded' && s?.test_correct !== false,
-      confidence: lowerConfidence((r.reason === 'succeeded' && s?.confidence) || 'low', unverified.length),
-      advice: r.reason === 'succeeded' ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
+      patch_correct: ok && s?.patch_correct === true,
+      test_correct: ok && s?.test_correct !== false,
+      ...conf,
+      advice: ok ? (s?.advice ?? '') : `evaluator run ${r.reason}: ${r.detail}`,
       ...(unverified.length ? { unverified_claims: unverified } : {}),
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
     this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
+  }
+
+  /**
+   * What makes a change protected (the same categories that hold it for the owner), plainly; empty when it touches
+   * none. A level that can't be computed counts as protected.
+   */
+  private protectedSurface(issue: Issue, files: ChangeFile[]): string[] {
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    try {
+      const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+      return whyHighRisk({ level, waitCategories: waitCategoriesOf(review) }).map((w) => w.text);
+    } catch (e) {
+      return [`could not be classified (${(e as Error).message.slice(0, 200)}), so it counts as protected`];
+    }
   }
 
   /**

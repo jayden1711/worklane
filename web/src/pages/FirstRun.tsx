@@ -13,6 +13,7 @@ import { Header } from '../components/Header';
 import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
+import { StarterCi } from '../components/StarterCi';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
@@ -604,6 +605,12 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
                       <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
+                    ) : s.id === 'required-checks' && !s.done && !f.repoConfig && !f.setupMode ? (
+                      // #469: a server's instance has no Repo config form; the starter CI is offered here all the same.
+                      <div className="space-y-2">
+                        <FixPanel s={s} />
+                        <StarterCi canEdit={!!f.canAct} inForm={false} />
+                      </div>
                     ) : (
                       <FixPanel s={s} />
                     )

@@ -15,6 +15,11 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
+import { starterCiView } from './starter-ci.js';
+import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+
+/** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
+const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
 import { GITHUB_API } from './github-hosts.js';
 import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
@@ -96,6 +101,8 @@ import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
 import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
+import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
+import { profilesView } from './claude-profiles.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
@@ -138,7 +145,7 @@ export function routingInEffect(o: Pick<DashboardOptions, 'policyFile' | 'cfg'>)
 export function settingsView(cfg: Config, routing = routingInEffect({ cfg, policyFile: null })) {
   return {
     configDir: BRAND.configDir,
-    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
+    project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime, ci: ciMode(cfg) },
     owners: cfg.project.owners,
     reports: cfg.project.reports,
     governor: cfg.project.governor,
@@ -1110,7 +1117,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       setupMode: !!opts.setupMode,
-      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
+      project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode, ci: ciMode(opts.cfg) },
       user: who.login,
       role: who.role,
       via: who.via,
@@ -1196,9 +1203,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
           return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
         }
+        // The agents' Claude account profiles (src/claude-profiles-routes.ts): a refusal is audited even with no session.
+        if (req.method === 'POST' && isProfileRoute(url.pathname) && 'status' in id && id.status === 403) {
+          const r = refuseUnidentified(req, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name }, url.pathname, id);
+          return json(res, r.status, r.body);
+        }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
+        if (req.method === 'POST' && isProfileRoute(url.pathname)) {
+          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), audit, readBody });
+          return json(res, r.status, r.body);
+        }
         // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
         // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
         if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
@@ -1672,6 +1688,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
           return json(res, 200, { checks, sha });
         }
+        // The starter CI (src/starter-ci.ts, #469): a drafted workflow and GitHub's new-file page for it, and its first
+        // run on the default branch. Read only: the person commits the workflow on GitHub, never the engine.
+        if (url.pathname === '/api/first-run/starter-ci' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          const gh = actionDeps().gh;
+          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, testRun: !!liveCfg().tests.test_run, gh: (args) => gh(args) }));
+        }
         // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
         // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.
         if (url.pathname === '/api/first-run/repo-config' && req.method === 'POST') {
@@ -2043,7 +2066,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
           const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), ...profilesView(accountDir) });
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {

@@ -2,6 +2,7 @@ import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
 import { Header } from '../components/Header';
+import { CiNote } from '../components/CiNote';
 
 const BATCH_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'info' | 'neutral'> = { landed: 'ok', green: 'ok', red: 'danger', split: 'warn', bisecting: 'warn', deferred: 'warn', abandoned: 'warn', started: 'info', testing: 'info' };
 const REVIEW = new Set(['verifying', 'evaluating', 'awaiting_decision']);
@@ -19,6 +20,7 @@ export function Landing({ state }: { state: State }) {
   return (
     <div data-testid="page-land">
       <Header title="Land queue" sub={`land mode ${state.project.landMode} · changes land in tested batches`} />
+      <CiNote ci={state.project.ci} />
       <div className="space-y-6 p-6">
         <Card className="overflow-hidden">
           <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Queued to land ({state.landQueue.length})</div>

@@ -89,7 +89,7 @@ test("the Repo config form: values from the default branch's config; Review show
   const before = readFileSync(join(f.dir, BRAND.configDir, 'config.yaml'), 'utf8');
   try {
     const v = await s.get();
-    assert.deepEqual(v.repoConfig, { values: { writers: ['example-owner', 'example-collaborator'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop', models: ['haiku', 'sonnet', 'opus'], defaultModel: 'sonnet', modelListed: true });
+    assert.deepEqual(v.repoConfig, { values: { writers: ['example-owner', 'example-collaborator'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet', ci: 'github' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop', models: ['haiku', 'sonnet', 'opus'], defaultModel: 'sonnet', modelListed: true });
     assert.deepEqual((await s.get('/api/first-run/checks-seen')).checks, ['ci/legacy', 'lint', 'test']);
     const values = { writers: ['example-owner', 'example-collaborator', 'ada-l'], required_checks: ['test', 'lint'], daily_budget_usd: 25 };
     const preview = await s.post('/api/first-run/repo-config', 'example-owner', { values });
@@ -225,6 +225,29 @@ test("#468 a model the engine doesn't list is a config warning, never a refusal:
     const step = (await s.get()).setup.groups.flatMap((g) => g.steps).find((x) => x.id === 'agents-config')!;
     assert.equal(step.done, true);
     assert.match(step.detail, /; warning: agents\.yaml roles\.workers\.model: gpt-5 isn't a model the engine lists/);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('the Repo config form, No CI (#469): ci: none is refused where tests.yaml has no test_run (the fix: the starter CI); with test_run it is proposed as config.yaml ci: none, nothing else', async () => {
+  const f = fixture();
+  const gh = ghStandIn();
+  const s = await dashboard(f.dir, gh.gh);
+  try {
+    const refused = await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'none' } });
+    assert.equal(refused.status, 400);
+    assert.match(refused.body.error!, /refused: .*ci: none judges PRs by this machine's test runs .*add the starter CI/);
+    assert.equal((await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'maybe' } })).status, 400);
+    // The default branch gets a test_run: now it is offered, and proposed as one key.
+    const tests = join(f.dir, BRAND.configDir, 'tests.yaml');
+    execFileSync('sh', ['-c', `printf '\\ntest_run:\\n  tiers:\\n    - { name: unit, command: "npm test", kind: fast }\\n' >> "$1"`, 'sh', tests]);
+    f.git('-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-am', 'test runs');
+    f.git('push', '-q', 'origin', 'main');
+    f.git('fetch', '-q', 'origin');
+    const preview = await s.post('/api/first-run/repo-config', 'example-owner', { values: { ci: 'none' } });
+    assert.equal(preview.status, 200, JSON.stringify(preview.body));
+    assert.deepEqual(preview.body.changes, [{ file: `${BRAND.configDir}/config.yaml`, key: 'ci', to: 'none' }]);
   } finally {
     await s.d.close();
   }

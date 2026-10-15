@@ -79,6 +79,7 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     listPrs: () => listOpenPrs(s.repo, s.token, fetch, s.api),
     start: (req, o) => startTestRun(req, o),
     post: (sha, result) => postChecks(sha, result, names),
+    fastTiers: () => config.tiers.filter((t) => t.kind === 'fast').map((t) => t.name),
     ...(sandbox ? { sandbox } : {}),
   });
   // INVARIANT: the first check is awaited here, so a coordinator whose sandbox passes starts exactly as before; one

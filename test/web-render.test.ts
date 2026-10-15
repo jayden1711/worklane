@@ -28,6 +28,7 @@ import { deliveryMetrics } from '../src/merge-metrics.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
+import type { StarterCiView } from '../src/starter-ci.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -52,7 +53,9 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
+  renderStarterCi(v: StarterCiView, inForm?: boolean): string;
+  renderCiNote(ci: { kind: 'github' | 'none'; means: string | null } | undefined): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -3173,6 +3176,49 @@ test("the Repo config form: no input moves when GitHub's checks answer arrives a
   // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
   assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
   assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
+});
+
+test("the Repo config form with no required check (#469): the starter CI, last in the form; its summary and file; Confirm is GitHub's new-file page with the file; once it ran on main, the step says its check is selected", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: [], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const file = 'name: ci\njobs:\n  test:\n    name: test\n';
+  const view: StarterCiView = { path: '.github/workflows/ci.yml', check: 'test', summary: 'Runs `npm test` on Node 22 for every PR and every push to main, as the check `test`, with read-only permissions.', file, placeholder: false, command: 'npm test', branch: 'main', newFile: 'https://github.com/example-org/example-shop/new/main?filename=.github%2Fworkflows%2Fci.yml', onBranch: false, firstRun: { state: 'none', conclusion: null }, noCi: { offered: false, means: 'No CI (ci: none): …', why: 'needs test_run: add the starter CI' } };
+  const closed = r.renderRepoConfigForm(c, { starter: view });
+  assert.match(closed, /data-testid="starter-ci-add"/);
+  assert.doesNotMatch(closed, /starter-ci-preview/);
+  // Last in the form: everything above it is the form as it was without it.
+  assert.ok(closed.indexOf('data-testid="starter-ci"') > closed.indexOf('data-testid="repo-config-review"'));
+  const open = r.renderRepoConfigForm(c, { starter: view, starterOpen: true });
+  assert.match(open, /data-testid="starter-ci-summary"[^>]*>Runs `npm test` on Node 22 for every PR and every push to main/);
+  assert.match(open, /data-testid="starter-ci-file"[^>]*>name: ci\njobs:/);
+  const href = /<a href="([^"]+)"[^>]*data-testid="starter-ci-confirm"/.exec(open)?.[1]?.replaceAll('&amp;', '&');
+  assert.ok(href, 'Confirm is a link');
+  const u = new URL(href);
+  assert.equal(`${u.origin}${u.pathname}`, 'https://github.com/example-org/example-shop/new/main');
+  assert.equal(u.searchParams.get('filename'), '.github/workflows/ci.yml');
+  assert.equal(u.searchParams.get('value'), file);
+  assert.match(open, /target="_blank"/);
+  assert.match(open, /data-testid="starter-ci-change"/);
+  assert.match(open, /you commit it and open the PR as yourself; nothing here writes a workflow/);
+  const ran = r.renderRepoConfigForm(c, { starter: { ...view, onBranch: true, firstRun: { state: 'done', conclusion: 'success' } } });
+  assert.match(ran, /data-testid="starter-ci-status" data-state="done"[^>]*>The workflow&#x27;s check test finished on main \(success\): it is selected above as a required check\. Review the change, then propose it\./);
+  // A server's instance (no form): the same panel, and once it ran, what to name in config.yaml through a PR.
+  assert.match(r.renderStarterCi(view), /data-testid="starter-ci-add"/);
+  assert.match(r.renderStarterCi({ ...view, onBranch: true, firstRun: { state: 'done', conclusion: 'failure' } }), /finished on main \(failure\): name it in config\.yaml required_checks \(required_checks: \[test\]\) through a PR, and merge it\./);
+  // No CI (#469): not offered without test_run, saying why; offered with it, saying what it means; a server gets the lines.
+  assert.match(open, /data-testid="no-ci" data-offered="false"[\s\S]*data-testid="no-ci-refused"[^>]*>No CI isn&#x27;t offered here: needs test_run: add the starter CI</);
+  const offered = { ...view, noCi: { offered: true, means: "No CI (ci: none): a PR is ready when this machine's test runs pass", why: null } };
+  const inForm = r.renderRepoConfigForm(c, { starter: offered });
+  assert.match(inForm, /data-testid="no-ci-means"[^>]*>Or choose No CI \(ci: none\): a PR is ready when this machine&#x27;s test runs pass\.</);
+  assert.match(inForm, /data-testid="no-ci-choose"/);
+  assert.match(r.renderStarterCi(offered), /data-testid="no-ci-lines"[^>]*># config\.yaml, through a PR:\nci: none\nrequired_checks: \[\]</);
+  // A config already on No CI has no starter CI to offer.
+  assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, ci: 'none' } }, { starter: offered }), /starter-ci/);
+  // The PR and Land pages' note, only under No CI.
+  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs\.</);
+  assert.equal(r.renderCiNote({ kind: 'github', means: null }), '');
+  assert.equal(r.renderCiNote(undefined), '');
+  // A config that names a check has nothing to add: no starter CI.
+  assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, required_checks: ['ci'] } }, { starter: view }), /starter-ci/);
 });
 
 /** A goal's graph as GET /api/goal-graph serves it (src/goal-graph.ts): 11 first, 12 and 14 after it, 13 after 12. */

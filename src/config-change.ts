@@ -23,6 +23,8 @@ export interface RepoConfigValues {
   daily_budget_usd: number;
   workers_count: number;
   workers_model: string;
+  /** Which CI judges a PR (#469): github (required_checks), or none (this machine's test runs, src/ci-none.ts). */
+  ci: 'github' | 'none';
 }
 
 /** Where each value lives: its file and its YAML path. */
@@ -32,6 +34,7 @@ const WHERE: Record<keyof RepoConfigValues, { file: string; path: string[] }> = 
   daily_budget_usd: { file: 'agents.yaml', path: ['daily_budget_usd'] },
   workers_count: { file: 'agents.yaml', path: ['roles', 'workers', 'count'] },
   workers_model: { file: 'agents.yaml', path: ['roles', 'workers', 'model'] },
+  ci: { file: 'config.yaml', path: ['ci'] },
 };
 const KEYS = Object.keys(WHERE) as (keyof RepoConfigValues)[];
 
@@ -43,7 +46,7 @@ export const WORKER_MODELS: readonly string[] = MODEL_TIERS;
 export const DEFAULT_WORKER_MODEL: string = ROUTING.build.default;
 
 export function repoConfigValues(cfg: Config): RepoConfigValues {
-  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? DEFAULT_WORKER_MODEL };
+  return { writers: [...cfg.project.owners.writers], required_checks: [...cfg.project.required_checks], daily_budget_usd: cfg.agents.daily_budget_usd, workers_count: cfg.agents.roles.workers?.count ?? 1, workers_model: cfg.agents.roles.workers?.model ?? DEFAULT_WORKER_MODEL, ci: cfg.project.ci ?? 'github' };
 }
 
 export interface RepoConfigForm {
@@ -92,6 +95,10 @@ function cleaned(v: Partial<Record<keyof RepoConfigValues, unknown>>): Partial<R
   if (v.daily_budget_usd !== undefined) out.daily_budget_usd = Number(v.daily_budget_usd);
   if (v.workers_count !== undefined) out.workers_count = Number(v.workers_count);
   if (v.workers_model !== undefined) out.workers_model = String(v.workers_model).trim();
+  if (v.ci !== undefined) {
+    if (v.ci !== 'github' && v.ci !== 'none') throw new ConfigChangeError('ci: github or none');
+    out.ci = v.ci;
+  }
   return out;
 }
 

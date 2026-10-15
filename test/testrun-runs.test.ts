@@ -9,7 +9,7 @@ import type { EventPayload } from '../src/events/types.js';
 import { healthView } from '../src/health.js';
 import { holdFlock } from '../src/os/index.js';
 import { cacheKey } from '../src/testrun/cache.js';
-import { checksFor, checksPermission, ChecksPermissionMissing, postChecks } from '../src/testrun/checks.js';
+import { checkOutput, checksFor, checksPermission, ChecksPermissionMissing, postChecks } from '../src/testrun/checks.js';
 import { TestRunConfig } from '../src/testrun/config.js';
 import { localHost, type RunHost } from '../src/testrun/host.js';
 import { checkNamesFor } from '../src/testrun/index.js';
@@ -518,4 +518,49 @@ test('after a restart: a GPU run cut off (no end recorded) is wiped and recorded
   again.advance(5000);
   assert.deepEqual((await again.runs.tick()).started, []);
   again.runs.stop();
+});
+
+test('after a restart: a PR\'s GPU fast run cut off gets a failing check on its head (every fast tier, saying it was cut off and not rerun), posted once; never a rerun', async () => {
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-prs-')), 'events.db'));
+  const [a, b] = ['a'.repeat(40), 'b'.repeat(40)];
+  log.append('testrun.queued', { id: 'fast-a-1', sha: a, kind: 'fast', prs: [1], shard: null }, 'test');
+  log.append('testrun.started', { id: 'fast-a-1', slot: 'test-0', lock_wait_ms: 0, gpu: 'planned' }, 'test');
+  // Not a GPU run: cut off too, but it runs again and gets no such check.
+  log.append('testrun.queued', { id: 'fast-b-1', sha: b, kind: 'fast', prs: [2], shard: null }, 'test');
+  log.append('testrun.started', { id: 'fast-b-1', slot: 'test-1', lock_wait_ms: 0 }, 'test');
+  const posted: [string, TestRunResult][] = [];
+  const started: string[] = [];
+  const mk = () =>
+    new PrTestRuns({
+      log,
+      actor: 'test',
+      repo: '/r',
+      remote: 'origin',
+      host: { wipe: async () => ({ ok: true, left: [] }) } as unknown as RunHost,
+      listPrs: async () => [1, 2].map((n) => ({ number: n, headSha: n === 1 ? a : b, base: 'main', author: 'x', bot: false })),
+      fetchPr: (pr) => pr.headSha,
+      changed: () => [],
+      now: () => 100_000,
+      start: async (req) => (started.push(req.sha), { id: 'x', sha: req.sha, kind: 'fast', ok: true, tiers: [], outcome: 'done' }),
+      post: async (sha, r) => void posted.push([sha, r]),
+      fastTiers: () => ['lint', 'cuda'],
+    });
+  const runs = mk();
+  assert.deepEqual(await runs.recover(), ['fast-a-1', 'fast-b-1']);
+  assert.equal(posted.length, 1);
+  const [sha, r] = posted[0]!;
+  assert.equal(sha, a);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.tiers.map((t) => [t.tier, t.ok]), [['lint', false], ['cuda', false]]);
+  assert.equal(r.setup?.step, 'gpu');
+  assert.equal(r.setup?.detail, 'cut off (GPU run ended by the coordinator or the machine stopping during it): not rerun automatically; push again to run it (a new head runs it), or rerun it by hand');
+  assert.deepEqual(checksFor(r, { lint: 'test / lint', cuda: 'test / cuda' }).map((c) => [c.name, c.conclusion]), [['test / lint', 'failure'], ['test / cuda', 'failure']]);
+  assert.equal(checkOutput(r, r.tiers, 'failure').title, 'Cut off (GPU run): not rerun automatically');
+  await runs.tick();
+  await runs.idle();
+  assert.deepEqual(started, [b], 'the GPU head is not run again; the other one is');
+  // Another restart: nothing more is posted.
+  assert.deepEqual(await mk().recover(), []);
+  assert.equal(posted.filter(([s]) => s === a).length, 1, 'the cut-off check on the GPU head, once');
+  runs.stop();
 });
