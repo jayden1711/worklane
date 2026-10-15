@@ -81,8 +81,10 @@ export function systemPath(p: string): string {
 /**
  * Why this command line may not run with <PREFIX>_SYSTEM_ROOT set at all, marked or not: the long-lived modes the
  * machine's units run (scripts/setup/service.sh, dashboards.sh, and `up`'s user units): `coordinator run` (one pass,
- * --once, is a command that ends, which tests run), and a dashboard with --service, --hub or --hub-setup. Null for any
- * other command.
+ * --once, is a command that ends, which tests run), an instance's dashboard (--instance … --service), the hub (--hub)
+ * and its setup mode (--hub-setup). Null for any
+ * other command. A checkout's dashboard (`dashboard --service --root <dir>`, which `dashboard --detach` starts in the
+ * person's own session) is none: every unit's dashboard is an instance's (--instance) or the hub's.
  */
 export function serviceModeRefusal(argv: string[], env: NodeJS.ProcessEnv = process.env): string | null {
   if (!env[SYSTEM_ROOT_VAR]) return null;
@@ -92,7 +94,7 @@ export function serviceModeRefusal(argv: string[], env: NodeJS.ProcessEnv = proc
     else args.push(argv[i]!);
   }
   const [cmd, sub] = args;
-  const mode = cmd === 'coordinator' && sub === 'run' && !args.includes('--once') ? 'coordinator run' : cmd === 'dashboard' ? ['--service', '--hub', '--hub-setup'].find((f) => args.includes(f)) : undefined;
+  const mode = cmd === 'coordinator' && sub === 'run' && !args.includes('--once') ? 'coordinator run' : cmd === 'dashboard' ? (['--hub', '--hub-setup'].find((f) => args.includes(f)) ?? (args.includes('--service') && argv.includes('--instance') ? '--instance --service' : undefined)) : undefined;
   return mode ? `${SYSTEM_ROOT_VAR} is set, and \`${cmd === 'dashboard' ? `dashboard ${mode}` : mode}\` is a service mode, which never runs with it: unset it.` : null;
 }
 

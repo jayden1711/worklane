@@ -718,9 +718,7 @@ async function main(argv: string[]): Promise<number> {
       // No subcommand here: options start right after the command.
       const opts = [sub, ...rest].filter((x): x is string => x !== undefined);
       // --service: run under a service manager: no browser, and the token stays in its file, out of the log.
-      // --background: the same for a checkout's own dashboard that `dashboard --detach` starts, which is no service
-      // (src/os/system-paths.ts serviceModeRefusal: a service mode never runs with <PREFIX>_SYSTEM_ROOT).
-      const service = flag(opts, '--service') || flag(opts, '--background');
+      const service = flag(opts, '--service');
       if (flag(opts, '--hub-setup')) {
         // The hub in setup mode (src/hub-setup.ts): one page that makes the sign-in App, then exits (dashboards.sh --setup).
         const publicUrl = option(opts, '--public-url');
@@ -776,7 +774,7 @@ async function main(argv: string[]): Promise<number> {
         const portFile = join(projectStateDir(root), 'dashboard.port');
         const where = { root, tokenFile: join(projectStateDir(root), 'dashboard-token'), logFile: join(projectStateDir(root), 'dashboard.log') };
         try {
-          const d = await detachDashboard({ ...where, port, portFile, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--background', '--root', root, '--port', String(port), ...(port === 0 ? ['--port-file', portFile] : [])] });
+          const d = await detachDashboard({ ...where, port, portFile, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--service', '--root', root, '--port', String(port), ...(port === 0 ? ['--port-file', portFile] : [])] });
           console.log(detachedLines(d, where).join('\n'));
           if (!flag(opts, '--no-open')) openUrl(d.url);
           return 0;

@@ -272,10 +272,10 @@ test(`${SYSTEM_ROOT_VAR} is honoured only in a process the test preload marked: 
 
 test('the service modes never run with the system root, marked or not; a command that ends does', () => {
   const env = { [SYSTEM_ROOT_VAR]: '/x' };
-  for (const argv of [['coordinator', 'run'], ['coordinator', 'run', '--instance', 'shop'], ['--root', '/r', 'coordinator', 'run'], ['dashboard', '--service'], ['dashboard', '--instance', 'shop', '--service'], ['dashboard', '--hub', 'a=/s'], ['dashboard', '--hub-setup', '--public-url', 'https://h']]) {
+  for (const argv of [['coordinator', 'run'], ['coordinator', 'run', '--instance', 'shop'], ['--root', '/r', 'coordinator', 'run'], ['dashboard', '--instance', 'shop', '--service'], ['dashboard', '--service', '--instance', 'shop'], ['dashboard', '--hub', 'a=/s'], ['dashboard', '--hub-setup', '--public-url', 'https://h']]) {
     assert.match(serviceModeRefusal(argv, env) ?? '', new RegExp(`^${SYSTEM_ROOT_VAR} is set, and .* is a service mode`), argv.join(' '));
   }
-  for (const argv of [['coordinator', 'run', '--once'], ['dashboard', '--detach'], ['dashboard', '--background', '--port', '0'], ['dashboard'], ['doctor'], ['--version']]) assert.equal(serviceModeRefusal(argv, env), null, argv.join(' '));
+  for (const argv of [['coordinator', 'run', '--once'], ['dashboard', '--detach'], ['dashboard', '--service', '--root', '/r', '--port', '0'], ['dashboard'], ['doctor'], ['--version']]) assert.equal(serviceModeRefusal(argv, env), null, argv.join(' '));
   assert.equal(serviceModeRefusal(['coordinator', 'run'], {}), null, 'unset: nothing to refuse');
 });
 
@@ -292,7 +292,7 @@ test(`the CLI refuses ${SYSTEM_ROOT_VAR} where it isn't honoured: a non-zero exi
     ['started by systemd', ['--version'], { ...base, INVOCATION_ID: 'c'.repeat(32) }, /systemd started this process/],
     ['started by systemd (journal)', ['doctor', '--root', dir], { ...base, JOURNAL_STREAM: '8:1' }, /systemd started this process/],
     ['coordinator run', ['coordinator', 'run', '--root', dir], base, /`coordinator run` is a service mode/],
-    ['dashboard --service', ['dashboard', '--service', '--root', dir, '--port', '0'], base, /`dashboard --service` is a service mode/],
+    ["an instance's dashboard", ['dashboard', '--instance', 'shop', '--service', '--port', '0'], base, /`dashboard --instance --service` is a service mode/],
     ['dashboard --hub', ['dashboard', '--hub', `a=${ok.root}`, '--port', '0', '--break-glass-port', '0'], base, /`dashboard --hub` is a service mode/],
     ['dashboard --hub-setup', ['dashboard', '--hub-setup', '--public-url', 'https://hub.example.test', '--signin-dir', ok.root, '--port', '0'], base, /`dashboard --hub-setup` is a service mode/],
   ];
