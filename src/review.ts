@@ -35,6 +35,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
   { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
+  // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
+  { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
   { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*'] },
   { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
 ];
@@ -67,7 +69,7 @@ export const DEFAULT_CATEGORIES: Record<string, string[]> = {
   'guardrail-config': [`${BRAND.configDir}/guardrails.yaml`],
   migration: ['**/migrations/**', '**/*.sql', 'prisma/schema.prisma'],
   'deploy-config': ['.github/workflows/**', 'railway.json', 'railway.toml', 'deploy/**', 'Dockerfile', 'fly.toml', 'render.yaml'],
-  'release-config': ['scripts/release*', '.github/workflows/release*'],
+  'release-config': ['scripts/release*', '.github/workflows/release*', '.github/release-signers', 'scripts/verify-release-tag*'],
   secrets: ['.env*', '**/*.pem', '**/*secret*', '**/*credential*'],
   auth: ['**/auth/**', '**/*auth*.*', '**/session*.*', '**/totp*.*'],
   'test-machinery': ['scripts/**', 'test/harness*', 'test/run-*'],
