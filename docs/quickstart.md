@@ -188,7 +188,7 @@ worklane dashboard --root /tmp/worklane-demo/shop --user example-owner
 
 ## No CI yet
 
-A PR is marked ready only once the checks named in `required_checks` pass, so an empty list means nothing ever merges. It is never left silent. The coordinator raises `config_invalid` naming it, doctor and the First-run page's **Required checks named** step stay blocked with the fix, and `worklane init` won't finish. A repo with no CI adds one in that step with **Add a starter CI…**:
+A PR is marked ready only once the checks named in `required_checks` pass, so an empty list means nothing ever merges. It is never left silent. The coordinator raises `config_invalid` naming it, doctor and the First-run page's **Required checks named** step stay blocked with the fix, and `worklane init` won't finish (exit 5). An unattended install (`bootstrap.sh --yes`) still ends with the wizard's URL, where you make the choice. A repo with no CI adds one in that step with **Add a starter CI…**:
 
 - It drafts `.github/workflows/ci.yml` from the detected toolchain and test command.
 - The workflow has one job, `test`, which is the check name.
@@ -197,7 +197,7 @@ A PR is marked ready only once the checks named in `required_checks` pass, so an
 
 The step shows a summary, then the file. **Change** lets you edit it. **Confirm** opens GitHub's new-file page with the file in it, and you commit it and open its PR as yourself: the engine never writes a workflow. Once it has run on the default branch, its check is selected in the form, and you review and propose that change like any other.
 
-**No CI** is the other choice, where tests.yaml has `test_run` (a server's sandboxed test runs). Choosing it records `ci: none` with no required checks. A PR is then ready when this machine's test runs pass on its exact head and the evaluator approves it. The test runs' results are read only from the instance's own event log, which the agent user can't write; a GitHub check of the same name counts for nothing. GitHub runs nothing, so the main watch can't judge merges by checks. The Pull requests, Land queue and Settings pages say so. Without `test_run`, `ci: none` is refused, and the fix is to add the starter CI.
+**No CI** is the other choice, where tests.yaml has `test_run` (a server's sandboxed test runs). Choosing it records `ci: none` with no required checks. A PR is then ready when this machine's test runs pass on its exact head and the evaluator approves it. The test runs' results are read only from the instance's own event log, which the agent user can't write; a GitHub check of the same name counts for nothing. GitHub runs nothing, so the main watch can't judge merges by checks. Instead, every tier runs on each merge commit on main, through the same sandbox, and main is judged by that run, read from the same log. Main is never recorded green with nothing checked. The Pull requests, Land queue and Settings pages say so. Without `test_run`, `ci: none` is refused, and the fix is to add the starter CI.
 
 ## Protect
 

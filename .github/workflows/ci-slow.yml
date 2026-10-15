@@ -1676,7 +1676,7 @@ jobs:
           # #469: auto-config's config names no required check (PR mode): init never finishes on it, and says why and the fix.
           set +e; sudo env NODE_OPTIONS="$LOOPBACK?port=8998" CI_LOOPBACK_GITHUB_PORT=8998 worklane init --mode server example/gamma --instance gamma --timeout 1 < /dev/null > "$F2/init2.log" 2>&1; code=$?; set -e
           cat "$F2/init2.log"
-          [ "$code" = 1 ] || { echo "init finished with no CI chosen (exit $code)" >&2; exit 1; }
+          [ "$code" = 5 ] || { echo "init did not stop for the CI choice (exit $code; 5 expected)" >&2; exit 1; }
           grep -q "but required_checks is empty and no CI is chosen: no PR is ever marked ready, so nothing ever merges. Fix: on the dashboard's First-run page" "$F2/init2.log"
           grep -q 'stopped at Repo config' "$F2/init2.log"
           # The owner's choice merged on main (its CI's check named), and the checkout brought up to it as add-project does.

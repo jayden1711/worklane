@@ -5,7 +5,7 @@
 // (holds).
 import { HeldTime, startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { BRAND } from '../brand.js';
-import type { Backlog } from '../backlog/types.js';
+import type { Backlog, CommitCheck } from '../backlog/types.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, EventType, StoredEvent } from '../events/types.js';
 import { nextStep, type BisectVerdict } from '../bisect.js';
@@ -43,8 +43,10 @@ export interface FixForwardDeps {
   clone: string;
   git: FixForwardGit;
   config: () => { max_attempts: number; revert_first_paths: string[] };
-  /** The project's required_checks. */
+  /** The project's required_checks (under No CI, every test-run tier's check: src/ci-none.ts). */
   required: () => string[];
+  /** The checks on a commit as the harness judges them (under No CI, the event log's test runs); absent: GitHub's. */
+  checks?: (sha: string) => Promise<CommitCheck[]>;
   /** A probe not done in this many minutes counts as untestable (config.yaml flaky.rerun_timeout_min). */
   probeTimeoutMin: () => number;
   testRuns: TestRuns | null;
@@ -78,6 +80,11 @@ export class FixForward {
   private attached = new Set<number>();
 
   constructor(private readonly d: FixForwardDeps) {}
+
+  /** A commit's checks, as the harness judges them. */
+  private checksOf(sha: string): Promise<CommitCheck[]> {
+    return this.d.checks ? this.d.checks(sha) : this.d.backlog.checks(sha);
+  }
 
   private get now() {
     return this.d.now?.() ?? Date.now();
@@ -209,7 +216,7 @@ export class FixForward {
     const required = this.d.required();
     if (!required.length) return 'pending';
     const q = quarantine(this.d.log.read(0, [...FLAKY_EVENTS]));
-    const out = requiredOutcomes(required, await this.d.backlog.checks(sha)).filter((c) => !(isFailure(c.outcome) && isQuarantined(q, c.name)));
+    const out = requiredOutcomes(required, await this.checksOf(sha)).filter((c) => !(isFailure(c.outcome) && isQuarantined(q, c.name)));
     if (out.some((c) => isFailure(c.outcome))) return 'red';
     return out.every((c) => c.outcome === 'pass') ? 'green' : 'pending';
   }
@@ -238,7 +245,7 @@ export class FixForward {
   }
 
   private async onCandidate(ep: Episode, sha: string): Promise<RequiredCheck[]> {
-    return requiredOutcomes(ep.started.failed, await this.d.backlog.checks(sha));
+    return requiredOutcomes(ep.started.failed, await this.checksOf(sha));
   }
 
   /** Test candidate `sha` on its own: the checks already on it, else a test run or an Actions re-run. True: a verdict is in. */
@@ -359,7 +366,7 @@ export class FixForward {
   /** Fix task `n`: an issue the dispatcher works like any task, with the failure, the culprit and the merged PRs. */
   private async attempt(ep: Episode, n: number): Promise<void> {
     const logs: string[] = [];
-    for (const c of requiredOutcomes(ep.started.failed, await this.d.backlog.checks(ep.started.sha))) {
+    for (const c of requiredOutcomes(ep.started.failed, await this.checksOf(ep.started.sha))) {
       if (c.id === undefined) {
         logs.push(`### ${c.name}\n(not a check run: no log to read)`);
         continue;

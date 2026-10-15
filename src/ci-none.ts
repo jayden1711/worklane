@@ -16,7 +16,7 @@ import type { StoredEvent } from './events/types.js';
 /** What No CI means, said the same way on the step, the PR and merge views, and the main watch. */
 export const CI_NONE_MEANS = "No CI (ci: none): a PR is ready when this machine's test runs (tests.yaml test_run, in the test-run sandbox) pass on its exact head and the evaluator approves it; GitHub runs nothing";
 /** The main watch's off detail under No CI. */
-export const CI_NONE_MAIN_WATCH = `${CI_NONE_MEANS}. The main watch can't judge merges by checks here, and auto-merge relies on this machine's runs`;
+export const CI_NONE_MAIN_WATCH = `${CI_NONE_MEANS}. The main watch can't judge merges by checks here, and auto-merge relies on this machine's runs: every tier runs on each merge commit, and main is judged by that run`;
 /** Why No CI is refused where there is no test_run. */
 export const CI_NONE_NEEDS_TEST_RUN = "ci: none judges PRs by this machine's test runs (tests.yaml test_run, in the test-run sandbox on a Linux server), and this config has none: add the starter CI on the First-run page's Required checks step instead";
 
