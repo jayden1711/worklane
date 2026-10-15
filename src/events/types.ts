@@ -358,6 +358,8 @@ export const EventSchemas = {
     patch_correct: z.boolean(),
     test_correct: z.boolean(),
     confidence: z.enum(['high', 'medium', 'low']),
+    /** Why the confidence isn't high (src/verdict-confidence.ts): always set when it isn't; absent on high and on older verdicts. */
+    confidence_reason: z.string().max(2000).optional(),
     advice: z.string(),
     /** The worker's claims no recorded command or check backs: never evidence; `confidence` was lowered for them. */
     unverified_claims: z.array(z.string()).optional(),

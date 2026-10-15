@@ -589,7 +589,7 @@ export abstract class FixRuns extends Landing {
       const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
       const touched = change.files.filter((f) => files.includes(f.path));
       const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review) : null;
-      const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
+      const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, confidenceReason: verdict.confidence_reason, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
       const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok && 'refused' in push) {
         this.emit('push.refused', { issue: n, head, stage: 'push', reasons: push.refused });

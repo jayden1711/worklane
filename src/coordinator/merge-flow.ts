@@ -545,7 +545,7 @@ export abstract class MergeFlow extends FixRuns {
       }
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons, ...(d.auto ? {} : { why: d.why }) });
-    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons);
+    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons, d.advice);
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (batching) return this.mergeTested(w, pr, 'auto');
@@ -671,13 +671,13 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** A PR that waits for the owner: the needs-owner label, one comment with every reason, a review request. */
-  private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[]) {
+  private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[], advice?: string) {
     const owner = this.ownerOf(w.issue);
     await this.d.backlog.addLabels(w.number, ['needs-owner']);
     const ask = this.prBatching()
       ? `waits for your review: approve it and ${BRAND.name} merges it onto exactly the ${this.branch} its full run tested (testing it again first if ${this.branch} moved). Merging it by hand skips that`
       : 'waits for you to review and merge';
-    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}`);
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}${advice ? `\n\n**Evaluator's advice:** ${advice.slice(0, 1500)}` : ''}`);
     try {
       await this.d.backlog.requestReview(w.number, [owner]);
     } catch (e) {
