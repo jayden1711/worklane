@@ -1344,6 +1344,12 @@ export interface ProfilesTable {
   instances: string[];
   profiles: { name: string; kind: string; addedAt: string | null; cells: ProfileCell[] }[];
   active: Record<string, string>;
+  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
+  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
+}
+export interface FailoverSetting {
+  order: string[];
+  back: boolean;
 }
 export interface ProfileOp {
   id: string;
@@ -1358,6 +1364,8 @@ export interface ProfileOp {
 }
 /** A new account profile from a setup token: the token in the body only, never the URL. */
 export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
+/** The failover setting: an order of 2 to 8 profiles, or null for off; for the machine, or one instance. */
+export const setClaudeFailover = (order: string[] | null, back: boolean, instance?: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back, ...(instance ? { instance } : {}) }) });
 export const claudeProfileAction = (action: 'use' | 'remove', profile: string, instance?: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile, ...(instance ? { instance } : {}) }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
@@ -1766,7 +1774,7 @@ export interface Incident {
   id: string;
   kind: string;
   instance: string | null;
-  severity: 'red' | 'amber';
+  severity: 'red' | 'amber' | 'info';
   title: string;
   since: string;
   resolvedAt: string | null;

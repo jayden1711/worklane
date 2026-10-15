@@ -1489,7 +1489,7 @@ jobs:
           s=/var/lib/worklane/claude-account
           if grep -qFf "$F/claude-token4" "$F/switch4.jsonl" "$F/switch4.err" || sudo grep -qFf "$F/claude-token4" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token4"; then echo "the token was echoed" >&2; exit 1; fi
           sudo rm -f /etc/ci-claude-refuse
-      - name: "claude-account profiles (#464), real users: profile-add in each agent user's own profile dir, proven by a real call there; use refused by the API changes nothing; use; remove refused while in use, then as each user"
+      - name: "claude-account profiles (#464), real users: profile-add in each agent user's own profile dir, proven by a real call there; use refused by the API changes nothing; use; the failover setting through real sudo; remove refused while in use, then as each user"
         run: |
           s=/var/lib/worklane/claude-account
           t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token5"); unset t
@@ -1520,6 +1520,11 @@ jobs:
           sudo rm -f /etc/ci-claude-refuse
           sudo bash scripts/setup/claude-account.sh use work beta --json > "$F/prof3.jsonl" 2> "$F/prof3.err" || { cat "$F/prof3.jsonl" "$F/prof3.err"; exit 1; }
           sudo jq -e '.active.beta.profile == "work" and (.active.ci == null)' "$s/profiles.json"
+          # The failover setting through the helper as the coordinator: real sudo takes the order joined by +, never a comma.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+work back ci < /dev/null
+          sudo jq -e '.failover.instances.ci == {"order": ["default", "work"], "back": true}' "$s/profiles.json"
+          if sudo -u wl-ci sudo -n "$HELPER" claude-account failover default,work back < /dev/null 2>/dev/null; then echo "sudo took a comma-separated order" >&2; exit 1; fi
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover off stay ci < /dev/null
           set +e
           sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof4.jsonl" 2> "$F/prof4.err"
           rc=$?

@@ -7,6 +7,7 @@
 #   sudo bash scripts/setup/claude-account.sh profile-add <profile> [--json]
 #   sudo bash scripts/setup/claude-account.sh use <profile> [<instance>] [--json]
 #   sudo bash scripts/setup/claude-account.sh remove <profile> [--json]
+#   sudo bash scripts/setup/claude-account.sh failover <profile+profile+...|off> back|stay [<instance>]
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -47,6 +48,10 @@
 #                changes: the previous profile stays active. `use default` goes back to the login each user had.
 #   remove       each agent user's dir of that profile, removed as that user (never as root: the dir is the user's);
 #                refused while any instance has it active.
+#   failover     auto-failover on a usage limit (off by default): the order of profiles to move through, and whether
+#                to move back once the limit resets (back) or not (stay); machine-wide, or for one instance (which
+#                then goes by its own, off included). Only written to profiles.json: the coordinator moves, each move a
+#                `use`, so each is proven by a real call first. Never on an auth failure (issue #463 holds those).
 # Every file step under an agent user's home is done as that user. Each step is a JSON line in profile-ops.jsonl.
 #
 # Output: plain lines, or with --json one JSON line per step change (switch) or one JSON object (status). Either way
@@ -55,7 +60,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json] | failover <profile+profile+...|off> back|stay [<instance>]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
@@ -74,7 +79,38 @@ while [ "$#" -gt 0 ]; do
     *) names+=("$1"); shift ;;
   esac
 done
-case "$cmd" in switch | status | profile-add | use | remove) ;; *) echo "$usage" >&2; exit 2 ;; esac
+case "$cmd" in switch | status | profile-add | use | remove | failover) ;; *) echo "$usage" >&2; exit 2 ;; esac
+if [ "$cmd" = failover ]; then
+  order="${names[0]:-}" back="${names[1]:-}" inst="${names[2]:-}"
+  [ "${#names[@]}" -le 3 ] && [[ "$back" == back || "$back" == stay ]] || { echo "$usage" >&2; exit 2; }
+  [ -z "$inst" ] || instance_name_ok "$inst" || { echo "instance name $inst: lowercase letters, digits and dashes" >&2; exit 2; }
+  if [ "$order" != off ]; then
+    [[ "$order" =~ ^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$ ]] || { echo "failover: an order of 2 to 8 profiles, joined by + (or off)" >&2; exit 2; }
+  fi
+  install -d -m 0755 "$CLAUDE_ACCOUNT_DIR"
+  "$(command -v node)" -e '
+const fs = require("node:fs");
+const [file, order, back, inst] = process.argv.slice(1);
+let p = {};
+try { p = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch {}
+p.version = 1;
+p.profiles = p.profiles && typeof p.profiles === "object" ? p.profiles : {};
+const list = order === "off" ? [] : order.split("+");
+if (new Set(list).size !== list.length) { console.error("failover: a profile named twice in the order"); process.exit(2); }
+const missing = list.filter((n) => n !== "default" && !(p.profiles[n] && p.profiles[n].kind !== "existing"));
+if (missing.length) { console.error(`failover: no profile ${missing.join(", ")} on this machine: add it first`); process.exit(1); }
+const f = (p.failover = p.failover && typeof p.failover === "object" ? p.failover : {});
+const v = { order: list, back: back === "back" };
+if (inst) (f.instances = f.instances && typeof f.instances === "object" ? f.instances : {})[inst] = v;
+else f.machine = v;
+const tmp = `${file}.tmp-${process.pid}`;
+fs.writeFileSync(tmp, JSON.stringify(p) + "\n", { mode: 0o644 });
+fs.chmodSync(tmp, 0o644);
+fs.renameSync(tmp, file);
+console.log(list.length ? `failover ${inst ? `for ${inst}` : "machine-wide"}: ${list.join(" > ")}, ${back === "back" ? "moving back after the reset" : "staying after the reset"}` : `failover off ${inst ? `for ${inst}` : "machine-wide"}`);
+' "$CLAUDE_ACCOUNT_DIR/profiles.json" "$order" "$back" "$inst"
+  exit $?
+fi
 # A profile's name: lowercase letters, digits and dashes (default: the login each agent user had, never added or removed).
 profile=""
 if [[ "$cmd" == profile-add || "$cmd" == use || "$cmd" == remove ]]; then

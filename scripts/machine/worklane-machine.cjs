@@ -38,6 +38,10 @@
 // user runs longer than the asking coordinator waits. The asking instance (from SUDO_USER, never an argument) is passed
 // as --for, and for profile-add as --token-from: its dashboard stored the new profile's token before it asked.
 //
+//   worklane-machine claude-account failover <profile,profile,...|off> back|stay [<instance>]
+//
+// the auto-failover setting (profiles.json only: no login is touched), run here like status.
+//
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
 //   worklane-machine install-updater
@@ -100,7 +104,7 @@ const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> [<instance>] | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> [<instance>] | claude-account failover <order|off> back|stay [<instance>] | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -195,6 +199,27 @@ function parseClaudeProfile(args) {
   if (action === 'use' && args.length === 3) return { action, profile: args[2], instance: null };
   if (action === 'use' && args.length === 4 && instanceName(args[3])) return { action, profile: args[2], instance: args[3] };
   return null;
+}
+
+/** The failover setting a list asks for: failover <order|off> back|stay [<instance>]; null for anything else. */
+function parseClaudeFailover(args) {
+  if (args[0] !== 'claude-account' || args[1] !== 'failover' || args.length < 4 || args.length > 5) return null;
+  const order = args[2];
+  if (order !== 'off' && !/^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$/.test(order)) return null;
+  if (args[3] !== 'back' && args[3] !== 'stay') return null;
+  if (args.length === 5 && !instanceName(args[4])) return null;
+  return { order, back: args[3], instance: args[4] || null };
+}
+
+function claudeFailover(f) {
+  const real = rootScript(CLAUDE_ACCOUNT);
+  if (!real) return 1;
+  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
+  return runLogged('claude-account', `failover ${f.order} ${f.back}${f.instance ? ` for ${f.instance}` : ''}`, () => {
+    const r = spawnSync('bash', [real, 'failover', f.order, f.back, ...(f.instance ? [f.instance] : [])], { cwd: '/', env, stdio: 'inherit' });
+    if (r.error) throw r.error;
+    return r.status === null ? 1 : r.status;
+  });
 }
 
 /** The instance whose coordinator user this is (wl-<name>), or null for anyone else. */
@@ -425,6 +450,7 @@ function needsUnit(args) {
   if (args.length === 1 && args[0] === 'install-updater') return true; // /usr/local/libexec, /etc/systemd, /etc/worklane
   if (parseSigner('stage-update-signer', args) || parseSigner('discard-update-signer', args)) return true; // its pending list, kept with the rest
   if (parseClaudeAccount(args) === 'status') return true; // claude-account.sh as root
+  if (parseClaudeFailover(args)) return true; // claude-account.sh as root
   return false;
 }
 
@@ -460,6 +486,8 @@ function main(argv) {
   if (account) return claudeAccount(account);
   const profile = parseClaudeProfile(args);
   if (profile) return claudeProfile(profile);
+  const failover = parseClaudeFailover(args);
+  if (failover) return claudeFailover(failover);
   if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
   const stage = parseSigner('stage-update-signer', args);
   if (stage) return stageSigner(stage);
@@ -498,4 +526,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

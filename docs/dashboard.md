@@ -353,7 +353,24 @@ What they keep, in `/var/lib/worklane/claude-account/` (root's, 0644, never a to
 
 No agent command may read any profile's `.credentials.json`, whichever profile it runs on: every one is added to each run's sandbox and Read deny list.
 
-From the dashboard, the Machine page's **Claude account** card has an **Accounts** table: each account against each instance, which one is active, and whether its agent user's last real call on it was answered (with the account and plan Claude names, and when). **Use here** (one instance), **Use everywhere**, **Remove** and **Add account** (a name and the setup token, in a password field) are machine requests, `claude-account use <name> [<instance>]`, `claude-account remove <name>` and `claude-account profile-add <name>`, gated like any machine change: an owner here who is a machine owner, signed in, on an allowed device. Every refusal is audited, a request with no session's too (`claude_account.refused`), and starts nothing: no token is read or stored, no request recorded. A new account's token is stored for the coordinator user only (0400) before the request; profile-add reads it once, as root, and deletes it, and a refused request deletes it. The helper starts each step as `worklane-claude-account.service`, so one at a time, with the switch too. A finished switch is recorded once in the asking instance's log as `account.switched`, with from, to, who asked and the result. The machine helper's sudoers rule needs rerunning once to allow the four profile patterns (sudo 1.9.10 or later, like add-project).
+From the dashboard, the Machine page's **Claude account** card has an **Accounts** table: each account against each instance, which one is active, and whether its agent user's last real call on it was answered (with the account and plan Claude names, and when). **Use here** (one instance), **Use everywhere**, **Remove** and **Add account** (a name and the setup token, in a password field) are machine requests, `claude-account use <name> [<instance>]`, `claude-account remove <name>` and `claude-account profile-add <name>`, gated like any machine change: an owner here who is a machine owner, signed in, on an allowed device. Every refusal is audited, a request with no session's too (`claude_account.refused`), and starts nothing: no token is read or stored, no request recorded. A new account's token is stored for the coordinator user only (0400) before the request; profile-add reads it once, as root, and deletes it, and a refused request deletes it. The helper starts each step as `worklane-claude-account.service`, so one at a time, with the switch too. A finished switch is recorded once in the asking instance's log as `account.switched`, with from, to, who asked and the result. The machine helper's sudoers rule needs rerunning once to allow the eight profile and failover patterns (sudo 1.9.10 or later, like add-project).
+
+### Failover on a usage limit
+
+Off by default. With two accounts or more, a machine owner can turn it on for every instance, or for one (an instance's own setting wins, off included), with an order of accounts and whether to move back after the reset:
+
+```sh
+sudo bash scripts/setup/claude-account.sh failover default+work+spare back [<instance>]   # or: failover off stay
+```
+
+The order's names are joined by `+`, because sudoers reads a comma as the end of a command. The setting goes only into `profiles.json`: no login is touched. Each coordinator acts for its own instance (`src/claude-failover.ts`):
+
+- When a usage limit pauses the instance, it asks for the next account in the order after the one in use. It skips any it tried for this pause, and any a move left whose reset hasn't come. The move is a `claude-account use <next> <instance>` through the machine helper, the same step a person takes, so it is proven by a real call as the agent user first and refused if the API refuses it. Then the next one is tried. With none free, it waits for the reset and says so once.
+- A move that's done raises an info notice (`claude_account_failover`: it never colours the instance's status, and its post says Notice) naming both accounts and when the limit resets. The pause ends at once, as for any account switch.
+- With move-back on, once the first move's reset has passed and the instance is still on the account the last move put it on, it asks for the account it began on, proven the same way. Refused, it stays, and asks again 15 minutes later. Back, the notice resolves.
+- It never moves on an auth failure: a refused login is held per profile (below), with its red incident, and failover only acts on a usage-limit pause.
+
+Each step is an `account.failover` event (asked, switched, refused, none, back-asked, back, back-refused), and each move's `account.switched` names `failover` as who asked.
 
 ## When Claude refuses the login
 

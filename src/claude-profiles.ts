@@ -56,11 +56,25 @@ export interface Profiles {
   active: Record<string, { profile: string; since: string }>;
   /** When each instance last switched profile (to default too). */
   switchedAt: Record<string, string>;
+  /** Auto-failover on a usage limit: machine-wide, and per instance (which overrides it; an empty order is off). */
+  failover: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
+}
+
+/** The order of profiles to move through on a usage limit, and whether to move back after its reset. */
+export interface FailoverSetting {
+  order: string[];
+  back: boolean;
 }
 
 const str = (v: unknown, max = 500): string | null => (typeof v === 'string' ? v.slice(0, max) : null);
 const isInstance = (s: string) => /^[a-z][a-z0-9-]{0,20}$/.test(s);
-const empty = (): Profiles => ({ profiles: {}, active: {}, switchedAt: {} });
+const empty = (): Profiles => ({ profiles: {}, active: {}, switchedAt: {}, failover: { machine: null, instances: {} } });
+const failoverOf = (v: unknown): FailoverSetting | null => {
+  const o = v as { order?: unknown; back?: unknown } | null;
+  if (!o || typeof o !== 'object' || !Array.isArray(o.order)) return null;
+  const order = o.order.filter((n): n is string => typeof n === 'string' && PROFILE_NAME.test(n)).slice(0, 8);
+  return { order: [...new Set(order)], back: o.back === true };
+};
 
 /** profiles.json, or no profiles when there is none (or it can't be read). Anything not of its shape is left out. */
 export function readProfiles(dir = CLAUDE_ACCOUNT_DIR): Profiles {
@@ -70,7 +84,7 @@ export function readProfiles(dir = CLAUDE_ACCOUNT_DIR): Profiles {
   } catch {
     return empty();
   }
-  const o = (raw ?? {}) as { profiles?: unknown; active?: unknown; switched_at?: unknown };
+  const o = (raw ?? {}) as { profiles?: unknown; active?: unknown; switched_at?: unknown; failover?: unknown };
   const out = empty();
   if (o.profiles && typeof o.profiles === 'object') {
     for (const [name, p] of Object.entries(o.profiles as Record<string, unknown>)) {
@@ -91,10 +105,24 @@ export function readProfiles(dir = CLAUDE_ACCOUNT_DIR): Profiles {
       if (isInstance(inst) && typeof p === 'string' && PROFILE_NAME.test(p) && p !== DEFAULT_PROFILE) out.active[inst] = { profile: p, since: str((a as { since?: unknown }).since, 40) ?? '' };
     }
   }
+  const f = (o.failover ?? {}) as { machine?: unknown; instances?: unknown };
+  out.failover.machine = failoverOf(f.machine);
+  if (f.instances && typeof f.instances === 'object') {
+    for (const [inst, v] of Object.entries(f.instances as Record<string, unknown>)) {
+      const x = failoverOf(v);
+      if (isInstance(inst) && x) out.failover.instances[inst] = x;
+    }
+  }
   if (o.switched_at && typeof o.switched_at === 'object') {
     for (const [inst, at] of Object.entries(o.switched_at as Record<string, unknown>)) if (isInstance(inst) && typeof at === 'string') out.switchedAt[inst] = at.slice(0, 40);
   }
   return out;
+}
+
+/** An instance's failover setting in force: its own, else the machine's; null when off (no order of two or more). */
+export function failoverFor(instance: string, p: Profiles = readProfiles()): FailoverSetting | null {
+  const f = p.failover.instances[instance] ?? p.failover.machine;
+  return f && f.order.length >= 2 ? f : null;
 }
 
 /** The profile an instance's runs use now. */
@@ -215,6 +243,7 @@ export function latestSwitch(a: string | null, b: string | null): string | null 
 
 /** The accounts × instances table: for each profile, each instance's agent user's last real call on it, and which is active. */
 export function profilesTable(o: { dir?: string; instances?: string[] }) {
+  const failover = readProfiles(o.dir).failover;
   const p = readProfiles(o.dir);
   const status = readAccountStatus(o.dir);
   // The instances: every one status.json has an agent user for, and every one with an active profile.
@@ -247,13 +276,31 @@ export function profilesTable(o: { dir?: string; instances?: string[] }) {
       }),
     };
   });
-  return { instances, profiles: rows, active: Object.fromEntries(instances.map((i) => [i, activeProfile(i, p)])) };
+  return { instances, profiles: rows, active: Object.fromEntries(instances.map((i) => [i, activeProfile(i, p)])), failover };
 }
 
 export type ProfilesTable = ReturnType<typeof profilesTable>;
 
 const isAccountRequest = (r: MachineRequest) => r.args[0] === 'claude-account';
 const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'running';
+
+/**
+ * Record the failover setting for the coordinator to run through the machine helper (`claude-account failover
+ * <order|off> back|stay [<instance>]`): the same gate as a profile step. `order`: two to eight profiles, or null (off).
+ */
+export function requestFailoverSetting(log: EventLog, r: { order: unknown; back: unknown; instance?: unknown; who: { role: Role | null; requester: MachineRequester }; ownersFile?: string }): MachineRequest {
+  const why = claudeAccountGate(r.who, r.ownersFile ? { ownersFile: r.ownersFile } : {});
+  if (why) throw new MachineRequestError(why, 403);
+  const off = r.order === null;
+  const order = Array.isArray(r.order) ? r.order : [];
+  if (!off && (order.length < 2 || order.length > 8 || !order.every((n) => typeof n === 'string' && PROFILE_NAME.test(n)) || new Set(order).size !== order.length)) throw new MachineRequestError('a failover order is two to eight different profiles (or null: off)');
+  if (typeof r.back !== 'boolean') throw new MachineRequestError('back is true (move back after the reset) or false');
+  if (r.instance !== undefined && r.instance !== null && (typeof r.instance !== 'string' || !isInstance(r.instance))) throw new MachineRequestError('an instance name, or none for the machine');
+  const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x));
+  if (pending) throw new MachineRequestError(`a claude-account ${pending.args.slice(1).join(' ')} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
+  const args = ['claude-account', 'failover', off ? 'off' : (order as string[]).join('+'), r.back ? 'back' : 'stay', ...(typeof r.instance === 'string' ? [r.instance] : [])];
+  return requestMachineChange(log, { args, requester: r.who.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
+}
 
 /**
  * Record a profile step for the coordinator to run through the machine helper: the same gate as any machine change
@@ -299,17 +346,23 @@ export function storeProfileToken(o: { value: unknown; instance: string; who: { 
 export function unrecordedSwitches(events: readonly StoredEvent[], ops: readonly ProfileOp[], instance: string) {
   const recorded = new Set(events.filter((e) => e.type === 'account.switched').map((e) => (e.payload as { op: string }).op));
   const asked = machineRequests(events).filter((r) => r.args[0] === 'claude-account' && r.args[1] === 'use');
+  // The coordinator's own moves (src/claude-failover.ts): asked for in the log before the step started.
+  const failovers = events.filter((e) => e.type === 'account.failover' && ['asked', 'back-asked'].includes((e.payload as { stage: string }).stage));
   return ops
     .filter((o) => o.op === 'use' && o.for === instance && (o.status === 'done' || o.status === 'failed') && !recorded.has(o.id))
     .map((o) => {
-      const req = [...asked].reverse().find((r) => r.args[2] === o.profile && Date.parse(r.at) <= Date.parse(o.startedAt) + 1000) ?? null;
+      const before = (at: string) => Date.parse(at) <= Date.parse(o.startedAt) + 1000;
+      // Who asked: the latest request for this profile before the step, a person's from the dashboard or the failover's.
+      const req = [...asked].reverse().find((r) => r.args[2] === o.profile && before(r.at)) ?? null;
+      const fo = [...failovers].reverse().find((e) => (e.payload as { to: string }).to === o.profile && before(e.ts)) ?? null;
+      const by = fo && (!req || Date.parse(fo.ts) > Date.parse(req.at)) ? 'failover' : (req?.by ?? 'terminal');
       const instances = [...new Set(o.steps.map((s) => s.instance).filter((x): x is string => !!x))];
       return {
         op: o.id,
         to: o.profile,
         from: Object.fromEntries(instances.map((i) => [i, o.from?.[i] ?? DEFAULT_PROFILE])),
         instances,
-        by: req?.by ?? 'terminal',
+        by,
         ok: o.status === 'done',
         detail: o.detail.slice(0, 1000),
       };
@@ -320,7 +373,7 @@ export function unrecordedSwitches(events: readonly StoredEvent[], ops: readonly
 export function recordProfileSwitches(log: EventLog, instance: string, dir = CLAUDE_ACCOUNT_DIR): number {
   const ops = readProfileOps(dir);
   if (!ops.some((o) => o.op === 'use' && o.for === instance)) return 0;
-  const todo = unrecordedSwitches(log.read(0, ['account.switched', 'machine.requested', 'machine.started', 'machine.finished']), ops, instance);
+  const todo = unrecordedSwitches(log.read(0, ['account.switched', 'account.failover', 'machine.requested', 'machine.started', 'machine.finished']), ops, instance);
   for (const s of todo) log.append('account.switched', s, instance, 'coordinator');
   return todo.length;
 }

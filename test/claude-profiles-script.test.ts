@@ -190,3 +190,18 @@ test('names are checked before anything runs', { skip: !posix }, () => {
   }
   assert.ok(!existsSync(join(m.T, 'var', 'profile-ops.jsonl')));
 });
+
+test('failover: the order and move-back written to profiles.json, machine-wide or for one instance; a profile never added is refused', { skip: !posix }, () => {
+  const m = machine();
+  const raw = (args: string[]) => spawnSync('bash', [join(m.T, 'scripts', 'setup', 'claude-account.sh'), ...args], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: m.T } });
+  assert.equal(raw(['failover', 'default+work', 'back']).status, 1, 'work is not a profile yet');
+  assert.equal(m.run(['profile-add', 'work', '--json'], `${TOKEN}\n`).status, 0);
+  const on = raw(['failover', 'default+work', 'back']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stdout, /failover machine-wide: default > work, moving back after the reset/);
+  assert.equal(raw(['failover', 'off', 'stay', 'beta']).status, 0);
+  const p = readProfiles(join(m.T, 'var'));
+  assert.deepEqual(p.failover.machine, { order: ['default', 'work'], back: true });
+  assert.deepEqual(p.failover.instances.beta, { order: [], back: false });
+  for (const bad of [['failover', 'work', 'back'], ['failover', 'default+work', 'maybe'], ['failover', 'default+default', 'back'], ['failover', 'default+work', 'back', 'Beta']]) assert.notEqual(raw(bad).status, 0, bad.join(' '));
+});
