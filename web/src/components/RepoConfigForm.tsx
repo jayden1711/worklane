@@ -2,7 +2,8 @@
 // server what the values change on the default branch, and Propose opens that change as a PR. Merge (an owner, after
 // seeing the command) merges that PR and fast-forwards this checkout to it, so the next step reads the new config.
 import { useEffect, useState } from 'react';
-import { changeRepoConfig, getChecksSeen, mergeRepoConfig, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues } from '../api';
+import { changeRepoConfig, getChecksSeen, mergeRepoConfig, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues, type StarterCi as StarterCiView } from '../api';
+import { StarterCi } from './StarterCi';
 import { Button, cx } from './ui';
 
 const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
@@ -72,12 +73,13 @@ function MergePanel({ number, initialPlan = null, onDone }: { number: number; in
 const STATUS_SLOT = 'block h-5 truncate text-[12px] leading-5 text-ink-3';
 const CHECKS_SLOT = 'h-[4.75rem] overflow-y-auto rounded-lg';
 
-export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialMergePlan = null, onMerged }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialMergePlan?: { command: string; then: string } | null; onMerged?: () => void }) {
+export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialMergePlan = null, initialStarter = null, initialStarterOpen = false, onMerged }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialMergePlan?: { command: string; then: string } | null; initialStarter?: StarterCiView | null; initialStarterOpen?: boolean; onMerged?: () => void }) {
   const [writers, setWriters] = useState(c.values.writers.join(', '));
   const [checks, setChecks] = useState<string[]>(c.values.required_checks);
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
   const [count, setCount] = useState(c.values.workers_count);
   const [model, setModel] = useState(c.values.workers_model);
+  const [ci, setCi] = useState<'github' | 'none'>(c.values.ci ?? 'github');
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
   const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
@@ -87,12 +89,12 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(initialProposed ? { ok: true, text: 'proposed: merge the PR to apply it', url: initialProposed } : null);
   useEffect(() => {
     getChecksSeen()
-      .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : 'GitHub ran no checks on its tip'))))
+      .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : `GitHub ran no checks on its tip${c.values.required_checks.length ? '' : ': add a starter CI below'}`))))
       .catch((e: Error) => setSeenNote(e.message))
       .finally(() => setSeenLoaded(true));
   }, []);
   const edited = () => (setChanges(null), setMsg(null));
-  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model });
+  const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model, ...(ci !== (c.values.ci ?? 'github') ? { ci } : {}) });
   const send = async (confirm: boolean) => {
     setBusy(true);
     setMsg(null);
@@ -212,6 +214,8 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
         </p>
       )}
       {canEdit && msg?.ok && prNumber(msg.url) && <MergePanel number={prNumber(msg.url)!} initialPlan={initialMergePlan} {...(onMerged ? { onDone: onMerged } : {})} />}
+      {/* #469: no checks chosen yet. Last in the form, so a late answer moves nothing above it. */}
+      {!c.values.required_checks.length && c.values.ci !== 'none' && <StarterCi canEdit={canEdit} initialView={initialStarter} initialOpen={initialStarterOpen} noCiChosen={ci === 'none'} onCheckRan={(name) => !checks.includes(name) && (setChecks((now) => (now.includes(name) ? now : [...now, name])), edited())} onChooseNoCi={() => (setCi('none'), setChecks([]), edited())} />}
     </div>
   );
 }

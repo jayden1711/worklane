@@ -144,6 +144,8 @@ jobs:
           tgz="$(ls "$RUNNER_TEMP"/pack/*.tgz)"
           t="$RUNNER_TEMP/npx"
           mkdir -p "$t" && cp -r examples/basic "$t/example" && git -C "$t/example" init -q
+          # Its CI's check named: init finishes only with a CI chosen (#469; the refusal is add-project's job's).
+          printf 'required_checks: [test]\n' >> "$t/example/.worklane/config.yaml"
           git -C "$t/example" remote add origin https://github.com/example-org/example-shop.git
           export PATH="$GITHUB_WORKSPACE/scripts/ci/stand-ins:$PATH"
           export npm_config_cache="$t/cache" WORKLANE_PREFIX="$t/prefix" WORKLANE_STATE_DIR="$t/state"

@@ -125,6 +125,8 @@ export const runLockPath = (name: string) => systemPath(`${SYSTEM_ROOTS.runLock}
 export const runPath = (name: string) => systemPath(`${SYSTEM_ROOTS.run}/${name}`);
 /** /etc/systemd/system/<unit> */
 export const unitPath = (unit: string) => systemPath(`${SYSTEM_ROOTS.units}/${unit}`);
+/** /srv/<cli>/<instance>/<repo name>: a server instance's checkout (scripts/setup/lib.sh SRV_ROOT, add-project.sh). */
+export const srvCheckoutPath = (instance: string, repoName: string) => systemPath(`/srv/${BRAND.cli}/${instance}/${repoName}`);
 /** The test-run sandbox's base (scripts/setup/testrun-sandbox.sh): beside /var/lib/<cli>, its own directory. */
 export const testRunBasePath = () => systemPath(`/var/lib/${BRAND.cli}-test`);
 /** Single-user and development machines' slot directory (unbranded: every agent harness on the box shares it). */
