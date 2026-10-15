@@ -6,7 +6,9 @@
 #   gh-signed-in    gh's own store holds a login (written by `auth login`, never by hand)
 #   gh-protected    the default branch has protection (written by the PUT the Protection step sends)
 #   gh-calls        every call, one per line: its arguments (no token ever passes through here: there is none)
-# It is example-owner, an admin of every repo, and no check runs on any commit. Anything else is refused, loudly.
+#   gh-admin        this login is the repo's admin, as GitHub's permissions.admin says (absent: it isn't, so the
+#                   first-run page opens a config PR for a merge on GitHub instead of merging it itself)
+# It is example-owner, and no check runs on any commit. Anything else is refused, loudly.
 # WHY not scripts/ci/stand-ins/gh: that one is always signed in (bootstrap's unattended run); this one starts signed
 # out, so the wizard's Connect GitHub screen has a login to relay.
 set -u
@@ -32,6 +34,10 @@ case "${1:-} ${2:-}" in
   "api user")
     need_login
     echo example-owner ;;
+  "repo view")
+    # The repo's default branch, as the stand-in's bare repo has it.
+    need_login
+    git -C "$d/git/$3.git" symbolic-ref --short HEAD ;;
   "api user/repos"*)
     need_login
     (cd "$d/git" && ls -d */*.git) | sed 's/\.git$//' ;;
@@ -55,6 +61,7 @@ case "${1:-} ${2:-}" in
       repos/*/*)
         case "$*" in
           *".permissions.push"*) echo true ;;
+          *".permissions.admin"*) if [ -f "$d/gh-admin" ]; then echo true; else echo false; fi ;;
           *"allow_merge_commit"*) echo 'true,true,true' ;;
           *) echo '{"permissions":{"admin":true,"push":true,"pull":true}}' ;;
         esac ;;
@@ -72,7 +79,7 @@ case "${1:-} ${2:-}" in
         --base) base="$2"; shift 2 ;;
         --head) head="$2"; shift 2 ;;
         --jq) jq="$2"; shift 2 ;;
-        --title | --body | --json | --state) shift 2 ;;
+        --title | --body | --json | --state | --subject) shift 2 ;;
         --*) shift ;;
         *) n="$1"; shift ;;
       esac
@@ -92,14 +99,17 @@ case "${1:-} ${2:-}" in
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
         set -- $(cat "$d/prs/$n")
         # With --jq (.state): the state alone. Without it, gh prints the JSON fields asked for.
-        if [ -n "$jq" ]; then echo "$4"; else printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s"}\n' "$4" "$2" "$3" "$1" "$n"; fi ;;
+        if [ -n "$jq" ]; then echo "$4"
+        elif [ "$4" = MERGED ]; then printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s","mergedBy":{"login":"%s"},"mergedAt":"%s"}\n' "$4" "$2" "$3" "$1" "$n" "${5:-example-owner}" "${6:-}"
+        else printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s"}\n' "$4" "$2" "$3" "$1" "$n"; fi ;;
       merge)
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
         set -- $(cat "$d/prs/$n")
         [ "$4" = OPEN ] || { echo "gh: pull request $n is $4" >&2; exit 1; }
         git -C "$d/git/$1.git" merge-base --is-ancestor "refs/heads/$2" "refs/heads/$3" || { echo "gh stand-in: $3 isn't based on $2" >&2; exit 1; }
         git -C "$d/git/$1.git" update-ref "refs/heads/$2" "refs/heads/$3"
-        echo "$1 $2 $3 MERGED" > "$d/prs/$n"
+        # Who merged it, and when: the stand-in's login (the page's, or the CLI's run outside it).
+        echo "$1 $2 $3 MERGED example-owner $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$d/prs/$n"
         echo "✓ Merged pull request #$n" ;;
       *) echo "gh stand-in: pr $sub is not something this stand-in does" >&2; exit 1 ;;
     esac ;;

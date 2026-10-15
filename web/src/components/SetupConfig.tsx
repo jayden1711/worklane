@@ -1,8 +1,10 @@
 // WHY: setup mode's own panels (src/setup-mode.ts): pick the repo, answer auto-config's questions, draft the config
-// (it runs the project's commands, so it is confirmed first), and merge the setup PR it opened. Each change is shown
-// before it is made and done by the server for the owners only.
+// (it runs the project's commands, so it is confirmed first), preview the draft and Confirm it as the setup PR (#468),
+// which the Config PRs list then follows to its merge. Each change is shown before it is made and done by the server
+// for the owners only.
 import { useEffect, useState } from 'react';
-import { getSetupRepos, setupAnswers, setupDraft, setupMerge, setupOrigin, type DraftJob, type FirstRunAutoConfig } from '../api';
+import { getSetupRepos, setupAnswers, setupDraft, setupDraftValues, setupOrigin, setupPropose, type DraftJob, type FirstRunAutoConfig, type HeldDraftView } from '../api';
+import { RepoConfigForm } from './RepoConfigForm';
 import { Button, cx } from './ui';
 
 const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
@@ -78,11 +80,10 @@ export function SetupOrigin({ canEdit, initialRepos = [], onDone }: { canEdit: b
   );
 }
 
-export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirming = false }: { a: FirstRunAutoConfig | null; draft: DraftJob | undefined; canEdit: boolean; onDone: () => void; initialConfirming?: boolean }) {
+export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirming = false, initialChanging = false }: { a: (FirstRunAutoConfig & { repo?: string | null }) | null; draft: DraftJob | undefined; canEdit: boolean; onDone: () => void; initialConfirming?: boolean; initialChanging?: boolean }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [confirming, setConfirming] = useState(initialConfirming);
-  const [merge, setMerge] = useState<string | null>(null);
   const act = useAct();
   const questions = ac?.questions ?? [];
   const running = !!draft?.running;
@@ -111,7 +112,7 @@ export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirmi
           )}
         </div>
       )}
-      {!questions.length && !ac?.pr && canEdit && (
+      {!questions.length && !ac?.pr && !ac?.held && canEdit && (
         <div className="space-y-2" data-testid="setup-draft">
           <p className="text-[12.5px] text-ink-2">Draft finds your project's commands, runs each on a scratch copy of the default branch (as you, in a worktree beside this checkout), asks what it can't settle, and proposes the config as a PR from its own branch. This checkout isn't changed.</p>
           {!confirming ? (
@@ -131,34 +132,15 @@ export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirmi
           )}
         </div>
       )}
+      {ac?.held && !ac.pr && <DraftPreview held={ac.held} repo={ac.repo ?? null} canEdit={canEdit} running={running} onDone={onDone} initialChanging={initialChanging} />}
       {ac?.pr && (
-        <div className="space-y-2" data-testid="setup-pr">
-          <p className="text-[12.5px] text-ink-2">
-            Proposed as{' '}
-            <a href={ac.pr.url} target="_blank" rel="noreferrer" className="text-blue-ink hover:underline">
-              {ac.pr.number ? `PR #${ac.pr.number}` : 'a PR'}
-            </a>
-            . Review it on GitHub; merging it puts the config on the default branch, and this checkout fast-forwards to it.
-          </p>
-          {canEdit && !merge && (
-            <Button size="sm" variant="outline" disabled={act.busy || running} onClick={() => void act.run(async () => void setMerge((await setupMerge(false)).command ?? ''))} data-testid="setup-merge-review">
-              Merge…
-            </Button>
-          )}
-          {merge && (
-            <div className="space-y-2 rounded-lg bg-blue-tint p-3" data-testid="setup-merge-confirming">
-              <code className={code}>{merge}</code>
-              <div className="flex gap-2">
-                <Button size="sm" disabled={act.busy} onClick={() => void act.run(async () => (await setupMerge(true), setMerge(null), onDone(), 'merged: bringing the config into this checkout'))} data-testid="setup-merge-confirm">
-                  Confirm merge
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setMerge(null)}>
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          )}
-        </div>
+        <p className="text-[12.5px] text-ink-2" data-testid="setup-pr">
+          Proposed as{' '}
+          <a href={ac.pr.url} target="_blank" rel="noreferrer" className="text-blue-ink hover:underline">
+            {ac.pr.number ? `PR #${ac.pr.number}` : 'a PR'}
+          </a>
+          : merge it under Config PRs below, or on GitHub. Either way this page notices, brings the config into this checkout, and goes on here.
+        </p>
       )}
       {draft && (draft.running || draft.lines.length > 0) && (
         <div className="space-y-1" data-testid="setup-draft-log">
@@ -167,6 +149,97 @@ export function SetupAutoConfig({ a: ac, draft, canEdit, onDone, initialConfirmi
         </div>
       )}
       {!canEdit && <p className="text-[12.5px] text-ink-3">Only the owners can set this checkout up.</p>}
+      {act.note}
+    </div>
+  );
+}
+
+/**
+ * WHY (#468): the drafted config before any PR: first what it means in plain words (from the drafted files themselves),
+ * then the files, read-only. Confirm opens the setup PR (and, for the repo's admin, merges it as their approval when
+ * GitHub allows it); Change opens the Repo config form on the draft, keeping what was changed.
+ */
+export function DraftPreview({ held, repo, canEdit, running, onDone, initialChanging = false }: { held: HeldDraftView; repo: string | null; canEdit: boolean; running: boolean; onDone: () => void; initialChanging?: boolean }) {
+  const [changing, setChanging] = useState(initialChanging);
+  const act = useAct();
+  const s = held.summary;
+  if (changing && held.values && s)
+    return (
+      <div className="space-y-2" data-testid="draft-change">
+        <RepoConfigForm c={{ values: held.values, owner: s.owner, branch: 'the default branch', repo: repo ?? 'this repo' }} canEdit={canEdit} draft={{ save: async (values, confirm) => (await setupDraftValues(values, confirm)).changes, onSaved: () => (setChanging(false), onDone()), onCancel: () => setChanging(false) }} />
+      </div>
+    );
+  const row = (testid: string, label: string, value: React.ReactNode) => (
+    <div className="grid grid-cols-[9rem_1fr] gap-2 py-1 max-sm:grid-cols-1 max-sm:gap-0.5" data-testid={testid}>
+      <dt className="text-[12px] text-ink-3">{label}</dt>
+      <dd className="min-w-0 break-words text-[12.5px] text-ink">{value}</dd>
+    </div>
+  );
+  return (
+    <div className="space-y-3" data-testid="draft-preview">
+      <p className="text-[12.5px] text-ink-2">The drafted config, before any PR. Nothing is pushed until you Confirm it.</p>
+      {s ? (
+        <dl className="divide-y divide-line rounded-lg bg-surface px-3 shadow-hairline" data-testid="draft-summary">
+          {row('draft-summary-owners', 'Owners and writers', <>owner @{s.owner}; writers {s.writers.map((w) => `@${w}`).join(', ') || 'none'}</>)}
+          {row(
+            'draft-summary-tests',
+            'Tests',
+            s.tests.length ? (
+              <ul className="space-y-0.5">
+                {s.tests.map((t) => (
+                  <li key={t.slot}>
+                    <span className="text-ink-3">{t.slot}: </span>
+                    <code className="font-mono text-[12px]">{t.command}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              'none'
+            ),
+          )}
+          {row('draft-summary-budget', 'Daily budget', `$${s.dailyBudgetUsd}`)}
+          {row('draft-summary-models', 'Models', s.models.map((m) => `${m.role}: ${m.model}`).join(', ') || 'none')}
+          {row(
+            'draft-summary-waits',
+            'Waits for you',
+            <ul className="list-disc space-y-0.5 pl-4">
+              {s.waits.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>,
+          )}
+          {row('draft-summary-automerge', 'May merge itself', s.autoMerge)}
+        </dl>
+      ) : (
+        <p className="break-words text-[12.5px] text-red" data-testid="draft-error">
+          The draft doesn't load: {held.error}
+        </p>
+      )}
+      <div className="space-y-1" data-testid="draft-files">
+        {held.files.map((f) => (
+          <details key={f.name} className="rounded-lg bg-surface shadow-hairline" data-testid="draft-file" data-file={f.name}>
+            <summary className="cursor-pointer select-none px-3 py-1.5 font-mono text-[12px] text-ink">{f.name}</summary>
+            <pre className="max-h-72 overflow-auto border-t border-line px-3 py-2 font-mono text-[11.5px] text-ink-2">{f.text}</pre>
+          </details>
+        ))}
+      </div>
+      {canEdit ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={act.busy || running || !s} onClick={() => void act.run(async () => {
+            const r = await setupPropose();
+            onDone();
+            return r.merged ? (r.detail ?? `PR #${r.number} merged as your approval`) : (r.why ?? `PR #${r.number} opened: merge it on GitHub`);
+          })} data-testid="draft-confirm">
+            {act.busy ? 'Proposing…' : 'Confirm'}
+          </Button>
+          <Button size="sm" variant="outline" disabled={act.busy || !s} onClick={() => setChanging(true)} data-testid="draft-change-button">
+            Change
+          </Button>
+          <span className="text-[12px] text-ink-3">Confirm opens the setup PR; if you're the repo's admin and GitHub allows it, it merges it here as your approval.</span>
+        </div>
+      ) : (
+        <p className="text-[12.5px] text-ink-3">Only the owners can set this checkout up.</p>
+      )}
       {act.note}
     </div>
   );

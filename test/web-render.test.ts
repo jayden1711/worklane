@@ -52,7 +52,9 @@ interface Render {
   renderLearnings(l: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
-  renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
+  renderRepoConfigForm(c: unknown, o?: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean }): string;
+  renderConfigPrs(prs: unknown[], o?: { canAct?: boolean; plan?: { command: string; then: string } }): string;
+  renderDraftPreview(held: unknown, o?: { canEdit?: boolean; changing?: boolean }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
@@ -1547,7 +1549,9 @@ test("the first-run page in setup mode: the banner; the origin picker; auto-conf
   const drafting = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [] } }, { open: 'questions', draftConfirming: true });
   assert.match(drafting, /data-testid="setup-draft"[\s\S]*?runs each on a scratch copy of the default branch[\s\S]*?data-testid="setup-draft-confirming"[\s\S]*?Run your project(&#x27;|')s commands to draft it\?[\s\S]*?data-testid="setup-draft-confirm"/);
   const pr = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7' } } }, { open: 'questions' });
-  assert.match(pr, /data-testid="setup-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[^>]*>PR #7[\s\S]*?data-testid="setup-merge-review"[^>]*>Merge…/);
+  // #468: the setup PR is followed in the Config PRs list (one merge path for every config PR), not merged from here.
+  assert.match(pr, /data-testid="setup-pr"[\s\S]*?href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"[^>]*>PR #7[\s\S]*?merge it under Config PRs below, or on GitHub/);
+  assert.doesNotMatch(pr, /setup-merge-review/);
   assert.doesNotMatch(pr, /setup-draft-button/);
   assert.match(r.renderFirstRun({ ...setup, canAct: false }, { open: 'questions' }), /Only the owners can set this checkout up/);
   assert.match(r.renderFirstRun({ ...setup, configReady: true }), /The config is here: opening the dashboard…/);
@@ -2368,15 +2372,50 @@ test("the first-run page's Discord step: the token's place and a paste box, the 
   assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
 });
 
-test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {
-  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
-  assert.doesNotMatch(r.renderRepoConfigForm(c), /repo-config-merge/, 'nothing to merge before a PR is proposed');
-  const proposed = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7' });
-  assert.match(proposed, /data-testid="repo-config-result"[^>]*>proposed: merge the PR to apply it/);
-  assert.match(proposed, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/7"/);
-  assert.match(proposed, /data-testid="repo-config-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
-  const confirming = r.renderRepoConfigForm(c, { proposed: 'https://github.com/example-org/example-shop/pull/7', mergePlan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash', then: "then this checkout's main is fast-forwarded to origin's" } });
-  assert.match(confirming, /data-testid="repo-config-merge-confirming"[\s\S]*?gh pr merge 7 --repo example-org\/example-shop --squash[\s\S]*?fast-forwarded to origin(&#x27;|')s\.[\s\S]*?data-testid="repo-config-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="repo-config-merge-cancel"/);
+test("#468 config PRs: open with Merge here (the command, as the approver's, before Confirm); merged with who, when and the checkout's commit; merged but not synced, why and Fast-forward now or the command; closed, said; writers can't act", () => {
+  const base = { url: 'https://github.com/example-org/example-shop/pull/7', kind: 'config', base: 'main', mergedBy: null, mergedAt: null, synced: false, sha: null, why: null, retry: false, command: null, checkedAt: null };
+  const open = r.renderConfigPrs([{ ...base, number: 7, state: 'open' }]);
+  assert.match(open, /data-testid="config-prs"[\s\S]*?data-testid="config-pr" data-number="7" data-state="open"[\s\S]*?Config PR #(<!-- -->)?7[\s\S]*?data-testid="config-pr-merge-review"[^>]*>Merge PR #(<!-- -->)?7(<!-- -->)? here…/);
+  assert.doesNotMatch(r.renderConfigPrs([{ ...base, number: 7, state: 'open' }], { canAct: false }), /config-pr-merge-review/);
+  const confirming = r.renderConfigPrs([{ ...base, number: 7, state: 'open' }], { plan: { command: 'gh pr merge 7 --repo example-org/example-shop --squash --subject x (#7), approved by example-owner on the first-run page --body ', then: "then this checkout's main is fast-forwarded to origin's" } });
+  assert.match(confirming, /data-testid="config-pr-merge-confirming"[\s\S]*?as your approval[\s\S]*?approved by example-owner[\s\S]*?data-testid="config-pr-merge-confirm"[^>]*>Confirm merge[\s\S]*?data-testid="config-pr-merge-cancel"/);
+  const done = r.renderConfigPrs([{ ...base, number: 1, kind: 'setup', state: 'merged', synced: true, mergedBy: 'example-owner', mergedAt: '2026-10-15T12:00:00Z', sha: 'abcdef1234567890' }]);
+  assert.match(done, /The setup PR #(<!-- -->)?1[\s\S]*?merged, in this checkout[\s\S]*?data-testid="config-pr-done"[^>]*>Merged(<!-- -->)? by @example-owner(<!-- -->)? at [^<]+[\s\S]*?checkout at <span[^>]*>abcdef1<\/span>/);
+  assert.doesNotMatch(done, /config-pr-merge-review|isn(&#x27;|')t open/, 'merged is never offered as an error');
+  const dirty = r.renderConfigPrs([{ ...base, number: 2, state: 'merged', why: 'this checkout has uncommitted changes (1 file(s): README.md)', retry: true, command: 'git pull --ff-only origin main' }]);
+  assert.match(dirty, /data-testid="config-pr-why"[\s\S]*?uncommitted changes \(1 file\(s\): README\.md\)[\s\S]*?data-testid="config-pr-sync"[^>]*>Fast-forward now/);
+  const diverged = r.renderConfigPrs([{ ...base, number: 3, state: 'merged', why: 'it diverged', retry: false, command: 'git log origin/main..main' }]);
+  assert.match(diverged, /data-testid="config-pr-command"[^>]*>git log origin\/main\.\.main</);
+  assert.doesNotMatch(diverged, /config-pr-sync/);
+  assert.match(r.renderConfigPrs([{ ...base, number: 4, state: 'closed', why: 'PR #4 was closed without merging: nothing changed; propose it again' }]), /closed without merging/);
+});
+
+test('#468 the draft preview: the summary and the files rendered from the same draft agree; Confirm and Change; Change is the Repo config form on the draft', async () => {
+  const { draftView } = await import('../src/setup-mode.js');
+  const { scaffoldConfig } = await import('../src/install.js');
+  const { parse } = await import('yaml');
+  const root = mkdtempSync(join(tmpdir(), 'web-render-draft-'));
+  const dir = join(root, BRAND.configDir);
+  scaffoldConfig(dir, { name: 'example-shop', repo: 'example-org/example-shop', defaultBranch: 'main', owner: 'example-owner' });
+  const yaml = Object.fromEntries(readdirSync(dir).filter((f) => f.endsWith('.yaml')).map((f) => [f, readFileSync(join(dir, f), 'utf8')]));
+  const held = draftView(root, { branch: 'main', base: 'a'.repeat(40), owner: 'example-owner', yaml, body: 'x', at: '2026-10-15T12:00:00Z' })!;
+  const html = r.renderDraftPreview(held);
+  // The files as rendered, read back, against the summary as rendered: the same draft.
+  const files = Object.fromEntries([...html.matchAll(/data-testid="draft-file" data-file="([^"]+)"><summary[^>]*>[^<]*<\/summary><pre[^>]*>([\s\S]*?)<\/pre>/g)].map((m) => [m[1], parse(m[2]!.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'))]));
+  assert.deepEqual(Object.keys(files).sort(), Object.keys(yaml).sort(), 'every drafted YAML file, read-only');
+  const text = (id: string) => html.match(new RegExp(`data-testid="${id}"[^>]*>([\\s\\S]*?)</div>`))![1]!.replace(/<[^>]+>/g, '').replace(/&#x27;/g, "'");
+  assert.match(text('draft-summary-owners'), new RegExp(`owner @${files['config.yaml'].owners.default}; writers ${files['config.yaml'].owners.writers.map((w: string) => `@${w}`).join(', ')}`));
+  assert.match(text('draft-summary-budget'), new RegExp(`\\$${files['agents.yaml'].daily_budget_usd}$`));
+  for (const [role, x] of Object.entries(files['agents.yaml'].roles as Record<string, { enabled: boolean; model: string }>)) {
+    if (x.enabled) assert.match(text('draft-summary-models'), new RegExp(`${role}: ${x.model}`));
+    else assert.doesNotMatch(text('draft-summary-models'), new RegExp(`${role}:`));
+  }
+  assert.match(text('draft-summary-tests'), new RegExp(`full: ${files['tests.yaml'].runner.full.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  for (const c of files['review.yaml'].levels.L3_human.when) assert.match(text('draft-summary-waits'), new RegExp(c));
+  assert.match(html, /data-testid="draft-confirm"[^>]*>Confirm<[\s\S]*?data-testid="draft-change-button"[^>]*>Change</);
+  assert.doesNotMatch(r.renderDraftPreview(held, { canEdit: false }), /draft-confirm/);
+  const change = r.renderDraftPreview(held, { changing: true });
+  assert.match(change, /data-testid="draft-change"[\s\S]*?data-testid="repo-config-form"[\s\S]*?nothing is pushed until you Confirm the preview[\s\S]*?data-testid="repo-config-budget"[^>]*value="40"[\s\S]*?data-testid="repo-config-draft-back"/);
 });
 
 test('Tailscale: the read that shows a step ended offers the next step at once, from the status after it, with no wait for the idle poll', { skip: process.platform === 'win32' }, async () => {

@@ -50,13 +50,15 @@ function proposeChecks(other: string, branch = `${CONFIG_BRANCH_PREFIX}1`) {
 function github(bare: string, pr: { head: string; state?: string; base?: string }) {
   const calls: string[][] = [];
   const ok = (stdout: string): RunResult => ({ status: 0, stdout, stderr: '' });
+  let state = pr.state ?? 'OPEN';
   const gh = (args: string[]): RunResult => {
     calls.push(args);
     const a = args.join(' ');
-    if (a.startsWith('pr view 7 ')) return ok(JSON.stringify({ state: pr.state ?? 'OPEN', headRefName: pr.head, baseRefName: pr.base ?? 'main', url: `https://github.com/${REPO}/pull/7` }));
+    if (a.startsWith('pr view 7 ')) return ok(JSON.stringify({ state, headRefName: pr.head, baseRefName: pr.base ?? 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: state === 'MERGED' ? '2026-10-15T12:00:00Z' : null, mergedBy: state === 'MERGED' ? { login: 'example-owner' } : null }));
     if (a.startsWith(`api repos/${REPO} --jq`)) return ok('false,true,false\n');
-    if (a === `pr merge 7 --repo ${REPO} --squash`) {
+    if (a.startsWith(`pr merge 7 --repo ${REPO} --squash `)) {
       execFileSync('git', ['update-ref', 'refs/heads/main', `refs/heads/${pr.head}`], { cwd: bare });
+      state = 'MERGED';
       return ok('');
     }
     if (a.includes('/protection')) return args.includes('PUT') ? ok('{}') : { status: 1, stdout: '', stderr: 'gh: Branch not protected (HTTP 404)' };
@@ -121,13 +123,13 @@ test('Merge a Repo config PR from the page: the command shown first, owners only
     assert.equal((await s.post('/api/first-run/repo-config/merge', 'example-collaborator', { number: 7, confirm: true })).status, 403);
     const shown = await s.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7 });
     assert.equal(shown.status, 200, JSON.stringify(shown.body));
-    assert.equal(shown.body.command, `gh pr merge 7 --repo ${REPO} --squash`);
+    assert.equal(shown.body.command, `gh pr merge 7 --repo ${REPO} --squash --subject Config from the first-run page: required_checks (#7), approved by example-owner on the first-run page --body `);
     assert.match(String(shown.body.then), /fast-forwarded to origin's \(only a fast-forward: refused if it has local changes or diverged\)/);
     assert.ok(!calls.some((c) => c[1] === 'merge'), 'nothing merged by the preview');
     const done = await s.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7, confirm: true });
     assert.equal(done.status, 200, JSON.stringify(done.body));
     assert.deepEqual([done.body.merged, done.body.synced], [true, true]);
-    assert.match(String(done.body.detail), /^fast-forwarded main from [0-9a-f]{7} to [0-9a-f]{7}$/);
+    assert.match(String(done.body.detail), /^PR #7 merged by @example-owner at 2026-10-15T12:00:00Z, checkout at [0-9a-f]{7}$/);
     assert.notEqual(git(dir, 'rev-parse', 'HEAD'), before);
     assert.equal(git(dir, 'rev-parse', 'HEAD'), execFileSync('git', ['rev-parse', 'main'], { cwd: bare, encoding: 'utf8' }).trim());
     assert.equal(git(dir, 'rev-list', '--merges', '--count', `${before}..HEAD`), '0', 'no merge commit');
@@ -137,8 +139,8 @@ test('Merge a Repo config PR from the page: the command shown first, owners only
   } finally {
     await s.d.close();
   }
-  // Only an open PR from the form's own branch into the default branch.
-  for (const [pr, why] of [[{ head: 'someone/else' }, /isn't one this form proposed/], [{ head: branch, state: 'MERGED' }, /isn't open \(MERGED\)/], [{ head: branch, base: 'release' }, /is against release, not main/]] as const) {
+  // Only a PR from the page's own branches into the default branch; closed is said as such. (#468: MERGED is not refused.)
+  for (const [pr, why] of [[{ head: 'someone/else' }, /isn't one this page proposed/], [{ head: branch, state: 'CLOSED' }, /was closed without merging: nothing to merge; propose it again/], [{ head: branch, base: 'release' }, /is against release, not main/]] as const) {
     const t = await dashboard(fixture().dir, github(bare, pr).gh);
     try {
       const r = await t.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7, confirm: true });
@@ -163,7 +165,7 @@ test('the fast-forward never overwrites the person\'s work: local changes, a div
   const head = git(dirty.dir, 'rev-parse', 'HEAD');
   const r1 = fastForwardCheckout('main', systemGit(dirty.dir));
   assert.equal(r1.ok, false);
-  assert.match(r1.detail, /uncommitted changes \(1 file\(s\)\); nothing was changed: commit or stash them, then run `git pull --ff-only origin main`/);
+  assert.match(r1.detail, /uncommitted changes \(1 file\(s\): README\.md\); nothing was changed: commit or stash them, then fast-forward again \(or run `git pull --ff-only origin main`\)/);
   assert.equal(git(dirty.dir, 'rev-parse', 'HEAD'), head);
   assert.equal(readFileSync(join(dirty.dir, 'README.md'), 'utf8'), 'my edit\n');
   // A local commit origin doesn't have.
@@ -174,7 +176,7 @@ test('the fast-forward never overwrites the person\'s work: local changes, a div
   const mine = git(diverged.dir, 'rev-parse', 'HEAD');
   const r2 = fastForwardCheckout('main', systemGit(diverged.dir));
   assert.equal(r2.ok, false);
-  assert.match(r2.detail, /has commits origin's doesn't \(it diverged\); nothing was changed/);
+  assert.match(r2.detail, /has commits origin's doesn't \(it diverged by 1 commit\(s\) of its own and 1 of origin's\); nothing was changed/);
   assert.equal(git(diverged.dir, 'rev-parse', 'HEAD'), mine);
   // Another branch checked out.
   const elsewhere = setup();

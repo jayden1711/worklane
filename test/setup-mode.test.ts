@@ -46,21 +46,32 @@ function project(withOrigin = true) {
   return { root, bare, git };
 }
 
-/** gh as auto-config, the merge and the repo list use it; a merge fast-forwards the bare repo's main to the setup branch. */
-function ghStandIn(bare: string) {
+/**
+ * gh as auto-config, the merge and the repo list use it; a merge fast-forwards the bare repo's main to the setup branch
+ * (as GitHub's would, by `mergedBy`). `admin`: this login is the repo's admin; `refuse`: GitHub's protection refuses the merge.
+ */
+function ghStandIn(bare: string, o: { admin?: boolean; refuse?: string } = {}) {
   const calls: string[][] = [];
+  const pr = { state: 'OPEN', mergedBy: null as string | null, mergedAt: null as string | null };
+  const mergeOnGitHub = (by: string) => {
+    execFileSync('git', ['push', '-q', bare, `refs/heads/${SETUP_BRANCH}:refs/heads/main`], { cwd: bare });
+    Object.assign(pr, { state: 'MERGED', mergedBy: by, mergedAt: '2026-10-15T12:00:00Z' });
+  };
   const gh = (args: string[]): RunResult => {
     calls.push(args);
     const a = args.join(' ');
     if (a.startsWith('repo view')) return { status: 0, stdout: 'main\n', stderr: '' };
     if (a.startsWith('api user/repos')) return { status: 0, stdout: 'example-org/example-shop\nexample-org/other\n', stderr: '' };
     if (a.startsWith('api user')) return { status: 0, stdout: 'example-owner\n', stderr: '' };
+    if (a.startsWith('api repos/') && a.endsWith('.permissions.admin')) return { status: 0, stdout: `${!!o.admin}\n`, stderr: '' };
     if (a.startsWith('api repos/')) return { status: 0, stdout: 'false,true,true\n', stderr: '' };
     if (a.startsWith('pr list')) return { status: 0, stdout: '', stderr: '' };
     if (a.startsWith('pr create')) return { status: 0, stdout: 'https://github.com/example-org/example-shop/pull/7\n', stderr: '' };
-    if (a.startsWith('pr view')) return { status: 0, stdout: 'OPEN\n', stderr: '' };
+    if (a.startsWith('pr view') && a.includes('--json state,headRefName')) return { status: 0, stdout: JSON.stringify({ ...pr, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null, headRefName: SETUP_BRANCH, baseRefName: 'main', url: 'https://github.com/example-org/example-shop/pull/7', title: `Add ${BRAND.name} config` }), stderr: '' };
+    if (a.startsWith('pr view')) return { status: 0, stdout: `${pr.state}\n`, stderr: '' };
     if (a.startsWith('pr merge')) {
-      execFileSync('git', ['push', '-q', bare, `refs/heads/${SETUP_BRANCH}:refs/heads/main`], { cwd: bare });
+      if (o.refuse) return { status: 1, stdout: '', stderr: o.refuse };
+      mergeOnGitHub('example-owner');
       return { status: 0, stdout: '', stderr: '' };
     }
     return { status: 1, stdout: '', stderr: `no stand-in for gh ${a}` };
@@ -71,7 +82,7 @@ function ghStandIn(bare: string) {
     const r = spawnSync(cmd, args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
     return { status: r.status, stdout: r.stdout, stderr: r.stderr };
   };
-  return { calls, gh, run };
+  return { calls, gh, run, mergeOnGitHub, pr };
 }
 
 function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | null = () => null, interactive: string[][] = []): InitIo {
@@ -142,7 +153,29 @@ async function setupDashboard(root: string, g: ReturnType<typeof ghStandIn>) {
       log.close();
     }
   };
-  return { d, get, post, drafted, audit };
+  const auditOf = () => {
+    const log = new EventLog(logPath(root));
+    try {
+      return log.read(0, ['dashboard.audit']).map((e) => e.payload as { action: string; detail: Record<string, unknown> });
+    } finally {
+      log.close();
+    }
+  };
+  const allAudit = () => auditOf().map((e) => e.action);
+  return { d, get, post, drafted, audit, allAudit, auditOf };
+}
+
+/** Draft (confirmed), answering any question "none" or with a passing command, until the draft is held for its preview. */
+async function toHeld(s: Awaited<ReturnType<typeof setupDashboard>>) {
+  for (let i = 0; i < 6; i++) {
+    assert.equal((await s.post('/api/first-run/setup/draft', { confirm: true })).status, 202);
+    const j = await s.drafted();
+    const ac = (await s.get('/api/first-run')).autoConfig;
+    if (ac?.held) return ac;
+    const answers = Object.fromEntries((ac?.questions ?? []).map((q: { id: string; choices: { id: string }[] }) => [q.id, q.id === 'no-test-command' ? `custom:${PASSES}` : q.choices.some((c) => c.id === 'none') ? 'none' : q.choices[0]!.id]));
+    assert.equal((await s.post('/api/first-run/setup/answers', { answers })).status, 200, JSON.stringify(j));
+  }
+  throw new Error('the draft was never held');
 }
 
 test("setup mode's stand-in config: from the templates, with the origin's repo, and nothing written into the checkout", () => {
@@ -185,32 +218,108 @@ test('setup mode end to end: the page alone, Start refused; draft (confirmed) as
     assert.deepEqual(saved.body.open, []);
     assert.deepEqual(readInitState(localInitFile(p.root))!.autoConfig!.answers['no-test-command'], { choice: 'custom', command: PASSES });
 
-    // Further questions, if the draft asks any, answered "none" (no single-file runner) until it proposes.
-    let proposed = null;
-    for (let i = 0; i < 4 && !proposed; i++) {
-      assert.equal((await s.post('/api/first-run/setup/draft', { confirm: true })).status, 202);
-      const j = await s.drafted();
-      const ac = (await s.get('/api/first-run')).autoConfig;
-      if (ac.pr) proposed = ac.pr;
-      else assert.equal((await s.post('/api/first-run/setup/answers', { answers: Object.fromEntries(ac.questions.map((q: { id: string }) => [q.id, 'none'])) })).status, 200, JSON.stringify(j));
-    }
-    assert.deepEqual(proposed, { number: 7, url: 'https://github.com/example-org/example-shop/pull/7' });
+    // Further questions, if the draft asks any, answered "none" (no single-file runner) until it is drafted.
+    const held = await toHeld(s);
+    // #468: held for its preview; nothing pushed, no PR, until Confirm.
+    assert.equal(held.pr, null);
+    assert.ok(held.held.summary, JSON.stringify(held.held));
+    assert.equal(g.calls.some((c) => c[0] === 'pr' && c[1] === 'create'), false, 'no PR before Confirm');
+    assert.equal(spawnSync('git', ['ls-remote', p.bare, `refs/heads/${SETUP_BRANCH}`], { encoding: 'utf8' }).stdout.trim(), '', 'nothing pushed before Confirm');
     assert.equal(existsSync(join(p.root, BRAND.configDir)), false, 'the checkout is untouched until the merge');
+    // Confirm: as a writer refused; without confirm, what it would do (and nothing done).
+    assert.equal((await s.post('/api/first-run/setup/propose', { confirm: true }, 'example-collaborator')).status, 403);
+    const plan = await s.post('/api/first-run/setup/propose', {});
+    assert.equal(plan.status, 200);
+    assert.match(plan.body.then, /opens the setup PR for you to merge on GitHub/, 'not the repo admin: no merge from here');
+    assert.equal(g.calls.some((c) => c[0] === 'pr' && (c[1] === 'create' || c[1] === 'merge')), false, 'a plan opens and merges nothing');
+    const opened = await s.post('/api/first-run/setup/propose', { confirm: true });
+    assert.equal(opened.status, 200, JSON.stringify(opened.body));
+    assert.deepEqual([opened.body.number, opened.body.merged, opened.body.url], [7, false, 'https://github.com/example-org/example-shop/pull/7']);
+    assert.match(opened.body.why, /PR #7 opened: merge it on GitHub/);
+    assert.equal(g.calls.some((c) => c[0] === 'pr' && c[1] === 'merge'), false, 'never merged for someone who is not the admin');
 
+    // The shared merge path (#468): its command first (the approver named in the subject), then the merge.
     const preview = await s.post('/api/first-run/setup/merge', {});
     assert.equal(preview.status, 200);
-    assert.equal(preview.body.command, 'gh pr merge 7 --repo example-org/example-shop --squash', "the repo's first allowed method");
+    assert.equal(preview.body.command, `gh pr merge 7 --repo example-org/example-shop --squash --subject Add ${BRAND.name} config (#7), approved by example-owner on the first-run page --body `, "the repo's first allowed method; the approver in the subject");
     assert.equal(g.calls.some((c) => c[0] === 'pr' && c[1] === 'merge'), false, 'a preview merges nothing');
     assert.equal((await s.post('/api/first-run/setup/merge', { confirm: true }, 'example-collaborator')).status, 403);
     const merged = await s.post('/api/first-run/setup/merge', { confirm: true });
     assert.equal(merged.status, 200, JSON.stringify(merged.body));
-    const after = await s.drafted();
-    assert.equal(after.result.status, 'merged', JSON.stringify(after));
+    assert.deepEqual([merged.body.merged, merged.body.synced], [true, true]);
+    assert.match(merged.body.detail, /^PR #7 merged by @example-owner at 2026-10-15T12:00:00Z, checkout at [0-9a-f]{7}$/);
     assert.ok(configReady(p.root), 'the checkout fast-forwarded to the merged config');
     assert.equal((await s.get('/api/first-run')).configReady, true);
     const actions = s.audit();
-    assert.ok(['first_run.setup_draft', 'first_run.setup_answers', 'first_run.setup_merge'].every((a) => actions.includes(a)), actions.join(', '));
-    assert.equal(actions.filter((a) => a === 'first_run.setup_refused').length, 4, 'draft unconfirmed, draft by a writer, a bad answer, merge by a writer');
+    assert.ok(['first_run.setup_draft', 'first_run.setup_answers', 'first_run.setup_proposed'].every((a) => actions.includes(a)), actions.join(', '));
+    assert.equal(s.allAudit().filter((a) => a === 'first_run.config_merged').length, 1);
+    assert.equal(actions.filter((a) => a === 'first_run.setup_refused').length, 5, 'draft unconfirmed, draft by a writer, a bad answer, Confirm by a writer, merge by a writer');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('#468 the preview: Change keeps its edits in the draft (nothing pushed); Confirm by the repo admin opens the setup PR and merges it as their approval, and the checkout has it', async () => {
+  const p = project();
+  const g = ghStandIn(p.bare, { admin: true });
+  const s = await setupDashboard(p.root, g);
+  try {
+    const held = (await toHeld(s)).held;
+    // The summary is read from the drafted files themselves.
+    const { parse } = await import('yaml');
+    const file = (n: string) => parse(held.files.find((f: { name: string }) => f.name === n)!.text);
+    assert.equal(held.summary.owner, file('config.yaml').owners.default);
+    assert.deepEqual(held.summary.writers, file('config.yaml').owners.writers);
+    assert.equal(held.summary.dailyBudgetUsd, file('agents.yaml').daily_budget_usd);
+    assert.deepEqual(held.summary.models, Object.entries(file('agents.yaml').roles as Record<string, { enabled: boolean; model: string }>).filter(([, r]) => r.enabled).map(([role, r]) => ({ role, model: r.model })));
+    assert.deepEqual(held.summary.tests.find((t: { slot: string }) => t.slot === 'full')?.command, file('tests.yaml').runner.full);
+    // Change: what it would change, then (confirmed) the draft changed, comments kept; nothing pushed either way.
+    const shown = await s.post('/api/first-run/setup/draft-values', { values: { daily_budget_usd: 12 } });
+    assert.equal(shown.status, 200, JSON.stringify(shown.body));
+    assert.deepEqual(shown.body.changes, [{ file: `${BRAND.configDir}/agents.yaml`, key: 'daily_budget_usd', from: held.summary.dailyBudgetUsd, to: 12 }]);
+    assert.equal((await s.get('/api/first-run')).autoConfig.held.summary.dailyBudgetUsd, held.summary.dailyBudgetUsd, 'not changed without confirm');
+    assert.equal((await s.post('/api/first-run/setup/draft-values', { values: { daily_budget_usd: 12 }, confirm: true }, 'example-collaborator')).status, 403);
+    assert.equal((await s.post('/api/first-run/setup/draft-values', { values: { daily_budget_usd: 12 }, confirm: true })).status, 200);
+    const kept = (await s.get('/api/first-run')).autoConfig.held;
+    assert.equal(kept.summary.dailyBudgetUsd, 12);
+    assert.equal(kept.values.daily_budget_usd, 12, 'the form reopens with the edit');
+    assert.match(kept.files.find((f: { name: string }) => f.name === 'agents.yaml').text, /daily_budget_usd: 12\s+# usage guard/, 'comments kept');
+    assert.equal(g.calls.some((c) => c[0] === 'pr'), false);
+    // Confirm, as the repo's admin: the PR opened, merged here as their approval, the checkout brought to it.
+    const plan = await s.post('/api/first-run/setup/propose', {});
+    assert.match(plan.body.then, /merges it here as your approval/);
+    const done = await s.post('/api/first-run/setup/propose', { confirm: true });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.deepEqual([done.body.number, done.body.merged, done.body.synced], [7, true, true]);
+    const merge = g.calls.find((c) => c[0] === 'pr' && c[1] === 'merge')!;
+    assert.deepEqual(merge.slice(merge.indexOf('--subject'), merge.indexOf('--subject') + 4), ['--subject', `Add ${BRAND.name} config (#7), approved by example-owner on the first-run page`, '--body', ''], 'the approver in the subject, nothing in the body');
+    assert.match(spawnSync('git', ['show', `main:${BRAND.configDir}/agents.yaml`], { cwd: p.bare, encoding: 'utf8' }).stdout, /daily_budget_usd: 12/, 'what was previewed and changed is what merged');
+    assert.ok(configReady(p.root), 'the checkout has it');
+    const approval = s.auditOf().find((e) => e.action === 'first_run.config_merged')!;
+    assert.deepEqual([approval.detail.number, approval.detail.approver, approval.detail.synced], [7, 'example-owner', true]);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#468 the preview's Confirm when GitHub's protection refuses the merge: the PR is opened, its link shown, nothing merged; the page keeps watching and sees a later merge on GitHub", async () => {
+  const p = project();
+  const g = ghStandIn(p.bare, { admin: true, refuse: 'GraphQL: Base branch policy prohibits the merge (mergePullRequest)' });
+  const s = await setupDashboard(p.root, g);
+  try {
+    await toHeld(s);
+    const r = await s.post('/api/first-run/setup/propose', { confirm: true });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.deepEqual([r.body.merged, r.body.url], [false, 'https://github.com/example-org/example-shop/pull/7']);
+    assert.match(r.body.why, /PR #7 opened: merge it on GitHub \(GitHub didn't merge PR #7: GraphQL: Base branch policy prohibits the merge/);
+    assert.equal(g.pr.state, 'OPEN');
+    assert.equal(existsSync(join(p.root, BRAND.configDir)), false);
+    // Merged on GitHub, outside the page: the next look sees it, fast-forwards, and the step is done.
+    g.mergeOnGitHub('example-owner');
+    const f = await s.get('/api/first-run?fresh=1');
+    const pr = f.configPrs.find((x: { number: number }) => x.number === 7);
+    assert.deepEqual([pr.kind, pr.state, pr.synced, pr.mergedBy], ['setup', 'merged', true, 'example-owner']);
+    assert.ok(configReady(p.root));
   } finally {
     await s.d.close();
   }

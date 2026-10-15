@@ -83,21 +83,28 @@ function cleaned(v: Partial<Record<keyof RepoConfigValues, unknown>>): Partial<R
 
 /** The default branch's config files with these values applied (only the files they change), and what changes. */
 function edited(root: string, cfg: Config, values: Partial<Record<keyof RepoConfigValues, unknown>>, git: Git): { texts: Record<string, string>; changes: ConfigChange[]; read: (f: string) => string | null } {
-  const v = cleaned(values);
   const branch = cfg.project.project.default_branch;
   const show = (f: string) => {
     const r = git(['show', `origin/${branch}:${BRAND.configDir}/${f}`], root);
     return r.status === 0 ? r.stdout : null;
   };
+  return applyConfigValues(show, repoConfigValues(cfg), values, `origin/${branch}`);
+}
+
+/**
+ * The config files `show` gives with these values applied (only the files they change, comments kept), and what
+ * changes. WHY (#468): the same edit for the default branch's config and for setup mode's held draft.
+ */
+export function applyConfigValues(show: (file: string) => string | null, now: RepoConfigValues, values: Partial<Record<keyof RepoConfigValues, unknown>>, where: string): { texts: Record<string, string>; changes: ConfigChange[]; read: (f: string) => string | null } {
+  const v = cleaned(values);
   const docs = new Map<string, ReturnType<typeof parseDocument>>();
   const changes: ConfigChange[] = [];
-  const now = repoConfigValues(cfg);
   for (const k of KEYS) {
     if (v[k] === undefined || JSON.stringify(v[k]) === JSON.stringify(now[k])) continue;
     const { file, path } = WHERE[k];
     if (!docs.has(file)) {
       const text = show(file);
-      if (text === null) throw new ConfigChangeError(`origin/${branch} has no ${BRAND.configDir}/${file}: the config isn't on the default branch yet`);
+      if (text === null) throw new ConfigChangeError(`${where} has no ${BRAND.configDir}/${file}: the config isn't on the default branch yet`);
       docs.set(file, parseDocument(text));
     }
     const doc = docs.get(file)!;
@@ -179,28 +186,3 @@ function spawnGh(args: string[], cwd: string) {
 
 /** The branch prefix the form proposes from: the only PRs its Merge takes. */
 export const CONFIG_BRANCH_PREFIX = `${BRAND.cli}/config-`;
-
-/**
- * The merge of a Repo config PR, as the page does it: only an open PR from one of the form's own branches into the
- * default branch, merged with the first method the repo allows. Refused otherwise; nothing is merged here.
- */
-export function configPrMerge(o: { repo: string; base: string; number: unknown; gh: (args: string[]) => { status: number | null; stdout: string; stderr: string } }): { number: number; url: string; command: string[] } {
-  const n = Number(o.number);
-  if (!Number.isInteger(n) || n <= 0) throw new ConfigChangeError('number: the PR number the form proposed');
-  const v = o.gh(['pr', 'view', String(n), '--repo', o.repo, '--json', 'state,headRefName,baseRefName,url']);
-  if (v.status !== 0) throw new ConfigChangeError(`can't read PR #${n} on ${o.repo}: ${v.stderr.trim().split('\n')[0] ?? ''}`);
-  let pr: { state?: string; headRefName?: string; baseRefName?: string; url?: string };
-  try {
-    pr = JSON.parse(v.stdout) as typeof pr;
-  } catch {
-    throw new ConfigChangeError(`GitHub's answer about PR #${n} could not be read`);
-  }
-  if (pr.state !== 'OPEN') throw new ConfigChangeError(`PR #${n} isn't open (${pr.state ?? 'unknown'})`);
-  if (!pr.headRefName?.startsWith(CONFIG_BRANCH_PREFIX)) throw new ConfigChangeError(`PR #${n} isn't one this form proposed (its branch is ${pr.headRefName ?? 'unknown'}, not ${CONFIG_BRANCH_PREFIX}...): merge it on GitHub`);
-  if (pr.baseRefName !== o.base) throw new ConfigChangeError(`PR #${n} is against ${pr.baseRefName ?? 'unknown'}, not ${o.base}`);
-  const methods = o.gh(['api', `repos/${o.repo}`, '--jq', '[.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge] | @csv']);
-  if (methods.status !== 0) throw new ConfigChangeError(`can't read ${o.repo}'s merge settings: ${methods.stderr.trim().split('\n')[0] ?? ''}`);
-  const i = methods.stdout.trim().split(',').findIndex((x) => x === 'true');
-  if (i < 0) throw new ConfigChangeError(`${o.repo} allows no merge method gh can use`);
-  return { number: n, url: pr.url ?? '', command: ['gh', 'pr', 'merge', String(n), '--repo', o.repo, `--${['merge', 'squash', 'rebase'][i]!}`] };
-}

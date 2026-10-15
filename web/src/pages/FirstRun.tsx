@@ -14,6 +14,7 @@ import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
+import { ConfigPrList } from '../components/ConfigPr';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -28,7 +29,9 @@ const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2
 const SLOT_LABEL: Record<FirstRunVerification['slot'], string> = { setup: 'worktree setup', full: 'runner.full', changed: 'runner.changed', one: 'runner.one' };
 
 /** Auto-config's part of the Repo config step: the questions it can't settle alone, with their choices, and each command's run on the default branch. */
-function AutoConfigView({ a }: { a: FirstRunAutoConfig }) {
+function AutoConfigView({ a: given, settled = false }: { a: FirstRunAutoConfig; settled?: boolean }) {
+  // WHY (#468): once the setup PR has merged and the config is here, its "merge it, then run init again" is stale.
+  const a = settled ? { ...given, pr: null } : given;
   if (!a.questions.length && !a.verified.length && !a.pr) return null;
   return (
     <section aria-label="Repo config" className="space-y-3" data-testid="first-run-auto-config">
@@ -529,7 +532,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                           Not from here yet: {f.repoConfig.error}
                         </p>
                       ) : (
-                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onMerged={() => onRecheck?.()} />
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onChanged={() => onRecheck?.()} />
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
@@ -545,8 +548,10 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           </Card>
         </section>
       ))}
+      {/* #468: every config PR, followed to its end the same way (merged here or anywhere: this checkout brought to it). */}
+      {f.configPrs && <ConfigPrList prs={f.configPrs} canAct={!!f.canAct} onDone={() => onRecheck?.()} />}
       <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
-      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
+      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} settled={!!f.setup?.groups.flatMap((g) => g.steps).find((s) => s.id === 'config-on-main')?.done || !!f.configPrs?.some((p) => p.number === f.autoConfig?.pr?.number && p.state === 'merged')} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
           <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
@@ -608,9 +613,10 @@ export function FirstRunPage({ state }: { state: State }) {
   useEffect(() => load(false), [load, state.lastId]);
   const setupMode = !!(f && 'setupMode' in f && f.setupMode);
   const drafting = !!(f && 'draft' in f && f.draft?.running);
-  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app.
+  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app, on First run.
   useEffect(() => {
-    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.reload();
+    // WHY (#468): onto First run itself, never the empty Board: it stays here until the person moves on.
+    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.replace('/first-run');
   }, [f, state.setupMode]);
   // Live while open: a provider login done in another tab shows here without a click; faster while setting up.
   useEffect(() => {
