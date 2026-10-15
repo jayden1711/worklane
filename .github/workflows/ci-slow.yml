@@ -1055,7 +1055,7 @@ jobs:
           # (the engine keeps its state 0770/0660, src/os/index.ts groupOnly; the home was found 0770 here too).
           for p in "$home" "$home/.local" "$state" "$db"; do
             [ "$(sudo stat -c '%U:%G' "$p")" = "wl-ci:wl-ci" ] || { echo "$p isn't wl-ci:wl-ci" >&2; exit 1; }
-            [ "$(( 0$(sudo stat -c '%a' "$p") % 10 ))" = 0 ] || { echo "$p gives others access" >&2; exit 1; }
+            m="$(sudo stat -c '%a' "$p")" && [ "${m: -1}" = 0 ] || { echo "$p gives others access ($m)" >&2; exit 1; }
           done
           # So the group is what keeps everyone else out: wl-ci is its only member, and no other user has it as theirs.
           getent group wl-ci
