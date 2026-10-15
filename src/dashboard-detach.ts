@@ -6,7 +6,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, r
 import { dirname } from 'node:path';
 import { BRAND } from './brand.js';
 import { newNonce, PROOF_PATH, proofMatches } from './dashboard-proof.js';
-import { readRegularFile } from './os/index.js';
+import { copyFileCommand, readRegularFile } from './os/index.js';
 
 /** WHY: one fixed URL per port, so a rerun prints exactly the same one. */
 export const wizardUrl = (port: number) => `http://127.0.0.1:${port}/first-run`;
@@ -148,11 +148,28 @@ export async function detachDashboard(o: DetachOptions): Promise<Detached> {
   throw new DetachError(`the dashboard didn't answer on port ${o.port} within ${Math.round(waitMs / 1000)} s: see ${o.logFile}`);
 }
 
-/** INVARIANT: the URL is the last line and the only one; the key's path is printed, never the key. */
-export function detachedLines(d: Detached, o: { root: string; tokenFile: string; logFile: string }): string[] {
+/**
+ * INVARIANT: the URL is the last line and the only one; the key's path is printed, never the key.
+ * WHY: the path on its own line, and a command that copies the key, quoted: on macOS it has a space in it and sits in
+ * ~/Library, which a browser's file picker hides (#467). Bold only on a terminal that takes colour (`bold`).
+ */
+export function detachedLines(d: Detached, o: { root: string; tokenFile: string; logFile: string; bold?: boolean; copy?: string | null }): string[] {
   return [
     `${BRAND.name} dashboard for ${o.root}: ${d.started ? `started in the background (pid ${d.pid ?? '?'}; its log: ${o.logFile})` : 'already running; nothing changed'}`,
-    `  the page asks once for the dashboard key: it is in ${o.tokenFile} (only you can read it)`,
+    ...keyLines(o.tokenFile, o),
     d.url,
   ];
 }
+
+/**
+ * Where the dashboard key is: a line saying so, the path alone on the next (CI reads it there), and the command that
+ * copies it (none without a clipboard tool). Every command that starts a dashboard prints these, never the key.
+ */
+export function keyLines(tokenFile: string, o: { bold?: boolean; copy?: string | null } = {}): string[] {
+  const b = (s: string) => (o.bold ? `\x1b[1m${s}\x1b[22m` : s);
+  const copy = o.copy === undefined ? copyFileCommand(tokenFile) : o.copy;
+  return ['  the page asks once for the dashboard key, in this file (only you can read it):', `    ${b(tokenFile)}`, ...(copy ? [`  copy it to paste: ${b(copy)}`] : [])];
+}
+
+/** Whether to print in bold: a terminal, and no NO_COLOR (no-color.org). */
+export const useBold = (stream: { isTTY?: boolean }, env: NodeJS.ProcessEnv = process.env): boolean => !!stream.isTTY && !env.NO_COLOR;

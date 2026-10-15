@@ -270,6 +270,16 @@ export function loopbackPeerUid(clientPort: number, serverPort: number): number 
   return null;
 }
 
+/**
+ * Whether the process at the other end of a loopback connection to us runs as this OS user: true or false on Linux
+ * (the kernel's socket table), null elsewhere, where there's no check (macOS, Windows: loopback alone).
+ */
+export function loopbackPeerIsMe(clientPort: number, serverPort: number, platform: NodeJS.Platform = process.platform): boolean | null {
+  if (platform !== 'linux') return null;
+  const uid = loopbackPeerUid(clientPort, serverPort);
+  return uid !== null && typeof process.getuid === 'function' && uid === process.getuid();
+}
+
 /** The OS user this process runs as. */
 export function currentUser(): string {
   try {
@@ -886,6 +896,24 @@ export function machineLoad(): number | null {
   if (process.platform === 'win32') return null;
   const [, five = 0, fifteen = 0] = loadavg();
   return Math.max(five, fifteen);
+}
+
+/** A path as one POSIX shell word: single-quoted, each ' as '\'' (nothing inside is expanded). */
+export const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * A command that copies `file`'s contents to this machine's clipboard, ready to paste into its shell, or null when
+ * there's no clipboard tool (then the path alone is shown). macOS: pbcopy. Linux: wl-copy, else xclip, else WSL's
+ * clip.exe. Windows (cmd): clip. WHY: a key file's path can have a space (~/Library/Application Support) (#467).
+ */
+export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = process.env.PATH ?? ''): string | null {
+  if (platform === 'win32') return /["%^&|<>]/.test(file) ? null : `clip < "${file}"`;
+  const q = shellQuote(file);
+  if (platform === 'darwin') return `pbcopy < ${q}`;
+  if (which('wl-copy', path)) return `wl-copy < ${q}`;
+  if (which('xclip', path)) return `xclip -selection clipboard < ${q}`;
+  if (which('clip.exe', path)) return `clip.exe < ${q}`;
+  return null;
 }
 
 /** Open a URL in the default browser, best effort. */

@@ -36,7 +36,7 @@ import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
 import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
-import { DetachError, detachDashboard, detachedLines, writeDashboardPort } from './dashboard-detach.js';
+import { DetachError, detachDashboard, detachedLines, useBold, writeDashboardPort } from './dashboard-detach.js';
 import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { keyFileNote } from './dashboard-key-url.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
@@ -786,7 +786,7 @@ async function main(argv: string[]): Promise<number> {
         const where = { root, tokenFile: join(projectStateDir(root), 'dashboard-token'), logFile: join(projectStateDir(root), 'dashboard.log') };
         try {
           const d = await detachDashboard({ ...where, port, portFile, command: [process.execPath, fileURLToPath(import.meta.url), 'dashboard', '--service', '--root', root, '--port', String(port), ...(port === 0 ? ['--port-file', portFile] : [])] });
-          console.log(detachedLines(d, where).join('\n'));
+          console.log(detachedLines(d, { ...where, bold: useBold(process.stdout) }).join('\n'));
           if (!flag(opts, '--no-open')) openUrl(d.url);
           return 0;
         } catch (e) {
@@ -816,7 +816,7 @@ async function main(argv: string[]): Promise<number> {
         // INVARIANT: the dashboard's key is never in a URL this prints or opens: the page asks for it once (src/dashboard-detach.ts).
         samePort = Number(new URL(d.url).port);
         if (portFile) writeDashboardPort(portFile, samePort);
-        const shown = setupModeLines(root, samePort);
+        const shown = setupModeLines(root, samePort, { bold: useBold(process.stdout) });
         console.log(shown.lines.join('\n'));
         if (!flag(opts, '--no-open') && !service) openUrl(shown.url);
         while (!configReady(root)) await new Promise((r) => setTimeout(r, 2_000));

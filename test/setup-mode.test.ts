@@ -278,7 +278,7 @@ test("what setup mode prints and opens: the key-free wizard URL and the key file
   const shown = setupModeLines('/r', 4317);
   assert.equal(shown.url, 'http://127.0.0.1:4317/first-run');
   assert.equal(shown.lines.filter((l) => l.includes('http')).join(), '  http://127.0.0.1:4317/first-run');
-  assert.match(shown.lines.join('\n'), /the page asks once for the dashboard key: it is in .*dashboard-token \(only you can read it\)/);
+  assert.match(shown.lines.join('\n'), /the page asks once for the dashboard key, in this file \(only you can read it\):\n {4}\S.*dashboard-token\n/);
   assert.doesNotMatch(shown.lines.join('\n'), /[?&]t=/);
 });
 
@@ -297,7 +297,7 @@ test('`dashboard` on a checkout with no config: setup mode at the given address,
   try {
     await waitFor(new RegExp(`no ${BRAND.configDir.replace('.', '\\.')}/ yet[\\s\\S]*\\n  http://127\\.0\\.0\\.1:${port}/first-run\\n`));
     // The key: only its file's path is printed; the key itself is read from that 0600 file, never from a URL.
-    const keyFile = /the dashboard key: it is in (.+) \(only you can read it\)/.exec(printed)![1]!;
+    const keyFile = /the dashboard key, in this file \(only you can read it\):\n {4}(.+)\n/.exec(printed)![1]!;
     const token = readFileSync(keyFile, 'utf8').trim();
     assert.match(token, /^[A-Za-z0-9_-]{16,}$/);
     assert.equal(statSync(keyFile).mode & 0o077, 0, 'the key file is the owner\'s alone');

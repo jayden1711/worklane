@@ -13,7 +13,7 @@ import { gitRemoteRepo, scaffoldConfig } from './install.js';
 import { addProjectRepoOk } from './machine.js';
 import type { RunResult } from './setup-steps.js';
 import { toolPrefix } from './tool-path.js';
-import { wizardUrl } from './dashboard-detach.js';
+import { keyLines, wizardUrl } from './dashboard-detach.js';
 import { projectStateDir } from './guardrails/context.js';
 
 export const needsSetupMode = (root: string, instance?: string | null) => !instance && !existsSync(join(root, BRAND.configDir));
@@ -172,13 +172,13 @@ export function setupPrMerge(file: string, root: string, run: Run): { number: nu
  * INVARIANT: what the setup-mode command prints and opens never carries the dashboard's key: the URL is #357's
  * key-free wizard URL, and only the key file's path is named (the page asks for the key once, in a hidden field).
  */
-export function setupModeLines(root: string, port: number): { url: string; lines: string[] } {
+export function setupModeLines(root: string, port: number, o: { bold?: boolean } = {}): { url: string; lines: string[] } {
   const url = wizardUrl(port);
   return {
     url,
     lines: [
       `${BRAND.name} setup for ${root}: no ${BRAND.configDir}/ yet, so the dashboard opens on its first-run page`,
-      `  the page asks once for the dashboard key: it is in ${join(projectStateDir(root), 'dashboard-token')} (only you can read it)`,
+      ...keyLines(join(projectStateDir(root), 'dashboard-token'), o),
       `  ${url}`,
       '(local only; Ctrl+C to stop)',
     ],
