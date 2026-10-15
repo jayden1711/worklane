@@ -1828,7 +1828,8 @@ export interface BoardCard {
   since: string;
   checks?: { state: 'failing' | 'pending' | 'passing' | 'none'; source: 'pr' | 'coordinator' | null; items: { name: string; outcome: string }[] };
   run?: { role: string; model: string; startedAt: string; lastHeartbeat: string | null; note: string | null; live: string | null; usage: { rssBytes: number; cpuSeconds: number; processes: number } | null } | null;
-  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  /** `reasons`: each of a PR hold's reasons whole (merge.decided), for the owner and writers; null otherwise. */
+  waiting: { kind: WaitKind; label: string; detail: string | null; reasons?: string[] | null; since: string } | null;
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
   /** Its PR head with the PR batches: queued, being tested, passed or returned (absent from older servers). */
