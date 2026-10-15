@@ -310,3 +310,30 @@ test('names are checked before anything runs', { skip: !posix }, () => {
   }
   assert.ok(!existsSync(join(m.T, 'var', 'profile-ops.jsonl')));
 });
+
+test('failover: the order and move-back written to profiles.json, machine-wide or for one instance; a profile never added is refused', { skip: !posix }, () => {
+  const m = machine();
+  const raw = (args: string[]) => spawnSync('bash', [join(m.T, 'scripts', 'setup', 'claude-account.sh'), ...args], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: m.T } });
+  assert.equal(raw(['failover', 'default+work', 'back']).status, 1, 'work is not a profile yet');
+  assert.equal(m.run(['profile-add', 'work', '--json'], `${TOKEN}\n`).status, 0);
+  const on = raw(['failover', 'default+work', 'back']);
+  assert.equal(on.status, 0, on.stderr);
+  assert.match(on.stdout, /failover machine-wide: default > work, moving back after the reset/);
+  assert.equal(raw(['failover', 'off', 'stay', 'beta']).status, 0);
+  const p = readProfiles(join(m.T, 'var'));
+  assert.deepEqual(p.failover.machine, { order: ['default', 'work'], back: true });
+  assert.deepEqual(p.failover.instances.beta, { order: [], back: false });
+  for (const bad of [['failover', 'work', 'back'], ['failover', 'default+work', 'maybe'], ['failover', 'default+default', 'back'], ['failover', 'default+work', 'back', 'Beta']]) assert.notEqual(raw(bad).status, 0, bad.join(' '));
+  // From a dashboard (--for, from SUDO_USER through the helper): its own instance's setting only, never another's or the machine's.
+  assert.equal(raw(['failover', 'default+work', 'back', 'beta', '--for', 'alpha']).status, 2);
+  assert.equal(raw(['failover', 'default+work', 'stay', '--for', 'alpha']).status, 0);
+  const q = readProfiles(join(m.T, 'var'));
+  assert.deepEqual([q.failover.instances.alpha, q.failover.machine], [{ order: ['default', 'work'], back: false }, { order: ['default', 'work'], back: true }]);
+  // A staged account can't be in an order.
+  m.pasted('alpha');
+  assert.equal(m.run(['profile-add', 'mine', '--json', '--token-from', 'alpha']).status, 0);
+  const staged = raw(['failover', 'default+mine', 'back']);
+  assert.equal(staged.status, 1);
+  assert.match(staged.stderr, /mine is staged, not confirmed/);
+  assert.ok(m.changes().some((c) => c.by === 'wl-alpha' && c.to === 'failover default+work stay for alpha'), 'an ops alert for the setting');
+});

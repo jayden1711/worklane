@@ -307,6 +307,12 @@ export const EventSchemas = {
    * the path, the login the hub named if any, and why. Nothing was read from the body or started.
    */
   'claude_account.refused': z.strictObject({ path: z.string().max(100), login: z.string().max(100).nullable(), status: z.number().int(), why: z.string().max(300) }),
+  /**
+   * Auto-failover between account profiles on a usage limit (src/claude-failover.ts): asked (a move, proven by a
+   * real call before it happens), switched, refused, none (no free account in the order), and the move back after
+   * the reset (back-asked, back, back-refused). Never on an auth failure. Never a token.
+   */
+  'account.failover': z.strictObject({ stage: z.enum(['asked', 'switched', 'refused', 'none', 'back-asked', 'back', 'back-refused']), from: z.string().max(40), to: z.string().max(40), reset_at: z.string().max(40).nullable(), detail: z.string().max(1000) }),
   /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
   'claude_auth.recovered': z.strictObject({ key: z.string().max(500), login: z.string().max(300), via: z.enum(['run', 'check']), role: z.string(), held_ms: z.number().int().nonnegative(), hold_id: z.number().int().nonnegative() }),
   /**

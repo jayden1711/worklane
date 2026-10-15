@@ -3,7 +3,7 @@
 // each agent user's last real call on each profile was answered), adding an account from a setup token, choosing one
 // for every instance or one instance (each checked by a real call first: refused, nothing changes), and removing one.
 import { useRef, useState } from 'react';
-import { addClaudeProfile, claudeProfileAction, type ProfileCell, type ProfileOp, type ProfilesTable } from '../api';
+import { addClaudeProfile, claudeProfileAction, setClaudeFailover, type ProfileCell, type ProfileOp, type ProfilesTable } from '../api';
 import { ago, Badge, Button, cx } from './ui';
 
 const OP_LABEL: Record<ProfileOp['op'], string> = { 'profile-add': 'Add', use: 'Switch to', remove: 'Remove' };
@@ -67,6 +67,56 @@ function AddForm({ disabled, onDone }: { disabled: boolean; onDone: (err: string
         {busy ? 'Adding…' : 'Add account'}
       </Button>
     </form>
+  );
+}
+
+/** Auto-failover: off by default; an order of accounts to move through on a usage limit, and whether to move back. */
+function Failover({ table, self, confirmScript, disabled, onDone }: { table: ProfilesTable; self: string; confirmScript: string; disabled: boolean; onDone: (err: string | null) => void }) {
+  // This instance's own setting, else the machine's (a root admin's, at a root shell).
+  const own = table.failover?.instances[self] ?? null;
+  const current = own ?? table.failover?.machine ?? null;
+  const on = !!current && current.order.length >= 2;
+  const usable = table.profiles.filter((p) => !p.staged).map((p) => p.name);
+  const [order, setOrder] = useState((current?.order.length ? current.order : usable).join(', '));
+  const [back, setBack] = useState(current?.back ?? true);
+  const [busy, setBusy] = useState(false);
+  const send = async (enable: boolean) => {
+    setBusy(true);
+    try {
+      const list = order.split(',').map((s) => s.trim()).filter(Boolean);
+      await setClaudeFailover(enable ? list : null, back);
+      onDone(null);
+    } catch (e) {
+      onDone((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-2 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-failover" data-on={on ? 'yes' : 'no'}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[13px] font-medium text-ink">Failover on a usage limit, for {self}</span>
+        <Badge tone={on ? 'info' : 'neutral'}>{on ? `on: ${current!.order.join(' → ')}${current!.back ? ', back after the reset' : ''}${own ? '' : " (the machine's)"}` : 'off'}</Badge>
+      </div>
+      <p className="text-[12px] text-ink-3">
+        When the account in use hits its usage limit, move {self} to the next one in this order, after a real call on it as its agent user; a notice says which and when the limit resets. Never on a sign-in failure, and never to a staged account. Every instance's setting is a root admin's: <code>sudo bash {confirmScript} failover a+b back</code>.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
+        <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
+        <label className="flex items-center gap-1">
+          <input type="checkbox" checked={back} onChange={(e) => setBack(e.target.checked)} data-testid="claude-failover-back" />
+          move back after the reset
+        </label>
+        <Button size="sm" disabled={disabled || busy} onClick={() => void send(true)} data-testid="claude-failover-on">
+          {on ? 'Save' : 'Turn on'}
+        </Button>
+        {on && (
+          <Button size="sm" variant="ghost" disabled={disabled || busy} onClick={() => void send(false)} data-testid="claude-failover-off">
+            Turn off
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -186,6 +236,7 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, canAct, onChan
         Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
       </p>
       <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
+      {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
       {err && (
         <p className="text-[12.5px] text-red" data-testid="claude-profile-error">
           {err}

@@ -97,8 +97,9 @@ refuse_if_open() {
 # no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
 #
 # And the agents' Claude account profiles (issue #464): `claude-account profile-add|remove <profile>` and
-# `claude-account use <profile>`: three anchored patterns, each one profile's name (lowercase letters, digits and
-# dashes) and nothing else. No pattern takes an instance: each step is for the asking coordinator's own instance,
+# `claude-account use <profile>`, and `claude-account failover <order|off> back|stay`: five anchored patterns, each
+# one profile's name (lowercase letters, digits and dashes), or an order (names joined by +: never a comma, which
+# sudoers reads as the end of a command), and nothing else. No pattern takes an instance: each step is for the asking coordinator's own instance,
 # which the helper takes from SUDO_USER, so a coordinator can never name another instance, or every instance.
 # Those, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
 # older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
@@ -114,6 +115,8 @@ PROFILE_SUDOERS_ARGS=(
   '^claude-account profile-add [a-z][a-z0-9-]*$'
   '^claude-account remove [a-z][a-z0-9-]*$'
   '^claude-account use [a-z][a-z0-9-]*$'
+  '^claude-account failover [a-z][a-z0-9+-]* back$'
+  '^claude-account failover [a-z][a-z0-9+-]* stay$'
 )
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
@@ -148,7 +151,7 @@ machine_sudoers() {
   fi
   printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
-  [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove).\n'
+  [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, failover).\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift

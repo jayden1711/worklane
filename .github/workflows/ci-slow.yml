@@ -1648,6 +1648,14 @@ jobs:
           ask use mine done
           sudo jq -e '.active.ci.profile == "mine" and .active.beta == null' "$s/profiles.json"
           ask use default done
+          # The failover setting, from ci's dashboard: real sudo takes the order joined by + (never a comma) and no instance.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+mine back < /dev/null
+          sudo jq -e '.failover.instances.ci == {"order": ["default", "mine"], "back": true} and .failover.machine == null' "$s/profiles.json"
+          for bad in "failover default+mine back beta" "failover off stay beta" "failover default,mine back"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
+          done
+          sudo -u wl-ci sudo -n "$HELPER" claude-account failover off stay < /dev/null
           # Every add, confirm, use and remove is an ops alert line in the machine change log; no token in any.
           sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged mine for ci") and (map(select(startswith("confirmed mine as agents-"))) | length == 1) and any(. == "use mine for ci")' /var/lib/worklane/machine-changes.jsonl
           if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err "$F"/confirm*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi

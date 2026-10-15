@@ -114,11 +114,11 @@ for u in "${users[@]}"; do
     echo "FAIL: sudo $(sudo_version) should match the stage-update-signer pattern, and $u can't run it" >&2; exit 1
   fi
   if sudo_regex_ok; then
-    for ok in "profile-add work" "remove work" "use work" "use default"; do
+    for ok in "profile-add work" "remove work" "use work" "use default" "failover work+default back" "failover off stay"; do
       # shellcheck disable=SC2086 # each case is its words
       sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $ok >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the claude-account $ok pattern, and $u can't run it" >&2; exit 1; }
     done
-    for bad in "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x"; do
+    for bad in "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x" "failover work+default back ci" "failover off stay alpha" "failover work,default back" "failover work+Home back" "failover work maybe" "failover work+default back --for x"; do
       # shellcheck disable=SC2086 # each case is its words
       if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $bad >/dev/null 2>&1; then echo "FAIL: $u may run claude-account $bad" >&2; exit 1; fi
     done
