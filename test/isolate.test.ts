@@ -5,9 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { connect as netConnect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -34,7 +35,7 @@ import { CONSOLE_SHELL } from '../src/console/terminal.js';
 import { ALLOWED_SIGNERS, PENDING_SIGNERS } from '../src/updater-setup.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
-import { refusedPort } from './held-port.js';
+import { ephemeralStart, refusedPort } from './held-port.js';
 import { exampleProject, repoRoot } from './helpers.js';
 import { homeMoved, isolatedEnv, onRealMachine, TEST_PRELOAD, testMachine } from './isolate.js';
 
@@ -313,11 +314,59 @@ test(`the CLI refuses ${SYSTEM_ROOT_VAR} where it isn't honoured: a non-zero exi
   assert.doesNotMatch(imported.stdout, /LOADED/);
 });
 
-test('a refused port is held: a connection there is refused, and nothing else can listen on it until it is closed', async () => {
+/** How a connection to `port` ends: its error code, or 'connected' (something answered), and how long it took. */
+function connectOutcome(port: number): Promise<{ code: string; message: string; ms: number }> {
+  const t0 = Date.now();
+  return new Promise((done) => {
+    const c = netConnect(port, '127.0.0.1');
+    c.once('connect', () => (c.destroy(), done({ code: 'connected', message: `connected from local port ${c.localPort}`, ms: Date.now() - t0 })));
+    c.once('error', (e: NodeJS.ErrnoException) => done({ code: e.code ?? e.name, message: e.message, ms: Date.now() - t0 }));
+  });
+}
+
+test("why the refused port isn't ephemeral: on Linux a connect whose source port is its destination connects to itself, with nothing listening", { skip: process.platform !== 'linux' && 'Linux TCP simultaneous open' }, async () => {
+  // What a held ephemeral port risked on a busy machine: the kernel may give a connect() to it that same port as
+  // its source (only the 4-tuple must be unique), and the connect then "succeeds" against itself.
+  let got = '';
+  for (let i = 0; i < 20 && !got; i++) {
+    const port = 10_000 + randomInt(ephemeralStart() - 10_000);
+    got = await new Promise<string>((done) => {
+      const c = netConnect({ port, host: '127.0.0.1', localAddress: '127.0.0.1', localPort: port });
+      c.once('connect', () => (c.destroy(), done('connected to itself')));
+      c.once('error', (e: NodeJS.ErrnoException) => done(e.code === 'EADDRINUSE' ? '' : `error ${e.code}`));
+    });
+  }
+  assert.equal(got, 'connected to itself');
+});
+
+test('the ephemeral range start: Linux reads ip_local_port_range; anything unreadable is the kernel default', () => {
+  if (process.platform === 'linux') {
+    assert.equal(ephemeralStart(() => '32768\t60999\n'), 32_768);
+    assert.equal(ephemeralStart(() => '40000 60999'), 40_000);
+    assert.equal(ephemeralStart(() => 'garbage'), 32_768);
+    assert.equal(ephemeralStart(() => {
+      throw new Error('EACCES');
+    }), 32_768);
+  } else assert.equal(ephemeralStart(), 49_152);
+});
+
+test('a refused port is held: a connection there is refused at once, every time, and nothing else can listen on it until it is closed', async () => {
   const p = await refusedPort();
   const other = createServer();
   try {
-    await assert.rejects(fetch(p.url), (e: Error & { cause?: { code?: string } }) => e.cause?.code === 'ECONNREFUSED');
+    // Never in the range the OS gives connect() its source ports from, so no connect there can connect to itself.
+    assert.ok(p.port < ephemeralStart(), `${p.port} is below the ephemeral range (${ephemeralStart()})`);
+    const t0 = Date.now();
+    const err = await fetch(p.url).then(
+      (r) => ({ code: `answered ${r.status}`, message: '' }),
+      (e: Error & { cause?: { code?: string; message?: string } }) => ({ code: e.cause?.code ?? `no code (${e.message})`, message: e.cause?.message ?? '' }),
+    );
+    assert.equal(err.code, 'ECONNREFUSED', `fetch: ${err.code}: ${err.message}`);
+    assert.ok(Date.now() - t0 < 2_000, `refused at once, not after ${Date.now() - t0} ms`);
+    // Many connects in a row, as a busy machine makes them: each refused, none answered, each fast.
+    const outcomes = await Promise.all(Array.from({ length: 200 }, () => connectOutcome(p.port)));
+    const odd = outcomes.filter((x) => x.code !== 'ECONNREFUSED' || x.ms > 2_000);
+    assert.deepEqual(odd, [], 'every connect refused, at once');
     // Linux (CI, and the release machine): a listener can't bind a port an open connection holds. macOS's
     // SO_REUSEADDR lets one bind it on purpose; nothing there is handed it by listen(0), which is what took it.
     const bound = new Promise<void>((ok, fail) => (other.once('error', fail), other.listen(p.port, '127.0.0.1', () => ok())));
