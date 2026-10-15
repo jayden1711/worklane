@@ -505,3 +505,17 @@ for (const mode of GATE_MODES) {
     }
   });
 }
+
+test('deploy gate: a GPU run of the tip cut off by a stop (no end recorded) is never run again by itself: a red verdict, deploy stays', async () => {
+  const t = gate();
+  t.log.append('testrun.queued', { id: 'full-g-1', sha: t.c2, kind: 'full', prs: [], shard: null }, 'coordinator');
+  t.log.append('testrun.started', { id: 'full-g-1', slot: 'test-0', lock_wait_ms: 0, gpu: 'planned' }, 'coordinator');
+  await t.g.step();
+  await t.g.idle();
+  assert.equal(t.runs.length, 0, 'not run again');
+  assert.equal(t.deployAt(), t.c1);
+  const v = t.of('deploy_gate.verdict');
+  assert.equal(v.length, 1);
+  assert.equal(v[0]!.ok, false);
+  assert.match(String(v[0]!.reason), /^its GPU run full-g-1 was cut off: a GPU run that timed out/);
+});

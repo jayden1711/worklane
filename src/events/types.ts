@@ -654,7 +654,7 @@ export const EventSchemas = {
    */
   'pr_batch.step': z.strictObject({
     id: z.string(),
-    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale']),
+    step: z.enum(['built', 'green', 'red', 'checks_posted', 'culprit', 'dropped', 'conflict', 'requeued', 'abandoned', 'resumed', 'error', 'finished', 'stale', 'gpu_held']),
     prs: z.array(z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string().optional() })),
     sha: sha.nullable(),
     base: sha.nullable(),
@@ -717,10 +717,15 @@ export const EventSchemas = {
   'coordinator.error': z.strictObject({ instance: z.string(), where: z.string(), kind: z.string(), message: z.string() }),
   // test runs (src/testrun/): a project's CI run by the coordinator, as the sandboxed test user
   'testrun.queued': z.strictObject({ id: z.string(), sha, kind: z.enum(['fast', 'full']), prs: z.array(z.number().int().positive()), shard: z.strictObject({ index: z.number().int().positive(), total: z.number().int().positive() }).nullable() }),
-  /** It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. */
-  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative() }),
+  /**
+   * It has a slot and the full-run lock (shared); `lock_wait_ms`: how long an exclusive holder kept it waiting. `gpu`:
+   * planned when a tier of it asks for the GPU and root's file lists the instance (or can't be read): recorded before
+   * any GPU command, so a run cut off by a hung machine is never run again by itself (src/testrun/gpu.ts).
+   */
+  'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative(), gpu: z.literal('planned').optional() }),
   /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
-  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable() }),
+  // `gpu`: only for a tier that asked for the GPU: whether the sandbox helper granted it, the nodes, and its line.
+  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable(), gpu: z.strictObject({ granted: z.boolean(), devices: z.array(z.string()), detail: z.string().max(300) }).optional() }),
   /** `results`: each tier's pass or fail, all a viewer sees of a run. */
   'testrun.finished': z.strictObject({
     id: z.string(),
@@ -731,6 +736,8 @@ export const EventSchemas = {
     outcome: z.enum(['done', 'cancelled', 'error', 'interrupted']),
     results: z.array(z.strictObject({ tier: z.string(), ok: z.boolean() })),
     detail: z.string().max(2000),
+    /** A granted GPU command of it timed out or was killed: the run is never run again by itself (src/testrun/gpu.ts). */
+    gpu_stopped: z.boolean().optional(),
   }),
   /**
    * One tier's per-test durations, read from its output (src/test-durations.ts): its slowest tests (at most 100) and

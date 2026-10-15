@@ -44,6 +44,12 @@ export const TestRunTier = z
      * out (every tier of that run shares its workspace).
      */
     full_checkout: z.boolean().default(false),
+    /**
+     * Asks for the GPU (docs/test-runs.md "GPU"). Only asks: the sandbox helper grants it only when root's own
+     * /etc/<cli>/testrun-gpu.json lists this instance, and then for at most that file's max_minutes. Without it the
+     * tier runs as any other, and its record and check say why.
+     */
+    gpu: z.boolean().default(false),
     timeout_s: z.number().int().min(30).max(6 * 3600).default(1800),
   })
   .refine((t) => !t.shardable || t.kind === 'full', { message: 'only a full tier can be sharded', path: ['shardable'] })

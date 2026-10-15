@@ -18,6 +18,7 @@ import { recommendTestSlots, testSlotCap } from '../src/testrun/slots.js';
 import { testRunStatus, viewerTestRuns } from '../src/testrun/status.js';
 import { fullRunAllowed, PrTestRuns, type OpenPr } from '../src/coordinator/test-runs.js';
 import { exampleProject } from './helpers.js';
+import { GPU_NO_REPEAT, type GpuGrant, type GpuOptIn } from '../src/testrun/gpu.js';
 
 const posix = process.platform !== 'win32';
 const hasPerl = posix && (() => {
@@ -431,4 +432,90 @@ test('the result says how the run ended: a cancel during the last tier is cancel
   const shard = (o: TestRunResult['outcome']): TestRunResult => ({ id: o, sha: r.sha, kind: 'full', ok: o === 'done', tiers: [], outcome: o });
   assert.equal(mergeShards([shard('done'), shard('cancelled')]).outcome, 'cancelled', 'one shard without a verdict: the run has none');
   assert.equal(mergeShards([shard('done'), shard('done')]).outcome, 'done');
+});
+
+// ---------------------------------------------------------------- GPU (src/testrun/gpu.ts, docs/test-runs.md "GPU")
+
+/** The rig's host, with what the sandbox helper would say of a GPU command (`grant`), and each exec's GPU ask. */
+function gpuHost(host: RunHost, grant: GpuGrant, o: { timesOut?: boolean } = {}) {
+  const asked: { command: string; gpu: boolean }[] = [];
+  const h: RunHost = {
+    ...host,
+    exec: async (id, command, env, ms, signal, eo = {}) => {
+      asked.push({ command, gpu: !!eo.gpu });
+      const r = await host.exec(id, command, env, ms, signal, eo);
+      if (!eo.gpu) return r;
+      return { ...r, gpu: grant, ...(o.timesOut ? { code: 1, timedOut: true, unitResult: 'timeout' } : {}) };
+    },
+  };
+  return { h, asked };
+}
+const GRANT: GpuGrant = { granted: true, indices: [0], devices: ['/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia0'], maxS: 900, waitedS: 2, note: '' };
+const GPU_TIERS = { tiers: [{ name: 'lint', command: 'true', kind: 'fast' }, { name: 'cuda', command: 'echo trained', kind: 'fast', gpu: true, timeout_s: 1800 }] };
+
+test('GPU: only a tier with gpu: true asks; the run is recorded gpu=planned before it starts (root\'s file lists the instance), and the tier\'s record and check say what it got', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(GPU_TIERS);
+  const g = gpuHost(r.host, GRANT);
+  const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => ({ state: 'on', devices: [0], maxMinutes: 15 }) }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [7] });
+  assert.equal(res.ok, true, JSON.stringify(res.tiers));
+  assert.deepEqual(g.asked.map((a) => [a.command, a.gpu]), [['true', false], ['echo trained', true]]);
+  assert.equal(r.events('testrun.started')[0]!.payload.gpu, 'planned');
+  const tiers = r.events('testrun.tier').map((e) => e.payload);
+  assert.equal(tiers[0]!.gpu, undefined, 'a tier that asked for nothing records nothing');
+  assert.deepEqual(tiers[1]!.gpu, { granted: true, devices: GRANT.devices, detail: 'GPU 0; max 900 s; waited 2 s' });
+  assert.equal(res.tiers[1]!.summary.split('\n')[0], 'GPU: yes (/dev/nvidiactl /dev/nvidia-uvm /dev/nvidia0; GPU 0; max 900 s; waited 2 s)');
+  assert.equal(res.gpuPlanned, true);
+  assert.equal(r.events('testrun.finished')[0]!.payload.gpu_stopped, undefined);
+});
+
+test('GPU: not planned while root\'s file says off, or with no tier asking; planned when the file can\'t be read (never assumed off)', { skip: !hasPerl && 'perl' }, async () => {
+  const cases: [unknown, GpuOptIn, 'planned' | undefined][] = [
+    [GPU_TIERS, { state: 'off', why: 'not on for test' }, undefined],
+    [{ tiers: [{ name: 'lint', command: 'true', kind: 'fast' }] }, { state: 'on', devices: [0], maxMinutes: 20 }, undefined],
+    [GPU_TIERS, { state: 'unknown', why: 'EACCES' }, 'planned'],
+  ];
+  for (const [cfg, opt, want] of cases) {
+    const r = rig(cfg);
+    const g = gpuHost(r.host, { granted: false, why: 'not on for test' });
+    const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => opt }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+    assert.equal(r.events('testrun.started')[0]!.payload.gpu, want, JSON.stringify(opt));
+    const cuda = res.tiers.find((t) => t.tier === 'cuda');
+    if (cuda) assert.equal(cuda.summary.split('\n')[0], 'GPU: no (not on for test)');
+  }
+});
+
+test('GPU: a granted command stopped at its cap marks the run gpu_stopped, and its check names the GPU\'s max runtime when that was the cap', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(GPU_TIERS);
+  const g = gpuHost(r.host, GRANT, { timesOut: true });
+  const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => ({ state: 'on', devices: [0], maxMinutes: 15 }) }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, false);
+  assert.equal(res.gpuStopped, true);
+  assert.equal(r.events('testrun.finished')[0]!.payload.gpu_stopped, true);
+  assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 15 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 2 s waiting for the GPU, 900\)/);
+});
+
+test('after a restart: a GPU run cut off (no end recorded) is wiped and recorded, and never run again by itself; one cancelled by a graceful stop runs again', async () => {
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-prs-')), 'events.db'));
+  const [a, b] = ['a'.repeat(40), 'b'.repeat(40)];
+  log.append('testrun.queued', { id: 'fast-a-1', sha: a, kind: 'fast', prs: [1], shard: null }, 'test');
+  log.append('testrun.started', { id: 'fast-a-1', slot: 'test-0', lock_wait_ms: 0, gpu: 'planned' }, 'test');
+  log.append('testrun.queued', { id: 'fast-b-1', sha: b, kind: 'fast', prs: [2], shard: null }, 'test');
+  log.append('testrun.started', { id: 'fast-b-1', slot: 'test-1', lock_wait_ms: 0, gpu: 'planned' }, 'test');
+  log.append('testrun.finished', { id: 'fast-b-1', sha: b, kind: 'fast', prs: [2], ok: false, outcome: 'cancelled', results: [], detail: 'superseded or cancelled' }, 'test');
+  const r = prRig(log);
+  assert.deepEqual(await r.runs.recover(), ['fast-a-1']);
+  const fin = log.read(0, ['testrun.finished']).at(-1)!.payload as EventPayload<'testrun.finished'>;
+  assert.equal(fin.outcome, 'interrupted');
+  assert.ok(fin.detail.includes(GPU_NO_REPEAT), fin.detail);
+  r.setPrs([r.pr(1, a), r.pr(2, b)]);
+  r.advance(5000);
+  assert.deepEqual((await r.runs.tick()).started, [2], 'PR 1\'s GPU run is not run again; PR 2\'s cancelled one is');
+  // And the same after another restart (its end is now recorded as interrupted).
+  r.runs.stop();
+  await r.runs.idle();
+  const again = prRig(log);
+  again.setPrs([again.pr(1, a)]);
+  again.advance(5000);
+  assert.deepEqual((await again.runs.tick()).started, []);
+  again.runs.stop();
 });

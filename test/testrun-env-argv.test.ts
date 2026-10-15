@@ -129,7 +129,7 @@ test('regression: the coordinator passes a run\'s variables to the helper on std
   // The host's exec: the only things in its argv are the run id, the cap and the command (the sandbox test checks
   // the call itself); the source never builds an --env argument.
   const host = readFileSync(join(repoRoot, 'src', 'testrun', 'host.ts'), 'utf8');
-  const exec = host.slice(host.indexOf('    async exec(id, command, env, timeoutMs, signal) {'), host.indexOf('    async check() {'));
+  const exec = host.slice(host.indexOf('    async exec(id, command, env, timeoutMs, signal, o = {}) {'), host.indexOf('    async check() {'));
   assert.match(exec, /call\(\['exec', id, String\(.*\), '--', command\], \{ stdin: vars,/);
   assert.doesNotMatch(exec, /'--env'/);
 });
@@ -162,7 +162,7 @@ test('the helper refuses variables in argv, an unended one on stdin, and the nam
   try {
     const old = h.run(['exec', h.id, '60', '--env', `X=${CANARY}`, '--', 'true'], '');
     assert.equal(old.status, 2);
-    assert.match(old.stderr, /usage: exec <id> <timeout_s> -- <command> \(the run's variables on stdin/);
+    assert.match(old.stderr, /usage: exec <id> <timeout_s> \[--gpu\] -- <command> \(the run's variables on stdin/);
     assert.equal(h.run(['exec', h.id, '60', '--', 'true'], 'X=no-nul').status, 2);
     for (const bad of ['GITHUB_TOKEN=x', 'PATH=/tmp', 'LD_PRELOAD=/x.so', 'STRIPE_SECRET=x', 'BAD-NAME=x']) {
       const r = h.run(['exec', h.id, '60', '--', 'true'], `${bad}\0`);

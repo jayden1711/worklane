@@ -369,6 +369,8 @@ jobs:
             grep -q "PASS wl-test-$i can't reach /var/lib/worklane-test/$([ "$i" = ci ] && echo "$I2" || echo ci)" "$RUNNER_TEMP/check-$i.log"
             tail -n 1 "$RUNNER_TEMP/check-$i.log" | grep -qx 'OK: all checks passed'
           done
+      - name: "GPU test runs on real systemd, stand-in NVIDIA nodes (no GPU here): off, absent; on, present and past the cgroup check (ENXIO/ENODEV, never EPERM/EACCES); uvm-tools, modeset, caps and other devices never; one GPU command per GPU; gpu hold takes the same lock"
+        run: bash scripts/ci/testrun-gpu-real-systemd.sh "$I2"
       - name: systemd-run leaves a command's ${...} to bash, on this systemd (the flag) and as an older one needs it ($$)
         run: |
           # The helper's own systemd_command, against real systemd-run. Unescaped, systemd blanks a shell-only ${x}

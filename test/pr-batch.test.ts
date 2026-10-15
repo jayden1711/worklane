@@ -499,3 +499,54 @@ test('which runs give a verdict, and when a green batch is still merging', () =>
   assert.match(noVerdict(r({ outcome: 'error', tiers: [tier(false)] }))!, /error/);
   assert.match(noVerdict(r({ tiers: [] }))!, /no tiers/);
 });
+
+// ---------------------------------------------------------------- GPU (src/testrun/gpu.ts)
+
+test('GPU: a batch whose GPU command timed out or was killed is held: not red, never bisected, its PRs told and not batched again at these heads', async () => {
+  const w = world(2);
+  const f = fakeRuns(w, { as: (req) => ({ id: 'run-g', sha: req.sha, kind: 'full', ok: false, outcome: 'done', gpuStopped: true, tiers: [{ tier: 'lint', ok: true, durationMs: 5, summary: 'ok', logRef: 'l' }, { tier: 'unit', ok: false, durationMs: 9, summary: 'GPU: yes (...)\ntier unit timed out', logRef: 'u' }] }) });
+  const { b, comments } = batcher(w, f.t);
+  for (const n of [1, 2]) assert.ok(b.enqueue(entry(w, n)));
+  await pass(b);
+  assert.equal(f.runs.length, 1, 'one run: no bisection would run the GPU again');
+  assert.equal(stepsOf(w, 'gpu_held').length, 1);
+  assert.equal(stepsOf(w, 'red').length, 0);
+  assert.equal(stepsOf(w, 'culprit').length, 0, 'nobody blamed');
+  assert.deepEqual(b.state().queue, []);
+  for (const n of [1, 2]) {
+    assert.equal(b.enqueue(entry(w, n)), false, 'not batched again at this head');
+    assert.match(b.returnedFor(n, w.prs.get(n)!.headSha)!, /^held from batch batch-1: a GPU run that timed out/);
+    assert.ok(comments.some((c) => c.n === n && c.body.includes('is never run again by itself')), JSON.stringify(comments));
+  }
+  await pass(b);
+  assert.equal(f.runs.length, 1);
+  // A new head is batched again.
+  w.prs.set(1, { ...w.prs.get(1)!, headSha: w.push(1, 'change 1, again\n') });
+  assert.ok(b.enqueue(entry(w, 1)));
+});
+
+test('GPU: after a restart, a batch whose GPU run was cut off (the coordinator or the machine stopped) is held, not batched again', async () => {
+  const w = world(1);
+  // The first coordinator: its batch's run is recorded as a GPU run, then it stops with the run in flight.
+  const first: TestRuns = {
+    startTestRun: (req) => {
+      w.log.append('testrun.queued', { id: 'full-g-1', sha: req.sha, kind: 'full', prs: req.prs, shard: null }, 'alice');
+      w.log.append('testrun.started', { id: 'full-g-1', slot: 'test-0', lock_wait_ms: 0, gpu: 'planned' }, 'alice');
+      return new Promise<TestRunResult>(() => {});
+    },
+    postChecks: async () => {},
+    checkNames: () => ({ unit: 'full' }),
+  };
+  const one = batcher(w, first);
+  assert.ok(one.b.enqueue(entry(w, 1)));
+  one.b.tick();
+  for (let i = 0; i < 100 && !w.log.read(0, ['testrun.started']).length; i++) await new Promise((r) => setTimeout(r, 20));
+  // The restart: a new batcher on the same log.
+  const f = fakeRuns(w);
+  const two = batcher(w, f.t);
+  await pass(two.b);
+  assert.equal(f.runs.length, 0, 'the GPU run is not run again');
+  assert.equal(stepsOf(w, 'gpu_held').length, 1);
+  assert.equal(stepsOf(w, 'abandoned').length, 0);
+  assert.equal(two.b.enqueue(entry(w, 1)), false);
+});

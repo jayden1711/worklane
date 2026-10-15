@@ -16,6 +16,7 @@
 // An owner may override from Discord (`deploy <sha>`, src/coordinator/deploy-commands.ts): a commit on the default
 // branch's first-parent line, moved by the same fast-forward-only path, recorded with the gate's state at the time.
 import { TestRunHeld } from '../testrun/gate.js';
+import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { EventLog } from '../events/log.js';
@@ -219,6 +220,10 @@ export class DeployGate {
     } catch {
       changedFiles = [];
     }
+    // A GPU run of this commit cut off by a stop of the coordinator or the machine is never run again by itself
+    // (src/testrun/gpu.ts): it gets a red verdict instead, and the branch stays where it is.
+    const cutOff = gpuRunsNotToRepeat(this.d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished']), sha).at(-1);
+    if (cutOff) return this.verdict(sha, deploy, cutOff, false, [...this.d.config.tiers], `its GPU run ${cutOff} was cut off: ${GPU_NO_REPEAT}`);
     let result: TestRunResult;
     try {
       result = await this.d.start({ repo: this.d.repo, sha, kind: 'full', prs: [], changedFiles, tiers: this.d.config.tiers }, { signal });
