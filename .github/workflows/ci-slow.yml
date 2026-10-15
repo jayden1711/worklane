@@ -2161,7 +2161,14 @@ jobs:
           if tail -n 1 "$F/server-install.log" | grep -qE '^https?://'; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
           if systemctl is-active -q worklane-dashboard-hub-setup.service; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
           # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
+          # tools.sh linked /usr/local/bin/claude to the real CLI in node's prefix: the link goes first (install would
+          # write through it), and the real one in node's prefix becomes the stand-in too, so no PATH reaches Anthropic.
+          sudo rm -f /usr/local/bin/claude
           sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
+          for c in /opt/node-*/bin/claude; do if [ -e "$c" ] || [ -L "$c" ]; then sudo ln -sfn /usr/local/bin/claude "$c"; fi; done
+          # #463: the login's proof (one real call) must reach the stand-in, never the real CLI (a random token is refused there).
+          out="$(cd / && sudo -H -u wl-ci-agent timeout 60 claude -p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json || true)"
+          printf '%s\n' "$out" | grep -q '"result":"Invalid API key · Please run /login"' || { echo "the real claude answered, not the stand-in: $out" >&2; sudo sh -c 'command -v claude; ls -l /usr/local/bin/claude /opt/node-*/bin/claude' >&2; exit 1; }
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
