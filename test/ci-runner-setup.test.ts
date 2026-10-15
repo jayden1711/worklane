@@ -292,7 +292,10 @@ test('the stand-in runner\'s probes reach the internet without a rate-limited AP
   // GitHub's unauthenticated API answers 403 once the runner's shared outbound address is over its hourly quota.
   for (const f of ['job.sh', 'run.sh', 'config.sh']) assert.doesNotMatch(readFileSync(join(dir, f), 'utf8'), /api\.github\.com/, `${f} calls GitHub's unauthenticated API`);
   const job = readFileSync(join(dir, 'job.sh'), 'utf8');
-  assert.match(job, /docker run --rm "\$img" wget -q -T 10 -O \/dev\/null https:\/\/github\.com\/ 2>&1\)"; then ok "a container reaches the internet/);
+  assert.match(job, /out="\$\(docker run --rm "\$img" wget -T 10 -O \/dev\/null https:\/\/github\.com\/ 2>&1\)" \|\| rc=\$\?\n\s*if \[ "\$rc" = 0 \]; then ok "a container reaches the internet/);
+  // The image pulled on its own first, and a failed fetch says wget's error and exit status, not a pull's first line (#495).
+  assert.ok(job.indexOf('docker pull -q "$img"') > -1 && job.indexOf('docker pull -q "$img"') < job.indexOf('wget -T 10 -O /dev/null https://github.com/'), 'the pull comes first');
+  assert.match(job, /bad "a container can't reach the internet \(exit \$rc\): /);
   assert.match(job, /printf 'FROM %s\\nRUN wget -q -T 10 -O \/dev\/null https:\/\/github\.com\/\\n' "\$img" > "\$b\/Dockerfile"/);
   assert.match(job, /docker build -q -t ci-probe "\$b" 2>&1\)"; then ok "docker build, with the network"/);
 });
