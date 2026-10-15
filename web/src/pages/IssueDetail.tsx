@@ -5,7 +5,7 @@ import { navigate, typing } from '../App';
 import { DotPill, Meter, RecordsTable } from '../components/patterns';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { DecisionCard } from './Decisions';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 import { RunList, runsRefusal } from './RunDetail';
 import { areaOf } from './Issues';
 import { GoalGraphPanel } from '../components/GoalGraph';

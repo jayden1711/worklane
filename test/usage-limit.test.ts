@@ -14,6 +14,7 @@ import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { coordinator, easyIssue, fixture, readAll, realFix, skip } from './repro-state-graph/harness.js';
 import { asPerson, exampleProject, exampleRoles, STDIN_LINE } from './helpers.js';
 import { loadConfig } from '../src/config/load.js';
+import { CONFIG_INCIDENT } from '../src/config/live.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { readSwitchLines, switchedOnto } from '../src/claude-account.js';
@@ -206,8 +207,10 @@ test('the incident model, when there is one: raised once on the pause, resolved 
   await c.idle();
   await c.tick();
   await c.idle();
-  assert.equal(calls.length, 1);
-  assert.match(calls[0]!, /^raise claude_usage_limit alice Claude usage limit reached; no new runs until /);
+  // The start-up resolve of a stale config_invalid (the default branch's config validated), then the one raise.
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0], `resolve ${CONFIG_INCIDENT} alice`);
+  assert.match(calls[1]!, /^raise claude_usage_limit alice Claude usage limit reached; no new runs until /);
   t.mock.timers.enable({ apis: ['Date'], now: resetAt + 1000 });
   try {
     await c.tick();
@@ -266,7 +269,9 @@ test('a Claude account switch ends the pause of an instance it put on the new lo
   const failed = await run(() => switchLines('failed', 'failed'));
   assert.ok(pauseOf(failed.f.log.read(0)), 'a failed check keeps the pause');
   assert.equal(failed.f.log.read(0, ['usage.resumed']).length, 0);
-  assert.ok(!failed.calls.some((x) => x.startsWith('resolve')));
+  // Only the start-up resolve of a stale config_invalid; no resolve after it.
+  assert.equal(failed.calls[0], `resolve ${CONFIG_INCIDENT} alice`);
+  assert.ok(!failed.calls.slice(1).some((x) => x.startsWith('resolve')));
   const none = await run(null);
   assert.ok(pauseOf(none.f.log.read(0)), 'no switch: paused until the reset');
 });

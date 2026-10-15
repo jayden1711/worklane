@@ -182,6 +182,22 @@ test('a high-risk change waits for the owner; a writer\'s /approve comment relea
   assert.equal((f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string }).level, 'L3');
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'nothing lands without approval');
   assert.ok((await f.backlog.get(n)).labels.includes('needs:decision'));
+  // What the decision rests on is recorded with it, for the dashboard's detail view: the commits, the files, the
+  // level and why, the categories (migration here), the evaluator's verdict and the checks at that head.
+  const land = f.log.read(0, ['decision.asked']).at(-1)!.payload as { kind: string; context?: { base?: string; head?: string; files?: { path: string; added: number }[]; level?: string; level_reasons?: string[]; categories?: Record<string, string[]>; verdict?: { patch_correct: boolean; confidence: string }; checks?: { check: string; status: string }[] } };
+  assert.equal(land.kind, 'land');
+  const ctx = land.context;
+  assert.ok(ctx, 'the land decision records its context');
+  const proposed = f.log.read(0, ['change.proposed']).at(-1)!.payload as { base: string; head: string };
+  assert.deepEqual([ctx.base, ctx.head], [proposed.base, proposed.head]);
+  assert.deepEqual(ctx.files, [{ path: 'migrations/001_orders.sql', added: 1, removed: 0 }]);
+  assert.equal(ctx.level, 'L3');
+  assert.ok(ctx.level_reasons?.some((r) => /migration/.test(r)), 'the level\'s reasons');
+  assert.deepEqual(ctx.categories?.migration, ['migrations/001_orders.sql']);
+  const verdict = f.log.read(0, ['eval.verdict']).at(-1)!.payload as { patch_correct: boolean; confidence: string };
+  assert.deepEqual([ctx.verdict?.patch_correct, ctx.verdict?.confidence], [verdict.patch_correct, verdict.confidence]);
+  const checks = f.log.read(0, ['check.result']).at(-1)!.payload as { checks: { check: string; status: string }[] };
+  assert.deepEqual(ctx.checks?.map((c) => [c.check, c.status]), checks.checks.map((c) => [c.check, c.status]));
   f.backlog.humanComment(n, 'stranger', '/worklane approve');
   await c.tick();
   assert.equal(f.log.read(0, ['land.result']).length, 0, 'a non-writer cannot approve');
@@ -908,6 +924,12 @@ test('an investigation posts findings with evidence, lands nothing, and asks the
   assert.deepEqual(asked.options, ['approve-fix', 'investigate-more', 'close']);
   assert.equal(asked.recommendation, '');
   assert.equal(asked.receipts.at(-1), 'Recommendation: Fix with a qty > 0 guard and a regression test.');
+  // Every finding is recorded with the decision, whole, with the file and line its evidence names.
+  assert.deepEqual((asked as { context?: unknown }).context, {
+    summary: 'Yes: totalCents multiplies qty without a guard.',
+    findings: [{ claim: 'no qty guard', evidence: 'src/price.js:3 sum + cents * qty', file: 'src/price.js', line: 3 }],
+    confidence: 'high',
+  });
   f.backlog.humanComment(n, 'example-owner', '/worklane approve-fix');
   await c.tick();
   const after = (await f.backlog.comments(n)).map((x) => x.body).join('\n');
@@ -928,6 +950,7 @@ test("a worker's ask whose recommendation is prose, not an option: the prose goe
   assert.deepEqual(asked.options, ['$50', '$75', '$100']);
   assert.equal(asked.recommendation, '', 'not one of the options: left empty');
   assert.deepEqual(asked.receipts, ['Need the threshold.', 'Recommendation: The fixtures decide it.', `Recommendation: ${why}`]);
+  assert.deepEqual((asked as { context?: unknown }).context, { summary: 'Need the threshold.' }, "the worker's summary, recorded whole with the decision");
   // The issue's comment names no recommendation; the prose is in its detail, whole.
   const comment = (await f.backlog.comments(n)).map((x) => x.body).find((b) => b.includes('decision needed'))!;
   assert.doesNotMatch(comment, /Recommendation: \*\*/);
@@ -1913,7 +1936,10 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       const d = lastOf(t.f.log, 'merge.decided') as { auto: boolean; reasons: string[]; why: { category: string; text: string }[] };
       assert.equal(d.auto, false, path);
       assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${path}: ${d.reasons.join(' | ')}`);
-      assert.deepEqual(d.why, [{ category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
+      // A control under .github/ (outside workflows, which never reach a PR) is also CI config, a category that
+      // always waits (merge-policy.ts waitCategoriesOf): both reasons are true, so both are named, in that order.
+      const ci = path.startsWith('.github/') ? [{ category: 'ci-config', text: `changes the CI config: ${path}` }] : [];
+      assert.deepEqual(d.why, [...ci, { category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
       assert.ok(!t.pr().merged && t.f.log.read(0, ['merge.done']).length === 0, `${path}: never auto-merged`);
     }
   }

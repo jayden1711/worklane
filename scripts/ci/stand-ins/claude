@@ -1,12 +1,17 @@
 #!/bin/sh
 # CI and tests only: a stand-in Claude Code for a fresh-machine run of `init` in local mode (no real login, no
 # network). It answers what init and doctor ask: --version, and `auth status`, signed in unless STANDIN_SIGNED_OUT is
-# set. `auth login` says what it would do. Anything else (an agent run) is refused, loudly.
+# set. `auth login` says what it would do. The login's proof (one minimal real call: -p "Reply with the single word: ok")
+# is answered when signed in, refused with a 401 when STANDIN_API_REFUSED is set. Anything else (an agent run) is
+# refused, loudly.
 case "$1 ${2:-}" in
   "--version "*) echo "2.1.296 (Claude Code)" ;;
   "auth status")
     if [ -n "${STANDIN_SIGNED_OUT:-}" ]; then echo '{"loggedIn": false}'; exit 1; fi
     echo '{"loggedIn": true, "authMethod": "stand-in"}' ;;
   "auth login") echo "claude stand-in: would open the Claude login" ;;
+  "-p Reply with the single word: ok")
+    if [ -n "${STANDIN_SIGNED_OUT:-}${STANDIN_API_REFUSED:-}" ]; then echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login"}'; exit 1; fi
+    echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0}' ;;
   *) echo "claude stand-in: $* is not something this stand-in does" >&2; exit 1 ;;
 esac

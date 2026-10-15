@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,8 +14,10 @@ const skip = process.platform === 'win32' && 'releases are cut on macOS or Linux
 /**
  * A repo whose build writes a stub dist/ and whose tests pass, so only the script's git steps are exercised. Signed
  * with a throwaway SSH key made here for the test (`signed: false`: no signing key at all), with a changelog section.
+ * `signers`: where the tag is verified from: the configured allowed-signers file (default), only the repo's own
+ * .github/release-signers (`repo`), the repo's file listing another key (`other`), or nowhere (`none`).
  */
-function repo(o: { signed?: boolean } = {}) {
+function repo(o: { signed?: boolean; signers?: 'config' | 'repo' | 'other' | 'none' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'release-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', env: { ...childEnv(), GIT_CONFIG_GLOBAL: join(dir, '.no-global'), GIT_CONFIG_NOSYSTEM: '1' } }).trim();
   git('init', '-q', '-b', 'main');
@@ -24,8 +26,21 @@ function repo(o: { signed?: boolean } = {}) {
     const key = join(mkdtempSync(join(tmpdir(), 'release-key-')), 'key');
     spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'ada', '-f', key]);
     const signers = `${key}.allowed`;
-    writeFileSync(signers, `ada@example.com namespaces="git" ${readFileSync(`${key}.pub`, 'utf8').trim()}\n`);
-    for (const [k, v] of [['gpg.format', 'ssh'], ['user.signingkey', key], ['gpg.ssh.allowedSignersFile', signers]]) git('config', k!, v!);
+    const line = (pub: string) => `release-signer namespaces="git" ${readFileSync(pub, 'utf8').trim()}\n`;
+    writeFileSync(signers, line(`${key}.pub`));
+    for (const [k, v] of [['gpg.format', 'ssh'], ['user.signingkey', key]]) git('config', k!, v!);
+    const where = o.signers ?? 'config';
+    if (where === 'config' || where === 'other') git('config', 'gpg.ssh.allowedSignersFile', signers);
+    if (where === 'repo' || where === 'other') {
+      let pub = `${key}.pub`;
+      if (where === 'other') {
+        const another = join(mkdtempSync(join(tmpdir(), 'release-key-')), 'key');
+        spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'eve', '-f', another]);
+        pub = `${another}.pub`;
+      }
+      mkdirSync(join(dir, '.github'));
+      writeFileSync(join(dir, '.github', 'release-signers'), line(pub));
+    }
   }
   const mk = (d: string) => `node -e "require('fs').mkdirSync('dist/${d}',{recursive:true});require('fs').writeFileSync('dist/${d}/x.js','')"`;
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'r', version: '1.2.3', scripts: { build: mk('src'), 'build:web': mk('web'), test: 'node -e ""' } }));
@@ -51,6 +66,77 @@ test('release signs the tag, on a commit holding dist/, and returns to the branc
   const notes = /--notes-file (\S+)/.exec(r.stdout)![1]!;
   assert.match(readFileSync(notes, 'utf8'), /^## v1\.2\.3 \(2026-10-12\)[\s\S]*Round totals \(#7\)/);
   assert.match(r.stdout, /gh release create v1\.2\.3 --verify-tag/);
+  // The push it suggests runs only behind the verify; npm gets a staged version the owner approves.
+  assert.match(r.stdout, /^push with \(only behind the verify, as its own step\): git tag -v v1\.2\.3 && git push origin v1\.2\.3$/m);
+  assert.match(r.stdout, /^CI then stages it on npm; approve it on npmjs\.com with 2FA \(docs\/releasing\.md\)$/m);
+  // Only after `git tag -v` passed, and last.
+  assert.match(r.stdout.trim().split('\n').at(-1)!, /^v1\.2\.3: signed and verified \(git tag -v passed\) at [0-9a-f]{40} \(on top of [0-9a-f]{7}\)\. Nothing is pushed yet\.$/);
+});
+
+/** A stand-in for ssh-keygen as git's gpg.ssh.program: `body` handles some calls; the rest go to the real one. */
+function signer(dir: string, git: (...a: string[]) => string, body: string) {
+  const bin = join(dir, '.signer');
+  writeFileSync(bin, `#!/bin/sh\n${body}\nexec ssh-keygen "$@"\n`);
+  chmodSync(bin, 0o755);
+  writeFileSync(join(dir, '.gitignore'), 'dist/\n.no-global\n.signer\n');
+  git('commit', '-q', '-am', 'ignore the stand-in');
+  git('config', 'gpg.ssh.program', bin);
+}
+
+/** Every way the tag must be gone after a failed run: no tag, non-zero, no push or success line, back where it started. */
+function noTagLeft(r: ReturnType<typeof run>, git: (...a: string[]) => string) {
+  assert.notEqual(r.status, 0, r.stdout);
+  assert.equal(git('tag', '-l'), '', 'no tag left behind');
+  assert.doesNotMatch(r.stdout, /push with|git push|gh release create|signed and verified/);
+  assert.match(r.stderr, /v1\.2\.3: not verified, so the tag is deleted \(nothing to push\)/);
+  assert.equal(git('symbolic-ref', '--short', 'HEAD'), 'main');
+}
+
+test('regression (#457): a signer that exits 0 without a real signature: the verify fails and the tag is deleted', { skip: skip || (process.platform === 'win32' && 'POSIX stand-in') }, () => {
+  const { dir, git } = repo();
+  signer(dir, git, `if [ "$1 $2" = "-Y sign" ]; then for f; do :; done; printf -- '-----BEGIN SSH SIGNATURE-----\\nU1NIU0lH\\n-----END SSH SIGNATURE-----\\n' > "$f.sig"; exit 0; fi`);
+  noTagLeft(run(dir), git);
+});
+
+test('regression (#457): a tag signed by a key the repo\'s .github/release-signers doesn\'t list (what CI checks) is deleted', { skip }, () => {
+  const { dir, git } = repo({ signers: 'other' });
+  noTagLeft(run(dir), git);
+});
+
+test('regression (#457): Ctrl-C during the verify: node isn\'t killed mid-step, the tag is deleted', { skip: skip || (process.platform === 'win32' && 'POSIX stand-in') }, () => {
+  const { dir, git } = repo();
+  // As a terminal's Ctrl-C: SIGINT to node (git's parent) and the step's own child fails.
+  signer(dir, git, 'case "$2" in find-principals|verify|check-novalidate) kill -INT "$(ps -o ppid= -p "$PPID" | tr -d " ")"; sleep 1; exit 1 ;; esac');
+  noTagLeft(run(dir), git);
+});
+
+test('the repo\'s own .github/release-signers is enough to verify (no allowed-signers file configured)', { skip }, () => {
+  const { dir, git } = repo({ signers: 'repo' });
+  const r = run(dir);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /v1\.2\.3: signed and verified/);
+  assert.equal(git('cat-file', '-t', 'v1.2.3'), 'tag');
+});
+
+test('regression (#457): nothing to verify against: refused before anything is built or tagged, with the setup commands', { skip }, () => {
+  const { dir, git } = repo({ signers: 'none' });
+  const r = run(dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /refusing to tag v1\.2\.3: no allowed-signers file to verify the tag against\. A release tag is verified before it's reported/);
+  assert.match(r.stderr, /git config --global gpg\.ssh\.allowedSignersFile ~\/\.ssh\/allowed_signers/);
+  assert.equal(git('tag', '-l'), '');
+  assert.equal(existsSync(join(dir, 'dist')), false, 'nothing built');
+});
+
+test('a tag that already exists is refused before anything is built, and left as it was', { skip }, () => {
+  const { dir, git } = repo();
+  git('tag', 'v1.2.3');
+  const before = git('rev-parse', 'v1.2.3');
+  const r = run(dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /refusing to tag v1\.2\.3: it already exists here\. If a failed run left it, check it isn't pushed, then: git tag -d v1\.2\.3/);
+  assert.equal(git('rev-parse', 'v1.2.3'), before);
+  assert.equal(existsSync(join(dir, 'dist')), false, 'nothing built');
 });
 
 test('without a signing key the release is refused before anything is built or tagged, with the exact setup commands', { skip }, () => {

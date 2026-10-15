@@ -170,9 +170,16 @@ function drainAfterMs(cfg) {
 
 const iso = (ms) => new Date(ms).toISOString();
 
+/**
+ * A slot file's pid, only when it can name one other process: a whole number of 2 or more. 0 and a negative pid
+ * address process groups and pid 1 is init, so `kill(pid, 0)` on any of them answers "alive" for good: a corrupt or
+ * hand-edited slot file would hold every update off forever. Anything else is no holder.
+ */
+const slotPid = (v) => (Number.isInteger(v) && v >= 2 ? v : null);
+
 /** What is in flight: live test-run slots and the full-run lock (test runs), and agent slots. entries: [{ name, pid, acquiredAt?, limitMs? }]. */
 function inFlight(entries, alive) {
-  const live = entries.filter((e) => e.pid && alive(e.pid));
+  const live = entries.filter((e) => slotPid(e.pid) && alive(e.pid));
   return { tests: live.filter((e) => /^test-\d+\.lock$/.test(e.name) || e.name === 'full-run.lock'), agents: live.filter((e) => /^agent-\d+\.lock$/.test(e.name)) };
 }
 
@@ -454,8 +461,8 @@ function evaluateChecks(runs, required) {
 function quiet(entries, alive) {
   for (const e of entries) {
     if (e.name === 'STOP') return { quiet: false, stop: true, why: 'an emergency stop is in force' };
-    if (/^test-\d+\.lock$/.test(e.name) && e.pid && alive(e.pid)) return { quiet: false, why: 'a test run is going' };
-    if ((/^agent-\d+\.lock$/.test(e.name) || e.name === 'full-run.lock') && e.pid && alive(e.pid)) return { quiet: false, why: e.name === 'full-run.lock' ? 'a full test run is going' : 'an agent is running' };
+    if (/^test-\d+\.lock$/.test(e.name) && slotPid(e.pid) && alive(e.pid)) return { quiet: false, why: 'a test run is going' };
+    if ((/^agent-\d+\.lock$/.test(e.name) || e.name === 'full-run.lock') && slotPid(e.pid) && alive(e.pid)) return { quiet: false, why: e.name === 'full-run.lock' ? 'a full test run is going' : 'an agent is running' };
   }
   return { quiet: true };
 }
@@ -946,6 +953,12 @@ async function update(deps, cfg, seen = {}) {
   const current = deps.installed();
   seen.current = current;
   const release = channelOf(cfg) === 'release';
+  // WHY: a pass with nothing newer logged nothing, so the dashboard couldn't say when this channel last checked (#465).
+  // The state file gets a dated entry; updates.jsonl stays a log of changes.
+  const upToDate = (newest) => {
+    if (deps.checked) deps.checked({ event: 'current', at: new Date(deps.now()).toISOString(), channel: release ? 'release' : 'main', sha: current, version: deps.installedVersion ? deps.installedVersion() : null, newest });
+    return 'current';
+  };
   let head;
   let tag = null;
   if (release) {
@@ -953,15 +966,15 @@ async function update(deps, cfg, seen = {}) {
     if (!tag) return deps.note('waiting', null, `no release tag vX.Y.Z on ${cfg.repo_url} yet`, false);
     head = tag.commit;
     seen.head = head;
-    if (head === current) return 'current';
+    if (head === current) return upToDate(tag.tag);
     // Never back: a tag no newer than the installed engine's version is not an update.
     const installedVersion = deps.installedVersion();
-    if (installedVersion && !newer(tag.version, installedVersion)) return 'current';
+    if (installedVersion && !newer(tag.version, installedVersion)) return upToDate(tag.tag);
   } else {
     head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
     if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
     seen.head = head;
-    if (head === current) return 'current';
+    if (head === current) return upToDate(head);
   }
   // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
   // (updates.sh --release-hold, which moves the hold file aside), releases it. Nothing a coordinator can do through
@@ -1556,10 +1569,11 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
       }
       return names.map((name) => {
         const j = readJson(path.join(SLOTS, name)) || {};
-        return { name, pid: j.pid || null, acquiredAt: typeof j.acquiredAt === 'string' ? j.acquiredAt : null, limitMs: typeof j.limit_ms === 'number' ? j.limit_ms : null };
+        return { name, pid: slotPid(j.pid), acquiredAt: typeof j.acquiredAt === 'string' ? j.acquiredAt : null, limitMs: typeof j.limit_ms === 'number' ? j.limit_ms : null };
       });
     },
     alive: (pid) => {
+      if (!slotPid(pid)) return false;
       try {
         process.kill(pid, 0);
         return true;
@@ -1618,6 +1632,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
     note: makeNote({ readState: () => readJson(files.state), writeState: (st) => writeRedacted(files.state, st), log, print }),
+    checked: (st) => writeRedacted(files.state, st),
   };
 }
 
@@ -1641,5 +1656,5 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });

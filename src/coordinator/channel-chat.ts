@@ -24,6 +24,9 @@ import { redactPii } from '../intake/redact.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
 import { IntakeMeter, reportId, storeRaw } from '../intake/store.js';
 import { Conversation } from './conversation.js';
+import { AuthPaused } from './shared.js';
+import { AUTH_FAILED_CHAT_TEXT } from '../claude-auth-failure.js';
+import type { RunResult } from '../runner.js';
 
 /** Turns of a channel's conversation a reply sees. */
 const HISTORY_TURNS = 10;
@@ -119,16 +122,24 @@ export abstract class ChannelChat extends Conversation {
     const message = redactPii(r.text, { names: [...(r.sender.name ? [r.sender.name] : []), ...cfg.redact.names], patterns: cfg.redact.patterns });
     const history = this.chatHistory(channel);
     const spec = chatRun({ repo: this.d.repo, model: cfg.discord.chat_model, prompt: chatPrompt({ state: this.chatState(), history, by: who.login, message }) });
-    const run = await this.d.runner.run({
-      ...spec,
-      stateDir: this.d.stateDir,
-      route: { kind: 'other', fallback: cfg.discord.chat_model },
-      // A person is waiting: the run doesn't queue behind agent runs on the login (src/runner.ts loginStartLock).
-      interactive: true,
-      maxBudgetUsd: Math.max(0.05, Math.min(1, cap - meter.chatSpent(), left)),
-      stallMs: 5 * 60_000,
-      timeoutMs: 10 * 60_000,
-    });
+    let run: RunResult;
+    try {
+      run = await this.d.runner.run({
+        ...spec,
+        stateDir: this.d.stateDir,
+        route: { kind: 'other', fallback: cfg.discord.chat_model },
+        // A person is waiting: the run doesn't queue behind agent runs on the login (src/runner.ts loginStartLock).
+        interactive: true,
+        maxBudgetUsd: Math.max(0.05, Math.min(1, cap - meter.chatSpent(), left)),
+        stallMs: 5 * 60_000,
+        timeoutMs: 10 * 60_000,
+      });
+    } catch (e) {
+      // The login is held (or this run was the one refused): the reply says so, never the generic failure text.
+      if (!(e instanceof AuthPaused)) throw e;
+      done('failed', 0, 'claude sign-in failed');
+      return void (await say('auth-failed', AUTH_FAILED_CHAT_TEXT));
+    }
     this.cost(null, CHAT_ROLE, run);
     meter.recordChat(run.costUsd);
     if (run.reason !== 'succeeded') {

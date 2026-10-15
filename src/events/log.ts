@@ -3,10 +3,11 @@
 // path can rewrite history. Payloads are validated and redacted on write.
 import { groupOnly, groupOnlyDir } from '../os/index.js';
 import { dirname } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import { EventSchemas, type EventPayload, type EventType, type StoredEvent } from './types.js';
 import { redact } from './redact.js';
 import { stampNewLog } from '../migrations.js';
+import { openWaiting } from './open.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
@@ -80,9 +81,10 @@ export class EventLog {
     private readonly opts: EventLogOptions = {},
   ) {
     if (path !== ':memory:') groupOnlyDir(dirname(path));
-    this.db = new DatabaseSync(path);
+    // The lock wait is set before any statement, journal_mode's included (src/events/open.ts).
+    this.db = openWaiting(path);
     if (path !== ':memory:') groupOnly(path);
-    this.db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+    this.db.exec('PRAGMA journal_mode = WAL');
     const fresh = !this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'").get();
     this.db.exec(SCHEMA);
     // A new log starts at the engine's state version; an existing one moves only through migrations.ts.

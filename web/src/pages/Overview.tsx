@@ -1,24 +1,13 @@
-import type { State, UsageInfo } from '../api';
-import { MenuButton, navigate } from '../App';
+import type { CoordinatorError, State, UsageInfo } from '../api';
+import { navigate } from '../App';
 import { InsightCard } from '../components/patterns';
 import { ago, Badge, Card, cx, Empty, EST_NOTE, estUsd, usd } from '../components/ui';
 import { IntakeHealthPanel } from './Intake';
-import { UsageLines } from '../components/Usage';
+import { resetClock as clock, UsageLines } from '../components/Usage';
 
-export function Header({ title, children, sub }: { title: string; sub?: string; children?: React.ReactNode }) {
-  return (
-    <>
-      <header className="sticky top-0 z-10 flex h-12 items-center gap-3 border-b border-line bg-page/90 px-6 backdrop-blur max-md:gap-2 max-md:px-4">
-        <MenuButton />
-        <h1 className="text-[14px] font-semibold tracking-tight text-ink" data-testid="page-title">{title}</h1>
-        {sub && <span className="truncate text-[12.5px] text-ink-3 max-md:hidden">{sub}</span>}
-        <div className="ml-auto flex items-center gap-2">{children}</div>
-      </header>
-      {/* On a phone the line under the title is whole, under the bar, rather than cut short in it. */}
-      {sub && <p className="px-6 pt-3 text-[12.5px] text-ink-3 md:hidden">{sub}</p>}
-    </>
-  );
-}
+// The page header lives in components/Header.tsx (every page has one; this page's chunk isn't theirs).
+import { Header } from '../components/Header';
+export { Header };
 
 /** A headline figure, as an insight card (Beautiful UI). */
 const Stat = InsightCard;
@@ -46,6 +35,59 @@ export function MachineSummary({ state }: { state: State }) {
   );
 }
 
+/**
+ * The coordinator's errors that are still current (the server clears one once a later tick ends without it, or the
+ * coordinator restarts: src/projection.ts), each once with how many times and since when, in the viewer's local time;
+ * the earlier ones folded away as history. A viewer gets only how many there are now.
+ */
+export function CoordinatorErrors({ errors, earlier = [], count, now = Date.now() }: { errors?: CoordinatorError[] | undefined; earlier?: CoordinatorError[] | undefined; count?: number | undefined; now?: number }) {
+  const when = (ts: string) => clock(ts, now);
+  const times = (e: CoordinatorError) => {
+    const n = e.count ?? 1;
+    const first = e.first ?? e.at;
+    const last = e.last ?? e.at;
+    return n > 1 ? `${n} times since ${when(first)}, last ${when(last)}` : `since ${when(first)}`;
+  };
+  return (
+    <>
+      {!errors && !!count && (
+        <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
+          The coordinator is reporting errors now ({count}).
+        </div>
+      )}
+      {!!errors?.length && (
+        <div className="mt-3 space-y-1.5" data-testid="coordinator-errors">
+          {errors.slice(0, 3).map((e) => (
+            <div key={`${e.where}\n${e.message}`} className="text-xs" data-testid="coordinator-error" data-count={e.count ?? 1}>
+              <div className="truncate text-danger" title={e.message}>
+                {e.where}: {e.message}
+                {(e.count ?? 1) > 1 && <span className="tabular-nums"> ×{e.count}</span>}
+              </div>
+              <div className="tabular-nums text-muted-foreground" title={`${new Date(e.first ?? e.at).toLocaleString()} to ${new Date(e.last ?? e.at).toLocaleString()}`} data-testid="coordinator-error-when">
+                {times(e)}
+              </div>
+            </div>
+          ))}
+          {errors.length > 3 && <div className="text-xs text-muted-foreground">and {errors.length - 3} more</div>}
+        </div>
+      )}
+      {!!earlier.length && (
+        <details className="mt-2 text-xs text-muted-foreground" data-testid="coordinator-errors-earlier">
+          <summary className="cursor-pointer">Earlier, since cleared ({earlier.length})</summary>
+          <div className="mt-1 space-y-1">
+            {earlier.slice(0, 10).map((e, i) => (
+              <div key={i} className="truncate" title={e.message}>
+                {e.where}: {e.message}
+                {(e.count ?? 1) > 1 ? ` ×${e.count}` : ''} · last {when(e.last ?? e.at)}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </>
+  );
+}
+
 const ACTIVE = new Set(['claimed', 'reproducing', 'building', 'verifying', 'evaluating']);
 
 export function Overview({ state, pulse, usage = [], now = Date.now() }: { state: State; pulse: number; usage?: UsageInfo[]; now?: number }) {
@@ -64,7 +106,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
     <div data-testid="page-overview">
       <Header title="Overview" sub={`${state.project.repo} · land mode ${state.project.landMode}`} />
       <div className="space-y-6 p-6">
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-5" data-testid="overview-stats" data-last-id={state.lastId}>
           <Stat label="Agents running" value={`${state.slots.running} / ${state.slots.cap}`} hint="machine-wide, all harnesses" />
           <Stat label="In progress" value={active.length} hint={active.map((t) => `#${t.issue}`).join(' ') || 'nothing running'} />
           <Stat label="Needs a decision" value={open.length} tone={open.length ? 'warn' : undefined} hint={open[0] ? `oldest ${ago(open.at(-1)!.askedAt)}` : 'none waiting'} />
@@ -136,20 +178,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
             ) : (
               <div className="mt-2 text-xs text-muted-foreground">Not started on this machine.</div>
             )}
-            {!state.errors && !!state.errorCount && (
-              <div className="mt-3 text-xs text-danger" data-testid="coordinator-errors-count">
-                The coordinator reported errors ({state.errorCount}).
-              </div>
-            )}
-            {!!state.errors?.length && (
-              <div className="mt-3 space-y-1">
-                {state.errors.slice(0, 3).map((e, i) => (
-                  <div key={i} className="truncate text-xs text-danger" title={e.message}>
-                    {e.where}: {e.message}
-                  </div>
-                ))}
-              </div>
-            )}
+            <CoordinatorErrors errors={state.errors} earlier={state.earlierErrors} count={state.errorCount} now={now} />
           </Card>
         </div>
 

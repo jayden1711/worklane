@@ -3,7 +3,7 @@
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { TailscaleAction, TailscaleData } from './api';
-import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, HealthStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, CoordinatorError, DotStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -15,7 +15,7 @@ import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
 import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
-import { Header } from './pages/Overview';
+import { Header } from './components/Header';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
 import { MachineSettingsView, type MachineData } from './components/MachineSettings';
@@ -48,10 +48,10 @@ import { GoalGraphView } from './components/GoalGraph';
 import { Issues } from './pages/Issues';
 import { Landing } from './pages/Landing';
 import { LogsPage } from './pages/Logs';
-import { Overview } from './pages/Overview';
+import { CoordinatorErrors, Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList, RunResearchView, RunsRefused, type RunResearchData } from './pages/RunDetail';
+import { RunDetail, RunList, RunResearchView, RunsRefused, RunWhy, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
@@ -92,9 +92,11 @@ export const renderGoalGraph = (graph: GoalGraph) => renderToStaticMarkup(<GoalG
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
-export const renderInstances = (hub: HubInfo, current: string, all = false, status?: Record<string, HealthStatus>) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} {...(status ? { status } : {})} />);
+export const renderInstances = (hub: HubInfo, current: string, all = false, status?: Record<string, DotStatus>, why?: Record<string, string>) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} {...(status ? { status } : {})} {...(why ? { why } : {})} />);
 export const renderHealthPage = (all: InstanceIncidents[], target?: string) => renderToStaticMarkup(<IncidentsHealthView all={all} {...(target ? { target } : {})} />);
-export { loadIncidents, mergeIncidents, statusOf } from './api';
+export { healthPass, loadIncidents, mergeIncidents, nextHub, refreshHub, statusOf, whyOf } from './api';
+/** The Overview's coordinator errors (current ones grouped, earlier ones folded), at a given time. */
+export const renderCoordinatorErrors = (errors: CoordinatorError[] | undefined, earlier: CoordinatorError[] = [], count?: number, now = Date.now()) => renderToStaticMarkup(<CoordinatorErrors errors={errors} earlier={earlier} count={count} now={now} />);
 export const renderPrs = (view: PrsView) => renderToStaticMarkup(<PullRequestsView view={view} />);
 export { probeHub } from './api';
 export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => renderToStaticMarkup(<HealthPanelView view={view} {...(instances ? { instances } : {})} />);
@@ -160,7 +162,7 @@ export const renderDiscordSetup = (v: DiscordSetup, o: { bot?: DiscordBot; botEr
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);
-export const renderKeyPage = () => renderToStaticMarkup(<KeyPage />);
+export const renderKeyPage = (help: { file: string; copy: string | null } | null = null) => renderToStaticMarkup(<KeyPage help={help} />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
 export { needsKey, tryKey } from './api';
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
@@ -180,11 +182,12 @@ export { addProjectInvalid } from './api';
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
 export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+export const renderRunWhy = (detail?: string) => renderToStaticMarkup(<RunWhy detail={detail} />);
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
 /** The page header with its menu button and the narrow-screen navigation drawer, open; on a hub, its instances with their dots. */
-export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo; status?: Record<string, HealthStatus> } = {}) => {
+export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo; status?: Record<string, DotStatus>; why?: Record<string, string> } = {}) => {
   const open = o.open ?? true;
   const status = o.status ?? {};
   const switcher = o.hub ? <InstanceList hub={o.hub} current={o.hub.instances[0]!.name} onSelect={() => {}} status={status} /> : null;
@@ -192,7 +195,7 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     <NavMenu.Provider value={{ open, setOpen: () => {} }}>
       <Header title="Board" />
       <NavDrawer open={open} setOpen={() => {}}>
-        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
+        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status, ...(o.why ? { why: o.why } : {}) }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
       </NavDrawer>
     </NavMenu.Provider>,
   );

@@ -89,6 +89,7 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
   const machine = (verified: Verified, installedVersion = '0.4.1') => {
     const calls: string[] = [];
     const logs: Record<string, unknown>[] = [];
+    const checked: Record<string, unknown>[] = [];
     let current = 'a'.repeat(40);
     let clock = 0;
     const deps = {
@@ -116,8 +117,9 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
       hold: () => {},
       configChangedAt: () => 0,
       note: (event: string, sha: string | null, reason: string) => (logs.push({ event, to: sha, reason }), event),
+      checked: (s: Record<string, unknown>) => checked.push(s),
     };
-    return { deps, calls, logs };
+    return { deps, calls, logs, checked };
   };
   const refused = machine({ ok: false, reason: "v0.5.0's signature doesn't verify against /etc/worklane/allowed_signers: no signature found" });
   assert.equal(await u.run(refused.deps), 'refused');
@@ -134,6 +136,10 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
   const same = machine({ ok: true, base: BASE }, '0.5.0');
   assert.equal(await u.run(same.deps), 'current');
   assert.deepEqual(same.calls.filter((c) => c.startsWith('verify')), []);
+  // Recorded with its time and channel in the state file, not as a line in the log (#465).
+  assert.deepEqual(same.checked, [{ event: 'current', at: new Date(0).toISOString(), channel: 'release', sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' }]);
+  assert.deepEqual(same.logs, []);
+  assert.deepEqual(ok.checked, [], 'an install is not an up-to-date check');
 });
 
 test('the channel: release only when updates.json says so; an existing file without one keeps main; a new install writes release', () => {

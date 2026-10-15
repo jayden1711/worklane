@@ -10,7 +10,8 @@ import { waitingOnYou, WAIT_LABEL, type WaitKind } from './digest.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { LiveRun } from './console.js';
 import type { ProcessGroupUsage } from './os/stats.js';
-import { batchSummaries, prBatchStatus, type BatchStatus } from './coordinator/pr-batch.js';
+import { batchState, batchSummaries, prBatchStatusIn, type BatchStatus } from './coordinator/pr-batch.js';
+import { localDay } from './local-day.js';
 
 export const BOARD_COLUMNS = ['planning', 'building', 'verifying', 'waiting', 'landing'] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
@@ -160,7 +161,7 @@ export function columnOf(t: Pick<Task, 'status'>, o: { waits: boolean; pr: Pick<
 /** The Board for one instance, as this role sees it. */
 export function boardView(i: BoardInput): BoardView {
   const now = i.now ?? new Date();
-  const p = project(i.events, now.toISOString().slice(0, 10));
+  const p = project(i.events, localDay(now));
   const prs = prsView(i.events).prs;
   const digest = waitingOnYou(i.events, now);
   const owner = isOwner(i.role);
@@ -170,8 +171,17 @@ export function boardView(i: BoardInput): BoardView {
   const change = new Map<number, { added: number | null; removed: number | null; lines: number; files: number }>();
   const stats = new Map<number, { head: string; additions: number; deletions: number; files: number; comments: number }>();
   const pgid = new Map<string, number>();
+  // WHY: each card's last check result, and its PR's batch, read from one pass each, not one pass per card (a busy
+  // log's Board took seconds). checkResults reads only its issue's check results, in order, so its issue's are enough.
+  const checkEvents = new Map<number, StoredEvent[]>();
+  let batchFold: ReturnType<typeof batchState> | null = null;
   for (const e of i.events) {
     const q = e.payload as Record<string, unknown>;
+    if ((e.type === 'check.result' || e.type === 'issue.no_change') && typeof q.issue === 'number') {
+      const list = checkEvents.get(q.issue);
+      if (list) list.push(e);
+      else checkEvents.set(q.issue, [e]);
+    }
     if (e.type === 'issue.claimed') claimedAt.set(Number(q.issue), e.ts);
     else if (e.type === 'change.proposed') change.set(Number(q.issue), { added: typeof q.added === 'number' ? q.added : null, removed: typeof q.removed === 'number' ? q.removed : null, lines: Number(q.lines), files: (q.files as string[]).length });
     else if (e.type === 'pr.stats') stats.set(Number(q.number), { head: String(q.head), additions: Number(q.additions), deletions: Number(q.deletions), files: Number(q.files), comments: Number(q.comments) });
@@ -198,7 +208,7 @@ export function boardView(i: BoardInput): BoardView {
     let checks: BoardCard['checks'] = { state: 'none', source: null, items: [] };
     if (pr?.status && pr.state === 'open') checks = { state: checkState(pr.status.checks.map((x) => x.outcome)), source: 'pr', items: pr.status.checks };
     else {
-      const last = checkResults(i.events, t.issue)[0];
+      const last = checkResults(checkEvents.get(t.issue) ?? [], t.issue)[0];
       if (last) {
         const items = last.checks.map((x) => ({ name: x.check, outcome: x.status }));
         checks = { state: checkState(items.filter((x) => x.outcome === 'pass' || x.outcome === 'fail').map((x) => x.outcome)), source: 'coordinator', items };
@@ -209,7 +219,7 @@ export function boardView(i: BoardInput): BoardView {
     const group = r ? pgid.get(`${r.issue}:${r.role}`) : undefined;
     const d = t.openDecision ? (p.decisions.find((x) => x.id === t.openDecision && !x.answer) ?? null) : null;
     const highRisk = t.level === 'L3' || d?.kind === 'land';
-    const batch = pr && pr.state === 'open' ? prBatchStatus(i.events, pr.number, pr.head) : null;
+    const batch = pr && pr.state === 'open' ? prBatchStatusIn((batchFold ??= batchState(i.events)), pr.number, pr.head) : null;
     const startedAt = claimedAt.get(t.issue) ?? t.firstSeen;
 
     // Approve/Merge: the owner's, on a high-risk change that waits for them. A landing decision is answered through

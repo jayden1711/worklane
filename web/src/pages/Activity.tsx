@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 import { AuditLog } from '../components/AuditLog';
 
 const GROUPS: Record<string, (t: string) => boolean> = {

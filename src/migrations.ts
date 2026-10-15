@@ -11,7 +11,9 @@
 // stays append-only. test/migrations.test.ts shows how to test one.
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './events/read-only.js';
+import { openWaiting } from './events/open.js';
 import { parseDocument, type Document } from 'yaml';
 import { BRAND } from './brand.js';
 import { replaceFileAtomically } from './os/index.js';
@@ -112,7 +114,7 @@ export function planMigrations(t: Targets, lists: { config?: ConfigMigration[]; 
     if (steps.length) plan.pending.push({ kind: 'config', path: f, from, to: steps.at(-1)!.to, steps: steps.map((m) => m.what), auto: false });
   }
   if (t.eventsDb && existsSync(t.eventsDb)) {
-    const db = new DatabaseSync(t.eventsDb, { readOnly: true });
+    const db = openReadOnly(t.eventsDb);
     try {
       const from = userVersion(db);
       if (from > latest(state)) plan.newer.push(`${t.eventsDb} is at state version ${from}; this engine knows up to ${latest(state)}`);
@@ -203,9 +205,8 @@ function migrateOne(p: Pending, now: Date, config: ConfigMigration[], state: Sta
       }
       replaceFileAtomically(p.path, doc.toString(), statSync(p.path).mode & 0o777);
     } else {
-      const db = new DatabaseSync(p.path);
+      const db = openWaiting(p.path);
       try {
-        db.exec('PRAGMA busy_timeout = 5000');
         db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
         made.push({ kind: 'state', path: p.path, backup });
         db.exec(RECORD);

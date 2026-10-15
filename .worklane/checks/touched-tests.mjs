@@ -15,6 +15,8 @@ const run = (cmd, args) => spawnSync(cmd, args, { cwd: root, stdio: 'inherit', s
 const git = (...a) => execFileSync('git', a, { cwd: root, encoding: 'utf8' });
 const posix = (p) => p.split(sep).join('/');
 const distOf = (t) => posix(t).replace(/^test\//, 'dist/test/').replace(/\.ts$/, '.js');
+// Every test run preloads the isolation (test/isolate.ts): a temporary home, state and slots, never this machine's.
+const PRELOAD = ['--import', './dist/test/isolate.js'];
 
 if (run(npm, ['run', 'build']) !== 0) process.exit(1);
 
@@ -25,12 +27,12 @@ if (one >= 0) {
     console.error('usage: touched-tests.mjs --one <test file>');
     process.exit(2);
   }
-  process.exit(run(process.execPath, ['--test', f.startsWith('dist/') ? f : distOf(f)]));
+  process.exit(run(process.execPath, [...PRELOAD, '--test', f.startsWith('dist/') ? f : distOf(f)]));
 }
 
 const full = (why) => {
   console.log(`touched-tests: running every test (${why})`);
-  process.exit(run(process.execPath, ['--test', 'dist/test/**/*.test.js']));
+  process.exit(run(process.execPath, [...PRELOAD, '--test', 'dist/test/**/*.test.js']));
 };
 
 let changed;
@@ -58,4 +60,4 @@ if (!files.length) {
   process.exit(0);
 }
 console.log(`touched-tests: ${files.length} file(s): ${files.join(' ')}`);
-process.exit(run(process.execPath, ['--test', ...files]));
+process.exit(run(process.execPath, [...PRELOAD, '--test', ...files]));

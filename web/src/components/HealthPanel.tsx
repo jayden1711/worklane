@@ -435,7 +435,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
 }
 
 /** Loads /api/health (every 30 s while shown); on a hub with All instances chosen, also each instance's own view for the side-by-side table. */
-export function HealthPanel() {
+export function HealthPanel({ onLoaded }: { onLoaded?: () => void }) {
   const [view, setView] = useState<HealthView | null>(null);
   const [instances, setInstances] = useState<InstanceHealth[] | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
@@ -457,6 +457,8 @@ export function HealthPanel() {
       } catch (e) {
         if (live) setError((e as Error).message);
       }
+      // The first look is done, the side-by-side table with it (web/src/in-order.tsx).
+      if (live) onLoaded?.();
     };
     void load();
     const t = setInterval(load, 30_000);
@@ -464,6 +466,7 @@ export function HealthPanel() {
       live = false;
       clearInterval(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   if (error) return <div className="text-[13px] text-red" data-testid="health-panel">Can't load machine health: {error}</div>;
   if (!view) return null;

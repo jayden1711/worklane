@@ -10,13 +10,13 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { findChrome, launchChrome, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { TailscaleStatus } from '../src/tailscale-setup.js';
 import { ALLOWED_SIGNERS } from '../src/updater-setup.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
 
 test('the machine settings are never keyed on their data: new data is new props, and each input follows what is set until the owner types', () => {
@@ -82,12 +82,14 @@ async function js<T>(cdp: Cdp, expression: string): Promise<T> {
 
 const q = (testid: string) => `document.querySelector('[data-testid="${testid}"]')`;
 
-/** A real mouse click at the element's centre. */
+/** A real mouse click at the element's centre, which must hold still from the read to the press (pressSteady). */
 async function click(cdp: Cdp, testid: string) {
   await until(`${testid} to show`, () => js<boolean>(cdp, `!!${q(testid)} && !${q(testid)}.disabled`), 20_000);
-  const at = await js<{ x: number; y: number }>(cdp, `(() => { const e = ${q(testid)}; e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
-  for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
+  await pressSteady(cdp, q(testid), testid);
 }
+
+/** Every Machine panel has had its first answer and is shown (web/src/in-order.tsx). */
+const machineLoaded = (cdp: Cdp) => until('every Machine panel loaded', () => js<boolean>(cdp, `document.querySelector('[data-testid="machine-panels"]')?.dataset.loaded === 'true'`), 20_000);
 
 /** Typed as keystrokes would be, into the focused element (its old text selected, so replaced). */
 async function type(cdp: Cdp, element: string, text: string) {
@@ -110,7 +112,7 @@ test(
     const slotsDir = join(dir, 'slots');
     mkdirSync(slotsDir, { recursive: true });
     const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir, machine: { updatesConfigPath, signersPath: join(dir, 'allowed_signers'), pendingSignersPath: join(dir, 'pending-signers.json'), changesPath, updatesLogPath: join(dir, 'updates.jsonl') }, machineOwnersFile: machineOwnersFile('example-owner') });
-    const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');
@@ -121,6 +123,7 @@ test(
       // #418: the key goes in the tab's session storage, as the page's key form keeps it: never in a URL.
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(d.token)}); } catch {}` });
       await cdp.send('Page.navigate', { url: `${d.url}/machine` });
+      await machineLoaded(cdp);
 
       // Ask for the install and confirm it: the message says it was requested, and the page now looks again every
       // few seconds while the request waits for the coordinator.
@@ -164,7 +167,7 @@ test(
     const tsDir = mkdtempSync(join(tmpdir(), 'tailscale-dir-'));
     const status: TailscaleStatus = { installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'NeedsLogin', name: null, https: false, serve: false, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test' };
     const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), instance: 'alpha', machineOwnersFile: machineOwnersFile('example-owner'), tailscaleDir: tsDir, tailscaleStatus: async () => status });
-    const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');
@@ -190,8 +193,8 @@ test(
       const next = `document.querySelector('[data-testid="tailscale-step"][data-next="true"]')`;
       await until('the Tailscale steps', () => js<boolean>(cdp, `!!${next}?.querySelector('[data-testid="tailscale-step-run"]')`), 20_000);
       const step = await js<string>(cdp, `${next}.dataset.step`);
-      const at = await js<{ x: number; y: number }>(cdp, `(() => { const e = ${next}.querySelector('[data-testid="tailscale-step-run"]'); e.scrollIntoView({ block: 'center' }); const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
-      for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
+      await machineLoaded(cdp);
+      await pressSteady(cdp, `${next}.querySelector('[data-testid="tailscale-step-run"]')`, 'tailscale-step-run');
       const open = `!!document.querySelector('[data-testid="tailscale-step"][data-step="${step}"] [data-testid="tailscale-step-confirm"]')`;
       await until('the confirmation', () => js<boolean>(cdp, open), 10_000);
 

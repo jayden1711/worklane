@@ -11,7 +11,7 @@ function pngSize(file: string): [number, number] {
   return [b.readUInt32BE(16), b.readUInt32BE(20)];
 }
 
-test('the logo: README shows it, and the dashboard uses the 512px square as its icon', () => {
+test('the logo: README shows it; the dashboard uses the 512px square as its touch icon and a 32px one as its tab icon', () => {
   const readme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
   const img = /<img src="([^"]+)" alt="([^"]+)"/.exec(readme.split('\n# ')[0]!);
   assert.ok(img, 'the logo sits above the title');
@@ -24,6 +24,9 @@ test('the logo: README shows it, and the dashboard uses the 512px square as its 
   // The repo's social preview (uploaded by hand in the repo settings): GitHub's 1280x640.
   assert.deepEqual(pngSize(join(repoRoot, 'docs', 'assets', 'social-preview.png')), [1280, 640]);
   const html = readFileSync(join(repoRoot, 'web', 'index.html'), 'utf8');
-  assert.match(html, /<link rel="icon" type="image\/png" href="\/icon-512\.png" \/>/);
+  // The tab icon is 32px: the 512px one (207 KB) was fetched on every cold load, a second at the relay's speed.
+  assert.match(html, /<link rel="icon" type="image\/png" sizes="32x32" href="\/icon-32\.png" \/>/);
+  assert.deepEqual(pngSize(join(repoRoot, 'web', 'public', 'icon-32.png')), [32, 32]);
+  assert.ok(readFileSync(join(repoRoot, 'web', 'public', 'icon-32.png')).length < 8 * 1024, 'the tab icon stays small');
   assert.match(html, /<link rel="apple-touch-icon" href="\/icon-512\.png" \/>/);
 });

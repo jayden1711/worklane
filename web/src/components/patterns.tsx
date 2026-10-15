@@ -2,8 +2,35 @@
 // THIRD_PARTY_NOTICES.md): task rows, tool chips, records tables, sidebar rows,
 // insight cards, the loading state. Their demo timelines are left out: these show
 // real state as it is, with no staged animation beyond a row's entrance.
-import { useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { cx } from './ui';
+
+/** The longest a row's entrance runs (owner's rule: a short fade, only for data that is new on the page). */
+export const ENTRANCE_MS = 150;
+/** The entrance of a row that arrived after its page was shown (styles.css drops it under reduced motion). */
+export const ENTRANCE: CSSProperties = { animation: `fade-in ${ENTRANCE_MS}ms ease-out both` };
+
+/** Whether the page around is still in its first render (a ref read at a row's mount). */
+const FirstRender = createContext<{ current: boolean } | null>(null);
+
+/**
+ * Around a page: what it shows in its first render (from what the page kept, on a switch; or its first data) appears
+ * as it is, with no entrance; a row that arrives later (a refresh, a live change) fades in, in ENTRANCE_MS.
+ */
+export function Entrances({ children }: { children: ReactNode }) {
+  const first = useRef(true);
+  useEffect(() => {
+    first.current = false;
+  }, []);
+  return <FirstRender.Provider value={first}>{children}</FirstRender.Provider>;
+}
+
+/** A row's entrance style, fixed at its mount: none in its page's first render (or outside Entrances), ENTRANCE after. */
+export function useEntrance(): CSSProperties | undefined {
+  const first = useContext(FirstRender);
+  const [style] = useState(() => (first && !first.current ? ENTRANCE : undefined));
+  return style;
+}
 
 const CheckIcon = (
   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -25,9 +52,10 @@ export type MarkState = 'done' | 'failed' | 'running' | 'waiting' | 'skipped';
 
 /** A task's state at the start of its row: a green check, a red cross, a spinning ring, or a quiet ring. */
 export function StatusMark({ state, children }: { state: MarkState; children?: ReactNode }) {
+  const entrance = useEntrance();
   if (state === 'done' || state === 'failed') {
     return (
-      <span className={cx('flex size-5.5 shrink-0 items-center justify-center rounded-full text-white', state === 'done' ? 'bg-green' : 'bg-red')} style={{ animation: 'pop-in 300ms cubic-bezier(0.23,1,0.32,1) both' }} aria-label={state}>
+      <span className={cx('flex size-5.5 shrink-0 items-center justify-center rounded-full text-white', state === 'done' ? 'bg-green' : 'bg-red')} style={entrance} aria-label={state}>
         {state === 'done' ? CheckIcon : XIcon}
       </span>
     );
@@ -51,8 +79,10 @@ export function StatusMark({ state, children }: { state: MarkState; children?: R
 export function TaskRow({ mark, label, amount, pill, onClick, details, index = 0, testId, dataTestId }: { mark: ReactNode; label: ReactNode; amount?: ReactNode; pill?: ReactNode; onClick?: () => void; details?: ReactNode; index?: number; testId?: string; dataTestId?: string }) {
   const [open, setOpen] = useState(false);
   const expandable = !onClick && !!details;
+  const entrance = useEntrance();
+  void index; // was the staggered entrance's delay; rows now enter at once (useEntrance)
   return (
-    <div className="overflow-hidden border-b border-line transition-colors duration-200 last:border-0 hover:bg-inset" style={{ animation: `fade-up 450ms cubic-bezier(0.23,1,0.32,1) ${Math.min(index, 8) * 60}ms both` }} data-task-row={testId} data-testid={dataTestId}>
+    <div className="overflow-hidden border-b border-line transition-colors duration-200 last:border-0 hover:bg-inset" style={entrance} data-task-row={testId} data-testid={dataTestId}>
       <button type="button" aria-expanded={expandable ? open : undefined} onClick={onClick ?? (expandable ? () => setOpen((o) => !o) : undefined)} className="flex h-11 w-full items-center gap-2.5 px-3 text-left max-md:h-auto max-md:min-h-11 max-md:flex-wrap max-md:py-1.5">
         <span className="flex size-6 shrink-0 items-center justify-center">{mark}</span>
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink max-md:min-w-[60%]">{label}</span>
@@ -107,8 +137,9 @@ const TOOL_ICON: Record<'run' | 'write' | 'read', ReactNode> = {
 export function ToolRow({ icon, label, chip, end, detail }: { icon: 'run' | 'write' | 'read'; label: string; chip: string; end?: ReactNode; detail?: string }) {
   const [open, setOpen] = useState(false);
   const can = !!detail;
+  const entrance = useEntrance();
   return (
-    <div style={{ animation: 'fade-up 300ms cubic-bezier(0.23,1,0.32,1) both' }} data-tool-row>
+    <div style={entrance} data-tool-row>
       <button type="button" aria-expanded={can ? open : undefined} onClick={can ? () => setOpen((o) => !o) : undefined} className={cx('group/row flex min-h-7 max-md:min-h-11 w-full min-w-0 items-center gap-2 rounded-control px-1 py-0.5 text-left transition-colors duration-100', can && 'hover:bg-hover-2')}>
         <span className="relative flex size-4 shrink-0 items-center justify-center text-ink-3">
           <svg width="13" height="13" viewBox="0 0 24 24" className={cx('transition-opacity duration-100', can && 'group-hover/row:opacity-0', open && 'opacity-0')}>

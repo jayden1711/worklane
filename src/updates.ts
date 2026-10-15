@@ -4,15 +4,18 @@
 import { readFileSync, readlinkSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { BRAND } from './brand.js';
+import { asRoot, etcPath, optPath, varLibPath } from './os/system-paths.js';
 
-export const UPDATES_CONFIG = `/etc/${BRAND.cli}/updates.json`;
-export const UPDATES_LOG = `/var/lib/${BRAND.cli}/updates.jsonl`;
+export const UPDATES_CONFIG = etcPath('updates.json');
+export const UPDATES_LOG = varLibPath('updates.jsonl');
+/** The updater's last pass that found nothing newer (event "current"), or its last refusal or wait. */
+export const UPDATES_STATE = varLibPath('update-state.json');
 /** The engine the machine's services run: a link to /opt/<cli>/<sha>. */
-export const ENGINE_CURRENT = `/opt/${BRAND.cli}/current`;
+export const ENGINE_CURRENT = optPath('current');
 
 /** held: a commit that was rolled back, skipped until a newer one or until an admin releases it at a root shell (updates.sh --release-hold). */
 /** The root command that releases a hold; nothing a coordinator or the dashboard can do releases one. */
-export const RELEASE_HOLD = `sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --release-hold`;
+export const RELEASE_HOLD = `sudo bash ${asRoot.opt('current/scripts/setup/updates.sh')} --release-hold`;
 /** chose: an older commit than main's tip is being installed (the tip, and every newer one, failed or held). */
 /** signers_changed: the release signers file changed outside updates.sh --signer or --confirm-signer; release installs are held until acknowledged. */
 export type UpdateEvent = 'attempt' | 'chose' | 'installed' | 'rolled_back' | 'held' | 'refused' | 'waiting' | 'build_failed' | 'error' | 'signers_changed' | CanaryEvent;
@@ -153,6 +156,8 @@ export interface UpdatesPanel {
   enabled: boolean | null;
   installed: { sha: string | null; version: string | null };
   lastInstall: { at: string; from: string | null; to: string | null } | null;
+  /** The updater's last pass that found nothing newer: when, on which channel, the installed version, the newest seen (#465). */
+  lastCheck: LastCheck | null;
   /** The newest rollback, while no later install succeeded: when, what, why, and whether it is held. */
   rollback: { at: string; sha: string | null; reason: string; held: boolean; canary: boolean } | null;
   /**
@@ -196,7 +201,31 @@ export function installedEngine(current = ENGINE_CURRENT): { sha: string | null;
 }
 
 /** The Updates panel from the updater's log (oldest first), its settings and the engine installed now. */
-export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }, drain: UpdatesDrain | null = null): UpdatesPanel {
+export interface LastCheck {
+  at: string;
+  channel: 'release' | 'main';
+  sha: string | null;
+  version: string | null;
+  /** The newest release tag (release channel) or main's head (main). */
+  newest: string | null;
+}
+
+/** The state file's "current" entry, as the updater writes it on a pass with nothing newer; null for anything else. */
+export function lastCheck(path = UPDATES_STATE): LastCheck | null {
+  let j: unknown;
+  try {
+    j = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+  const o = j as Record<string, unknown> | null;
+  if (!o || o.event !== 'current' || typeof o.at !== 'string' || Number.isNaN(Date.parse(o.at))) return null;
+  if (o.channel !== 'release' && o.channel !== 'main') return null;
+  const str = (v: unknown) => (typeof v === 'string' && v.length <= 200 ? v : null);
+  return { at: o.at, channel: o.channel, sha: str(o.sha), version: str(o.version), newest: str(o.newest) };
+}
+
+export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof updateSettings>, installed: { sha: string | null; version: string | null }, drain: UpdatesDrain | null = null, checked: LastCheck | null = null): UpdatesPanel {
   const lastOf = (f: (e: UpdateEntry) => boolean) => [...log].reverse().find(f) ?? null;
   const install = lastOf((e) => e.event === 'installed');
   const rolled = lastOf((e) => e.event === 'rolled_back');
@@ -210,6 +239,8 @@ export function updatesPanel(log: UpdateEntry[], settings: ReturnType<typeof upd
     enabled: settings ? settings.enabled : null,
     installed,
     lastInstall: install ? { at: install.at, from: install.from ?? null, to: install.to ?? null } : null,
+    // Only while it is still about the engine installed now: an install since makes it stale.
+    lastCheck: checked && (!install || checked.at >= install.at) && (!checked.sha || !installed.sha || checked.sha === installed.sha) ? checked : null,
     rollback: rollbackNow
       ? { at: rollbackNow.at, sha: rollbackNow.from ?? null, reason: rollbackNow.reason ?? (rollbackNow.failed?.length ? `rolled back: ${rollbackNow.failed.join('; ')}` : 'rolled back'), held: !!held && held.at === rollbackNow.at, canary: !!rollbackNow.canary }
       : null,

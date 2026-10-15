@@ -9,13 +9,13 @@ import { createServer, type IncomingHttpHeaders } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { findChrome, launchChrome, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { writeLive } from '../src/console.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { RunFeed } from '../src/run-feed.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const WEB_SRC = join(repoRoot, 'web', 'src');
@@ -195,7 +195,7 @@ test(
     feed.line({ type: 'assistant', message: { content: [{ type: 'text', text: 'Looking at the totals.' }] } });
     log.append('issue.seen', { issue: 7, title: 'Round the totals', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, 'c');
     const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, pollMs: 50, slotsDir: join(dir, 'slots') });
-    const b = await launchChrome(chrome!, { width: 1280, height: 900 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 900 });
     const requests: { url: string; headers: Record<string, string> }[] = [];
     try {
       const cdp = b.cdp;

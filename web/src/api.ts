@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { openStream, type Stream, type StreamOptions } from './sse';
+import { coalesced, forgetAll, forgetInstance, instanceOf, keep, markUpdating, peek } from './cache';
 
 export type TaskStatus =
   | 'triage' | 'ready' | 'claimed' | 'reproducing' | 'building' | 'verifying' | 'evaluating'
@@ -77,6 +78,8 @@ export interface RunRecord {
   otherTools: number;
   final: string;
   truncated: boolean;
+  /** Why a run that didn't succeed ended: Claude's error text or its stderr's tail (redacted). Absent in older records. */
+  detail?: string;
 }
 
 /** An issue's runs without their steps (GET /api/runs?issue=n). */
@@ -202,6 +205,17 @@ export interface GoalGraph {
 
 export interface Activity { id: number; ts: string; type: string; actor: string; issue: number | null; summary: string }
 
+/** One coordinator error, grouped by where and message (src/projection.ts CoordinatorError). */
+export interface CoordinatorError {
+  where: string;
+  message: string;
+  kind?: string;
+  count?: number;
+  first?: string;
+  last?: string;
+  at: string;
+}
+
 export interface State {
   brand: { name: string; cli: string };
   /** Setup mode (src/setup-mode.ts): no config yet; the first-run page is the whole dashboard. */
@@ -246,8 +260,13 @@ export interface State {
   baseline: { sha: string; failing: string[]; at: string } | null;
   deploys: { env: string; sha: string; status: string; why?: string; at: string }[];
   coordinator: { instance: string; startedAt: string; lastTick: string | null } | null;
-  /** The coordinator's recent errors; a viewer gets only how many (errorCount), never their text. */
-  errors?: { at: string; where: string; message: string }[];
+  /**
+   * The coordinator's errors still current (a later tick or a restart clears one: src/projection.ts), one per place
+   * and message with how many times, first and last; a viewer gets only how many (errorCount), never their text.
+   */
+  errors?: CoordinatorError[];
+  /** Errors no longer current, newest first: history only (owners and writers). */
+  earlierErrors?: CoordinatorError[];
   errorCount?: number;
   activity: Activity[];
   inbox: { decisions: Decision[]; blocked: Task[]; notify: Task[] };
@@ -527,6 +546,8 @@ export function liveStream(path: string | Promise<string>, on: StreamOptions['on
 
 /** Sign out: the hub deletes the session (server-side), then the page shows the sign-in again. */
 export async function signOut(): Promise<void> {
+  // Nothing read in this session stays, even for the moment before the page leaves.
+  forgetAll();
   await fetch('/auth/logout', { method: 'POST', headers: await authHeaders(), body: '{}' }).catch(() => undefined);
   try {
     sessionStorage.removeItem('dash-instance');
@@ -543,6 +564,10 @@ export interface UsageInfo {
   paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
   today: { runs: number; limitHits: number };
   lastHit: string | null;
+  /** Claude logins the API refused (no new runs on them until a call succeeds): the account and Claude's words, never a token. */
+  signinFailed?: { login: string; detail: string; since: string; lastCheck: { at: string; ok: boolean; detail: string } | null }[];
+  /** This viewer may ask the coordinator to re-check a refused login now. */
+  canRecheckSignin?: boolean;
 }
 
 /** On a hub (one view over several instances), its instances; null on an instance's or a checkout's own dashboard. */
@@ -559,7 +584,39 @@ export function probeHub(servedByHub: boolean, get: typeof fetch = fetch, auth =
     .then((r) => (r.ok ? (r.json() as Promise<HubInfo>) : null))
     .catch(() => null);
 }
-export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null);
+// WHY asked beside /api/me, not after it: one round trip less before any data. Signed out, the hub refuses it (401)
+// and the answer is dropped; what it lists is still only the instances this person has a role on.
+const hubAsked = inBrowser ? probeHub(servedByHub) : Promise.resolve(null);
+export const hub: Promise<HubInfo | null> = inBrowser ? needsSignIn.then((n) => (n ? null : hubAsked)) : Promise.resolve(null);
+
+/**
+ * The hub's list again, from a fresh answer: it replaces the last one when it differs (an instance that was down at
+ * page load, during an update's restart, is up again); no answer (the hub itself didn't answer, or refused) keeps the
+ * last one rather than emptying the sidebar.
+ */
+export function nextHub(prev: HubInfo | null, fresh: HubInfo | null): HubInfo | null {
+  if (!fresh) return prev;
+  return prev && JSON.stringify(prev) === JSON.stringify(fresh) ? prev : fresh;
+}
+/** The hub's list as last read: this page's first answer, then each refresh's (refreshHub). */
+let latestHub: Promise<HubInfo | null> = hub;
+/** The same, once read: what an instance switch picks from without waiting. */
+let latestHubNow: HubInfo | null = null;
+void hub.then((h) => {
+  latestHubNow ??= h;
+});
+/** The hub's instances as last read, synchronously (null before the first answer, or off a hub). */
+export const hubNow = (): HubInfo | null => latestHubNow;
+/** The hub's instances as last read, without asking again. */
+export const currentHub = (): Promise<HubInfo | null> => latestHub;
+/** Ask the hub for its instances again (each health refresh does): whether each answers now, not at page load. */
+export async function refreshHub(probe: () => Promise<HubInfo | null> = () => (servedByHub ? needsSignIn.then((n) => (n ? null : probeHub(servedByHub))) : Promise.resolve(null))): Promise<HubInfo | null> {
+  const prev = await latestHub;
+  const next = nextHub(prev, await probe());
+  latestHub = Promise.resolve(next);
+  latestHubNow = next;
+  return next;
+}
 
 /**
  * Which instances a hub page reads: the selected one, or every instance this person has a role on when they
@@ -585,28 +642,66 @@ const saved = (key: string): string | null => {
     return null; // no storage: the default
   }
 };
-export const instanceScope: Promise<InstanceScope> = hub.then((h) => scopeOf(h, saved('dash-instance'), saved('dash-all-instances') === '1'));
+/**
+ * The scope this page shows now. An instance switch changes it in place (no reload): `instanceScope` and
+ * `hubInstance` are live bindings, so whatever asks after the switch gets the new one, and the Dashboard is keyed on
+ * it (App.tsx), so every view below it starts again for the new instance, from what was kept for that instance.
+ */
+let scopeNow: InstanceScope | null = null;
+const scopeListeners = new Set<() => void>();
+/**
+ * On a hub page, the state of the instance this tab showed last, asked for beside /api/me and /api/hub rather than
+ * after them (two round trips less before the first data). The hub checks the session and the role on it as for any
+ * call; it is kept only if answered, under that instance's own key, and shown only if the scope turns out to be it.
+ */
+if (inBrowser && servedByHub && !keyMissing) {
+  const last = saved('dash-instance');
+  if (last && saved('dash-all-instances') !== '1') void request(`/api/i/${encodeURIComponent(last)}/state`, { prefetch: true, early: true } as RequestInit).catch(() => undefined);
+}
+export let instanceScope: Promise<InstanceScope> = hub.then((h) => (scopeNow = scopeOf(h, saved('dash-instance'), saved('dash-all-instances') === '1')));
 /** The instance a hub page shows: the one picked last in this tab, else the first that answers. */
-export const hubInstance: Promise<string | null> = instanceScope.then((s) => s.current);
+export let hubInstance: Promise<string | null> = instanceScope.then((s) => s.current);
+/** The scope now, synchronously: null until the hub's first answer (or its absence) is in. */
+export const scopeNowOrNull = (): InstanceScope | null => scopeNow;
+/** A key for the scope ('' off a hub): what the Dashboard is keyed on. */
+export const scopeKey = (s: InstanceScope | null): string => (s ? `${s.all ? 'all:' : ''}${s.current ?? ''}` : '');
+/** The scope, as a hook: re-renders on a switch. */
+export function useScope(): InstanceScope | null {
+  return useSyncExternalStore(
+    (l) => (scopeListeners.add(l), () => void scopeListeners.delete(l)),
+    () => scopeNow,
+    () => null,
+  );
+}
+function setScope(s: InstanceScope) {
+  scopeNow = s;
+  instanceScope = Promise.resolve(s);
+  hubInstance = Promise.resolve(s.current);
+  for (const l of scopeListeners) l();
+}
 
-/** Show another instance (hub only), and only it: everything reloads from that instance's own server. */
+/** Show another instance (hub only), and only it: every view starts again on that instance's own server, from what was kept for it. */
 export function selectInstance(name: string) {
   try {
     sessionStorage.setItem('dash-instance', name);
     sessionStorage.removeItem('dash-all-instances');
   } catch {
-    // no storage: this tab can't switch
+    // no storage: the switch still holds for this page
   }
-  window.location.reload();
+  const h = latestHubNow;
+  if (!h) return window.location.reload();
+  setScope(scopeOf(h, name, false));
 }
 /** "All instances" (hub only): the Board and its test runs show every instance this person has a role on, labelled. */
 export function selectAllInstances() {
   try {
     sessionStorage.setItem('dash-all-instances', '1');
   } catch {
-    // no storage: this tab can't switch
+    // no storage: the switch still holds for this page
   }
-  window.location.reload();
+  const h = latestHubNow;
+  if (!h || !scopeNow) return window.location.reload();
+  setScope(scopeOf(h, scopeNow.current, true));
 }
 
 /** An API path as this page reaches it: on a hub, through the selected instance's own server. */
@@ -617,8 +712,82 @@ export async function apiPath(path: string): Promise<string> {
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
 export async function instanceApi<T>(name: string, path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  return answer<T>(res);
+  return request<T>(path.replace(/^\/api\//, `/api/i/${encodeURIComponent(name)}/`), init);
+}
+
+/**
+ * The URL a view is read at, now: on a hub through the named instance (null or absent: the selected one), else this
+ * page's own server. What the cache keys on (cache.ts), synchronously, so a page can show what was kept before it asks.
+ */
+export function viewUrl(path: string, instance?: string | null): string {
+  const inst = instance ?? scopeNow?.current ?? null;
+  return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
+}
+
+/**
+ * Every call: a GET (no body) asked once at a time per URL (cache.ts coalesced) and its answer kept when it is a listed
+ * view; a refusal forgets what it says is no longer this person's (a 401 everything; a 403 on /state that instance's).
+ */
+async function request<T>(url: string, init: RequestInit): Promise<T> {
+  const get = (!init.method || init.method === 'GET') && init.body === undefined;
+  const { early, prefetch, ...rest } = init as RequestInit & { early?: boolean; prefetch?: boolean };
+  const go = async () => {
+    // Early (a GET before /api/me is in): the key if any; a session goes by its cookie, and a GET needs no CSRF token.
+    const headers = early ? { ...(token ? { authorization: `Bearer ${token}` } : {}) } : await authHeaders();
+    const res = await fetch(url, { ...rest, headers: { ...(rest.headers ?? {}), ...headers } });
+    try {
+      const d = await answer<T>(res);
+      if (get) keep(url, d);
+      return d;
+    } catch (e) {
+      if (e instanceof ApiError) {
+        if (e.status === 401) forgetAll();
+        else if (e.status === 403 && /\/state(?:\?|$)/.test(url)) forgetInstance(instanceOf(url));
+      }
+      throw e;
+    }
+  };
+  return get ? coalesced(url, go, !prefetch) : go();
+}
+
+/** A GET in the background, at low priority: what was kept is refreshed; a GET of it already in flight is enough. */
+export function prefetchView(path: string, instance?: string | null): Promise<unknown> {
+  return request(viewUrl(path, instance), { priority: 'low', prefetch: true } as RequestInit);
+}
+
+/**
+ * A view, shown at once from what was kept for this instance (marked "updating…" until the fresh answer comes), read
+ * again on mount and whenever `dep` changes. A refusal hides it; any other failure keeps the last good data with the
+ * error. `path` null: nothing asked (refused before asking).
+ */
+export function useView<T>(path: string | null, dep: unknown = 0, instance?: string | null): { data: T | null; error: string | null; updating: boolean } {
+  const url = path === null ? null : viewUrl(path, instance);
+  const init = (u: string | null) => {
+    const k = u === null ? undefined : peek<T>(u);
+    return { url: u, data: k ? k.data : null, error: null as string | null, updating: !!k };
+  };
+  const [st, setSt] = useState(() => init(url));
+  let cur = st;
+  if (st.url !== url) {
+    // Another view (or instance) from now on: never one moment of the last one's data under it.
+    cur = init(url);
+    setSt(cur);
+  }
+  useEffect(() => {
+    if (url === null) return;
+    let live = true;
+    const unmark = cur.updating ? markUpdating() : () => {};
+    request<T>(url, {}).then(
+      (data) => live && setSt({ url, data, error: null, updating: false }),
+      (e: Error) => live && setSt((p) => (p.url !== url ? p : isRefusal(e) ? { url, data: null, error: e.message, updating: false } : { ...p, error: e.message, updating: false })),
+    ).finally(unmark);
+    return () => {
+      live = false;
+      unmark();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [url, dep]);
+  return { data: cur.data, error: cur.error, updating: cur.updating };
 }
 
 /** A server's answer that wasn't a success, with its HTTP status: a refusal (isRefusal) or something to retry. */
@@ -645,29 +814,34 @@ async function answer<T>(res: Response): Promise<T> {
 }
 
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const res = await fetch(await apiPath(path), { ...init, headers: { ...(init.headers ?? {}), ...(await authHeaders()) } });
-  return answer<T>(res);
+  return request<T>(await apiPath(path), init);
 }
 
-/** State from the server, refetched whenever the event log changes (one SSE stream). */
+/**
+ * State from the server, refetched whenever the event log changes (one SSE stream: the instance shown). Shown at once
+ * from what was kept for this instance (an instance or page switch), marked "updating…" until the fresh answer.
+ */
 export function useLiveState() {
-  const [state, setState] = useState<State | null>(null);
+  const url = viewUrl('/api/state');
+  const [state, setState] = useState<State | null>(() => peek<State>(url)?.data ?? null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(false);
   const [pulse, setPulse] = useState(0);
   const timer = useRef<number | undefined>(undefined);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (first = false) => {
     try {
-      setState(await api<State>('/api/state'));
+      // The first load takes an answer already on its way (the early ask); every later one asks again.
+      setState(await request<State>(url, first ? ({ prefetch: true } as RequestInit) : {}));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
-  }, []);
+  }, [url]);
 
   useEffect(() => {
-    void refresh();
+    const unmark = peek(url) ? markUpdating() : () => {};
+    void refresh(true).finally(unmark);
     const es = liveStream(
       apiPath('/api/stream'),
       {
@@ -683,10 +857,11 @@ export function useLiveState() {
       { onError: () => setLive(false) },
     );
     return () => {
+      unmark();
       window.clearTimeout(timer.current);
       es.close();
     };
-  }, [refresh]);
+  }, [url, refresh]);
 
   return { state, error, live, pulse, refresh };
 }
@@ -1580,6 +1755,8 @@ export interface InstanceIncidents {
   name: string | null;
   view: IncidentsView | null;
   error: string | null;
+  /** The hub says this instance's dashboard isn't answering (not merely that its incidents couldn't be read). */
+  down?: boolean;
 }
 
 /**
@@ -1590,7 +1767,7 @@ export async function loadIncidents(h: HubInfo | null, get: (name: string | null
   const names: (string | null)[] = h?.instances.length ? h.instances.map((i) => i.name) : [null];
   return Promise.all(
     names.map(async (name) => {
-      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering" };
+      if (name && h?.instances.find((i) => i.name === name)?.up === false) return { name, view: null, error: "its dashboard isn't answering", down: true };
       try {
         return { name, view: await get(name, '/api/health/incidents'), error: null };
       } catch (e) {
@@ -1612,7 +1789,23 @@ export function mergeIncidents(all: InstanceIncidents[]): { open: Incident[]; re
   };
 }
 
-/** Each instance's dot: its own server's status; red when it isn't answering. */
-export function statusOf(all: InstanceIncidents[]): Record<string, HealthStatus> {
-  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view?.status ?? 'red']));
+/**
+ * A status dot: an instance's own status (green, amber, red), or unknown when its incidents couldn't be read (a
+ * refusal, a timeout, a proxy blip): that is not "broken", and red stays for an open red incident or an instance
+ * that isn't answering.
+ */
+export type DotStatus = HealthStatus | 'unknown';
+/** Each instance's dot: its own server's status; red when the hub says it isn't answering; unknown when its incidents couldn't be read. */
+export function statusOf(all: InstanceIncidents[]): Record<string, DotStatus> {
+  return Object.fromEntries(all.map((a) => [a.name ?? '', a.view ? a.view.status : a.down ? 'red' : 'unknown']));
+}
+/** Why each instance's status couldn't be read (only those that couldn't), for the dot's hover and screen-reader text. */
+export function whyOf(all: InstanceIncidents[]): Record<string, string> {
+  return Object.fromEntries(all.filter((a) => !a.view && a.error).map((a) => [a.name ?? '', a.error!]));
+}
+/** One health refresh: the hub's list asked again (an instance down at page load can be up now), then each instance's incidents. */
+export async function healthPass(refresh: () => Promise<HubInfo | null> = refreshHub, load: (h: HubInfo | null) => Promise<InstanceIncidents[]> = (h) => loadIncidents(h)): Promise<{ hub: HubInfo | null; status: Record<string, DotStatus>; why: Record<string, string> }> {
+  const h = await refresh();
+  const all = await load(h);
+  return { hub: h, status: statusOf(all), why: whyOf(all) };
 }

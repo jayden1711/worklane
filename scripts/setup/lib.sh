@@ -296,6 +296,51 @@ claude_status_json() {
   command -v claude >/dev/null 2>&1 || return 0
   (cd / && sudo -H -u "$1" timeout 60 claude auth status --json 2>/dev/null) || true
 }
+# Whether the API takes this user's Claude login (issue #463: claude auth status says a credential is configured, not
+# that it works): one minimal real call as that user, the cheapest model, a one-word answer, one turn, a hard budget
+# cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when
+# Claude answered; else prints Claude's message (token-shaped strings redacted, 500 characters at most) and fails.
+CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
+claude_api_check() {
+  command -v claude >/dev/null 2>&1 || { echo "claude is not installed"; return 1; }
+  local out
+  out="$( (cd / && sudo -H -u "$1" timeout 120 claude "${CLAUDE_PROOF_ARGS[@]}" 2>&1) || true)"
+  printf '%s' "$out" | "$(command -v node)" -e '
+const text = require("node:fs").readFileSync(0, "utf8");
+let j = null;
+for (const l of text.trim().split("\n").reverse()) {
+  try {
+    const o = JSON.parse(l);
+    if (o && typeof o === "object" && o.type === "result") { j = o; break; }
+  } catch {}
+}
+if (j && ((j.subtype === "success" && !j.is_error) || j.subtype === "error_max_budget_usd")) process.exit(0);
+const said = `${j && j.api_error_status ? `HTTP ${j.api_error_status}: ` : ""}${(j && j.result) || text.trim() || "claude gave no answer"}`;
+const clean = said.replace(/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-[REDACTED]").replace(/\b(Bearer)\s+[A-Za-z0-9._~+\/-]{20,}=*/g, "$1 [REDACTED]").replace(/\s+/g, " ").trim();
+process.stdout.write(clean.slice(0, 500));
+process.exit(1);
+'
+}
+# One user's Claude credentials file put back as it was (a switch's rollback): the content on stdin, written as that
+# user, 0600, by a rename; empty stdin: there was none, so the file is removed. Never an argument or a log line.
+#   restore_claude_credentials <user> <claude config dir>
+restore_claude_credentials() {
+  (cd / && sudo -H -u "$1" "$(command -v node)" -e '
+const { existsSync, readFileSync, renameSync, rmSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const dir = process.argv[1];
+if (!dir || !dir.startsWith("/")) process.exit(2);
+const file = join(dir, ".credentials.json");
+const prev = readFileSync(0, "utf8");
+if (!prev.trim()) {
+  if (existsSync(file)) rmSync(file);
+  process.exit(0);
+}
+const tmp = `${file}.tmp-${process.pid}`;
+writeFileSync(tmp, prev, { mode: 0o600 });
+renameSync(tmp, file);
+' "$2")
+}
 # Whether a path is a plain file (not a link) that this user owns.
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -user "$2" 2>/dev/null)" ]; }
 # Pause an instance: SIGTERM to its coordinator's main process only. It starts no more runs, lets the ones it has

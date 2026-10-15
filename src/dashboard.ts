@@ -10,15 +10,19 @@
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { GITHUB_API } from './github-hosts.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
+import { EventCache } from './events/cache.js';
+import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
+import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
+import { localDay } from './local-day.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
@@ -38,16 +42,18 @@ import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
 import { usageView } from './usage-limit.js';
+import { authHoldsOf } from './claude-auth-failure.js';
+import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
-import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
+import { ENGINE_CURRENT, installedEngine, lastCheck, UPDATES_CONFIG, UPDATES_LOG, UPDATES_STATE, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
 import { updateDrain } from './update-drain.js';
 import { updaterPlan, updaterSetup } from './updater-setup.js';
 import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
@@ -194,7 +200,7 @@ export interface DashboardOptions {
   /** The machine's limits file for settings; the system one when unset. */
   limitsPath?: string;
   /** Machine settings: where the helper's change log and the updater's files are (the system's when unset). Changes go to the coordinator (src/machine-requests.ts); this server never runs sudo. */
-  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
+  machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; updatesStatePath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
@@ -807,13 +813,77 @@ export function serveStatic(webDir: string, url: URL, res: ServerResponse, opts:
     res.end('dashboard UI not built: run `npm run build:web` in the engine');
     return;
   }
-  res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': extname(file) === '.html' ? 'no-store' : 'max-age=3600' });
-  if (opts.hub && extname(file) === '.html') {
-    const html = readFileSync(file, 'utf8');
-    return void res.end(html.includes('</head>') ? html.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${html}`);
+  const type = MIME[extname(file)] ?? 'application/octet-stream';
+  const html = extname(file) === '.html';
+  // WHY: vite names every file under assets/ by its content's hash, so a name is never reused for other bytes.
+  const hashed = !html && file.startsWith(resolve(webDir, 'assets') + sep);
+  const headers: Record<string, string> = { 'content-type': type, 'cache-control': html ? 'no-store' : hashed ? IMMUTABLE : 'max-age=3600' };
+  const enc = compressibleType(type) ? requestEncoding(res.req) : null;
+  if (compressibleType(type)) headers.vary = 'accept-encoding';
+  if (html) {
+    const page = readFileSync(file, 'utf8');
+    const body = Buffer.from(opts.hub ? (page.includes('</head>') ? page.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${page}`) : page);
+    return send(res, 200, headers, body, enc);
   }
-  res.end(readFileSync(file));
+  const st = statSync(file);
+  if (!enc || st.size < MIN_COMPRESS_BYTES) return send(res, 200, headers, readFileSync(file), null);
+  staticCompressed.get(file, `${st.size}:${st.mtimeMs}`, () => readFileSync(file), enc).then(
+    (body) => {
+      res.writeHead(200, { ...headers, 'content-encoding': enc, 'content-length': String(body.length) });
+      res.end(body);
+    },
+    () => send(res, 200, headers, readFileSync(file), null),
+  );
 }
+
+/** Content-hashed built files: the same name is always the same bytes, so a browser keeps them a year without asking. */
+export const IMMUTABLE = 'public, max-age=31536000, immutable';
+
+const staticCompressed = new StaticCompressed();
+
+/**
+ * Compress the built UI's assets now, in the background (zlib's pool), so the first person to load it doesn't wait for
+ * it: the hub does this when it starts. Anything that fails is compressed on its first request instead.
+ */
+export function warmStatic(webDir: string): void {
+  const dir = join(webDir, 'assets');
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    const file = join(dir, n);
+    if (!compressibleType(MIME[extname(file)] ?? '')) continue;
+    try {
+      const st = statSync(file);
+      if (st.size < MIN_COMPRESS_BYTES) continue;
+      for (const enc of ['br', 'gzip'] as const) staticCompressed.get(file, `${st.size}:${st.mtimeMs}`, () => readFileSync(file), enc).catch(() => {});
+    } catch {
+      // compressed on its first request instead
+    }
+  }
+}
+
+/** Send a body, compressed with `enc` when given and worth it. */
+function send(res: ServerResponse, status: number, headers: Record<string, string>, body: Buffer, enc: Encoding | null) {
+  if (enc && body.length >= MIN_COMPRESS_BYTES) {
+    const out = compress(body, enc);
+    res.writeHead(status, { ...headers, 'content-encoding': enc, 'content-length': String(out.length) });
+    return void res.end(out);
+  }
+  res.writeHead(status, { ...headers, 'content-length': String(body.length) });
+  res.end(body);
+}
+
+/** Whether a request's Host header names this loopback port (not a DNS name that was pointed at 127.0.0.1). */
+export function loopbackHostHeader(host: string | undefined, port: number | undefined): boolean {
+  return port !== undefined && [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes((host ?? '').toLowerCase());
+}
+
+/** GET: the key page's help (the key file's path and a copy command), loopback only, never the key. */
+export const KEY_HELP_PATH = '/api/key-help';
 
 export function dashboardToken(stateDir: string): string {
   const f = join(stateDir, 'dashboard-token');
@@ -826,7 +896,7 @@ export function dashboardToken(stateDir: string): string {
 
 function readEvents(dbPath: string, after = 0): StoredEvent[] {
   if (!existsSync(dbPath)) return [];
-  const db = new DatabaseSync(dbPath, { readOnly: true });
+  const db = openReadOnly(dbPath);
   try {
     const rows = db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id').all(after) as { id: number; ts: string; type: string; actor: string; source: string; payload: string }[];
     return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }) as StoredEvent);
@@ -835,9 +905,14 @@ function readEvents(dbPath: string, after = 0): StoredEvent[] {
   }
 }
 
+/**
+ * A JSON answer, never stored by a browser or a proxy. Compressed only for a view COMPRESSIBLE_API lists (the BREACH
+ * check, src/dashboard-compress.ts) and a client that accepts it.
+ */
 export function json(res: ServerResponse, status: number, body: unknown) {
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(body));
+  const req = res.req as IncomingMessage | undefined;
+  const view = mayCompressApi(new URL(req?.url ?? '/', 'http://127.0.0.1').pathname);
+  send(res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(view ? { vary: 'accept-encoding' } : {}) }, Buffer.from(JSON.stringify(body)), view ? requestEncoding(req) : null);
 }
 
 async function readBody(req: IncomingMessage): Promise<unknown> {
@@ -867,7 +942,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
    * repo stops getting this instance's changes once the cache says so, even on a stream opened before.
    */
   const clients = new Map<ServerResponse, { role: Role; login: string | null }>();
-  let lastId = readEvents(opts.eventsDb).at(-1)?.id ?? 0;
+  // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
+  const eventCache = new EventCache(opts.eventsDb);
+  let lastId = eventCache.lastId();
 
   const owners = opts.cfg.project.owners;
   const repo = opts.cfg.project.project.repo;
@@ -985,9 +1062,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   };
 
   const state = (who: Who) => {
-    const events = readEvents(opts.eventsDb);
-    const p = project(events);
-    const posted = events.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>);
+    const events = eventCache.all();
+    // Folds of the events alone, kept until the log changes (the projection's "today" is part of its key).
+    const today = localDay();
+    const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
+    const posted = eventCache.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
     const slots = slotStatus(opts.slotsDir);
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
@@ -1001,7 +1080,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents.map(holder), fullRun: slots.fullRun ? holder(slots.fullRun) : null },
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
-      activity: isWriter(who.role) ? p.activity : viewerActivity(events),
+      activity: isWriter(who.role) ? p.activity : eventCache.memo('viewerActivity', viewerActivity),
       // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
@@ -1025,7 +1104,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
       inbox: inbox(p, who.login),
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
-      prCounts: prCounts(prsView(events).prs),
+      prCounts: prCounts(eventCache.memo('prsView', prsView).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
       // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why; and
@@ -1050,6 +1129,24 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     // Every route, the page itself included: a key in the URL is refused, never accepted.
     if (refuseKeyInUrl(url, res, [token])) return;
     try {
+      // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
+      // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
+      if (url.pathname === PROOF_PATH && req.method === 'GET') {
+        const nonce = url.searchParams.get('nonce') ?? '';
+        if (!NONCE.test(nonce)) return json(res, 400, { error: 'nonce: 64 hex characters' });
+        return json(res, 200, { proof: dashboardProof(token, req.socket.localPort ?? 0, nonce) });
+      }
+      // The key page's help, before any key: where the key's file is and a command that copies it (#467), never the key.
+      // Only to a process on this machine, never through a proxy or the hub, and only under a loopback Host, so a site
+      // the browser reached through DNS rebinding can't read it. On Linux, only this OS user's own process (the kernel's
+      // socket table); on macOS and Windows any local process can read the path (never the key: the file is 0600).
+      if (url.pathname === KEY_HELP_PATH && req.method === 'GET') {
+        const local = req.socket.localPort;
+        const me = req.socket.remotePort !== undefined && local !== undefined ? loopbackPeerIsMe(req.socket.remotePort, local) : false;
+        if (!breakGlassAllowed(req) || !loopbackHostHeader(req.headers.host, local) || me === false) return json(res, 404, { error: 'not here' });
+        const file = join(opts.stateDir, 'dashboard-token');
+        return json(res, 200, { file, copy: copyFileCommand(file) });
+      }
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
@@ -1076,7 +1173,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!isOwnerHere) return refuse(403, `only the instance's owners (admin on ${repo}) may accept a commit as a bootstrap merge; @${who.login} is a ${who.role}`);
           if (!target) return refuse(400, 'name either a commit sha or a PR number');
           const branch = opts.cfg.project.project.default_branch;
-          const r = acceptMerge({ stateFile: join(opts.stateDir, 'main-watch.json'), git: opts.acceptGit ?? acceptGit(opts.root, 'origin', branch), branch, target, reason, by: who.login, judgedPrs: judgedPrs(readEvents(opts.eventsDb)) });
+          const r = acceptMerge({ stateFile: join(opts.stateDir, 'main-watch.json'), git: opts.acceptGit ?? acceptGit(opts.root, 'origin', branch), branch, target, reason, by: who.login, judgedPrs: judgedPrs(eventCache.all()) });
           if (!r.ok) return refuse(r.status, r.error);
           const a = r.acceptance;
           audit(who, 'main_watch.accept', { id: a.id, sha: a.sha, pr: a.pr, head: a.head, base: a.base, reason: a.reason });
@@ -1090,18 +1187,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // Each action is refused again by the route it calls (decide, the console).
         if (url.pathname === '/api/board' && req.method === 'GET') {
           const slots = slotStatus(opts.slotsDir);
-          const board = boardView({ events: readEvents(opts.eventsDb), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
+          const board = boardView({ events: eventCache.all(), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
           return json(res, 200, who.role === 'owner' || who.role === 'writer' ? board : boardForViewer(board));
         }
         // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
         if (url.pathname === '/api/test-runs' && req.method === 'GET') {
           const held = testSlotsHeld(opts.slotsDir);
-          return json(res, 200, testRunsView({ events: readEvents(opts.eventsDb), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
+          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {
           if (!isOwnerHere) return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
-          return json(res, 200, { entries: readEvents(opts.eventsDb).filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
+          return json(res, 200, { entries: eventCache.all().filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...(e.payload as object) })) });
         }
         // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
         if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machineOwnersFile ? { machineOwnersFile: opts.machineOwnersFile } : {}), ...(secretRules ? { secretRules } : {}) })) return;
@@ -1109,7 +1206,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // the writers', like the throughput it carries.
         if (url.pathname === '/api/report' && req.method === 'GET') {
           if (!mayReadReports(who.role)) return json(res, 403, { error: writersOnly('the report preview is', who) });
-          const events = readEvents(opts.eventsDb);
+          const events = eventCache.all();
           const last = [...events].reverse().find((e) => e.type === 'report.posted');
           return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
         }
@@ -1117,7 +1214,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
         if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
-          const all = readEvents(opts.eventsDb, Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+          const all = eventCache.after(Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
           const evs = isWriter(who.role) ? all : forViewers(all);
           const issue = url.searchParams.get('issue');
@@ -1200,7 +1297,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
         // is the runs gate's to say (the owner and the writers), as for the rest of the run.
         const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
-        if (research && req.method === 'GET') return json(res, 200, researchView(readEvents(opts.eventsDb), research[1]!));
+        if (research && req.method === 'GET') return json(res, 200, researchView(eventCache.all(), research[1]!));
         // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
         if (url.pathname === '/api/live' && req.method === 'GET') return json(res, 200, liveView({ ...opts, user: who.login, role: who.role }));
         const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
@@ -1276,34 +1373,34 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
         if (url.pathname === '/api/prs' && req.method === 'GET') {
-          return json(res, 200, { ...prsView(readEvents(opts.eventsDb)), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
+          return json(res, 200, { ...prsView(eventCache.all()), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
         // Intake: each report (redacted) and what became of it, and the numbers for the health panel. The owner's
         // and the writers' to read, like the runs.
         if (url.pathname === '/api/intake' && req.method === 'GET') {
           if (!mayReadIntake(who.role)) return json(res, 403, { error: writersOnly('intake reports are', who) });
-          const events = readEvents(opts.eventsDb);
+          const events = eventCache.all();
           return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
         }
         // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
         // tuning each. The owner's and the writers' to read, like the runs it is made of.
         if (url.pathname === '/api/throughput' && req.method === 'GET') {
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('throughput is', who) });
-          return json(res, 200, throughput(readEvents(opts.eventsDb)));
+          return json(res, 200, throughput(eventCache.all()));
         }
         // Repeated feedback (src/checks-from-feedback.ts): the constraints people's "no"s cluster into, each with its
         // count, its evidence links and its proposal. People's words, so the owner's and the writers', like the runs.
         if (url.pathname === '/api/constraints' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('repeated feedback is', who) });
           const c = opts.cfg.project.checks_from_feedback;
-          return json(res, 200, constraintsView(readEvents(opts.eventsDb), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
+          return json(res, 200, constraintsView(eventCache.all(), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
         }
         // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
         // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
         if (url.pathname === '/api/trust') {
           if (req.method !== 'GET') return json(res, 405, { error: 'the trust numbers are read-only' });
-          const view = trustView(readEvents(opts.eventsDb), { agents: instanceAgents(opts) });
+          const view = trustView(eventCache.all(), { agents: instanceAgents(opts) });
           return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
         }
         // Metrics (src/merge-metrics.ts deliveryMetrics): merges, main red, time to green, reverts and fix-forward, PR CI
@@ -1312,7 +1409,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/metrics') {
           if (req.method !== 'GET') return json(res, 405, { error: 'the metrics are read-only' });
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
-          return json(res, 200, { ...deliveryMetrics(readEvents(opts.eventsDb), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
+          return json(res, 200, { ...deliveryMetrics(eventCache.all(), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
         }
         // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
         // and writers' to read; only an owner clears a test from quarantine, audited.
@@ -1320,11 +1417,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // change from its baseline. What runs cost: the owners' and writers', like the flaky tests and throughput.
         if (url.pathname === '/api/harness-evals' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: `the harness evals are for the instance's owners and writers; @${who.login} is a ${who.role}` });
-          return json(res, 200, { ...harnessEvalView(readEvents(opts.eventsDb)), enabled: opts.cfg.project.harness_evals.enabled });
+          return json(res, 200, { ...harnessEvalView(eventCache.all()), enabled: opts.cfg.project.harness_evals.enabled });
         }
         if (url.pathname === '/api/flaky' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: `the flaky tests are for the instance's owners and writers; @${who.login} is a ${who.role}` });
-          return json(res, 200, { ...flakyView(readEvents(opts.eventsDb), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });
+          return json(res, 200, { ...flakyView(eventCache.all(), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });
         }
         if (url.pathname === '/api/flaky/clear' && req.method === 'POST') {
           const body = (await readBody(req)) as { test?: unknown };
@@ -1343,7 +1440,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
         if (url.pathname === '/api/learnings' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the learnings are', who) });
-          return json(res, 200, { ...learningsView(readEvents(opts.eventsDb)), canPromote: isOwnerHere });
+          return json(res, 200, { ...learningsView(eventCache.all()), canPromote: isOwnerHere });
         }
         if (url.pathname === '/api/learnings/promote' && req.method === 'POST') {
           const body = (await readBody(req)) as { fingerprint?: unknown; line?: unknown };
@@ -1363,14 +1460,25 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
           if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
-          const digest = waitingOnYou(readEvents(opts.eventsDb));
+          const digest = waitingOnYou(eventCache.all());
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
         }
         // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and
         // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
         if (url.pathname === '/api/usage' && req.method === 'GET') {
-          const v = usageView(readEvents(opts.eventsDb));
-          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
+          const v = usageView(eventCache.all());
+          // Logins the API refused (src/claude-auth-failure.ts): the account as Claude names it and Claude's message
+          // (redacted), never a token; the owner may ask for a re-check.
+          const signin = authHoldsOf(eventCache.all()).map((h) => ({ login: h.login, detail: h.detail, since: h.since, lastCheck: h.lastCheck }));
+          return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null, signinFailed: signin, canRecheckSignin: isOwnerHere });
+        }
+        // The owner's re-check of a refused Claude login: recorded for the coordinator (which runs the one tiny call as
+        // the agent user), never run here. One a minute at most, however often it is asked.
+        if (url.pathname === '/api/claude-auth/recheck' && req.method === 'POST') {
+          if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may re-check the Claude sign-in; @${who.login} is a ${who.role}` });
+          requestAuthRecheck(opts.stateDir, who.login);
+          audit(who, 'claude_auth.recheck', {});
+          return json(res, 202, { ok: true, note: 'the coordinator checks the login on its next tick, with one minimal real call' });
         }
         if (url.pathname === '/api/health' && req.method === 'GET') {
           let stats: MachineStats | null = null;
@@ -1379,7 +1487,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          const view = healthView(readEvents(opts.eventsDb), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
+          const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
           // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
           // WHY: the proxy's internal host is the machine's network layout: writers only, as costs are.
@@ -1610,7 +1718,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/first-run/claude-signin' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
           if (opts.instance) {
-            const asks = asksFrom(readEvents(opts.eventsDb).filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
+            const asks = asksFrom(eventCache.all().filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
             return json(res, 200, { mode: 'server', canAct: isOwnerHere, ...claudeServerView({ instance: opts.instance, asks, role: who.role, engineRoot: engineRoot(), ...(opts.claudeAccountDir ? { accountDir: opts.claudeAccountDir } : {}) }) });
           }
           return json(res, 200, { mode: 'local', canAct: isOwnerHere, ...signin.view(isOwnerHere) });
@@ -1675,7 +1783,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/first-run/discord' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
           if (!instanceHome) return json(res, 200, { available: false, why: "Discord intake is a server instance's: this dashboard serves a checkout, and local mode has no Discord wiring" });
-          const all = asksFrom(readEvents(opts.eventsDb).filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
+          const all = asksFrom(eventCache.all().filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
           return json(res, 200, discordSetupView({ instance: opts.instance!, home: instanceHome, asks: all, role: who.role, engineRoot: engineRoot() }));
         }
         if (url.pathname.startsWith('/api/first-run/discord/')) {
@@ -1759,7 +1867,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.addProject}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('adding a project is', who) });
           const requester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
-          return json(res, 200, addProjectView(readEvents(opts.eventsDb).filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, { ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) }));
+          return json(res, 200, addProjectView(eventCache.all().filter((e) => (ADD_PROJECT_EVENTS as readonly string[]).includes(e.type)), { role: who.role, requester }, { ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) }));
         }
         // Add project's repo picker (src/setup/repo-picker.ts): an account's repos the agents' App can be installed on,
         // the signed-in person's own account by default. Read-only: it starts nothing, and the start checks it all again.
@@ -1772,12 +1880,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // instance's owner who is also a machine owner, on an allowed device (or the break-glass),
         // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
         // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
-        const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk, requests: machineRequests(readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
+        const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk, requests: machineRequests(eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type))) });
         // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
         // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
         if (url.pathname === '/api/updates' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('engine updates are', who) });
-          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT), drainView(opts.slotsDir)));
+          return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT), drainView(opts.slotsDir), lastCheck(opts.machine?.updatesStatePath ?? UPDATES_STATE)));
         }
         if (url.pathname === `/api/${DEVICE_VIEWS.machine}` && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the machine settings are', who) });
@@ -1860,7 +1968,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
         if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
-          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
           return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
@@ -1895,7 +2003,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // A local checkout has no hub, and anyone but a machine owner has no screen: both are told only that (the
           // Machine page asks on every visit, so this is an answer, not an error).
           if (!opts.instance || !mayViewTailscale(accountRequester, opts.machineOwnersFile)) return json(res, 200, noTailscaleView(who.login, opts.instance ?? null));
-          const events = readEvents(opts.eventsDb).filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
+          const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
           return json(res, 200, tailscaleView({ status: await tailscaleNow(url.searchParams.get('fresh') === '1'), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
         }
         // Run one step: a machine request (`tailscale <step>`, two fixed words) that the coordinator runs through the
@@ -1945,7 +2053,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
-          return json(res, 200, checkResults(readEvents(opts.eventsDb), issue));
+          return json(res, 200, checkResults(eventCache.all(), issue));
         }
         // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
         // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a
@@ -1953,7 +2061,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/goal-graph' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
-          const all = readEvents(opts.eventsDb);
+          const all = eventCache.all();
           const runs = mayReadRuns(who.role);
           const live = runs ? liveRuns(opts.stateDir) : [];
           const runOf = (n: number) => live.find((r) => r.issue === n)?.run ?? runsForIssue(opts.stateDir, n).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]?.id ?? null;
@@ -2038,7 +2146,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The coordinator writes the log from another process: poll it and fan new events out.
   const poll = setInterval(() => {
     if (!clients.size) return;
-    const fresh = readEvents(opts.eventsDb, lastId);
+    const fresh = eventCache.after(lastId);
     if (!fresh.length) return;
     lastId = fresh.at(-1)!.id;
     const visible = fresh.filter((e) => e.type !== 'coordinator.tick');

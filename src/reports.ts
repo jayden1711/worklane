@@ -12,6 +12,7 @@ import { offsiteLine, offsiteStatus } from './offsite-backup.js';
 import { project } from './projection.js';
 import { readRun, RUNS_DIR, type RunRecord } from './run-record.js';
 import { throughput, throughputMarkdown } from './throughput.js';
+import { localDay } from './local-day.js';
 
 const fmtH = (h: number) => (h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(h < 10 ? 1 : 0)}h`);
 const money = (n: number) => `$${n.toFixed(2)}`;
@@ -74,7 +75,7 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const now = opts.now ?? new Date();
   const since = opts.since.getTime();
   const after = (e: StoredEvent) => Date.parse(e.ts) > since;
-  const p = project(events, now.toISOString().slice(0, 10));
+  const p = project(events, localDay(now));
   const title = (n: number) => p.tasks.find((t) => t.issue === n)?.title ?? `#${n}`;
   const owner = (n: number) => p.tasks.find((t) => t.issue === n)?.owner;
   const lines: string[] = [];

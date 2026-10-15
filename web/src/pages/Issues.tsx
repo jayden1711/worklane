@@ -3,7 +3,7 @@ import { Columns3, List, Save, X } from 'lucide-react';
 import { listViews, saveViews, type Filters, type SavedView, type State, type Task, type TaskStatus } from '../api';
 import { navigate, pageKey, typing } from '../App';
 import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd, LevelBadge, STATUS_LABEL, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const TABS: { key: string; label: string; statuses: TaskStatus[] }[] = [
   { key: 'current', label: 'Current', statuses: ['claimed', 'reproducing', 'building', 'verifying', 'evaluating', 'awaiting_decision', 'queued', 'blocked'] },

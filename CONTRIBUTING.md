@@ -55,6 +55,10 @@ npm run typecheck
 - Prefer making the wrong thing impossible (architecture) over a test or lint, and a test or lint over a written rule.
 - Every bug fix comes with a test that fails without the fix.
 
+## Releasing
+
+The owner cuts releases with a signed tag (`scripts/release.mjs`). CI (`.github/workflows/release.yml`) checks the tag's SSH signature against `.github/release-signers` on main and only **stages** the version on npm (`npm stage publish`); it goes live when the owner approves it on npmjs.com with 2FA. The repo variable `NPM_PUBLISH=true` is the switch; without it every run is a dry run. The checklist: [docs/releasing.md](docs/releasing.md).
+
 ## Pull requests
 
 Keep them small and focused, with atomic commits. Describe how you verified the change, not just that tests pass.

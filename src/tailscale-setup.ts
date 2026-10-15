@@ -25,9 +25,10 @@ import type { Role } from './console/asks.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
 import { MACHINE_EVENTS, MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT } from './updates.js';
+import { varLibPath } from './os/system-paths.js';
 
 /** Where tailscale.sh writes steps.jsonl (root's, 0644) and, while `up` waits, login-url (0400, this coordinator's user; lib.sh's TAILSCALE_DIR). */
-export const TAILSCALE_DIR = `/var/lib/${BRAND.cli}/tailscale`;
+export const TAILSCALE_DIR = varLibPath('tailscale');
 /** The installed engine's script: its `status --json` is what the screen shows (no root needed). */
 export const TAILSCALE_SCRIPT = join(ENGINE_CURRENT, 'scripts', 'setup', 'tailscale.sh');
 /** The helper's four tailscale commands, in the order the screen walks them (scripts/machine/, the helper's source; a test keeps the two equal). */
