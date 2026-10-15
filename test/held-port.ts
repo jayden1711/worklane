@@ -78,7 +78,9 @@ export function ephemeralStart(read: (f: string) => string = (f) => readFileSync
  * server, a live instance's, or this test's own next listen(0), which the OS may hand the same port.
  *
  * Here the port is the local end of an open connection, bound explicitly: nothing listens on it, so a connection
- * there is refused, and nothing else can bind it until close(). It is below the ephemeral range on purpose: Linux
+ * there is refused, and the OS hands it to no listen(0) or connect() until close() (it is outside the range they are
+ * given ports from). A program that listens on this exact port on purpose could still take it: Node binds an explicit
+ * local port with SO_REUSEADDR, as every Node server does. It is below the ephemeral range on purpose: Linux
  * gives an ephemeral port already in use to another connect() whenever the 4-tuple differs, so a connect to a held
  * ephemeral port can get that same port as its source and connect to itself (TCP simultaneous open): no refusal, and
  * its own request read back as the answer ("fetch failed", not ECONNREFUSED, on a busy release machine). No connect()

@@ -350,9 +350,10 @@ test('the ephemeral range start: Linux reads ip_local_port_range; anything unrea
   } else assert.equal(ephemeralStart(), 49_152);
 });
 
-test('a refused port is held: a connection there is refused at once, every time, and nothing else can listen on it until it is closed', async () => {
+test('a refused port is held: a connection there is refused at once, every time, and the OS hands it to no listen(0) or connect() until it is closed', async () => {
   const p = await refusedPort();
   const other = createServer();
+  const others: Server[] = [];
   try {
     // Never in the range the OS gives connect() its source ports from, so no connect there can connect to itself.
     assert.ok(p.port < ephemeralStart(), `${p.port} is below the ephemeral range (${ephemeralStart()})`);
@@ -367,13 +368,23 @@ test('a refused port is held: a connection there is refused at once, every time,
     const outcomes = await Promise.all(Array.from({ length: 200 }, () => connectOutcome(p.port)));
     const odd = outcomes.filter((x) => x.code !== 'ECONNREFUSED' || x.ms > 2_000);
     assert.deepEqual(odd, [], 'every connect refused, at once');
-    // Linux (CI, and the release machine): a listener can't bind a port an open connection holds. macOS's
-    // SO_REUSEADDR lets one bind it on purpose; nothing there is handed it by listen(0), which is what took it.
-    const bound = new Promise<void>((ok, fail) => (other.once('error', fail), other.listen(p.port, '127.0.0.1', () => ok())));
-    if (process.platform === 'linux') await assert.rejects(bound, /EADDRINUSE/);
-    else await bound.catch(() => undefined);
+    // What took the old port: a listen(0) handed it (the stand-in's own, or another process's). Below the range, no
+    // listen(0) is: 300 of them, all held at once, none get it. (A program that listens on this exact port on purpose
+    // could; the old one, held ephemeral, could be both handed out and connected to itself.)
+    const handed = await Promise.all(
+      Array.from(
+        { length: 300 },
+        () =>
+          new Promise<Server>((ok) => {
+            const s = createServer();
+            s.listen(0, '127.0.0.1', () => ok(s));
+          }),
+      ),
+    );
+    others.push(...handed);
+    assert.deepEqual(handed.map((s) => (s.address() as { port: number }).port).filter((x) => x === p.port), [], 'no listen(0) is handed the held port');
   } finally {
-    if (other.listening) await new Promise<void>((r) => other.close(() => r()));
+    await Promise.all([other, ...others].map((s) => new Promise<void>((r) => (s.listening ? s.close(() => r()) : r()))));
     await p.close();
   }
 });
