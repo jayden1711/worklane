@@ -2064,6 +2064,46 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
           [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
           [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
+      # The Siri gateway on a real machine (docs/siri.md): dashboards.sh --siri gives wl-dash the instance's Siri gateway
+      # token (and takes it away again without --siri), the hub listens on 127.0.0.1:4397, and the kernel's word on who
+      # opened the connection (/proc/net/tcp) refuses a program on this machine whatever headers it sends; the dashboard
+      # key never works on /api/siri, and the gateway token works nowhere else; serve-siri adds 8443 and keeps 443.
+      - name: "Siri gateway: wl-dash reads the gateway token only with --siri; a local program is refused by the kernel's word; the dashboard key never works on /api/siri; serve-siri adds 8443 only"
+        run: |
+          d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
+          state="$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state"
+          port="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/dashboard.js"); console.log(m.instancePort("ci"));')"
+          id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
+          [ -n "$id" ] && [ -n "$url" ]
+          sudo cp "$d/steps.jsonl" "$F/siri-steps-before.jsonl"
+          sudo test -s "$state/siri-gateway-token"
+          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash reads the Siri gateway token without --siri" >&2; exit 1; fi
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci | tee "$F/siri-dashboards.log"
+          grep -q -- ' --siri-port 4397' "$hub"
+          sudo -u wl-dash test -r "$state/siri-gateway-token"
+          if sudo -u wl-dash test -w "$state/siri-gateway-token"; then echo "wl-dash can write the Siri gateway token" >&2; exit 1; fi
+          if sudo cmp -s "$state/siri-gateway-token" "$state/dashboard-token"; then echo "the gateway token is the dashboard token" >&2; exit 1; fi
+          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4397/tell)" != 000 ] && break; sleep 1; done
+          # One try from this runner's user, which is not tailscaled, naming a tailnet address: refused before any token is read.
+          peer="$(printf '100.%s.%s.%s' 101 102 103)"
+          code="$(curl -sS -o "$F/siri-local.json" -w '%{http_code}' -X POST http://127.0.0.1:4397/tell -H 'content-type: application/json' -H "x-forwarded-for: $peer" -d '{"text":"an idea"}')"
+          cat "$F/siri-local.json"; echo
+          [ "$code" = 403 ] && jq -e '.speech|test("only answers from your tailnet")' "$F/siri-local.json"
+          tok="$(sudo cat "$state/dashboard-token")"; echo "::add-mask::$tok"
+          gw="$(sudo cat "$state/siri-gateway-token")"; echo "::add-mask::$gw"
+          # The dashboard key on the instance's Siri routes: refused; the gateway token on the dashboard's routes: refused.
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" -H 'content-type: application/json' -d '{"text":"x"}' "http://127.0.0.1:$port/api/siri/tell")" = 401 ]
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $gw" -H 'content-type: application/json' -d '{"id":"x","answer":"approve"}' "http://127.0.0.1:$port/api/decide")" = 401 ]
+          if sudo test -d "$state/voice"; then sudo find "$state/voice" -name '*.json' | grep -q . && { echo "something reached the voice inbox" >&2; exit 1; }; fi
+          # serve-siri, by hand as root: 8443 to the gateway, 443 still to the hub, never Funnel.
+          sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri
+          sudo jq -e --arg n "$TS_NAME" '.Web["\($n):8443"].Handlers["/"].Proxy=="http://127.0.0.1:4397" and .Web["\($n):443"].Handlers["/"].Proxy=="http://127.0.0.1:4399" and (has("AllowFunnel")|not)' /var/lib/ci-tailscale/serve.json
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.siri and .serve and (.funnel|not)'
+          # Back as it was for the steps after: no gateway, and wl-dash's read of the gateway token removed.
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" ci > "$F/siri-dashboards-off.log"
+          if grep -q -- '--siri-port' "$hub"; then echo "the gateway stayed on" >&2; exit 1; fi
+          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash still reads the Siri gateway token" >&2; exit 1; fi
+          sudo install -o root -g root -m 0644 "$F/siri-steps-before.jsonl" "$d/steps.jsonl"
       # The first-run wizard's Tailscale screen, end to end on this machine: the instance's own dashboard (the owner's
       # break-glass token, on loopback), the request in its event log, the real coordinator (worklane-ci.service) running
       # the helper through sudo, the step's own unit, and the screen's view of it. The stand-in is logged out first.

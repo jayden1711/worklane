@@ -507,6 +507,18 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   high-risk merge, a plan held for a high-risk reason, a delegation); those take a click.
 - Off by default twice: `voice.enabled` in `intake.yaml`, and each owner's own switch in Settings, Voice.
 
+### 2.6 Siri ("Hey Siri, tell")
+
+- A phone's Siri Shortcut posts what was said to the hub's Siri gateway, over the tailnet, with a device token an
+  owner made on the dashboard (docs/siri.md). The instance leaves it in the same voice inbox as 2.5
+  (`submitVoiceIntake`, sender `siri:<device name>`), so it goes through the same intake pass.
+- Never trusted: `trusted` has no voice or Siri list (a config error if one is added), so its draft is always an Inbox
+  decision for an owner or a writer. Even once approved, the App files it, so it isn't actionable until a writer adds
+  `ready`.
+- The audit names the device, its token id, its Tailscale node and the idea's id and length, never its words.
+- Off unless `siri.enabled` in `intake.yaml` (which also takes the voice source on for it). `siri.ask_model` and
+  `siri.ask_max_usd_per_day` are for "Hey Siri, ask" (docs/siri.md).
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.

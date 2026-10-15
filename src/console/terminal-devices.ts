@@ -30,6 +30,8 @@ export interface Device {
   tags: string[];
   /** Its Tailscale address. */
   ip: string;
+  /** Tailscale's stable node id (whois Node.StableID), when Tailscale gives one: a Siri token binds to it. */
+  stableId?: string;
 }
 
 export type DeviceCheck = { ok: true; device: Device } | { ok: false; why: string };
@@ -81,7 +83,7 @@ export function identifyDevice(req: IncomingMessage, o: DeviceOptions): DeviceCh
   const fwd = req.headers['x-forwarded-for'];
   const ip = typeof fwd === 'string' ? fwd.trim() : '';
   if (!ip || ip.includes(',') || !isTailscaleIp(ip)) return { ok: false, why: "tailscale serve didn't name the peer's Tailscale address, so its device can't be identified" };
-  let who: { Node?: { Name?: unknown; Tags?: unknown } };
+  let who: { Node?: { Name?: unknown; Tags?: unknown; StableID?: unknown } };
   try {
     who = JSON.parse((o.whois ?? defaultWhois)(ip)) as typeof who;
   } catch {
@@ -90,7 +92,8 @@ export function identifyDevice(req: IncomingMessage, o: DeviceOptions): DeviceCh
   const name = typeof who.Node?.Name === 'string' ? who.Node.Name.replace(/\.$/, '') : '';
   const tags = Array.isArray(who.Node?.Tags) ? who.Node.Tags.filter((t): t is string => typeof t === 'string') : [];
   if (!name) return { ok: false, why: `Tailscale has no node for ${ip}` };
-  return { ok: true, device: { name, tags, ip } };
+  const stableId = typeof who.Node?.StableID === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(who.Node.StableID) ? who.Node.StableID : null;
+  return { ok: true, device: { name, tags, ip, ...(stableId ? { stableId } : {}) } };
 }
 
 /** Why this request's device may not open the terminal; null when it may. Fails closed. */
