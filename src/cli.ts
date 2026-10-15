@@ -79,8 +79,8 @@ usage: ${BRAND.cli} <command> [options]
                                    when not given. local: this checkout (default: here), as you; server:
                                    <owner/repo>, as root, through scripts/setup/add-project.sh (--timeout:
                                    how long it waits for a GitHub click or the setup PR's merge). --yes
-                                   installs missing tools as shown. To install from scratch, run
-                                   bash scripts/bootstrap.sh <repo> in a checkout (docs/quickstart.md)
+                                   installs missing tools as shown. Run through npx (npx ${BRAND.pkg} init),
+                                   local mode first installs the engine under ~/.local, then goes on from there
   export [--instance name] [--out file]
                                    one file with this checkout's (or instance's) config and history (the
                                    event log, init's checklist, findings); never secrets, locks or logs

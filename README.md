@@ -12,19 +12,25 @@ Worklane is an open-source harness that runs a crew of Claude agents on a real c
 
 ## Install
 
-From a checkout of this repo, on macOS or Linux (on Windows, use WSL2), pointing at a repo you've checked out:
+On macOS or Linux (on Windows, use WSL2), with Node.js 22.13 or newer, install the engine from npm, then open the first-run wizard from the repo you want it to work on:
 
 ```sh
-bash scripts/bootstrap.sh ~/code/your-repo
+npm i -g @worklane/cli
+cd ~/code/your-repo
+worklane dashboard --detach
 ```
 
-On a Debian or Ubuntu server, where each project runs as users of its own, run it as root instead:
+The last command starts that repo's dashboard in the background and prints one URL, last: the first-run wizard, `http://127.0.0.1:4317/first-run`. That's where every setup step after the install happens, including installing the tools the agents need (Claude Code, gitleaks, gh). The URL never carries a key: the page asks for it once, and the key stays in a file only you can read.
+
+Without a global install, `npx @worklane/cli init` in the repo installs the engine under `~/.local` and walks the same setup steps in the terminal.
+
+On a Debian or Ubuntu server, where each project runs as users of its own, use the install script from a checkout of this repo, as root:
 
 ```sh
 sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
 ```
 
-Either way, the command installs pinned, checksum-checked tools and the engine, then prints one URL: the dashboard's first-run wizard. That's where every setup step after the install happens. The URL never carries a key: the page asks for it once, and the key stays in a file only you can read.
+The script installs pinned, checksum-checked tools and the same engine as npm, v0.5.0 (the signed release pinned in it), then prints the wizard's URL. Locally, `bash scripts/bootstrap.sh ~/code/your-repo` does the same for one repo, if you'd rather have the tools pinned too.
 
 [docs/quickstart.md](docs/quickstart.md) is the getting-started guide. It covers what each wizard screen does, the server path (Tailscale, setup mode, the GitHub Apps), your first project, engine updates, Discord, and where to look when something's wrong. It also covers the current limit: a fresh server with no https origin gets no URL yet.
 
