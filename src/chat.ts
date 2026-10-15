@@ -229,6 +229,14 @@ export interface ChatTurnOptions {
   attachments?: string[];
   /** Records the turn's cost (the coordinator emits run.cost with role chat). */
   onCost?: (r: { costUsd: number; model: string; turns: number }) => void;
+  /**
+   * A turn in a conversation (src/chat-conversations.ts): its data block (the earlier turns in the window and the
+   * Project's instructions, between random-nonce markers), in the prompt, never the system prompt. Such a turn
+   * neither reads nor writes the single-shot chat's summary and history: its memory is its own thread.
+   */
+  conversation?: string;
+  /** The run's record id, once the runner has one (a conversation removes its turns' run records). */
+  onRun?: (runId: string) => void;
   now?: () => Date;
 }
 
@@ -240,8 +248,9 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
   // Attachments: text inline in the prompt, images and PDFs in the bundle for Read; all of it data, never instructions.
   const attached = attachmentPrompt(o.stateDir, o.attachments ?? [], join(o.bundleRoot, turn));
   const dir = writeBundle(o.bundleRoot, turn, o.gid, bundleFiles(o.context), attached.binary);
-  // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty.
-  const previous = readOnly ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
+  // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty. A
+  // conversation turn has its own thread instead (o.conversation), and no summary.
+  const previous = readOnly || o.conversation !== undefined ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
   const role = o.cfg.agents.roles.chief_of_staff;
   const model = role?.model ?? 'sonnet';
   // WHY: the copies in the bundle are for this turn only; afterwards only the instance's state holds the file, so the
@@ -255,8 +264,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     prompt: [
       `Context files for instance ${o.context.instance}: ${dir} (start with README.md). The repository is the current directory.`,
       '',
-      'Conversation summary so far (your memory of it, not a source; return it updated):',
-      renderSummary(previous),
+      ...(o.conversation !== undefined ? [o.conversation] : ['Conversation summary so far (your memory of it, not a source; return it updated):', renderSummary(previous)]),
       '',
       readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
       '',
@@ -273,6 +281,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     jsonSchema: CHAT_SCHEMA,
     stallMs: 10 * 60_000,
     timeoutMs: 20 * 60_000,
+    ...(o.onRun ? { onControl: (c: { runId: string | null }) => void (c.runId && o.onRun!(c.runId)) } : {}),
   }).finally(dropCopies);
   o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
   const s = (r.reason === 'succeeded' ? r.structured : undefined) as { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[]; summary?: unknown } | undefined;
@@ -291,8 +300,9 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     readOnly,
     costUsd: r.costUsd,
   };
-  // The conversation, kept per instance: only the owner's turns, redacted, 0600.
-  if (!readOnly) {
+  // The conversation, kept per instance: only the owner's turns, redacted, 0600. A conversation turn is kept in its
+  // own conversation by the caller, never here.
+  if (!readOnly && o.conversation === undefined) {
     try {
       groupOnlyDir(join(o.stateDir, 'chat'));
       appendFileSync(join(o.stateDir, CHAT_HISTORY), `${JSON.stringify(redact({ at: (o.now ?? (() => new Date()))().toISOString(), by: o.by, question: o.question, answer: out.answer, citations: kept.map((c) => `${c.kind}:${c.id}`) }))}\n`, { mode: 0o600 });
@@ -321,7 +331,9 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
 
 export class ChatError extends Error {}
 export const MAX_QUESTION = 4000;
-const CHAT_ID = /^[0-9]+-[a-f0-9]+$/;
+export const CHAT_ID = /^[0-9]+-[a-f0-9]+$/;
+/** A conversation's id (src/chat-conversations.ts). */
+export const CONVERSATION_ID = /^c-[a-f0-9]{16}$/;
 
 export interface ChatRequest {
   v: 1;
@@ -331,13 +343,15 @@ export interface ChatRequest {
   question: string;
   /** Attachment ids (src/chat-attachments.ts), checked by the dashboard when asked. */
   attachments?: string[];
+  /** A turn in this conversation (src/chat-conversations.ts): answered into the conversation, not chat/answers. */
+  conversation?: string;
 }
 
 export type ChatAnswerFile = { v: 1; id: string; at: string } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
 
-const chatDirs = (stateDir: string) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers'), keys: join(stateDir, 'chat', 'keys') });
+export const chatDirs = (stateDir: string) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers'), keys: join(stateDir, 'chat', 'keys') });
 
-function writeJson(dir: string, id: string, v: unknown) {
+export function writeJson(dir: string, id: string, v: unknown) {
   groupOnlyDir(dir);
   const tmp = join(dir, `.${id}.${randomBytes(3).toString('hex')}.tmp`);
   writeFileSync(tmp, JSON.stringify(redact(v)), { mode: 0o600 });
@@ -413,7 +427,9 @@ export function takeChatRequests(stateDir: string): ChatRequest[] {
     const p = join(d, f);
     try {
       const r = JSON.parse(readFileSync(p, 'utf8')) as ChatRequest;
-      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') out.push({ ...r, attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [] });
+      // A conversation turn's request names a well-formed conversation, or it is dropped: never run as a single-shot one.
+      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string' && (r.conversation === undefined || (typeof r.conversation === 'string' && CONVERSATION_ID.test(r.conversation))))
+        out.push({ ...r, attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [] });
     } catch {
       // unreadable: dropped
     }

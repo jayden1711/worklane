@@ -28,10 +28,11 @@ import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
 import { recordProfileSwitches } from './claude-profiles.js';
 import { failoverStep } from './claude-failover.js';
-import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatAnswer, type ChatRequest } from './chat.js';
 import { siriPass } from './coordinator/siri.js';
 import { machineStats } from './os/stats.js';
 import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
+import { conversationTurn, projectFileIds, sweepRemovedMembers, writeConversationAnswer } from './chat-conversations.js';
 import { pushProblems } from './push-check.js';
 import { needsPlan, PLAN_DISALLOWED, PLAN_TOOLS, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
@@ -116,6 +117,7 @@ export class Coordinator extends HarnessEvals {
     await step('config', () => this.refreshConfig(), undefined);
     await step('settings', () => this.refreshSettings(), undefined);
     await step('chat attachments', () => this.sweepChatAttachments(), undefined);
+    await step('chat members', () => this.sweepChatMembers(), undefined);
     // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
     await step('usage', () => this.resumeIfDue(), false);
     // A Claude login the API refused is checked with one tiny real call (every 10 min at most, at once on the owner's
@@ -371,8 +373,10 @@ export class Coordinator extends HarnessEvals {
   }
 
   private async chatRequest(q: ChatRequest): Promise<void> {
+    // A turn in a conversation is answered into the conversation's own turn file; a single-shot question as always.
+    const write = (a: { answer: ChatAnswer } | { refused: string }) => (q.conversation ? void writeConversationAnswer(this.d.stateDir, q.conversation, q.id, a) : writeChatAnswer(this.d.stateDir, q.id, a));
     const refuse = (why: string) => {
-      writeChatAnswer(this.d.stateDir, q.id, { refused: why });
+      write({ refused: why });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: true, citations: 0, draft: 'none', actions: 0, cost_usd: 0, refused: why });
     };
     try {
@@ -398,21 +402,21 @@ export class Coordinator extends HarnessEvals {
       // Bundles beside the agents' task files: readable by their group, never writable by it.
       const at = this.d.agentTasks;
       const bundle = at ? { root: join(dirname(at.dir), 'chat'), gid: at.gid } : { root: join(this.d.stateDir, 'chat', 'bundles'), gid: process.getgid?.() ?? 0 };
-      const a = await chatTurn({
+      const turn = {
         cfg: this.d.cfg,
         context,
         question: q.question,
         by: q.by,
-        ...(q.attachments?.length ? { attachments: q.attachments } : {}),
         runner: this.d.runner,
         stateDir: this.d.stateDir,
         bundleRoot: bundle.root,
         gid: bundle.gid,
         repo: this.d.repo,
         remainingUsd: left,
-        onCost: (r) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
-      });
-      writeChatAnswer(this.d.stateDir, q.id, { answer: a });
+        onCost: (r: { costUsd: number; model: string; turns: number }) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+      };
+      const a = q.conversation ? await conversationTurn({ ...turn, request: q, ...(this.d.roleOf ? { roleOf: this.d.roleOf } : {}) }) : await chatTurn({ ...turn, ...(q.attachments?.length ? { attachments: q.attachments } : {}) });
+      write({ answer: a });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
     } catch (e) {
       if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);
@@ -539,7 +543,19 @@ export class Coordinator extends HarnessEvals {
   sweepChatAttachments(now = Date.now()): void {
     if (now - this.attachmentsSweptAt < 3_600_000) return;
     this.attachmentsSweptAt = now;
-    sweepAttachments(this.d.stateDir, attachmentCaps(this.d.settings?.().settings ?? {}).retention_days, new Date(now));
+    sweepAttachments(this.d.stateDir, attachmentCaps(this.d.settings?.().settings ?? {}).retention_days, projectFileIds(this.d.stateDir), new Date(now));
+  }
+
+  private membersSweptAt = 0;
+
+  /**
+   * Chat conversations and Projects of people who lost their role here are deleted REMOVED_MEMBER_DAYS after
+   * (src/chat-conversations.ts): checked once an hour, only where roles can be looked up.
+   */
+  async sweepChatMembers(now = Date.now()): Promise<void> {
+    if (!this.d.roleOf || now - this.membersSweptAt < 3_600_000) return;
+    this.membersSweptAt = now;
+    await sweepRemovedMembers({ stateDir: this.d.stateDir, roleOf: this.d.roleOf, defaultOwner: this.d.cfg.project.owners.default, now: new Date(now) });
   }
 
   /**

@@ -36,7 +36,9 @@ import { deployGateView } from './deploy-gate/gate.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
-import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswer, type ChatAnswerFile } from './chat.js';
+import { handleConversationRoute } from './chat-routes.js';
+import { mayDownload, mayRemove, sharers } from './chat-conversations.js';
 import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
@@ -1445,11 +1447,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const m = sub && sub !== 'limits' ? readAttachment(opts.stateDir, sub) : null;
           if (sub && sub !== 'limits' && !m) return json(res, 404, { error: 'no such attachment (it may have expired)' });
           if (m && req.method === 'GET') {
+            // Its uploader, or someone who can see a Project that holds it (src/chat-conversations.ts): anyone else is
+            // refused even knowing the id, owners included.
+            if (!mayDownload(opts.stateDir, m, who.login, await sharers(opts.stateDir, opts.roleOf))) return json(res, 403, { error: 'only who attached it, or someone who can see a project that holds it, may open an attachment' });
             res.writeHead(200, downloadHeaders(m));
             return void res.end(attachmentBytes(opts.stateDir, m.id));
           }
           if (m && req.method === 'DELETE') {
-            if (!isOwnerHere && m.by.toLowerCase() !== who.login.toLowerCase()) return json(res, 403, { error: 'only who attached it, or an owner, may remove an attachment' });
+            // Its uploader, or the creator of a Project holding it: nobody else, owners included (src/chat-conversations.ts).
+            if (!mayRemove(opts.stateDir, m, who.login)) return json(res, 403, { error: 'only who attached it, or the creator of a project that holds it, may remove an attachment' });
             removeAttachment(opts.stateDir, m.id);
             audit(who, 'chat.attachment_removed', { id: m.id });
             return json(res, 200, { ok: true });
@@ -1459,7 +1465,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/chat' && req.method === 'POST') {
           const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
           try {
-            const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts)).map((m) => m.id);
+            const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts), who.login).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
             const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
             audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
@@ -1470,40 +1476,48 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
+        // The confirm flow that files a chat answer's draft (a single-shot answer's, or a conversation turn's): the
+        // owner's only; the stored draft, validated again here, with `ready`, through this instance's backlog; once.
+        const fileDraft = async (id: string, answer: ChatAnswer | null): Promise<{ status: number; body: unknown }> => {
+          if (!isOwnerHere) return { status: 403, body: { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` } };
+          if (!answer?.issueDraft) return { status: 400, body: { error: 'this answer has no issue draft' } };
+          if (existsSync(filedPath(opts.stateDir, id))) return { status: 409, body: { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, id), 'utf8')) as object) } };
+          // The draft as the answer file has it, never one from the request, checked again as the harness will.
+          const d = validateDraft(answer.issueDraft.title, answer.issueDraft.body);
+          if (!d.ok) return { status: 400, body: { error: `the draft isn't one the harness can take: ${d.why}` } };
+          if (!opts.backlog) return { status: 400, body: { error: 'this dashboard has no backlog to file to' } };
+          // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
+          mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
+          try {
+            writeFileSync(filedPath(opts.stateDir, id), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
+          } catch {
+            return { status: 409, body: { error: 'this draft is being filed already' } };
+          }
+          let number: number;
+          try {
+            number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
+          } catch (e) {
+            rmSync(filedPath(opts.stateDir, id), { force: true });
+            throw e;
+          }
+          writeFileSync(filedPath(opts.stateDir, id), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
+          audit(who, 'chat.draft_filed', { id, issue: number });
+          return { status: 200, body: { ok: true, number } };
+        };
+        const filedOf = (id: string) => {
+          const rec = existsSync(filedPath(opts.stateDir, id)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, id), 'utf8')) as { number?: number }) : null;
+          return typeof rec?.number === 'number' ? { number: rec.number } : null;
+        };
+        // Conversations and Projects (src/chat-routes.ts): owners' and writers' only, each conversation its creator's.
+        if (await handleConversationRoute(req, res, url, { stateDir: opts.stateDir, who, roleOf: opts.roleOf, caps: chatAttachmentCaps(opts), readBody, json, audit: (action, detail) => audit(who, action, detail), answerFor: chatAnswerFor, filed: filedOf, fileDraft })) return;
         const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
         if (chat) {
           const f = chatAnswer(opts.stateDir, chat[1]!);
           if (!f) return json(res, 404, { error: `no chat question ${chat[1]}` });
-          if (!chat[2] && req.method === 'GET') {
-            const rec = existsSync(filedPath(opts.stateDir, chat[1]!)) ? (JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as { number?: number }) : null;
-            const filed = typeof rec?.number === 'number' ? { number: rec.number } : null;
-            return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed });
-          }
+          if (!chat[2] && req.method === 'GET') return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed: filedOf(chat[1]!) });
           if (chat[2] && req.method === 'POST') {
-            if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` });
-            if (f.state !== 'answered' || !f.answer.issueDraft) return json(res, 400, { error: 'this answer has no issue draft' });
-            if (existsSync(filedPath(opts.stateDir, chat[1]!))) return json(res, 409, { error: 'this draft was filed already', ...(JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]!), 'utf8')) as object) });
-            // The draft as the answer file has it, never one from the request, checked again as the harness will.
-            const d = validateDraft(f.answer.issueDraft.title, f.answer.issueDraft.body);
-            if (!d.ok) return json(res, 400, { error: `the draft isn't one the harness can take: ${d.why}` });
-            if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog to file to' });
-            // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
-            mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
-            try {
-              writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
-            } catch {
-              return json(res, 409, { error: 'this draft is being filed already' });
-            }
-            let number: number;
-            try {
-              number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
-            } catch (e) {
-              rmSync(filedPath(opts.stateDir, chat[1]!), { force: true });
-              throw e;
-            }
-            writeFileSync(filedPath(opts.stateDir, chat[1]!), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
-            audit(who, 'chat.draft_filed', { id: chat[1]!, issue: number });
-            return json(res, 200, { ok: true, number });
+            const r = await fileDraft(chat[1]!, f.state === 'answered' ? f.answer : null);
+            return json(res, r.status, r.body);
           }
         }
         // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
