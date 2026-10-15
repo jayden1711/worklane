@@ -97,8 +97,9 @@ refuse_if_open() {
 # no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
 #
 # And the agents' Claude account profiles (issue #464): `claude-account profile-add|remove <profile>` and
-# `claude-account use <profile> [<instance>]`, four anchored patterns whose arguments are each a profile's or an
-# instance's name (lowercase letters, digits and dashes), which the helper checks again, strictly.
+# `claude-account use <profile>`: three anchored patterns, each one profile's name (lowercase letters, digits and
+# dashes) and nothing else. No pattern takes an instance: each step is for the asking coordinator's own instance,
+# which the helper takes from SUDO_USER, so a coordinator can never name another instance, or every instance.
 # Those, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
 # older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
 # machine-helper.sh records it in HELPER_RULES for the dashboard (which then shows the root command instead).
@@ -113,7 +114,6 @@ PROFILE_SUDOERS_ARGS=(
   '^claude-account profile-add [a-z][a-z0-9-]*$'
   '^claude-account remove [a-z][a-z0-9-]*$'
   '^claude-account use [a-z][a-z0-9-]*$'
-  '^claude-account use [a-z][a-z0-9-]* [a-z][a-z0-9-]*$'
 )
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
@@ -303,6 +303,8 @@ CLAUDE_ACCOUNT_CREDENTIAL=claude-account-token
 # The same for a new account profile's token (claude-account.sh profile-add --token-from): stored by the dashboard
 # before it asks, read once by the script as root, and deleted.
 CLAUDE_PROFILE_CREDENTIAL=claude-profile-token
+# The machine change log (the machine helper's, root's 0644): the watchdog posts what it finds there to the ops channel.
+MACHINE_CHANGES=/var/lib/worklane/machine-changes.jsonl
 # A token from `claude setup-token`, strictly: install_claude_token's check, and src/claude-account.ts's.
 # (The length apart: a repeat bound over 255 is no regular expression to every libc.)
 claude_token_ok() { [[ "${#1}" -le 513 && "$1" =~ ^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}$ ]]; }

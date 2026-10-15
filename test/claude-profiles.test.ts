@@ -45,6 +45,9 @@ test('two profiles for one agent user: the active one is the CLAUDE_CONFIG_DIR i
   // Another instance's choice, or another user (the eval lane), is never this one's.
   assert.equal(resolveLogin({ user: 'wl-alpha-eval', home: '/home/example/wl-alpha-eval' }, { instance: 'alpha', agentUser: AGENT.user, dir }).claudeConfigDir, undefined);
   assert.equal(resolveLogin(AGENT, { instance: 'beta', agentUser: AGENT.user, dir }).claudeConfigDir, undefined);
+  // A staged profile (added from a dashboard, not confirmed by a root admin) is never used, whatever the file says.
+  writeFileSync(join(dir, 'profiles.json'), JSON.stringify({ ...twoProfiles({ alpha: { profile: 'work', since: 'x' } }), profiles: { work: { kind: 'setup-token', users: {}, staged: true, instance: 'alpha' } } }));
+  assert.equal(runner.loginOf({}), '/home/example/wl-alpha-agent/.claude');
   // A name that isn't a profile's (a path, say) is never used.
   writeFileSync(join(dir, 'profiles.json'), JSON.stringify({ active: { alpha: { profile: '../../etc' } } }));
   assert.equal(runner.loginOf({}), '/home/example/wl-alpha-agent/.claude');
@@ -83,19 +86,18 @@ test('a profile step is a machine request with exactly its arguments, one at a t
       [{ action: 'use', profile: '../x' }, /profile's name/],
       [{ action: 'profile-add', profile: 'default' }, /never added or removed/],
       [{ action: 'remove', profile: 'default' }, /never added or removed/],
-      [{ action: 'remove', profile: 'work', instance: 'alpha' }, /only to use/],
-      [{ action: 'use', profile: 'work', instance: 'Alpha' }, /only to use/],
       [{ action: 'switch', profile: 'work' }, /profile-add, use or remove/],
     ] as const) assert.throws(() => requestProfileOp(log, { ...args, who, dir, ownersFile: owners }), why, JSON.stringify(args));
-    const r = requestProfileOp(log, { action: 'use', profile: 'work', instance: 'beta', who, dir, ownersFile: owners });
-    assert.deepEqual(r.args, ['claude-account', 'use', 'work', 'beta']);
+    const r = requestProfileOp(log, { action: 'use', profile: 'work', who, dir, ownersFile: owners });
+    // No instance: the helper takes the asking coordinator's from sudo.
+    assert.deepEqual(r.args, ['claude-account', 'use', 'work']);
     assert.throws(() => requestProfileOp(log, { action: 'remove', profile: 'personal', who, dir, ownersFile: owners }), (e: unknown) => e instanceof MachineRequestError && e.status === 409);
-    // The coordinator runs it through the helper: sudo -n <helper> claude-account use work beta, nothing else.
+    // The coordinator runs it through the helper: sudo -n <helper> claude-account use work, nothing else.
     const ran: string[][] = [];
     runMachineRequests({ log, instance: 'alpha', ownersFile: owners, exec: (file, a) => (ran.push([file, ...a]), 'started') });
     assert.equal(ran.length, 1);
     assert.deepEqual(ran[0]!.slice(0, 2), ['sudo', '-n']);
-    assert.deepEqual(ran[0]!.slice(3), ['claude-account', 'use', 'work', 'beta']);
+    assert.deepEqual(ran[0]!.slice(3), ['claude-account', 'use', 'work']);
     assert.equal(machineRequests(log.read(0)).at(-1)!.status, 'done');
   } finally {
     log.close();
@@ -104,8 +106,9 @@ test('a profile step is a machine request with exactly its arguments, one at a t
 
 test("the allowlist and the helper take the same profile steps, and no other", () => {
   const helper = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs')) as { parseClaudeProfile: (a: string[]) => unknown };
-  const good = [['profile-add', 'work'], ['remove', 'work'], ['use', 'work'], ['use', 'default'], ['use', 'work', 'alpha'], ['use', 'default', 'alpha']];
-  const bad = [['profile-add', 'default'], ['remove', 'default'], ['profile-add'], ['profile-add', 'Work'], ['profile-add', 'work', 'alpha'], ['remove', 'work', 'alpha'], ['use'], ['use', 'work', 'alpha', 'beta'], ['use', '../x'], ['use', 'work', 'dash'], ['use', 'work', 'alpha-agent'], ['use', 'work', '--for'], ['use', `w${'x'.repeat(21)}`], ['switch', 'work']];
+  const good = [['profile-add', 'work'], ['remove', 'work'], ['use', 'work'], ['use', 'default']];
+  // Never an instance (another one, or "all"), never confirm-profile, never the script's own flags.
+  const bad = [['profile-add', 'default'], ['remove', 'default'], ['profile-add'], ['profile-add', 'Work'], ['profile-add', 'work', 'alpha'], ['remove', 'work', 'alpha'], ['use'], ['use', 'work', 'alpha'], ['use', 'default', 'alpha'], ['use', 'work', 'all'], ['use', 'work', 'alpha', 'beta'], ['use', '../x'], ['use', 'work', '--for'], ['use', 'work', '--for', 'beta'], ['use', `w${'x'.repeat(21)}`], ['switch', 'work'], ['confirm-profile', 'work']];
   for (const a of good) {
     assert.ok(profileStepOk(a), JSON.stringify(a));
     assert.ok(checkRootStep('claude-account', a).allowed, JSON.stringify(a));
@@ -186,6 +189,12 @@ test('the dashboard: only a machine owner on an allowed device starts a profile 
     };
     const add = (headers: Record<string, string>) => call('/api/claude-account/profile-add?profile=work', headers, { value: TOKEN });
     const use = (headers: Record<string, string>) => call('/api/machine/claude-profile', headers, { action: 'use', profile: 'work' });
+    // Another instance, or every one, from this dashboard: refused for anyone, audited, nothing started.
+    for (const instance of ['beta', 'all']) {
+      const r = await call('/api/machine/claude-profile', asDevicePerson('example-owner'), { action: 'use', profile: 'work', instance });
+      assert.equal(r.status, 403, r.text);
+      assert.match(r.text, /a root admin's on the machine/);
+    }
     const refusedBy = new Map<string, Record<string, string>>([
       // A writer, and a viewer (both machine owners by the file: the instance role is checked too).
       ['writer', asDevicePerson('example-collaborator')],
@@ -250,4 +259,15 @@ test('the dashboard: only a machine owner on an allowed device starts a profile 
   } finally {
     await d.close();
   }
+});
+
+test('the ops alert: each profile change in the machine change log is an alert for a day; a staged one says how to confirm or remove it; never more than the line says', async () => {
+  const { profileFindings } = await import('../src/watchdog/probes.js');
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const line = (at: string, by: string, to: string) => ({ at, by, what: 'claude_account.profile', from: '', to });
+  const f = profileFindings([line('2026-10-15T11:00:00Z', 'wl-alpha', 'staged work for alpha'), line('2026-10-15T11:05:00Z', 'root', 'confirmed work as a@example.com'), line('2026-10-13T11:00:00Z', 'wl-alpha', 'use work for alpha'), { at: '2026-10-15T11:00:00Z', by: 'root', what: 'set-slots', from: 1, to: 2 }], now);
+  assert.deepEqual(f.map((x) => [x.kind, x.instance]), [['claude_profile_changed', 'alpha'], ['claude_profile_changed', null]]);
+  assert.match(f[0]!.detail, /staged work for alpha, by wl-alpha \(instance alpha's dashboard\).*Staged: nothing may use it/);
+  assert.match(f[0]!.fix, /confirm-profile work.*remove work/);
+  assert.match(f[1]!.detail, /confirmed work as a@example\.com/);
 });

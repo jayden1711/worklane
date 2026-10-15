@@ -30,13 +30,16 @@
 // admin switches from a terminal with claude-account.sh itself.
 //
 //   worklane-machine claude-account profile-add <profile>
-//   worklane-machine claude-account use <profile> [<instance>]
+//   worklane-machine claude-account use <profile>
 //   worklane-machine claude-account remove <profile>
 //
 // the agents' Claude account profiles (issue #464; claude-account.sh's profile-add, use and remove), started the same
 // way as the switch, as worklane-claude-account.service (so one at a time, with the switch too): a real call per agent
-// user runs longer than the asking coordinator waits. The asking instance (from SUDO_USER, never an argument) is passed
-// as --for, and for profile-add as --token-from: its dashboard stored the new profile's token before it asked.
+// user runs longer than the asking coordinator waits. Each is for the asking instance alone, which comes from sudo's
+// SUDO_USER and never from an argument: the helper takes no instance, and passes the script --for <that instance> (and
+// for profile-add --token-from <that instance>: its dashboard stored the token before it asked). Every instance, or
+// another one, is a root admin's, with claude-account.sh at a root shell. A profile added this way is staged: nothing
+// may use it until an admin confirms it on the machine (claude-account.sh confirm-profile, never through here).
 //
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
@@ -100,7 +103,7 @@ const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> [<instance>] | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -187,13 +190,15 @@ function parseClaudeAccount(args) {
 
 /** A profile's name (claude-account.sh's check): default is the login each agent user had, never added or removed. */
 const profileName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
-/** The profile step a list asks for: profile-add|remove <profile>, use <profile> [<instance>]; null for anything else. */
+/**
+ * The profile step a list asks for: profile-add|remove|use <profile>, for the asking instance alone; null for anything
+ * else. No instance is ever taken from the arguments (a coordinator could name any): it comes from SUDO_USER.
+ */
 function parseClaudeProfile(args) {
-  if (args[0] !== 'claude-account' || !profileName(args[2])) return null;
+  if (args[0] !== 'claude-account' || args.length !== 3 || !profileName(args[2])) return null;
   const action = args[1];
-  if ((action === 'profile-add' || action === 'remove') && args.length === 3 && args[2] !== 'default') return { action, profile: args[2], instance: null };
-  if (action === 'use' && args.length === 3) return { action, profile: args[2], instance: null };
-  if (action === 'use' && args.length === 4 && instanceName(args[3])) return { action, profile: args[2], instance: args[3] };
+  if ((action === 'profile-add' || action === 'remove') && args[2] !== 'default') return { action, profile: args[2] };
+  if (action === 'use') return { action, profile: args[2] };
   return null;
 }
 
@@ -240,8 +245,9 @@ function claudeProfile(p) {
     process.stderr.write(`claude-account ${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh ${p.action}\n`);
     return 2;
   }
-  const what = `${p.action} ${p.profile}${p.instance ? ` for ${p.instance}` : ''} (asked from ${instance}'s dashboard)`;
-  const args = [real, p.action, p.profile, ...(p.instance ? [p.instance] : []), '--json', p.action === 'profile-add' ? '--token-from' : '--for', instance];
+  const what = `${p.action} ${p.profile} for ${instance} (asked from ${instance}'s dashboard)`;
+  // The instance is sudo's, never the caller's: the script also refuses any other one than --for names.
+  const args = [real, p.action, p.profile, ...(p.action === 'use' ? [instance] : []), '--json', p.action === 'profile-add' ? '--token-from' : '--for', instance];
   const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account profile', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
   if (r.error || r.status !== 0) {
     const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();

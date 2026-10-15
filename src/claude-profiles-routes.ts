@@ -2,7 +2,7 @@
 // page's Claude account panel:
 //
 //   POST /api/claude-account/profile-add?profile=<name>   body {"value": "<token from claude setup-token>"}
-//   POST /api/machine/claude-profile                      body {"action": "use"|"remove", "profile", "instance"?}
+//   POST /api/machine/claude-profile                      body {"action": "use"|"remove", "profile"}
 //
 // Each is a machine owner's who is an owner of this instance, on one of the console's allowed devices (the same gate as
 // the owner terminal and any machine change), or the owner's break-glass. Every refusal is audited, a request with no
@@ -107,7 +107,9 @@ export async function handleProfileRoute(req: IncomingMessage, url: URL, who: Pr
   const action = body.action === 'use' || body.action === 'remove' ? body.action : null;
   if (who.role !== 'owner') return refuse(403, `only the instance's owners (admin on ${d.repo}) who are machine owners may switch or remove a Claude account; @${who.login} is a ${who.role}`, { action: action ?? 'not an action' });
   if (!action) return refuse(400, 'action is use or remove (adding one takes its token: profile-add)', { action: 'not an action' });
-  return record({ action, profile: body.profile, ...(body.instance !== undefined && body.instance !== null ? { instance: body.instance } : {}) });
+  // Never another instance, nor every one: a dashboard's step is for its own instance (a root admin's otherwise).
+  if (body.instance !== undefined && body.instance !== null && body.instance !== d.instance) return refuse(403, `a step from ${d.instance}'s dashboard is for ${d.instance} alone; another instance, or every one, is a root admin's on the machine (claude-account.sh)`, { action });
+  return record({ action, profile: body.profile });
 }
 
 /** Only a session's device flag counts; the break-glass passes the machine gate on its own. */

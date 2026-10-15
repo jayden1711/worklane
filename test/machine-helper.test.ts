@@ -132,7 +132,7 @@ const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; s
 /** The helper as root's sudoers rules name it (lib.sh), and the engine's, on a real machine. */
 const HELPER_AS_ROOT = onRealMachine(MACHINE_HELPER);
 
-test('the sudoers rule lists exactly the 34 commands, no patterns but add-project\'s, the staged signer\'s two and the four Claude account profile steps\', for the named coordinators only', { skip: !posix && 'bash' }, () => {
+test('the sudoers rule lists exactly the 34 commands, no patterns but add-project\'s, the staged signer\'s two and the three Claude account profile steps\', for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
@@ -140,9 +140,12 @@ test('the sudoers rule lists exactly the 34 commands, no patterns but add-projec
   const stage = `${HELPER_AS_ROOT} ^stage-update-signer ${SIGNER_ARGS}`;
   const discard = `${HELPER_AS_ROOT} ^discard-update-signer ${SIGNER_ARGS}`;
   // The account profile steps (issue #464): each argument a profile's or an instance's name, nothing else.
-  const profiles = ['^claude-account profile-add [a-z][a-z0-9-]*$', '^claude-account remove [a-z][a-z0-9-]*$', '^claude-account use [a-z][a-z0-9-]*$', '^claude-account use [a-z][a-z0-9-]* [a-z][a-z0-9-]*$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
+  // One profile name each, and no instance: the helper takes the asking coordinator's from SUDO_USER.
+  const profiles = ['^claude-account profile-add [a-z][a-z0-9-]*$', '^claude-account remove [a-z][a-z0-9-]*$', '^claude-account use [a-z][a-z0-9-]*$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
   const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, ...profiles, addProject];
-  assert.equal(want.length - 7, 34);
+  assert.equal(want.length - 6, 34);
+  // No profile pattern takes a second word: never an instance, never every instance.
+  for (const p of profiles) assert.doesNotMatch(p, /\* \[/, p);
   // Tailscale's four are whole commands: sudo matches a listed command's arguments exactly, so nothing may follow one.
   for (const a of ['install', 'up', 'serve', 'public-url']) assert.match(r.stdout, new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} tailscale ${a}(, \\\\)?$`, 'm'), a);
   // The rule names no funnel command, no flag and no target: sudo matches a listed command's arguments exactly, so `tailscale serve <anything>` is not `tailscale serve`.
@@ -461,7 +464,7 @@ test('the pattern rules (add-project, stage-update-signer, discard-update-signer
   for (const v of ['1.9.10', '1.9.10p1', '1.9.15p5', '1.9.17', '1.10.0', '2.0.0']) {
     const r = sudoersWithSudo(v);
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^claude-account profile-add', '^claude-account remove', '^claude-account use', '^claude-account use', '^add-project'], `sudo ${v}: every pattern rule`);
+    assert.deepEqual((r.stdout.match(k) ?? []).map((x) => x.trim()), ['^stage-update-signer', '^discard-update-signer', '^claude-account profile-add', '^claude-account remove', '^claude-account use', '^add-project'], `sudo ${v}: every pattern rule`);
     assert.doesNotMatch(r.stdout, /^# Not here/m);
   }
   const newer = commands(sudoersWithSudo('1.9.10').stdout).filter((l) => !/\^(stage-update-signer|discard-update-signer|add-project|claude-account [a-z-]+) /.test(l));

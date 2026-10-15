@@ -93,17 +93,21 @@ function LastOp({ op }: { op: ProfileOp }) {
 }
 
 /** The profiles section; `canAct`: the person may change accounts now (a machine owner here, nothing else running). */
-export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; canAct: boolean; onChanged?: () => void }) {
+/**
+ * `self`: this dashboard's instance. Every step from here is for it alone (the server and the machine helper hold to
+ * that): another instance, or every one, is a root admin's on the machine, with `confirmScript`.
+ */
+export function ClaudeProfiles({ table, ops, self, confirmScript, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string; confirmScript: string; canAct: boolean; onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const running = ops.some((o) => o.status === 'running');
   const may = canAct && !running && !busy;
-  const act = async (action: 'use' | 'remove', profile: string, instance?: string) => {
+  const act = async (action: 'use' | 'remove', profile: string) => {
     setBusy(true);
     setErr(null);
     try {
-      await claudeProfileAction(action, profile, instance);
+      await claudeProfileAction(action, profile);
       setRemoving(null);
       onChanged?.();
     } catch (e) {
@@ -117,7 +121,7 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
       <div>
         <div className="text-[13px] font-medium text-ink">Accounts</div>
         <p className="text-[12px] text-ink-3">
-          Each account is signed in for every agent user side by side. Choosing one first makes one minimal real call as each agent user on it (the cheapest model, a one-word answer); if any is refused, nothing changes. Runs already going finish on the account they started on.
+          Accounts sit side by side for each agent user. From here, only {self}'s: choosing one first makes one minimal real call as its agent user on it (the cheapest model, a one-word answer); if it is refused, nothing changes. Runs already going finish on the account they started on. Another instance, or every one, is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt; [&lt;instance&gt;]</code>.
         </p>
       </div>
       <div className="overflow-x-auto rounded-card bg-surface shadow-card">
@@ -140,23 +144,26 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
                 <tr key={p.name} data-testid="claude-profile-row" data-profile={p.name}>
                   <td className="px-2 py-1.5 align-top">
                     <div className="font-mono text-[12px] text-ink">{p.name}</div>
-                    <div className="text-[11px] text-ink-3">{p.name === 'default' ? 'the login each agent user had' : p.addedAt ? `added ${ago(p.addedAt)}` : p.kind}</div>
+                    <div className="text-[11px] text-ink-3">{p.name === 'default' ? 'the login each agent user had' : p.addedAt ? `added ${ago(p.addedAt)}${p.addedFor ? ` for ${p.addedFor}` : ''}` : p.kind}</div>
+                    {p.staged && (
+                      <div className="mt-1 space-y-0.5" data-testid="claude-profile-staged">
+                        <Badge tone="warn">staged: not usable yet</Badge>
+                        <div className="text-[11px] text-ink-3">
+                          An admin confirms it on the machine, seeing the account first: <code>sudo bash {confirmScript} confirm-profile {p.name}</code>
+                        </div>
+                      </div>
+                    )}
                   </td>
                   {p.cells.map((c) => (
-                    <Cell key={c.instance} c={c} profile={p.name} canAct={may} busy={busy} onUse={() => void act('use', p.name, c.instance)} />
+                    <Cell key={c.instance} c={c} profile={p.name} canAct={may && c.instance === self && !p.staged} busy={busy} onUse={() => void act('use', p.name)} />
                   ))}
                   <td className="px-2 py-1.5 align-top">
                     <div className="flex flex-wrap gap-1">
-                      {!p.cells.every((c) => c.active) && (
-                        <Button size="sm" variant="outline" disabled={!may} onClick={() => void act('use', p.name)} data-testid="claude-profile-use-all">
-                          Use everywhere
-                        </Button>
-                      )}
-                      {p.name !== 'default' &&
+                      {p.name !== 'default' && p.cells.some((c) => c.instance === self && c.apiOk !== null) &&
                         (removing === p.name ? (
                           <>
                             <Button size="sm" disabled={!may} onClick={() => void act('remove', p.name)} data-testid="claude-profile-remove-confirm">
-                              Remove its login from every agent user
+                              Remove its login from {self}'s agent user
                             </Button>
                             <Button size="sm" variant="ghost" onClick={() => setRemoving(null)}>
                               Cancel
@@ -176,7 +183,7 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
         </table>
       </div>
       <p className="text-[12px] text-ink-3">
-        Add an account: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in each agent user's own profile and checked with a real call; if the API refuses it, nothing is kept.
+        Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
       </p>
       <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
       {err && (

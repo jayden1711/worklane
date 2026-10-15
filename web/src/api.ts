@@ -1328,6 +1328,8 @@ export interface ClaudeAccountData {
   /** The account profiles (src/claude-profiles.ts); absent from an older server. */
   profiles?: ProfilesTable;
   profileOps?: ProfileOp[];
+  /** The root script a staged profile is confirmed with, on the machine. */
+  confirmScript?: string;
 }
 /** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
 export interface ProfileCell {
@@ -1342,7 +1344,7 @@ export interface ProfileCell {
 }
 export interface ProfilesTable {
   instances: string[];
-  profiles: { name: string; kind: string; addedAt: string | null; cells: ProfileCell[] }[];
+  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
   active: Record<string, string>;
 }
 export interface ProfileOp {
@@ -1358,7 +1360,8 @@ export interface ProfileOp {
 }
 /** A new account profile from a setup token: the token in the body only, never the URL. */
 export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
-export const claudeProfileAction = (action: 'use' | 'remove', profile: string, instance?: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile, ...(instance ? { instance } : {}) }) });
+/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
+export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });

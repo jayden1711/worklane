@@ -211,7 +211,7 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
         </p>
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
-      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
+      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" disabled={!data.allowed || !!busy || open.some((r) => r.args[1] === 'status')} onClick={() => void act('status')} data-testid="claude-account-refresh">
           {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
