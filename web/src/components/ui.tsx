@@ -1,7 +1,7 @@
 // Small component set: shadcn/ui's API shape (MIT), styled after Beautiful UI's atoms (MIT,
 // beautifului.dev). Both credited in THIRD_PARTY_NOTICES.md.
-import { useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
-import type { TaskStatus } from '../api';
+import { useEffect, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
+import { avatarSrc, type TaskStatus } from '../api';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
@@ -61,9 +61,22 @@ export function Avatar({ login, title, size = 20 }: { login: string | null | und
  * WHY (#452): the bare <img> took its height from the page's `img { height: auto }`, so once GitHub's picture failed
  * the broken image grew to its alt text's height (18 px to 52 px) until the initials replaced it; every decision card
  * grew 30 px for that moment, and a click aimed at a card below landed 60 px off.
+ * The picture is this server's (#462): the box stays empty while it is asked, and shows initials when there is none.
  */
 function PersonAvatar({ login, title, size }: { login: string; title: string | undefined; size: number }) {
-  const [failed, setFailed] = useState(false);
+  // The picture comes from this page's own server (#462), never GitHub: undefined while asked, null when there is none.
+  const [src, setSrc] = useState<string | null | undefined>(undefined);
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    let live = true;
+    setSrc(undefined);
+    setBroken(false);
+    void avatarSrc(login, size).then((s) => live && setSrc(s));
+    return () => {
+      live = false;
+    };
+  }, [login, size]);
+  const failed = src === null || broken;
   return (
     <span
       title={title ?? `@${login}`}
@@ -73,9 +86,9 @@ function PersonAvatar({ login, title, size }: { login: string; title: string | u
     >
       {failed ? (
         login.replace(/[^a-z0-9]/gi, '').slice(0, 2)
-      ) : (
-        <img src={`https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`} alt={login} width={size} height={size} className="block max-w-none rounded-full" style={{ width: size, height: size }} onError={() => setFailed(true)} />
-      )}
+      ) : src ? (
+        <img src={src} alt={login} width={size} height={size} className="block max-w-none rounded-full" style={{ width: size, height: size }} onError={() => setBroken(true)} />
+      ) : null}
     </span>
   );
 }

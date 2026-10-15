@@ -189,7 +189,7 @@ do_install() {
   trap 'rm -rf "$work"; installed || rm -f "$TAILSCALE_LIST" "$TAILSCALE_KEYRING"' EXIT
 
   emit running "fetching the signing key of $TAILSCALE_REPO/$id ($codename)"
-  curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 -o "$work/key.gpg" "$TAILSCALE_REPO/$id/$codename.noarmor.gpg" || fail "couldn't fetch the signing key for $id $codename from $TAILSCALE_REPO (is this release one Tailscale packages for?); nothing installed"
+  curl -fsSL --proto '=https' --tlsv1.2 --max-time 60 --retry 3 -o "$work/key.gpg" "$TAILSCALE_REPO/$id/$codename.noarmor.gpg" || fail "couldn't fetch the signing key for $id $codename from $TAILSCALE_REPO (is this release one Tailscale packages for?); nothing installed"
   got="$(key_fingerprints "$work" | tr '\n' ' ' | sed 's/ $//')"
   # Exactly one key, and it is the pinned one. Never loosened: a different key is a reviewed change to lib.sh.
   [ "$got" = "$TAILSCALE_SIGNER_FPR" ] || fail "the signing key fetched isn't the pinned one (pinned $TAILSCALE_SIGNER_FPR, got ${got:-none}); nothing installed"

@@ -122,7 +122,7 @@ test('install: Tailscale\'s signed apt repository, the fetched key exactly the p
   // The key, over https only, from Tailscale's repository for this distribution; no script is fetched.
   const curls = calls.filter((c) => c.startsWith('curl '));
   assert.equal(curls.length, 1);
-  assert.match(curls[0]!, /^curl -fsSL --proto =https --tlsv1\.2 --max-time 60 -o \S+\/key\.gpg https:\/\/pkgs\.tailscale\.com\/stable\/ubuntu\/noble\.noarmor\.gpg$/);
+  assert.match(curls[0]!, /^curl -fsSL --proto =https --tlsv1\.2 --max-time 60 --retry 3 -o \S+\/key\.gpg https:\/\/pkgs\.tailscale\.com\/stable\/ubuntu\/noble\.noarmor\.gpg$/);
   assert.equal(m.text('keyring.gpg'), `KEY ${FPR}\n`);
   assert.equal(m.text('owners/keyring.gpg'), 'root root 0644\n');
   assert.match(m.text('tailscale.list'), new RegExp(`^deb \\[signed-by=${join(m.T, 'keyring.gpg').replace(/[/.]/g, '\\$&')}\\] https://pkgs\\.tailscale\\.com/stable/ubuntu noble main$`, 'm'));
