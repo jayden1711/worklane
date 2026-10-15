@@ -11,7 +11,7 @@ import { configFrom, loadConfig, type Config } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
 import { checkedPush } from './push-check.js';
-import { MODEL_TIERS } from './model-routing.js';
+import { listedModel, MODEL_TIERS } from './model-routing.js';
 import { ROUTING } from './routing.js';
 import { withToolPath } from './tool-path.js';
 
@@ -55,9 +55,11 @@ export interface RepoConfigForm {
   /** The workers' models the form offers, and the engine's default among them. */
   models: readonly string[];
   defaultModel: string;
+  /** Whether the config's worker model is one the engine lists (an alias, or a full Anthropic model id). */
+  modelListed: boolean;
 }
 
-export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo, models: WORKER_MODELS, defaultModel: DEFAULT_WORKER_MODEL });
+export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo, models: WORKER_MODELS, defaultModel: DEFAULT_WORKER_MODEL, modelListed: listedModel(repoConfigValues(cfg).workers_model) });
 
 export class ConfigChangeError extends Error {}
 
@@ -107,7 +109,7 @@ function edited(root: string, cfg: Config, values: Partial<Record<keyof RepoConf
   for (const k of KEYS) {
     if (v[k] === undefined || JSON.stringify(v[k]) === JSON.stringify(now[k])) continue;
     // INVARIANT (#468): the form proposes only a model the engine lists; a hand-edited one is kept as it is unless changed.
-    if (k === 'workers_model' && !WORKER_MODELS.includes(v.workers_model!)) throw new ConfigChangeError(`worker model: not one the engine supports: ${v.workers_model!.slice(0, 80)} (one of ${WORKER_MODELS.join(', ')})`);
+    if (k === 'workers_model' && !listedModel(v.workers_model!)) throw new ConfigChangeError(`worker model: not one the engine supports: ${v.workers_model!.slice(0, 80)} (one of ${WORKER_MODELS.join(', ')}, or a full Anthropic model id)`);
     const { file, path } = WHERE[k];
     if (!docs.has(file)) {
       const text = show(file);

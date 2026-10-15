@@ -1110,6 +1110,8 @@ export interface FirstRunRepoConfig {
   /** The workers' models the engine supports (src/config-change.ts WORKER_MODELS) and its default; absent from older servers. */
   models?: string[];
   defaultModel?: string;
+  /** #468: the config's worker model is listed (an alias, or a full Anthropic model id); absent from older servers. */
+  modelListed?: boolean;
 }
 export interface ConfigChange {
   file: string;

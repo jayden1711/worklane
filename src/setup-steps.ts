@@ -26,6 +26,7 @@ import { OFFSITE_FILE } from './offsite-backup.js';
 import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
+import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
@@ -730,7 +731,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
-      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}`);
+      // WHY (#468): a model the engine doesn't list is a warning here, never a refusal: the step stays done.
+      const models = modelWarnings(cfg.agents);
+      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}${models.length ? `; warning: ${models.join('; ')}` : ''}`);
     },
   },
   {

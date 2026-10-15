@@ -2465,9 +2465,13 @@ test("#468 the Repo config form's worker model: a dropdown of exactly the server
   const select = html.match(/<select[^>]*data-testid="repo-config-workers-model"[^>]*>([\s\S]*?)<\/select>/)!;
   assert.deepEqual([...select[1]!.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map((m) => [m[1], m[2]]), [['haiku', 'haiku'], ['sonnet', 'sonnet (default)'], ['opus', 'opus']]);
   assert.doesNotMatch(html, /repo-config-model-warning/);
-  const odd = r.renderRepoConfigForm({ ...c, values: { ...c.values, workers_model: 'claude-sonnet-4-5' } });
-  assert.match(odd, /<option value="claude-sonnet-4-5"[^>]*data-testid="repo-config-model-unknown"[^>]*>claude-sonnet-4-5 \(not supported\)/);
-  assert.match(odd, /data-testid="repo-config-model-warning"[^>]*>The config names a worker model the engine doesn(&#x27;|')t list \(claude-sonnet-4-5\): it is kept as it is unless you pick another/);
+  const odd = r.renderRepoConfigForm({ ...c, values: { ...c.values, workers_model: 'gpt-5' }, modelListed: false });
+  assert.match(odd, /<option value="gpt-5"[^>]*data-testid="repo-config-model-unknown"[^>]*>gpt-5 \(not listed\)/);
+  assert.match(odd, /data-testid="repo-config-model-warning"[^>]*>The config names a worker model the engine doesn(&#x27;|')t list \(gpt-5\): it is kept as it is unless you pick another/);
+  // #468 (the owner): a full Anthropic model id counts as listed: shown as itself, no warning.
+  const full = r.renderRepoConfigForm({ ...c, values: { ...c.values, workers_model: 'claude-sonnet-4-5' }, modelListed: true });
+  assert.match(full, /<option value="claude-sonnet-4-5"[^>]*>claude-sonnet-4-5<\/option>/);
+  assert.doesNotMatch(full, /repo-config-model-warning|repo-config-model-unknown/);
 });
 
 test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {

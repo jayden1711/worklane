@@ -79,6 +79,8 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [count, setCount] = useState(c.values.workers_count);
   const [model, setModel] = useState(c.values.workers_model);
   const models = c.models ?? [c.values.workers_model];
+  // #468 (the owner): a full Anthropic model id counts as listed; only the server's own answer says so of the saved one.
+  const listed = (m: string) => models.includes(m) || (m === c.values.workers_model ? c.modelListed !== false : false);
   const [seen, setSeen] = useState<string[]>(initialSeen);
   const [extra, setExtra] = useState('');
   const [seenNote, setSeenNote] = useState<string | null>(initialSeenNote);
@@ -173,8 +175,8 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
               with a warning, never replaced behind the person's back. */}
           <select value={model} disabled={!canEdit || busy} onChange={(e) => (setModel(e.target.value), edited())} className={cx(field, 'w-40 font-sans')} data-testid="repo-config-workers-model">
             {!models.includes(model) && (
-              <option value={model} data-testid="repo-config-model-unknown">
-                {model} (not supported)
+              <option value={model} {...(listed(model) ? {} : { 'data-testid': 'repo-config-model-unknown' })}>
+                {listed(model) ? model : `${model} (not listed)`}
               </option>
             )}
             {models.map((m) => (
@@ -184,7 +186,7 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
             ))}
           </select>
         </label>
-        {!models.includes(model) && (
+        {!listed(model) && (
           <p className="basis-full text-[12px] text-orange" data-testid="repo-config-model-warning">
             The config names a worker model the engine doesn't list ({model}): it is kept as it is unless you pick another ({models.join(', ')}).
           </p>
