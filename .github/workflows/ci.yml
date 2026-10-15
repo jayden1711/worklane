@@ -89,7 +89,7 @@ jobs:
             echo "shard $SHARD/4: none of the selected test files"
             exit 0
           fi
-          node --test "${files[@]}"
+          node --import ./dist/test/isolate.js --test "${files[@]}"
 
   test-shard-24:
     name: test shard ${{ matrix.shard }}/4 (${{ matrix.os }}, ${{ matrix.node }})

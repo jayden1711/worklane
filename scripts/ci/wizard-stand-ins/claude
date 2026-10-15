@@ -3,6 +3,7 @@
 # to from the first-run page. No network, no token. Its state is files in $WIZARD_STANDIN_DIR:
 #   claude-signed-in   Anthropic's sign-in finished (the job writes it, as a person finishing the login would)
 #   claude-calls       every call, one per line
+# The login's proof (one minimal real call) is answered once signed in, refused with a 401 before.
 # `auth login` hands the browser opener ($BROWSER, which the dashboard sets to its relay) Anthropic's authorize link,
 # whose redirect comes back to a listener on localhost, as Claude Code's own does; then it waits for the sign-in.
 set -u
@@ -12,6 +13,8 @@ case "${1:-} ${2:-}" in
   "--version "*) echo "2.1.296 (Claude Code)" ;;
   "auth status")
     if [ -f "$d/claude-signed-in" ]; then echo '{"loggedIn": true, "authMethod": "claude.ai", "email": "owner@example.com"}'; else echo '{"loggedIn": false, "authMethod": "none"}'; exit 1; fi ;;
+  "-p Reply with the single word: ok")
+    if [ -f "$d/claude-signed-in" ]; then echo '{"type":"result","subtype":"success","is_error":false,"result":"ok","total_cost_usd":0}'; else echo '{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Please run /login"}'; exit 1; fi ;;
   "auth login")
     [ -n "${BROWSER:-}" ] || { echo "claude stand-in: no browser opener" >&2; exit 1; }
     "$BROWSER" "https://claude.ai/oauth/authorize?code=true&client_id=wizard-stand-in&response_type=code&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&scope=user%3Ainference&state=wizard-e2e"

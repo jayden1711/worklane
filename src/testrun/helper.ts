@@ -6,13 +6,14 @@
 // watchdog raises one helper_outdated incident (from the testrun.helper event this records).
 import { BRAND } from '../brand.js';
 import type { RunHost } from './host.js';
+import { asRoot } from '../os/system-paths.js';
 
 /** The protocol this engine speaks: the helper's PROTOCOL must equal it (a test checks the script's). */
 export const HELPER_PROTOCOL = 7;
 
 /** The one reinstall that fixes an outdated helper: only the helper, from the installed engine, nothing else changed. */
 export const helperFix = (instance: string) =>
-  `sudo bash /opt/${BRAND.cli}/current/scripts/setup/test-user.sh update-helper, then restart the instance: sudo systemctl restart ${BRAND.cli}-${instance}.service`;
+  `sudo bash ${asRoot.opt('current/scripts/setup/test-user.sh')} update-helper, then restart the instance: sudo systemctl restart ${BRAND.cli}-${instance}.service`;
 
 export interface HelperState {
   ok: boolean;

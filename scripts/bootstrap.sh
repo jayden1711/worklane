@@ -27,10 +27,13 @@
 #                                                 You become the machine's first owner (your GitHub login:
 #                                                 asked, or read from gh and confirmed); it ends with one URL,
 #                                                 checked to answer first: on a fresh machine the hub's setup
-#                                                 mode (it makes the sign-in App; needs the https origin, from
-#                                                 Tailscale or --public-url), then the hub's first-run wizard.
-#                                                 No key or token in it: the page asks, from a 0600 file.
-#                                                 When nothing answers yet, no URL: the reason, the fix, exit 4.
+#                                                 mode (it makes the sign-in App) at the https origin (from
+#                                                 Tailscale or --public-url); with no origin yet, the same page on
+#                                                 http://127.0.0.1:4399/, with the ssh -L line that reaches it
+#                                                 (its App step shows Tailscale and HTTPS first); then the hub's
+#                                                 first-run wizard. No key or token in it: the page asks, from a
+#                                                 0600 file. When nothing answers, no URL: the reason, the fix,
+#                                                 exit 4.
 #                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
@@ -52,9 +55,11 @@ GITLEAKS_SHA256_DARWIN_X64=dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a180
 GITLEAKS_SHA256_DARWIN_ARM64=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
 CLAUDE_VERSION=2.1.296
 # The engine: a release tag, installed by its commit (the tag's commit carries the built dist/), from the repo
-# this script ships in (package.json's repository, beside it or one level up).
-ENGINE_TAG=v0.4.1
-ENGINE_COMMIT=9c24a10eb91ffac894e24f0b0a54d8407f23d423
+# this script ships in (package.json's repository, beside it or one level up). Both lines are written by
+# `node scripts/pin-engine.mjs <tag>` once the signed tag exists: it checks the tag's signature and that its commit
+# is a release commit, then writes them. Never by hand: an empty or partial ENGINE_COMMIT is refused below.
+ENGINE_TAG=v0.5.0
+ENGINE_COMMIT=3cfd04876b41c052f6bef9df4be4bd5e2bce6a1d
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
@@ -212,6 +217,17 @@ setup_step() {
 # WHY: a printed URL that answers nothing (HTTP 000 on a fresh server, #393) is worse than none: each is asked first.
 answers() { [ "$DRY" = 1 ] || [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$1" 2>/dev/null || true)" = 200 ]; }
 unit_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
+# Setup mode running with these arguments (--loopback, or --public-url <url>): a rerun leaves it, and its token, alone.
+setup_serves() { unit_active "$HUB_SETUP_UNIT" && systemctl show -p ExecStart --value "$HUB_SETUP_UNIT" 2>/dev/null | grep -qF -- " $1 "; }
+# Where an ssh tunnel to this machine starts from: the user who ran sudo and this machine's name, each only when it is
+# a plain name (it is printed as a command to copy); otherwise <you>@<this machine>.
+ssh_target() {
+  local u="${SUDO_USER:-}" h=""
+  h="$(hostname 2>/dev/null || true)"
+  [[ "$u" =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]] && [ "$u" != root ] || u=""
+  [[ "$h" =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || h=""
+  if [ -n "$u" ] && [ -n "$h" ]; then printf '%s@%s' "$u" "$h"; else printf '%s@%s' "${u:-<you>}" "${h:-<this machine>}"; fi
+}
 # No URL this time: why, and the command that fixes it. Exit 4: installed, but nothing to open yet.
 no_url() {
   if [ "$DRY" = 1 ]; then printf '   would end with no URL: %s (fix: %s)\n' "$1" "$2"; exit 0; fi
@@ -225,7 +241,10 @@ no_url() {
 # INVARIANT: the output ends with one URL that answered 200 just now, the only URL in this block, with no key or
 # token in it; or with no URL at all, the reason and the fix (no_url). Rerun, it changes nothing that's running.
 #   - no sign-in App yet: the hub's setup mode (dashboards.sh --setup) at the hub's https origin; it asks for its
-#     one-time setup token, from a 0600 file of the hub's user.
+#     one-time setup token, from a 0600 file of the hub's user. With no origin yet (owner, 2026-10-14: the one command
+#     always ends with a working URL), setup mode on loopback (--setup --loopback) at http://127.0.0.1:4399/, reached
+#     through the ssh -L line printed above it; its App step waits for the origin (screen 7, Tailscale and HTTPS), and
+#     the run after that restarts setup mode at the origin.
 #   - the sign-in App made, no hub yet: the hub alone (dashboards.sh --no-instances, with what setup mode stored).
 #   - a hub: its https origin's /first-run, else the owner's break-glass on this machine (it asks for the hub's key).
 dashboard_next() {
@@ -242,16 +261,28 @@ dashboard_next() {
   if [ -z "$url" ] && [ -s "$signin_dir/public-url" ]; then url="$(cat "$signin_dir/public-url")"; fi
 
   if [ ! -f "$signin_dir/client-secret" ]; then
-    [ -n "$url" ] || no_url "the sign-in App is made through the hub's setup mode, which needs this machine's https origin, and there is none yet" \
-      "turn on Tailscale with MagicDNS and HTTPS certificates (docs/dashboard.md), then run this again; or give the origin: sudo bash scripts/bootstrap.sh --hardened --public-url https://<machine>.<tailnet>.ts.net $NAME $GITHUB"
-    unit_active "$HUB_SETUP_UNIT" || setup_step "dashboards.sh --setup --public-url $url"
-    say "the dashboard: everything after this first install happens there"
-    echo "   No sign-in App yet: the hub's setup mode makes it with GitHub (Connect GitHub), then turns itself off."
-    echo "   The page asks for a one-time setup token: sudo cat $hub_state/setup-token on this machine (it is never"
-    echo "   printed, logged or put in a link)."
-    final="$url/"
-    answers "$final" || no_url "the hub's setup mode runs on this machine (port $HUB_PORT), but $url doesn't reach it" \
-      "sudo tailscale serve --bg --https=443 http://127.0.0.1:$HUB_PORT, then run this again"
+    if [ -z "$url" ]; then
+      setup_serves --loopback || setup_step "dashboards.sh --setup --loopback"
+      say "the dashboard: everything after this first install happens there"
+      echo "   No sign-in App yet, and no https origin for it: the hub's setup mode answers on this machine only (port $HUB_PORT)."
+      echo "   Its sign-in App step needs the https origin first: the page shows Tailscale and HTTPS (screen 7) and how;"
+      echo "   run this again once that's done, and setup mode moves to the origin, where the App step goes on."
+      echo "   From your own computer, first: ssh -L $HUB_PORT:127.0.0.1:$HUB_PORT $(ssh_target)"
+      echo "   The page asks for a one-time setup token: sudo cat $hub_state/setup-token on this machine (it is never"
+      echo "   printed, logged or put in a link)."
+      final="http://127.0.0.1:$HUB_PORT/"
+      answers "$final" || no_url "the hub's setup mode doesn't answer on this machine (port $HUB_PORT)" \
+        "sudo systemctl status $HUB_SETUP_UNIT (journalctl -u $HUB_SETUP_UNIT says why), then run this again"
+    else
+      setup_serves "--public-url $url" || setup_step "dashboards.sh --setup --public-url $url"
+      say "the dashboard: everything after this first install happens there"
+      echo "   No sign-in App yet: the hub's setup mode makes it with GitHub (Connect GitHub), then turns itself off."
+      echo "   The page asks for a one-time setup token: sudo cat $hub_state/setup-token on this machine (it is never"
+      echo "   printed, logged or put in a link)."
+      final="$url/"
+      answers "$final" || no_url "the hub's setup mode runs on this machine (port $HUB_PORT), but $url doesn't reach it" \
+        "sudo tailscale serve --bg --https=443 http://127.0.0.1:$HUB_PORT, then run this again"
+    fi
   else
     if ! unit_active "$HUB_UNIT"; then
       [ ! -f "/etc/systemd/system/$HUB_UNIT" ] || no_url "the hub is installed but not running" "sudo systemctl start $HUB_UNIT (journalctl -u $HUB_UNIT says why it stopped), then run this again"
@@ -273,7 +304,7 @@ dashboard_next() {
         echo "   This machine has no https origin yet (Tailscale with MagicDNS and HTTPS certificates, or --public-url);"
       fi
       echo "   until then, the owner's way in, on this machine only."
-      echo "   From your laptop, first: ssh -N -L $HUB_BREAK_GLASS_PORT:127.0.0.1:$HUB_BREAK_GLASS_PORT <you>@<this-host>"
+      echo "   From your own computer, first: ssh -L $HUB_BREAK_GLASS_PORT:127.0.0.1:$HUB_BREAK_GLASS_PORT $(ssh_target)"
       echo "   The page asks once for the hub's key: it is in $hub_state/dashboard-token (root and the hub's user only)."
     fi
   fi
@@ -414,6 +445,8 @@ else
   for f in "$here/package.json" "$here/../package.json"; do [ -f "$f" ] && { pkg="$f"; break; }; done
   engine_repo="$([ -n "$pkg" ] && sed -n 's#.*"url": *"[^"]*github\.com/\([^/"]*/[^/".]*\).*#\1#p' "$pkg" | head -1 || true)"
   [ -n "$engine_repo" ] || die "can't tell the engine's repo (no package.json with a GitHub repository next to this script); pass --engine <spec>"
+  # WHY: the commit is the engine's only checksum; without a full one there is nothing to check a fetch against.
+  [[ "$ENGINE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "the pinned engine $ENGINE_TAG has no release commit in this script yet (ENGINE_COMMIT is '$ENGINE_COMMIT', not a full commit id): use a copy of this script from after it was pinned, or pass --engine <spec>"
   spec="" id="release:$ENGINE_TAG:$ENGINE_COMMIT"
 fi
 if [ "$(cat "$marker" 2>/dev/null || true)" = "$id" ] && command -v "$CLI" >/dev/null 2>&1; then

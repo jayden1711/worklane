@@ -20,8 +20,9 @@ import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from '.
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains } from './sandbox.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
+import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 
-export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'stopped' | 'stuck';
+export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
 
 export interface RunRequest {
   role: string;
@@ -119,6 +120,11 @@ export interface RunResult {
   stuck?: StuckVerdict;
   /** Reason rate_limited: when the limit resets, as claude said (or the default when it didn't). */
   limit?: LimitHit;
+  /**
+   * Reason auth_failed: the login the API refused, by its key (its config dir, as loginOf) and its account as claude
+   * auth status names it (null when it names none). Never a token.
+   */
+  login?: { key: string; account: string | null };
 }
 
 /**
@@ -141,6 +147,8 @@ export const userMessage = (text: string) => `${JSON.stringify({ type: 'user', m
 
 export interface AgentRunner {
   run(req: RunRequest): Promise<RunResult>;
+  /** The Claude login a run would use (its config dir): runs on one login share its sign-in, and its refusal. */
+  loginOf?(req: Pick<RunRequest, 'lane' | 'provider'>): string;
 }
 
 // CLAUDE_CONFIG_DIR: an instance's own Claude login (a path, not a secret). No CA bundle: a custom CA comes only from
@@ -262,13 +270,17 @@ export function claudeAuthMethod(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
   return claudeAuthStatus(env, runAs, bin).method;
 }
 
-/** claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed otherwise. */
-export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string } {
+/**
+ * claude auth status: the auth method ('none' when signed out, 'unknown' when unreadable) and what it printed
+ * otherwise, and the account as it names it (its email, else its org; never the token).
+ */
+export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'claude'): { method: string; text: string; account?: string | null } {
   const c = authStatusCommand(env, runAs, bin);
   const r = spawnSync(c.file, c.args, { encoding: 'utf8', env: c.env, timeout: 30_000 });
   try {
-    const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string };
-    return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '' };
+    const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; email?: unknown; orgName?: unknown };
+    const account = typeof j.email === 'string' && j.email ? j.email : typeof j.orgName === 'string' && j.orgName ? j.orgName : null;
+    return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '', account: account?.slice(0, 200) ?? null };
   } catch {
     return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
   }
@@ -447,7 +459,7 @@ export class CliRunner implements AgentRunner {
   ) {}
 
   /** The Claude login a run uses: the lane's agent user's config dir, else the runner's own. */
-  private loginOf(req: RunRequest): string {
+  loginOf(req: Pick<RunRequest, 'lane' | 'provider'>): string {
     if (req.provider) return `provider:${req.provider.name}`;
     const lane = this.lanes?.[req.lane ?? 'default'];
     const runAs = lane ? lane.runAs : this.runAs;
@@ -590,6 +602,7 @@ export class CliRunner implements AgentRunner {
       req.onStart?.(child.pid ?? -1);
       let result: ResultLine | null = null;
       let rateLimited: RateLimitInfo | null = null;
+      let assistantError: string | null = null;
       let ended: TerminalReason | null = null;
       let buf = '';
       let stderr = '';
@@ -665,6 +678,8 @@ export class CliRunner implements AgentRunner {
           }
           req.onLine?.(j);
           if (j.type === 'assistant' || j.type === 'result') started();
+          // claude marks the API's refusal of its login on the assistant message it reports it in.
+          if (j.type === 'assistant' && (j as { error?: unknown }).error === 'authentication_failed') assistantError = 'authentication_failed';
           if (j.type === 'result') {
             result = j as ResultLine;
             turnEnded();
@@ -695,7 +710,7 @@ export class CliRunner implements AgentRunner {
         const base = { costUsd: r?.total_cost_usd ?? 0, turns: r?.num_turns ?? 0, model, ...(r?.session_id ? { sessionId: r.session_id } : {}), ...(tokens ? { tokens } : {}), ...(r?.duration_ms !== undefined ? { durationMs: r.duration_ms } : {}), ...(req.provider ? { provider: req.provider.name } : {}) };
         const done = (o: RunResult) => {
           const out: RunResult = { ...o, ...(refusals.refused.length ? { refusedHosts: refusals.refused } : {}), ...(o.reason === 'stuck' && stuck?.stopped ? { stuck: stuck.stopped } : {}) };
-          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}), ...(out.sessionId ? { sessionId: out.sessionId } : {}) });
+          record?.finish({ reason: out.reason, costUsd: out.costUsd, turns: out.turns, model: out.model, ...(out.reason !== 'succeeded' && out.detail ? { detail: out.detail } : {}), ...(r?.result ? { final: r.result } : {}), ...(stuck ? { stuck: { ...stuck.detector.longest } } : {}), ...(out.sessionId ? { sessionId: out.sessionId } : {}) });
           feed?.end({ reason: out.reason, costUsd: out.costUsd, turns: out.turns });
           resolve(out);
         };
@@ -710,6 +725,12 @@ export class CliRunner implements AgentRunner {
         if (rateLimited || r?.api_error_status === 429 || ((!r || r.is_error || r.subtype !== 'success') && USAGE_LIMIT_TEXT.test(said))) {
           const text = (r?.is_error ? (r.result ?? '') : '').trim().slice(0, 300);
           return done({ reason: 'rate_limited', detail: `usage or rate limit reached${text ? `: ${text}` : ''}`, limit: limitHit({ info: rateLimited, text: said, now: (this.retry.now ?? Date.now)() }), ...base });
+        }
+        // The API refused the login (401/403, an invalid or expired key or token): its own reason, never an ordinary
+        // failure, with Claude's words (redacted) and the login it refused (src/claude-auth-failure.ts).
+        const refusedText = `${r?.is_error || r?.subtype !== 'success' ? (r?.result ?? '').trim() : ''}\n${stderr ? stderrTail(stderr) : ''}`.trim();
+        if ((!r || r.is_error || r.subtype !== 'success') && isAuthFailure({ apiErrorStatus: r?.api_error_status ?? null, assistantError, text: refusedText })) {
+          return done({ reason: 'auth_failed', detail: authFailedDetail({ apiErrorStatus: r?.api_error_status ?? null, text: refusedText }), login: { key: this.loginOf(req), account: status.account ?? null }, ...base });
         }
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });

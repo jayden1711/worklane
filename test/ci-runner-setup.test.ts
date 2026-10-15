@@ -160,7 +160,14 @@ test('the access checks fail closed: a path the runner user can reach, or a prob
   }
   // install and check both run these, as the runner user, over every protected path.
   const sh = readFileSync(script, 'utf8');
-  assert.match(sh, /deny_acl=\(\/srv\/worklane \/opt\/worklane \/var\/lib\/worklane \/etc\/worklane\)/);
+  const denied = /^deny_acl=\(([^)]*)\)$/m.exec(sh)?.[1]?.split(' ') ?? [];
+  assert.deepEqual(denied, ['/srv/worklane', '/opt/worklane', '/var/lib/worklane', '/etc/worklane', '/var/lib/worklane-test']);
+  // Every worklane path the units make inaccessible is denied by an ACL too: the units hide them from the runner
+  // processes, the ACL from the runner user everywhere else (its hooks, its Docker, check's probes). /var/lib/worklane-test
+  // was hidden but not denied, and the install's own check refused it on a real machine (0711, a test user's way in).
+  const hidden = (/^InaccessiblePaths=(.*)$/m.exec(sh)?.[1] ?? '').split(' ').map((p) => p.replace(/^-/, '')).filter((p) => !p.includes('$'));
+  assert.ok(hidden.length >= 5, `InaccessiblePaths read: ${hidden.join(' ')}`);
+  for (const p of hidden) assert.ok(denied.includes(p), `${p} is inaccessible to the units but has no ACL entry`);
   assert.match(sh, /setfacl -m "u:\$user:---" "\$p"/);
   assert.match(sh, /\[\[ "\$u" == wl-\* && "\$u" != "\$user"/, 'every other wl-* home');
   assert.match(sh, /deny_check "\$user" "\$\{paths\[@\]\}" \|\| fail=1/);

@@ -30,6 +30,7 @@ import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly }
 import { coordinatorUser } from './setup/app-manifest.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
+import { varLibPath } from './os/system-paths.js';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
@@ -87,7 +88,7 @@ export const localInitFile = (root: string) => join(projectStateDir(root), INIT_
  */
 export const serverInitFile = (instance: string) => join(machineInitDir(), `${instance}.json`);
 /** The machine's init records (tests point it elsewhere). */
-export const machineInitDir = () => process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] ?? `/var/lib/${BRAND.cli}/init`;
+export const machineInitDir = () => process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] ?? varLibPath('init');
 /** Where an engine before this kept it: root's own state, which the coordinator can't read. Read once, to carry it over. */
 export const legacyServerInitFile = (instance: string) => join(stateDir(), 'init', `${instance}.json`);
 

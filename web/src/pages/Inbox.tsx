@@ -2,7 +2,7 @@ import type { State, Task } from '../api';
 import { navigate } from '../App';
 import { ago, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
 import { DecisionCard } from './Decisions';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 function TaskRow({ t, note }: { t: Task; note?: string }) {
   return (

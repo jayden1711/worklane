@@ -2,14 +2,16 @@
 // rerun that starts nothing, and never the dashboard's key in the URL or the output.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { createServer, type IncomingMessage } from 'node:http';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer, request, type IncomingMessage } from 'node:http';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { DetachError, detachDashboard, detachedLines, probeDashboard, wizardUrl, type Probe } from '../src/dashboard-detach.js';
+import { DetachError, detachDashboard, detachedLines, probeDashboard, readDashboardPort, useBold, wizardUrl, writeDashboardPort, type Probe } from '../src/dashboard-detach.js';
 import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
+import { dashboardProof, NONCE, PROOF_PATH } from '../src/dashboard-proof.js';
 import { projectStateDir } from '../src/guardrails/context.js';
+import { freePort } from '../src/browser/cdp.js';
 import { engineCli, exampleProject } from './helpers.js';
 
 const KEY = 'k'.repeat(32);
@@ -20,23 +22,42 @@ function keyFile(): string {
   return f;
 }
 
-/** A server that answers like a dashboard: 200 with this key in a bearer header, 401 otherwise. */
-async function fakeDashboard(): Promise<{ port: number; seen: IncomingMessage[]; close: () => void }> {
+/** A server that answers like a dashboard holding `key`: the proof over the nonce and the port it was reached on. */
+async function fakeDashboard(key = KEY): Promise<{ port: number; seen: IncomingMessage[]; close: () => void }> {
   const seen: IncomingMessage[] = [];
   const s = createServer((req, res) => {
     seen.push(req);
-    res.writeHead(req.headers.authorization === `Bearer ${KEY}` ? 200 : 401).end('{}');
+    const url = new URL(req.url ?? '/', 'http://x');
+    const nonce = url.searchParams.get('nonce') ?? '';
+    if (url.pathname !== PROOF_PATH || !NONCE.test(nonce)) return void res.writeHead(404).end('{}');
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ proof: dashboardProof(key, req.socket.localPort!, nonce) }));
   });
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
   return { port: (s.address() as { port: number }).port, seen, close: () => s.close() };
 }
 
-test('detach: the probe sends the key in a header, never the URL; ours, another, or nothing on the port', async () => {
+/** Everything a request carried that a listener sees: the request line, every header, the body. */
+async function squatter(answer: (req: IncomingMessage, body: string) => { status: number; body: string } = () => ({ status: 200, body: '{}' })) {
+  const heard: string[] = [];
+  const s = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString()));
+    req.on('end', () => {
+      heard.push(`${req.method} ${req.url}\n${req.rawHeaders.join('\n')}\n\n${body}`);
+      const a = answer(req, body);
+      res.writeHead(a.status, { 'content-type': 'application/json' }).end(a.body);
+    });
+  });
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+  return { port: (s.address() as { port: number }).port, heard, close: () => s.close() };
+}
+
+test('detach: the probe proves the dashboard holds the key without sending it; ours, another, or nothing on the port', async () => {
   const f = keyFile();
   const d = await fakeDashboard();
   try {
     assert.equal(await probeDashboard(d.port, f), 'ours');
-    assert.ok(d.seen.every((r) => !(r.url ?? '').includes(KEY)), 'the key is not in any request URL');
+    assert.ok(d.seen.every((r) => !(r.url ?? '').includes(KEY) && !JSON.stringify(r.headers).includes(KEY)), 'the key is in no request');
     assert.equal(await probeDashboard(d.port, join(f, '..', 'missing')), 'other', 'without the key: something answers, not ours');
     const wrong = join(mkdtempSync(join(tmpdir(), 'detach-')), 'dashboard-token');
     writeFileSync(wrong, 'x'.repeat(32));
@@ -45,6 +66,52 @@ test('detach: the probe sends the key in a header, never the URL; ours, another,
     d.close();
   }
   assert.equal(await probeDashboard(d.port, f), 'none', 'nothing on the port');
+});
+
+test('regression (#448): a program squatting the port never gets the key, on a first run or a rerun, whatever it answers', async () => {
+  const f = keyFile();
+  const answers: Array<(req: IncomingMessage) => { status: number; body: string }> = [
+    () => ({ status: 200, body: '{}' }),
+    () => ({ status: 200, body: JSON.stringify({ proof: 'a'.repeat(64) }) }),
+    () => ({ status: 200, body: 'not json' }),
+    () => ({ status: 401, body: '{}' }),
+  ];
+  for (const answer of answers) {
+    const sq = await squatter(answer);
+    try {
+      assert.equal(await probeDashboard(sq.port, f), 'other');
+      // The first run, on the squatted fixed port: refused, the key never sent.
+      await assert.rejects(detachDashboard({ root: '/r', port: sq.port, tokenFile: f, logFile: join(tmpdir(), 'x.log'), command: ['x'], start: () => assert.fail('nothing started') }), /answers, but not as this checkout's dashboard/);
+      // A rerun with --port 0 whose port file now names the squatter's port: probed, refused, the key never sent.
+      const portFile = join(mkdtempSync(join(tmpdir(), 'detach-')), 'dashboard.port');
+      writeDashboardPort(portFile, sq.port);
+      await assert.rejects(detachDashboard({ root: '/r', port: 0, portFile, tokenFile: f, logFile: join(tmpdir(), 'x.log'), command: ['x'], waitMs: 250, sleep: async () => {}, start: () => ({ pid: 1, exited: () => null }) }), /didn't answer within/);
+      assert.ok(sq.heard.length >= 2, 'it was asked');
+      for (const h of sq.heard) assert.ok(!h.includes(KEY), `the key reached the squatter:\n${h}`);
+    } finally {
+      sq.close();
+    }
+  }
+});
+
+test("regression (#448): a squatter relaying the nonce to this checkout's real dashboard gets a proof for the other port, refused", async () => {
+  const f = keyFile();
+  const real = await fakeDashboard();
+  const relay = createServer((req, res) => {
+    const fwd = request({ host: '127.0.0.1', port: real.port, path: req.url, method: req.method, headers: req.headers }, (up) => {
+      res.writeHead(up.statusCode ?? 502, up.headers);
+      up.pipe(res);
+    });
+    req.pipe(fwd);
+  });
+  await new Promise<void>((r) => relay.listen(0, '127.0.0.1', r));
+  try {
+    assert.equal(await probeDashboard(real.port, f), 'ours', 'the real one, asked directly');
+    assert.equal(await probeDashboard((relay.address() as { port: number }).port, f), 'other', 'through the relay: a proof for the real port, not the one asked');
+  } finally {
+    relay.close();
+    real.close();
+  }
 });
 
 test('detach: already answering with this key: the same URL, nothing started', async () => {
@@ -72,12 +139,66 @@ test("detach: refuses a port another program (or checkout) answers on, and says 
   await assert.rejects(detachDashboard({ ...base, waitMs: 1000, probe: async () => 'none', start: () => ({ pid: 1, exited: () => null }) }), /didn't answer on port 4317 within 1 s/);
 });
 
-test('detach: the lines it prints end with the one URL; the key file is named, the key never', () => {
-  const lines = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/s/dashboard.log' });
+test('detach --port 0: the dashboard names its own port; a rerun finds it answering there and starts nothing; a stale or foreign port file is never probed again', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'detach-'));
+  const portFile = join(state, 'dashboard.port');
+  const base = { root: '/r', port: 0, portFile, tokenFile: '/k', logFile: join(state, 'd.log'), command: ['x'], sleep: async () => {} };
+  const probed: number[] = [];
+  // Started: it writes the port it got after a moment; only that port answers as ours.
+  let ticks = 0;
+  const start = () => ({ pid: 9, exited: () => (++ticks === 2 ? (writeDashboardPort(portFile, 45_001), null) : null) });
+  const probe = async (p: number) => (probed.push(p), p === 45_001 ? ('ours' as const) : ('none' as const));
+  assert.deepEqual(await detachDashboard({ ...base, probe, start }), { url: wizardUrl(45_001), started: true, pid: 9 });
+  assert.equal(statSync(portFile).mode & 0o777, 0o600);
+  // A rerun: the same URL, nothing started.
+  let starts = 0;
+  assert.deepEqual(await detachDashboard({ ...base, probe, start: () => (starts++, { pid: 1, exited: () => null }) }), { url: wizardUrl(45_001), started: false });
+  assert.equal(starts, 0);
+  // Gone (nothing answers there now): the file is dropped and a new one started, never the old port again.
+  probed.length = 0;
+  const gone = async (p: number) => (probed.push(p), 'none' as const);
+  await assert.rejects(detachDashboard({ ...base, waitMs: 500, probe: gone, start: () => ({ pid: 2, exited: () => null }) }), /didn't answer within \d+ s/);
+  assert.deepEqual(probed, [45_001], 'the old port is probed once, then forgotten');
+  assert.equal(readDashboardPort(portFile), null);
+  // Without a file to name the port in, port 0 is refused.
+  const { portFile: _none, ...noFile } = base;
+  await assert.rejects(detachDashboard({ ...noFile, probe }), /--port 0 needs a file/);
+});
+
+test("detach --port 0: the port file is believed only when it is this user's, written by nobody else, and holds one port", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'detach-'));
+  const f = join(d, 'dashboard.port');
+  writeDashboardPort(f, 4317);
+  assert.equal(readDashboardPort(f), 4317);
+  for (const bad of ['0', '65536', '43 17', 'x', '', '-1', '4317\n4318']) {
+    writeFileSync(f, bad, { mode: 0o600 });
+    assert.equal(readDashboardPort(f), null, JSON.stringify(bad));
+  }
+  writeFileSync(f, '4317\n');
+  chmodSync(f, 0o622);
+  assert.equal(readDashboardPort(f), null, 'writable by others: someone else could point the key at their port');
+  rmSync(f);
+  symlinkSync(join(d, 'elsewhere'), f);
+  writeFileSync(join(d, 'elsewhere'), '4317\n', { mode: 0o600 });
+  assert.equal(readDashboardPort(f), null, 'a symlink is not followed');
+  assert.equal(readDashboardPort(join(d, 'missing')), null);
+});
+
+test('detach: the lines it prints end with the one URL; the key file is named on its own line with a copy command, the key never', () => {
+  const lines = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/s/dashboard.log', copy: "pbcopy < '/s/dashboard-token'" });
   assert.equal(lines.at(-1), 'http://127.0.0.1:4317/first-run');
   assert.equal(lines.filter((l) => /https?:\/\//.test(l)).length, 1, 'one URL');
   assert.match(lines.join('\n'), /started in the background \(pid 7; its log: \/s\/dashboard\.log\)/);
-  assert.match(lines.join('\n'), /dashboard key: it is in \/s\/dashboard-token \(only you can read it\)/);
+  assert.match(lines.join('\n'), /dashboard key, in this file \(only you can read it\):\n {4}\/s\/dashboard-token\n {2}copy it to paste: pbcopy < '\/s\/dashboard-token'\n/);
+  assert.doesNotMatch(lines.join('\n'), /\x1b/, 'plain unless asked');
+  // On a terminal: the path and the command in bold, the same text otherwise; no tool: the path alone.
+  const bold = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/l', copy: 'c', bold: true });
+  assert.ok(bold.includes('    \x1b[1m/s/dashboard-token\x1b[22m') && bold.includes('  copy it to paste: \x1b[1mc\x1b[22m'), bold.join('\n'));
+  assert.ok(!detachedLines({ url: wizardUrl(4317), started: true }, { root: '/r', tokenFile: '/t', logFile: '/l', copy: null }).some((l) => l.includes('copy it')));
+  assert.equal(useBold({ isTTY: true }, {}), true);
+  assert.equal(useBold({ isTTY: true }, { NO_COLOR: '1' }), false);
+  assert.equal(useBold({ isTTY: false }, {}), false);
+  assert.equal(useBold({}, {}), false);
   assert.match(detachedLines({ url: wizardUrl(4317), started: false }, { root: '/r', tokenFile: '/t', logFile: '/l' })[0]!, /already running; nothing changed/);
 });
 
@@ -85,17 +206,34 @@ const skip = process.platform === 'win32' && 'a detached dashboard is stopped he
 
 test('dashboard --detach, for real: started once, the same URL again with nothing started, no key in it or the output', { skip }, async () => {
   const { dir, stateDir } = exampleProject();
-  const free = createServer();
-  await new Promise<void>((r) => free.listen(0, '127.0.0.1', r));
-  const port = (free.address() as { port: number }).port;
-  await new Promise<void>((r) => free.close(() => r()));
   const env = { ...process.env, WORKLANE_STATE_DIR: stateDir, WORKLANE_USER: 'example-owner' };
-  const run = () => spawnSync(process.execPath, [engineCli, 'dashboard', '--detach', '--no-open', '--root', dir, '--port', String(port)], { encoding: 'utf8', env, timeout: 60_000 });
-  const first = run();
-  const pid = Number(/pid (\d+);/.exec(first.stdout)?.[1]);
+  // Not spawnSync: the squatter below answers from this process.
+  const run = (port: number) =>
+    new Promise<{ status: number | null; stdout: string; stderr: string }>((ok) => {
+      const p = spawn(process.execPath, [engineCli, 'dashboard', '--detach', '--no-open', '--root', dir, '--port', String(port)], { env, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+      let stdout = '';
+      let stderr = '';
+      p.stdout.on('data', (c: Buffer) => (stdout += c.toString()));
+      p.stderr.on('data', (c: Buffer) => (stderr += c.toString()));
+      p.on('close', (status) => ok({ status, stdout, stderr }));
+    });
+  // WHY (#312): a port picked free and handed over can be taken before the dashboard listens on it; on a busy machine
+  // it was ("port N answers, but not as this checkout's dashboard"). A squatter takes the port freePort() returns, as
+  // another program would: a given port is then refused, and --port 0 (the dashboard's own choice) is not affected.
+  const squatted = await freePort();
+  const squatter = createServer((_q, r) => r.writeHead(401).end('{}'));
+  await new Promise<void>((r) => squatter.listen(squatted, '127.0.0.1', r));
+  let pid = 0;
   try {
+    const taken = await run(squatted);
+    assert.equal(taken.status, 1, taken.stdout + taken.stderr);
+    assert.match(taken.stderr, new RegExp(`port ${squatted} answers, but not as this checkout's dashboard`));
+    const first = await run(0);
+    pid = Number(/pid (\d+);/.exec(first.stdout)?.[1]);
     assert.equal(first.status, 0, first.stdout + first.stderr);
-    const second = run();
+    const port = Number(/^http:\/\/127\.0\.0\.1:(\d+)\/first-run$/m.exec(first.stdout)?.[1]);
+    assert.ok(port > 0 && port !== squatted, `its own port: ${first.stdout}`);
+    const second = await run(0);
     assert.equal(second.status, 0, second.stdout + second.stderr);
     const url = `http://127.0.0.1:${port}/first-run`;
     for (const r of [first, second]) assert.equal(r.stdout.trim().split('\n').at(-1), url, 'the URL is the last line, the same both times');
@@ -104,7 +242,7 @@ test('dashboard --detach, for real: started once, the same URL again with nothin
     const key = readFileSync(tokenFile, 'utf8').trim();
     assert.ok(key.length >= 16);
     for (const r of [first, second]) assert.ok(!(r.stdout + r.stderr).includes(key), 'the key is never printed');
-    assert.match(first.stdout, new RegExp(`dashboard key: it is in ${tokenFile.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`));
+    assert.match(first.stdout, new RegExp(`dashboard key, in this file \\(only you can read it\\):\\n {4}${tokenFile.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\n`));
     assert.equal(statSync(tokenFile).mode & 0o777, 0o600, 'only the owner reads the key');
     const page = await fetch(url);
     assert.equal(page.status === 200 || page.status === 503, true, 'the page is served (503 only when this build has no web UI)');
@@ -112,6 +250,7 @@ test('dashboard --detach, for real: started once, the same URL again with nothin
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/role`, { headers: { authorization: `Bearer ${key}` } })).status, 200, 'the key in a header opens it (the CI job asks /api/first-run itself)');
   } finally {
     if (pid) process.kill(pid);
+    squatter.close();
   }
 });
 

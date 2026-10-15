@@ -21,7 +21,7 @@ export abstract class Gardener extends Delegation {
   /** Start the gardener when it is due (one run at a time). */
   async checkGardener(): Promise<void> {
     const g = this.d.cfg.project.gardener;
-    if (!g.enabled || this.gardenerBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.diskHeld()) return;
+    if (!g.enabled || this.gardenerBusy || this.halt.signal.aborted || this.stopped || this.usagePause() || this.authHeld() || this.diskHeld()) return;
     const last = (this.d.log.read(0, ['gardener.run']).at(-1)?.payload as EventPayload<'gardener.run'> | undefined)?.started_at ?? null;
     if (!gardenerDue(this.d.now?.() ?? new Date(), last, { everyDays: g.every_days, at: g.at })) return;
     this.gardenerBusy = true;

@@ -16,7 +16,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, MARKS, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -74,6 +74,7 @@ interface Render {
   renderRunResearch(data: unknown): string;
   renderStopBanner(state: State): string;
   renderUsageBanner(usage: unknown[], now: number): string;
+  renderRunWhy(detail?: string): string;
   renderUsageLines(usage: unknown[], now: number): string;
   renderOverviewWithUsage(state: State, usage: unknown[], now: number): string;
   countdown(resetAt: string, now: number): string;
@@ -112,7 +113,7 @@ interface Render {
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
   renderSignIn(local?: boolean): string;
-  renderKeyPage(): string;
+  renderKeyPage(help?: { file: string; copy: string | null } | null): string;
   renderKeyForm(error?: string | null): string;
   needsKey(hubPage: boolean, key: string): boolean;
   tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
@@ -400,6 +401,14 @@ test("the dashboard key: a page opened without one (the install's URL) asks for 
   assert.match(page, /data-testid="key-page"/);
   assert.match(page, /<input id="dash-key" type="password" autoComplete="off"|<input id="dash-key" type="password" autocomplete="off"/);
   assert.match(page, /data-testid="key-file"[\s\S]*type="file"/, 'or its file');
+  // #467: on this machine, the key's file whole and the command that copies it; nothing when the server gives none.
+  assert.doesNotMatch(page, /data-testid="key-help"/);
+  const file = '/Users/example/Library/Application Support/example/projects/abc/dashboard-token';
+  const helped = r.renderKeyPage({ file, copy: `pbcopy < '${file}'` });
+  assert.match(helped, /data-testid="key-help-file"[^>]*>\/Users\/example\/Library\/Application Support\/example\/projects\/abc\/dashboard-token</);
+  assert.match(helped, /data-testid="key-help-command"[^>]*>pbcopy &lt; (&#x27;|')\/Users\/example\/Library\/Application Support/);
+  assert.match(helped, /data-testid="key-help-copy"[^>]*>Copy command</);
+  assert.doesNotMatch(r.renderKeyPage({ file, copy: null }), /key-help-command|key-help-copy/, 'no clipboard tool: the path alone');
   assert.match(r.renderKeyForm("That key doesn't open this dashboard."), /role="alert" data-testid="key-error">That key doesn(&#x27;|')t open this dashboard\./);
 
   const key = 'a'.repeat(32);
@@ -729,6 +738,10 @@ test('the Updates panel: the engine installed, the last update, a rollback held 
   for (const id of ['updates-panel', 'updates-installed', 'updates-last', 'updates-rollback', 'updates-rollback-reason', 'updates-canary', 'updates-canary-last', 'updates-canary-why']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
   assert.match(html, /data-testid="updates-installed"[\s\S]*?v0\.4\.1[\s\S]*?aaaaaaaaaaaa/);
   assert.match(html, /data-testid="updates-last"[\s\S]*?aaaaaaaaaaaa → bbbbbbbbbbbb/);
+  // The last pass that found nothing newer (#465): when, on which channel, the version; no row without one.
+  assert.doesNotMatch(html, /data-testid="updates-last-check"/);
+  const checked = r.renderUpdatesPanel({ ...data, lastCheck: { at, channel: 'release', sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' } });
+  assert.match(checked, /data-testid="updates-last-check"[\s\S]*?3h ago[\s\S]*?on (<!-- -->)?release(<!-- -->)?: up to date \((<!-- -->)?v0\.5\.0/);
   assert.match(html, /rolled back: canary failed[\s\S]*?held[\s\S]*?timed out after 121 minutes/);
   assert.match(html, /data-testid="updates-canary-last"[\s\S]*?timed out[\s\S]*?after installing bbbbbbbbbbbb · 2 h 01 min[\s\S]*?href="https:\/\/github\.com\/example-org\/canary-scratch\/pull\/7"[^>]*>PR #(<!-- -->)?7/);
   // Passed, a daily one, and nothing rolled back.
@@ -981,6 +994,22 @@ test('the usage-limit pause: a banner per paused instance counting down to its r
   assert.doesNotMatch(banner, /default wait/, 'claude named the reset');
   assert.match(r.renderUsageBanner([{ ...paused, paused: { ...paused.paused, source: 'default' } }], now), /default wait/);
   assert.match(r.renderUsageBanner([paused], now + 3 * 3600_000), />resuming now</);
+  // Issue #463: a Claude login the API refused: a red banner naming the login and Claude's words, with the owner's
+  // re-check; none while every login works.
+  const refused = { ...running, signinFailed: [{ login: 'agents@example.com', detail: "claude's login was refused (HTTP 401): Invalid API key", since: '2026-10-13T09:00:00Z', lastCheck: { at: '2026-10-13T09:50:00Z', ok: false, detail: 'still 401' } }], canRecheckSignin: true };
+  const signin = r.renderUsageBanner([refused], now);
+  assert.equal((signin.match(/data-testid="signin-banner"/g) ?? []).length, 1);
+  assert.match(signin, /Claude sign-in failed: no new runs/);
+  assert.match(signin, /agents@example\.com/);
+  assert.match(signin, /Claude said: claude&#x27;s login was refused \(HTTP 401\): Invalid API key/);
+  assert.match(signin, /data-testid="signin-recheck"/);
+  assert.match(signin, /Last checked .*still 401/);
+  assert.doesNotMatch(r.renderUsageBanner([{ ...refused, canRecheckSignin: false }], now), /signin-recheck/, 'only the owner re-checks');
+  assert.equal(r.renderUsageBanner([{ ...running, signinFailed: [] }], now), '');
+  assert.match(r.renderUsageLines([refused], now), /data-testid="usage-line-status"[^>]*>Claude sign-in failed: no new runs</);
+  // A failed run's why, on its run detail.
+  assert.match(r.renderRunWhy('error_during_execution: sandbox required but unavailable'), /data-testid="run-detail-why"[\s\S]*Why it ended[\s\S]*sandbox required but unavailable/);
+  assert.equal(r.renderRunWhy(undefined), '');
   // The Overview: a line per instance, running or paused, with today's runs and limit hits.
   const lines = r.renderUsageLines([running, paused], now);
   assert.equal((lines.match(/data-testid="usage-line"/g) ?? []).length, 2);
@@ -1860,10 +1889,7 @@ test("Add project: the page's name and repo check gives the machine helper's ans
 });
 
 test("two instances on one machine: with one selected, no page shows any of the other's items; All instances shows both, labelled; the default is the selected one", async () => {
-  const marks: Record<'a' | 'b', InstanceMarks> = {
-    a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
-    b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
-  };
+  const marks: Record<'a' | 'b', InstanceMarks> = { a: { ...MARKS.a }, b: { ...MARKS.b } };
   // Both instances' coordinators hold slots in the machine's one slots dir, as on a real machine.
   const shared = mkdtempSync(join(tmpdir(), 'web-render-shared-slots-'));
   const servers: Record<string, Awaited<ReturnType<typeof startDashboard>>> = {};

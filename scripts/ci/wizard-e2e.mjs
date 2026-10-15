@@ -9,6 +9,9 @@
 //       page and GitHub's merge button (scripts/ci/wizard-stand-ins/)
 //   node wizard-e2e.mjs server <dist dir> <wizard URL> <key file> <out dir> <instance>
 //       server mode, through the hub's break-glass: checks on the machine through sudo (the runner's)
+//   node wizard-e2e.mjs setup-loopback <dist dir> <setup URL> <setup token file> <out dir> -
+//       a fresh server with no https origin: the hub's setup mode on loopback, as the install printed it; the one-time
+//       token from its file, then the sign-in App step, which must say https comes first and point to screen 7
 //
 // It prints one JSON line per screen ({"screen", "ok", "ms", ...}) and writes <out dir>/urls.txt (every URL the
 // browser asked for) and <out dir>/automation.json (each step's "Without this page" line as the page showed it), for
@@ -20,12 +23,12 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const [mode, dist, wizardUrl, keyFile, out, extra] = process.argv.slice(2);
-if (!['local', 'server'].includes(mode) || !dist || !wizardUrl || !keyFile || !out || !extra) {
-  console.error('usage: wizard-e2e.mjs local <dist dir> <wizard URL> <key file> <out dir> <checkout>\n       wizard-e2e.mjs server <dist dir> <wizard URL> <key file> <out dir> <instance>');
+if (!['local', 'server', 'setup-loopback'].includes(mode) || !dist || !wizardUrl || !keyFile || !out || !extra) {
+  console.error('usage: wizard-e2e.mjs local <dist dir> <wizard URL> <key file> <out dir> <checkout>\n       wizard-e2e.mjs server <dist dir> <wizard URL> <key file> <out dir> <instance>\n       wizard-e2e.mjs setup-loopback <dist dir> <setup URL> <setup token file> <out dir> -');
   process.exit(2);
 }
 const instance = mode === 'server' ? extra : null;
-const checkout = mode === 'server' ? null : extra;
+const checkout = mode === 'local' ? extra : null;
 const { launchChrome, findChrome, until, sleep } = await import(pathToFileURL(join(dist, 'src', 'browser', 'cdp.js')).href);
 mkdirSync(out, { recursive: true });
 const origin = new URL(wizardUrl).origin;
@@ -619,8 +622,59 @@ async function serverMachine() {
   });
 }
 
+// ---------------------------------------------------------------- server, no https origin yet
+/**
+ * Setup mode on loopback (bootstrap --hardened with no origin): a server-rendered page, no script. The one-time token
+ * goes into its form from the token file (never typed here, never printed, never in the address bar); then the sign-in
+ * App step must not start GitHub's manifest flow: it says https comes first, and points to screen 7.
+ */
+async function setupLoopback() {
+  const base = new URL(wizardUrl);
+  assert.equal(base.hostname, '127.0.0.1', 'the setup URL is a loopback one');
+  await screen('server, screen 3 with no origin: the loopback URL, the one-time token from its file', async () => {
+    await cdp.send('Page.navigate', { url: wizardUrl });
+    await until('the setup page', () => evaluate(`document.readyState === 'complete' && !!document.querySelector('#token')`), 30_000, 200);
+    assert.ok(!new URL(await evaluate('location.href')).search, 'the URL carries nothing');
+    assert.match((await text('main')) ?? '', /waits for screen 7, Tailscale and HTTPS/);
+    const token = readFileSync(keyFile, 'utf8').trim();
+    await click('#token');
+    assert.ok(await evaluate(`document.activeElement === document.querySelector('#token')`), 'the click focused the token field');
+    await cdp.send('Input.insertText', { text: token });
+    // INVARIANT: the token is never in a message: only its length is compared.
+    assert.ok((await evaluate(`document.querySelector('#token').value.length`)) === token.length, 'the token went into the field');
+    await click('form[action="/setup/unlock"] button[type="submit"]');
+    await waitFor(tid('signin-app-needs-https'), 30_000);
+    assert.equal(new URL(await evaluate('location.href')).search, '', 'nothing in the address bar');
+    return { at: await evaluate('location.pathname') };
+  }, { gate: true });
+  await screen('server, screen 3 with no origin: the App step says https first and sends the owner to screen 7 (Tailscale and HTTPS)', async () => {
+    const card = tid('signin-app-needs-https');
+    assert.equal(await attr(card, 'data-next-screen'), '7');
+    const t = (await text(card)) ?? '';
+    assert.match(t, /Screen 7 first: Tailscale and HTTPS/);
+    for (const step of ['install', 'up', 'serve']) assert.match(t, new RegExp(`sudo bash /\\S+/scripts/setup/tailscale\\.sh ${step}\\b`), `screen 7's ${step} step`);
+    assert.match(t, /Then run the install command again/);
+    assert.ok(!(await evaluate(`!!document.querySelector('input[name="owner"], form[action="/setup/signin-app"]')`)), 'no App form');
+    // The App step asked for anyway, as a form from this page with its session (the page's CSP allows no fetch): the
+    // same answer, 409, and nothing started.
+    const statuses = [];
+    const seen = (p) => statuses.push({ url: p.response.url, status: p.response.status });
+    cdp.on('Network.responseReceived', seen);
+    await evaluate(`(() => { const f = document.createElement('form'); f.method = 'post'; f.action = '/setup/signin-app'; const i = document.createElement('input'); i.name = 'owner'; i.value = 'example'; f.append(i); document.body.append(f); f.submit(); return true; })()`);
+    await until('the App step\'s answer', () => evaluate(`location.pathname === '/setup/signin-app' && document.readyState === 'complete' && !!document.querySelector('[data-testid="signin-app-needs-https"]')`), 20_000, 200);
+    const posted = await until('its status', () => statuses.find((x) => new URL(x.url).pathname === '/setup/signin-app') ?? null, 10_000, 100);
+    assert.equal(posted.status, 409);
+    // GitHub never asked: every URL this browser opened is the setup page's own.
+    const away = urls.filter((u) => !u.startsWith(base.origin + '/'));
+    assert.deepEqual(away, [], 'no request left the loopback page');
+    return { next: 7, requests: urls.length };
+  });
+}
+
 try {
-  if (mode === 'local') {
+  if (mode === 'setup-loopback') {
+    await setupLoopback();
+  } else if (mode === 'local') {
     // One tab, the whole walk: Protect must see the merged checks in the same dashboard, never after a restart.
     await local();
     await localRest(checkout);

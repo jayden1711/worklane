@@ -15,8 +15,9 @@
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
 import { fileAccess } from './os/index.js';
+import { etcPath } from './os/system-paths.js';
 
-export const MACHINE_OWNERS_FILE = `/etc/${BRAND.cli}/machine-owners.json`;
+export const MACHINE_OWNERS_FILE = etcPath('machine-owners.json');
 
 /** A GitHub login: letters, digits and single dashes inside, at most 39 characters (dashboards.sh checks the same). */
 export const GITHUB_LOGIN = /^(?=.{1,39}$)[A-Za-z0-9](?:-?[A-Za-z0-9])*$/;

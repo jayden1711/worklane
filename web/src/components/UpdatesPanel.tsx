@@ -10,6 +10,8 @@ export interface UpdatesPanelData {
   enabled: boolean | null;
   installed: { sha: string | null; version: string | null };
   lastInstall: { at: string; from: string | null; to: string | null } | null;
+  /** The updater's last pass that found nothing newer (#465); absent from an older server. */
+  lastCheck?: { at: string; channel: 'release' | 'main'; sha: string | null; version: string | null; newest: string | null } | null;
   rollback: { at: string; sha: string | null; reason: string; held: boolean; canary: boolean } | null;
   /** The updater draining the machine for an install (src/update-drain.ts); absent from an older server. */
   drain?: { since: string; until: string; to: string | null; testRuns: number; agents: number } | null;
@@ -90,6 +92,13 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
             'no install recorded yet'
           )}
         </Row>
+        {data.lastCheck ? (
+          <Row label="Last checked" testId="updates-last-check">
+            <span title={data.lastCheck.at}>
+              {ago(data.lastCheck.at)} on {data.lastCheck.channel}: up to date ({data.lastCheck.version ? `v${data.lastCheck.version}` : short(data.lastCheck.sha)})
+            </span>
+          </Row>
+        ) : null}
         {data.drain ? (
           <Row label="Draining" testId="updates-drain">
             <div className="space-y-1">
@@ -169,13 +178,15 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
   );
 }
 
-export function UpdatesPanel() {
+export function UpdatesPanel({ onLoaded }: { onLoaded?: () => void }) {
   const [data, setData] = useState<UpdatesPanelData | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     api<UpdatesPanelData>('/api/updates')
       .then((d) => (setData(d), setError(null)))
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => setError(e.message))
+      .finally(() => onLoaded?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   if (error) return <div className="text-[13px] text-red" data-testid="updates-panel">Can't load engine updates: {error}</div>;
   if (!data) return null;

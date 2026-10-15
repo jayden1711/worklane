@@ -15,6 +15,7 @@ import { childEnv, projectCommand } from '../src/os/index.js';
 import { agentEnv, CliRunner, runAsEnv, type RunRequest } from '../src/runner.js';
 import { instanceEnv, instanceTokens } from '../src/service.js';
 import { BRAND } from '../src/brand.js';
+import { onRealMachine } from './isolate.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX file owners and modes, and POSIX stand-ins for claude and gh';
 const me = typeof process.getuid === 'function' ? process.getuid() : -1;
@@ -59,7 +60,7 @@ const proxiesIn = (env: Record<string, string | undefined>) => Object.fromEntrie
 const PROXY_SET = (url: string, noProxy?: string) => ({ HTTPS_PROXY: url, HTTP_PROXY: url, https_proxy: url, http_proxy: url, ...(noProxy ? { NO_PROXY: noProxy, no_proxy: noProxy } : {}) });
 
 test('the file is root\'s, under /etc/<cli>/', () => {
-  assert.equal(NETWORK_FILE, `/etc/${BRAND.cli}/network.json`);
+  assert.equal(onRealMachine(NETWORK_FILE), `/etc/${BRAND.cli}/network.json`);
   assert.deepEqual(machineNetwork, { file: NETWORK_FILE, ownerUid: 0 }, 'the engine reads the real file, owned by root');
 });
 

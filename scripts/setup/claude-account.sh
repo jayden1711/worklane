@@ -15,14 +15,19 @@
 #   install  the token, for every agent user of every instance (its agent user, and its eval user if it has one;
 #            channel chat runs as the agent user), in that user's own ~/.claude/.credentials.json, 0600. Never echoed,
 #            never an argument, never in a log.
-#   check    `claude auth status`, as each of those users.
+#   check    `claude auth status`, as each of those users, and one minimal real call to the API as each of them (the
+#            cheapest model, a one-word answer, one turn, a hard budget cap: issue #463, where a login claude auth
+#            status called fine was refused by the API with a 401 on every run). If the API refuses the new login
+#            for any user, the switch is refused: every agent user is put back on the login it had before (its
+#            credentials file as it was), Claude's message is shown, and the instances resume on their old login.
 #   resume   each instance it paused whose users all passed is started again. One whose check failed is not: it stays
 #            stopped, named, until a rerun passes. Safe to rerun: it remembers the instances it paused.
 # Without a token (none pasted, or not one from claude setup-token) nothing is installed: each paused instance is
-# checked on its current login and resumed if that passes.
+# checked on its current login (claude auth status and the real call) and resumed if that passes.
 #
-# status: each agent user's account (as claude auth status names it), whether it is signed in, which token (the first
-# 8 hex digits of its sha256: the same login shows the same id) and when that expires. With instances named (add-project
+# status: each agent user's account (as claude auth status names it), whether it is signed in, whether the API takes
+# the login (one minimal real call as that user, for each one signed in), which token (the first 8 hex digits of its
+# sha256: the same login shows the same id) and when that expires. With instances named (add-project
 # and credentials.sh name theirs once its token is in, before the machine helper lists it), only their records are
 # found again; status.json keeps every other instance's as it was.
 #
@@ -89,12 +94,12 @@ users_of() {
 
 # One user's record: its stored login (read as root: which token, by id; when it expires) and claude auth status as
 # that user. Never the token itself.
-account_record() { # <instance> <kind> <user> <credentials file> <claude auth status output>
+account_record() { # <instance> <kind> <user> <credentials file> <claude auth status output> [<the real call: ok, or Claude's message>]
   "$(command -v node)" -e '
 const fs = require("node:fs");
 const crypto = require("node:crypto");
-const [instance, kind, user, file, auth] = process.argv.slice(1);
-const r = { instance, kind, user, stored: false, logged_in: false, auth_method: null, account: null, org: null, subscription: null, token_id: null, expires_at: null, installed_at: null, error: null };
+const [instance, kind, user, file, auth, api = ""] = process.argv.slice(1);
+const r = { instance, kind, user, stored: false, logged_in: false, auth_method: null, account: null, org: null, subscription: null, token_id: null, expires_at: null, installed_at: null, error: null, api_ok: null, api_error: null };
 try {
   const st = fs.lstatSync(file);
   if (!st.isFile()) throw Object.assign(new Error("not a file"), { code: "NOTFILE" });
@@ -118,16 +123,29 @@ else {
   for (const [k, from] of [["auth_method", "authMethod"], ["account", "email"], ["org", "orgName"], ["subscription", "subscriptionType"]]) if (typeof a[from] === "string") r[k] = a[from].slice(0, 200);
   if (!r.logged_in) r.error = r.error || "claude auth status says it is not logged in";
 }
+// The real call (#463), when one was made: whether the API took the login, and what Claude said when it did not.
+if (api) {
+  r.api_ok = api === "ok";
+  if (!r.api_ok) {
+    r.api_error = api.slice(0, 500);
+    r.error = r.error || `the API refused the login: ${r.api_error}`;
+  }
+}
 process.stdout.write(JSON.stringify(r));
 ' "$@"
 }
-# Every agent user's record, as a JSON array; written to status.json (root's, 0644) for the dashboard.
+# The real call as this user, as account_record takes it: ok, or Claude's message.
+api_result() { local said; if said="$(claude_api_check "$1")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
+# Every agent user's record, as a JSON array; written to status.json (root's, 0644) for the dashboard. With `api`, each
+# user claude auth status calls signed in is also checked with one minimal real call (a switch's end has just made it).
 collect_status() {
-  local n kind user cfg recs="" rec
+  local n kind user cfg recs="" rec auth api
   for n in $(instances); do
     while read -r kind user cfg; do
       [ -n "$user" ] || continue
-      rec="$(account_record "$n" "$kind" "$user" "$cfg/.credentials.json" "$(claude_status_json "$user")")"
+      auth="$(claude_status_json "$user")" api=""
+      if [ "${1:-}" = api ] && printf '%s' "$auth" | grep -q '"loggedIn": *true'; then api="$(api_result "$user")"; fi
+      rec="$(account_record "$n" "$kind" "$user" "$cfg/.credentials.json" "$auth" "$api")"
       recs="${recs:+$recs,}$rec"
     done < <(users_of "$n")
   done
@@ -168,11 +186,11 @@ for (const r of rows) {
 }
 
 if [ "$cmd" = status ]; then
-  recs="$(collect_status)"
+  recs="$(collect_status api)"
   if [ "${#names[@]}" -gt 0 ]; then save_status "$(merge_status "$recs" "${names[@]}")"; else save_status "$recs"; fi
   if [ -n "$json" ]; then printf '{"users":%s}\n' "$recs"; else show_status "$recs"; fi
-  # Exit 1 when any user isn't signed in.
-  if printf '%s' "$recs" | grep -q '"logged_in":false'; then exit 1; fi
+  # Exit 1 when any user isn't signed in, or the API refused its login.
+  if printf '%s' "$recs" | grep -q '"logged_in":false\|"api_ok":false'; then exit 1; fi
   exit 0
 fi
 
@@ -277,15 +295,22 @@ for n in ${ours[@]+"${ours[@]}"}; do
   fi
 done
 
-# 4. Install the token for every agent user, then check each as that user.
-failed=" "
+# 4. Install the token for every agent user, then check each as that user: claude auth status, and one minimal real call.
+failed=" " refused="" installed=() previous=()
 for n in "${all[@]}"; do
   found=""
   while read -r kind user cfg; do
     [ -n "$user" ] || continue
     found=1
     if [ -n "$have_token" ]; then
+      # The login it has now, kept in memory only (never a file, an argument or a log line): put back if the API
+      # refuses the new one. An absent file is kept as empty. previous[i] is installed[i]'s.
+      before=""
+      if [ -f "$cfg/.credentials.json" ] && [ ! -L "$cfg/.credentials.json" ]; then before="$(cat "$cfg/.credentials.json"; printf x)"; before="${before%x}"; fi
       if printf '%s' "$token" | install_claude_token "$user" "$cfg" >/dev/null 2>&1; then
+        installed+=("$n $user $cfg")
+        previous+=("$before")
+        before=""
         emit install done "$n" "stored in its own Claude login, 0600" "$user"
       else
         emit install failed "$n" "couldn't store the token in $cfg/.credentials.json" "$user"
@@ -297,7 +322,14 @@ for n in "${all[@]}"; do
     who="$(printf '%s' "$rec" | sed -n 's/.*"account":"\([^"]*\)".*/\1/p')"
     method="$(printf '%s' "$rec" | sed -n 's/.*"auth_method":"\([^"]*\)".*/\1/p')"
     if printf '%s' "$rec" | grep -q '"logged_in":true'; then
-      emit check done "$n" "claude auth status: signed in${who:+ as $who}${method:+ ($method)}" "$user"
+      # Signed in, as claude auth status says: now whether the API takes it (#463).
+      if said="$(claude_api_check "$user")"; then
+        emit check done "$n" "claude auth status: signed in${who:+ as $who}${method:+ ($method)}; the API answered a minimal call" "$user"
+      else
+        emit check failed "$n" "claude auth status says signed in${who:+ as $who}, but the API refused the login: ${said:-no answer}" "$user"
+        failed="$failed$n "
+        [ -z "$have_token" ] || refused="${refused:-${said:-no answer}}"
+      fi
     else
       why="$(printf '%s' "$rec" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')"
       emit check failed "$n" "${why:-claude auth status says it is not logged in}" "$user"
@@ -310,6 +342,24 @@ for n in "${all[@]}"; do
   fi
 done
 token=""
+
+# 4b. The API refused the new login: the switch is refused. Every agent user given the token is put back on the login
+# it had before, and the instances resume on it, as they ran before the switch (a login refused before the switch is
+# held at run time, src/claude-auth-failure.ts).
+if [ -n "$refused" ]; then
+  for ((i = 0; i < ${#installed[@]}; i++)); do
+    read -r n user cfg <<< "${installed[$i]}"
+    if printf '%s' "${previous[$i]}" | restore_claude_credentials "$user" "$cfg" >/dev/null 2>&1; then
+      emit install failed "$n" "rolled back: the API refused the new login, so this user is on its previous login again" "$user"
+    else
+      emit install failed "$n" "the API refused the new login, and putting the previous one back failed: sign this user in again" "$user"
+      left_broken="${left_broken:-} $n"
+    fi
+  done
+  previous=()
+  # Back on the old login: each instance resumes as it ran before, unless its rollback failed.
+  failed=" ${left_broken:-} "
+fi
 
 # 5. Resume the instances this switch paused, unless their check failed.
 left=()
@@ -333,6 +383,10 @@ done
 if [ "${#left[@]}" -gt 0 ]; then printf '%s\n' "${left[@]}" > "$paused_file"; else : > "$paused_file"; fi
 
 save_status "$(collect_status)"
+if [ -n "$refused" ]; then
+  emit switch failed "" "refused: the API refused the new login (Claude said: $refused). Every agent user is back on its previous login${left[*]:+; not resumed: ${left[*]}}. Make a new token with claude setup-token on a machine signed in to the account, then rerun: $again"
+  exit 1
+fi
 if [ "${#left[@]}" -gt 0 ]; then
   emit switch failed "" "not resumed: ${left[*]}; fix what each says, then rerun: $again"
   exit 1

@@ -16,7 +16,19 @@ import { UpdatesPanel } from '../components/UpdatesPanel';
 import { TestRunsPanel } from '../components/TestRuns';
 import { RecordsTable } from '../components/patterns';
 import { ago } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
+import { useEffect } from 'react';
+import { InOrder, type PanelLoaded } from '../in-order';
+
+/** For a viewer: the machine-wide settings aren't theirs (nothing to load, so it has its answer at once). */
+function SettingsRefused({ onLoaded }: { onLoaded: PanelLoaded }) {
+  useEffect(onLoaded, [onLoaded]);
+  return (
+    <div className="text-[12.5px] text-ink-3" data-testid="machine-settings-refused">
+      The machine-wide settings and their history are for the owners and writers.
+    </div>
+  );
+}
 
 /** The machine's agent slots: how many of the cap are in use, and who holds each (also what the render checks render). */
 export function MachineSlots({ slots }: { slots: State['slots'] }) {
@@ -56,27 +68,29 @@ export function MachinePage({ state }: { state: State }) {
   return (
     <div data-testid="page-machine">
       <Header title="Machine" sub="the always-on machine: slots, health and machine-wide settings, shared by every instance on it" />
-      <div className="space-y-6 p-6">
+      {/* A flex column with a gap, not space-y: a panel still waiting (display: none) or with nothing to show takes no gap. */}
+      <div className="flex flex-col gap-6 p-6">
         <MachineSlots slots={state.slots} />
         <ProtectionStatus protection={state.protection} brand={state.brand.name} />
         <DeployGateStatus gate={state.deployGate} />
-        <TestRunsPanel />
-        <HealthPanel />
-        {/* The agents' Claude account: the machine owners' only (it renders nothing for anyone else). */}
-        <ClaudeAccountPanel />
-        {/* Tailscale and HTTPS for the hub (the first-run wizard's screen): the machine owners' only, on a server instance. */}
-        <TailscaleSetupPanel />
-        {/* The machine settings are the owners' and writers' (a viewer's request for them is refused). */}
-        {state.canReadMachine ? (
-          <>
-            <UpdatesPanel />
-            <MachineSettings />
-          </>
-        ) : (
-          <div className="text-[12.5px] text-ink-3" data-testid="machine-settings-refused">
-            The machine-wide settings and their history are for the owners and writers.
-          </div>
-        )}
+        {/* Each panel below loads its own data, and is shown in page order (web/src/in-order.tsx): a panel shows once
+            every panel above it has answered, so none that answers late moves a button already on screen (the Updates
+            panel answering after the machine settings moved Install down 208 px, onto the "Machine settings" heading). */}
+        <InOrder
+          testId="machine-panels"
+          panels={[
+            (loaded) => <TestRunsPanel onLoaded={loaded} />,
+            (loaded) => <HealthPanel onLoaded={loaded} />,
+            // The agents' Claude account: the machine owners' only (it renders nothing for anyone else).
+            (loaded) => <ClaudeAccountPanel onLoaded={loaded} />,
+            // Tailscale and HTTPS for the hub (the first-run wizard's screen): the machine owners' only, on a server instance.
+            (loaded) => <TailscaleSetupPanel onLoaded={loaded} />,
+            // The machine settings are the owners' and writers' (a viewer's request for them is refused).
+            ...(state.canReadMachine
+              ? [(loaded: PanelLoaded) => <UpdatesPanel onLoaded={loaded} />, (loaded: PanelLoaded) => <MachineSettings onLoaded={loaded} />]
+              : [(loaded: PanelLoaded) => <SettingsRefused onLoaded={loaded} />]),
+          ]}
+        />
       </div>
     </div>
   );

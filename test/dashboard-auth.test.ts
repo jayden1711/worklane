@@ -60,7 +60,7 @@ import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { fullRunLock, tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { exampleProject, machineOwnersFile, repoRoot, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { exampleProject, machineOwnersFile, repoRoot, marksOf, MARKS, seedInstanceItems } from './helpers.js';
 
 const CLIENT_ID = 'Iv1.testclient01';
 const CLIENT_SECRET = 'client-secret-for-tests';
@@ -121,10 +121,7 @@ const seenIssue = (issue: number, title: string) => ({ issue, title, labels: ['r
 const ask = (id: string, kind: 'question' | 'plan' | 'land') => ({ id, kind, issue: 1, owner: 'example-owner', question: `${kind}?`, options: ['approve', 'reject'], recommendation: 'approve', receipts: [] });
 
 /** Each instance's items when the set-up seeds them (src/dashboard.ts ownHolders tells holders apart by project and actor). */
-const MARKS: Record<'a' | 'b', InstanceMarks> = {
-  a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
-  b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
-};
+// The two instances' markers: test/helpers.ts MARKS (every number above any pid).
 
 /**
  * The whole set-up: a fake GitHub, two instances (each its own server, repo and log), the hub with sign-in, a mockable clock.
@@ -882,15 +879,17 @@ test("the terminal's upgrade through the hub takes the session's CSRF token as a
     const open = (protocols: string[], o: { origin?: string; cookie?: string } = {}) => openTerminalWs(s.base, protocols, { ...laptop, cookie: o.cookie ?? ada.cookie }, o.origin);
     const refusals = () => termAudit.filter((e) => e.kind === 'refused').length;
 
-    const cases: [string, Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
-      ['no token', open([TERMINAL_PROTOCOL]), /CSRF/],
-      ['a wrong token', open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
-      ["another session's token", open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
-      ['the token in the header only (what a browser cannot send)', openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
+    // One at a time: each refusal is counted against the audit as it was just before that one (opened together, a
+    // later one's audit line could land before an earlier one was counted).
+    const cases: [string, () => Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
+      ['no token', () => open([TERMINAL_PROTOCOL]), /CSRF/],
+      ['a wrong token', () => open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
+      ["another session's token", () => open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
+      ['the token in the header only (what a browser cannot send)', () => openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
     ];
     for (const [what, r, re] of cases) {
       const before = refusals();
-      const got = await r;
+      const got = await r();
       assert.match(got.refused ?? '', re, `${what}: ${JSON.stringify(got)}`);
       assert.equal(refusals(), before + 1, `${what}: audited`);
     }

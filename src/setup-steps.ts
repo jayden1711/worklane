@@ -10,6 +10,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
+import { AUTH_CHECK, authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
+import { redactString } from './events/redact.js';
 import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
@@ -26,6 +28,7 @@ import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
+import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -81,8 +84,8 @@ export const MACHINE_PATHS: MachinePaths = {
   helper: MACHINE_HELPER,
   machineOwners: MACHINE_OWNERS_FILE,
   updatesConfig: UPDATES_CONFIG,
-  allowedSigners: `/etc/${BRAND.cli}/allowed_signers`,
-  hubUnitFile: `/etc/systemd/system/${BRAND.cli}-dashboard-hub.service`,
+  allowedSigners: etcPath('allowed_signers'),
+  hubUnitFile: unitPath(`${BRAND.cli}-dashboard-hub.service`),
   fullRunLock: FULL_RUN_LOCK,
   claudeAccountDir: CLAUDE_ACCOUNT_DIR,
 };
@@ -218,6 +221,8 @@ export interface Checking {
   c: SetupContext;
   p: SetupProbe;
   m: MachinePaths;
+  /** A call that costs (the Claude login's proof): its answer kept per identity in the dashboard's cache (proveClaudeLogin). */
+  memo?: (identity: string, call: () => Detected) => Detected;
   cfg: () => Config | { error: string };
   inst: () => InstanceFacts | { error: string };
 }
@@ -230,6 +235,8 @@ function agentLogin(k: Checking): Detected | null {
   const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
   if (!s || !u) return null;
   const when = s.at ? ` at ${s.at}` : '';
+  // WHY (#463): signed in per claude auth status is not proof the API takes the login; the real call is, when made.
+  if (u.loggedIn && u.apiOk === false) return no(`${u.user} is signed in per claude auth status, but the API refused the login on a minimal real call${when}: ${u.apiError ?? 'no answer'}`);
   if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
   return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
 }
@@ -255,19 +262,54 @@ export function detectTools(mode: Mode, p: Pick<SetupProbe, 'which'>, node = pro
   return { done: true, detail: `node ${node}, ${REQUIRED_TOOLS[mode].join(', ')}; ${docker}`, missing };
 }
 
-/** Claude Code signed in, per `claude auth status` (local mode: the person's own login). */
-export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>): Detected {
+/** The minimal real call that proves a login: the cheapest model, a one-word answer, one turn, a hard budget cap. */
+export const LOGIN_PROOF_ARGS = ['-p', AUTH_CHECK.prompt, '--model', AUTH_CHECK.model, '--max-turns', String(AUTH_CHECK.maxTurns), '--max-budget-usd', String(AUTH_CHECK.maxBudgetUsd), '--output-format', 'json'];
+
+/**
+ * Whether the API takes the login (issue #463: `claude auth status` says a credential is configured, not that it
+ * works): one minimal real call. Done when Claude answered (a reply, or the budget cap reached); else Claude's
+ * message, redacted, never a token.
+ */
+export function proveClaudeLogin(p: Pick<SetupProbe, 'run'>): Detected {
+  const r = p.run('claude', LOGIN_PROOF_ARGS);
+  type Result = { subtype?: string; is_error?: boolean; result?: string; api_error_status?: number | null };
+  let j: Result | null = null;
+  try {
+    const parsed = JSON.parse(r.stdout.trim().split('\n').filter(Boolean).at(-1) ?? '') as unknown;
+    j = parsed && typeof parsed === 'object' ? (parsed as Result) : null;
+  } catch {
+    // no JSON result: the exit status and stderr say what happened
+  }
+  if (j && ((j.subtype === 'success' && !j.is_error) || j.subtype === 'error_max_budget_usd')) return ok('a minimal real call was answered');
+  const text = `${j?.result ?? ''}\n${r.stderr}`.trim() || r.stdout.trim() || `claude exited ${r.status ?? 'without a status'}`;
+  if (isAuthFailure({ apiErrorStatus: j?.api_error_status ?? null, text })) return no(authFailedDetail({ apiErrorStatus: j?.api_error_status ?? null, text }));
+  return no(redactString(`a minimal real call failed: ${text.replace(/\s+/g, ' ')}`).slice(0, 1000));
+}
+
+/**
+ * Claude Code signed in (local mode: the person's own login, which the agents use): `claude auth status` says so,
+ * and a minimal real call proves the API takes it. `memo` (the dashboard's) keeps the call's answer for the same
+ * login: a success for LOGIN_PROOF_OK_MS, a failure for LOGIN_PROOF_FAILED_MS; Re-check calls again.
+ */
+export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, memo?: (identity: string, call: () => Detected) => Detected): Detected {
   if (!p.which('claude')) return no('claude is not installed (the tools step)');
   const r = p.run('claude', ['auth', 'status']);
-  let parsed: { loggedIn?: boolean; authMethod?: string } = {};
+  let parsed: { loggedIn?: boolean; authMethod?: string; email?: unknown; orgId?: unknown } = {};
   try {
     parsed = JSON.parse(r.stdout) as typeof parsed;
   } catch {
     // older output: the exit status says it
   }
-  if (r.status === 0 && parsed.loggedIn !== false) return ok(`signed in${parsed.authMethod ? ` (${parsed.authMethod})` : ''}, per \`claude auth status\``);
-  return no('not signed in, per `claude auth status`');
+  if (!(r.status === 0 && parsed.loggedIn !== false)) return no('not signed in, per `claude auth status`');
+  const how = `signed in${parsed.authMethod ? ` (${parsed.authMethod})` : ''}, per \`claude auth status\``;
+  const identity = JSON.stringify([parsed.authMethod ?? null, parsed.email ?? null, parsed.orgId ?? null]);
+  const proof = memo ? memo(identity, () => proveClaudeLogin(p)) : proveClaudeLogin(p);
+  return proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`);
 }
+
+/** How long the dashboard keeps a login's proof: an answered call, and a refused one (Re-check always calls again). */
+export const LOGIN_PROOF_OK_MS = 6 * 3600_000;
+export const LOGIN_PROOF_FAILED_MS = 10 * 60_000;
 
 /** gh signed in, per `gh auth status`, and able to push to the repo. */
 export function detectGithubLogin(p: Pick<SetupProbe, 'which' | 'run'>, repo: string | null): Detected {
@@ -431,7 +473,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here).`,
     fix: { kind: 'signin', label: 'Sign in' },
     automation: 'claude auth login (in a terminal, as this user)',
-    detect: (k) => detectClaudeLogin(k.p),
+    detect: (k) => detectClaudeLogin(k.p, k.memo),
   },
   {
     id: 'claude-token',
@@ -500,7 +542,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then `dashboards.sh --client-id <id> --public-url <url> <name>`.',
+    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. With no https origin yet, `dashboards.sh --setup --loopback` serves the same page on 127.0.0.1 only (an ssh tunnel reaches it), and its App step shows Tailscale and HTTPS (screen 7) first. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then `dashboards.sh --client-id <id> --public-url <url> <name>`.',
     fix: { kind: 'terminal', command: 'sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net', why: "root makes the hub's user and its setup-mode service; the page it serves, behind a one-time setup token from a root-only file, makes the sign-in App on GitHub" },
     detect: (k) => {
       const up = k.p.systemUnitActive(HUB_UNIT);
@@ -815,7 +857,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers (or `--confirm-signer <fingerprint>` for one staged on the Machine page), and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
     fix: { kind: 'screen', path: '/machine', label: "the Machine page's Updater setup" },
-    automation: `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/${BRAND.cli}-machine set-updates on`,
+    automation: `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo ${asRoot.libexec('machine')} set-updates on`,
     detect: (k) => {
       if (!existsSync(k.m.updatesConfig)) return no(`the updater isn't set up (no ${k.m.updatesConfig})`);
       return existsSync(k.m.allowedSigners) ? ok(`set up (${k.m.updatesConfig}); release signers listed`) : no(`set up, but no ${k.m.allowedSigners}: the release channel installs nothing until it lists the signing key`);
@@ -1029,6 +1071,15 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
         }
       })()),
     inst: () => (inst ??= facts()),
+    // WHY: the login's proof is a real (cheap) call: never once per poll. Kept for the same login; Re-check calls again.
+    memo: (identity, call) => {
+      const hit = o.cache?.get('claude-login:proof');
+      const t = now();
+      if (hit && !o.fresh && hit.key === identity && hit.r && t - hit.at < (hit.r.done ? LOGIN_PROOF_OK_MS : LOGIN_PROOF_FAILED_MS)) return hit.r;
+      const r = call();
+      o.cache?.set('claude-login:proof', { at: t, key: identity, r });
+      return r;
+    },
   };
   const key = JSON.stringify([c.mode, c.root, c.repo, c.instance, c.openQuestions, c.setupPr]);
   const steps: StepView[] = [];

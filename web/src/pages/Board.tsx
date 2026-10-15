@@ -6,14 +6,15 @@
 // and each goes to that instance's existing routes (decide, the console), which check the role again.
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
-import { instanceScope, instanceStream, liveStream, onInstance, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
+import { instanceStream, liveStream, onInstance, scopeNowOrNull, viewUrl, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import type { Stream } from '../sse';
+import { markUpdating, peek } from '../cache';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
 import { TestRunsPanel } from '../components/TestRuns';
 import { ago, Badge, Button, cx, Empty, LevelBadge } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 /** One instance's board as the page holds it: `name` is the hub's name for it (null on an instance's own dashboard). */
 export interface InstanceBoard {
@@ -136,7 +137,7 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
   const decide = (id: string, answer: string) => call('/api/decide', { id, answer }, `answered ${answer}`);
   const usage = card.run?.usage;
   return (
-    <article className="rounded-card bg-surface p-3 shadow-card" data-testid="board-card" data-instance={instance ?? card.instance} data-issue={card.issue} data-column={card.column}>
+    <article className="rounded-card bg-surface p-3 shadow-card" data-testid="board-card" data-instance={instance ?? card.instance} data-card-instance={card.instance} data-issue={card.issue} data-column={card.column}>
       <div className="flex items-center gap-1.5 text-[11.5px] text-ink-3" data-testid="board-card-ref">
         {showInstance && (
           <span className="truncate font-medium text-ink-2" data-testid="board-card-instance">
@@ -313,6 +314,9 @@ function BatchStrip({ batches }: { batches: BoardBatch[] }) {
   );
 }
 
+/** How many cards a column shows before its "Show more" (oldest first, so what has waited longest is always shown). */
+export const COLUMN_CARDS = 30;
+
 /** The board from its data (also what the render checks render): the boards in scope, then a column per stage. Several boards: "All instances", each card labelled. */
 export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { boards: InstanceBoard[]; now?: number; onChanged?: () => void }) {
   const several = boards.length > 1;
@@ -320,6 +324,9 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
   const batches = boards.flatMap((b) => b.data?.batches ?? []);
   const failed = boards.filter((b) => b.error);
   const slots = boards.find((b) => b.data)?.data?.slots;
+  // Columns shown whole (the rest show their first COLUMN_CARDS: a busy instance's hundreds of waiting cards made
+  // every switch to the Board build them all, about 200 ms).
+  const [whole, setWhole] = useState<ReadonlySet<string>>(() => new Set());
   return (
     <div className="space-y-4 p-6" data-testid="board">
       <div className="flex flex-wrap items-center gap-3">
@@ -355,7 +362,16 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
               </div>
               {col.id === 'landing' && <BatchStrip batches={batches} />}
               {these.length ? (
-                these.map((x) => <BoardCardView key={`${x.card.instance}:${x.card.issue}`} card={x.card} instance={x.instance} showInstance={several} now={now} onChanged={onChanged} />)
+                <>
+                  {(whole.has(col.id) ? these : these.slice(0, COLUMN_CARDS)).map((x) => (
+                    <BoardCardView key={`${x.card.instance}:${x.card.issue}`} card={x.card} instance={x.instance} showInstance={several} now={now} onChanged={onChanged} />
+                  ))}
+                  {!whole.has(col.id) && these.length > COLUMN_CARDS && (
+                    <button type="button" data-testid="board-column-more" onClick={() => setWhole((w) => new Set(w).add(col.id))} className="rounded-control px-1 py-1 text-left text-[12px] font-medium text-ink-2 hover:bg-hover hover:text-ink">
+                      Show {these.length - COLUMN_CARDS} more
+                    </button>
+                  )}
+                </>
               ) : (
                 <div className="px-1 pb-1 text-[11.5px] text-ink-3">Nothing here.</div>
               )}
@@ -373,29 +389,41 @@ export function loadBoards(scope: InstanceScope, get: <T>(instance: string | nul
   return Promise.all(scope.instances.map((n) => get<BoardData>(n, '/api/board').then((data) => ({ name: n, data, error: null }), (e: Error) => ({ name: n, data: null, error: e.message }))));
 }
 
+/** What was kept of each board in this scope (web/src/cache.ts), when every one of them was; else null (never half a scope). */
+export function keptBoards(scope: InstanceScope): InstanceBoard[] | null {
+  const out: InstanceBoard[] = [];
+  for (const name of scope.instances) {
+    const k = peek<BoardData>(viewUrl('/api/board', name));
+    if (!k) return null;
+    out.push({ name, data: k.data, error: null });
+  }
+  return out;
+}
+
 /** The selected instance's board (every instance's this person can see, labelled, when they chose All instances), refreshed live. */
 export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
-  const [boards, setBoards] = useState<InstanceBoard[] | null>(null);
+  // The scope: the switcher's choice (the selected instance, or All instances), or this page's own server. Fixed for
+  // this page's life: the Dashboard is keyed on it, so a switch mounts a new one.
+  const scope = scopeNowOrNull();
+  // Shown at once from what was kept for this scope, marked "updating…" until the first fresh answer.
+  const [boards, setBoards] = useState<InstanceBoard[] | null>(() => (scope ? keptBoards(scope) : null));
+  const fromKept = useRef(boards !== null);
   const [tick, setTick] = useState(0);
   const [now, setNow] = useState(Date.now());
-  const scope = useRef<InstanceScope | null>(null);
-
-  // The scope: the switcher's choice (the selected instance, or All instances), or this page's own server.
-  useEffect(() => {
-    void instanceScope.then((s) => {
-      scope.current = s;
-      setTick((t) => t + 1);
-    });
-  }, []);
 
   useEffect(() => {
-    if (scope.current === null) return;
+    if (scope === null) return;
     let live = true;
-    void loadBoards(scope.current).then((b) => live && setBoards(b));
+    const unmark = fromKept.current ? markUpdating() : () => {};
+    fromKept.current = false;
+    void loadBoards(scope)
+      .then((b) => live && setBoards(b))
+      .finally(unmark);
     return () => {
       live = false;
+      unmark();
     };
-  }, [tick, pulse]);
+  }, [scope, tick, pulse]);
 
   // Live: the page's own stream (pulse) covers the selected instance; with All instances, each other one gets its own stream.
   // Elapsed times and resource use are refreshed every 15 s besides.
@@ -403,9 +431,10 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
     const streams: Stream[] = [];
     let closed = false;
     let timer: number | undefined;
-    void instanceScope.then(async (s) => {
-      for (const name of s.instances) {
-        if (closed || name === null || name === s.current) continue;
+    void (async () => {
+      if (!scope) return;
+      for (const name of scope.instances) {
+        if (closed || name === null || name === scope.current) continue;
         const path = await instanceStream(name, '/api/stream');
         if (closed) return;
         streams.push(
@@ -417,7 +446,7 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
           }),
         );
       }
-    });
+    })();
     const t = setInterval(() => {
       setNow(Date.now());
       setTick((x) => x + 1);
@@ -428,7 +457,7 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
       clearInterval(t);
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [scope]);
 
   return (
     <div data-testid="page-board">

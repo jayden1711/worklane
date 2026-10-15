@@ -1,7 +1,7 @@
 import type { State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Card, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const TONE = { verified: 'ok', failed: 'danger', requested: 'info' } as const;
 

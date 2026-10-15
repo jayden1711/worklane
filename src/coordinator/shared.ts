@@ -267,6 +267,17 @@ export class UsagePaused extends Halted {
   }
 }
 
+/**
+ * The run's Claude login is held (src/claude-auth-failure.ts): the API refused it, on this run or an earlier one, and
+ * no call on it has succeeded since. A run asked for while it holds never starts. A kind of halt, so every caller that
+ * requeues on a halt requeues on this too; it never counts as an attempt.
+ */
+export class AuthPaused extends Halted {
+  constructor(readonly login: string, readonly detail: string) {
+    super(`Claude sign-in failed on this machine (${login}): no new runs on that login until it works again`);
+  }
+}
+
 export const DEFAULT_REVIEW = {
   version: 1 as const,
   categories: {},

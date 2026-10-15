@@ -11,8 +11,9 @@
 // stays append-only. test/migrations.test.ts shows how to test one.
 import { copyFileSync, existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import { openReadOnly } from './events/read-only.js';
+import { openWaiting } from './events/open.js';
 import { parseDocument, type Document } from 'yaml';
 import { BRAND } from './brand.js';
 import { replaceFileAtomically } from './os/index.js';
@@ -204,9 +205,8 @@ function migrateOne(p: Pending, now: Date, config: ConfigMigration[], state: Sta
       }
       replaceFileAtomically(p.path, doc.toString(), statSync(p.path).mode & 0o777);
     } else {
-      const db = new DatabaseSync(p.path);
+      const db = openWaiting(p.path);
       try {
-        db.exec('PRAGMA busy_timeout = 5000');
         db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
         made.push({ kind: 'state', path: p.path, backup });
         db.exec(RECORD);

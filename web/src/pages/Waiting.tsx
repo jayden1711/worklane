@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
 import { api, type MergedItem, type State, type WaitItem, type WaitKind, type Waiting } from '../api';
 import { navigate } from '../App';
 import { Badge, Card, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 /** The kinds in the digest's order, with its headings (src/digest.ts). */
 export const KINDS: [WaitKind, string][] = [

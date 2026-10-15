@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { BRAND } from '../src/brand.js';
-import { liveProcesses } from '../src/browser/cdp.js';
+import { launchChrome, liveProcesses, type Browser, type Cdp } from '../src/browser/cdp.js';
+import { isLocal } from '../src/browser/run.js';
 
 /** Per real-Chrome test: room for scaled launches, a retry and teardown on a loaded runner. */
 export const REAL_CHROME_TIMEOUT = 300_000;
@@ -29,12 +30,62 @@ export async function unscaled<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Scale the browser's timeouts (unless the environment already does), and fail any test that leaks a process. */
+/**
+ * Scale the browser's timeouts (unless the environment already does), and fail any test that leaks a process, or
+ * whose pages asked for anything outside this machine (launchTestChrome), naming each URL.
+ */
 export function realChromeTests(): void {
   process.env[SCALE] ??= '3';
   afterEach(() => {
     assert.deepEqual(liveProcesses(), [], 'a browser or app process outlived its test');
+    const asked = outsideRequests.splice(0);
+    assert.deepEqual(asked, [], 'a page asked for a host outside this machine (no live outside calls from tests, #462)');
   });
+}
+
+/**
+ * WHY: a real-Chrome test that reaches the internet depends on its answer (a 404, a redirect, a timeout, a rate
+ * limit), which moves layouts and timings (#452's flake: avatars from github.com). In a test's Chrome no host resolves
+ * but loopback (localhost, 127.0.0.1, ::1), so an outside request fails at once, the same way every run.
+ */
+// MAP * covers IP literals too, so each loopback form is excluded by name (::1 without brackets; with them it isn't).
+export const OFFLINE_CHROME_ARGS = ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1'];
+
+/**
+ * Outside URLs a page may still ask for (they fail at once, never reaching the network) until the product stops
+ * asking: a person's GitHub picture, until the dashboard serves them from its own origin (#462, option B).
+ */
+export const KNOWN_OUTSIDE: RegExp[] = [/^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\.png(?:\?[^#]*)?$/];
+
+/** Outside URLs pages asked for since the last test ended; realChromeTests' afterEach fails on any. */
+const outsideRequests: string[] = [];
+
+/** The outside URLs asked for so far, emptied: for the test that checks this guard itself. */
+export const takeOutsideRequests = (): string[] => outsideRequests.splice(0);
+
+/** Whether a page's request goes outside this machine: http(s) or ws(s) to any host but loopback. */
+export const isOutside = (url: string): boolean => /^(?:https?|wss?):/i.test(url) && !isLocal(url);
+
+/**
+ * The only way a test starts a real Chrome (test/offline-chrome.test.ts keeps it so): launchChrome with no host but
+ * localhost resolving, and every request its page makes watched. One outside the machine that isn't KNOWN_OUTSIDE, or
+ * `allow` for this test (one it answers itself with Fetch, say), fails the test, named.
+ */
+export async function launchTestChrome(chrome: string, o: Parameters<typeof launchChrome>[1] & { allow?: RegExp[] } = {}): Promise<Browser> {
+  const { allow = [], ...launch } = o;
+  const b = await launchChrome(chrome, { ...launch, extraArgs: [...OFFLINE_CHROME_ARGS, ...(launch.extraArgs ?? [])] });
+  const known = [...KNOWN_OUTSIDE, ...allow];
+  b.cdp.on('Network.requestWillBeSent', (p) => {
+    const url = String((p.request as { url?: unknown } | undefined)?.url ?? '');
+    if (isOutside(url) && !known.some((r) => r.test(url))) outsideRequests.push(url);
+  });
+  try {
+    await b.cdp.send('Network.enable');
+  } catch (e) {
+    await b.close();
+    throw e;
+  }
+  return b;
 }
 
 /**
@@ -169,4 +220,47 @@ export async function takeChromeLock(lock = CHROME_LOCK): Promise<() => void> {
 export async function oneChromeAtATime(t: TestContext): Promise<void> {
   const release = await takeChromeLock();
   t.after(release);
+}
+
+/** How far (CSS px) a target may drift between the read and the press: sub-pixel layout rounding, nothing more. */
+export const STEADY_PX = 0.5;
+
+/**
+ * Where to press `element` (an in-page expression): its centre, scrolled to the middle of the view, read, then read
+ * again two frames later, just before the press. A target that moved in between (a panel answering late above it)
+ * fails here at once, saying where it was, where it went and what the press would have reached, never a press that
+ * silently lands on something else and a wait that times out later (#453: Install moved 208 px onto a heading).
+ */
+export async function steadyCentre(cdp: Cdp, element: string, what: string = element): Promise<{ x: number; y: number }> {
+  const r = await cdp.send<{ result: { value: { a: { x: number; y: number }; b: { x: number; y: number }; connected: boolean; under: string } | null }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', {
+    expression: `(async () => {
+      const e = ${element};
+      if (!e) return null;
+      e.scrollIntoView({ block: 'center' });
+      const at = () => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; };
+      const a = at();
+      // Two frames (at most 250 ms, should frames not come): long enough for a late answer's render to land.
+      await Promise.race([new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))), new Promise((ok) => setTimeout(ok, 250))]);
+      const b = at();
+      const h = document.elementFromPoint(a.x, a.y);
+      const under = h === e || (h && e.contains(h)) ? 'the target' : h ? '<' + h.tagName.toLowerCase() + [...h.attributes].map((x) => ' ' + x.name + '="' + x.value.slice(0, 60) + '"').join('') + '>' + (h.textContent || '').trim().slice(0, 60) : 'nothing';
+      return { a, b, connected: e.isConnected, under };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+  if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
+  const v = r.result.value;
+  if (!v) throw new Error(`${what}: not in the page at the press`);
+  const p = (q: { x: number; y: number }) => `(${Math.round(q.x)}, ${Math.round(q.y)})`;
+  if (!v.connected || Math.abs(v.a.x - v.b.x) > STEADY_PX || Math.abs(v.a.y - v.b.y) > STEADY_PX) {
+    throw new Error(`${what} moved between the read and the press: from ${p(v.a)} to ${v.connected ? p(v.b) : 'out of the page'}; a press at ${p(v.a)} would reach ${v.under}`);
+  }
+  return v.b;
+}
+
+/** A real mouse press and release at a steady target's centre (steadyCentre above). */
+export async function pressSteady(cdp: Cdp, element: string, what: string = element): Promise<void> {
+  const at = await steadyCentre(cdp, element, what);
+  for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
 }

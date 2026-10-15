@@ -9,7 +9,7 @@ import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
 import { DiscordSetupPanel } from '../components/DiscordSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
