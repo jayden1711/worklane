@@ -15,6 +15,7 @@ import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
+import { starterCiView } from './starter-ci.js';
 import { GITHUB_API } from './github-hosts.js';
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
@@ -1597,6 +1598,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (runs.status !== 0 && statuses.status !== 0) return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
           const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
           return json(res, 200, { checks, sha });
+        }
+        // The starter CI (src/starter-ci.ts, #469): a drafted workflow and GitHub's new-file page for it, and its first
+        // run on the default branch. Read only: the person commits the workflow on GitHub, never the engine.
+        if (url.pathname === '/api/first-run/starter-ci' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+          const gh = actionDeps().gh;
+          return json(res, 200, starterCiView({ root: opts.root, repo, branch: opts.cfg.project.project.default_branch, configured: liveCfg().tests.runner.full, gh: (args) => gh(args) }));
         }
         // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
         // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.

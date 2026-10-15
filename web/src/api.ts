@@ -1043,6 +1043,20 @@ export interface ConfigChange {
 }
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+/** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
+export interface StarterCi {
+  path: string;
+  check: string;
+  summary: string;
+  file: string;
+  placeholder: boolean;
+  command: string | null;
+  branch: string;
+  newFile: string;
+  onBranch: boolean;
+  firstRun: { state: 'none' | 'running' | 'done'; conclusion: string | null };
+}
+export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
 /** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
 export const mergeRepoConfig = (number: number, confirm: boolean) =>
