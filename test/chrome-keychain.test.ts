@@ -4,14 +4,15 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { CHROME_NO_KEYCHAIN_ARGS } from '../src/browser/cdp.js';
-import { launchTestChrome, OFFLINE_CHROME_ARGS } from './browser-helpers.js';
+import { launchTestChrome, OFFLINE_CHROME_ARGS, oneChromeAtATime } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 // On macOS a headless Chrome that may use the OS keychain pops up "A keychain cannot be found to store Chrome".
 
 // Through launchTestChrome, the only way a test starts Chrome (test/offline-chrome.test.ts), which is launchChrome with
 // the offline arguments added: so this covers the engine's launches and every test's at once.
-test('the engine\'s Chrome, and so every test Chrome, starts with a mock keychain and a basic password store', { skip: process.platform === 'win32' && 'the stand-in browser is a shell script' }, async () => {
+test('the engine\'s Chrome, and so every test Chrome, starts with a mock keychain and a basic password store', { skip: process.platform === 'win32' && 'the stand-in browser is a shell script' }, async (ctx) => {
+  await oneChromeAtATime(ctx);
   const dir = mkdtempSync(join(tmpdir(), 'chrome-keychain-'));
   const stub = join(dir, 'chrome');
   // A stand-in that writes down its arguments and fails to start.

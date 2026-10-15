@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { findChrome, sleep, until } from '../src/browser/cdp.js';
-import { isOutside, KNOWN_OUTSIDE, launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, takeOutsideRequests, webUiSkip } from './browser-helpers.js';
+import { isOutside, launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, takeOutsideRequests, webUiSkip } from './browser-helpers.js';
 import { repoRoot } from './helpers.js';
 
 realChromeTests();
@@ -21,11 +21,10 @@ test('every real-Chrome test starts it through launchTestChrome (offline, watche
   assert.deepEqual(direct, [], 'use launchTestChrome from ./browser-helpers.js');
 });
 
-test('what counts as outside: any http(s) or ws(s) host but loopback; a GitHub picture only until the dashboard serves them', () => {
+test('what counts as outside: any http(s) or ws(s) host but loopback, a GitHub picture too', () => {
   for (const u of ['https://github.com/x.png', 'http://example.com/', 'wss://example.com/s', 'http://127.0.0.1.example.com/']) assert.equal(isOutside(u), true, u);
   for (const u of ['http://127.0.0.1:4317/', 'http://localhost:1/', 'http://[::1]:2/', 'data:image/png;base64,AA', 'about:blank', 'chrome-error://chromewebdata/']) assert.equal(isOutside(u), false, u);
-  assert.ok(KNOWN_OUTSIDE.some((r) => r.test('https://github.com/example-owner.png?size=40')));
-  for (const u of ['https://github.com/example-owner', 'https://github.com/a/b.png', 'https://avatars.githubusercontent.com/u/1', 'https://github.com.example.com/x.png']) assert.ok(!KNOWN_OUTSIDE.some((r) => r.test(u)), u);
+  for (const u of ['https://github.com/example-owner.png?size=40', 'https://avatars.githubusercontent.com/u/1']) assert.equal(isOutside(u), true, u);
 });
 
 test('loopback still answers in a test Chrome: localhost, 127.0.0.1 and [::1]', { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) }, async (ctx) => {
@@ -54,7 +53,7 @@ test('loopback still answers in a test Chrome: localhost, 127.0.0.1 and [::1]', 
 
 test('a page asking for an outside host: the request fails at once, never reaching the network, and the test is told which URL', { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) }, async (ctx) => {
   await oneChromeAtATime(ctx);
-  // A local page that asks for three outside things: a picture, a fetch, and a GitHub picture (known, not reported).
+  // A local page that asks for three outside things: a picture, a fetch, and a GitHub picture (no longer excused, #462).
   const page = `<!doctype html><img id="a" src="https://example.com/a.png"><img id="g" src="https://github.com/example-owner.png?size=40"><script>window.done = fetch('https://example.org/api').then(() => 'answered', () => 'failed');</script>`;
   const s = createServer((_req, res) => res.writeHead(200, { 'content-type': 'text/html' }).end(page));
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
@@ -75,5 +74,5 @@ test('a page asking for an outside host: the request fails at once, never reachi
     s.close();
   }
   const asked = takeOutsideRequests();
-  assert.deepEqual([...asked].sort(), ['https://example.com/a.png', 'https://example.org/api'], 'each outside URL named; the GitHub picture is known');
+  assert.deepEqual([...asked].sort(), ['https://example.com/a.png', 'https://example.org/api', 'https://github.com/example-owner.png?size=40'], 'each outside URL named, the GitHub picture too');
 });

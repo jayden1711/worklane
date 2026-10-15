@@ -1082,3 +1082,34 @@ export function flockHolders(path: string): { pid: number; mode: 'shared' | 'exc
     return null;
   }
 }
+
+/**
+ * Exclusive flock(2) locks on each of `paths`, taken one after another in the order given and held together until
+ * released (or this process exits). The GPU test runs' locks (src/testrun/gpu.ts): `<cli> gpu hold` and the sandbox
+ * helper both take them in ascending GPU order, so neither ever holds one the other waits on while waiting itself.
+ * `waiting` is told each lock another process holds before this one waits for it.
+ */
+export async function holdFlocksInOrder(paths: readonly string[], o: { signal?: AbortSignal; waiting?: (path: string) => void } = {}): Promise<HeldFlock> {
+  const held: HeldFlock[] = [];
+  const release = async () => {
+    for (const h of held.reverse()) await h.release();
+  };
+  try {
+    for (const p of paths) {
+      if (flockHeld(p) !== false) o.waiting?.(p);
+      held.push(await holdFlock(p, 'exclusive', o.signal));
+    }
+  } catch (e) {
+    await release();
+    throw e;
+  }
+  return { release };
+}
+
+/**
+ * The device nodes a GPU test run with these NVIDIA GPUs needs (Linux; the sandbox helper binds exactly these): the
+ * control node, the unified-memory node, and one per GPU. Never nvidia-uvm-tools, nvidia-modeset, nvidia-caps or dri.
+ */
+export function nvidiaNodes(indices: readonly number[], dev = '/dev'): string[] {
+  return ['nvidiactl', 'nvidia-uvm', ...indices.map((i) => `nvidia${i}`)].map((n) => `${dev}/${n}`);
+}

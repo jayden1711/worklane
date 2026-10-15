@@ -148,7 +148,7 @@ test(
 const TALL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAADCAIAAADdv/LVAAAADklEQVR4nGNwaDjAAMUAGYwEgS6QGrIAAAAASUVORK5CYII=';
 
 // #452: on CI the Show more toggle moved 60 px between the click's read and its press, from (438, 494) to (438, 434).
-// Each card's avatar is a picture from GitHub; when it failed, the broken image grew from 18 px to its alt text's
+// Each card's avatar was a picture from GitHub (now from the dashboard's own server, #462); when it failed, the broken image grew from 18 px to its alt text's
 // height until the initials replaced it, so each card above the toggle grew 30 px for that moment. Here every picture
 // request is held until the page is drawn and every control on screen noted, then answered (failed, or a picture taller than
 // wide), and where each control is gets read in the image's own error or load event, before the page's
@@ -181,7 +181,8 @@ for (const outcome of ['fails', 'is taller than wide'] as const) {
         await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
         const held: string[] = [];
         cdp.on('Fetch.requestPaused', (p) => void held.push(p.requestId as string));
-        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'https://github.com/*', requestStage: 'Request' }] });
+        // People's pictures come from the dashboard's own server (#462); each is held here instead.
+        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/avatar/*', requestStage: 'Request' }] });
         for (const page of ['decisions', 'inbox']) {
           held.length = 0;
           await cdp.send('Page.navigate', { url: `${d.url}/${page}` });

@@ -136,7 +136,10 @@ function WaitingCard({ pr }: { pr: PrView }) {
           head <span className="font-mono">{short(pr.head)}</span>
           {pr.fixes.length ? ` · ${pr.fixes.length} fix run(s)` : ''}
         </span>
-        <a href={pr.url} {...ext} className="ml-auto inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="pr-review-link">
+        <a href={`/decisions/pr-${pr.number}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/pr-${pr.number}`))} className="ml-auto inline-flex h-7 items-center rounded-full bg-surface px-3 text-[12.5px] font-medium text-ink shadow-btn hover:bg-hover" data-testid="pr-details">
+          Details
+        </a>
+        <a href={pr.url} {...ext} className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="pr-review-link">
           Review on GitHub
         </a>
       </div>

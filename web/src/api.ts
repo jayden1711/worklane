@@ -52,6 +52,48 @@ export interface Decision {
   voiceRefused?: string | null;
 }
 
+/** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
+export interface DecisionDetail {
+  id: string;
+  kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'pr';
+  issue: number | null;
+  owner: string;
+  question: string;
+  options: { option: string; does: string; cannot: string; recommended: boolean }[];
+  recommendation: string;
+  askedAt: string;
+  answer: { by: string; answer: string; at: string } | null;
+  canAnswer: boolean;
+  ifNothing: string;
+  /** A viewer's: why the rest isn't here. */
+  withheld: string | null;
+  title?: string | null;
+  summary?: { happened: string; agent: string | null };
+  reasoning?: string[];
+  receipts?: string[];
+  findings?: { list: { claim: string; evidence: string; file?: string; line?: number; severity?: string; confidence?: string }[]; confidence: string | null; unverified: string[] } | null;
+  change?: { base: string | null; head: string | null; files: { path: string; added: number | null; removed: number | null }[]; filesMore: number; level: string | null; levelReasons: string[]; source: 'asked' | 'log' } | null;
+  verdict?: { patch_correct: boolean; test_correct: boolean; confidence: string; confidenceReason: string | null; advice: string; unread: string[]; unverifiedClaims: string[]; designChange: boolean | null; designReason: string | null } | null;
+  tests?: { check: string; status: string; duration_ms: number | null; tail?: string }[] | null;
+  tampered?: string[];
+  pr?: { number: number; url: string; head: string; phase: string; draft: boolean; checks: { name: string; outcome: string }[]; checksOnHead: boolean; waitReasons: string[]; why: { category: string; text: string }[] } | null;
+  impact?: { flags: { flag: 'money-path' | 'auth' | 'secrets'; files: string[] | null }[]; others: string[]; note: string | null };
+  runs?: { id: string; role: string; model: string; startedAt: string; endedAt: string | null; reason: string | null }[] | null;
+  auth?: { failed: { at: string; role: string; detail: string }[]; held: { login: string; detail: string; since: string } | null };
+  diff?: 'owner' | 'owners-only' | 'none';
+  prBody?: boolean;
+  ownerOnly?: string | null;
+}
+/** A decision's change as a diff (owners only), or why there's none. */
+export type DecisionDiff = { diff: string; truncated: boolean } | { diff: null; why: string };
+/** A decision's PR body: its fail-without and "never" sections (null: the body has none), or why it couldn't be read. */
+export interface DecisionPrBody {
+  pr: number | null;
+  failWithout: string | null;
+  never: string | null;
+  why: string | null;
+}
+
 /** One step of an agent run: a shell command or a file write. */
 export interface RunStep {
   kind: 'command' | 'write';
@@ -712,6 +754,31 @@ export function selectAllInstances() {
 export async function apiPath(path: string): Promise<string> {
   const inst = await hubInstance;
   return inst ? path.replace(/^\/api\//, `/api/i/${encodeURIComponent(inst)}/`) : path;
+}
+
+/** The sizes the server fetches people's pictures at (src/avatars.ts AVATAR_SIZES; test/avatars.test.ts keeps them the same). */
+export const AVATAR_SIZES = [40, 80, 160];
+const avatarUrls = new Map<string, Promise<string | null>>();
+
+/**
+ * A person's picture for a box of `box` px, as a blob: URL the page shows, or null (the page shows initials). Read from
+ * this page's own server with the page's own auth, never from GitHub (#462): an <img> can't send the key in a header.
+ * Asked once per picture while the page is open, whatever the answer (initials until a reload when there was none).
+ */
+export async function avatarSrc(login: string, box: number): Promise<string | null> {
+  const size = AVATAR_SIZES.find((s) => s >= box * 2) ?? AVATAR_SIZES[AVATAR_SIZES.length - 1]!;
+  const url = await apiPath(`/api/avatar/${encodeURIComponent(login)}?size=${size}`);
+  let p = avatarUrls.get(url);
+  if (!p) {
+    p = (async () => {
+      await me;
+      const r = await fetch(url, { headers: token ? { authorization: `Bearer ${token}` } : {} });
+      if (!r.ok || !/^image\/(?:png|jpeg|gif|webp)$/.test(r.headers.get('content-type') ?? '')) return null;
+      return URL.createObjectURL(await r.blob());
+    })().catch(() => null);
+    avatarUrls.set(url, p);
+  }
+  return p;
 }
 
 /** A call to one named instance's own server through the hub (`/api/i/<name>/...`), whichever instance this page shows. */
@@ -1636,6 +1703,8 @@ export interface WaitItem {
   sha?: string;
   /** A PR left to the owner as high-risk: each category it touches, plainly, with its first file ("changes the merge policy: src/merge-policy.ts"). */
   why?: { category: string; text: string }[];
+  /** A decision or a held plan: its id, for its detail page (/decisions/<id>). */
+  decision?: string;
 }
 /** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
 export interface MergedItem {

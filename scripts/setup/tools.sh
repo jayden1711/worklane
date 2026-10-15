@@ -37,7 +37,7 @@ if [ "$(/usr/local/bin/gitleaks version 2>/dev/null || true)" = "$gitleaks_versi
 else
   work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
   tgz="gitleaks_${gitleaks_version}_linux_${arch}.tar.gz"
-  curl -fsSL -o "$work/$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v$gitleaks_version/$tgz"
+  curl -fsSL --retry 3 -o "$work/$tgz" "https://github.com/gitleaks/gitleaks/releases/download/v$gitleaks_version/$tgz"
   echo "$sum  $work/$tgz" | sha256sum -c -
   tar -xzf "$work/$tgz" -C "$work" gitleaks
   install -o root -g root -m 0755 "$work/gitleaks" /usr/local/bin/gitleaks

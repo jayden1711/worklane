@@ -51,12 +51,6 @@ export function realChromeTests(): void {
 // MAP * covers IP literals too, so each loopback form is excluded by name (::1 without brackets; with them it isn't).
 export const OFFLINE_CHROME_ARGS = ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1'];
 
-/**
- * Outside URLs a page may still ask for (they fail at once, never reaching the network) until the product stops
- * asking: a person's GitHub picture, until the dashboard serves them from its own origin (#462, option B).
- */
-export const KNOWN_OUTSIDE: RegExp[] = [/^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\.png(?:\?[^#]*)?$/];
-
 /** Outside URLs pages asked for since the last test ended; realChromeTests' afterEach fails on any. */
 const outsideRequests: string[] = [];
 
@@ -68,13 +62,17 @@ export const isOutside = (url: string): boolean => /^(?:https?|wss?):/i.test(url
 
 /**
  * The only way a test starts a real Chrome (test/offline-chrome.test.ts keeps it so): launchChrome with no host but
- * localhost resolving, and every request its page makes watched. One outside the machine that isn't KNOWN_OUTSIDE, or
- * `allow` for this test (one it answers itself with Fetch, say), fails the test, named.
+ * localhost resolving, and every request its page makes watched. One outside the machine that isn't in `allow` for this
+ * test (one it answers itself with Fetch, say), fails the test, named. No outside URL is allowed for every test: the
+ * dashboard serves people's pictures from its own origin (#462).
  */
 export async function launchTestChrome(chrome: string, o: Parameters<typeof launchChrome>[1] & { allow?: RegExp[] } = {}): Promise<Browser> {
+  // INVARIANT: never two test Chromes at once across files (CHROME_LOCK): refused here, at run time, not only by the
+  // static scan in test/real-chrome-lock.test.ts.
+  if (chromeLocksHeld === 0) throw new Error('launchTestChrome without the real-Chrome lock: start the test with `await oneChromeAtATime(ctx);`');
   const { allow = [], ...launch } = o;
   const b = await launchChrome(chrome, { ...launch, extraArgs: [...OFFLINE_CHROME_ARGS, ...(launch.extraArgs ?? [])] });
-  const known = [...KNOWN_OUTSIDE, ...allow];
+  const known = [...allow];
   b.cdp.on('Network.requestWillBeSent', (p) => {
     const url = String((p.request as { url?: unknown } | undefined)?.url ?? '');
     if (isOutside(url) && !known.some((r) => r.test(url))) outsideRequests.push(url);
@@ -201,14 +199,20 @@ function clearStale(lock: string): boolean {
 }
 
 /** Wait for the real-Chrome lock and take it; the returned function gives it back. */
+/** How many takes of the real CHROME_LOCK this process holds now (launchTestChrome refuses at 0). */
+let chromeLocksHeld = 0;
+
 export async function takeChromeLock(lock = CHROME_LOCK): Promise<() => void> {
   const mine = String(process.pid);
   for (;;) {
     if (tryTake(lock, mine)) {
       let held = true;
+      const real = lock === CHROME_LOCK;
+      if (real) chromeLocksHeld++;
       return () => {
         if (!held) return;
         held = false;
+        if (real) chromeLocksHeld--;
         if (readLock(lock) === mine) rmSync(lock, { force: true });
       };
     }

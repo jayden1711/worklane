@@ -12,8 +12,8 @@ name="node-$version-linux-$arch"
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
 cd "$work"
 say "download $name and its release checksums"
-curl -fsSLO "https://nodejs.org/dist/$version/$name.tar.xz"
-curl -fsSLO "https://nodejs.org/dist/$version/SHASUMS256.txt"
+curl -fsSL --retry 3 -O "https://nodejs.org/dist/$version/$name.tar.xz"
+curl -fsSL --retry 3 -O "https://nodejs.org/dist/$version/SHASUMS256.txt"
 grep " $name.tar.xz\$" SHASUMS256.txt | sha256sum -c -
 say "install to /opt/$name, linked from /usr/local/bin"
 tar -xJf "$name.tar.xz" -C /opt

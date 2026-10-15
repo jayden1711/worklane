@@ -46,6 +46,7 @@ const SetupPage = lazyPage(() => import('./pages/Setup').then((m) => m.SetupPage
 const WaitingPage = lazyPage(() => import('./pages/Waiting').then((m) => m.WaitingPage));
 const FirstRunPage = lazyPage(() => import('./pages/FirstRun').then((m) => m.FirstRunPage));
 const Decisions = lazyPage(() => import('./pages/Decisions').then((m) => m.Decisions));
+const DecisionDetailPage = lazyPage(() => import('./pages/DecisionDetail').then((m) => m.DecisionDetailPage));
 const Issues = lazyPage(() => import('./pages/Issues').then((m) => m.Issues));
 const IssueDetail = lazyPage(() => import('./pages/IssueDetail').then((m) => m.IssueDetail));
 const Landing = lazyPage(() => import('./pages/Landing').then((m) => m.Landing));
@@ -68,6 +69,7 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/health/, HealthPage],
   [/^\/inbox/, InboxPage],
   [/^\/waiting/, WaitingPage],
+  [/^\/decisions\/./, DecisionDetailPage],
   [/^\/decisions/, Decisions],
   [/^\/setup/, SetupPage],
   [/^\/issues\/\d/, IssueDetail],
@@ -445,6 +447,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
 
   const issueMatch = path.match(/^\/issues\/(\d+)/);
   const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
+  const decisionMatch = path.match(/^\/decisions\/([A-Za-z0-9._-]+)$/);
   let page: React.ReactNode;
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
@@ -453,6 +456,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
+  else if (decisionMatch) page = <DecisionDetailPage state={state} id={decisionMatch[1]!} />;
   else if (path === '/setup') page = <SetupPage />;
   else if (path === '/first-run') page = <FirstRunPage state={state} />;
   else if (runMatch) page = <RunDetail id={runMatch[1]!} refused={runsRefusal(state)} />;

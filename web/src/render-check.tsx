@@ -62,6 +62,8 @@ import { TailscaleSetupView } from './components/TailscaleSetup';
 export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
 export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
+import { DecisionDetailView, DETAIL_SECTIONS } from './pages/DecisionDetail';
+import type { DecisionDetail, DecisionDiff, DecisionPrBody } from './api';
 import { UsageBanner, UsageLines } from './components/Usage';
 import type { UsageInfo } from './api';
 
@@ -182,6 +184,10 @@ export { addProjectInvalid } from './api';
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
 export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
+/** A decision's detail page from its data; `prBody` and `diff` as already read (undefined: not asked yet). */
+export const renderDecisionDetail = (d: DecisionDetail, prBody?: DecisionPrBody | { error: string } | null, diff?: DecisionDiff | { error: string } | null) =>
+  renderToStaticMarkup(<DecisionDetailView d={d} {...(prBody !== undefined ? { prBody } : {})} {...(diff !== undefined ? { diff } : {})} />);
+export { DETAIL_SECTIONS };
 export const renderRunWhy = (detail?: string) => renderToStaticMarkup(<RunWhy detail={detail} />);
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
