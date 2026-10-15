@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { BRAND } from './brand.js';
+import { newNonce, PROOF_PATH, proofMatches } from './dashboard-proof.js';
 import { readRegularFile } from './os/index.js';
 
 /** WHY: one fixed URL per port, so a rerun prints exactly the same one. */
@@ -12,15 +13,24 @@ export const wizardUrl = (port: number) => `http://127.0.0.1:${port}/first-run`;
 
 export type Probe = 'ours' | 'other' | 'none';
 
-/** INVARIANT: the key goes in a header, never the URL; only a 200 with this checkout's key is 'ours'. */
+/**
+ * INVARIANT: the key is never sent, in a header, the URL or a body (#448): whatever listens on the port first would get
+ * it. 'ours' only when the answer proves the key for this port and a fresh nonce (src/dashboard-proof.ts).
+ */
 export async function probeDashboard(port: number, tokenFile: string, timeoutMs = 2_000): Promise<Probe> {
   const key = existsSync(tokenFile) ? readFileSync(tokenFile, 'utf8').trim() : '';
+  const nonce = newNonce();
+  let r: Response;
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/api/role`, { headers: key ? { authorization: `Bearer ${key}` } : {}, signal: AbortSignal.timeout(timeoutMs) });
-    await r.body?.cancel();
-    return r.ok && key ? 'ours' : 'other';
+    r = await fetch(`http://127.0.0.1:${port}${PROOF_PATH}?nonce=${nonce}`, { signal: AbortSignal.timeout(timeoutMs) });
   } catch {
     return 'none';
+  }
+  try {
+    const body = r.ok ? ((await r.json()) as { proof?: unknown }) : (await r.body?.cancel(), null);
+    return key && body && proofMatches(key, port, nonce, body.proof) ? 'ours' : 'other';
+  } catch {
+    return 'other';
   }
 }
 
@@ -126,7 +136,7 @@ export async function detachDashboard(o: DetachOptions): Promise<Detached> {
   const url = wizardUrl(o.port);
   const now = await probe(o.port, o.tokenFile);
   if (now === 'ours') return { url, started: false };
-  if (now === 'other') throw new DetachError(`port ${o.port} answers, but not as this checkout's dashboard (another project's, or another program): stop it, or give --port`);
+  if (now === 'other') throw new DetachError(`port ${o.port} answers, but not as this checkout's dashboard (another project's, another program, or this one's from an older version): stop it, or give --port`);
   mkdirSync(dirname(o.logFile), { recursive: true });
   const child = (o.start ?? startDetached)(o.command, o.logFile);
   for (let waited = 0; waited < waitMs; waited += 250) {

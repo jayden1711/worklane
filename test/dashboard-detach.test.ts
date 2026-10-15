@@ -3,12 +3,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, request, type IncomingMessage } from 'node:http';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { DetachError, detachDashboard, detachedLines, probeDashboard, readDashboardPort, wizardUrl, writeDashboardPort, type Probe } from '../src/dashboard-detach.js';
 import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
+import { dashboardProof, NONCE, PROOF_PATH } from '../src/dashboard-proof.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { freePort } from '../src/browser/cdp.js';
 import { engineCli, exampleProject } from './helpers.js';
@@ -21,23 +22,42 @@ function keyFile(): string {
   return f;
 }
 
-/** A server that answers like a dashboard: 200 with this key in a bearer header, 401 otherwise. */
-async function fakeDashboard(): Promise<{ port: number; seen: IncomingMessage[]; close: () => void }> {
+/** A server that answers like a dashboard holding `key`: the proof over the nonce and the port it was reached on. */
+async function fakeDashboard(key = KEY): Promise<{ port: number; seen: IncomingMessage[]; close: () => void }> {
   const seen: IncomingMessage[] = [];
   const s = createServer((req, res) => {
     seen.push(req);
-    res.writeHead(req.headers.authorization === `Bearer ${KEY}` ? 200 : 401).end('{}');
+    const url = new URL(req.url ?? '/', 'http://x');
+    const nonce = url.searchParams.get('nonce') ?? '';
+    if (url.pathname !== PROOF_PATH || !NONCE.test(nonce)) return void res.writeHead(404).end('{}');
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ proof: dashboardProof(key, req.socket.localPort!, nonce) }));
   });
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
   return { port: (s.address() as { port: number }).port, seen, close: () => s.close() };
 }
 
-test('detach: the probe sends the key in a header, never the URL; ours, another, or nothing on the port', async () => {
+/** Everything a request carried that a listener sees: the request line, every header, the body. */
+async function squatter(answer: (req: IncomingMessage, body: string) => { status: number; body: string } = () => ({ status: 200, body: '{}' })) {
+  const heard: string[] = [];
+  const s = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c: Buffer) => (body += c.toString()));
+    req.on('end', () => {
+      heard.push(`${req.method} ${req.url}\n${req.rawHeaders.join('\n')}\n\n${body}`);
+      const a = answer(req, body);
+      res.writeHead(a.status, { 'content-type': 'application/json' }).end(a.body);
+    });
+  });
+  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
+  return { port: (s.address() as { port: number }).port, heard, close: () => s.close() };
+}
+
+test('detach: the probe proves the dashboard holds the key without sending it; ours, another, or nothing on the port', async () => {
   const f = keyFile();
   const d = await fakeDashboard();
   try {
     assert.equal(await probeDashboard(d.port, f), 'ours');
-    assert.ok(d.seen.every((r) => !(r.url ?? '').includes(KEY)), 'the key is not in any request URL');
+    assert.ok(d.seen.every((r) => !(r.url ?? '').includes(KEY) && !JSON.stringify(r.headers).includes(KEY)), 'the key is in no request');
     assert.equal(await probeDashboard(d.port, join(f, '..', 'missing')), 'other', 'without the key: something answers, not ours');
     const wrong = join(mkdtempSync(join(tmpdir(), 'detach-')), 'dashboard-token');
     writeFileSync(wrong, 'x'.repeat(32));
@@ -46,6 +66,52 @@ test('detach: the probe sends the key in a header, never the URL; ours, another,
     d.close();
   }
   assert.equal(await probeDashboard(d.port, f), 'none', 'nothing on the port');
+});
+
+test('regression (#448): a program squatting the port never gets the key, on a first run or a rerun, whatever it answers', async () => {
+  const f = keyFile();
+  const answers: Array<(req: IncomingMessage) => { status: number; body: string }> = [
+    () => ({ status: 200, body: '{}' }),
+    () => ({ status: 200, body: JSON.stringify({ proof: 'a'.repeat(64) }) }),
+    () => ({ status: 200, body: 'not json' }),
+    () => ({ status: 401, body: '{}' }),
+  ];
+  for (const answer of answers) {
+    const sq = await squatter(answer);
+    try {
+      assert.equal(await probeDashboard(sq.port, f), 'other');
+      // The first run, on the squatted fixed port: refused, the key never sent.
+      await assert.rejects(detachDashboard({ root: '/r', port: sq.port, tokenFile: f, logFile: join(tmpdir(), 'x.log'), command: ['x'], start: () => assert.fail('nothing started') }), /answers, but not as this checkout's dashboard/);
+      // A rerun with --port 0 whose port file now names the squatter's port: probed, refused, the key never sent.
+      const portFile = join(mkdtempSync(join(tmpdir(), 'detach-')), 'dashboard.port');
+      writeDashboardPort(portFile, sq.port);
+      await assert.rejects(detachDashboard({ root: '/r', port: 0, portFile, tokenFile: f, logFile: join(tmpdir(), 'x.log'), command: ['x'], waitMs: 250, sleep: async () => {}, start: () => ({ pid: 1, exited: () => null }) }), /didn't answer within/);
+      assert.ok(sq.heard.length >= 2, 'it was asked');
+      for (const h of sq.heard) assert.ok(!h.includes(KEY), `the key reached the squatter:\n${h}`);
+    } finally {
+      sq.close();
+    }
+  }
+});
+
+test("regression (#448): a squatter relaying the nonce to this checkout's real dashboard gets a proof for the other port, refused", async () => {
+  const f = keyFile();
+  const real = await fakeDashboard();
+  const relay = createServer((req, res) => {
+    const fwd = request({ host: '127.0.0.1', port: real.port, path: req.url, method: req.method, headers: req.headers }, (up) => {
+      res.writeHead(up.statusCode ?? 502, up.headers);
+      up.pipe(res);
+    });
+    req.pipe(fwd);
+  });
+  await new Promise<void>((r) => relay.listen(0, '127.0.0.1', r));
+  try {
+    assert.equal(await probeDashboard(real.port, f), 'ours', 'the real one, asked directly');
+    assert.equal(await probeDashboard((relay.address() as { port: number }).port, f), 'other', 'through the relay: a proof for the real port, not the one asked');
+  } finally {
+    relay.close();
+    real.close();
+  }
 });
 
 test('detach: already answering with this key: the same URL, nothing started', async () => {

@@ -21,6 +21,7 @@ import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js'
 import { EventLog } from './events/log.js';
 import { EventCache } from './events/cache.js';
 import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
+import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
 import { localDay } from './local-day.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -1120,6 +1121,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     // Every route, the page itself included: a key in the URL is refused, never accepted.
     if (refuseKeyInUrl(url, res, [token])) return;
     try {
+      // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
+      // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
+      if (url.pathname === PROOF_PATH && req.method === 'GET') {
+        const nonce = url.searchParams.get('nonce') ?? '';
+        if (!NONCE.test(nonce)) return json(res, 400, { error: 'nonce: 64 hex characters' });
+        return json(res, 200, { proof: dashboardProof(token, req.socket.localPort ?? 0, nonce) });
+      }
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
