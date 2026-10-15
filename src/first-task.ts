@@ -72,7 +72,7 @@ export const FIRST_TASK_TEMPLATE = {
   body: ['**Outcome:** <one sentence: what is true when this is done>', '', '```done_when', '- test: "<a test file or test name your runner knows>"', '- command: |', '    <a command that exits 0 when it is done>', '```', '', '**Context:** <anything that helps; optional>'].join('\n'),
 };
 
-/** The `ready` label as `worklane labels` creates it. */
+/** The `ready` label as the CLI's `labels` command creates it. */
 export const READY_LABEL = LABELS.find((l) => l.name === 'ready')!;
 
 export type IgnoreKind = 'no-ready' | 'contract' | 'not-writer' | 'waiting' | 'blocked' | 'held';
