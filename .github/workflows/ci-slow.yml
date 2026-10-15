@@ -110,7 +110,7 @@ jobs:
           [ "$(grep -cE '^   done: ' "$RUNNER_TEMP/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$RUNNER_TEMP/first.log"
           grep -q 'started in the background' "$RUNNER_TEMP/first.log"
-          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$RUNNER_TEMP/first.log")"
+          kf="$(awk '/^  the page asks once for the dashboard key, in this file/{getline; sub(/^ +/, ""); print; exit}' "$RUNNER_TEMP/first.log")"
           [ "$(ls -l "$kf" | cut -c1-10)" = '-rw-------' ] || { ls -l "$kf"; echo "the key file isn't 0600" >&2; exit 1; }
           u1="$(bash scripts/ci/wizard-url.sh "$RUNNER_TEMP/first.log" "$kf" /api/first-run | tail -n 1)"
           # The second run, the one command as a person runs it: no --mode and no terminal (local, said so); no checklist
@@ -247,7 +247,7 @@ jobs:
           bash "$WS/scripts/bootstrap.sh" --mode local --yes --engine "$tgz" "$ex" | tee "$H/first.log"
           [ "$(grep -cE '^   done: ' "$H/first.log")" = 5 ] || { echo "not every required step was done" >&2; exit 1; }
           grep -q 'all 6 steps done or skipped' "$H/first.log"
-          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$H/first.log")"
+          kf="$(awk '/^  the page asks once for the dashboard key, in this file/{getline; sub(/^ +/, ""); print; exit}' "$H/first.log")"
           [ "$(stat -c %a "$kf")" = 600 ]
           u1="$(bash "$WS/scripts/ci/wizard-url.sh" "$H/first.log" "$kf" /api/first-run | tail -n 1)"
           bash "$WS/scripts/bootstrap.sh" --engine "$tgz" "$ex" < /dev/null | tee "$H/second.log"
@@ -2111,7 +2111,7 @@ jobs:
           gh auth status && { echo "the stand-in gh starts signed in" >&2; exit 1; } || true
           # The one command, as a person runs it: no --mode and no terminal (local, said so).
           bash scripts/bootstrap.sh --engine "$TGZ" "$RUNNER_TEMP/alpha" < /dev/null | tee "$F/local-install.log"
-          kf="$(sed -n 's/^  the page asks once for the dashboard key: it is in \(.*\) (only you can read it)$/\1/p' "$F/local-install.log")"
+          kf="$(awk '/^  the page asks once for the dashboard key, in this file/{getline; sub(/^ +/, ""); print; exit}' "$F/local-install.log")"
           [ "$(stat -c '%U %a' "$kf")" = "$USER 600" ]
           u="$(bash scripts/ci/wizard-url.sh "$F/local-install.log" "$kf" /api/first-run | tail -n 1)"
           { echo "LOCAL_URL=$u"; echo "LOCAL_KEY=$kf"; } >> "$GITHUB_ENV"

@@ -162,7 +162,7 @@ export const renderDiscordSetup = (v: DiscordSetup, o: { bot?: DiscordBot; botEr
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);
-export const renderKeyPage = () => renderToStaticMarkup(<KeyPage />);
+export const renderKeyPage = (help: { file: string; copy: string | null } | null = null) => renderToStaticMarkup(<KeyPage help={help} />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
 export { needsKey, tryKey } from './api';
 export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);

@@ -7,7 +7,7 @@ import { createServer, request, type IncomingMessage } from 'node:http';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { DetachError, detachDashboard, detachedLines, probeDashboard, readDashboardPort, wizardUrl, writeDashboardPort, type Probe } from '../src/dashboard-detach.js';
+import { DetachError, detachDashboard, detachedLines, probeDashboard, readDashboardPort, useBold, wizardUrl, writeDashboardPort, type Probe } from '../src/dashboard-detach.js';
 import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
 import { dashboardProof, NONCE, PROOF_PATH } from '../src/dashboard-proof.js';
 import { projectStateDir } from '../src/guardrails/context.js';
@@ -184,12 +184,21 @@ test("detach --port 0: the port file is believed only when it is this user's, wr
   assert.equal(readDashboardPort(join(d, 'missing')), null);
 });
 
-test('detach: the lines it prints end with the one URL; the key file is named, the key never', () => {
-  const lines = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/s/dashboard.log' });
+test('detach: the lines it prints end with the one URL; the key file is named on its own line with a copy command, the key never', () => {
+  const lines = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/s/dashboard.log', copy: "pbcopy < '/s/dashboard-token'" });
   assert.equal(lines.at(-1), 'http://127.0.0.1:4317/first-run');
   assert.equal(lines.filter((l) => /https?:\/\//.test(l)).length, 1, 'one URL');
   assert.match(lines.join('\n'), /started in the background \(pid 7; its log: \/s\/dashboard\.log\)/);
-  assert.match(lines.join('\n'), /dashboard key: it is in \/s\/dashboard-token \(only you can read it\)/);
+  assert.match(lines.join('\n'), /dashboard key, in this file \(only you can read it\):\n {4}\/s\/dashboard-token\n {2}copy it to paste: pbcopy < '\/s\/dashboard-token'\n/);
+  assert.doesNotMatch(lines.join('\n'), /\x1b/, 'plain unless asked');
+  // On a terminal: the path and the command in bold, the same text otherwise; no tool: the path alone.
+  const bold = detachedLines({ url: wizardUrl(4317), started: true, pid: 7 }, { root: '/r', tokenFile: '/s/dashboard-token', logFile: '/l', copy: 'c', bold: true });
+  assert.ok(bold.includes('    \x1b[1m/s/dashboard-token\x1b[22m') && bold.includes('  copy it to paste: \x1b[1mc\x1b[22m'), bold.join('\n'));
+  assert.ok(!detachedLines({ url: wizardUrl(4317), started: true }, { root: '/r', tokenFile: '/t', logFile: '/l', copy: null }).some((l) => l.includes('copy it')));
+  assert.equal(useBold({ isTTY: true }, {}), true);
+  assert.equal(useBold({ isTTY: true }, { NO_COLOR: '1' }), false);
+  assert.equal(useBold({ isTTY: false }, {}), false);
+  assert.equal(useBold({}, {}), false);
   assert.match(detachedLines({ url: wizardUrl(4317), started: false }, { root: '/r', tokenFile: '/t', logFile: '/l' })[0]!, /already running; nothing changed/);
 });
 
@@ -233,7 +242,7 @@ test('dashboard --detach, for real: started once, the same URL again with nothin
     const key = readFileSync(tokenFile, 'utf8').trim();
     assert.ok(key.length >= 16);
     for (const r of [first, second]) assert.ok(!(r.stdout + r.stderr).includes(key), 'the key is never printed');
-    assert.match(first.stdout, new RegExp(`dashboard key: it is in ${tokenFile.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`));
+    assert.match(first.stdout, new RegExp(`dashboard key, in this file \\(only you can read it\\):\\n {4}${tokenFile.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}\\n`));
     assert.equal(statSync(tokenFile).mode & 0o777, 0o600, 'only the owner reads the key');
     const page = await fetch(url);
     assert.equal(page.status === 200 || page.status === 503, true, 'the page is served (503 only when this build has no web UI)');

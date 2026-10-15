@@ -888,6 +888,24 @@ export function machineLoad(): number | null {
   return Math.max(five, fifteen);
 }
 
+/** A path as one POSIX shell word: single-quoted, each ' as '\'' (nothing inside is expanded). */
+export const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * A command that copies `file`'s contents to this machine's clipboard, ready to paste into its shell, or null when
+ * there's no clipboard tool (then the path alone is shown). macOS: pbcopy. Linux: wl-copy, else xclip, else WSL's
+ * clip.exe. Windows (cmd): clip. WHY: a key file's path can have a space (~/Library/Application Support) (#467).
+ */
+export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = process.env.PATH ?? ''): string | null {
+  if (platform === 'win32') return /["%^&|<>]/.test(file) ? null : `clip < "${file}"`;
+  const q = shellQuote(file);
+  if (platform === 'darwin') return `pbcopy < ${q}`;
+  if (which('wl-copy', path)) return `wl-copy < ${q}`;
+  if (which('xclip', path)) return `xclip -selection clipboard < ${q}`;
+  if (which('clip.exe', path)) return `clip.exe < ${q}`;
+  return null;
+}
+
 /** Open a URL in the default browser, best effort. */
 export function openUrl(url: string): void {
   const cmd = process.platform === 'darwin' ? ['open', url] : process.platform === 'win32' ? ['cmd', '/c', 'start', '', url] : ['xdg-open', url];

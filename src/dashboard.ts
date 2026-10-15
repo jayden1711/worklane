@@ -46,7 +46,7 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { cpuCount, flockHolders, installService, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerUid, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
@@ -877,6 +877,9 @@ function send(res: ServerResponse, status: number, headers: Record<string, strin
   res.end(body);
 }
 
+/** GET: the key page's help (the key file's path and a copy command), loopback only, never the key. */
+export const KEY_HELP_PATH = '/api/key-help';
+
 export function dashboardToken(stateDir: string): string {
   const f = join(stateDir, 'dashboard-token');
   if (existsSync(f)) return readFileSync(f, 'utf8').trim();
@@ -1127,6 +1130,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         const nonce = url.searchParams.get('nonce') ?? '';
         if (!NONCE.test(nonce)) return json(res, 400, { error: 'nonce: 64 hex characters' });
         return json(res, 200, { proof: dashboardProof(token, req.socket.localPort ?? 0, nonce) });
+      }
+      // The key page's help, before any key: where the key's file is and a command that copies it (#467), never the key.
+      // Only to a browser on this machine, not through a proxy or the hub, and on Linux only to this process's own user.
+      if (url.pathname === KEY_HELP_PATH && req.method === 'GET') {
+        const peer = req.socket.remotePort !== undefined && req.socket.localPort !== undefined ? loopbackPeerUid(req.socket.remotePort, req.socket.localPort) : null;
+        if (!breakGlassAllowed(req) || (peer !== null && typeof process.getuid === 'function' && peer !== process.getuid())) return json(res, 404, { error: 'not here' });
+        const file = join(opts.stateDir, 'dashboard-token');
+        return json(res, 200, { file, copy: copyFileCommand(file) });
       }
       if (url.pathname.startsWith('/api/')) {
         const id = await identify(req, url);

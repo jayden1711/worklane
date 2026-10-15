@@ -113,7 +113,7 @@ interface Render {
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
   renderSignIn(local?: boolean): string;
-  renderKeyPage(): string;
+  renderKeyPage(help?: { file: string; copy: string | null } | null): string;
   renderKeyForm(error?: string | null): string;
   needsKey(hubPage: boolean, key: string): boolean;
   tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
@@ -401,6 +401,14 @@ test("the dashboard key: a page opened without one (the install's URL) asks for 
   assert.match(page, /data-testid="key-page"/);
   assert.match(page, /<input id="dash-key" type="password" autoComplete="off"|<input id="dash-key" type="password" autocomplete="off"/);
   assert.match(page, /data-testid="key-file"[\s\S]*type="file"/, 'or its file');
+  // #467: on this machine, the key's file whole and the command that copies it; nothing when the server gives none.
+  assert.doesNotMatch(page, /data-testid="key-help"/);
+  const file = '/Users/example/Library/Application Support/example/projects/abc/dashboard-token';
+  const helped = r.renderKeyPage({ file, copy: `pbcopy < '${file}'` });
+  assert.match(helped, /data-testid="key-help-file"[^>]*>\/Users\/example\/Library\/Application Support\/example\/projects\/abc\/dashboard-token</);
+  assert.match(helped, /data-testid="key-help-command"[^>]*>pbcopy &lt; (&#x27;|')\/Users\/example\/Library\/Application Support/);
+  assert.match(helped, /data-testid="key-help-copy"[^>]*>Copy command</);
+  assert.doesNotMatch(r.renderKeyPage({ file, copy: null }), /key-help-command|key-help-copy/, 'no clipboard tool: the path alone');
   assert.match(r.renderKeyForm("That key doesn't open this dashboard."), /role="alert" data-testid="key-error">That key doesn(&#x27;|')t open this dashboard\./);
 
   const key = 'a'.repeat(32);

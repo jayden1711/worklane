@@ -68,7 +68,7 @@ Run it again whenever you like. Each step checks first and does only what isn't 
 
 Without `--mode`, it asks whether you want local or server. With no terminal to ask on, it picks local and says so.
 
-**The key is in a file, never in the URL.** The page asks once for the dashboard key, in a hidden field, or you choose the key file. The command prints that file's path, never the key, and only you can read the file. The page sends the key in a header and keeps it in that browser tab until you close it. Every dashboard route refuses (401) a request whose URL carries a key.
+**The key is in a file, never in the URL.** The page asks once for the dashboard key, in a hidden field, or you choose the key file. The command prints that file's path on its own line, never the key, and only you can read the file. Below it is a command that copies the key to your clipboard (`pbcopy` on macOS; `wl-copy`, `xclip` or WSL's `clip.exe` on Linux), quoted so it works pasted as is. Opened on the same machine, the key page shows the same path and command, with a Copy command button. The page sends the key in a header and keeps it in that browser tab until you close it. Every dashboard route refuses (401) a request whose URL carries a key.
 
 ### Server
 
