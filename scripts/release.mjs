@@ -11,6 +11,10 @@
 //   node scripts/release.mjs X.Y.Z
 //     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
 //     the GitHub release notes (the changelog's section). Refuses without a signing key, saying how to set one.
+//
+// The step-by-step checklist for a release, from a green main to the approved npm version: docs/releasing.md.
+// Pushing the tag runs .github/workflows/release.yml, which only STAGES the version on npm (after checking the tag's
+// signature against main's .github/release-signers); it goes live when the owner approves it on npmjs.com with 2FA.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -116,5 +120,6 @@ try {
 }
 const notesFile = join(tmpdir(), `release-notes-v${version}.md`);
 writeFileSync(notesFile, `${notes}\n`);
-console.log(`push with: git push origin v${version}`);
+console.log(`push with (only behind the verify, as its own step): git tag -v v${version} && git push origin v${version}`);
+console.log('CI then stages it on npm; approve it on npmjs.com with 2FA (docs/releasing.md)');
 console.log(`then the GitHub release: gh release create v${version} --verify-tag --title v${version} --notes-file ${notesFile}`);
