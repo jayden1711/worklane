@@ -26,6 +26,7 @@ import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
+import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -81,8 +82,8 @@ export const MACHINE_PATHS: MachinePaths = {
   helper: MACHINE_HELPER,
   machineOwners: MACHINE_OWNERS_FILE,
   updatesConfig: UPDATES_CONFIG,
-  allowedSigners: `/etc/${BRAND.cli}/allowed_signers`,
-  hubUnitFile: `/etc/systemd/system/${BRAND.cli}-dashboard-hub.service`,
+  allowedSigners: etcPath('allowed_signers'),
+  hubUnitFile: unitPath(`${BRAND.cli}-dashboard-hub.service`),
   fullRunLock: FULL_RUN_LOCK,
   claudeAccountDir: CLAUDE_ACCOUNT_DIR,
 };
@@ -815,7 +816,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'most',
     today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers (or `--confirm-signer <fingerprint>` for one staged on the Machine page), and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
     fix: { kind: 'screen', path: '/machine', label: "the Machine page's Updater setup" },
-    automation: `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/${BRAND.cli}-machine set-updates on`,
+    automation: `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo ${asRoot.libexec('machine')} set-updates on`,
     detect: (k) => {
       if (!existsSync(k.m.updatesConfig)) return no(`the updater isn't set up (no ${k.m.updatesConfig})`);
       return existsSync(k.m.allowedSigners) ? ok(`set up (${k.m.updatesConfig}); release signers listed`) : no(`set up, but no ${k.m.allowedSigners}: the release channel installs nothing until it lists the signing key`);

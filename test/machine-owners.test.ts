@@ -12,12 +12,13 @@ import { MachineRequestError, machineRequests, requestMachineChange } from '../s
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { ownerRequester, machineOwnersFile, repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 const setup = join(repoRoot, 'scripts', 'setup');
 
 test('the machine owners file: two logins, matched case-insensitively; missing, malformed or open to others is no owners', () => {
-  assert.equal(MACHINE_OWNERS_FILE, `/etc/${BRAND.cli}/machine-owners.json`);
+  assert.equal(onRealMachine(MACHINE_OWNERS_FILE), `/etc/${BRAND.cli}/machine-owners.json`);
   const two = machineOwnersFile('ada', 'Olu');
   assert.deepEqual(machineOwners(two), ['ada', 'Olu']);
   for (const l of ['ada', 'ADA', 'olu']) assert.equal(isMachineOwner(l, two), true, l);
@@ -107,5 +108,5 @@ test('dashboards.sh --machine-owner writes the machine owners file root:root 064
   assert.ok(sh.indexOf('machine_owners_json "$machine_owner" >/dev/null || exit 2') < sh.indexOf('ensure_user "$viewer"'), 'validated before anything changes');
   assert.match(sh, /if \[ -n "\$machine_owner_set" \]; then\n[^\n]*\n  install_machine_owners "\$machine_owner"\nfi/);
   const lib = readFileSync(join(setup, 'lib.sh'), 'utf8');
-  assert.match(lib, new RegExp(`^MACHINE_OWNERS=${MACHINE_OWNERS_FILE.replace(/[.]/g, '\\.')}$`, 'm'), "the script's path is the engine's");
+  assert.match(lib, new RegExp(`^MACHINE_OWNERS=${onRealMachine(MACHINE_OWNERS_FILE).replace(/[.]/g, '\\.')}$`, 'm'), "the script's path is the engine's");
 });

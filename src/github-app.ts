@@ -6,6 +6,7 @@
 import { createSign } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { REQUEST_TIMEOUT_MS } from './backlog/github.js';
 
 type Fetch = typeof fetch;
 
@@ -31,13 +32,18 @@ export interface InstallationToken {
   expiresAt: string;
 }
 
-/** Mint an installation token limited to `repos` (owner/name; all must share the installation's owner). */
-export async function mintInstallationToken(c: AppCredentials, repos: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com', now = Date.now()): Promise<InstallationToken> {
+/**
+ * Mint an installation token limited to `repos` (owner/name; all must share the installation's owner). The request
+ * gives up after `timeoutMs` (a TimeoutError), like every other GitHub call: a connection that never answers must not
+ * hold a coordinator tick, or the watchdog's pass, forever.
+ */
+export async function mintInstallationToken(c: AppCredentials, repos: string[], fetchImpl: Fetch = fetch, api = 'https://api.github.com', now = Date.now(), timeoutMs = REQUEST_TIMEOUT_MS): Promise<InstallationToken> {
   const jwt = appJwt(c.appId, readFileSync(c.keyPath, 'utf8'), now);
   const res = await fetchImpl(`${api}/app/installations/${c.installationId}/access_tokens`, {
     method: 'POST',
     headers: { authorization: `Bearer ${jwt}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'content-type': 'application/json' },
     body: JSON.stringify({ repositories: repos.map((r) => r.split('/')[1]) }),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`GitHub ${res.status} minting an installation token for App ${c.appId}`);
   const j = (await res.json()) as { token: string; expires_at: string };
@@ -70,14 +76,14 @@ export function installationTokens(c: AppCredentials, repos: string[], stateDir:
  * The App's bot identity, as GitHub attributes commits to it:
  * "<slug>[bot]" <"<bot user id>+<slug>[bot]@users.noreply.github.com">.
  */
-export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch, api = 'https://api.github.com'): Promise<{ name: string; email: string }> {
+export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch, api = 'https://api.github.com', timeoutMs = REQUEST_TIMEOUT_MS): Promise<{ name: string; email: string }> {
   const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' };
-  const app = await fetchImpl(`${api}/app`, { headers: { ...headers, authorization: `Bearer ${appJwt(c.appId, readFileSync(c.keyPath, 'utf8'))}` } });
+  const app = await fetchImpl(`${api}/app`, { headers: { ...headers, authorization: `Bearer ${appJwt(c.appId, readFileSync(c.keyPath, 'utf8'))}` }, signal: AbortSignal.timeout(timeoutMs) });
   if (!app.ok) throw new Error(`GitHub ${app.status} reading App ${c.appId}`);
   const { slug } = (await app.json()) as { slug?: unknown };
   if (typeof slug !== 'string' || !/^[a-z0-9-]+$/.test(slug)) throw new Error(`App ${c.appId}: GitHub returned no usable slug`);
   const bot = `${slug}[bot]`;
-  const user = await fetchImpl(`${api}/users/${encodeURIComponent(bot)}`, { headers });
+  const user = await fetchImpl(`${api}/users/${encodeURIComponent(bot)}`, { headers, signal: AbortSignal.timeout(timeoutMs) });
   if (!user.ok) throw new Error(`GitHub ${user.status} reading the App's bot user ${bot}`);
   const { id } = (await user.json()) as { id?: unknown };
   if (typeof id !== 'number') throw new Error(`the App's bot user ${bot}: GitHub returned no id`);

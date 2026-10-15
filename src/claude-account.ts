@@ -24,9 +24,10 @@ import { secretsDir } from './console/secrets.js';
 import type { Role } from './console/asks.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
+import { varLibPath } from './os/system-paths.js';
 
 /** Where claude-account.sh writes status.json, switch.jsonl and paused (root's, 0644; lib.sh's CLAUDE_ACCOUNT_DIR). */
-export const CLAUDE_ACCOUNT_DIR = `/var/lib/${BRAND.cli}/claude-account`;
+export const CLAUDE_ACCOUNT_DIR = varLibPath('claude-account');
 /** The pasted token's file in this instance's secrets directory (lib.sh's CLAUDE_ACCOUNT_CREDENTIAL). */
 export const CLAUDE_ACCOUNT_CREDENTIAL = 'claude-account-token';
 /** A token from `claude setup-token` (lib.sh's claude_token_ok, install_claude_token's check). */

@@ -23,8 +23,9 @@ import { X509Certificate } from 'node:crypto';
 import { dirname, posix } from 'node:path';
 import { BRAND } from './brand.js';
 import { fileAccess, readRegularFile } from './os/index.js';
+import { etcPath } from './os/system-paths.js';
 
-export const NETWORK_FILE = `/etc/${BRAND.cli}/network.json`;
+export const NETWORK_FILE = etcPath('network.json');
 
 /** Bounds on the file and its values. */
 export const NETWORK_LIMITS = { fileBytes: 4096, proxy: 512, noProxy: 1024, caPath: 256, caBytes: 256 * 1024, caCerts: 64 } as const;

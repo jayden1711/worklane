@@ -1,3 +1,4 @@
+import { restoreIsolated } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -101,7 +102,7 @@ test('a queued full run waits while another run is live, then starts by itself',
     unlinkSync(busy);
     assert.ok(await until(() => readJob(stateDir, job.id).status === 'passed', 60_000), readJob(stateDir, job.id).status);
   } finally {
-    delete process.env.AGENT_SLOTS_DIR;
+    restoreIsolated('AGENT_SLOTS_DIR');
   }
 });
 
@@ -116,6 +117,6 @@ test('a queued run waits while the machine is too loaded', { skip: !posix && 'lo
     assert.equal(existsSync(join(base, 'ran')), false);
     process.kill(readJob(stateDir, job.id).runnerPid!, 'SIGKILL');
   } finally {
-    delete process.env.AGENT_SLOTS_DIR;
+    restoreIsolated('AGENT_SLOTS_DIR');
   }
 });

@@ -20,6 +20,7 @@ import { drainView } from '../src/dashboard.js';
 import { updatesPanel } from '../src/updates.js';
 import type { TestRunConfig, TestRunTier } from '../src/testrun/config.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 type Flag = { since: string; until: string; to: string | null };
 type Deps = Record<string, unknown> & { drainState(): Flag | null; saveDrain(f: Flag | null): void };
@@ -262,7 +263,7 @@ test('the drain blocks every start gate: test slots, the full-run lock and agent
     got.lock.release();
     // On a machine, the flag is root's, outside the group-writable slot directory.
     assert.equal(updateDrainPath(SYSTEM_SLOTS.dir), UPDATE_DRAIN_FILE);
-    assert.match(UPDATE_DRAIN_FILE, /^\/var\/lib\/[^/]+\/update-drain\.json$/);
+    assert.match(onRealMachine(UPDATE_DRAIN_FILE), /^\/var\/lib\/[^/]+\/update-drain\.json$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -334,13 +335,13 @@ test('an expired flag left by a crashed updater is ignored by the gates, and the
 test('the drain decision: drain_after_minutes, the deadline from each run\'s recorded cap, overdue, and a run with no cap', () => {
   const alive = () => true;
   const stuck = (min: number) => ({ installed: OLD, since: iso(T0 - min * MIN), tip: NEW, notQuietSince: iso(T0 - min * MIN), raised: false });
-  const run = (startedMinAgo: number, capMin: number | null) => ({ name: 'test-0.lock', pid: 1, acquiredAt: iso(T0 - startedMinAgo * MIN), limitMs: capMin === null ? null : capMin * MIN });
+  const run = (startedMinAgo: number, capMin: number | null) => ({ name: 'test-0.lock', pid: 101, acquiredAt: iso(T0 - startedMinAgo * MIN), limitMs: capMin === null ? null : capMin * MIN });
   assert.equal(u.drainAfterMs({}), 60 * MIN);
   assert.equal(u.drainAfterMs({ drain_after_minutes: 15 }), 15 * MIN);
   assert.equal(u.drainAfterMs({ drain_after_minutes: 0 }), 60 * MIN);
   assert.equal(u.drainStep(null, stuck(59), OLD, NEW, [run(10, 30)], alive, 60 * MIN, T0), null, 'busy 59 minutes: not yet');
   assert.equal(u.drainStep(null, { ...stuck(90), installed: 'e'.repeat(40) }, OLD, NEW, [run(10, 30)], alive, 60 * MIN, T0), null, 'another engine\'s clock does not count');
-  const d = u.drainStep(null, stuck(60), OLD, NEW, [run(10, 30), { name: 'agent-0.lock', pid: 1 }, { name: 'test-1.lock', pid: 1, acquiredAt: iso(T0), limitMs: 5 * MIN }], alive, 60 * MIN, T0)!;
+  const d = u.drainStep(null, stuck(60), OLD, NEW, [run(10, 30), { name: 'agent-0.lock', pid: 101 }, { name: 'test-1.lock', pid: 101, acquiredAt: iso(T0), limitMs: 5 * MIN }], alive, 60 * MIN, T0)!;
   assert.deepEqual(d.flag, { since: iso(T0), until: iso(T0 + u.DRAIN_TTL_MS), to: NEW });
   assert.equal(d.deadline, T0 + 20 * MIN + u.DRAIN_MARGIN_MS, 'the latest run\'s start plus its cap, plus the margin');
   assert.match(d.line, /2 test runs and 1 agent finishing; the test runs are due by /);

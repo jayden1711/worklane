@@ -228,10 +228,10 @@ test('each Node version\'s 4 test shards gate through a summary job under the re
     const steps = jobs[shard]!.steps ?? [];
     const run = steps.map((s) => s.run ?? '').join('\n');
     assert.match(run, /node scripts\/ci\/shard\.mjs "\$SHARD\/4" --only "\$RUNNER_TEMP\/selected"/, `${shard}: each shard runs its share of the 4, of the selected files`);
-    assert.match(run, /node --test "\$\{files\[@\]\}"/);
+    assert.match(run, /node --import \.\/dist\/test\/isolate\.js --test "\$\{files\[@\]\}"/, `${shard}: every shard runs isolated (test/isolate.ts)`);
     // The selection: affected.mjs, told the event (a push to main gets every file), diffing the PR's merge commit
     // against its base; a shard with no selected file passes only on a pull request.
-    const tests = steps.find((s) => /node --test/.test(s.run ?? ''))!;
+    const tests = steps.find((s) => /node --import \.\/dist\/test\/isolate\.js --test/.test(s.run ?? ''))!;
     assert.equal(tests.env?.EVENT, '${{ github.event_name }}', `${shard}: the selection knows the event`);
     assert.match(tests.run!, /if \[ "\$FULL_CI" = true \]; then EVENT=full-ci; fi/, `${shard}: the full-ci label runs every file`);
     assert.equal(tests.env?.FULL_CI, "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}");

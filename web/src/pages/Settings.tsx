@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
-import { getSettings, useFetch, type Settings } from '../api';
+import { useView, type Settings, type ViewerSettings } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
 import { Loading } from '../components/patterns';
 import { Badge, Card } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 import { VoiceSettings } from '../voice/VoiceSettings';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -88,10 +88,10 @@ const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span c
 
 /** `owner`: whether this person is one of the instance's owners (State.role), for the owners-only voice section; `brand` names its wake word. */
 export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?: string }) {
-  const { data: s, error } = useFetch(getSettings);
+  const { data: s, error } = useView<Settings | ViewerSettings>('/api/settings');
   // A viewer gets the project part only; the rest is the owners' and writers'.
   const full = s && !('forViewer' in s) ? s : null;
-  if (error || !s)
+  if (!s)
     return (
       <div>
         <Header title="Settings" sub="read-only" />

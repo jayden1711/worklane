@@ -6,7 +6,8 @@
 //
 //   node scripts/release.mjs changelog X.Y.Z [--repo owner/repo]
 //     Write CHANGELOG.md's section for X.Y.Z from the PRs merged since the previous release (one GitHub
-//     listing through `gh`). Commit it with the version bump in a normal PR.
+//     listing through `gh`). Commit it with the version bump in a normal PR. Safe to rerun: the lists are
+//     rewritten, and whatever is written by hand above them in that section (highlights, upgrade notes) is kept.
 //   node scripts/release.mjs X.Y.Z
 //     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
 //     the GitHub release notes (the changelog's section). Refuses without a signing key, saying how to set one.
@@ -14,7 +15,8 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changelogSection, prNumbers, sectionFor, withSection } from './lib/changelog.mjs';
+import { changelogSection, prNumbers, scrubTitle, sectionFor, withSection } from './lib/changelog.mjs';
+import { loadRules, scanText } from './lib/denylist.mjs';
 import { canVerify, signingProblem } from './lib/signing.mjs';
 
 const args = process.argv.slice(2);
@@ -52,11 +54,24 @@ if (changelogOnly) {
   const numbers = prNumbers(subjects);
   const repo = opt('repo') ?? /github\.com[:/](.+?)(?:\.git)?$/.exec(git('remote', 'get-url', 'origin'))?.[1];
   if (!repo) fail('which GitHub repo? pass --repo owner/repo');
-  const listed = numbers.length ? JSON.parse(execFileSync('gh', ['pr', 'list', '--repo', repo, '--state', 'merged', '--limit', '1000', '--json', 'number,title,labels,files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) : [];
+  // --state all: a PR a batch merged is closed, not merged, on GitHub; its number came from main's history.
+  const listed = numbers.length ? JSON.parse(execFileSync('gh', ['pr', 'list', '--repo', repo, '--state', 'all', '--limit', '1000', '--json', 'number,title,labels,files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) : [];
   const byNumber = new Map(listed.map((p) => [p.number, { number: p.number, title: p.title, labels: (p.labels ?? []).map((l) => l.name), files: (p.files ?? []).map((f) => f.path) }]));
-  const prs = numbers.map((n) => byNumber.get(n) ?? { number: n, title: `#${n}`, labels: [], files: [] });
+  // A title with a word the denylist refuses (an internal ticket key, say) is listed without it, and named here.
+  const rules = loadRules('.');
+  const denied = (text) => scanText(rules, 'CHANGELOG.md', text).length > 0;
+  const prs = numbers
+    .map((n) => byNumber.get(n) ?? { number: n, title: `#${n}`, labels: [], files: [] })
+    .map((pr) => {
+      const title = scrubTitle(pr.title, denied);
+      if (title !== pr.title) console.log(`#${pr.number}: listed without a word the denylist refuses`);
+      return { ...pr, title };
+    });
   const section = changelogSection(version, new Date().toISOString().slice(0, 10), prs);
-  writeFileSync('CHANGELOG.md', withSection(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section));
+  const changelog = withSection(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section);
+  writeFileSync('CHANGELOG.md', changelog);
+  const left = scanText(rules, 'CHANGELOG.md', sectionFor(changelog, version) ?? '');
+  if (left.length) fail(`CHANGELOG.md's v${version} section still fails the denylist (the hand-written top?):\n  ${left.join('\n  ')}`);
   console.log(`CHANGELOG.md: v${version}, ${prs.length} PR(s) since ${prev ? `v${prev}` : 'the first commit'}. Review it, then commit it with the version bump in a PR.`);
   process.exit(0);
 }

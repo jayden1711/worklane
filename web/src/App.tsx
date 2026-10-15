@@ -1,38 +1,90 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { hub, instanceScope, keyMissing, loadIncidents, needsSignIn, onLoopback, selectAllInstances, selectInstance, signOut, statusOf, useLiveState, type HealthStatus, type HubInfo, type InstanceScope, type State } from './api';
-import { Loading, SidebarRow } from './components/patterns';
+import { healthPass, hub, hubNow, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
+import { peek, useUpdating } from './cache';
+import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
 import { VoiceControl } from './voice/VoiceControl';
 import { useVoicePrefs } from './voice/prefs';
 import { MainWatchAlert } from './components/Protection';
 import { UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
-import { Header, Overview } from './pages/Overview';
-import { BoardPage } from './pages/Board';
-import { MachinePage } from './pages/Machine';
-import { InboxPage } from './pages/Inbox';
-import { SetupPage } from './pages/Setup';
-import { WaitingPage } from './pages/Waiting';
-import { FirstRunPage } from './pages/FirstRun';
-import { Decisions } from './pages/Decisions';
-import { Issues } from './pages/Issues';
-import { IssueDetail } from './pages/IssueDetail';
-import { Landing } from './pages/Landing';
-import { Agents } from './pages/Agents';
-import { ActivityPage } from './pages/Activity';
-import { IntakePage } from './pages/Intake';
-import { Deploys } from './pages/Deploys';
-import { Reports } from './pages/Reports';
-import { SettingsPage } from './pages/Settings';
+import { Header } from './components/Header';
+import { StatusDot } from './components/StatusDot';
 import { WakeWord } from './voice/WakeIndicator';
-import { LogsPage, logsRefusal } from './pages/Logs';
-import { RunDetail, runsRefusal } from './pages/RunDetail';
-import { PullRequests } from './pages/PullRequests';
-import { HealthPage, StatusDot } from './pages/Health';
+import { logsRefusal, runsRefusal } from './refusals';
 import { KeyForm, KeyPage } from './components/DashboardKey';
+import { background, idle } from './prefetch';
+
+/**
+ * A page as its own chunk (code split): the first load ships the shell and the page shown. Once its module is in
+ * (preload, or its first render), it renders directly, with no Suspense fallback on a later switch to it.
+ */
+function lazyPage<P extends object>(load: () => Promise<ComponentType<P>>): ComponentType<P> & { preload: () => Promise<unknown> } {
+  let mod: ComponentType<P> | null = null;
+  let loading: Promise<{ default: ComponentType<P> }> | null = null;
+  const loader = () =>
+    (loading ??= load().then(
+      (c) => ({ default: (mod = c) }),
+      (e: unknown) => {
+        loading = null; // a failed chunk is asked again next time
+        throw e;
+      },
+    ));
+  const Lazy = lazy(loader);
+  const Page = (props: P) => (mod ? createElement(mod, props) : createElement(Lazy as ComponentType<P>, props));
+  return Object.assign(Page, { preload: () => loader().catch(() => undefined) });
+}
+
+const Overview = lazyPage(() => import('./pages/Overview').then((m) => m.Overview));
+const BoardPage = lazyPage(() => import('./pages/Board').then((m) => m.BoardPage));
+const MachinePage = lazyPage(() => import('./pages/Machine').then((m) => m.MachinePage));
+const InboxPage = lazyPage(() => import('./pages/Inbox').then((m) => m.InboxPage));
+const SetupPage = lazyPage(() => import('./pages/Setup').then((m) => m.SetupPage));
+const WaitingPage = lazyPage(() => import('./pages/Waiting').then((m) => m.WaitingPage));
+const FirstRunPage = lazyPage(() => import('./pages/FirstRun').then((m) => m.FirstRunPage));
+const Decisions = lazyPage(() => import('./pages/Decisions').then((m) => m.Decisions));
+const Issues = lazyPage(() => import('./pages/Issues').then((m) => m.Issues));
+const IssueDetail = lazyPage(() => import('./pages/IssueDetail').then((m) => m.IssueDetail));
+const Landing = lazyPage(() => import('./pages/Landing').then((m) => m.Landing));
+const Agents = lazyPage(() => import('./pages/Agents').then((m) => m.Agents));
+const ActivityPage = lazyPage(() => import('./pages/Activity').then((m) => m.ActivityPage));
+const IntakePage = lazyPage(() => import('./pages/Intake').then((m) => m.IntakePage));
+const Deploys = lazyPage(() => import('./pages/Deploys').then((m) => m.Deploys));
+const Reports = lazyPage(() => import('./pages/Reports').then((m) => m.Reports));
+const SettingsPage = lazyPage(() => import('./pages/Settings').then((m) => m.SettingsPage));
+const LogsPage = lazyPage(() => import('./pages/Logs').then((m) => m.LogsPage));
+const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
+const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
+const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
+
+/** Each route's page chunk: the one shown is asked for at once (beside the first API calls), the rest when idle. */
+const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
+  [/^\/$/, BoardPage],
+  [/^\/overview/, Overview],
+  [/^\/prs/, PullRequests],
+  [/^\/health/, HealthPage],
+  [/^\/inbox/, InboxPage],
+  [/^\/waiting/, WaitingPage],
+  [/^\/decisions/, Decisions],
+  [/^\/setup/, SetupPage],
+  [/^\/issues\/\d/, IssueDetail],
+  [/^\/issues/, Issues],
+  [/^\/intake/, IntakePage],
+  [/^\/land/, Landing],
+  [/^\/agents/, Agents],
+  [/^\/activity/, ActivityPage],
+  [/^\/deploys/, Deploys],
+  [/^\/reports/, Reports],
+  [/^\/logs/, LogsPage],
+  [/^\/machine/, MachinePage],
+  [/^\/settings/, SettingsPage],
+  [/^\/runs\//, RunDetail],
+  [/^\/first-run/, FirstRunPage],
+];
+if (typeof window !== 'undefined') void (PAGE_FOR.find(([re]) => re.test(window.location.pathname))?.[1] ?? BoardPage).preload();
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -238,9 +290,10 @@ export function WhoAmI({ state, onSignOut }: { state: Pick<State, 'user' | 'role
 
 export function App() {
   // Known before anything asks the server for state, so a signed-out page makes no call that would be refused.
+  // And the scope (which instance this page shows), so every view can start from what was kept for it.
   const [signIn, setSignIn] = useState<boolean | null>(null);
   useEffect(() => {
-    void needsSignIn.then(setSignIn);
+    void needsSignIn.then((n) => (n ? setSignIn(n) : instanceScope.then(() => setSignIn(n))));
   }, []);
   if (signIn === null) return <Loading />;
   if (signIn) return <SignInPage local={onLoopback} />;
@@ -248,9 +301,64 @@ export function App() {
   return <Dashboard />;
 }
 
+/**
+ * The dashboard for the scope shown. Keyed on it: an instance switch (no reload) mounts it again, so no view holds
+ * the last instance's data, and each starts from what was kept for the new one (web/src/cache.ts). The status dots
+ * are the hub's, the same whichever instance is shown, so they stay across a switch.
+ */
 function Dashboard() {
+  const scope = useScope();
+  const health = useHealth();
+  return <InstanceDashboard key={scopeKey(scope)} health={health} />;
+}
+
+/** The views likely to be opened next, by page: the Board's, the Overview's and the PR page's. */
+const NEXT_VIEWS = ['/api/board', '/api/test-runs', '/api/prs'];
+
+/**
+ * Once the page shown has its state, in the background: the other pages' code, then this instance's likely next
+ * views, then each other instance's state and board (only what isn't kept yet). Cancelled when the page goes.
+ */
+function usePrefetch(ready: boolean, current: string | null) {
+  useEffect(() => {
+    if (!ready) return;
+    const tasks: (() => Promise<unknown>)[] = PAGE_FOR.map(([, p]) => () => p.preload());
+    const want = (path: string, inst?: string | null) => {
+      tasks.push(() => (peek(viewUrl(path, inst)) ? Promise.resolve() : prefetchView(path, inst)));
+    };
+    for (const v of NEXT_VIEWS) want(v);
+    for (const i of hubNow()?.instances ?? []) {
+      if (!i.up || i.name === current) continue;
+      want('/api/state', i.name);
+      want('/api/board', i.name);
+      want('/api/test-runs', i.name);
+    }
+    let cancel = () => {};
+    // After the page's own first paint and its first requests.
+    const stopIdle = idle(() => (cancel = background(tasks)), 1000);
+    return () => {
+      stopIdle();
+      cancel();
+    };
+  }, [ready, current]);
+}
+
+/** The small "updating…" mark while a view is shown from what was kept and its fresh answer is on its way. */
+function UpdatingMark() {
+  const updating = useUpdating();
+  if (!updating) return null;
+  return (
+    <div className="pointer-events-none fixed right-3 top-3 z-30 rounded-full bg-surface px-2 py-0.5 text-[11px] text-ink-3 shadow-btn" role="status" data-testid="updating">
+      updating…
+    </div>
+  );
+}
+
+function InstanceDashboard({ health }: { health: Health | null }) {
   const path = useRoute();
+  const scope = useScope();
   const { state, error, live, pulse, refresh } = useLiveState();
+  usePrefetch(!!state, scope?.current ?? null);
   // The Claude usage limit: every instance's pause (a banner on every page) and usage (the Overview's lines).
   const usage = useUsage(state?.lastId);
   const now = useNow(usage.some((u) => u.paused));
@@ -259,7 +367,6 @@ function Dashboard() {
   // The narrow-screen navigation drawer: closed on every change of page.
   const [nav, setNav] = useState(false);
   useEffect(() => setNav(false), [path]);
-  const health = useHealth();
   const [voice] = useVoicePrefs();
 
   useEffect(() => {
@@ -330,7 +437,7 @@ function Dashboard() {
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
 
-  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} /> };
+  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} why={health?.why} live={health?.hub} /> };
   return (
     <NavMenu.Provider value={{ open: nav, setOpen: setNav }}>
       <div className="flex h-full">
@@ -341,8 +448,11 @@ function Dashboard() {
           {state && <StopBanner state={state} />}
           <UsageBanner usage={usage} now={now} />
           {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
-          {page}
+          <Entrances key={path}>
+            <Suspense fallback={<Loading />}>{page}</Suspense>
+          </Entrances>
         </main>
+        <UpdatingMark />
         <NavDrawer open={nav} setOpen={setNav}>
           <SidebarBody {...sidebar} />
         </NavDrawer>
@@ -356,7 +466,7 @@ function Dashboard() {
 }
 
 type Counts = Partial<Record<string, number>>;
-type Health = { hub: HubInfo | null; status: Record<string, HealthStatus> };
+type Health = { hub: HubInfo | null; status: Record<string, DotStatus>; why?: Record<string, string> };
 
 /**
  * The sidebar's contents: the project and its status dot (off a hub), the instance list (on a hub), Search, the pages,
@@ -375,7 +485,7 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
         {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
         {health && !health.hub && (
           <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
-            <StatusDot status={health.status[''] ?? 'green'} testId="instance-status-dot" />
+            <StatusDot status={health.status[''] ?? 'green'} why={health.why?.['']} testId="instance-status-dot" />
           </a>
         )}
       </div>
@@ -490,14 +600,14 @@ export function NavDrawer({ open, setOpen, children }: { open: boolean; setOpen:
  * chosen: the Board and its test runs then show every instance, each item labelled; every other page stays on the
  * selected instance.
  */
-export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {}, status = {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void; status?: Record<string, HealthStatus> }) {
+export function InstanceList({ hub: info, current, all = false, onSelect, onSelectAll = () => {}, status = {}, why = {} }: { hub: HubInfo; current: string; all?: boolean; onSelect: (name: string) => void; onSelectAll?: () => void; status?: Record<string, DotStatus>; why?: Record<string, string> }) {
   return (
     <nav className="mt-1 flex flex-col gap-px px-2" aria-label="Instances" data-instance-switcher data-testid="instance-switcher" data-scope={all ? 'all' : current}>
       <div className="px-2 pt-1 pb-1 text-[11.5px] font-medium text-ink-3">Instances</div>
       {info.instances.map((i) => (
         <SidebarRow
           key={i.name}
-          icon={<StatusDot status={i.up ? (status[i.name] ?? 'green') : 'red'} testId="instance-dot" />}
+          icon={<StatusDot status={i.up ? (status[i.name] ?? 'green') : 'red'} why={i.up ? why[i.name] : (i.error ?? "its dashboard isn't answering")} testId="instance-dot" />}
           label={i.up ? i.name : `${i.name} (not answering)`}
           title={i.error ?? undefined}
           active={!all && i.name === current}
@@ -518,22 +628,33 @@ export function InstanceList({ hub: info, current, all = false, onSelect, onSele
   );
 }
 
-/** On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served by its own dashboard). */
-function InstanceSwitcher({ status }: { status: Record<string, HealthStatus> }) {
-  const [info, setInfo] = useState<{ hub: HubInfo; scope: InstanceScope } | null>(null);
-  useEffect(() => {
-    void Promise.all([hub, instanceScope]).then(([h, scope]) => h && scope.current && setInfo({ hub: h, scope }));
-  }, []);
-  if (!info) return null;
-  return <InstanceList hub={info.hub} current={info.scope.current!} all={info.scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} status={status} />;
+/**
+ * On a hub: which instance this page shows (or All instances, for the Board), and a switch to the others (each served
+ * by its own dashboard). `live`: the hub's list as the last health refresh read it, so an instance that was down at
+ * page load and is up again can be picked without a reload.
+ */
+function InstanceSwitcher({ status, why, live }: { status: Record<string, DotStatus>; why?: Record<string, string> | undefined; live?: HubInfo | null | undefined }) {
+  const scope = useScope();
+  const info = live ?? hubNow();
+  if (!info || !scope?.current) return null;
+  return <InstanceList hub={info} current={scope.current} all={scope.all} onSelect={selectInstance} onSelectAll={selectAllInstances} status={status} {...(why ? { why } : {})} />;
 }
 
-/** Each instance's status dot (green, amber, red) from its watchdog incidents, read again every minute. */
-function useHealth(): { hub: HubInfo | null; status: Record<string, HealthStatus> } | null {
-  const [health, setHealth] = useState<{ hub: HubInfo | null; status: Record<string, HealthStatus> } | null>(null);
+/**
+ * Each instance's status dot (green, amber, red; grey when its status couldn't be read) from its watchdog incidents,
+ * read again every minute, with the hub's list asked again each time (healthPass).
+ */
+function useHealth(): Health | null {
+  const [health, setHealth] = useState<Health | null>(null);
   useEffect(() => {
     let live = true;
-    const load = () => void hub.then(async (h) => ({ hub: h, status: statusOf(await loadIncidents(h)) })).then((x) => live && setHealth(x));
+    let first = true;
+    // The first pass uses the list this page loaded with; every later one asks the hub again.
+    const load = () => {
+      const pass = first ? healthPass(() => hub) : healthPass();
+      first = false;
+      void pass.then((x) => live && setHealth(x));
+    };
     load();
     const t = setInterval(load, 60_000);
     return () => {

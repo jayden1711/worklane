@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, type ServiceLog, type State } from '../api';
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
-import { Header } from './Overview';
+import { Header } from '../components/Header';
 
 const PRIORITY: Record<number, { label: string; tone: 'danger' | 'warn' | 'neutral' }> = {
   0: { label: 'emerg', tone: 'danger' },
@@ -12,8 +12,7 @@ const PRIORITY: Record<number, { label: string; tone: 'danger' | 'warn' | 'neutr
 };
 
 /** For someone the state says may not read the service log (a viewer), the refusal the server would give; null otherwise. */
-export const logsRefusal = (state: Pick<State, 'canReadLogs' | 'user' | 'role'>) =>
-  state.canReadLogs === false ? `the service log is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
+export { logsRefusal } from '../refusals';
 
 /** The coordinator's service log, read-only: newest at the bottom, refreshed every 10 s while open. Not asked for when refused. */
 export function LogsPage({ refused = null }: { refused?: string | null }) {

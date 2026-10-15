@@ -12,8 +12,9 @@ import { readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
 import { DISK_PCT, STALL_HOURS } from './probes.js';
 import { FLOOR_GB, FLOOR_PCT } from '../disk-guard.js';
+import { etcPath } from '../os/system-paths.js';
 
-export const WATCHDOG_CONFIG = `/etc/${BRAND.cli}/watchdog.json`;
+export const WATCHDOG_CONFIG = etcPath('watchdog.json');
 
 export interface WatchdogConfig {
   stallHours: number;

@@ -1217,6 +1217,77 @@ jobs:
           echo "OK: add-project, called by the coordinator from inside its sandbox, ran in a unit of its own: every step skipped as done"
       - name: "the updater through the machine helper, as the coordinator: installed off, the release channel only, a signer staged and the signers file untouched; adding a signer and any other arguments refused by sudo"
         run: sudo "$(command -v node)" scripts/ci/updater-setup-root.mjs wl-ci
+      - name: "updates.sh --add-check, as root: an existing updates.json with its own values gets only the new names (twice for one: added once), every other byte, its owner and mode kept; nothing installed; bad names, other options and a missing file refused"
+        run: |
+          cfg=/etc/worklane/updates.json
+          sudo cp -p "$cfg" "$RUNNER_TEMP/updates.json.saved"
+          # An owner's own values, laid out as updates.sh writes it, with a key setup never writes.
+          printf '%s\n' '{' '  "enabled": true,' '  "channel": "main",' '  "allowed_signers": "/etc/worklane/allowed_signers",' '  "repo_url": "https://example.invalid/fork.git",' '  "branch": "stable",' '  "required_checks": [' '    "scan",' '    "test (ubuntu-latest, 22)"' '  ],' '  "note": {"kept": [1, 2]}' '}' > "$RUNNER_TEMP/custom.json"
+          printf '%s\n' '{' '  "enabled": true,' '  "channel": "main",' '  "allowed_signers": "/etc/worklane/allowed_signers",' '  "repo_url": "https://example.invalid/fork.git",' '  "branch": "stable",' '  "required_checks": [' '    "scan",' '    "test (ubuntu-latest, 22)",' '    "wizard end to end (real systemd)",' '    "dco"' '  ],' '  "note": {"kept": [1, 2]}' '}' > "$RUNNER_TEMP/want.json"
+          sudo install -o root -g root -m 0644 "$RUNNER_TEMP/custom.json" "$cfg"
+          installed() { sudo sha256sum /usr/local/libexec/worklane-update /etc/systemd/system/worklane-update.service /etc/systemd/system/worklane-update.timer; systemctl show -p ActiveEnterTimestampMonotonic worklane-update.timer; }
+          before="$(installed)"
+          sudo bash scripts/setup/updates.sh --add-check "wizard end to end (real systemd)" --add-check dco > "$RUNNER_TEMP/add1.out" 2>&1 || { cat "$RUNNER_TEMP/add1.out"; exit 1; }
+          cat "$RUNNER_TEMP/add1.out"
+          sudo cmp "$cfg" "$RUNNER_TEMP/want.json"
+          [ "$(sudo stat -c '%U %G %a' "$cfg")" = "root root 644" ]
+          grep -qxF 'added: "wizard end to end (real systemd)"' "$RUNNER_TEMP/add1.out"
+          grep -qxF 'added: "dco"' "$RUNNER_TEMP/add1.out"
+          grep -qxF "$cfg required_checks before:" "$RUNNER_TEMP/add1.out"
+          grep -qxF "$cfg required_checks after:" "$RUNNER_TEMP/add1.out"
+          # dco runs on pull requests only, so main's commits never pass it: warned. A default check isn't.
+          grep -q '^WARNING: "dco" isn'"'"'t one of the checks a batched main commit gets' "$RUNNER_TEMP/add1.out"
+          if grep -q 'WARNING: "wizard end to end' "$RUNNER_TEMP/add1.out"; then echo "a default check was warned about" >&2; exit 1; fi
+          # Again, the same name twice and one already there: nothing changes, the file isn't rewritten.
+          ino="$(sudo stat -c %i "$cfg")"
+          sudo bash scripts/setup/updates.sh --add-check "wizard end to end (real systemd)" --add-check "wizard end to end (real systemd)" --add-check scan > "$RUNNER_TEMP/add2.out" 2>&1 || { cat "$RUNNER_TEMP/add2.out"; exit 1; }
+          cat "$RUNNER_TEMP/add2.out"
+          sudo cmp "$cfg" "$RUNNER_TEMP/want.json"
+          [ "$(sudo stat -c '%i %U %G %a' "$cfg")" = "$ino root root 644" ]
+          [ "$(grep -c '^already listed, skipped: ' "$RUNNER_TEMP/add2.out")" = 3 ]
+          grep -qxF 'nothing to add; the file is unchanged' "$RUNNER_TEMP/add2.out"
+          # The file's own mode is kept (here 0600), and no dotted temp file is left.
+          sudo chmod 0600 "$cfg"
+          sudo bash scripts/setup/updates.sh --add-check desktop > /dev/null
+          [ "$(sudo stat -c '%U %G %a' "$cfg")" = "root root 600" ]
+          sudo jq -e '.required_checks[-1] == "desktop" and (.required_checks | length) == 5' "$cfg"
+          if sudo ls -A /etc/worklane | grep '^\.updates'; then echo "a temp file was left" >&2; exit 1; fi
+          sudo grep -q '"what":"updates.required_checks".*"to":"added \\"wizard end to end (real systemd)\\", \\"dco\\""' /var/lib/worklane/machine-changes.jsonl
+          # Refused, with nothing changed: a bad name, another option beside it, an unknown flag, no name.
+          now="$(sudo sha256sum "$cfg")"
+          refused() {
+            local rc=0
+            sudo bash scripts/setup/updates.sh "$@" > "$RUNNER_TEMP/bad.out" 2>&1 || rc=$?
+            cat "$RUNNER_TEMP/bad.out"
+            [ "$rc" = 2 ] || { echo "exit $rc, not 2, for: $*" >&2; exit 1; }
+          }
+          refused --add-check "test (macos-latest"
+          grep -q 'has unbalanced parentheses' "$RUNNER_TEMP/bad.out"
+          refused --add-check "22)"
+          refused --add-check ""
+          grep -q 'the name is empty' "$RUNNER_TEMP/bad.out"
+          refused --add-check " scan"
+          refused --add-check "$(printf 'a\nb')"
+          grep -q 'has a newline or another control character' "$RUNNER_TEMP/bad.out"
+          refused --add-check scan --channel main
+          grep -q 'takes no other option' "$RUNNER_TEMP/bad.out"
+          refused --add-check scan --check scan
+          refused --add-check scan --bogus
+          grep -q 'unknown argument --bogus' "$RUNNER_TEMP/bad.out"
+          refused --add-check
+          refused --add-check --release-hold
+          grep -q -- '--add-check needs a check name' "$RUNNER_TEMP/bad.out"
+          [ "$(sudo sha256sum "$cfg")" = "$now" ]
+          # The edit alone, every time: the updater, its units and its timer as they were.
+          [ "$(installed)" = "$before" ]
+          # No updates.json: refused with the fix, and none made.
+          sudo mv "$cfg" "$RUNNER_TEMP/updates.json.aside"
+          if sudo bash scripts/setup/updates.sh --add-check scan > "$RUNNER_TEMP/none.out" 2>&1; then echo "added to a missing file" >&2; exit 1; fi
+          grep -qF "updates.json doesn't exist: install the updater first (sudo bash scripts/setup/updates.sh, without --add-check)" "$RUNNER_TEMP/none.out"
+          if sudo test -e "$cfg"; then echo "--add-check made an updates.json" >&2; exit 1; fi
+          sudo cp -p "$RUNNER_TEMP/updates.json.saved" "$cfg"
+          [ "$(sudo stat -c '%U %G %a' "$cfg")" = "root root 644" ]
+          echo "OK: --add-check added only the new names, byte for byte, kept owner and mode, installed nothing, refused the rest"
       # Wizard screen 11's terminal half and its server path, on the instance add-project made (ci): credentials.sh
       # intake-discord installs the bot token for the coordinator only and writes credentials.yaml itself; the engine's
       # own listing code, run as the coordinator, reads that token and asks a fake Discord (scripts/ci/fake-discord.mjs,
@@ -2258,6 +2329,10 @@ jobs:
           journalctl --user --no-pager -n 60 || true
           tail -n 60 "$F"/*.err "$FK/server.log" 2>/dev/null || true
           cat "$HOME"/.local/state/worklane/projects/*/dashboard.log 2>/dev/null | tail -n 60 || true
+          # The local coordinator unit's own output: its stdout and stderr go to coordinator.log (StandardOutput=append:),
+          # not the journal, which has only systemd's lines (e.g. "exited, status=2").
+          systemctl --user status --no-pager 'dev.worklane.*' 2>/dev/null || true
+          tail -n 80 "$HOME"/.local/state/worklane/projects/*/coordinator.log 2>/dev/null || true
       - name: the browser's screenshots
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -6,7 +6,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { groupOnlyDir, writeGroupOnly } from '../os/index.js';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DatabaseSync } from 'node:sqlite';
+import { openReadOnly } from './read-only.js';
 import type { EventLog } from './log.js';
 
 /** Where backups go. `put` stores bytes; `get` reads them back independently. */
@@ -33,7 +33,7 @@ function lastIdOf(bytes: Buffer): number {
   const path = join(dir, 'check.db');
   try {
     writeFileSync(path, bytes);
-    const db = new DatabaseSync(path, { readOnly: true });
+    const db = openReadOnly(path);
     try {
       const r = db.prepare('SELECT MAX(id) AS id FROM events').get() as { id: number | null };
       return r.id ?? 0;

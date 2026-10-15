@@ -72,3 +72,23 @@ export function classifyGitHubError(status: number, headers: Headers = {}, body:
   }
   return { kind: 'unknown', retryable: false, message };
 }
+
+/** Error codes (Node's, and undici's) that mean GitHub was never reached, or never answered: no HTTP status at all. */
+const NETWORK_CODES = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_CLOSED']);
+
+/**
+ * Whether a thrown error is a network-level failure (GitHub not reached, or no answer in time) rather than an answer
+ * from GitHub. Read from the error's structure only (its name, code and cause), never its message text, so an HTTP
+ * error (a 401, a 403, a revoked installation: GitHub answered) or a bad key on disk is never taken for one.
+ */
+export function isNetworkFailure(e: unknown): boolean {
+  for (let x: unknown = e, depth = 0; x && typeof x === 'object' && depth < 4; x = (x as { cause?: unknown }).cause, depth++) {
+    const { name, code, message } = x as { name?: unknown; code?: unknown; message?: unknown };
+    // fetch()'s own failure (undici): a TypeError "fetch failed", the reason in its cause.
+    if (x instanceof TypeError && message === 'fetch failed') return true;
+    // AbortSignal.timeout(): no answer within the request's time limit.
+    if (name === 'TimeoutError') return true;
+    if (typeof code === 'string' && NETWORK_CODES.has(code)) return true;
+  }
+  return false;
+}

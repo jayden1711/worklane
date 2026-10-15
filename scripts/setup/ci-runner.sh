@@ -12,8 +12,9 @@
 #
 # What install does:
 #   - A runner user, wl-ci-<name>: its own group only, no sudo, no login shell, and no access to the engine
-#     (/opt/worklane), the checkouts (/srv/worklane), /var/lib/worklane, /etc/worklane (each denied to it by an
-#     ACL entry), any other wl-* home (instance homes hold App keys and credentials) or /root. Checked as that user,
+#     (/opt/worklane), the checkouts (/srv/worklane), /var/lib/worklane, /etc/worklane, the test runs'
+#     /var/lib/worklane-test (each denied to it by an ACL entry), any other wl-* home (instance homes hold App keys
+#     and credentials) or /root. Checked as that user,
 #     path by path, before anything is registered and again after the runners start; any failure stops there.
 #   - Trusted jobs only. The job-started hook (ci-runner/job-hook.sh) fails every job before its first step unless
 #     it is this repo's, from a push, a dispatch or a schedule on <branch>, with the workflow file read from
@@ -138,7 +139,11 @@ fw_unit_name="worklane-ci-$name-firewall.service"
 fw_table="worklane_ci_${name//-/_}"
 fw_file="/etc/worklane-ci/$name.nft"
 hosted_home=/home/runner
-deny_acl=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane)
+# Denied to the runner user by an ACL entry each (u:<user>:---), so it can't even pass through them. Every worklane path
+# its units make inaccessible (InaccessiblePaths) is here too: /var/lib/worklane-test is 0711 (each test user passes
+# through to its own run directory), so without an entry the runner user could reach whatever a test run leaves
+# readable there. A named-user entry changes nothing for anyone else: the test users keep their access.
+deny_acl=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /var/lib/worklane-test)
 # What the runner user may not reach: v4 and v6 loopback, private, shared (CGNAT, Tailscale's), link-local, multicast.
 deny_v4="0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4"
 deny_v6="::/128, ::1/128, ::ffff:0:0/96, fc00::/7, fe80::/10, ff00::/8"
@@ -400,7 +405,7 @@ put_script() {
 # Every path the runner user must not reach: worklane's own, every other wl-* user's home, root's, sudoers.
 protected_paths() {
   local u h
-  printf '%s\n' "${deny_acl[@]}" /var/lib/worklane-test /etc/sudoers.d /root /run/docker.sock /var/run/docker.sock
+  printf '%s\n' "${deny_acl[@]}" /etc/sudoers.d /root /run/docker.sock /var/run/docker.sock
   while IFS=: read -r u _ _ _ _ h _; do
     [[ "$u" == wl-* && "$u" != "$user" && -n "$h" && "$h" != / ]] && printf '%s\n' "$h"
   done < <(getent passwd)

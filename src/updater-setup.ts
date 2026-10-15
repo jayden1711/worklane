@@ -15,16 +15,19 @@ import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
 import { MACHINE_HELPER, signerFingerprint, signerKeyOk, signerPrincipalOk, type UpdateChannelName } from './machine.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG, updateChannel } from './updates.js';
+import { asRoot, etcPath, varLibPath } from './os/system-paths.js';
 
 /** The signers file the updater reads (what a new updates.json names): written only by updates.sh, at a root shell. */
-export const ALLOWED_SIGNERS = `/etc/${BRAND.cli}/allowed_signers`;
+export const ALLOWED_SIGNERS = etcPath('allowed_signers');
 /** The helper's pending list (scripts/machine/, the helper's source; a test keeps the path, the limit and the 24 hours equal). */
-export const PENDING_SIGNERS = `/var/lib/${BRAND.cli}/pending-signers.json`;
+export const PENDING_SIGNERS = varLibPath('pending-signers.json');
 export const PENDING_MAX = 4;
 export const PENDING_TTL_MS = 24 * 60 * 60_000;
 const UPDATES_SCRIPT = 'scripts/setup/updates.sh';
 /** The installed engine's copy: what an admin runs on the machine, wherever their shell is. */
-const INSTALLED_SCRIPT = `${ENGINE_CURRENT}/${UPDATES_SCRIPT}`;
+const INSTALLED_SCRIPT = `${asRoot.opt('current')}/${UPDATES_SCRIPT}`;
+/** The files root's helper changes, as the plans name them (src/os/system-paths.ts asRoot). */
+const ROOT_SEES = { config: asRoot.etc('updates.json'), signers: asRoot.etc('allowed_signers'), pending: asRoot.varLib('pending-signers.json'), updater: asRoot.libexec('update') };
 
 export interface ListedSigner {
   principal: string;
@@ -113,7 +116,7 @@ export function signerInput(principal: unknown, key: unknown): SignerToStage | {
   const p = typeof principal === 'string' ? principal.trim() : '';
   if (!signerPrincipalOk(p)) return { error: 'the principal is one name of an email\'s shape (release@example.com): no spaces, wildcards, lists or options' };
   const w = (typeof key === 'string' ? key : '').trim().split(/\s+/).filter(Boolean);
-  if (w[0] && KEY_TYPE.test(w[0]) && w[0] !== 'ssh-ed25519') return { error: `the page stages ssh-ed25519 keys only, not ${w[0]}: add another kind of key to ${ALLOWED_SIGNERS} at a root shell` };
+  if (w[0] && KEY_TYPE.test(w[0]) && w[0] !== 'ssh-ed25519') return { error: `the page stages ssh-ed25519 keys only, not ${w[0]}: add another kind of key to ${asRoot.etc('allowed_signers')} at a root shell` };
   const k = w[0] === 'ssh-ed25519' ? w[1] : w.length === 1 ? w[0] : undefined;
   if (!signerKeyOk(k)) return { error: 'the public key is one ssh-ed25519 key: the line of a .pub file (ssh-ed25519 AAAAC3... comment), or its AAAAC3... part alone' };
   const fingerprint = signerFingerprint(k);
@@ -201,9 +204,9 @@ export function updaterPlan(body: { step?: unknown; principal?: unknown; key?: u
       'install',
       ['install-updater'],
       [
-        `installs /usr/local/libexec/${BRAND.cli}-update (root-owned) and ${BRAND.cli}-update.timer (every 10 minutes), from the installed engine's ${UPDATES_SCRIPT}`,
-        now.installed ? `keeps ${UPDATES_CONFIG} as it is: its channel, its required checks, and whether updates are on` : `writes ${UPDATES_CONFIG} with updates off and the channel "release": nothing is installed until updates are turned on`,
-        `doesn't touch ${ALLOWED_SIGNERS}`,
+        `installs ${ROOT_SEES.updater} (root-owned) and ${BRAND.cli}-update.timer (every 10 minutes), from the installed engine's ${UPDATES_SCRIPT}`,
+        now.installed ? `keeps ${ROOT_SEES.config} as it is: its channel, its required checks, and whether updates are on` : `writes ${ROOT_SEES.config} with updates off and the channel "release": nothing is installed until updates are turned on`,
+        `doesn't touch ${ROOT_SEES.signers}`,
       ],
       now.script.install,
     );
@@ -214,7 +217,7 @@ export function updaterPlan(body: { step?: unknown; principal?: unknown; key?: u
     return plan(
       'release',
       ['set-update-channel', 'release'],
-      [`sets the channel in ${UPDATES_CONFIG} from "${now.channel}" to "release": the updater then follows ${CHANNEL_WHAT.release}`, `changes nothing else in ${UPDATES_CONFIG}: the required checks, the signers file it names, and whether updates are on stay as they are`, `doesn't touch ${ALLOWED_SIGNERS}`],
+      [`sets the channel in ${ROOT_SEES.config} from "${now.channel}" to "release": the updater then follows ${CHANNEL_WHAT.release}`, `changes nothing else in ${ROOT_SEES.config}: the required checks, the signers file it names, and whether updates are on stay as they are`, `doesn't touch ${ROOT_SEES.signers}`],
       now.script.release,
     );
   }
@@ -229,8 +232,8 @@ export function updaterPlan(body: { step?: unknown; principal?: unknown; key?: u
         'stage',
         ['stage-update-signer', s.principal, 'ssh-ed25519', s.key],
         [
-          `stages this principal and key in ${PENDING_SIGNERS}, for 24 hours`,
-          `changes nothing in ${ALLOWED_SIGNERS}: a staged key is trusted for nothing, and no release signed with it installs`,
+          `stages this principal and key in ${ROOT_SEES.pending}, for 24 hours`,
+          `changes nothing in ${ROOT_SEES.signers}: a staged key is trusted for nothing, and no release signed with it installs`,
           `it becomes a signer only when an admin runs, as root on this machine: ${s.confirm}`,
         ],
         now.script.signer.replace('<principal>', s.principal).replace('<public key>', s.key),
@@ -241,7 +244,7 @@ export function updaterPlan(body: { step?: unknown; principal?: unknown; key?: u
   if (body.step === 'discard') {
     const e = now.pending.find((x) => x.principal === body.principal && x.key === body.key);
     if (!e) return { error: "that signer isn't staged (or its 24 hours have passed)", status: 409 };
-    return plan('discard', ['discard-update-signer', e.principal, 'ssh-ed25519', e.key], [`takes ${e.principal} (${e.fingerprint}) out of ${PENDING_SIGNERS}: its confirming command then finds nothing`, `changes nothing in ${ALLOWED_SIGNERS}`], '');
+    return plan('discard', ['discard-update-signer', e.principal, 'ssh-ed25519', e.key], [`takes ${e.principal} (${e.fingerprint}) out of ${ROOT_SEES.pending}: its confirming command then finds nothing`, `changes nothing in ${ROOT_SEES.signers}`], '');
   }
   return { error: 'step is install, release, stage or discard' };
 }

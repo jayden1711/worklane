@@ -461,6 +461,11 @@ export class Coordinator extends HarnessEvals {
       this.d.incidents?.raiseIncident(CONFIG_INCIDENT, this.d.instance, `${BRAND.configDir}/ on ${this.branch} at ${r.sha.slice(0, 8)} is invalid; running on the last good config: ${errors.join('; ').slice(0, 800)}`, `Fix ${BRAND.configDir}/ on ${this.branch}; it is applied on the next tick.`);
       return;
     }
+    if (r.kind === 'confirmed') {
+      // Started on a valid config: an incident left open by an earlier process (or engine) is stale.
+      this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);
+      return;
+    }
     if (r.kind === 'recovered') {
       this.emit('config.recovered', { sha: r.sha });
       this.d.incidents?.resolveIncident(CONFIG_INCIDENT, this.d.instance);

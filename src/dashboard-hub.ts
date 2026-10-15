@@ -21,11 +21,12 @@
 //   - the break-glass port (4398): the token only, for the owner on this
 //     machine (or through an ssh tunnel to it). Tailscale never forwards it,
 //     and a request carrying a proxy's headers is refused there anyway.
-import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { Agent, createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven } from './dashboard.js';
+import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
+import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
 import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, csrfFromProtocols, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { attachTerminal } from './console/terminal-server.js';
 import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
@@ -124,6 +125,12 @@ export function signInFromFiles(o: { clientId: string; publicUrl: string; dir: s
   return { clientId: o.clientId, clientSecret: read('client-secret'), sessionSecret: read('session-secret'), publicUrl: u.origin };
 }
 
+/**
+ * The hub's connections to its instances' servers, kept open between calls: a page switch makes several calls at once,
+ * and each would otherwise open a new connection. Said here rather than left to Node's default.
+ */
+const upstream = new Agent({ keepAlive: true });
+
 const readToken = (i: HubInstance): string | null => {
   try {
     return readFileSync(i.tokenFile, 'utf8').trim() || null;
@@ -147,9 +154,19 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
   if (req.headers['last-event-id']) headers['last-event-id'] = String(req.headers['last-event-id']);
   if (login) headers[LOGIN_HEADER] = login;
   if (login && deviceOk) headers[DEVICE_HEADER] = '1';
-  const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers }, (r) => {
+  // No accept-encoding goes upstream (the headers are built above), so the instance answers uncompressed over loopback;
+  // a view COMPRESSIBLE_API lists is compressed here, on its way to the browser. Never a stream: it is text/event-stream.
+  const enc = mayCompressApi(path) ? requestEncoding(req) : null;
+  const up = request({ host: '127.0.0.1', port: i.port, path: `${path}${qs ? `?${qs}` : ''}`, method: req.method, headers, agent: upstream }, (r) => {
     const h: Record<string, string> = { 'cache-control': 'no-store' };
-    if (r.headers['content-type']) h['content-type'] = r.headers['content-type'];
+    const type = r.headers['content-type'];
+    if (type) h['content-type'] = type;
+    const json = !!type && /^application\/json/.test(type) && !r.headers['content-encoding'];
+    if (mayCompressApi(path)) h.vary = 'accept-encoding';
+    if (enc && json) {
+      res.writeHead(r.statusCode ?? 502, { ...h, 'content-encoding': enc });
+      return void r.pipe(compressStream(enc)).pipe(res);
+    }
     res.writeHead(r.statusCode ?? 502, h);
     r.pipe(res);
   });
@@ -166,7 +183,7 @@ function probe(i: HubInstance, login: string | null): Promise<{ up: boolean; err
   const token = readToken(i);
   if (!token) return Promise.resolve({ up: false, error: "can't read its dashboard token", role: null });
   return new Promise((done) => {
-    const r = request({ host: '127.0.0.1', port: i.port, path: '/api/role', headers: { authorization: `Bearer ${token}`, ...(login ? { [LOGIN_HEADER]: login, [FRESH_HEADER]: '1' } : {}) }, timeout: 3000 }, (res) => {
+    const r = request({ host: '127.0.0.1', port: i.port, path: '/api/role', headers: { authorization: `Bearer ${token}`, ...(login ? { [LOGIN_HEADER]: login, [FRESH_HEADER]: '1' } : {}) }, timeout: 3000, agent: upstream }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c: string) => (body += c));
@@ -211,6 +228,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
+  warmStatic(webDir);
   const now = opts.now ?? Date.now;
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
   const signIn = opts.signIn ?? null;
@@ -309,10 +327,13 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (!session || !sid) return json(res, 401, { error: 'sign in first', signIn: '/auth/login' });
         if (url.pathname === '/api/me' && req.method === 'GET') return json(res, 200, { login: session.login, csrf: sessions!.csrf(sid), breakGlass: false });
         if (url.pathname === '/api/hub' && req.method === 'GET') {
-          // Only the instances where this person has a role: each instance reads it from its own repo.
+          // Only the instances where this person has a role: each instance reads it from its own repo. One that isn't
+          // answering can't say, so it is listed (as down, nothing more) only while the hub's own copy of the person's
+          // role there is still fresh: the same copy, and the same 5 minutes, that the hub forwards a request on.
           const all = await Promise.all(opts.instances.map(async (i) => ({ name: i.name, ...(await probe(i, session.login)) })));
           for (const i of all) if (i.up) learn(i.name, session.login, i.role);
-          return json(res, 200, { instances: all.filter((i) => i.role) });
+          const listed = all.map((i) => (i.up ? i : { ...i, role: knownRole(i.name, session.login)?.role ?? null }));
+          return json(res, 200, { instances: listed.filter((i) => i.role) });
         }
         const m = url.pathname.match(/^\/api\/i\/([^/]+)\/(.+)$/);
         if (m) {
