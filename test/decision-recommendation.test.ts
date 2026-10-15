@@ -218,6 +218,26 @@ async function click(cdp: Cdp, element: string) {
     })()`,
   );
   if (at.hit) throw new Error(`the click at (${Math.round(at.x)}, ${Math.round(at.y)}) would land on ${at.hit}, not on ${element}`);
-  for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
-  await until('the click to land', () => js<boolean>(cdp, `${element}?.getAttribute('aria-expanded') === 'true'`), 5_000);
+  // DIAGNOSTIC (not for merge): what the press reached, and what changed on the page around it.
+  await js(cdp, `(() => {
+    const t0 = performance.now(); const e = ${element}; const main = document.querySelector('main');
+    const name = (n) => n && n.tagName ? '<' + n.tagName.toLowerCase() + [...n.attributes].map((a) => ' ' + a.name + '="' + a.value.slice(0, 40) + '"').join('') + '>' : String(n);
+    window.__d = { t0, log: [], e, rect0: JSON.stringify(e.getBoundingClientRect()), scroll0: main && main.scrollTop };
+    for (const ty of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) document.addEventListener(ty, (ev) => window.__d.log.push([ty, Math.round(performance.now() - t0), ev.clientX, ev.clientY, name(ev.target), ev.defaultPrevented]), true);
+    new MutationObserver((ms) => { for (const m of ms) { if (m.type === 'attributes') window.__d.log.push(['attr', Math.round(performance.now() - t0), m.attributeName, name(m.target)]); for (const n of m.removedNodes) if (n.nodeType === 1) window.__d.log.push(['removed', Math.round(performance.now() - t0), name(n)]); for (const n of m.addedNodes) if (n.nodeType === 1) window.__d.log.push(['added', Math.round(performance.now() - t0), name(n)]); } }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-expanded', 'style', 'class'] });
+    main && main.addEventListener('scroll', () => window.__d.log.push(['scroll', Math.round(performance.now() - t0), main.scrollTop]));
+    window.__d.log.push(['visibility', document.visibilityState, document.hasFocus()]);
+    return true;
+  })()`);
+  const sent: string[] = [];
+  for (const type of ['mousePressed', 'mouseReleased']) {
+    await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
+    sent.push(`${type}@${Date.now()}`);
+  }
+  try {
+    await until('the click to land', () => js<boolean>(cdp, `${element}?.getAttribute('aria-expanded') === 'true'`), 5_000);
+  } catch (err) {
+    const d = await js<unknown>(cdp, `(() => { const e = ${element}; const main = document.querySelector('main'); const h = document.elementFromPoint(${at.x}, ${at.y}); return { at: [${at.x}, ${at.y}], same: e === window.__d.e, connected: window.__d.e.isConnected, expanded: e && e.getAttribute('aria-expanded'), oldExpanded: window.__d.e.getAttribute('aria-expanded'), rect0: window.__d.rect0, rect1: e && JSON.stringify(e.getBoundingClientRect()), scroll0: window.__d.scroll0, scroll1: main && main.scrollTop, hitNow: h && h.outerHTML.slice(0, 200), log: window.__d.log.slice(0, 80), url: location.href, focus: document.hasFocus(), vis: document.visibilityState }; })()`).catch((x) => String(x));
+    throw new Error(`${(err as Error).message}; sent ${sent.join(' ')}; DIAG ${JSON.stringify(d)}`);
+  }
 }
