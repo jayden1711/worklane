@@ -107,3 +107,24 @@ test('release.yml: never a real npm publish, never a dist-tag; every dry run is 
   const cmds = dry.split('\n').filter((l) => !l.startsWith('#') && /\bnpm (stage|publish|dist-tag)\b/.test(l));
   assert.deepEqual(cmds.map((l) => l.trim()), ['out="$(npm stage publish "$tgz" --dry-run --access public 2>&1)" || code=$?'], 'the dry run only ever dry-runs the stage');
 });
+
+test('regression (#458): on a tag, the tarball is checked against the signed commit byte for byte, and nothing is staged unless that passed', () => {
+  const TREE = 'node scripts/verify-release-tree.mjs "$(ls "$RUNNER_TEMP"/pack/*.tgz)" --commit "$GITHUB_SHA"';
+  const build = wf.jobs.build!.steps;
+  const early = build.findIndex((s) => s.run?.trim() === TREE);
+  assert.ok(early > build.findIndex((s) => s.name === 'pack'), 'the build job checks the tarball it packed');
+  assert.equal(build[early]!.if, "startsWith(github.ref, 'refs/tags/v')");
+  const pub = wf.jobs.publish!.steps;
+  const t = pub.findIndex((s) => s.id === 'tree');
+  const verify = pub.findIndex((s) => s.id === 'verify');
+  const stage = pub.findIndex((s) => s.run?.includes(STAGE));
+  assert.ok(verify < t && t < stage, 'after the tag check, before the stage');
+  assert.equal(pub[t]!.if, "startsWith(github.ref, 'refs/tags/v')");
+  assert.equal(pub[t]!.run!.trim(), `${TREE}\necho "commit=\${GITHUB_SHA}" >> "$GITHUB_OUTPUT"`);
+  assert.equal(pub[stage]!.env?.SAME_TREE, '${{ steps.tree.outputs.commit }}');
+  const real = pub[stage]!.run!.split(/\n\s*fi\n/)[1]!;
+  const gate = real.search(/\[ "\$SAME_TREE" = "\$GITHUB_SHA" \] \|\| \{[^\n]*nothing staged" >&2; exit 1; \}/);
+  assert.ok(gate >= 0 && gate < real.indexOf('npm stage publish'), 'the real path requires the tree check, before the stage');
+  const paths = (wf.on.pull_request as { paths: string[] }).paths;
+  for (const p of ['scripts/verify-release-tree.mjs', 'scripts/lib/release-tree.mjs', 'scripts/web-licenses.mjs', 'test/release-tree.test.ts']) assert.ok(paths.includes(p), p);
+});
