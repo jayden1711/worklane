@@ -77,10 +77,10 @@ test('size caps: a file over its cap is refused mid-stream (the rest never read)
   assert.equal(pulled, 0, 'a declared length over the cap is refused before a byte is read');
   const a = await put(s, 'a.txt', 'a'.repeat(700 * 1024));
   const b = await put(s, 'b.txt', 'b'.repeat(700 * 1024));
-  assert.equal(attachmentsFor(s, [a.id], caps({ max_message_mb: 1 })).length, 1);
-  assert.throws(() => attachmentsFor(s, [a.id, b.id], caps({ max_message_mb: 1 })), (e: unknown) => e instanceof AttachmentError && e.status === 413 && /per question/.test(e.message));
-  assert.throws(() => attachmentsFor(s, ['att-' + '0'.repeat(32)], caps()), /no attachment/);
-  assert.throws(() => attachmentsFor(s, ['../../x'], caps()), /not an attachment id/);
+  assert.equal(attachmentsFor(s, [a.id], caps({ max_message_mb: 1 }), 'example-collaborator').length, 1);
+  assert.throws(() => attachmentsFor(s, [a.id, b.id], caps({ max_message_mb: 1 }), 'example-collaborator'), (e: unknown) => e instanceof AttachmentError && e.status === 413 && /per question/.test(e.message));
+  assert.throws(() => attachmentsFor(s, ['att-' + '0'.repeat(32)], caps(), 'example-collaborator'), /no attachment/);
+  assert.throws(() => attachmentsFor(s, ['../../x'], caps(), 'example-collaborator'), /not an attachment id/);
 });
 
 test('stored 0600 in a 0700 directory under the state dir, under a random id: never the file\'s name', { skip: posix }, async () => {
@@ -118,11 +118,11 @@ test('the retention sweep deletes attachments past their days, and half-written 
   const part = join(s, ATTACHMENTS_DIR, `.att-${'a'.repeat(32)}.part`);
   writeFileSync(part, 'x');
   utimesSync(part, new Date('2026-10-14T09:00:00Z'), new Date('2026-10-14T09:00:00Z'));
-  assert.deepEqual(sweepAttachments(s, 30, now), [old.id]);
+  assert.deepEqual(sweepAttachments(s, 30, new Set(), now), [old.id]);
   assert.equal(readAttachment(s, old.id), null);
   assert.ok(readAttachment(s, fresh.id));
   assert.ok(!existsSync(part), 'an upload left half-written for over an hour is removed');
-  assert.deepEqual(sweepAttachments(s, 3, now), [fresh.id], 'fewer days, sooner');
+  assert.deepEqual(sweepAttachments(s, 3, new Set(), now), [fresh.id], 'fewer days, sooner');
   assert.deepEqual(readdirSync(join(s, ATTACHMENTS_DIR)), []);
 });
 
@@ -217,7 +217,9 @@ test('only the owners and the writers: a viewer is refused (403) on upload, down
     assert.equal((await s.upload('someone-else', 'notes.txt', 'hello')).status, 403, 'a viewer may not upload');
     for (const p of [`/api/chat/attachments/${attachment.id}`, '/api/chat/attachments/limits']) assert.equal((await fetch(`${s.base}${p}`, { headers: s.h('someone-else') })).status, 403, `a viewer may not read ${p}`);
     assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { method: 'DELETE', headers: s.h('someone-else') })).status, 403);
-    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-owner') })).status, 200, 'an owner may');
+    // Only its uploader (or someone who can see a Project holding it: test/chat-conversations.test.ts) opens it.
+    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-collaborator') })).status, 200, 'its uploader may');
+    assert.equal((await fetch(`${s.base}/api/chat/attachments/${attachment.id}`, { headers: s.h('example-owner') })).status, 403, 'an owner who can see no Project holding it may not');
     const limits = (await (await fetch(`${s.base}/api/chat/attachments/limits`, { headers: s.h('example-collaborator') })).json()) as { maxFileMb: number; maxMessageMb: number; retentionDays: number };
     assert.deepEqual([limits.maxFileMb, limits.maxMessageMb, limits.retentionDays], [10, 25, 30]);
     // Removal: who attached it, or an owner.

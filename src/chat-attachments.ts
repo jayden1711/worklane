@@ -10,7 +10,8 @@
 // extension and checked against the bytes (an image's or a PDF's magic, text that is valid UTF-8 with no NULs);
 // macro-enabled Office files are refused outright. Text is scanned for secrets on upload (the engine's own patterns
 // and gitleaks when it is installed): a hit is refused with the kinds found, never the value, until the uploader
-// says to attach it anyway. Files are deleted after the retention days by sweepAttachments.
+// says to attach it anyway. Files are deleted after the retention days by sweepAttachments, except a file a chat
+// Project holds (src/chat-conversations.ts): that one stays until it is taken off the Project or the Project goes.
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -263,10 +264,11 @@ export function removeAttachment(stateDir: string, id: string): boolean {
 }
 
 /**
- * The attachments a question names: each must exist, at most MAX_ATTACHMENTS, together within the per-message cap.
- * Returns their records in the order given; throws an AttachmentError otherwise.
+ * The attachments a question (or a Project) names: each must exist and be `by`'s own upload, at most
+ * MAX_ATTACHMENTS, together within the per-message cap. Returns their records in the order given; throws an
+ * AttachmentError otherwise. Someone else's id reads exactly like an unknown one, so it tells nobody it exists.
  */
-export function attachmentsFor(stateDir: string, ids: unknown, caps: AttachmentCaps): AttachmentMeta[] {
+export function attachmentsFor(stateDir: string, ids: unknown, caps: AttachmentCaps, by: string): AttachmentMeta[] {
   if (ids === undefined || ids === null) return [];
   if (!Array.isArray(ids)) throw new AttachmentError('attachments must be a list of attachment ids', 400);
   const unique = [...new Set(ids.map(String))];
@@ -274,7 +276,7 @@ export function attachmentsFor(stateDir: string, ids: unknown, caps: AttachmentC
   const out: AttachmentMeta[] = [];
   for (const id of unique) {
     const m = readAttachment(stateDir, id);
-    if (!m) throw new AttachmentError(`no attachment ${ATTACHMENT_ID.test(id) ? id : '(not an attachment id)'}: it may have expired; attach it again`, 400);
+    if (!m || m.by.toLowerCase() !== by.toLowerCase()) throw new AttachmentError(`no attachment ${ATTACHMENT_ID.test(id) ? id : '(not an attachment id)'}: it may have expired; attach it again`, 400);
     out.push(m);
   }
   const total = out.reduce((n, m) => n + m.size, 0);
@@ -297,10 +299,11 @@ export function downloadHeaders(m: AttachmentMeta): Record<string, string> {
 }
 
 /**
- * Delete every attachment older than the retention days, and any upload left half-written for over an hour.
- * Returns the ids removed. Run by the coordinator (src/coordinator.ts) about once an hour.
+ * Delete every attachment older than the retention days, except the ones in `held` (the files chat Projects hold:
+ * src/chat-conversations.ts projectFileIds), and any upload left half-written for over an hour. Returns the ids
+ * removed. Run by the coordinator (src/coordinator.ts) about once an hour.
  */
-export function sweepAttachments(stateDir: string, retentionDays: number, now = new Date()): string[] {
+export function sweepAttachments(stateDir: string, retentionDays: number, held: ReadonlySet<string>, now = new Date()): string[] {
   const dir = dirOf(stateDir);
   if (!existsSync(dir)) return [];
   const cutoff = now.getTime() - retentionDays * 86_400_000;
@@ -311,7 +314,7 @@ export function sweepAttachments(stateDir: string, retentionDays: number, now = 
       if (statSync(p).mtimeMs < now.getTime() - 3_600_000) rmSync(p, { force: true });
       continue;
     }
-    if (!ATTACHMENT_ID.test(f)) continue;
+    if (!ATTACHMENT_ID.test(f) || held.has(f)) continue;
     let when = statSync(p).mtimeMs;
     try {
       when = Date.parse((JSON.parse(readFileSync(join(dir, `${f}.json`), 'utf8')) as AttachmentMeta).at) || when;

@@ -4,6 +4,7 @@ import { BRAND } from '../brand.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { refuseInterruptedChats } from '../chat.js';
+import { refuseInterruptedTurns } from '../chat-conversations.js';
 import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
@@ -20,6 +21,7 @@ export abstract class Recovery extends Intake {
   async recover(): Promise<number[]> {
     // Chat turns and intake reports cut off by a restart: each ended once, never run again.
     refuseInterruptedChats(this.d.stateDir);
+    refuseInterruptedTurns(this.d.stateDir);
     try {
       await this.recoverIntake();
     } catch (e) {

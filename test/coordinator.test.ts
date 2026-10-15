@@ -16,6 +16,8 @@ import { Coordinator, logTail } from '../src/coordinator.js';
 import type { InstanceSettings } from '../src/instance.js';
 import { liveRuns, sendMessage, stopRun } from '../src/console.js';
 import { askChat, chatAnswer } from '../src/chat.js';
+import { ATTACHMENT_DEFAULT_CAPS } from '../src/chat-attachments.js';
+import { askInConversation, conversationTurns, createConversation } from '../src/chat-conversations.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { boardView } from '../src/board.js';
@@ -2871,6 +2873,23 @@ test('chat: a question from the dashboard is answered by a chief_of_staff turn; 
   assert.match(req.prompt, /Context files for instance alice: /);
 });
 
+
+test('chat: a conversation turn is answered into its conversation with the earlier turns as context; events carry ids only', { skip }, async () => {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: req.prompt.includes('<<<TURN 1 BEGIN') ? 'second answer' : 'first answer', citations: [] }, costUsd: 0.1 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  const conv = createConversation({ stateDir: f.stateDir, by: 'example-owner', sharer: () => true });
+  askInConversation({ stateDir: f.stateDir, id: conv.id, by: 'example-owner', caps: ATTACHMENT_DEFAULT_CAPS, text: 'first one', now: new Date(Date.UTC(2026, 9, 14, 10)) });
+  await c.checkChat();
+  const second = askInConversation({ stateDir: f.stateDir, id: conv.id, by: 'example-owner', caps: ATTACHMENT_DEFAULT_CAPS, text: 'and then?', now: new Date(Date.UTC(2026, 9, 14, 11)) });
+  await c.checkChat();
+  const turns = conversationTurns(f.stateDir, conv.id);
+  assert.deepEqual(turns.map((t) => [t.text, t.state, t.answer?.answer]), [['first one', 'answered', 'first answer'], ['and then?', 'answered', 'second answer']]);
+  assert.match(runner.calls[1]!.prompt, /<<<TURN 1 BEGIN ([a-f0-9]{12})>>>\nAsked by @example-owner at [^\n]+\nQuestion: first one\nAnswer: first answer\n<<<TURN 1 END \1>>>/);
+  assert.equal(chatAnswer(f.stateDir, second.id), null, 'nothing in the single-shot answers');
+  assert.deepEqual(lastOf(f.log, 'chat.turn'), { id: second.id, by: 'example-owner', read_only: false, citations: 0, draft: 'none', actions: 0, cost_usd: 0.1, refused: null });
+  assert.doesNotMatch(JSON.stringify(f.log.read()), /first one|and then\?|first answer/, 'no message text in the event log');
+});
 test("chat: someone who isn't the owner gets a read-only answer; a spent budget or a disabled chat is refused", { skip }, async () => {
   const f = fixture();
   const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [], actions: [{ kind: 'pause' }] } } : {}));
