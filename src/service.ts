@@ -68,11 +68,11 @@ export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.pro
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
  */
-export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env, node: string = stableNodePath({ path: env.PATH ?? '' }).path): ServiceSpec {
+export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessEnv = process.env, node: string = stableNodePath().path): ServiceSpec {
   return {
     label: serviceLabel(cfg),
-    // WHY (#468): node by the path the shell finds (a symlink such as /opt/homebrew/bin/node), never its realpath in a
-    // versioned directory (Homebrew's Cellar, nvm...), which an upgrade deletes from under the service.
+    // WHY (#468): Homebrew's stable $(brew --prefix)/bin/node when this node is Homebrew's, never its realpath in the
+    // Cellar, which `brew upgrade` deletes from under the service; never a `node` found on PATH.
     program: [node, fileURLToPath(new URL('./cli.js', import.meta.url)), 'coordinator', 'run', '--root', root],
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
@@ -130,8 +130,7 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
     // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
     env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
     const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
-    // WHY (#468): the same stable node as the service's: a versioned path breaks every fetch and push after an upgrade.
-    git.push(['credential.helper', ''], ['credential.helper', `!"${stableNodePath({ path: base.PATH ?? '' }).path}" "${cli}" git-credential`]);
+    git.push(['credential.helper', ''], ['credential.helper', `!"${process.execPath}" "${cli}" git-credential`]);
   }
   env.GIT_CONFIG_COUNT = String(git.length);
   git.forEach(([k, v], n) => {

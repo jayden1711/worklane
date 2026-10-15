@@ -694,15 +694,13 @@ async function main(argv: string[]): Promise<number> {
         }
         const r = installService({
           label: instanceServiceLabel(i.name),
-          program: [stableNodePath().path, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
+          program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
           workingDir: i.home,
           logFile: join(i.stateDir, 'coordinator.log'),
           // Only what's needed to find tools and the instance; its credentials come from the instance itself.
           env: { PATH: toolPath(), HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
         });
         console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
-        const node = stableNodePath();
-        if (node.why) console.error(`warning: ${node.why}`);
         return r.started ? 0 : 1;
       }
       const cfg = loadConfig(root);

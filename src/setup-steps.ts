@@ -977,7 +977,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       // WHY (#468): a service that runs node by a path an upgrade deleted (or will) stops at its next restart.
       const svc = k.p.serviceProgram?.(label) ?? null;
       const bad = svc ? nodePathProblem(svc.node, k.p.exists ?? existsSync) : null;
-      if (svc && bad) return no(`${svc.file} ${bad}: run \`${BRAND.cli} up\` to rewrite it with the node on your PATH`);
+      if (svc && bad) return no(`${svc.file} ${bad}: run \`${BRAND.cli} up\` to rewrite it with a stable node (Homebrew's bin/node, or this node's own path)`);
       const up = k.p.serviceRunning(label);
       if (up === null) return no('no service manager here (agents need macOS, Linux or WSL2)');
       return up ? ok(`${label} is running`) : no(`${label} isn't running`);

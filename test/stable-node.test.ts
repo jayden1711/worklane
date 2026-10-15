@@ -1,78 +1,112 @@
 // WHY (#468): the local service ran node by its realpath (process.execPath), e.g. Homebrew's
 // /opt/homebrew/Cellar/node/26.7.0/bin/node, and the next `brew upgrade node` deleted it: the coordinator died at its
-// next restart. The service, the instance's service and the git credential helper now name the node the shell
-// finds (the symlink kept as it is), and doctor and the first-run page flag a service file whose node is gone or
-// sits inside a versioned directory. A fake PATH and a fake Cellar stand in for Homebrew.
+// next restart. The owner's rule: the local service and the checkout's pre-push hook name Homebrew's stable
+// `$(brew --prefix)/bin/node` when this node is Homebrew's, else this node's own absolute path; never a `node` found
+// on PATH; a server instance keeps its root-controlled absolute path (the service and the credential helper alike).
+// Doctor and the first-run page flag a service file whose node is gone or inside a versioned directory. A fake
+// Homebrew prefix stands in for /opt/homebrew.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { projectStateDir } from '../src/guardrails/context.js';
-import { install } from '../src/install.js';
+import { install, installCheckoutPrePush } from '../src/install.js';
 import type { Instance } from '../src/instance.js';
-import { inVersionedNodeDir, launchdPlist, nodePathProblem, programOf, stableNodePath, systemdUserUnit } from '../src/os/index.js';
+import { inVersionedNodeDir, launchdPlist, nodePathProblem, ownedPath, programOf, stableNodePath, systemdUserUnit } from '../src/os/index.js';
 import { instanceEnv, localServiceSpec } from '../src/service.js';
 import { checkSetup, type SetupProbe } from '../src/setup-steps.js';
 import { exampleProject } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX symlinks and paths';
+const re = (s: string) => new RegExp(s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
 
-/** Homebrew as it lays node out: the versioned binary in the Cellar, and bin/node a symlink to it. */
-function brew() {
+/** Homebrew as it lays node out under a prefix: bin/brew, the versioned binary in the Cellar, bin/node a symlink to it. */
+function brew(real?: string) {
   const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'brew-')));
-  const cellar = join(prefix, 'Cellar', 'node', '26.7.0', 'bin');
-  mkdirSync(cellar, { recursive: true });
-  const real = join(cellar, 'node');
-  writeFileSync(real, '#!/bin/sh\n');
-  chmodSync(real, 0o755);
   mkdirSync(join(prefix, 'bin'));
+  writeFileSync(join(prefix, 'bin', 'brew'), '#!/bin/sh\n');
+  let node = real;
+  if (!node) {
+    const cellar = join(prefix, 'Cellar', 'node', '26.7.0', 'bin');
+    mkdirSync(cellar, { recursive: true });
+    node = join(cellar, 'node');
+    writeFileSync(node, '#!/bin/sh\n');
+    chmodSync(node, 0o755);
+  }
   const link = join(prefix, 'bin', 'node');
-  symlinkSync(real, link);
-  return { prefix, real, link, path: `${join(prefix, 'bin')}:/usr/bin:/bin` };
+  symlinkSync(node, link);
+  return { prefix, real: node, link };
 }
 
-test('#468 the node to name: the symlink on PATH when it is this node, never its realpath in the Cellar; only a versioned one is said so, with what to do', { skip: posix }, () => {
+test("#468 the node to name: Homebrew's $(brew --prefix)/bin/node when this node is Homebrew's; else this node's own path; a versioned one is said so", { skip: posix }, () => {
   const b = brew();
   assert.ok(inVersionedNodeDir(b.real));
   assert.equal(inVersionedNodeDir(b.link), false);
-  assert.deepEqual(stableNodePath({ execPath: b.real, path: b.path }), { path: b.link, versioned: false, why: null });
-  // No node on PATH that is this one: its own path, and a versioned one is called out.
-  const only = stableNodePath({ execPath: b.real, path: '/usr/bin:/bin' });
-  assert.equal(only.path, b.real);
-  assert.equal(only.versioned, true);
-  assert.match(only.why!, /inside a versioned directory \(Homebrew's Cellar, nvm, fnm, asdf, volta or mise\): the next upgrade deletes it[\s\S]*Put a stable node on PATH/);
-  // A node on PATH that is another node (another version): not this one, so not named for it.
+  assert.deepEqual(stableNodePath({ execPath: b.real, brewPrefixes: [b.prefix] }), { path: b.link, versioned: false, why: null });
+  // No Homebrew: this node's own path; one inside a versioned directory is called out with what to do.
+  const none = stableNodePath({ execPath: b.real, brewPrefixes: [] });
+  assert.deepEqual([none.path, none.versioned], [b.real, true]);
+  assert.match(none.why!, /inside a versioned directory[\s\S]*Install node with Homebrew/);
+  assert.deepEqual(stableNodePath({ execPath: '/usr/bin/node', brewPrefixes: [] }), { path: '/usr/bin/node', versioned: false, why: null });
+  // Homebrew's node is another node (another version): not named for this one.
   const other = brew();
-  assert.equal(stableNodePath({ execPath: b.real, path: other.path }).path, b.real);
+  assert.equal(stableNodePath({ execPath: b.real, brewPrefixes: [other.prefix] }).path, b.real);
+  // A prefix without bin/brew isn't Homebrew.
+  const fake = brew();
+  writeFileSync(join(fake.prefix, 'bin', 'brew.not'), '');
+  execFileSync('rm', [join(fake.prefix, 'bin', 'brew')]);
+  assert.equal(stableNodePath({ execPath: fake.real, brewPrefixes: [fake.prefix] }).path, fake.real);
   for (const p of ['/home/example/.nvm/versions/node/v24.1.0/bin/node', '/home/example/.local/share/fnm/node-versions/v24/installation/bin/node', '/home/example/.asdf/installs/nodejs/24.1.0/bin/node', '/opt/homebrew/Cellar/node@22/22.13.0/bin/node']) assert.ok(inVersionedNodeDir(p), p);
-  for (const p of ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node']) assert.equal(inVersionedNodeDir(p), false, p);
 });
 
-test('#468 the local service (launchd plist and systemd unit) runs node by the PATH symlink, not the realpath this process runs from', { skip: posix }, () => {
-  // A PATH whose bin/node is a symlink to the node running this test (whatever its real path).
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'path-')));
-  symlinkSync(process.execPath, join(dir, 'node'));
+test('#468 a `node` earlier on PATH is never what gets written: the local service and the pre-push hook name Homebrew\'s or this node\'s own path', { skip: posix }, () => {
+  // A node planted first on PATH, even one that is this very node (a symlink to it), and Homebrew's beside it.
+  const planted = realpathSync(mkdtempSync(join(tmpdir(), 'planted-')));
+  symlinkSync(process.execPath, join(planted, 'node'));
+  const env = { PATH: `${planted}:/usr/bin:/bin`, HOME: '/home/example' };
   const { dir: root } = exampleProject();
-  const spec = localServiceSpec(root, loadConfig(root), { PATH: `${dir}:/usr/bin:/bin`, HOME: '/home/example' });
-  assert.equal(spec.program[0], join(dir, 'node'));
-  for (const text of [launchdPlist(spec), systemdUserUnit(spec)]) {
-    assert.equal(programOf(text), join(dir, 'node'), 'what the service file runs');
-    if (realpathSync(process.execPath) !== join(dir, 'node')) assert.ok(!text.includes(`>${realpathSync(process.execPath)}<`) && !text.includes(`"${realpathSync(process.execPath)}"`), 'never the realpath');
-  }
+  const spec = localServiceSpec(root, loadConfig(root), env);
+  assert.notEqual(spec.program[0], join(planted, 'node'), 'never the PATH node');
+  assert.equal(spec.program[0], stableNodePath().path, "Homebrew's bin/node or this node's own path");
+  for (const text of [launchdPlist(spec), systemdUserUnit(spec)]) assert.equal(programOf(text), spec.program[0]);
+  // With a Homebrew whose bin/node is this node: that symlink, never the realpath, in the plist and the unit.
+  const b = brew(realpathSync(process.execPath));
+  const viaBrew = localServiceSpec(root, loadConfig(root), env, stableNodePath({ brewPrefixes: [b.prefix] }).path);
+  assert.equal(viaBrew.program[0], b.link);
+  assert.equal(programOf(launchdPlist(viaBrew)), b.link);
+  assert.equal(programOf(systemdUserUnit(viaBrew)), b.link);
+  // The checkout's pre-push hook: the same node, never the PATH one.
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git'], { cwd: root });
+  const hook = readFileSync(installCheckoutPrePush(root, ['main'], '/opt/engine/dist/src/cli.js', stableNodePath({ brewPrefixes: [b.prefix] }).path), 'utf8');
+  assert.match(hook, re(b.link));
+  assert.doesNotMatch(hook, re(join(planted, 'node')));
+  assert.doesNotMatch(readFileSync(installCheckoutPrePush(root, ['main'], '/opt/engine/dist/src/cli.js'), 'utf8'), re(join(planted, 'node')));
 });
 
-test("#468 the instance's git credential helper names the same stable node", { skip: posix }, () => {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'path-')));
-  symlinkSync(process.execPath, join(dir, 'node'));
+test("#468 a server instance keeps its root-controlled absolute path: the credential helper is process.execPath, whatever PATH holds", { skip: posix }, () => {
+  const planted = realpathSync(mkdtempSync(join(tmpdir(), 'planted-')));
+  symlinkSync(process.execPath, join(planted, 'node'));
   const home = mkdtempSync(join(tmpdir(), 'inst-'));
   const i = { name: 'shop', home, stateDir: join(home, 'state'), credentials: { version: 1, github: { kind: 'app', app_id: 1, installation_id: 2, key_path: join(home, 'app.pem') } } } as unknown as Instance;
-  const env = instanceEnv(i, { PATH: `${dir}:/usr/bin:/bin` });
+  const env = instanceEnv(i, { PATH: `${planted}:/usr/bin:/bin` });
   const helper = Object.entries(env).find(([k, v]) => k.startsWith('GIT_CONFIG_VALUE_') && String(v).includes('git-credential'))![1]!;
-  assert.match(helper, new RegExp(`^!"${join(dir, 'node').replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}" ".*cli\\.js" git-credential$`));
+  assert.match(helper, new RegExp(`^!"${re(process.execPath).source}" ".*cli\\.js" git-credential$`));
+});
+
+test("#468 Homebrew's bin/node is named only if no other user can redirect it", { skip: posix }, () => {
+  const b = brew(realpathSync(process.execPath));
+  assert.equal(ownedPath(b.link), true);
+  chmodSync(join(b.prefix, 'bin'), 0o777);
+  assert.equal(ownedPath(b.link), false, 'a bin/ anyone may write');
+  assert.equal(stableNodePath({ brewPrefixes: [b.prefix] }).path, process.execPath);
+  assert.equal(ownedPath('/x/node', { uid: 501, lstat: ((p: string) => ({ uid: p === '/x/node' ? 777 : 0, gid: 0, mode: 0o755, isSymbolicLink: () => false })) as never }), false, "another user's file");
+  const groupDir = (gid: number) => ((p: string) => ({ uid: 0, gid: p === '/x' ? gid : 0, mode: p === '/x' ? 0o775 : 0o755, isSymbolicLink: () => false })) as never;
+  assert.equal(ownedPath('/x/node', { uid: 501, lstat: groupDir(4242) }), false, 'a directory any member of an ordinary group may write');
+  assert.equal(ownedPath('/x/node', { uid: 501, lstat: groupDir(0) }), true, "wheel's: its members are root already");
 });
 
 test('#468 doctor and the first-run page: a service whose node is gone, or inside a versioned directory, is flagged with its file and the fix', { skip: posix }, () => {
@@ -97,10 +131,9 @@ test('#468 doctor and the first-run page: a service whose node is gone, or insid
   const step = (p: SetupProbe) => checkSetup(ctx, p).groups.flatMap((g) => g.steps).find((s) => s.id === 'service')!;
   const gone = step(probe('/opt/homebrew/Cellar/node/26.7.0/bin/node', false));
   assert.equal(gone.done, false, 'running now, but not after its next restart');
-  assert.match(gone.detail, new RegExp(`^${plist.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} runs node at /opt/homebrew/Cellar/node/26\\.7\\.0/bin/node, which no longer exists.*run \`${BRAND.cli} up\` to rewrite it with the node on your PATH$`));
+  assert.match(gone.detail, new RegExp(`^${re(plist).source} runs node at /opt/homebrew/Cellar/node/26\\.7\\.0/bin/node, which no longer exists.*run \`${BRAND.cli} up\` to rewrite it`));
   const cellar = step(probe('/opt/homebrew/Cellar/node/26.7.0/bin/node', true));
   assert.equal(cellar.done, false);
   assert.match(cellar.detail, /inside a versioned directory: the next upgrade deletes it: run `.* up`/);
-  const fine = step(probe('/opt/homebrew/bin/node', true));
-  assert.equal(fine.done, true, fine.detail);
+  assert.equal(step(probe('/opt/homebrew/bin/node', true)).done, true);
 });
