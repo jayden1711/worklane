@@ -41,6 +41,7 @@ import { FirstRunPage, FirstRunView } from './pages/FirstRun';
 import { RepoConfigForm } from './components/RepoConfigForm';
 import type { StarterCi as StarterCiView } from './api';
 import { StarterCi } from './components/StarterCi';
+import { CiNote } from './components/CiNote';
 import { ClaudeSigninView } from './components/ClaudeSignin';
 import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
@@ -214,3 +215,6 @@ export { ApiError, isRefusal } from './api';
 
 /** The starter CI outside the Repo config form (a server's instance, #469). */
 export const renderStarterCi = (v: StarterCiView, inForm = false) => renderToStaticMarkup(<StarterCi canEdit initialView={v} inForm={inForm} />);
+
+/** The No CI note on the PR and Land pages (#469). */
+export const renderCiNote = (ci: Parameters<typeof CiNote>[0]['ci']) => renderToStaticMarkup(<CiNote ci={ci} />);

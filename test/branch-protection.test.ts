@@ -84,6 +84,10 @@ async function protectionDetail(dir: string): Promise<string> {
 }
 
 test("init's Protection step recommends not strict by default, and strict when the repo opts in", async () => {
-  assert.match(await protectionDetail(exampleProject().dir), /GitHub doesn't protect main \(HTTP 404\)[^;]*; recommended: require your CI checks \(config\.yaml required_checks is empty\), not strict/);
-  assert.match(await protectionDetail(withConfig((y) => `${y}\nprotection: { strict: true }\n`)), /recommended: require your CI checks \(config\.yaml required_checks is empty\), strict \(PRs must be up to date first/);
+  // A check named (init refuses to finish on an empty required_checks in PR mode, #469).
+  const named = (y: string) => `${y}\nrequired_checks: [test]\n`;
+  assert.match(await protectionDetail(withConfig(named)), /GitHub doesn't protect main \(HTTP 404\)[^;]*; recommended: require the 1 required_checks, not strict/);
+  assert.match(await protectionDetail(withConfig((y) => `${named(y)}protection: { strict: true }\n`)), /recommended: require the 1 required_checks, strict \(PRs must be up to date first/);
+  // The advice for an empty list is still said where it's asked (protectionAdvice), though init stops before it.
+  assert.match(protectionAdvice(loadConfig(exampleProject().dir).project), /require your CI checks \(config\.yaml required_checks is empty\), not strict/);
 });

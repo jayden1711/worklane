@@ -54,6 +54,7 @@ interface Render {
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderStarterCi(v: StarterCiView, inForm?: boolean): string;
+  renderCiNote(ci: { kind: 'github' | 'none'; means: string | null } | undefined): string;
   renderRepoConfigForm(c: unknown, o?: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
   renderFirstRun(f: unknown, o?: { open?: string; confirming?: boolean; actionConfirming?: boolean; policyChanges?: unknown[]; configChanges?: unknown[]; rerun?: string; draftConfirming?: boolean; signin?: unknown; discord?: unknown; ghLogin?: unknown }): string;
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
@@ -3097,6 +3098,19 @@ test("the Repo config form with no required check (#469): the starter CI, last i
   // A server's instance (no form): the same panel, and once it ran, what to name in config.yaml through a PR.
   assert.match(r.renderStarterCi(view), /data-testid="starter-ci-add"/);
   assert.match(r.renderStarterCi({ ...view, onBranch: true, firstRun: { state: 'done', conclusion: 'failure' } }), /finished on main \(failure\): name it in config\.yaml required_checks \(required_checks: \[test\]\) through a PR, and merge it\./);
+  // No CI (#469): not offered without test_run, saying why; offered with it, saying what it means; a server gets the lines.
+  assert.match(open, /data-testid="no-ci" data-offered="false"[\s\S]*data-testid="no-ci-refused"[^>]*>No CI isn&#x27;t offered here: needs test_run: add the starter CI</);
+  const offered = { ...view, noCi: { offered: true, means: "No CI (ci: none): a PR is ready when this machine's test runs pass", why: null } };
+  const inForm = r.renderRepoConfigForm(c, { starter: offered });
+  assert.match(inForm, /data-testid="no-ci-means"[^>]*>Or choose No CI \(ci: none\): a PR is ready when this machine&#x27;s test runs pass\.</);
+  assert.match(inForm, /data-testid="no-ci-choose"/);
+  assert.match(r.renderStarterCi(offered), /data-testid="no-ci-lines"[^>]*># config\.yaml, through a PR:\nci: none\nrequired_checks: \[\]</);
+  // A config already on No CI has no starter CI to offer.
+  assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, ci: 'none' } }, { starter: offered }), /starter-ci/);
+  // The PR and Land pages' note, only under No CI.
+  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs\.</);
+  assert.equal(r.renderCiNote({ kind: 'github', means: null }), '');
+  assert.equal(r.renderCiNote(undefined), '');
   // A config that names a check has nothing to add: no starter CI.
   assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, required_checks: ['ci'] } }, { starter: view }), /starter-ci/);
 });
