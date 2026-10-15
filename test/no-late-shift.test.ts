@@ -98,15 +98,23 @@ function watchRequests(cdp: Cdp) {
  */
 async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<typeof json>) | null>) {
   const at = new Map(Object.keys(routes).map((path) => [path, { holding: false, paused: [] as string[] }]));
+  // Every answer on its way, so stop() can wait for them before the browser closes (one still being sent when it
+  // closed failed a test on CI: "Fetch.fulfillRequest: the DevTools connection closed").
+  const sending = new Set<Promise<unknown>>();
+  const send = (p: Promise<unknown>) => {
+    sending.add(p);
+    void p.finally(() => sending.delete(p)).catch(() => {});
+    return p;
+  };
   const reply = (path: string, requestId: string) => {
     const answer = routes[path];
-    return answer ? cdp.send('Fetch.fulfillRequest', { requestId, ...answer() }) : cdp.send('Fetch.continueRequest', { requestId });
+    return send(answer ? cdp.send('Fetch.fulfillRequest', { requestId, ...answer() }) : cdp.send('Fetch.continueRequest', { requestId }));
   };
   cdp.on('Fetch.requestPaused', (p) => {
     const requestId = p.requestId as string;
     const path = new URL((p.request as { url: string }).url).pathname;
     const s = at.get(path);
-    if (!s) return void cdp.send('Fetch.continueRequest', { requestId });
+    if (!s) return void send(cdp.send('Fetch.continueRequest', { requestId }));
     if (s.holding) s.paused.push(requestId);
     else void reply(path, requestId);
   });
@@ -118,6 +126,11 @@ async function intercept(cdp: Cdp, routes: Record<string, (() => ReturnType<type
       const s = at.get(path)!;
       s.holding = false;
       for (const requestId of s.paused.splice(0)) await reply(path, requestId);
+    },
+    /** Stop answering: every answer on its way is sent, and the page's requests go to the server again. */
+    stop: async () => {
+      await cdp.send('Fetch.disable');
+      await Promise.all([...sending]);
     },
   };
 }
@@ -189,6 +202,7 @@ for (const held of ['/api/instance-settings', '/api/first-run', 'the on-device s
         // A link, pressed where it is (it must hold still), opens its page.
         await pressSteady(cdp, q('settings-first-run-link'), 'settings-first-run-link');
         await until('the first-run page', () => js<boolean>(cdp, `location.pathname === '/first-run'`), 5_000);
+        await answers.stop();
       } finally {
         await b.close();
         await d.close();
@@ -249,6 +263,7 @@ test(
         await until(`the ${page} page`, () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-${page}"] [data-decision="d-old-prose"]')`), 5_000);
         await pressShowMore(cdp, page);
       }
+      await answers.stop();
     } finally {
       await b.close();
       await d.close();
