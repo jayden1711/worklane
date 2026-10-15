@@ -18,6 +18,18 @@ const skip = process.platform === 'win32' && 'bash scripts (macOS and Linux)';
 const script = join(repoRoot, 'scripts', 'bootstrap.sh');
 const TOOLS = ['bash', 'sed', 'cat', 'mkdir', 'tr', 'cut', 'dirname', 'basename', 'mktemp', 'rm', 'head', 'git', 'id', 'ln', 'tar', 'install', 'env', 'sh', 'sha256sum', 'shasum', 'perl'];
 
+/**
+ * The bootstrap as `dest`, its every /etc/ path moved under `root`. WHY: the release runs this suite on a live server,
+ * where /etc/systemd/system/<hub unit> and /etc/<cli>/machine-owners.json exist (#312), and a run read them: the hub
+ * "installed but not running", the machine's own owner. Checked: no path of the machine's own is left in the copy.
+ */
+function offMachine(dest: string, root: string): void {
+  const text = readFileSync(script, 'utf8').replace(/(?<=^|[\s"'=(])\/etc\//gm, `${root}/etc/`);
+  const machines = text.split('\n').filter((l) => !/^\s*#/.test(l) && /(?<=^|[\s"'=(])\/(etc|var\/lib|usr\/local\/libexec|run\/lock|opt\/worklane)\//.test(l));
+  assert.deepEqual(machines, [], "the bootstrap a test runs reads nothing of the machine's own");
+  writeFileSync(dest, text);
+}
+
 /** A machine of stand-ins: `uname` says what it is, and only the given commands exist (plus basic tools). */
 function machine(o: { os?: 'Linux' | 'Darwin'; arch?: string; have?: Record<string, string> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'bootstrap-'));
@@ -38,12 +50,20 @@ function machine(o: { os?: 'Linux' | 'Darwin'; arch?: string; have?: Record<stri
   mkdirSync(repo);
   spawnSync('git', ['init', '-q', repo]);
   const prefix = join(dir, 'prefix');
+  // The engine checkout it runs from: this bootstrap off the machine (offMachine), beside the real setup scripts.
+  const root = join(dir, 'root');
+  const checkout = join(dir, 'checkout');
+  mkdirSync(join(checkout, 'scripts'), { recursive: true });
+  const own = join(checkout, 'scripts', 'bootstrap.sh');
+  offMachine(own, root);
+  symlinkSync(join(repoRoot, 'scripts', 'setup'), join(checkout, 'scripts', 'setup'));
+  symlinkSync(join(repoRoot, 'package.json'), join(checkout, 'package.json'));
   const run = (...args: string[]) => {
-    const r = spawnSync(join(bin, 'bash'), [script, ...args], { encoding: 'utf8', env: { PATH: bin, HOME: dir, WORKLANE_PREFIX: prefix } });
+    const r = spawnSync(join(bin, 'bash'), [own, ...args], { encoding: 'utf8', env: { PATH: bin, HOME: dir, WORKLANE_PREFIX: prefix } });
     return { code: r.status, out: r.stdout + r.stderr };
   };
   const calls = () => (existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter((l) => l && !l.startsWith('uname ')) : []);
-  return { dir, bin, repo, prefix, run, calls, stub };
+  return { dir, bin, repo, prefix, root, run, calls, stub };
 }
 
 /** The pinned release recorded as installed (so a run never fetches it). */
@@ -284,7 +304,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   const eng = join(m.dir, 'engine', 'scripts');
   const setup = join(eng, 'setup');
   mkdirSync(setup, { recursive: true });
-  copyFileSync(script, join(eng, 'bootstrap.sh'));
+  offMachine(join(eng, 'bootstrap.sh'), m.root);
   copyFileSync(join(repoRoot, 'scripts', 'setup', 'machine-owners.sh'), join(setup, 'machine-owners.sh'));
   const owners = join(m.dir, 'machine-owners.json');
   const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
@@ -414,7 +434,9 @@ test('the Dockerfile: a pinned base image, a non-root user, the same bootstrap; 
 });
 
 test('the installed package carries what `demo` copies (examples/basic), so the demo works from an install', () => {
-  const r = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: repoRoot, encoding: 'utf8', shell: process.platform === 'win32' });
+  // npm's cache, logs and update check in a directory of the test's own: on macOS the test keeps the real HOME (#312).
+  const npmCache = mkdtempSync(join(tmpdir(), 'npm-cache-'));
+  const r = spawnSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], { cwd: repoRoot, encoding: 'utf8', shell: process.platform === 'win32', env: { ...process.env, npm_config_cache: npmCache, npm_config_update_notifier: 'false' } });
   assert.equal(r.status, 0, r.stderr);
   const files = (JSON.parse(r.stdout) as { files: { path: string }[] }[])[0]!.files.map((f) => f.path);
   for (const f of ['examples/basic/.worklane/config.yaml', 'examples/basic/src/price.js', 'examples/basic/test/price.test.js']) assert.ok(files.includes(f), f);
