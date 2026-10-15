@@ -953,6 +953,12 @@ async function update(deps, cfg, seen = {}) {
   const current = deps.installed();
   seen.current = current;
   const release = channelOf(cfg) === 'release';
+  // WHY: a pass with nothing newer logged nothing, so the dashboard couldn't say when this channel last checked (#465).
+  // The state file gets a dated entry; updates.jsonl stays a log of changes.
+  const upToDate = (newest) => {
+    if (deps.checked) deps.checked({ event: 'current', at: new Date(deps.now()).toISOString(), channel: release ? 'release' : 'main', sha: current, version: deps.installedVersion ? deps.installedVersion() : null, newest });
+    return 'current';
+  };
   let head;
   let tag = null;
   if (release) {
@@ -960,15 +966,15 @@ async function update(deps, cfg, seen = {}) {
     if (!tag) return deps.note('waiting', null, `no release tag vX.Y.Z on ${cfg.repo_url} yet`, false);
     head = tag.commit;
     seen.head = head;
-    if (head === current) return 'current';
+    if (head === current) return upToDate(tag.tag);
     // Never back: a tag no newer than the installed engine's version is not an update.
     const installedVersion = deps.installedVersion();
-    if (installedVersion && !newer(tag.version, installedVersion)) return 'current';
+    if (installedVersion && !newer(tag.version, installedVersion)) return upToDate(tag.tag);
   } else {
     head = deps.exec('git', ['ls-remote', cfg.repo_url, `refs/heads/${cfg.branch || 'main'}`]).split(/\s/)[0];
     if (!/^[0-9a-f]{40}$/.test(head)) return deps.note('refused', null, `no ${cfg.branch || 'main'} on ${cfg.repo_url}`, true);
     seen.head = head;
-    if (head === current) return 'current';
+    if (head === current) return upToDate(head);
   }
   // A commit that was rolled back is never retried by itself: only a newer commit, or an admin at a root shell
   // (updates.sh --release-hold, which moves the hold file aside), releases it. Nothing a coordinator can do through
@@ -1626,6 +1632,7 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     log,
     note: makeNote({ readState: () => readJson(files.state), writeState: (st) => writeRedacted(files.state, st), log, print }),
+    checked: (st) => writeRedacted(files.state, st),
   };
 }
 
