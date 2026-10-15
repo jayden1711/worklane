@@ -23,7 +23,10 @@ import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, readAccountStatus, SETUP_TOKEN, 
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import type { MachineRequester } from './machine-owners.js';
 import type { RunAs } from './runner.js';
+import { asRoot } from './os/system-paths.js';
 
+/** The root script, as an admin runs it on the machine (confirm-profile, and every instance's steps). */
+export const CLAUDE_ACCOUNT_SCRIPT = asRoot.opt('current/scripts/setup/claude-account.sh');
 /** The login each agent user always had: never added or removed, always there to go back to. */
 export const DEFAULT_PROFILE = 'default';
 /** A profile's name (claude-account.sh and the machine helper check the same). */
@@ -51,7 +54,11 @@ export interface ProfileCheck {
 }
 
 export interface Profiles {
-  profiles: Record<string, { kind: string; addedAt: string | null; users: Record<string, ProfileCheck> }>;
+  /**
+   * Each profile. `staged`: added from a dashboard and not yet confirmed by a root admin on the machine (claude-account.sh
+   * confirm-profile): nothing may use it. `instance`: the instance whose dashboard added it, if one did.
+   */
+  profiles: Record<string, { kind: string; addedAt: string | null; users: Record<string, ProfileCheck>; staged: boolean; instance: string | null }>;
   /** Each instance's active profile; an instance not named is on default. */
   active: Record<string, { profile: string; since: string }>;
   /** When each instance last switched profile (to default too). */
@@ -89,14 +96,14 @@ export function readProfiles(dir = CLAUDE_ACCOUNT_DIR): Profiles {
   if (o.profiles && typeof o.profiles === 'object') {
     for (const [name, p] of Object.entries(o.profiles as Record<string, unknown>)) {
       if (!PROFILE_NAME.test(name) || !p || typeof p !== 'object') continue;
-      const x = p as { kind?: unknown; added_at?: unknown; users?: unknown };
+      const x = p as { kind?: unknown; added_at?: unknown; users?: unknown; staged?: unknown; instance?: unknown };
       const users: Record<string, ProfileCheck> = {};
       for (const [user, r] of Object.entries((x.users && typeof x.users === 'object' ? x.users : {}) as Record<string, unknown>)) {
         if (!r || typeof r !== 'object') continue;
         const c = r as Record<string, unknown>;
         users[user] = { instance: str(c.instance, 40) ?? '', user, account: str(c.account, 200), subscription: str(c.subscription, 100), apiOk: c.api_ok === true, apiError: str(c.api_error), checkedAt: str(c.checked_at, 40) };
       }
-      out.profiles[name] = { kind: str(x.kind, 40) ?? 'unknown', addedAt: str(x.added_at, 40), users };
+      out.profiles[name] = { kind: str(x.kind, 40) ?? 'unknown', addedAt: str(x.added_at, 40), users, staged: x.staged === true, instance: typeof x.instance === 'string' && isInstance(x.instance) ? x.instance : null };
     }
   }
   if (o.active && typeof o.active === 'object') {
@@ -122,11 +129,18 @@ export function readProfiles(dir = CLAUDE_ACCOUNT_DIR): Profiles {
 /** An instance's failover setting in force: its own, else the machine's; null when off (no order of two or more). */
 export function failoverFor(instance: string, p: Profiles = readProfiles()): FailoverSetting | null {
   const f = p.failover.instances[instance] ?? p.failover.machine;
-  return f && f.order.length >= 2 ? f : null;
+  if (!f) return null;
+  // A staged profile (not confirmed by a root admin) is never moved to, whatever the order says.
+  const order = f.order.filter((n) => n === DEFAULT_PROFILE || (p.profiles[n] && !p.profiles[n]!.staged));
+  return order.length >= 2 ? { ...f, order } : null;
 }
 
 /** The profile an instance's runs use now. */
-export const activeProfile = (instance: string, p: Profiles = readProfiles()): string => p.active[instance]?.profile ?? DEFAULT_PROFILE;
+export function activeProfile(instance: string, p: Profiles = readProfiles()): string {
+  const name = p.active[instance]?.profile;
+  // A staged profile is never used, whatever the file says (the script never makes one active; this holds if it did).
+  return name && p.profiles[name] && !p.profiles[name]!.staged ? name : DEFAULT_PROFILE;
+}
 
 /** A user's default login dir (as runs always had it). */
 const defaultDir = (r: RunAs) => r.claudeConfigDir ?? posix.join(r.home, '.claude');
@@ -257,6 +271,9 @@ export function profilesTable(o: { dir?: string; instances?: string[] }) {
     return {
       name,
       kind: name === DEFAULT_PROFILE ? 'existing' : (prof?.kind ?? 'unknown'),
+      staged: prof?.staged === true,
+      /** The instance whose dashboard added it (only that instance's agent user has it), or null for a root admin's. */
+      addedFor: prof?.instance ?? null,
       addedAt: prof?.addedAt ?? null,
       cells: instances.map((instance) => {
         const user = agents.get(instance) ?? null;
@@ -286,19 +303,19 @@ const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'runn
 
 /**
  * Record the failover setting for the coordinator to run through the machine helper (`claude-account failover
- * <order|off> back|stay [<instance>]`): the same gate as a profile step. `order`: two to eight profiles, or null (off).
+ * <order|off> back|stay`), for this dashboard's own instance: the same gate as a profile step. `order`: two to eight profiles, or null (off).
  */
-export function requestFailoverSetting(log: EventLog, r: { order: unknown; back: unknown; instance?: unknown; who: { role: Role | null; requester: MachineRequester }; ownersFile?: string }): MachineRequest {
+export function requestFailoverSetting(log: EventLog, r: { order: unknown; back: unknown; who: { role: Role | null; requester: MachineRequester }; ownersFile?: string }): MachineRequest {
   const why = claudeAccountGate(r.who, r.ownersFile ? { ownersFile: r.ownersFile } : {});
   if (why) throw new MachineRequestError(why, 403);
   const off = r.order === null;
   const order = Array.isArray(r.order) ? r.order : [];
   if (!off && (order.length < 2 || order.length > 8 || !order.every((n) => typeof n === 'string' && PROFILE_NAME.test(n)) || new Set(order).size !== order.length)) throw new MachineRequestError('a failover order is two to eight different profiles (or null: off)');
   if (typeof r.back !== 'boolean') throw new MachineRequestError('back is true (move back after the reset) or false');
-  if (r.instance !== undefined && r.instance !== null && (typeof r.instance !== 'string' || !isInstance(r.instance))) throw new MachineRequestError('an instance name, or none for the machine');
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x));
   if (pending) throw new MachineRequestError(`a claude-account ${pending.args.slice(1).join(' ')} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
-  const args = ['claude-account', 'failover', off ? 'off' : (order as string[]).join('+'), r.back ? 'back' : 'stay', ...(typeof r.instance === 'string' ? [r.instance] : [])];
+  // Never an instance: the helper takes the asking coordinator's from sudo; the machine-wide setting is a root admin's.
+  const args = ['claude-account', 'failover', off ? 'off' : (order as string[]).join('+'), r.back ? 'back' : 'stay'];
   return requestMachineChange(log, { args, requester: r.who.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
 }
 
@@ -307,18 +324,18 @@ export function requestFailoverSetting(log: EventLog, r: { order: unknown; back:
  * (a machine owner, on an allowed device, or the break-glass), the instance's owner role, one profile step or switch
  * at a time. Never runs anything.
  */
-export function requestProfileOp(log: EventLog, r: { action: unknown; profile: unknown; instance?: unknown; who: { role: Role | null; requester: MachineRequester }; dir?: string; ownersFile?: string; now?: number }): MachineRequest {
+export function requestProfileOp(log: EventLog, r: { action: unknown; profile: unknown; who: { role: Role | null; requester: MachineRequester }; dir?: string; ownersFile?: string; now?: number }): MachineRequest {
   const why = claudeAccountGate(r.who, r.ownersFile ? { ownersFile: r.ownersFile } : {});
   if (why) throw new MachineRequestError(why, 403);
   if (!(PROFILE_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError('action is profile-add, use or remove');
   const action = r.action as ProfileAction;
   if (typeof r.profile !== 'string' || !PROFILE_NAME.test(r.profile)) throw new MachineRequestError("a profile's name: lowercase letters, digits and dashes, starting with a letter, at most 21");
   if (action !== 'use' && r.profile === DEFAULT_PROFILE) throw new MachineRequestError('default is the login each agent user already has: it is never added or removed');
-  if (r.instance !== undefined && r.instance !== null && (action !== 'use' || typeof r.instance !== 'string' || !isInstance(r.instance))) throw new MachineRequestError('an instance is named only to use a profile for that instance alone');
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x));
   if (pending) throw new MachineRequestError(`a claude-account ${pending.args.slice(1).join(' ')} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
   if (readProfileOps(r.dir, r.now).some((o) => o.status === 'running')) throw new MachineRequestError('a Claude account profile change is running on this machine; wait for it to end', 409);
-  const args = ['claude-account', action, r.profile, ...(typeof r.instance === 'string' ? [r.instance] : [])];
+  // Never an instance: each step is for this dashboard's own instance, which the helper takes from sudo (SUDO_USER).
+  const args = ['claude-account', action, r.profile];
   return requestMachineChange(log, { args, requester: r.who.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
 }
 
@@ -380,5 +397,6 @@ export function recordProfileSwitches(log: EventLog, instance: string, dir = CLA
 
 /** The panel's profile data: the accounts × instances table and the last few profile steps (newest first). */
 export function profilesView(dir = CLAUDE_ACCOUNT_DIR, now = Date.now()) {
-  return { profiles: profilesTable({ dir }), profileOps: readProfileOps(dir, now).slice(-5).reverse() };
+  // A staged profile's confirmation, at a root shell on the machine (never through the dashboard).
+  return { profiles: profilesTable({ dir }), profileOps: readProfileOps(dir, now).slice(-5).reverse(), confirmScript: CLAUDE_ACCOUNT_SCRIPT };
 }

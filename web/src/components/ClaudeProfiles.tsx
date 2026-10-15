@@ -71,18 +71,20 @@ function AddForm({ disabled, onDone }: { disabled: boolean; onDone: (err: string
 }
 
 /** Auto-failover: off by default; an order of accounts to move through on a usage limit, and whether to move back. */
-function Failover({ table, disabled, onDone }: { table: ProfilesTable; disabled: boolean; onDone: (err: string | null) => void }) {
-  const [scope, setScope] = useState('');
-  const current = (scope ? table.failover?.instances[scope] : undefined) ?? table.failover?.machine ?? null;
+function Failover({ table, self, confirmScript, disabled, onDone }: { table: ProfilesTable; self: string; confirmScript: string; disabled: boolean; onDone: (err: string | null) => void }) {
+  // This instance's own setting, else the machine's (a root admin's, at a root shell).
+  const own = table.failover?.instances[self] ?? null;
+  const current = own ?? table.failover?.machine ?? null;
   const on = !!current && current.order.length >= 2;
-  const [order, setOrder] = useState((current?.order.length ? current.order : table.profiles.map((p) => p.name)).join(', '));
+  const usable = table.profiles.filter((p) => !p.staged).map((p) => p.name);
+  const [order, setOrder] = useState((current?.order.length ? current.order : usable).join(', '));
   const [back, setBack] = useState(current?.back ?? true);
   const [busy, setBusy] = useState(false);
   const send = async (enable: boolean) => {
     setBusy(true);
     try {
       const list = order.split(',').map((s) => s.trim()).filter(Boolean);
-      await setClaudeFailover(enable ? list : null, back, scope || undefined);
+      await setClaudeFailover(enable ? list : null, back);
       onDone(null);
     } catch (e) {
       onDone((e as Error).message);
@@ -93,33 +95,13 @@ function Failover({ table, disabled, onDone }: { table: ProfilesTable; disabled:
   return (
     <div className="space-y-2 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-failover" data-on={on ? 'yes' : 'no'}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13px] font-medium text-ink">Failover on a usage limit</span>
-        <Badge tone={on ? 'info' : 'neutral'}>{on ? `on: ${current!.order.join(' → ')}${current!.back ? ', back after the reset' : ''}` : 'off'}</Badge>
+        <span className="text-[13px] font-medium text-ink">Failover on a usage limit, for {self}</span>
+        <Badge tone={on ? 'info' : 'neutral'}>{on ? `on: ${current!.order.join(' → ')}${current!.back ? ', back after the reset' : ''}${own ? '' : " (the machine's)"}` : 'off'}</Badge>
       </div>
       <p className="text-[12px] text-ink-3">
-        When the account in use hits its usage limit, move to the next one in this order, after a real call on it as each agent user; a notice says which and when the limit resets. Never on a sign-in failure: that pauses runs on that account until you act.
+        When the account in use hits its usage limit, move {self} to the next one in this order, after a real call on it as its agent user; a notice says which and when the limit resets. Never on a sign-in failure, and never to a staged account. Every instance's setting is a root admin's: <code>sudo bash {confirmScript} failover a+b back</code>.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
-        <label className="flex items-center gap-1">
-          For
-          <select
-            value={scope}
-            onChange={(e) => {
-              // The form shows the chosen scope's setting (an instance without its own goes by the machine's).
-              const next = e.target.value;
-              const c = (next ? table.failover?.instances[next] : undefined) ?? table.failover?.machine ?? null;
-              setScope(next);
-              setOrder((c?.order.length ? c.order : table.profiles.map((p) => p.name)).join(', '));
-              setBack(c?.back ?? true);
-            }} className="rounded-control border border-line bg-surface px-1.5 py-1" data-testid="claude-failover-scope">
-            <option value="">every instance</option>
-            {table.instances.map((i) => (
-              <option key={i} value={i}>
-                {i}
-              </option>
-            ))}
-          </select>
-        </label>
         <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
         <label className="flex items-center gap-1">
           <input type="checkbox" checked={back} onChange={(e) => setBack(e.target.checked)} data-testid="claude-failover-back" />
@@ -161,17 +143,21 @@ function LastOp({ op }: { op: ProfileOp }) {
 }
 
 /** The profiles section; `canAct`: the person may change accounts now (a machine owner here, nothing else running). */
-export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; canAct: boolean; onChanged?: () => void }) {
+/**
+ * `self`: this dashboard's instance. Every step from here is for it alone (the server and the machine helper hold to
+ * that): another instance, or every one, is a root admin's on the machine, with `confirmScript`.
+ */
+export function ClaudeProfiles({ table, ops, self, confirmScript, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string; confirmScript: string; canAct: boolean; onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const running = ops.some((o) => o.status === 'running');
   const may = canAct && !running && !busy;
-  const act = async (action: 'use' | 'remove', profile: string, instance?: string) => {
+  const act = async (action: 'use' | 'remove', profile: string) => {
     setBusy(true);
     setErr(null);
     try {
-      await claudeProfileAction(action, profile, instance);
+      await claudeProfileAction(action, profile);
       setRemoving(null);
       onChanged?.();
     } catch (e) {
@@ -185,7 +171,7 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
       <div>
         <div className="text-[13px] font-medium text-ink">Accounts</div>
         <p className="text-[12px] text-ink-3">
-          Each account is signed in for every agent user side by side. Choosing one first makes one minimal real call as each agent user on it (the cheapest model, a one-word answer); if any is refused, nothing changes. Runs already going finish on the account they started on.
+          Accounts sit side by side for each agent user. From here, only {self}'s: choosing one first makes one minimal real call as its agent user on it (the cheapest model, a one-word answer); if it is refused, nothing changes. Runs already going finish on the account they started on. Another instance, or every one, is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt; [&lt;instance&gt;]</code>.
         </p>
       </div>
       <div className="overflow-x-auto rounded-card bg-surface shadow-card">
@@ -208,23 +194,26 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
                 <tr key={p.name} data-testid="claude-profile-row" data-profile={p.name}>
                   <td className="px-2 py-1.5 align-top">
                     <div className="font-mono text-[12px] text-ink">{p.name}</div>
-                    <div className="text-[11px] text-ink-3">{p.name === 'default' ? 'the login each agent user had' : p.addedAt ? `added ${ago(p.addedAt)}` : p.kind}</div>
+                    <div className="text-[11px] text-ink-3">{p.name === 'default' ? 'the login each agent user had' : p.addedAt ? `added ${ago(p.addedAt)}${p.addedFor ? ` for ${p.addedFor}` : ''}` : p.kind}</div>
+                    {p.staged && (
+                      <div className="mt-1 space-y-0.5" data-testid="claude-profile-staged">
+                        <Badge tone="warn">staged: not usable yet</Badge>
+                        <div className="text-[11px] text-ink-3">
+                          An admin confirms it on the machine, seeing the account first: <code>sudo bash {confirmScript} confirm-profile {p.name}</code>
+                        </div>
+                      </div>
+                    )}
                   </td>
                   {p.cells.map((c) => (
-                    <Cell key={c.instance} c={c} profile={p.name} canAct={may} busy={busy} onUse={() => void act('use', p.name, c.instance)} />
+                    <Cell key={c.instance} c={c} profile={p.name} canAct={may && c.instance === self && !p.staged} busy={busy} onUse={() => void act('use', p.name)} />
                   ))}
                   <td className="px-2 py-1.5 align-top">
                     <div className="flex flex-wrap gap-1">
-                      {!p.cells.every((c) => c.active) && (
-                        <Button size="sm" variant="outline" disabled={!may} onClick={() => void act('use', p.name)} data-testid="claude-profile-use-all">
-                          Use everywhere
-                        </Button>
-                      )}
-                      {p.name !== 'default' &&
+                      {p.name !== 'default' && p.cells.some((c) => c.instance === self && c.apiOk !== null) &&
                         (removing === p.name ? (
                           <>
                             <Button size="sm" disabled={!may} onClick={() => void act('remove', p.name)} data-testid="claude-profile-remove-confirm">
-                              Remove its login from every agent user
+                              Remove its login from {self}'s agent user
                             </Button>
                             <Button size="sm" variant="ghost" onClick={() => setRemoving(null)}>
                               Cancel
@@ -244,10 +233,10 @@ export function ClaudeProfiles({ table, ops, canAct, onChanged }: { table: Profi
         </table>
       </div>
       <p className="text-[12px] text-ink-3">
-        Add an account: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in each agent user's own profile and checked with a real call; if the API refuses it, nothing is kept.
+        Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
       </p>
       <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-      {table.profiles.length > 1 && <Failover table={table} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
+      {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
       {err && (
         <p className="text-[12.5px] text-red" data-testid="claude-profile-error">
           {err}

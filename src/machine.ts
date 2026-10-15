@@ -71,8 +71,9 @@ export function claudeAccount(action: 'status' | 'switch', exec: Exec = defaultE
 }
 
 /**
- * A Claude account profile step through the helper (src/claude-profiles.ts): profile-add|remove <profile>, or use
- * <profile> [<instance>]. The helper starts it as its own unit and returns at once; the caller checked the shape.
+ * A Claude account profile step through the helper (src/claude-profiles.ts): profile-add|remove|use <profile>, for
+ * this coordinator's own instance (the helper takes it from sudo). It starts the step as its own unit and returns at
+ * once; the caller checked the shape.
  */
 export function claudeProfile(args: readonly string[], exec: Exec = defaultExec): MachineResult {
   return runHelper(['claude-account', ...args], exec);

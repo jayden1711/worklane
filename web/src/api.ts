@@ -1328,6 +1328,8 @@ export interface ClaudeAccountData {
   /** The account profiles (src/claude-profiles.ts); absent from an older server. */
   profiles?: ProfilesTable;
   profileOps?: ProfileOp[];
+  /** The root script a staged profile is confirmed with, on the machine. */
+  confirmScript?: string;
 }
 /** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
 export interface ProfileCell {
@@ -1342,7 +1344,7 @@ export interface ProfileCell {
 }
 export interface ProfilesTable {
   instances: string[];
-  profiles: { name: string; kind: string; addedAt: string | null; cells: ProfileCell[] }[];
+  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
   active: Record<string, string>;
   /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
   failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
@@ -1364,9 +1366,10 @@ export interface ProfileOp {
 }
 /** A new account profile from a setup token: the token in the body only, never the URL. */
 export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
-/** The failover setting: an order of 2 to 8 profiles, or null for off; for the machine, or one instance. */
-export const setClaudeFailover = (order: string[] | null, back: boolean, instance?: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back, ...(instance ? { instance } : {}) }) });
-export const claudeProfileAction = (action: 'use' | 'remove', profile: string, instance?: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile, ...(instance ? { instance } : {}) }) });
+/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
+export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
+/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
+export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });

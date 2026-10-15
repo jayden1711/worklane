@@ -2,7 +2,7 @@
 // page's Claude account panel:
 //
 //   POST /api/claude-account/profile-add?profile=<name>   body {"value": "<token from claude setup-token>"}
-//   POST /api/machine/claude-profile                      body {"action": "use"|"remove", "profile", "instance"?}
+//   POST /api/machine/claude-profile                      body {"action": "use"|"remove", "profile"}
 //
 // Each is a machine owner's who is an owner of this instance, on one of the console's allowed devices (the same gate as
 // the owner terminal and any machine change), or the owner's break-glass. Every refusal is audited, a request with no
@@ -107,21 +107,23 @@ export async function handleProfileRoute(req: IncomingMessage, url: URL, who: Pr
   const action = body.action === 'use' || body.action === 'remove' || body.action === 'failover' ? body.action : null;
   if (who.role !== 'owner') return refuse(403, `only the instance's owners (admin on ${d.repo}) who are machine owners may switch or remove a Claude account; @${who.login} is a ${who.role}`, { action: action ?? 'not an action' });
   if (!action) return refuse(400, 'action is use, remove or failover (adding one takes its token: profile-add)', { action: 'not an action' });
+  // Never another instance, nor every one: a dashboard's step is for its own instance (a root admin's otherwise).
+  if (body.instance !== undefined && body.instance !== null && body.instance !== d.instance) return refuse(403, `a step from ${d.instance}'s dashboard is for ${d.instance} alone; another instance, or every one, is a root admin's on the machine (claude-account.sh)`, { action });
   if (action === 'failover') {
     const log = new EventLog(d.eventsDb);
     let r: MachineRequest;
     try {
-      r = requestFailoverSetting(log, { order: body.order, back: body.back, ...(body.instance !== undefined && body.instance !== null ? { instance: body.instance } : {}), who: gateWho, ...(d.ownersFile ? { ownersFile: d.ownersFile } : {}) });
+      r = requestFailoverSetting(log, { order: body.order, back: body.back, who: gateWho, ...(d.ownersFile ? { ownersFile: d.ownersFile } : {}) });
     } catch (e) {
       if (e instanceof MachineRequestError) return refuse(e.status, e.message, { action });
       throw e;
     } finally {
       log.close();
     }
-    d.audit(who, 'machine.claude_profile', { action, order: r.args[2], back: r.args[3], instance: r.args[4] ?? null, request: r.id });
+    d.audit(who, 'machine.claude_profile', { action, order: r.args[2], back: r.args[3], request: r.id });
     return { status: 200, body: { ok: true, pending: true, request: r } };
   }
-  return record({ action, profile: body.profile, ...(body.instance !== undefined && body.instance !== null ? { instance: body.instance } : {}) });
+  return record({ action, profile: body.profile });
 }
 
 /** Only a session's device flag counts; the break-glass passes the machine gate on its own. */

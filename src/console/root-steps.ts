@@ -32,15 +32,16 @@ export function slotCeiling(): number {
 
 /**
  * An account profile step (src/claude-profiles.ts), as the helper and its sudoers patterns take it: profile-add|remove
- * <profile> (never default), use <profile> [<instance>].
+ * <profile> (never default), use <profile>. Each is for the asking coordinator's own instance.
  */
 export function profileStepOk(a: readonly string[]): boolean {
   const name = (s: string | undefined) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
-  // failover <order|off> back|stay [<instance>]: the setting only (src/claude-failover.ts).
-  if (a[0] === 'failover') return (a.length === 3 || (a.length === 4 && addProjectNameOk(a[3]))) && (a[1] === 'off' || /^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$/.test(a[1] ?? '')) && (a[2] === 'back' || a[2] === 'stay');
+  // Never an instance: the helper takes the asking coordinator's from sudo (SUDO_USER).
+  // failover <order|off> back|stay: the setting only (src/claude-failover.ts), for the asking instance.
+  if (a[0] === 'failover') return a.length === 3 && (a[1] === 'off' || /^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$/.test(a[1] ?? '')) && (a[2] === 'back' || a[2] === 'stay');
   if (!name(a[1])) return false;
   if ((a[0] === 'profile-add' || a[0] === 'remove') && a.length === 2) return a[1] !== 'default';
-  return a[0] === 'use' && (a.length === 2 || (a.length === 3 && addProjectNameOk(a[2])));
+  return a[0] === 'use' && a.length === 2;
 }
 
 /** The helper's allowlist, as its sudoers rule spells it out: set-slots SLOTS_MIN..slotCeiling(), set-updates on|off, set-test-slots 1..8, claude-account status|switch, tailscale install|up|serve|public-url, add-project <name> <owner/repo>, and the updater's setup: install-updater, set-update-channel release, stage-update-signer and discard-update-signer <principal> ssh-ed25519 <public key>. Nothing else: nothing here adds a release signer or follows main. */
@@ -72,7 +73,7 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   {
     command: 'claude-account',
     what: "the agents' Claude account: refresh each agent user's account and expiry (status), or switch every agent on the machine to another account (switch)",
-    usage: 'claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use <profile> [<instance>] | claude-account failover <order|off> back|stay [<instance>]',
+    usage: 'claude-account status|switch | claude-account profile-add|remove|use <profile> | claude-account failover <order|off> back|stay',
     allows: (a) => (a.length === 1 && (a[0] === 'status' || a[0] === 'switch')) || profileStepOk(a),
     run: (a, exec) => (a.length === 1 ? claudeAccount(a[0] as 'status' | 'switch', exec) : claudeProfile(a, exec)),
   },

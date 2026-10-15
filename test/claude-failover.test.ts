@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FAILOVER_INCIDENT, failoverStep } from '../src/claude-failover.js';
@@ -73,7 +73,7 @@ test('a stand-in usage limit moves to the next account through the helper; done,
   assert.equal(m.step(), 'asked');
   assert.equal(m.calls.length, 1);
   assert.deepEqual(m.calls[0]!.slice(0, 2), ['sudo', '-n']);
-  assert.deepEqual(m.calls[0]!.slice(3), ['claude-account', 'use', 'work', 'alpha']);
+  assert.deepEqual(m.calls[0]!.slice(3), ['claude-account', 'use', 'work']);
   // Waiting for the step's answer: nothing more is asked.
   assert.equal(m.step(), null);
   assert.equal(m.calls.length, 1);
@@ -96,7 +96,7 @@ test('a move the real call refuses is not made: the next account in the order is
   m.answer('work', false);
   assert.equal(m.step(), 'refused');
   assert.equal(m.step(), 'asked');
-  assert.deepEqual(m.calls.at(-1)!.slice(3), ['claude-account', 'use', 'spare', 'alpha']);
+  assert.deepEqual(m.calls.at(-1)!.slice(3), ['claude-account', 'use', 'spare']);
   m.answer('spare', false);
   assert.equal(m.step(), 'refused');
   assert.equal(m.step(), 'none');
@@ -130,7 +130,7 @@ test('back after the reset: once it has passed and the instance is still on the 
   assert.equal(m.step(), null, 'not before the reset');
   m.tick(2 * 60_000);
   assert.equal(m.step(), 'back-asked');
-  assert.deepEqual(m.calls.at(-1)!.slice(3), ['claude-account', 'use', 'default', 'alpha']);
+  assert.deepEqual(m.calls.at(-1)!.slice(3), ['claude-account', 'use', 'default']);
   m.answer('default', false);
   assert.equal(m.step(), 'back-refused');
   assert.equal(m.step(), null, 'asked again only after a while');
@@ -184,20 +184,35 @@ test('the setting is a machine request with exactly its arguments, gated like an
   const who = { role: 'owner' as const, requester: ownerRequester('ada') };
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'cf-req-')), 'e.db'));
   try {
-    for (const bad of [{ order: ['work'], back: true }, { order: ['work', 'work'], back: true }, { order: ['Work', 'x'], back: true }, { order: ['a', 'b'], back: 'yes' }, { order: ['a', 'b'], back: true, instance: 'Alpha' }]) assert.throws(() => requestFailoverSetting(log, { ...bad, who, ownersFile: owners }), MachineRequestError, JSON.stringify(bad));
+    for (const bad of [{ order: ['work'], back: true }, { order: ['work', 'work'], back: true }, { order: ['Work', 'x'], back: true }, { order: ['a', 'b'], back: 'yes' }]) assert.throws(() => requestFailoverSetting(log, { ...bad, who, ownersFile: owners }), MachineRequestError, JSON.stringify(bad));
     assert.throws(() => requestFailoverSetting(log, { order: ['a', 'b'], back: true, who: { role: 'writer', requester: ownerRequester('ada') }, ownersFile: owners }), (e: unknown) => e instanceof MachineRequestError && e.status === 403);
     assert.throws(() => requestFailoverSetting(log, { order: ['a', 'b'], back: true, who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, ownersFile: owners }), (e: unknown) => e instanceof MachineRequestError && e.status === 403);
-    assert.deepEqual(requestFailoverSetting(log, { order: ['default', 'work'], back: true, instance: 'beta', who, ownersFile: owners }).args, ['claude-account', 'failover', 'default+work', 'back', 'beta']);
+    // Never an instance: the helper takes this coordinator's from sudo; every instance's setting is a root admin's.
+    assert.deepEqual(requestFailoverSetting(log, { order: ['default', 'work'], back: true, who, ownersFile: owners }).args, ['claude-account', 'failover', 'default+work', 'back']);
   } finally {
     log.close();
   }
   const helper = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs')) as { parseClaudeFailover: (a: string[]) => unknown };
-  for (const a of [['failover', 'default+work', 'back'], ['failover', 'off', 'stay'], ['failover', 'a+b+c', 'stay', 'alpha']]) {
+  for (const a of [['failover', 'default+work', 'back'], ['failover', 'off', 'stay'], ['failover', 'a+b+c', 'stay']]) {
     assert.ok(profileStepOk(a) && checkRootStep('claude-account', a).allowed, JSON.stringify(a));
     assert.ok(helper.parseClaudeFailover(['claude-account', ...a]), JSON.stringify(a));
   }
-  for (const a of [['failover', 'work', 'back'], ['failover', 'a+b', 'maybe'], ['failover', 'a+b', 'back', 'x', 'y'], ['failover', 'a++b', 'back'], ['failover', 'a+b', 'back', 'dash'], ['failover', 'a+b+c+d+e+f+g+h+i', 'back'], ['failover', 'a,b', 'back']]) {
+  for (const a of [['failover', 'work', 'back'], ['failover', 'a+b', 'maybe'], ['failover', 'a+b', 'back', 'x', 'y'], ['failover', 'a++b', 'back'], ['failover', 'a+b', 'back', 'dash'], ['failover', 'a+b+c+d+e+f+g+h+i', 'back'], ['failover', 'a,b', 'back'], ['failover', 'a+b', 'back', 'alpha'], ['failover', 'off', 'stay', 'beta']]) {
     assert.ok(!profileStepOk(a) && !checkRootStep('claude-account', a).allowed, JSON.stringify(a));
     assert.equal(helper.parseClaudeFailover(['claude-account', ...a]), null, JSON.stringify(a));
   }
+});
+
+test('a staged account (not confirmed by a root admin) is never moved to: it is left out of the order', () => {
+  const m = setup({ failover: { machine: { order: ['default', 'work', 'spare'], back: true } } });
+  const p = JSON.parse(readFileSync(join(m.dir, 'profiles.json'), 'utf8'));
+  p.profiles.work.staged = true;
+  writeFileSync(join(m.dir, 'profiles.json'), JSON.stringify(p));
+  m.limit();
+  assert.equal(m.step(), 'asked');
+  assert.deepEqual(m.calls[0]!.slice(3), ['claude-account', 'use', 'spare']);
+  p.profiles.spare.staged = true;
+  writeFileSync(join(m.dir, 'profiles.json'), JSON.stringify(p));
+  assert.equal(failoverFor('alpha', readProfiles(m.dir)), null, 'default alone: nowhere to move');
+  m.log.close();
 });

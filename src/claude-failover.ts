@@ -63,7 +63,8 @@ export function failoverStep(d: FailoverDeps): FailoverStage | null {
   };
   const ask = (stage: 'asked' | 'back-asked', from: string, to: string, resetAt: string | null): FailoverStage => {
     emit({ stage, from, to, reset_at: resetAt, detail: stage === 'asked' ? `usage limit on ${from}: moving to ${to}, after a real call on it` : `the limit on ${to} has reset: moving back from ${from}, after a real call on it` });
-    const r = claudeProfile(['use', to, d.instance], d.exec);
+    // For this coordinator's own instance: the helper takes it from sudo, never from here.
+    const r = claudeProfile(['use', to], d.exec);
     if (!r.ok) return emit({ stage: stage === 'asked' ? 'refused' : 'back-refused', from, to, reset_at: resetAt, detail: `couldn't start the switch: ${r.error}` });
     return stage;
   };
