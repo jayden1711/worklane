@@ -3,6 +3,7 @@ import { navigate } from '../App';
 import { ago, Card, Empty, LevelBadge, StatusBadge } from '../components/ui';
 import { DecisionCard } from './Decisions';
 import { Header } from '../components/Header';
+import { useArrivalOrder } from '../arrival-order';
 
 function TaskRow({ t, note }: { t: Task; note?: string }) {
   return (
@@ -18,7 +19,9 @@ function TaskRow({ t, note }: { t: Task; note?: string }) {
 }
 
 export function InboxPage({ state }: { state: State }) {
-  const { decisions, blocked, notify } = state.inbox;
+  const { blocked, notify } = state.inbox;
+  // A decision asked while the page is open goes below those shown, never above them (web/src/arrival-order.ts).
+  const decisions = useArrivalOrder(state.inbox.decisions);
   const empty = !decisions.length && !blocked.length && !notify.length;
   return (
     <div data-testid="page-inbox">
