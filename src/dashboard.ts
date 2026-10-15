@@ -46,7 +46,7 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerUid, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
@@ -877,6 +877,11 @@ function send(res: ServerResponse, status: number, headers: Record<string, strin
   res.end(body);
 }
 
+/** Whether a request's Host header names this loopback port (not a DNS name that was pointed at 127.0.0.1). */
+export function loopbackHostHeader(host: string | undefined, port: number | undefined): boolean {
+  return port !== undefined && [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes((host ?? '').toLowerCase());
+}
+
 /** GET: the key page's help (the key file's path and a copy command), loopback only, never the key. */
 export const KEY_HELP_PATH = '/api/key-help';
 
@@ -1132,10 +1137,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         return json(res, 200, { proof: dashboardProof(token, req.socket.localPort ?? 0, nonce) });
       }
       // The key page's help, before any key: where the key's file is and a command that copies it (#467), never the key.
-      // Only to a browser on this machine, not through a proxy or the hub, and on Linux only to this process's own user.
+      // Only to this OS user's own process on this machine (Linux and macOS check it; elsewhere loopback alone), never
+      // through a proxy or the hub, and only under a loopback Host, so a site the browser reached through DNS rebinding
+      // can't read it.
       if (url.pathname === KEY_HELP_PATH && req.method === 'GET') {
-        const peer = req.socket.remotePort !== undefined && req.socket.localPort !== undefined ? loopbackPeerUid(req.socket.remotePort, req.socket.localPort) : null;
-        if (!breakGlassAllowed(req) || (peer !== null && typeof process.getuid === 'function' && peer !== process.getuid())) return json(res, 404, { error: 'not here' });
+        const local = req.socket.localPort;
+        const me = req.socket.remotePort !== undefined && local !== undefined ? loopbackPeerIsMe(req.socket.remotePort, local) : false;
+        if (!breakGlassAllowed(req) || !loopbackHostHeader(req.headers.host, local) || me === false) return json(res, 404, { error: 'not here' });
         const file = join(opts.stateDir, 'dashboard-token');
         return json(res, 200, { file, copy: copyFileCommand(file) });
       }

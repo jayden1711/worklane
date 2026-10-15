@@ -270,6 +270,41 @@ export function loopbackPeerUid(clientPort: number, serverPort: number): number 
   return null;
 }
 
+/**
+ * Whether lsof's -Fn output lists the client end of this loopback connection (`<client> -> <server>`). WHY: run as a
+ * normal user, macOS's lsof lists only that user's own processes, so the client end is there only when the
+ * connecting process is this user's.
+ */
+export function lsofListsClient(out: string, clientPort: number, serverPort: number): boolean {
+  const ends = (h: string) => [`${h}:${clientPort}->${h}:${serverPort}`];
+  const want = new Set([...ends('127.0.0.1'), ...ends('[::1]')]);
+  return out.split('\n').some((l) => l.startsWith('n') && want.has(l.slice(1).trim()));
+}
+
+/**
+ * Whether the process at the other end of a loopback connection to us runs as this OS user: true or false where the
+ * OS can say (Linux: the kernel's socket table; macOS: lsof, which shows a normal user only their own processes),
+ * null where it can't (elsewhere, or as root on macOS, where lsof shows everyone).
+ */
+export function loopbackPeerIsMe(clientPort: number, serverPort: number, platform: NodeJS.Platform = process.platform): boolean | null {
+  if (platform === 'linux') {
+    const uid = loopbackPeerUid(clientPort, serverPort);
+    return uid !== null && typeof process.getuid === 'function' && uid === process.getuid();
+  }
+  if (platform === 'darwin') {
+    if (typeof process.getuid !== 'function' || process.getuid() === 0) return null;
+    try {
+      const out = execFileSync('/usr/sbin/lsof', ['-nP', '-a', `-iTCP@127.0.0.1:${serverPort}`, '-sTCP:ESTABLISHED', '-Fn'], { encoding: 'utf8', timeout: 3_000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return lsofListsClient(out, clientPort, serverPort);
+    } catch (e) {
+      // lsof exits 1 when it lists nothing: then no process of ours holds the client end.
+      const out = (e as { stdout?: unknown }).stdout;
+      return typeof out === 'string' ? lsofListsClient(out, clientPort, serverPort) : false;
+    }
+  }
+  return null;
+}
+
 /** The OS user this process runs as. */
 export function currentUser(): string {
   try {

@@ -8,9 +8,9 @@ import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
-import { KEY_HELP_PATH, startDashboard } from '../src/dashboard.js';
+import { KEY_HELP_PATH, loopbackHostHeader, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { copyFileCommand, shellQuote } from '../src/os/index.js';
+import { copyFileCommand, loopbackPeerIsMe, lsofListsClient, shellQuote } from '../src/os/index.js';
 import { exampleProject, exampleRoles } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -86,6 +86,12 @@ test("the key page's help: on this machine, with no key, the file and its copy c
     assert.equal(readFileSync(help.file, 'utf8').trim(), d.token, 'the file the key is in');
     if (help.copy !== null) assert.ok(help.copy.includes(shellQuote(help.file)) || help.copy.includes(`"${help.file}"`), help.copy);
     assert.ok(!r.body.includes(d.token), 'never the key');
+    // A page from another site whose name was pointed at 127.0.0.1 (DNS rebinding): its Host is that name. Nothing.
+    for (const host of [`evil.example:${port}`, 'localhost', `127.0.0.1:${port + 1}`]) {
+      const p = await get(port, KEY_HELP_PATH, { host });
+      assert.equal(p.status, 404, host);
+      assert.ok(!p.body.includes('dashboard-token'));
+    }
     // Through a proxy (tailscale serve, the hub): nothing, not even where it is.
     for (const h of [{ 'x-forwarded-for': '192.0.2.9' }, { forwarded: 'for=192.0.2.9' }]) {
       const p = await get(port, KEY_HELP_PATH, h);
@@ -95,4 +101,18 @@ test("the key page's help: on this machine, with no key, the file and its copy c
   } finally {
     await d.close();
   }
+});
+
+test('who may have the help: a loopback Host for this port; the connecting process is this OS user (Linux: the kernel; macOS: lsof)', () => {
+  for (const h of ['127.0.0.1:4317', 'localhost:4317', 'LOCALHOST:4317', '[::1]:4317']) assert.equal(loopbackHostHeader(h, 4317), true, h);
+  for (const h of [undefined, '', '127.0.0.1', '127.0.0.1:4318', 'evil.example:4317', '127.0.0.1.evil.example:4317', 'localhost.:4317']) assert.equal(loopbackHostHeader(h, 4317), false, String(h));
+  assert.equal(loopbackHostHeader('127.0.0.1:4317', undefined), false);
+  // lsof -Fn as a normal macOS user lists only that user's processes: the client end listed means the client is ours.
+  const out = 'p84222\nf13\nn127.0.0.1:60440->127.0.0.1:4317\nf14\nn127.0.0.1:4317->127.0.0.1:60440\n';
+  assert.equal(lsofListsClient(out, 60440, 4317), true);
+  assert.equal(lsofListsClient('p1\nf14\nn127.0.0.1:4317->127.0.0.1:60440\n', 60440, 4317), false, 'only our own (server) end: the client is someone else\'s');
+  assert.equal(lsofListsClient('', 60440, 4317), false);
+  assert.equal(lsofListsClient('p1\nn[::1]:60440->[::1]:4317\n', 60440, 4317), true);
+  assert.equal(lsofListsClient('p1\nn127.0.0.1:60441->127.0.0.1:4317\n', 60440, 4317), false, 'another connection');
+  assert.equal(loopbackPeerIsMe(1, 2, 'win32'), null, 'no check there: loopback alone');
 });
