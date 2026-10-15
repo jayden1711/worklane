@@ -13,7 +13,9 @@ export const REPLIER_ROLE = 'intake-replier';
 export const REPLIER_DENIED = ['Read', 'Glob', 'Grep', 'LS', 'Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'NotebookRead', 'Task', 'TodoWrite', 'WebSearch', 'WebFetch', 'mcp__*'] as const;
 export const REPLIER_SCHEMA = { type: 'object', additionalProperties: false, required: ['reply'], properties: { reply: { type: 'string' } } } as const;
 
-export type ReplyStage = 'filed' | 'merged' | 'deployed' | 'needs_info' | 'question';
+/** Every stage the engine can give the replier; it sends no other (the coordinator's fixed reply covers the rest). */
+export const REPLY_STAGES = ['filed', 'merged', 'deployed', 'needs_info', 'question'] as const;
+export type ReplyStage = (typeof REPLY_STAGES)[number];
 
 /** What the engine tells the replier, and all it knows besides the redacted message. */
 export interface ReplyFacts {
