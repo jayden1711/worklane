@@ -72,6 +72,9 @@ export const isOutside = (url: string): boolean => /^(?:https?|wss?):/i.test(url
  * `allow` for this test (one it answers itself with Fetch, say), fails the test, named.
  */
 export async function launchTestChrome(chrome: string, o: Parameters<typeof launchChrome>[1] & { allow?: RegExp[] } = {}): Promise<Browser> {
+  // INVARIANT: never two test Chromes at once across files (CHROME_LOCK): refused here, at run time, not only by the
+  // static scan in test/real-chrome-lock.test.ts.
+  if (chromeLocksHeld === 0) throw new Error('launchTestChrome without the real-Chrome lock: start the test with `await oneChromeAtATime(ctx);`');
   const { allow = [], ...launch } = o;
   const b = await launchChrome(chrome, { ...launch, extraArgs: [...OFFLINE_CHROME_ARGS, ...(launch.extraArgs ?? [])] });
   const known = [...KNOWN_OUTSIDE, ...allow];
@@ -201,14 +204,20 @@ function clearStale(lock: string): boolean {
 }
 
 /** Wait for the real-Chrome lock and take it; the returned function gives it back. */
+/** How many takes of the real CHROME_LOCK this process holds now (launchTestChrome refuses at 0). */
+let chromeLocksHeld = 0;
+
 export async function takeChromeLock(lock = CHROME_LOCK): Promise<() => void> {
   const mine = String(process.pid);
   for (;;) {
     if (tryTake(lock, mine)) {
       let held = true;
+      const real = lock === CHROME_LOCK;
+      if (real) chromeLocksHeld++;
       return () => {
         if (!held) return;
         held = false;
+        if (real) chromeLocksHeld--;
         if (readLock(lock) === mine) rmSync(lock, { force: true });
       };
     }
