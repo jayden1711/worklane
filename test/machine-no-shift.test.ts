@@ -10,12 +10,12 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { findChrome, launchChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { ALLOWED_SIGNERS } from '../src/updater-setup.js';
-import { REAL_CHROME_TIMEOUT, STEADY_PX, oneChromeAtATime, pressSteady, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, STEADY_PX, webUiSkip } from './browser-helpers.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile } from './helpers.js';
 
 realChromeTests();
@@ -65,7 +65,7 @@ for (const held of LATE) {
       const slotsDir = join(dir, 'slots');
       mkdirSync(slotsDir, { recursive: true });
       const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir, machine: { updatesConfigPath, signersPath: join(dir, 'allowed_signers'), pendingSignersPath: join(dir, 'pending-signers.json'), changesPath: join(dir, 'changes.jsonl'), updatesLogPath: join(dir, 'updates.jsonl') }, machineOwnersFile: machineOwnersFile('example-owner') });
-      const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+      const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
       try {
         const cdp = b.cdp;
         await cdp.send('Page.enable');

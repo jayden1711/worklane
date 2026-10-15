@@ -10,13 +10,13 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { findChrome, launchChrome, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { TailscaleStatus } from '../src/tailscale-setup.js';
 import { ALLOWED_SIGNERS } from '../src/updater-setup.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, pressSteady, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
 
 test('the machine settings are never keyed on their data: new data is new props, and each input follows what is set until the owner types', () => {
@@ -112,7 +112,7 @@ test(
     const slotsDir = join(dir, 'slots');
     mkdirSync(slotsDir, { recursive: true });
     const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir, machine: { updatesConfigPath, signersPath: join(dir, 'allowed_signers'), pendingSignersPath: join(dir, 'pending-signers.json'), changesPath, updatesLogPath: join(dir, 'updates.jsonl') }, machineOwnersFile: machineOwnersFile('example-owner') });
-    const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');
@@ -167,7 +167,7 @@ test(
     const tsDir = mkdtempSync(join(tmpdir(), 'tailscale-dir-'));
     const status: TailscaleStatus = { installed: true, version: '1.104.1', pinnedVersion: '1.104.1', state: 'NeedsLogin', name: null, https: false, serve: false, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test' };
     const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), instance: 'alpha', machineOwnersFile: machineOwnersFile('example-owner'), tailscaleDir: tsDir, tailscaleStatus: async () => status });
-    const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');

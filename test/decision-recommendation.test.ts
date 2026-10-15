@@ -6,14 +6,14 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { findChrome, launchChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { RECOMMENDATION_PREFIX, settleRecommendation } from '../src/decision-ask.js';
 import { seedDemo } from '../src/demo.js';
 import { EventLog } from '../src/events/log.js';
 import { INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, WORKER_SCHEMA } from '../src/roles.js';
-import { REAL_CHROME_TIMEOUT, STEADY_PX, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, STEADY_PX, webUiSkip } from './browser-helpers.js';
 import { exampleRoles, repoRoot } from './helpers.js';
 
 /** A long prose recommendation, as an older engine stored it (the one seen cut at "reconcile.js:472 (pin"). */
@@ -69,7 +69,7 @@ test(
     log.append('decision.asked', { id: 'd-option', kind: 'question', issue: null, owner: 'example-owner', question: 'Which export format?', options: ['csv', 'json'], recommendation: 'csv', receipts: [] }, 'coordinator');
     log.close();
     const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'rec-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'rec-slots-')) });
-    const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+    const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');
@@ -170,7 +170,7 @@ for (const outcome of ['fails', 'is taller than wide'] as const) {
       log.append('decision.asked', { id: 'd-old-prose', kind: 'question', issue: null, owner: 'example-owner', question: 'How should this proceed?', options: ['approve-fix', 'investigate-more', 'close'], recommendation: LONG_PROSE, receipts: ['confidence high'] }, 'coordinator');
       log.close();
       const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'rec-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'rec-slots-')) });
-      const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+      const b = await launchTestChrome(chrome!, { width: 1280, height: 1000 });
       try {
         const cdp = b.cdp;
         await cdp.send('Page.enable');
@@ -237,7 +237,7 @@ test(
   { timeout: REAL_CHROME_TIMEOUT, skip: (!chrome && 'no Chrome or Chromium') || (process.platform === 'win32' && 'checked on macOS and Linux') },
   async (ctx) => {
     await oneChromeAtATime(ctx);
-    const b = await launchChrome(chrome!, { width: 800, height: 600 });
+    const b = await launchTestChrome(chrome!, { width: 800, height: 600 });
     try {
       const cdp = b.cdp;
       await cdp.send('Page.enable');

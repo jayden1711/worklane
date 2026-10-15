@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { BRAND } from '../src/brand.js';
-import { liveProcesses, type Cdp } from '../src/browser/cdp.js';
+import { launchChrome, liveProcesses, type Browser, type Cdp } from '../src/browser/cdp.js';
+import { isLocal } from '../src/browser/run.js';
 
 /** Per real-Chrome test: room for scaled launches, a retry and teardown on a loaded runner. */
 export const REAL_CHROME_TIMEOUT = 300_000;
@@ -29,12 +30,62 @@ export async function unscaled<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Scale the browser's timeouts (unless the environment already does), and fail any test that leaks a process. */
+/**
+ * Scale the browser's timeouts (unless the environment already does), and fail any test that leaks a process, or
+ * whose pages asked for anything outside this machine (launchTestChrome), naming each URL.
+ */
 export function realChromeTests(): void {
   process.env[SCALE] ??= '3';
   afterEach(() => {
     assert.deepEqual(liveProcesses(), [], 'a browser or app process outlived its test');
+    const asked = outsideRequests.splice(0);
+    assert.deepEqual(asked, [], 'a page asked for a host outside this machine (no live outside calls from tests, #462)');
   });
+}
+
+/**
+ * WHY: a real-Chrome test that reaches the internet depends on its answer (a 404, a redirect, a timeout, a rate
+ * limit), which moves layouts and timings (#452's flake: avatars from github.com). In a test's Chrome no host resolves
+ * but loopback (localhost, 127.0.0.1, ::1), so an outside request fails at once, the same way every run.
+ */
+// MAP * covers IP literals too, so each loopback form is excluded by name (::1 without brackets; with them it isn't).
+export const OFFLINE_CHROME_ARGS = ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE localhost, EXCLUDE 127.0.0.1, EXCLUDE ::1'];
+
+/**
+ * Outside URLs a page may still ask for (they fail at once, never reaching the network) until the product stops
+ * asking: a person's GitHub picture, until the dashboard serves them from its own origin (#462, option B).
+ */
+export const KNOWN_OUTSIDE: RegExp[] = [/^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\.png(?:\?[^#]*)?$/];
+
+/** Outside URLs pages asked for since the last test ended; realChromeTests' afterEach fails on any. */
+const outsideRequests: string[] = [];
+
+/** The outside URLs asked for so far, emptied: for the test that checks this guard itself. */
+export const takeOutsideRequests = (): string[] => outsideRequests.splice(0);
+
+/** Whether a page's request goes outside this machine: http(s) or ws(s) to any host but loopback. */
+export const isOutside = (url: string): boolean => /^(?:https?|wss?):/i.test(url) && !isLocal(url);
+
+/**
+ * The only way a test starts a real Chrome (test/offline-chrome.test.ts keeps it so): launchChrome with no host but
+ * localhost resolving, and every request its page makes watched. One outside the machine that isn't KNOWN_OUTSIDE, or
+ * `allow` for this test (one it answers itself with Fetch, say), fails the test, named.
+ */
+export async function launchTestChrome(chrome: string, o: Parameters<typeof launchChrome>[1] & { allow?: RegExp[] } = {}): Promise<Browser> {
+  const { allow = [], ...launch } = o;
+  const b = await launchChrome(chrome, { ...launch, extraArgs: [...OFFLINE_CHROME_ARGS, ...(launch.extraArgs ?? [])] });
+  const known = [...KNOWN_OUTSIDE, ...allow];
+  b.cdp.on('Network.requestWillBeSent', (p) => {
+    const url = String((p.request as { url?: unknown } | undefined)?.url ?? '');
+    if (isOutside(url) && !known.some((r) => r.test(url))) outsideRequests.push(url);
+  });
+  try {
+    await b.cdp.send('Network.enable');
+  } catch (e) {
+    await b.close();
+    throw e;
+  }
+  return b;
 }
 
 /**
