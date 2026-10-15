@@ -49,11 +49,29 @@ test("budget: refused at or over the conversation's cap; an answer's cap is the 
     return x.ok ? x.maxBudgetUsd : null;
   };
   assert.deepEqual([r(0, 10), r(2.5, 10), r(0, 0.4)], [2, 0.5, 0.4]);
-  // What a conversation spent: its own chat answers; main's one conversation, today's only.
+  // What a conversation spent: its own chat answers; main's one conversation, today's only (a minute before now and two
+  // days before: the same and another day in any time zone).
   const now = new Date('2026-10-15T12:00:00Z');
   const cost = (ts: string, p: object) => ({ ts, payload: { role: 'chat', usd: 1, ...p } });
-  const costs = [cost('2026-10-15T01:00:00Z', { conversation: 'c1' }), cost('2026-10-01T01:00:00Z', { conversation: 'c1' }), cost('2026-10-15T01:00:00Z', { conversation: 'c2' }), cost('2026-10-15T01:00:00Z', { conversation: 'c1', role: 'worker' }), cost('2026-10-15T02:00:00Z', { conversation: MAIN_CONVERSATION }), cost('2026-10-14T02:00:00Z', { conversation: MAIN_CONVERSATION })];
+  const costs = [cost('2026-10-15T01:00:00Z', { conversation: 'c1' }), cost('2026-10-01T01:00:00Z', { conversation: 'c1' }), cost('2026-10-15T01:00:00Z', { conversation: 'c2' }), cost('2026-10-15T01:00:00Z', { conversation: 'c1', role: 'worker' }), cost('2026-10-15T11:59:00Z', { conversation: MAIN_CONVERSATION }), cost('2026-10-13T12:00:00Z', { conversation: MAIN_CONVERSATION })];
   assert.deepEqual([conversationSpentUsd(costs, 'c1', now), conversationSpentUsd(costs, MAIN_CONVERSATION, now)], [2, 1]);
+});
+
+test("main's conversation resets on the local day, not the UTC one: just after local midnight, yesterday's local spend no longer counts", () => {
+  const tz = process.env.TZ;
+  // WHY: Tokyo (UTC+9, no DST): at 00:30 local on the 16th it is still the 15th in UTC.
+  process.env.TZ = 'Asia/Tokyo';
+  try {
+    const now = new Date('2026-10-15T15:30:00Z');
+    const costs = [
+      { ts: '2026-10-15T15:10:00Z', payload: { role: 'chat', usd: 1, conversation: MAIN_CONVERSATION } }, // 00:10 on the 16th, local
+      { ts: '2026-10-15T14:50:00Z', payload: { role: 'chat', usd: 2, conversation: MAIN_CONVERSATION } }, // 23:50 on the 15th, local
+    ];
+    assert.equal(conversationSpentUsd(costs, MAIN_CONVERSATION, now), 1);
+  } finally {
+    if (tz === undefined) delete process.env.TZ;
+    else process.env.TZ = tz;
+  }
 });
 
 test('default: routing.chat, else chief_of_staff.model; routing.chat may not be an open model, and only chief_of_staff has a conversation cap', () => {

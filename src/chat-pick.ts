@@ -12,6 +12,7 @@
 //   role's per-answer cap, what's left of the conversation's, and what's left of the day's budget.
 // Nobody sets the cap from the dashboard: it is config only.
 import type { Config } from './config/load.js';
+import { localDay } from './local-day.js';
 import { MODEL_TIERS, tierOf } from './model-routing.js';
 import { providerOf } from './providers.js';
 import { effectiveRouting, route } from './routing.js';
@@ -82,14 +83,15 @@ export function conversationCapUsd(agents: Agents): number {
 
 /**
  * What a conversation has spent, from the run.cost events of its chat answers. Main's single conversation never
- * ends, so its window is the day (UTC, like the daily budget): otherwise its cap would close main's chat for good.
+ * ends, so its window is the machine's local day (localDay; owner, 2026-10-15: budgets follow the local day):
+ * otherwise its cap would close main's chat for good.
  */
 export function conversationSpentUsd(costs: { ts: string; payload: unknown }[], conversation: string, now = new Date()): number {
-  const day = now.toISOString().slice(0, 10);
+  const day = localDay(now);
   return costs.reduce((s, e) => {
     const p = e.payload as { role?: unknown; conversation?: unknown; usd?: unknown };
     if (p.role !== 'chat' || p.conversation !== conversation || typeof p.usd !== 'number') return s;
-    if (conversation === MAIN_CONVERSATION && !e.ts.startsWith(day)) return s;
+    if (conversation === MAIN_CONVERSATION && localDay(e.ts) !== day) return s;
     return s + p.usd;
   }, 0);
 }

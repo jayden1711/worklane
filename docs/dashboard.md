@@ -617,7 +617,7 @@ viewer never sees the picker, and the server refuses a viewer's pick (403). Code
   $5); it is config only, never set from the dashboard. Before each answer the coordinator checks it: at or over it,
   the question is refused. The answer's own cap is the least of `roles.chief_of_staff.budget_usd` (default $1),
   what's left of the conversation's cap and what's left of the day's budget. The chat has one conversation per
-  instance for now, counted over the day (UTC, like the daily budget).
+  instance for now, counted over the machine's local day.
 - **Cost:** each answer shows its estimated cost, the model it ran on, and the conversation's spend against its cap.
   Each answer's `run.cost` event carries its conversation.
 - **API:** `GET /api/chat/options` (what this person may pick: models, efforts, the default, the cap) and
