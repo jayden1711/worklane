@@ -40,3 +40,5 @@ scripts/ci/runner-stand-in/job.sh 100.100.100.100
 scripts/ci/runner-stand-in/job.sh 10.0.2.2
 .github/workflows/ci-runner-setup.yml 10.255.255.1
 .github/workflows/ci-runner-setup.yml 100.100.100.100
+# The self-hosted runner's label in this repo's own slow CI (docs/ci-runners.md).
+.github/workflows/ci-slow.yml nuc
