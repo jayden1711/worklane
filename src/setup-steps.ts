@@ -155,13 +155,13 @@ export type Fix =
   /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
   | { kind: 'signin'; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
   | { kind: 'gh-login'; label: string; command: string }
   /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
   | { kind: 'discord'; label: string };
 
-export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service';
+export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service' | 'first-task';
 
 export interface GroupDef {
   id: GroupId;
@@ -187,6 +187,8 @@ export const GROUPS: readonly GroupDef[] = [
   { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
   { id: 'extras', title: 'Extras', optional: true, modes: MODES, walked: false },
   { id: 'service', title: 'Start', optional: false, modes: ['local'], walked: false },
+  // WHY (#468): after Start, how to give the harness work; local mode only for now (the owner, 2026-10-15).
+  { id: 'first-task', title: 'Your first task', optional: false, modes: ['local'], walked: false },
 ];
 
 /** How many installs reach a step (the audit's estimate from where it sits on the path, not usage data). */
@@ -993,6 +995,37 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const l = k.p.linger();
       if (l === null) return null;
       return l ? ok('linger is on: the service outlives your login') : no('linger is off: the coordinator stops when you log out');
+    },
+  },
+  // Your first task (local): one issue the coordinator will take, filed from the page or by hand.
+  {
+    id: 'first-task',
+    group: 'first-task',
+    rows: [20],
+    title: 'An issue ready for the harness',
+    modes: ['local'],
+    optional: false,
+    reach: 'all',
+    today: 'Open an issue whose body has a fenced ```done_when block (a test or a command that passes when it is done), and add the ready label.',
+    fix: { kind: 'form', form: 'first-task', label: 'File one' },
+    automation: 'gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>',
+    network: true,
+    detect: (k) => {
+      const cfg = k.cfg();
+      if (isErr(cfg)) return no('no valid config yet');
+      if (cfg.project.backlog === 'file') {
+        try {
+          const j = JSON.parse(readFileSync(join(k.c.stateDir, 'backlog.json'), 'utf8')) as { issues?: { labels?: string[]; pr?: unknown }[] };
+          const n = (j.issues ?? []).filter((i) => !i.pr && i.labels?.includes('ready')).length;
+          return n ? ok(`${n} issue${n === 1 ? '' : 's'} labelled ready`) : no('no issue is labelled ready yet');
+        } catch {
+          return no('no issue is labelled ready yet');
+        }
+      }
+      if (!k.c.repo || !k.p.which('gh')) return no("can't ask GitHub: no GitHub origin or no gh");
+      const r = k.p.run('gh', ['api', `repos/${k.c.repo}/issues?labels=ready&state=all&per_page=1`, '--jq', 'length']);
+      if (r.status !== 0) return no(`couldn't ask GitHub: ${firstLine(r.stderr)}`);
+      return Number(r.stdout.trim()) > 0 ? ok('an issue is labelled ready: the coordinator picks it up when it runs') : no('no issue is labelled ready yet: the coordinator has nothing to work on');
     },
   },
 ];

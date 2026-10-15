@@ -38,6 +38,7 @@ import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
+import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
@@ -1018,6 +1019,29 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(cfg), actionDeps());
   const setupRun = (): SetupRun => opts.setupMode?.run ?? ((cmd, args, o) => systemProbe().run(cmd, args, o));
   const draft = newDraftJob();
+  /**
+   * WHY (#468): the Issues page's "not picked up" list: ONE read of the open issues (Backlog.openIssues), kept two
+   * minutes for everyone (GitHub's rate limit is shared with the coordinator), with the reasons from the events.
+   */
+  let ignoredCache: { at: number; issues: IgnoredIssue[]; error: string | null } | null = null;
+  const ignoredNow = async (): Promise<{ at: number; issues: IgnoredIssue[]; error: string | null }> => {
+    if (ignoredCache && Date.now() - ignoredCache.at < 120_000) return ignoredCache;
+    const b = opts.backlog?.();
+    if (!b?.openIssues) return (ignoredCache = { at: Date.now(), issues: [], error: 'this dashboard has no backlog to list issues from' });
+    try {
+      const open = await b.openIssues();
+      ignoredCache = { at: Date.now(), issues: ignoredIssues(open, eventCache.all(), { repo }), error: null };
+    } catch (e) {
+      ignoredCache = { at: Date.now(), issues: ignoredCache?.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` };
+    }
+    return ignoredCache;
+  };
+  /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
+  const testFiles = (): string[] => {
+    const r = spawnSync('git', ['ls-files'], { cwd: opts.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    if (r.status !== 0) return [];
+    return r.stdout.split('\n').filter((f) => /(^|\/)(tests?|__tests__|spec)\/.+\.[a-z]+$|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$|(^|\/)test_[^/]+\.py$/.test(f)).slice(0, 300);
+  };
   const readSkips = (): string[] => {
     try {
       const j = JSON.parse(readFileSync(join(opts.stateDir, SKIPS_FILE), 'utf8')) as { skipped?: unknown };
@@ -1295,6 +1319,56 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
           return json(res, 200, runsForIssue(opts.stateDir, issue));
+        }
+        // WHY (#468): "Your first task": the form's picks (the repo's test files) and the template; and the form's issue,
+        // built and checked with the coordinator's own parser, then (confirmed) filed with `ready`. A checkout's only:
+        // on a server an issue filed here would be the App's, which the coordinator doesn't take as a writer's.
+        if (url.pathname === '/api/first-run/first-task') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('your first task is', who) });
+          const why = "on a server an issue filed from this page would be its GitHub App's, which the coordinator doesn't count as a writer's: file it on GitHub with the template, and add ready";
+          if (req.method === 'GET') return json(res, 200, { local: !opts.instance, why: opts.instance ? why : null, template: FIRST_TASK_TEMPLATE, tests: opts.instance ? [] : testFiles(), runner: opts.cfg.tests.runner });
+          if (req.method !== 'POST') return json(res, 405, { error: 'GET or POST' });
+          const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown };
+          const refused = (status: number, error: string) => {
+            audit(who, 'first_run.first_task_refused', { why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (opts.instance) return refused(400, `not from here: ${why}`);
+          if (!opts.backlog) return refused(400, 'this dashboard has no backlog to file to');
+          let issue: { title: string; body: string };
+          try {
+            issue = firstTaskBody((body.values && typeof body.values === 'object' ? body.values : {}) as Record<string, unknown>);
+          } catch (e) {
+            if (e instanceof FirstTaskError) return refused(400, e.message);
+            throw e;
+          }
+          if (body.confirm !== true) return json(res, 200, { ok: true, ...issue, label: 'ready', confirmed: false });
+          const b = opts.backlog();
+          const created = await b.ensureLabels([READY_LABEL]);
+          const number = await b.createIssue(issue.title, issue.body, ['ready']);
+          setupCache.delete('first-task');
+          ignoredCache = null;
+          audit(who, 'first_run.first_task_filed', { issue: number, label_created: created.includes('ready') });
+          return json(res, 200, { ok: true, number, url: opts.cfg.project.backlog === 'github' ? `https://github.com/${repo}/issues/${number}` : null, labelCreated: created.includes('ready'), confirmed: true });
+        }
+        // WHY (#468): why each open issue isn't being worked on (anyone may read it; the fix is a writer's, locally).
+        if (url.pathname === '/api/issues/ignored' && req.method === 'GET') {
+          const v = await ignoredNow();
+          return json(res, 200, { ...v, canFix: isWriter(who.role) && !opts.instance, local: !opts.instance });
+        }
+        const readyFix = url.pathname.match(/^\/api\/issues\/(\d+)\/ready$/);
+        if (readyFix && req.method === 'POST') {
+          const n = Number(readyFix[1]);
+          if (!isWriter(who.role)) return json(res, 403, { error: `only the project's writers may mark an issue ready; @${who.login} is a ${who.role}` });
+          // On a server the label would be added by the App, which the coordinator doesn't count as a writer's.
+          if (opts.instance) return json(res, 400, { error: "on a server, add ready on GitHub: added from here it would be the App's, which the coordinator doesn't count as a writer's" });
+          if (!opts.backlog) return json(res, 400, { error: 'this dashboard has no backlog' });
+          const b = opts.backlog();
+          await b.ensureLabels([READY_LABEL]);
+          await b.addLabels(n, ['ready']);
+          ignoredCache = null;
+          audit(who, 'issue.ready_added', { issue: n });
+          return json(res, 200, { ok: true, issue: n });
         }
         // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
         // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.

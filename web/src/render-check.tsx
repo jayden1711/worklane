@@ -38,6 +38,7 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { FirstTaskForm, IgnoredIssues } from './components/FirstTask';
 import { RepoConfigForm } from './components/RepoConfigForm';
 import type { StarterCi as StarterCiView } from './api';
 import { StarterCi } from './components/StarterCi';
@@ -209,6 +210,9 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     </NavMenu.Provider>,
   );
 };
+/** #468: Your first task's form (its picks loaded, a preview shown), and the Issues page's "Not picked up". */
+export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?: { title: string; body: string } } = {}) => renderToStaticMarkup(<FirstTaskForm canEdit={o.canEdit ?? true} initial={info as never} initialPreview={o.preview ?? null} onDone={() => {}} />);
+export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIssues initial={data as never} />);
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 

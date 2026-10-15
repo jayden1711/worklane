@@ -1121,6 +1121,34 @@ export interface ConfigChange {
   to: unknown;
 }
 /** The checks GitHub ran on the default branch's tip (the required-checks picker's suggestions). */
+/** #468: the first-task form's picks (the repo's test files) and the template; `local` false on a server, with why. */
+export interface FirstTaskInfo {
+  local: boolean;
+  why: string | null;
+  template: { label: string; body: string };
+  tests: string[];
+}
+export type DoneWhenPick = { test: string } | { command: string; expect?: string };
+export interface FirstTaskValues {
+  title: string;
+  outcome: string;
+  done_when: DoneWhenPick[];
+  context?: string;
+}
+export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task');
+/** confirm false: the issue as it would be filed (checked with the coordinator's parser); true: filed, with `ready`. */
+export const fileFirstTask = (values: FirstTaskValues, confirm: boolean) => api<{ ok: boolean; title: string; body: string; number?: number; url?: string | null; labelCreated?: boolean; confirmed: boolean }>('/api/first-run/first-task', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/** #468: each open issue the harness isn't working on, and why. */
+export interface IgnoredIssue {
+  issue: number;
+  title: string;
+  url: string;
+  author: string;
+  labels: string[];
+  reasons: { kind: 'no-ready' | 'contract' | 'not-writer' | 'waiting' | 'blocked' | 'held'; text: string; fix: 'add-ready' | 'edit' | null }[];
+}
+export const getIgnored = () => api<{ at: number; issues: IgnoredIssue[]; error: string | null; canFix: boolean; local: boolean }>('/api/issues/ignored');
+export const addReady = (issue: number) => api<{ ok: boolean }>(`/api/issues/${issue}/ready`, { method: 'POST', body: '{}' });
 export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
 /** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
 export interface StarterCi {
@@ -1183,7 +1211,7 @@ export type SetupFix =
   | { kind: 'start' }
   | { kind: 'action'; action: string; label: string }
   | { kind: 'signin'; label: string }
-  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config'; label: string }
+  | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
   | { kind: 'discord'; label: string };
 export interface SetupStepView {

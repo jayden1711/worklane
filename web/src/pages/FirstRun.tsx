@@ -15,6 +15,7 @@ import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { StarterCi } from '../components/StarterCi';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
+import { FirstTaskForm } from '../components/FirstTask';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
 export const POLL_MS = 15_000;
@@ -534,6 +535,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
+                    ) : s.fix.kind === 'form' && s.fix.form === 'first-task' ? (
+                      <FirstTaskForm canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-config' && f.setupMode ? (
                       <SetupAutoConfig a={f.autoConfig} draft={f.draft} canEdit={!!f.canAct} onDone={() => onRecheck?.()} initialConfirming={initialDraftConfirming} />
                     ) : s.id === 'required-checks' && !s.done && !f.repoConfig && !f.setupMode ? (
@@ -552,6 +555,12 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           </Card>
         </section>
       ))}
+      {/* #468: the first-task form is a checkout's only for now (the owner, 2026-10-15); on a server, why, in one line. */}
+      {f.mode === 'server' && (
+        <p className="text-[12.5px] text-ink-2" data-testid="first-run-first-task-server">
+          Your first task: open an issue on GitHub with a ```done_when block and the ready label. There is no form for it on a server: an issue filed from this page would be the App's, which the coordinator doesn't count as a writer's.
+        </p>
+      )}
       <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} />
       {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
       {!f.recorded && (
