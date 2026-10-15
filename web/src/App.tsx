@@ -461,7 +461,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
           <SidebarBody {...sidebar} />
         </NavDrawer>
         <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
-        {state && <ChatPanel cli={state.brand.cli} role={state.role} />}
+        {state && <ChatPanel cli={state.brand.cli} role={state.role} user={state.user} />}
         {state && <WakeWord role={state.role} brand={state.brand.name} />}
         {state && <VoiceControl state={state} prefs={voice} />}
       </div>
