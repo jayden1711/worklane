@@ -2160,21 +2160,6 @@ jobs:
           grep -q "^no URL to open yet: the sign-in App is made through the hub's setup mode, which needs this machine's https origin" "$F/server-install.log"
           if tail -n 1 "$F/server-install.log" | grep -qE '^https?://'; then echo "a URL was printed with nothing to open" >&2; exit 1; fi
           if systemctl is-active -q worklane-dashboard-hub-setup.service; then echo "setup mode started with no origin to reach it" >&2; exit 1; fi
-          # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token).
-          # tools.sh linked /usr/local/bin/claude to the real CLI in node's prefix: the link goes first (install would
-          # write through it), and the real one in node's prefix becomes the stand-in too, so no PATH reaches Anthropic.
-          sudo rm -f /usr/local/bin/claude
-          sudo install -m 0755 scripts/ci/claude-stand-in.cjs /usr/local/bin/claude
-          # Every other claude root or the agent user could reach (node's prefix, anything else on their PATH) is the stand-in too.
-          for c in /opt/node-*/bin/claude $(sudo sh -c 'which -a claude' 2>/dev/null) $(cd / && sudo -H -u wl-ci-agent sh -c 'which -a claude' 2>/dev/null); do
-            if [ "$c" != /usr/local/bin/claude ] && { [ -e "$c" ] || [ -L "$c" ]; }; then echo "the stand-in also at $c (was $(readlink -f "$c"))"; sudo ln -sfn /usr/local/bin/claude "$c"; fi
-          done
-          # #463: the login's proof (one real call) must reach the stand-in, never the real CLI, which refuses a random token.
-          # --version tells them apart (the stand-in answers only auth status and the proof, so it names itself here).
-          for u in root wl-ci-agent; do
-            v="$(cd / && sudo -H -u "$u" timeout 60 claude --version 2>&1 || true)"
-            case "$v" in *"claude stand-in"*) ;; *) echo "as $u, the real claude answers: $v" >&2; sudo -H -u "$u" sh -c 'echo "PATH=$PATH"; which -a claude' >&2; exit 1 ;; esac
-          done
       - name: "server mode: a fake GitHub with the repo (examples/basic) behind the App's token, reached through the loopback stand-in"
         run: |
           f="$RUNNER_TEMP/fake" && mkdir -p "$f/git/example"
@@ -2253,12 +2238,18 @@ jobs:
           d="$(getent passwd wl-dash | cut -d: -f6)/.config/dashboard-signin"
           for x in client-secret session-secret client-id public-url; do [ "$(sudo stat -c '%U %a' "$d/$x")" = "wl-dash 400" ]; done
           (umask 077; sudo cat "$d/client-secret" > "$F/client-secret")
+      # Anthropic's sign-in stays outside: the stand-in claude (signed in when a user's login holds a setup token), pinned
+      # here, after the last bootstrap that runs tools.sh (which links /usr/local/bin/claude to the real CLI again). The
+      # real CLI refuses CI's random token on the login's proof (#463). Every later step that relies on it checks it first.
+      - name: "server: the stand-in claude, pinned after the last tools.sh, for root and the agent user"
+        run: bash scripts/ci/claude-stand-in-pin.sh pin wl-ci-agent
       # Screens 5 and 2 (server): the machine's first project. add-project.sh as root (the Setup console's Add project
       # needs a running coordinator to run it, and a fresh machine has none): the agents' App through the manifest flow,
       # approved by the machine owner's browser (scripts/ci/manifest-browser.mjs) on a hub stand-in, since the real hub
       # signs people in at github.com only; the Claude token pasted on stdin.
       - name: "server, screens 5 and 2: the first project: the agents' App through the manifest flow, the Claude token, the checkout, the services"
         run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
           t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token"); unset t
           dd=/etc/systemd/system/worklane-dashboard-hub.service.d
           printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/node /opt/worklane/current/scripts/ci/hub-stand-in.mjs /opt/worklane/current/dist %s https://hub.example.test\n' "$GH_FAKE" | sudo tee "$dd/stand-in.conf" >/dev/null
@@ -2283,6 +2274,7 @@ jobs:
       # (tailscale serve's stand-in goes), and the same command must then print the break-glass URL, which the walk opens.
       - name: "server mode: the install command again: the hub's wizard at its https origin; with the origin gone, the break-glass, which the walk uses"
         run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
           boot() { sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash "$BOOT/scripts/bootstrap.sh" --hardened --after-credentials --yes ci example/alpha > "$F/$1" 2>&1 || { cat "$F/$1"; exit 1; }; tail -n 12 "$F/$1"; }
           one_url() { closing="$(awk '/^== /{b=""} {b=b $0 "\n"} END{printf "%s", b}' "$F/$1")"; [ "$(grep -c '://' <<< "$closing")" = 1 ]; }
           boot server-install2.log
@@ -2299,7 +2291,9 @@ jobs:
           [ "$u" = http://127.0.0.1:4398/first-run ]
           echo "SERVER_URL=$u" >> "$GITHUB_ENV"
       - name: "server mode, in the browser through the hub: Claude, Protect, the policy, Discord skipped, Tailscale, the updater, every automation line, rerun from Settings, the project's dashboard (screens 2, 6-9, 11)"
-        run: node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
+        run: |
+          bash scripts/ci/claude-stand-in-pin.sh check wl-ci-agent
+          node scripts/ci/wizard-e2e.mjs server "$GITHUB_WORKSPACE/dist" "$SERVER_URL" "$F/hub-key" "$F/browser" ci | tee "$F/walk-server.jsonl"
       - name: "the first project's dashboard: the hub lists it, reachable, the coordinator running"
         run: |
           (umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$F/hub-key")" > "$F/hub-auth")
