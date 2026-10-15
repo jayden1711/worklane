@@ -163,9 +163,10 @@ test("a turn runs nothing when its conversation is gone, isn't the asker's, or t
 test('a conversation turn cut off by a restart is refused once, never run again; one still queued is left to run', () => {
   const s = base();
   const c = createConversation({ stateDir: s.stateDir, by: owner, sharer: everyone });
-  const taken = askInConversation({ stateDir: s.stateDir, id: c.id, by: owner, caps, text: 'first' });
+  // WHY explicit times: two asks in the same millisecond would order by their random id suffix.
+  const taken = askInConversation({ stateDir: s.stateDir, id: c.id, by: owner, caps, text: 'first', now: new Date(Date.UTC(2026, 9, 14, 10)) });
   takeChatRequests(s.stateDir);
-  const queued = askInConversation({ stateDir: s.stateDir, id: c.id, by: owner, caps, text: 'second' });
+  const queued = askInConversation({ stateDir: s.stateDir, id: c.id, by: owner, caps, text: 'second', now: new Date(Date.UTC(2026, 9, 14, 11)) });
   assert.deepEqual(refuseInterruptedTurns(s.stateDir), [taken.id]);
   assert.deepEqual(conversationTurns(s.stateDir, c.id).map((t) => [t.id, t.state]), [[taken.id, 'refused'], [queued.id, 'pending']]);
 });
