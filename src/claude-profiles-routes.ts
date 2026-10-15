@@ -12,7 +12,7 @@
 import type { IncomingMessage } from 'node:http';
 import { rmSync } from 'node:fs';
 import { ClaudeTokenError } from './claude-account.js';
-import { PROFILE_NAME, requestFailoverSetting, requestProfileOp, storeProfileToken } from './claude-profiles.js';
+import { PROFILE_NAME, requestFailoverSetting, requestProfileOp, storeLoginCode, storeProfileToken } from './claude-profiles.js';
 import type { Role } from './console/asks.js';
 import { AskError } from './console/asks.js';
 import { readSecretBody } from './console/secrets.js';
@@ -22,7 +22,9 @@ import type { MachineRequester } from './machine-owners.js';
 
 export const PROFILE_ADD_PATH = '/api/claude-account/profile-add';
 export const PROFILE_PATH = '/api/machine/claude-profile';
-export const isProfileRoute = (path: string) => path === PROFILE_ADD_PATH || path === PROFILE_PATH;
+/** The one-time code for a relayed sign-in (claude-account.sh login), in a JSON body: {"value": "<code>"}. */
+export const LOGIN_CODE_PATH = '/api/claude-account/login-code';
+export const isProfileRoute = (path: string) => path === PROFILE_ADD_PATH || path === PROFILE_PATH || path === LOGIN_CODE_PATH;
 
 /** A person the dashboard identified. */
 export interface ProfileWho {
@@ -84,6 +86,23 @@ export async function handleProfileRoute(req: IncomingMessage, url: URL, who: Pr
     d.audit(who, 'machine.claude_profile', { action: r.args[1], profile: r.args[2], instance: r.args[3] ?? null, request: r.id });
     return { status: 200, body: { ok: true, pending: true, request: r } };
   };
+  if (url.pathname === LOGIN_CODE_PATH) {
+    // The gate before the body is read: a refused request never has its code read or stored.
+    if (who.role !== 'owner') {
+      req.resume();
+      return refuse(403, `only the instance's owners (admin on ${d.repo}) who are machine owners may sign a Claude account in; @${who.login} is a ${who.role}`, { action: 'login-code' });
+    }
+    try {
+      const value = await readSecretBody(req);
+      storeLoginCode({ value, instance: d.instance, who: gateWho, dir: d.accountDir, ...(d.secretsHome ? { home: d.secretsHome } : {}), ...(d.ownersFile ? { ownersFile: d.ownersFile } : {}) });
+    } catch (e) {
+      if (e instanceof ClaudeTokenError || e instanceof AskError) return refuse(e.status, e.message, { action: 'login-code' });
+      return refuse(500, "the code couldn't be stored", { action: 'login-code' });
+    }
+    // Only that it was stored: never the code.
+    d.audit(who, 'machine.claude_login_code', { stored: true });
+    return { status: 200, body: { ok: true } };
+  }
   if (url.pathname === PROFILE_ADD_PATH) {
     const profile = url.searchParams.get('profile') ?? '';
     const named = PROFILE_NAME.test(profile) ? profile : 'not a profile name';
@@ -104,9 +123,9 @@ export async function handleProfileRoute(req: IncomingMessage, url: URL, who: Pr
     return record({ action: 'profile-add', profile }, () => rmSync(file, { force: true }));
   }
   const body = ((await d.readBody(req)) ?? {}) as { action?: unknown; profile?: unknown; instance?: unknown; order?: unknown; back?: unknown };
-  const action = body.action === 'use' || body.action === 'remove' || body.action === 'failover' ? body.action : null;
+  const action = body.action === 'use' || body.action === 'remove' || body.action === 'login' || body.action === 'failover' ? body.action : null;
   if (who.role !== 'owner') return refuse(403, `only the instance's owners (admin on ${d.repo}) who are machine owners may switch or remove a Claude account; @${who.login} is a ${who.role}`, { action: action ?? 'not an action' });
-  if (!action) return refuse(400, 'action is use, remove or failover (adding one takes its token: profile-add)', { action: 'not an action' });
+  if (!action) return refuse(400, 'action is use, remove, login or failover (adding one by its token: profile-add)', { action: 'not an action' });
   // Never another instance, nor every one: a dashboard's step is for its own instance (a root admin's otherwise).
   if (body.instance !== undefined && body.instance !== null && body.instance !== d.instance) return refuse(403, `a step from ${d.instance}'s dashboard is for ${d.instance} alone; another instance, or every one, is a root admin's on the machine (claude-account.sh)`, { action });
   if (action === 'failover') {

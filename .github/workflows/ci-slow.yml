@@ -1648,6 +1648,33 @@ jobs:
           ask use mine done
           sudo jq -e '.active.ci.profile == "mine" and .active.beta == null' "$s/profiles.json"
           ask use default done
+          # The relayed sign-in (the owner's approved exception), from ci's dashboard: the link for wl-ci alone, the one-time
+          # code through wl-ci's 0400 file onto claude's stdin, the account staged; neither the link nor the code kept anywhere.
+          code="$(openssl rand -hex 12)#$(openssl rand -hex 12)"; echo "::add-mask::$code"
+          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token6"; printf '%s\n' "$code" > "$F/login-code"); unset t
+          printf '%s %s\n' "$code" "$(cat "$F/claude-token6")" | sudo tee /etc/ci-claude-login > /dev/null
+          unset code
+          if sudo -u wl-ci sudo -n "$HELPER" claude-account login rel beta < /dev/null 2>/dev/null; then echo "wl-ci may sign in for beta" >&2; exit 1; fi
+          n="$(ends login rel)"
+          sudo -u wl-ci sudo -n "$HELPER" claude-account login rel < /dev/null | tee -a "$F/helper-ops.txt"
+          for _ in $(seq 1 60); do sudo test -e "$s/login-url" && break; sleep 2; done
+          [ "$(sudo stat -c '%U %a' "$s/login-url")" = "wl-ci 400" ] || { sudo stat -c '%U %a' "$s/login-url"; exit 1; }
+          sudo -u wl-ci grep -q '^https://claude.ai/oauth/authorize?.*redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' "$s/login-url"
+          if sudo -u wl-beta cat "$s/login-url" 2>/dev/null; then echo "another instance's coordinator can read the link" >&2; exit 1; fi
+          sudo -u wl-ci bash -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/claude-login-code"; chmod 0400 "$d/claude-login-code"' < "$F/login-code"
+          for _ in $(seq 1 60); do [ "$(ends login rel)" -gt "$n" ] && break; sleep 2; done
+          sudo grep -E '"op":"login","profile":"rel","step":"login","state":"done".*"for":"ci"' "$s/profile-ops.jsonl" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
+          sudo test ! -e "$s/login-url"
+          sudo -u wl-ci test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-login-code"
+          sudo jq -e '.profiles.rel.staged == true and .profiles.rel.kind == "login" and (.profiles.rel.users | keys) == ["wl-ci-agent"]' "$s/profiles.json"
+          h="$(getent passwd wl-ci-agent | cut -d: -f6)"
+          [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/rel/.credentials.json")" = "wl-ci-agent 600" ]
+          ask use rel failed
+          sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged rel for ci (signed in from the dashboard)")' /var/lib/worklane/machine-changes.jsonl
+          # The code is single-use: claude has it; a second one is never read (the step is over), and the account is still staged.
+          if grep -qFf "$F/login-code" "$F"/helper-ops.txt || sudo grep -qFf "$F/login-code" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/login-code"; then echo "the code was echoed" >&2; exit 1; fi
+          if sudo journalctl --no-pager | grep -q 'ci-relayed-link-4s7'; then echo "the sign-in link was logged" >&2; exit 1; fi
+          sudo rm -f /etc/ci-claude-login
           # The failover setting, from ci's dashboard: real sudo takes the order joined by + (never a comma) and no instance.
           sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+mine back < /dev/null
           sudo jq -e '.failover.instances.ci == {"order": ["default", "mine"], "back": true} and .failover.machine == null' "$s/profiles.json"
@@ -2064,6 +2091,46 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
           [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
           [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
+      # The Siri gateway on a real machine (docs/siri.md): dashboards.sh --siri gives wl-dash the instance's Siri gateway
+      # token (and takes it away again without --siri), the hub listens on 127.0.0.1:4397, and the kernel's word on who
+      # opened the connection (/proc/net/tcp) refuses a program on this machine whatever headers it sends; the dashboard
+      # key never works on /api/siri, and the gateway token works nowhere else; serve-siri adds 8443 and keeps 443.
+      - name: "Siri gateway: wl-dash reads the gateway token only with --siri; a local program is refused by the kernel's word; the dashboard key never works on /api/siri; serve-siri adds 8443 only"
+        run: |
+          d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
+          state="$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state"
+          port="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/dashboard.js"); console.log(m.instancePort("ci"));')"
+          id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
+          [ -n "$id" ] && [ -n "$url" ]
+          sudo cp "$d/steps.jsonl" "$F/siri-steps-before.jsonl"
+          sudo test -s "$state/siri-gateway-token"
+          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash reads the Siri gateway token without --siri" >&2; exit 1; fi
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci | tee "$F/siri-dashboards.log"
+          grep -q -- ' --siri-port 4397' "$hub"
+          sudo -u wl-dash test -r "$state/siri-gateway-token"
+          if sudo -u wl-dash test -w "$state/siri-gateway-token"; then echo "wl-dash can write the Siri gateway token" >&2; exit 1; fi
+          if sudo cmp -s "$state/siri-gateway-token" "$state/dashboard-token"; then echo "the gateway token is the dashboard token" >&2; exit 1; fi
+          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4397/tell)" != 000 ] && break; sleep 1; done
+          # One try from this runner's user, which is not tailscaled, naming a tailnet address: refused before any token is read.
+          peer="$(printf '100.%s.%s.%s' 101 102 103)"
+          code="$(curl -sS -o "$F/siri-local.json" -w '%{http_code}' -X POST http://127.0.0.1:4397/tell -H 'content-type: application/json' -H "x-forwarded-for: $peer" -d '{"text":"an idea"}')"
+          cat "$F/siri-local.json"; echo
+          [ "$code" = 403 ] && jq -e '.speech|test("only answers from your tailnet")' "$F/siri-local.json"
+          tok="$(sudo cat "$state/dashboard-token")"; echo "::add-mask::$tok"
+          gw="$(sudo cat "$state/siri-gateway-token")"; echo "::add-mask::$gw"
+          # The dashboard key on the instance's Siri routes: refused; the gateway token on the dashboard's routes: refused.
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" -H 'content-type: application/json' -d '{"text":"x"}' "http://127.0.0.1:$port/api/siri/tell")" = 401 ]
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $gw" -H 'content-type: application/json' -d '{"id":"x","answer":"approve"}' "http://127.0.0.1:$port/api/decide")" = 401 ]
+          if sudo test -d "$state/voice"; then sudo find "$state/voice" -name '*.json' | grep -q . && { echo "something reached the voice inbox" >&2; exit 1; }; fi
+          # serve-siri, by hand as root: 8443 to the gateway, 443 still to the hub, never Funnel.
+          sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri
+          sudo jq -e --arg n "$TS_NAME" '.Web["\($n):8443"].Handlers["/"].Proxy=="http://127.0.0.1:4397" and .Web["\($n):443"].Handlers["/"].Proxy=="http://127.0.0.1:4399" and (has("AllowFunnel")|not)' /var/lib/ci-tailscale/serve.json
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.siri and .serve and (.funnel|not)'
+          # Back as it was for the steps after: no gateway, and wl-dash's read of the gateway token removed.
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" ci > "$F/siri-dashboards-off.log"
+          if grep -q -- '--siri-port' "$hub"; then echo "the gateway stayed on" >&2; exit 1; fi
+          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash still reads the Siri gateway token" >&2; exit 1; fi
+          sudo install -o root -g root -m 0644 "$F/siri-steps-before.jsonl" "$d/steps.jsonl"
       # The first-run wizard's Tailscale screen, end to end on this machine: the instance's own dashboard (the owner's
       # break-glass token, on loopback), the request in its event log, the real coordinator (worklane-ci.service) running
       # the helper through sudo, the step's own unit, and the screen's view of it. The stand-in is logged out first.

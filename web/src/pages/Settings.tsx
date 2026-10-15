@@ -7,6 +7,7 @@ import { Badge, Card, cx } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
 import { Header } from '../components/Header';
 import { VoiceSettings } from '../voice/VoiceSettings';
+import { SiriDevices } from '../components/SiriDevices';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -131,6 +132,8 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
       )}
       <div className="grid gap-6 p-6 lg:grid-cols-2">
         <VoiceSettings owner={owner} brand={brand} />
+        {/* WHY: the owners' and writers' only; a viewer's page never asks for it. */}
+        {full && <SiriDevices />}
         <Section title="Project">
           <Row k="Name">{s.project.name}</Row>
           <Row k="Repository">{s.project.repo}</Row>

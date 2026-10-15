@@ -22,7 +22,7 @@
 #
 #   bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net      (first, once)
 #   bash scripts/setup/dashboards.sh --setup --loopback          (first, before the machine has an https origin)
-#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
 #
 #   --setup: before the sign-in App exists (the hub can't start without it). Starts the hub in setup mode
 #     (worklane-dashboard-hub-setup.service, as wl-dash, loopback port 4399, no instances): one page that makes the
@@ -53,16 +53,23 @@
 #     tags (tag:owner-laptop) and/or MagicDNS node names, comma-separated. Prefer tags you alone own in the
 #     tailnet policy. Empty or missing: every device is refused. Kept in the hub's unit on this machine only.
 #
+#   --siri: the hub's Siri gateway (docs/siri.md), on 127.0.0.1:4397, for "Hey Siri, tell / ask" Shortcuts. wl-dash
+#     may then read each instance's siri-gateway-token too (the token that works on that instance's /api/siri/ routes
+#     and nowhere else; never its dashboard token). Publish it on the tailnet with tailscale.sh serve-siri (8443).
+#     Each instance still needs siri.enabled in its intake.yaml, and an owner's device token. Left out: no gateway,
+#     and wl-dash's read of the Siri gateway tokens is removed.
+#
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
-client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback=""
+usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --setup) setup=1; shift ;;
     --no-instances) no_instances=1; shift ;;
     --loopback) loopback=1; shift ;;
+    --siri) siri=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
@@ -94,7 +101,7 @@ url_ok() { [[ "$1" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub'
 
 if [ -n "$setup" ]; then
   # Exactly one of --public-url and --loopback.
-  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
+  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances$siri" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
   [ -n "$loopback" ] || url_ok "$public_url"
   [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
   say "viewer user $viewer (runs the hub; holds no credential)"
@@ -228,7 +235,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -284,6 +291,13 @@ for name in "$@"; do
     d="$(dirname "$d")"
   done
   setfacl -m "g:$viewer:r--" "$state/dashboard-token"
+  # The Siri gateway's token (works on the instance's /api/siri/ routes only): readable by $viewer only with --siri.
+  wait_for "$state/siri-gateway-token" "$unit"
+  if [ -n "$siri" ]; then
+    setfacl -m "g:$viewer:r--" "$state/siri-gateway-token"
+  else
+    setfacl -x "g:$viewer" "$state/siri-gateway-token" 2>/dev/null || true
+  fi
   hub_arg="${hub_arg:+$hub_arg,}$name=$state"
 done
 
@@ -309,6 +323,12 @@ for name in "$@"; do
   sudo -u "$viewer" test -r "$state/dashboard-token" || { echo "FAIL: $viewer can't read $name's token" >&2; exit 1; }
   if sudo -u "$viewer" test -r "$state/events.db" || sudo -u "$viewer" ls "$state" >/dev/null 2>&1; then echo "FAIL: $viewer can read $name's state beyond its token" >&2; exit 1; fi
   if sudo -u "$viewer" test -w "$state/dashboard-token" || sudo -u "$viewer" test -w "$state"; then echo "FAIL: $viewer can write $name's state" >&2; exit 1; fi
+  if [ -n "$siri" ]; then
+    sudo -u "$viewer" test -r "$state/siri-gateway-token" || { echo "FAIL: $viewer can't read $name's Siri gateway token" >&2; exit 1; }
+    if sudo -u "$viewer" test -w "$state/siri-gateway-token"; then echo "FAIL: $viewer can write $name's Siri gateway token" >&2; exit 1; fi
+  elif sudo -u "$viewer" test -r "$state/siri-gateway-token"; then
+    echo "FAIL: $viewer can read $name's Siri gateway token without --siri" >&2; exit 1
+  fi
   echo "OK: $name"
 done
 
@@ -316,6 +336,7 @@ echo
 echo "sign-in: $public_url (people sign in with GitHub; their role on each instance is their permission on its repo)"
 echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
 echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
+[ -z "$siri" ] || echo "Siri gateway: 127.0.0.1:4397; publish it on the tailnet once with: sudo bash scripts/setup/tailscale.sh serve-siri (https 8443; docs/siri.md)"
 echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/ (the page asks for the key once: it is in $hub_token_file; never put it in a URL)"
 echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
 if [ -s "$MACHINE_OWNERS" ]; then echo "machine owners (may change the slot caps and engine updates): $(cat "$MACHINE_OWNERS")"; else echo "machine owners: none yet, so only the break-glass may change the machine; rerun with --machine-owner <login>"; fi

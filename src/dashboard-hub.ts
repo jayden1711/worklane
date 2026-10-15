@@ -23,7 +23,7 @@
 //     and a request carrying a proxy's headers is refused there anyway.
 import { Agent, createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
 import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
@@ -35,6 +35,8 @@ import { currentUser } from './os/index.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
 import { Avatars, type AvatarOptions } from './avatars.js';
+import { startSiriGateway } from './siri/gateway.js';
+import { SIRI_GATEWAY_TOKEN_FILE } from './siri/instance.js';
 
 export interface HubInstance {
   name: string;
@@ -74,6 +76,11 @@ export interface HubOptions {
   appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
   /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
   avatars?: AvatarOptions;
+  /**
+   * The Siri gateway (src/siri/gateway.ts): its own loopback listener on `port` (tailscale serve publishes it on
+   * 8443), given each instance's Siri gateway token file only. Absent: no gateway. whois and peerUid: tests only.
+   */
+  siri?: { port: number; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; lockout?: { fails: number; windowMs: number; forMs: number } };
   now?: () => number;
 }
 
@@ -281,7 +288,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; siriUrl: string | null; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -490,6 +497,27 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     server.close();
     throw e;
   }
+  // The Siri gateway: built from each instance's Siri gateway token file only, never its dashboard token.
+  let siri: Awaited<ReturnType<typeof startSiriGateway>> | null = null;
+  if (opts.siri) {
+    try {
+      siri = await startSiriGateway({
+        instances: opts.instances.map((i) => ({ name: i.name, port: i.port, gatewayTokenFile: join(dirname(i.tokenFile), SIRI_GATEWAY_TOKEN_FILE) })),
+        port: opts.siri.port,
+        host,
+        auditFile: join(opts.stateDir, 'siri-audit.jsonl'),
+        ...(opts.siri.whois ? { whois: opts.siri.whois } : {}),
+        ...(opts.siri.peerUid ? { peerUid: opts.siri.peerUid } : {}),
+        ...(opts.siri.lockout ? { lockout: opts.siri.lockout } : {}),
+        now,
+      });
+    } catch (e) {
+      detachTerminal();
+      server.close();
+      breakGlass.close();
+      throw e;
+    }
+  }
   return {
     server,
     breakGlass,
@@ -499,6 +527,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     keyFile: join(opts.stateDir, 'dashboard-token'),
     token,
     session,
+    siriUrl: siri?.url ?? null,
     close: () => {
       detachTerminal();
       return Promise.all(
@@ -508,7 +537,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
               s.closeAllConnections();
               s.close(() => r());
             }),
-        ),
+        ).concat(siri ? [siri.close()] : []),
       ).then(() => undefined);
     },
   };

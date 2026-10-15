@@ -232,6 +232,20 @@ export const IntakeConfig = z.strictObject({
     })
     .prefault({}),
   /**
+   * Siri (docs/siri.md, src/siri/): "tell" leaves a spoken idea in the same voice inbox (never trusted: an Inbox
+   * approval, always), and "ask" answers aloud at a viewer's level, with no tools and no repository. Both need a
+   * device token an owner made on the dashboard, through the hub's Siri gateway, from the tailnet. Off by default.
+   */
+  siri: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      /** The model Siri answers with: fast enough to be heard within Siri's patience. */
+      ask_model: z.string().min(1).max(100).default('haiku'),
+      /** Siri answers' own daily cap, in USD; every answer also counts against the instance's daily budget. */
+      ask_max_usd_per_day: z.number().positive().max(20).default(1),
+    })
+    .prefault({}),
+  /**
    * Replies worded by the casual replier role from the redacted message and the engine's facts, each checked in
    * code before it is sent (src/intake/replier.ts). Off: the engine's fixed replies.
    */

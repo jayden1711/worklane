@@ -211,7 +211,7 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
         </p>
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
-      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
+      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} signin={data.signin ?? null} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" disabled={!data.allowed || !!busy || open.some((r) => r.args[1] === 'status')} onClick={() => void act('status')} data-testid="claude-account-refresh">
           {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
@@ -264,13 +264,14 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
  * shows an earlier switch, or none). Without that last case the panel stopped looking the moment the request finished,
  * before the switch had started, and never showed it.
  */
-export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | 'profileOps'>, now = Date.now()): boolean {
+export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | 'profileOps' | 'signin'>, now = Date.now()): boolean {
   if (d.switch?.status === 'running') return true;
   if (d.profileOps?.[0]?.status === 'running') return true;
+  if (d.signin?.status === 'running') return true;
   if (d.requests.some((r) => r.status === 'pending' || r.status === 'running')) return true;
   const last = d.requests[0];
   // A profile step handed to its unit, which hasn't written its first line yet: the same wait as the switch's below.
-  if (last && last.status === 'done' && ['profile-add', 'use', 'remove'].includes(last.args[1] ?? '') && now - Date.parse(last.finishedAt ?? last.at) <= 60_000) {
+  if (last && last.status === 'done' && ['profile-add', 'use', 'remove', 'login'].includes(last.args[1] ?? '') && now - Date.parse(last.finishedAt ?? last.at) <= 60_000) {
     const op = d.profileOps?.[0];
     return !op || Date.parse(op.startedAt) < Date.parse(last.at) - 1_000;
   }

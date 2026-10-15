@@ -100,10 +100,10 @@ test('a machine without tailscale: status says so and changes nothing; up, serve
   writeFileSync(join(m.T, 'hub.service'), hubUnit('https://hub.example.test'));
   const st = m.run(['status', '--json']);
   assert.equal(st.status, 0, st.stderr);
-  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, funnel: false, hub_url: 'https://hub.example.test' });
+  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, funnel: false, siri: false, hub_url: 'https://hub.example.test' });
   assert.match(m.run(['status']).stdout, /^tailscale: not installed \(optional/);
   assert.ok(!existsSync(join(m.T, 'var')), 'status writes nothing');
-  for (const step of ['up', 'serve', 'public-url']) {
+  for (const step of ['up', 'serve', 'serve-siri', 'public-url']) {
     const r = m.run([step]);
     assert.equal(r.status, 1, step);
     assert.match(m.steps().at(-1)!.detail, /tailscale isn't installed on this machine/);
@@ -181,10 +181,13 @@ test('the script fetches no install script and pipes nothing to a shell', () => 
   assert.doesNotMatch(code, /install\.sh|tailscale\.com\/install/);
   assert.deepEqual([...code.matchAll(/curl [^\n]*/g)].length, 1, 'one download: the key');
   assert.doesNotMatch(code, /--auth-?key/i, 'no auth key option anywhere');
-  // tailscale itself is run in exactly these ways: two reads, `up` with a timeout, and the one fixed serve. No funnel
-  // command, no flag that turns Funnel on, no other serve target, no other `up` flag.
+  // tailscale itself is run in exactly these ways: two reads, `up` with a timeout, and the two fixed serves (the hub on
+  // 443, the Siri gateway on 8443). No funnel command, no flag that turns Funnel on, no other serve target, no other
+  // `up` flag.
   const runs = [...code.matchAll(/(?:\bts|"\$TAILSCALE_BIN") ([a-z][^|)\n]*)/g)].map((m) => m[1]!.replace(/ 2>.*$/, '').trim());
-  assert.deepEqual([...new Set(runs)].sort(), ['serve --bg --https=443 "http://127.0.0.1:$HUB_PORT"', 'serve status --json', 'status --json', 'up --timeout="${TAILSCALE_UP_SECONDS}s"', 'version']);
+  assert.deepEqual([...new Set(runs)].sort(), ['serve --bg "--https=$SIRI_TAILNET_PORT" "http://127.0.0.1:$SIRI_GATEWAY_PORT"', 'serve --bg --https=443 "http://127.0.0.1:$HUB_PORT"', 'serve status --json', 'status --json', 'up --timeout="${TAILSCALE_UP_SECONDS}s"', 'version']);
+  assert.match(libText, /^SIRI_GATEWAY_PORT=4397$/m);
+  assert.match(libText, /^SIRI_TAILNET_PORT=8443$/m);
   assert.ok(!/(\bts|TAILSCALE_BIN"?) +funnel|--funnel/.test(code), 'tailscale is never given a funnel command or flag');
   assert.deepEqual([...new Set([...code.matchAll(/tailscale funnel [a-z]+/g)].map((m) => m[0]))], ['tailscale funnel reset'], 'the only funnel command named is the one an admin is told to run to turn it off');
   assert.doesNotMatch(code, /--(advertise|ssh|accept-routes|exit-node|login-server|operator|set-path|tcp|tls-terminated|http=)/);
@@ -306,6 +309,11 @@ test('every other argument list is refused before anything runs: no auth key, fl
     ['up', '--reset'],
     ['up', '--timeout=1s'],
     ['up', '--for', 'alpha', '--ssh'],
+    ['serve-siri', '4397'],
+    ['serve-siri', '--https=8443', 'http://127.0.0.1:4398'],
+    ['serve-siri', 'http://127.0.0.1:4399'],
+    ['serve-siri', '--funnel'],
+    ['serve-siri', '--for', 'alpha'],
     ['public-url', '--name', 'other'],
     ['public-url', 'box.example.test'],
   ];
@@ -415,7 +423,7 @@ test('Funnel is read and never changed: with it on, status says so, and serve an
     const st = JSON.parse(m.run(['status', '--json']).stdout) as { funnel: boolean };
     assert.equal(st.funnel, true, JSON.stringify(cfg));
     assert.match(m.run(['status']).stdout, /Tailscale Funnel \(the public internet\): ON; nothing here changes it/);
-    for (const step of ['serve', 'public-url']) {
+    for (const step of ['serve', 'serve-siri', 'public-url']) {
       assert.equal(m.run([step]).status, 1, `${step}: ${JSON.stringify(cfg)}`);
       assert.match(m.steps().at(-1)!.detail, /Tailscale Funnel is on for this machine, which publishes to the public internet\. This step never turns Funnel on or off, and does nothing while it is on/);
     }
@@ -434,4 +442,40 @@ test('Funnel is read and never changed: with it on, status says so, and serve an
   assert.equal(m.run(['serve']).status, 0);
   // What serve wrote has no Funnel in it.
   assert.doesNotMatch(m.text('ts/serve.json'), /AllowFunnel/);
+});
+
+test('serve-siri: https 8443 to the Siri gateway (4397) and nothing else, beside 443; refused off a tailnet, without certificates, over another 8443 and with the break-glass forwarded; public-url keeps --siri', { skip: !posix }, () => {
+  const m = machine();
+  const SIRI = 'http://127.0.0.1:4397';
+  assert.equal(m.run(['serve-siri']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /isn't on a tailnet yet/);
+  m.set('state.json', { ...RUNNING, CertDomains: null });
+  assert.equal(m.run(['serve-siri']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /doesn't issue an HTTPS certificate/);
+  m.set('state.json', RUNNING);
+  m.set('serve.json', serving(HUB));
+  const r = m.run(['serve-siri']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(m.tsCalls().filter((c) => c.args[0] === 'serve' && c.args[1] === '--bg').map((c) => c.args), [['serve', '--bg', '--https=8443', SIRI]]);
+  assert.match(m.steps().at(-1)!.detail, new RegExp(`^https 8443 on ${NAME.replace(/\./g, '\\.')} forwards to the Siri gateway \\(4397\\), and to nothing else`));
+  const st = JSON.parse(m.run(['status', '--json']).stdout) as { serve: boolean; siri: boolean };
+  assert.deepEqual([st.serve, st.siri], [true, true], '443 still goes to the hub');
+  assert.equal(m.run(['serve-siri']).status, 0);
+  assert.match(m.steps().at(-1)!.detail, /already forwards to the Siri gateway/);
+  assert.equal(m.tsCalls().filter((c) => c.args[0] === 'serve' && c.args[1] === '--bg').length, 1);
+  // 8443 already somewhere else, or the break-glass forwarded anywhere: refused, nothing run.
+  m.set('serve.json', { ...serving(HUB), TCP: { 443: { HTTPS: true }, 8443: { HTTPS: true } }, Web: { ...serving(HUB).Web, [`${NAME}:8443`]: { Handlers: { '/': { Proxy: 'http://127.0.0.1:3000' } } } } });
+  assert.equal(m.run(['serve-siri']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /already forwards https 8443 somewhere else; left as it is/);
+  m.set('serve.json', serving('http://127.0.0.1:4398'));
+  assert.equal(m.run(['serve-siri']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /break-glass port 4398/);
+  assert.equal(m.tsCalls().filter((c) => c.args[0] === 'serve' && c.args[1] === '--bg').length, 1, 'never run again');
+  // public-url reruns dashboards.sh with the hub's gateway kept on.
+  const p = machine();
+  writeFileSync(join(p.T, 'hub.service'), hubUnit('https://hub.example.test', ' --siri-port 4397'));
+  p.set('state.json', RUNNING);
+  p.set('serve.json', serving(HUB));
+  assert.equal(p.run(['public-url']).status, 0);
+  assert.deepEqual(p.lines('dashboards-calls'), [`--client-id Iv1.signin0001 --public-url https://${NAME} --siri alpha beta`]);
 });

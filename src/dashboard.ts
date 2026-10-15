@@ -112,6 +112,9 @@ import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
+import { handleSiri, siriGatewayToken } from './siri/instance.js';
+import { siriDevicesRoute } from './siri/manage.js';
+import { RateLimits } from './siri/tokens.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -985,6 +988,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
+  // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
+  const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
+  const siriLimits = new RateLimits();
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -1212,8 +1218,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, [token])) return;
+    if (refuseKeyInUrl(url, res, siriToken ? [token, siriToken] : [token])) return;
     try {
+      // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
+      // gateway token works there, and nothing under /api/siri falls through to any other route.
+      if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
+        if (!siriToken) return json(res, 404, { error: 'not found' });
+        return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
+      }
       // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
       // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
       if (url.pathname === PROOF_PATH && req.method === 'GET') {
@@ -2206,7 +2218,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
           const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), ...profilesView(accountDir) });
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name) });
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
@@ -2361,6 +2373,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
           audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
           return json(res, 200, { ok: true, id: voiceId });
+        }
+        // Settings, Siri devices (src/siri/manage.ts): the list, a new token (shown once), revoke and unbind.
+        if (url.pathname === '/api/siri-devices' || url.pathname.startsWith('/api/siri-devices/')) {
+          const body = req.method === 'POST' ? ((await readBody(req)) as Record<string, unknown>) : {};
+          const a = siriDevicesRoute(who, req.method ?? 'GET', url.pathname, body && typeof body === 'object' ? body : {}, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), audit: (action, detail) => audit(who, action, detail) });
+          if (a) return json(res, a.status, a.body);
         }
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);

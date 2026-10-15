@@ -8,7 +8,7 @@
 //   last-url     the login link its last `up` printed
 //   login.json   written by the test to "log in": the state `up` moves to. `up` waits for it, as the real one waits for
 //                the owner, until its --timeout.
-// It answers: version; status --json; up --timeout=<n>s; serve --bg --https=443 <target>; serve status --json. Anything
+// It answers: version; status --json; up --timeout=<n>s; serve --bg --https=443|8443 <target>; serve status --json. Anything
 // else, an auth key among them: exit 64.
 'use strict';
 const fs = require('node:fs');
@@ -66,15 +66,19 @@ if (is('version')) {
     }
     sleep(200);
   }
-} else if (is('serve', '--bg', '--https=443', /^http:\/\/127\.0\.0\.1:[0-9]+$/)) {
+} else if (is('serve', '--bg', /^--https=(443|8443)$/, /^http:\/\/127\.0\.0\.1:[0-9]+$/)) {
   const s = read('state.json', {});
   const name = ((s.Self && s.Self.DNSName) || '').replace(/\.$/, '');
   if (s.BackendState !== 'Running' || !name) {
     process.stderr.write('tailscale is not running\n');
     process.exit(1);
   }
-  fs.writeFileSync(path.join(dir, 'serve.json'), JSON.stringify({ TCP: { 443: { HTTPS: true } }, Web: { [`${name}:443`]: { Handlers: { '/': { Proxy: args[3] } } } } }));
-  process.stdout.write(`Available within your tailnet:\n\nhttps://${name}/\n|-- proxy ${args[3]}\n\nServe started and running in the background.\n`);
+  // 443 (the hub): written afresh, as it always was here. 8443 (the Siri gateway): added beside what is served already.
+  const port = args[2].slice('--https='.length);
+  const sv = port === '443' ? {} : read('serve.json', {});
+  const next = { TCP: { ...(sv.TCP || {}), [port]: { HTTPS: true } }, Web: { ...(sv.Web || {}), [`${name}:${port}`]: { Handlers: { '/': { Proxy: args[3] } } } } };
+  fs.writeFileSync(path.join(dir, 'serve.json'), JSON.stringify(next));
+  process.stdout.write(`Available within your tailnet:\n\nhttps://${name}${port === '443' ? '' : `:${port}`}/\n|-- proxy ${args[3]}\n\nServe started and running in the background.\n`);
 } else {
   process.stderr.write(`tailscale stand-in: not something it answers (asked: ${args.join(' ')})\n`);
   process.exit(64);
