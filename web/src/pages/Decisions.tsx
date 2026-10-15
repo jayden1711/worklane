@@ -86,6 +86,9 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
           <Badge tone={d.kind === 'land' ? 'danger' : 'warn'}>{d.kind === 'land' ? 'Approve landing' : 'Question'}</Badge>
           <span>for @{d.owner}</span>
           <span>· asked {ago(d.askedAt)}</span>
+          <a href={`/decisions/${d.id}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/${d.id}`))} className="ml-auto font-medium text-blue-ink hover:underline" data-testid="decision-details">
+            Details
+          </a>
         </div>
         <div className="mt-2 text-[14px] font-medium text-ink">{d.question}</div>
         {isOption && (

@@ -173,6 +173,7 @@ export class GitHubBacklog implements Backlog {
       draft: Boolean(p.draft),
       state: p.merged ? 'merged' : p.state === 'closed' ? 'closed' : 'open',
       title: p.title ?? '',
+      ...(typeof p.body === 'string' ? { body: p.body } : {}),
       mergeable: p.mergeable ?? null,
       mergeableState: p.mergeable_state ?? 'unknown',
       ...(typeof p.additions === 'number' && typeof p.deletions === 'number'
@@ -315,6 +316,7 @@ interface GhPull {
   state: string;
   merged?: boolean;
   title?: string;
+  body?: string | null;
   mergeable?: boolean | null;
   mergeable_state?: string;
   // The single-PR endpoint's counts (absent from list endpoints).

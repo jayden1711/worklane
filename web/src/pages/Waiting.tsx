@@ -37,6 +37,9 @@ export function waited(since: string, now = Date.now()): string {
 export const waitingRefusal = (state: Pick<State, 'canReadDigest' | 'owners' | 'user' | 'role'>) =>
   state.canReadDigest === false ? `what waits on the owner is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
+/** A waiting item's detail page: its decision's, or its held PR's; null for the rest. */
+export const detailOf = (i: WaitItem): string | null => (i.decision ? `/decisions/${i.decision}` : i.pr !== null && (i.kind === 'needs_owner' || i.kind === 'ci_fix_gave_up') ? `/decisions/pr-${i.pr}` : null);
+
 function Subject({ i }: { i: WaitItem }) {
   const issue = i.issue !== null && (
     <button onClick={() => navigate(`/issues/${i.issue}`)} className="font-mono text-[12.5px] text-blue-ink hover:underline" data-testid="waiting-issue">
@@ -153,6 +156,11 @@ function WaitList({ w, now }: { w: Waiting; now?: number }) {
                     <span className="text-[12px] tabular-nums text-ink-3" title={i.since} data-testid="waiting-since">
                       waiting {waited(i.since, now)}
                     </span>
+                    {detailOf(i) && (
+                      <a href={detailOf(i)!} onClick={(e) => (e.preventDefault(), navigate(detailOf(i)!))} className="text-[12px] font-medium text-blue-ink hover:underline" data-testid="waiting-details">
+                        Details
+                      </a>
+                    )}
                   </li>
                 ))}
               </ul>

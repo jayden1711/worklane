@@ -79,8 +79,8 @@ test('every test that drives a real Chrome takes the lock first', () => {
     }
   }
   // 15 on main, plus #414's two (machine cards) and #418's one (web-key-in-url), the dashboard speed test's five, and
-  // offline-chrome's two (#462), the hold banner's one (#470), and avatars' one (#462).
-  assert.ok(found === 27, `found the real-Chrome tests (${found})`);
+  // offline-chrome's two (#462), the hold banner's one (#470), the decision detail page's one, and avatars' one (#462).
+  assert.ok(found === 28, `found the real-Chrome tests (${found})`);
   assert.deepEqual(missing, [], 'start with `await oneChromeAtATime(ctx);`');
 });
 
