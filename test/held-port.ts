@@ -52,3 +52,39 @@ export async function heldPort(target: number | null): Promise<HeldPort> {
       }),
   };
 }
+
+/**
+ * A loopback port where a connection is refused (ECONNREFUSED), for as long as it is held. WHY (#312): a port found
+ * free and then closed ("nothing listens there") can be taken by any process before it is used: another test's
+ * server, a live instance's, or this test's own next listen(0), which the OS may hand the same port. Here the port is
+ * the local end of an open connection: nothing listens on it, so a connection there is refused, and nothing else can
+ * bind it until close().
+ */
+export async function refusedPort(): Promise<{ port: number; url: string; close: () => Promise<void> }> {
+  const accepted = new Set<Socket>();
+  const server = createServer((s) => {
+    accepted.add(s);
+    s.on('error', () => undefined);
+  });
+  await new Promise<void>((ok, fail) => {
+    server.once('error', fail);
+    server.listen(0, '127.0.0.1', () => ok());
+  });
+  const client = connect((server.address() as AddressInfo).port, '127.0.0.1');
+  client.on('error', () => undefined);
+  await new Promise<void>((ok, fail) => {
+    client.once('connect', () => ok());
+    client.once('error', fail);
+  });
+  const port = client.localPort!;
+  return {
+    port,
+    url: `http://127.0.0.1:${port}`,
+    close: () =>
+      new Promise<void>((ok) => {
+        client.destroy();
+        for (const s of accepted) s.destroy();
+        server.close(() => ok());
+      }),
+  };
+}

@@ -1,7 +1,7 @@
 // The machine watchdog (src/watchdog/): every trigger raises its incident once and resolves it once; posts are
 // rate-limited, carry no secret and link to the incident on the Health page; one coordinator posts per machine;
 // GET /api/health/incidents gives a viewer the allowlisted fields only.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -30,6 +30,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { VIEWER_INCIDENT_FIELDS } from '../src/viewer-events.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { refusedPort } from './held-port.js';
 
 const DASH = 'https://dash.example.test';
 // Planted fakes, in a Discord bot token's shape: assembled at run time so no token-shaped literal is committed.
@@ -485,13 +486,15 @@ async function standInGitHub() {
   };
 }
 
-/** A loopback port nothing listens on: a connection there is refused (ECONNREFUSED). */
-async function deadPort(): Promise<string> {
-  const s = createServer();
-  await new Promise<void>((r) => s.listen(0, '127.0.0.1', r));
-  const port = (s.address() as { port: number }).port;
-  await new Promise<void>((r) => s.close(() => r()));
-  return `http://127.0.0.1:${port}`;
+/**
+ * A loopback URL where a connection is refused (ECONNREFUSED), held until the test ends (test/held-port.ts). WHY: a
+ * port found free and closed was taken back by the stand-in's own listen(0) or another process on a busy machine, and
+ * the "unreachable" passes then reached it (#312).
+ */
+async function deadPort(t: TestContext): Promise<string> {
+  const p = await refusedPort();
+  t.after(() => p.close());
+  return p.url;
 }
 
 const appKey = () => {
@@ -509,8 +512,8 @@ function mintingWorld(api: () => string) {
   return { ...wd, gh };
 }
 
-test(`regression: GitHub not reached while minting the token is no red github_auth; ${GITHUB_UNREACHABLE_PASSES} passes in a row raise one amber "GitHub not reachable", resolved once it answers`, async () => {
-  const dead = await deadPort();
+test(`regression: GitHub not reached while minting the token is no red github_auth; ${GITHUB_UNREACHABLE_PASSES} passes in a row raise one amber "GitHub not reachable", resolved once it answers`, async (t) => {
+  const dead = await deadPort(t);
   const up = await standInGitHub();
   let api = dead;
   const { w, pass, gh } = mintingWorld(() => api);
@@ -540,9 +543,9 @@ test(`regression: GitHub not reached while minting the token is no red github_au
   }
 });
 
-test('a real refusal of the App token (401 on the mint) is red on the first pass, and stays red while GitHub then cannot be reached', async () => {
+test('a real refusal of the App token (401 on the mint) is red on the first pass, and stays red while GitHub then cannot be reached', async (t) => {
   const up = await standInGitHub();
-  const dead = await deadPort();
+  const dead = await deadPort(t);
   let api = up.api;
   const { w, pass, gh } = mintingWorld(() => api);
   try {
@@ -609,8 +612,8 @@ test('a refused permission (403 on one call) is not cleared by another call succ
   assert.equal(open()[0]!.severity, 'red');
 });
 
-test('isNetworkFailure: no answer from GitHub (fetch failed, a timeout, a network code) is one; an answer (401, 403) or a bad key is not', async () => {
-  const dead = await deadPort();
+test('isNetworkFailure: no answer from GitHub (fetch failed, a timeout, a network code) is one; an answer (401, 403) or a bad key is not', async (t) => {
+  const dead = await deadPort(t);
   const refused = await fetch(dead).then(
     () => null,
     (e: unknown) => e,
