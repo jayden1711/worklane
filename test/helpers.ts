@@ -109,10 +109,24 @@ export function seedInstanceItems(log: { append(type: string, data: unknown, act
   log.append('testrun.queued', { id: m.run, sha: sha('d'), kind: 'fast', prs: [m.pr], shard: null }, m.actor);
 }
 
+/**
+ * Linux's largest possible pid (PID_MAX_LIMIT, 2^22). A marker number at or below it can be a real pid, and pages show
+ * pids (an agent's "pid 8170"): with the test process given that pid, an instance's own page matched another's marker.
+ */
+export const PID_LIMIT = 4_194_304;
+
+/** Two instances' markers for the cross-instance leak checks: every number above any pid, so no pid on a page matches one. */
+export const MARKS = {
+  a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 81_010_001, pr: 81_010_070, run: 'tr-alpha-1', title: 'Alpha-only' },
+  b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 92_010_001, pr: 92_010_070, run: 'tr-beta-1', title: 'Beta-only' },
+} as const satisfies Record<'a' | 'b', InstanceMarks>;
+
 /** Every trace of one instance's items a response or page could carry: its issue numbers, PR, run, project, actor and titles. */
-// A number marks an item only as a whole number: b's PR 9270 must not match a byte count like 15381192704.
-export const marksOf = (m: InstanceMarks): RegExp =>
-  new RegExp([...[m.issue, m.issue + 1, m.issue + 2, m.pr].map((n) => `(?<![0-9])${n}(?![0-9])`), ...[m.run, m.project, m.actor, m.title].map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))].join('|'));
+// A number marks an item only as a whole number: b's PR must not match a byte count that contains its digits.
+export const marksOf = (m: InstanceMarks): RegExp => {
+  for (const n of [m.issue, m.pr]) if (!(n > PID_LIMIT)) throw new Error(`marker number ${n} could be a pid: use one above ${PID_LIMIT}`);
+  return new RegExp([...[m.issue, m.issue + 1, m.issue + 2, m.pr].map((n) => `(?<![0-9])${n}(?![0-9])`), ...[m.run, m.project, m.actor, m.title].map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))].join('|'));
+};
 
 /**
  * A child engine process's GitHub, when a test runs the CLI as its own process against a fake on this machine: the
