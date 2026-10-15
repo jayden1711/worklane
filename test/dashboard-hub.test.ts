@@ -12,6 +12,7 @@ import { EventLog } from '../src/events/log.js';
 import { childEnv } from '../src/os/index.js';
 import { heldPort } from './held-port.js';
 import { exampleProject, repoRoot } from './helpers.js';
+import { serviceModeEnv } from './isolate.js';
 
 const seen = (issue: number, title: string) => ({ issue, title, labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' });
 const asked = (id: string) => ({ id, kind: 'land' as const, issue: 1, owner: 'example-owner', question: 'Approve?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] });
@@ -158,7 +159,7 @@ test('--hub names each instance once, with its state dir; the CLI refuses a malf
   // a list that came out empty by mistake is still refused, and - is never mixed with names.
   assert.deepEqual(parseHubArg('-', port), []);
   for (const bad of ['-,a=/x', 'a=/x,-', ',']) assert.throws(() => parseHubArg(bad, port), /--hub/);
-  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'dashboard', '--hub', 'Bad', '--service'], { encoding: 'utf8', env: childEnv(), timeout: 20_000 });
+  const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'dashboard', '--hub', 'Bad', '--service'], { encoding: 'utf8', env: serviceModeEnv(childEnv()), timeout: 20_000 });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr + r.stdout, /--hub takes name=/);
 });

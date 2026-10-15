@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MACHINE_HELPER, machineChanges, setSlotCap, setUpdates } from '../src/machine.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
 const { parse } = createRequire(import.meta.url)(helperSrc) as { parse: (a: string[]) => { what: string; value: unknown } | null };
@@ -128,17 +129,20 @@ const signerRefused = (k: string): string[][] => [
 
 const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
 
+/** The helper as root's sudoers rules name it (lib.sh), and the engine's, on a real machine. */
+const HELPER_AS_ROOT = onRealMachine(MACHINE_HELPER);
+
 test('the sudoers rule lists exactly the 34 commands, no patterns but add-project\'s and the staged signer\'s two, for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
-  const cmds = [...r.stdout.matchAll(new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
-  const addProject = `${MACHINE_HELPER} ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`;
-  const stage = `${MACHINE_HELPER} ^stage-update-signer ${SIGNER_ARGS}`;
-  const discard = `${MACHINE_HELPER} ^discard-update-signer ${SIGNER_ARGS}`;
-  const want = [...Array.from({ length: 16 }, (_, i) => `${MACHINE_HELPER} set-slots ${i + 1}`), `${MACHINE_HELPER} set-updates on`, `${MACHINE_HELPER} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${MACHINE_HELPER} set-test-slots ${i + 1}`), `${MACHINE_HELPER} claude-account status`, `${MACHINE_HELPER} claude-account switch`, `${MACHINE_HELPER} install-updater`, `${MACHINE_HELPER} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${MACHINE_HELPER} tailscale ${a}`), stage, discard, addProject];
+  const cmds = [...r.stdout.matchAll(new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
+  const addProject = `${HELPER_AS_ROOT} ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$`;
+  const stage = `${HELPER_AS_ROOT} ^stage-update-signer ${SIGNER_ARGS}`;
+  const discard = `${HELPER_AS_ROOT} ^discard-update-signer ${SIGNER_ARGS}`;
+  const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, addProject];
   assert.equal(want.length - 3, 34);
   // Tailscale's four are whole commands: sudo matches a listed command's arguments exactly, so nothing may follow one.
-  for (const a of ['install', 'up', 'serve', 'public-url']) assert.match(r.stdout, new RegExp(`${MACHINE_HELPER.replace(/[/.]/g, '\\$&')} tailscale ${a}(, \\\\)?$`, 'm'), a);
+  for (const a of ['install', 'up', 'serve', 'public-url']) assert.match(r.stdout, new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} tailscale ${a}(, \\\\)?$`, 'm'), a);
   // The rule names no funnel command, no flag and no target: sudo matches a listed command's arguments exactly, so `tailscale serve <anything>` is not `tailscale serve`.
   // WHY: checked on tailscale's own four lines (the staged signer's pattern names ssh-ed25519, digits and all); no rule anywhere names funnel.
   const tailscaleLines = r.stdout.split('\n').filter((l) => l.includes(' tailscale '));

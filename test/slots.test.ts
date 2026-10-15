@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
 import { slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const slotsDir = (cap: number) => {
   const dir = mkdtempSync(join(tmpdir(), 'slots-'));
@@ -60,7 +61,8 @@ test('slot locations: durable system paths when present, env overrides, the old 
   delete process.env.AGENT_SLOTS_DIR;
   delete process.env.AGENT_SLOTS_CONFIG;
   try {
-    assert.equal(machineSlotsDir(system), '/var/tmp/agent-slots', 'no system dir: the development default');
+    // The machine's /var/tmp, inside the test's own root (test/isolate.ts): a test never uses the real one.
+    assert.equal(onRealMachine(machineSlotsDir(system)), '/var/tmp/agent-slots', 'no system dir: the development default');
     mkdirSync(system.dir, { recursive: true });
     assert.equal(machineSlotsDir(system), system.dir, 'the durable dir when it exists');
     assert.equal(slotsConfigPath(system.dir, system), join(system.dir, 'config.json'), 'no system config yet');

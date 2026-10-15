@@ -882,15 +882,17 @@ test("the terminal's upgrade through the hub takes the session's CSRF token as a
     const open = (protocols: string[], o: { origin?: string; cookie?: string } = {}) => openTerminalWs(s.base, protocols, { ...laptop, cookie: o.cookie ?? ada.cookie }, o.origin);
     const refusals = () => termAudit.filter((e) => e.kind === 'refused').length;
 
-    const cases: [string, Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
-      ['no token', open([TERMINAL_PROTOCOL]), /CSRF/],
-      ['a wrong token', open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
-      ["another session's token", open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
-      ['the token in the header only (what a browser cannot send)', openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
+    // One at a time: each refusal is counted against the audit as it was just before that one (opened together, a
+    // later one's audit line could land before an earlier one was counted).
+    const cases: [string, () => Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
+      ['no token', () => open([TERMINAL_PROTOCOL]), /CSRF/],
+      ['a wrong token', () => open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
+      ["another session's token", () => open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
+      ['the token in the header only (what a browser cannot send)', () => openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
     ];
     for (const [what, r, re] of cases) {
       const before = refusals();
-      const got = await r;
+      const got = await r();
       assert.match(got.refused ?? '', re, `${what}: ${JSON.stringify(got)}`);
       assert.equal(refusals(), before + 1, `${what}: audited`);
     }

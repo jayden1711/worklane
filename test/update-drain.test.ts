@@ -20,6 +20,7 @@ import { drainView } from '../src/dashboard.js';
 import { updatesPanel } from '../src/updates.js';
 import type { TestRunConfig, TestRunTier } from '../src/testrun/config.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 type Flag = { since: string; until: string; to: string | null };
 type Deps = Record<string, unknown> & { drainState(): Flag | null; saveDrain(f: Flag | null): void };
@@ -262,7 +263,7 @@ test('the drain blocks every start gate: test slots, the full-run lock and agent
     got.lock.release();
     // On a machine, the flag is root's, outside the group-writable slot directory.
     assert.equal(updateDrainPath(SYSTEM_SLOTS.dir), UPDATE_DRAIN_FILE);
-    assert.match(UPDATE_DRAIN_FILE, /^\/var\/lib\/[^/]+\/update-drain\.json$/);
+    assert.match(onRealMachine(UPDATE_DRAIN_FILE), /^\/var\/lib\/[^/]+\/update-drain\.json$/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

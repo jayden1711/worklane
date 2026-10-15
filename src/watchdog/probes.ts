@@ -11,6 +11,7 @@ import type { UpdateEntry } from '../updates.js';
 import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
+import { asRoot } from '../os/system-paths.js';
 
 export interface Finding {
   kind: WatchdogKind;
@@ -124,8 +125,8 @@ export function signerFindings(changes: readonly MachineChange[], now: number): 
       kind: 'update_signer_added',
       key: `${principal} ${fingerprint}`,
       instance: null,
-      detail: `the release signer ${principal}, key fingerprint ${fingerprint}, was added to /etc/${BRAND.cli}/allowed_signers by ${c.by} at ${c.at}: engine releases signed with that key now verify on this machine`,
-      fix: `Nothing, if you added it. If you didn't: turn engine updates off (the Machine page), remove its line from /etc/${BRAND.cli}/allowed_signers at a root shell, and find out who ran it. This notice closes by itself after a day`,
+      detail: `the release signer ${principal}, key fingerprint ${fingerprint}, was added to ${asRoot.etc('allowed_signers')} by ${c.by} at ${c.at}: engine releases signed with that key now verify on this machine`,
+      fix: `Nothing, if you added it. If you didn't: turn engine updates off (the Machine page), remove its line from ${asRoot.etc('allowed_signers')} at a root shell, and find out who ran it. This notice closes by itself after a day`,
       tried: [],
     });
   }
@@ -154,7 +155,7 @@ export function stagedSignerFindings(changes: readonly MachineChange[], now: num
       key: `${principal} ${fingerprint}`,
       instance: inst ? inst[1]! : null,
       detail: `a release signer was staged: ${principal}, key fingerprint ${fingerprint}, by ${c.by}${inst ? ` (instance ${inst[1]})` : ''} at ${c.at}. It is trusted for nothing until an admin confirms it at a root shell`,
-      fix: `If you asked for it, confirm it on the machine: sudo bash /opt/${BRAND.cli}/current/scripts/setup/updates.sh --confirm-signer ${fingerprint} (it asks you to type the principal). If not, discard it on the Machine page's Updater setup. It is dropped after 24 hours either way`,
+      fix: `If you asked for it, confirm it on the machine: sudo bash ${asRoot.opt('current/scripts/setup/updates.sh')} --confirm-signer ${fingerprint} (it asks you to type the principal). If not, discard it on the Machine page's Updater setup. It is dropped after 24 hours either way`,
       tried: [],
     });
   }

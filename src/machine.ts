@@ -6,9 +6,10 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
+import { asRoot, etcPath, libexecPath, varLibPath } from './os/system-paths.js';
 
-export const MACHINE_HELPER = `/usr/local/libexec/${BRAND.cli}-machine`;
-export const MACHINE_CHANGES = `/var/lib/${BRAND.cli}/machine-changes.jsonl`;
+export const MACHINE_HELPER = libexecPath('machine');
+export const MACHINE_CHANGES = varLibPath('machine-changes.jsonl');
 export const SLOTS_MIN = 1;
 export const SLOTS_MAX = 16;
 
@@ -137,9 +138,9 @@ export function addProjectRepoOk(s: unknown): s is string {
 }
 
 /** What machine-helper.sh recorded about this machine's sudo rule (scripts/setup/lib.sh HELPER_RULES). */
-export const HELPER_RULES = `/etc/${BRAND.cli}/helper-rules.json`;
+export const HELPER_RULES = etcPath('helper-rules.json');
 /** The root command an owner runs instead, where the helper's add-project rule isn't installed. */
-export const ADD_PROJECT_SCRIPT = `/opt/${BRAND.cli}/current/scripts/setup/add-project.sh`;
+export const ADD_PROJECT_SCRIPT = asRoot.opt('current/scripts/setup/add-project.sh');
 
 /**
  * The helper's commands this machine's sudo rule leaves out (an older sudo reads their patterns as literal text), and
