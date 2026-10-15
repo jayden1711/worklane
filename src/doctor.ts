@@ -23,6 +23,7 @@ import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { modelWarnings } from './model-routing.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -66,6 +67,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   try {
     cfg = loadConfig(root);
     add('config', 'ok', `${BRAND.configDir}/ valid`);
+    // WHY (#468): a model the engine doesn't list is a warning, never a refusal (the config still loads).
+    const models = modelWarnings(cfg.agents);
+    add('config models', models.length ? 'warn' : 'ok', models.length ? models.join('\n') : 'every model named is one the engine lists');
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
   }

@@ -535,7 +535,8 @@ export function probeMe(servedByHub: boolean, get: typeof fetch = fetch, auth = 
     .then((m) => (m && (m.login || m.breakGlass) ? m : null))
     .catch(() => null);
 }
-const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
+/** Whether the hub served this page (its sign-in or break-glass port); false on an instance's own dashboard. */
+export const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
 export const me: Promise<Me | null> = probeMe(servedByHub);
 /** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
 export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
@@ -1113,6 +1114,11 @@ export interface FirstRunRepoConfig {
   owner: string;
   branch: string;
   repo: string;
+  /** The workers' models the engine supports (src/config-change.ts WORKER_MODELS) and its default; absent from older servers. */
+  models?: string[];
+  defaultModel?: string;
+  /** #468: the config's worker model is listed (an alias, or a full Anthropic model id); absent from older servers. */
+  modelListed?: boolean;
 }
 export interface ConfigChange {
   file: string;

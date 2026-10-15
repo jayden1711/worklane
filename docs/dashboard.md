@@ -263,7 +263,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
 | The agents' GitHub App | server | `sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)` |
 | Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
-| Auto-config questions answered | local | `worklane init --answer <id>=<choice> (or answer init's questions in a terminal)` |
+| Auto-config questions answered | local | `worklane init --mode local` |
 | .worklane/ valid and on the default branch | local, server | `worklane init (drafts the config and proposes it as a PR), then gh pr merge <number>, then worklane init again (it fast-forwards)` |
 | Hooks for local runs installed | local | `worklane install` |
 | Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |

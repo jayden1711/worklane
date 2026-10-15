@@ -66,6 +66,24 @@ export function tierOf(model: string): ModelTier | null {
   return MODEL_TIERS.find((t) => words.includes(t)) ?? null;
 }
 
+/**
+ * WHY (#468, the owner): the models a config may name without a warning: the tiers' aliases (haiku, sonnet, opus) and
+ * full Anthropic model ids (claude-..., a tier in the name, e.g. claude-sonnet-4-5). Anything else still loads (a
+ * running coordinator never stops over it) but is a config warning.
+ */
+export const listedModel = (model: string): boolean => (MODEL_TIERS as readonly string[]).includes(model) || (/^claude-[a-z0-9][a-z0-9.-]*$/.test(model) && tierOf(model) !== null);
+
+/** The config's model names that aren't listed: one warning each, naming where it is and the list. */
+export function modelWarnings(agents: { roles: Record<string, { model: string; hard_issues_model?: string | undefined } | undefined> }): string[] {
+  const out: string[] = [];
+  for (const [role, r] of Object.entries(agents.roles)) {
+    for (const [key, m] of [['model', r?.model], ['hard_issues_model', r?.hard_issues_model]] as const) {
+      if (m && !listedModel(m)) out.push(`agents.yaml roles.${role}.${key}: ${m} isn't a model the engine lists (${MODEL_TIERS.join(', ')}, or a full Anthropic model id such as claude-sonnet-4-5); it is used as written`);
+    }
+  }
+  return out;
+}
+
 /** The model, capped at `cap`: a model above it (or of an unknown tier) becomes the cap's alias. */
 export function capped(model: string, cap?: ModelTier): string {
   if (!cap) return model;

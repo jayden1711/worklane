@@ -122,8 +122,10 @@ interface Render {
   renderKeyForm(error?: string | null): string;
   needsKey(hubPage: boolean, key: string): boolean;
   tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
-  renderWhoAmI(state: { user: string; role?: string; via?: string }): string;
+  renderWhoAmI(state: { user: string; role?: string; via?: string }, o?: { hubPage?: boolean }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
+  renderSetupModeHidden(path: string): string;
+  nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
   renderAudit(entries: unknown[]): string;
@@ -459,9 +461,14 @@ test('sign-in: the hub page shows a GitHub sign-in when nobody is signed in; the
   assert.match(me, /data-testid="sign-out"/, 'a signed-in person can sign out');
   const viewer = r.renderWhoAmI({ user: 'someone-else', role: 'viewer', via: 'session' });
   assert.match(viewer, /data-testid="who-role"> · viewer</);
-  const glass = r.renderWhoAmI({ user: 'example-owner', role: 'owner', via: 'break-glass' });
+  // #468: "break-glass" only on the hub's break-glass port; a checkout's own dashboard reached with its key is the owner on this machine.
+  const glass = r.renderWhoAmI({ user: 'example-owner', role: 'owner', via: 'break-glass' }, { hubPage: true });
   assert.match(glass, /owner \(break-glass\)/);
   assert.doesNotMatch(glass, /sign-out/, 'the break-glass has no session to end');
+  const local = r.renderWhoAmI({ user: 'example-owner', role: 'owner', via: 'break-glass' }, { hubPage: false });
+  assert.match(local, /data-testid="who-role"> · owner \(this machine\)</);
+  assert.doesNotMatch(local, /break-glass/, 'no alarm word on a local dashboard');
+  assert.doesNotMatch(local, /sign-out/);
 
   const audit = r.renderAudit([{ id: 2, at: new Date().toISOString(), login: 'example-collaborator', role: 'writer', via: 'session', instance: 'a', action: 'decision.answered', detail: { id: 'd-1', answer: 'approve' } }]);
   assert.match(audit, /data-testid="audit-log"/);
@@ -1387,8 +1394,10 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // Each not-done step has a Fix of its kind; a done one has none.
   assert.match(html, /data-step="claude-login" data-status="todo"[\s\S]*?data-testid="first-run-fix" data-fix="signin"[^>]*>Sign in</);
   assert.match(html, /data-step="service" data-status="todo"[\s\S]*?data-fix="start"[^>]*>Start</);
+  // A done one is folded to its line; its screen opens again only from its own (quiet) button (#468).
   const tools = html.slice(html.indexOf('data-step="tools"'), html.indexOf('</li>', html.indexOf('data-step="tools"')));
-  assert.doesNotMatch(tools, /first-run-fix/);
+  assert.match(tools, /data-expanded="false"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Run again</);
+  assert.doesNotMatch(tools, /first-run-fix-panel|bg-ink text-surface/);
   assert.doesNotMatch(html, /first-run-fix-panel/, 'no Fix open yet');
   // init's record: where it last stopped, and the command that picks up there.
   assert.match(html, /data-testid="first-run-resume"[\s\S]*?init last stopped at Claude login[\s\S]*?<code[^>]*>worklane init \/r<\/code>/);
@@ -1548,7 +1557,9 @@ test("the first-run page in setup mode: the banner; the origin picker; auto-conf
   assert.match(r.renderFirstRun(setup, { open: 'origin' }), /data-step="origin" data-status="todo"[\s\S]*?data-fix="form"[^>]*>Pick[\s\S]*?data-testid="setup-origin"[\s\S]*?placeholder="owner\/name"[^>]*data-testid="setup-origin-repo"[\s\S]*?data-testid="setup-origin-review"/);
   const questions = r.renderFirstRun(setup, { open: 'questions' });
   assert.match(questions, /data-testid="setup-question" data-question="package-manager"[\s\S]*?which package manager runs it\?[\s\S]*?type="radio"[\s\S]*?npm[\s\S]*?pnpm[\s\S]*?data-testid="setup-save-answers"/);
-  assert.match(questions, /data-testid="setup-draft-log"[\s\S]*?Finished: 1 question to answer[\s\S]*?running runner\.full on main/);
+  // #468: the finished draft's log folded away (its questions are the choices above, not repeated in the terminal's words).
+  assert.match(questions, /<details[^>]*data-testid="setup-draft-log"><summary[^>]*>What the draft did \(failed\)<\/summary>[\s\S]*?running runner\.full on main/);
+  assert.doesNotMatch(questions, /<details[^>]*data-testid="setup-draft-log" open/);
   const drafting = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [] } }, { open: 'questions', draftConfirming: true });
   assert.match(drafting, /data-testid="setup-draft"[\s\S]*?runs each on a scratch copy of the default branch[\s\S]*?data-testid="setup-draft-confirming"[\s\S]*?Run your project(&#x27;|')s commands to draft it\?[\s\S]*?data-testid="setup-draft-confirm"/);
   const pr = r.renderFirstRun({ ...setup, autoConfig: { ...autoConfig, questions: [], pr: { number: 7, url: 'https://github.com/example-org/example-shop/pull/7' } } }, { open: 'questions' });
@@ -1601,15 +1612,102 @@ test('the first-run page: Skip on a step not done (owners), skipped shown and Un
   assert.match(sk, /data-step="pre-commit" data-status="skipped"[\s\S]*?>skipped<[\s\S]*?data-testid="first-run-skip" data-skipped="true"[^>]*>Undo skip</);
   assert.doesNotMatch(sk.slice(sk.indexOf('data-step="pre-commit"'), sk.indexOf('</li>', sk.indexOf('data-step="pre-commit"'))), /first-run-fix-panel/, 'a skipped step stays closed');
   const open = r.renderFirstRun(owner, { open: 'pre-commit' });
-  assert.match(open, /data-testid="first-run-automation"[^>]*>Without this page: <code[^>]*>worklane install --git-hooks<\/code>/);
+  assert.match(open, /<details[^>]*data-testid="first-run-without"><summary[^>]*>Without this page<\/summary>[\s\S]*?data-testid="first-run-automation"><span class="text-\[0px\]" aria-hidden="true">Without this page: <\/span><code[^>]*>worklane install --git-hooks<\/code>/);
   const done = { ...owner, setup: { ...owner.setup!, groups: owner.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'pre-commit' ? { ...s, done: true } : s)) })) } };
-  assert.doesNotMatch(r.renderFirstRun(done).match(/data-step="pre-commit"[\s\S]*?<\/li>/)![0], /first-run-fix"/, 'done: no Fix on the checklist');
+  // #468: a done step is folded (its one line, no panel) and can be opened again from its own button.
+  const doneRow = r.renderFirstRun(done).match(/data-step="pre-commit"[\s\S]*?<\/li>/)![0];
+  assert.match(doneRow, /data-status="done" data-expanded="false"/);
+  assert.match(doneRow, /class="[^"]*truncate[^"]*"[^>]*data-testid="first-run-step-detail"/, 'its result on one line');
+  assert.match(doneRow, /data-testid="first-run-fix" data-fix="action"[^>]*>Run again</);
+  assert.doesNotMatch(doneRow, /first-run-fix-panel/);
   assert.match(r.renderFirstRun(done, { open: 'pre-commit', rerun: 'pre-commit' }), /data-step="pre-commit" data-status="done"[\s\S]*?data-testid="first-run-fix" data-fix="action"[^>]*>Run again[\s\S]*?data-testid="first-run-action" data-action="git-hooks"/);
   const settings = r.renderSetupScreens(done.setup!.groups.flatMap((g) => g.steps));
   assert.match(settings, /data-testid="setup-screens"[\s\S]*?Setup screens/);
   assert.match(settings, /data-step="pre-commit"[\s\S]*?>done<[\s\S]*?worklane install --git-hooks[\s\S]*?href="\/first-run\?step=pre-commit"[^>]*>Run again/);
   assert.match(settings, /data-step="service"[\s\S]*?worklane up[\s\S]*?href="\/first-run\?step=service"[^>]*>Open/);
   assert.doesNotMatch(settings, /data-step="docker"/, 'a step done on the vendor\'s own page has no screen here');
+});
+
+test('#468 first run: exactly one primary button, on the first required step not done in screen order, moving on as steps complete; none once every required step is done', () => {
+  let f: ReturnType<typeof firstRun> & { canAct?: boolean } = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  f = { ...f, canAct: true };
+  const order = f.setup!.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && !s.skipped).map((s) => s.id);
+  const seen: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    const next = r.nextStep(f);
+    const html = r.renderFirstRun(f);
+    const primaries = [...html.matchAll(/data-primary="true"/g)].length;
+    if (!next) {
+      assert.equal(primaries, 0, 'every required step done: no primary step button');
+      break;
+    }
+    seen.push(next.id);
+    assert.equal(primaries, 1, `exactly one primary with ${next.id} next`);
+    const step = f.setup!.groups.flatMap((g) => g.steps).find((s) => s.id === next.id)!;
+    if (step.fix.kind === 'start') assert.match(html, /data-testid="first-run-start-button" data-primary="true"/, 'Start is pressed in its card');
+    else assert.match(html.match(new RegExp(`data-step="${next.id}"[\\s\\S]*?</li>`))![0], /data-testid="first-run-fix"[^>]*data-primary="true"/, `${next.id}'s own button`);
+    // Every other step's button is secondary (outlined or quiet), never the dark primary.
+    const dark = [...html.matchAll(/<button[^>]*>/g)].map((m) => m[0]).filter((b) => /data-testid="first-run-(fix|start-button)"/.test(b) && /bg-ink text-surface/.test(b));
+    assert.equal(dark.length, 1, 'one dark (primary) step button');
+    assert.match(dark[0]!, /data-primary="true"/);
+    f = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === next.id ? { ...s, done: true } : s)) })) } };
+  }
+  assert.deepEqual(seen, order, 'every required step not done, each once, in screen order');
+  assert.ok(seen.length >= 3);
+  // Where Start has no button here (a server: the owner's root command), the coordinator step's own button is the primary.
+  const srv = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop', start: { kind: 'owner-command', unit: 'u', command: 'c', why: 'w' } });
+  const onlyCoordinator = { ...srv, setup: { ...srv.setup!, groups: srv.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((x) => (x.id === 'coordinator' ? { ...x, done: false, skipped: false } : { ...x, done: true })) })) } };
+  assert.equal(r.nextStep(onlyCoordinator)!.id, 'coordinator');
+  const srvHtml = r.renderFirstRun(onlyCoordinator);
+  assert.equal([...srvHtml.matchAll(/data-primary="true"/g)].length, 1, 'still exactly one');
+  assert.match(srvHtml.match(/data-step="coordinator"[\s\S]*?<\/li>/)![0], /data-testid="first-run-fix"[^>]*data-primary="true"/);
+  // A skipped required step is passed over.
+  const g = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const first = r.nextStep(g)!;
+  const skipped = { ...g, setup: { ...g.setup!, groups: g.setup!.groups.map((x) => ({ ...x, steps: x.steps.map((s) => (s.id === first.id ? { ...s, skipped: true } : s)) })) } };
+  assert.notEqual(r.nextStep(skipped)?.id, first.id);
+});
+
+test('#468 first run: the CLI fallback is one complete line, folded under "Without this page"; the questions are asked once, as choices', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const autoConfig = { questions: [{ id: 'package-manager', ask: 'which package manager runs it?', choices: [{ id: 'npm', label: 'npm' }, { id: 'pnpm', label: 'pnpm' }], custom: false }], verified: [], pr: null, answer: 'worklane init /r --answer <id>=<choice>' };
+  const draft = { running: false, startedAt: '2026-10-13T10:00:00.000Z', finishedAt: '2026-10-13T10:00:05.000Z', lines: ['   ? which package manager runs it?', '       npm)  npm', '     answer (npm / pnpm): '], result: { status: 'failed', detail: '1 question to answer before the config is proposed: package-manager (npm / pnpm). Run `worklane init` in a terminal to answer' } };
+  const open = { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'questions' ? { ...s, done: false, detail: '1 question open (shown below)' } : s)) })) };
+  const html = r.renderFirstRun({ ...f, setup: open, setupMode: true, configReady: false, autoConfig, draft, canAct: true }, { open: 'questions' });
+  const row = html.match(/data-step="questions"[\s\S]*?<\/li>/)![0];
+  const lines = [...row.matchAll(/data-testid="first-run-automation"><span class="text-\[0px\]" aria-hidden="true">Without this page: <\/span><code[^>]*>([^<]*)<\/code>/g)].map((m) => m[1]);
+  assert.deepEqual(lines, ['worklane init --mode local'], 'one line, complete: nothing to fill in');
+  assert.match(row, /<details[^>]*data-testid="first-run-without">/);
+  assert.doesNotMatch(row, /<details[^>]*data-testid="first-run-without" open/, 'folded');
+  assert.match(row, /data-testid="first-run-without-copy"/);
+  // Nothing outside a folded <details> shows a CLI line, or init's prompt, again.
+  // (What local mode can't do, at the foot of the page, is about other repos, not this walk.)
+  const visible = html.replace(/<details[\s\S]*?<\/details>/g, '').split('data-testid="first-run-unavailable"')[0]!;
+  const again = visible.search(/worklane init|answer \(npm \/ pnpm\)/);
+  assert.equal(again, -1, `a CLI line outside "Without this page": ${visible.slice(Math.max(0, again - 300), again + 80)}`);
+  assert.equal([...visible.matchAll(/which package manager runs it\?/g)].length, 1, 'the question, once');
+});
+
+test('#468 setup mode: the sidebar offers First run alone (all pages once configured); a hidden page\'s address says what it needs', () => {
+  // Rendered as on the server, with no window (as the drawer test above: its scroll lock measures the page only in a browser).
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  let setupMode: string, configured: string;
+  try {
+    setupMode = r.renderNavDrawer({ ...asOwner, setupMode: true } as never);
+    configured = r.renderNavDrawer({ ...asOwner, setupMode: false } as never);
+  } finally {
+    g.window = stub;
+  }
+  assert.deepEqual([...setupMode.matchAll(/data-testid="(nav-[a-z-]+)"/g)].map((m) => m[1]).filter((t) => t !== 'nav-drawer-overlay' && t !== 'nav-drawer-close' && t !== 'nav-drawer' && t !== 'nav-menu'), ['nav-first-run']);
+  assert.match(setupMode, /<a href="\/first-run"[^>]*data-testid="nav-first-run"/);
+  for (const n of r.navRows) assert.match(configured, new RegExp(`data-testid="${n.testId}"`), `${n.label} shown once configured`);
+  assert.doesNotMatch(configured, /nav-first-run/);
+  const hidden = r.renderSetupModeHidden('/issues');
+  assert.match(hidden, /data-testid="setup-mode-hidden-why"[^>]*>Issues shows once this checkout has its config, and it has none yet\./);
+  assert.match(hidden, /href="\/first-run"[^>]*data-testid="setup-mode-hidden-link"/);
+  assert.match(r.renderSetupModeHidden('/nowhere'), /This page shows once/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {
@@ -2427,6 +2525,21 @@ test("the first-run page's Discord step: the token's place and a paste box, the 
   assert.match(r.renderFirstRun(f, { open: 'discord', discord: stored }), /data-step="discord"[\s\S]*?data-testid="first-run-fix-panel"[\s\S]*?data-testid="discord-setup"/);
   const done = { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => (s.id === 'discord' ? { ...s, done: true } : s)) })) } };
   assert.match(r.renderFirstRun(done, { open: 'discord', discord: stored }), /data-step="discord" data-status="done"[\s\S]*?data-fix="discord"[^>]*>Change<[\s\S]*?data-testid="discord-setup"/);
+});
+
+test("#468 the Repo config form's worker model: a dropdown of exactly the server's list, the default marked; a hand-edited value shown with a warning, not replaced", () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'opus' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop', models: ['haiku', 'sonnet', 'opus'], defaultModel: 'sonnet' };
+  const html = r.renderRepoConfigForm(c);
+  const select = html.match(/<select[^>]*data-testid="repo-config-workers-model"[^>]*>([\s\S]*?)<\/select>/)!;
+  assert.deepEqual([...select[1]!.matchAll(/<option value="([^"]+)"[^>]*>([^<]+)<\/option>/g)].map((m) => [m[1], m[2]]), [['haiku', 'haiku'], ['sonnet', 'sonnet (default)'], ['opus', 'opus']]);
+  assert.doesNotMatch(html, /repo-config-model-warning/);
+  const odd = r.renderRepoConfigForm({ ...c, values: { ...c.values, workers_model: 'gpt-5' }, modelListed: false });
+  assert.match(odd, /<option value="gpt-5"[^>]*data-testid="repo-config-model-unknown"[^>]*>gpt-5 \(not listed\)/);
+  assert.match(odd, /data-testid="repo-config-model-warning"[^>]*>The config names a worker model the engine doesn(&#x27;|')t list \(gpt-5\): it is kept as it is unless you pick another/);
+  // #468 (the owner): a full Anthropic model id counts as listed: shown as itself, no warning.
+  const full = r.renderRepoConfigForm({ ...c, values: { ...c.values, workers_model: 'claude-sonnet-4-5' }, modelListed: true });
+  assert.match(full, /<option value="claude-sonnet-4-5"[^>]*>claude-sonnet-4-5<\/option>/);
+  assert.doesNotMatch(full, /repo-config-model-warning|repo-config-model-unknown/);
 });
 
 test("the Repo config form's Merge: offered once a PR is proposed, the command and the fast-forward shown before Confirm", () => {

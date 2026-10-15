@@ -28,7 +28,7 @@ import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
-import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, protectionAnswer, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
@@ -381,11 +381,10 @@ async function protection(c: InitContext): Promise<StepResult> {
   }
   const watch = readWatchState(join(projectStateDir(c.root!), 'main-watch.json'));
   if (watch.mode === 'github') return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
-  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}: the main watch guards it${advice}; ${later}` };
+  if (watch.mode === 'main_watch') return { status: 'done', detail: `GitHub doesn't protect ${branch}; ${MAIN_WATCH_GUARDS}${advice}; ${later}` };
   const r = c.io.run('gh', ['api', `repos/${c.repo}/branches/${branch}/protection`, '--silent']);
-  if (r.status === 0) return { status: 'done', detail: `GitHub enforces protection on ${branch}${advice}; ${later}` };
-  const code = r.stderr.match(/HTTP (\d{3})/)?.[1];
-  return { status: 'done', detail: `GitHub doesn't protect ${branch}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge (land_mode pr)${advice}; ${later}` };
+  // WHY (#468): what GitHub's answer means (protected, not yet, can't on this plan, no access), never a bare HTTP code.
+  return { status: 'done', detail: `${protectionAnswer(r, branch).detail}${advice}; ${later}` };
 }
 
 async function discord(): Promise<StepResult> {
