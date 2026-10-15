@@ -1,0 +1,2217 @@
+// The local dashboard server: static UI plus a small API over the event
+// log. It binds to loopback only and requires a per-install token, which only
+// two kinds of caller hold: the hub, which names the signed-in person on each
+// request (their role here is then read from their permission on this
+// instance's repo, never taken from the caller), and the owner on this machine
+// (the break-glass: no person named, never through a proxy; it grants owner).
+// It reads the log read-only, pushes changes over one SSE stream, and records
+// every write a person makes (answers, settings, chat, console) in the audit.
+// See dashboard-auth.ts.
+import { spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { openReadOnly } from './events/read-only.js';
+import { BRAND } from './brand.js';
+import { GITHUB_API } from './github-hosts.js';
+import { loadConfig, loadConfigAt } from './config/load.js';
+import { fastForwardCheckout, systemGit } from './checkout-sync.js';
+import { EventLog } from './events/log.js';
+import { EventCache } from './events/cache.js';
+import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed } from './dashboard-compress.js';
+import { localDay } from './local-day.js';
+import { redactString } from './events/redact.js';
+import { acceptGit, acceptMerge, protectionView } from './main-watch.js';
+import { deployGateView } from './deploy-gate/gate.js';
+import { checkResults, inbox, prsView, project } from './projection.js';
+import { instancesDir, loadInstance, readPolicy } from './instance.js';
+import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
+import { askChat, ChatError, chatAnswer, validateDraft } from './chat.js';
+import { mayAnswer } from './backlog/types.js';
+import { answerDecision, auditWrite } from './decide.js';
+import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
+import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
+import { readRun, runsForIssue } from './run-record.js';
+import { emergencyStop, slotStatus } from './slots.js';
+import { testRunsView } from './testrun/status.js';
+import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
+import { FULL_RUN_LOCK } from './testrun/run.js';
+import { healthView } from './health.js';
+import { usageView } from './usage-limit.js';
+import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
+import { readFeed } from './run-feed.js';
+import { cpuCount, flockHolders, installService, serviceChange } from './os/index.js';
+import { machineStats, processGroupUsage } from './os/stats.js';
+import { boardForViewer, boardView } from './board.js';
+import { goalGraph } from './goal-graph.js';
+import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
+import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
+import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS } from './machine-requests.js';
+import { ENGINE_CURRENT, installedEngine, UPDATES_CONFIG, UPDATES_LOG, updateLog, updatesPanel, updateSettings } from './updates.js';
+import { updateDrain } from './update-drain.js';
+import { updaterPlan, updaterSetup } from './updater-setup.js';
+import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError } from './settings.js';
+import { researchForRun } from './research.js';
+import { PolicyFile } from './instance.js';
+import { parseDocument } from 'yaml';
+import { buildReport } from './reports.js';
+import { intakeHealth, intakeReports } from './intake/view.js';
+import { throughput } from './throughput.js';
+import { constraintsView } from './checks-from-feedback.js';
+import { digestMarkdown, waitingOnYou } from './digest.js';
+import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
+import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
+import { deliveryMetrics } from './merge-metrics.js';
+import { flakyView, releaseByOwner } from './flaky.js';
+import { harnessEvalView } from './harness-evals/score.js';
+import { learningsView, promoteRefusal } from './learnings.js';
+import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin } from './dashboard-auth.js';
+import { handleAskRoute } from './console/routes.js';
+import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
+import { listInstallableRepos } from './setup/repo-picker.js';
+import { engineRoot, firstRunLiveView, INIT_FILE, serverInitFile } from './init.js';
+import { SETUP_STEPS } from './setup-steps.js';
+/** The steps skipped on the first-run page, in the dashboard's state dir. */
+export const SKIPS_FILE = 'first-run-skips.json';
+import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
+import { ConfigChangeError, configPrMerge, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
+import { configReady, newDraftJob, originPlan, pushableRepos, saveAnswers, setOrigin, setupPrMerge, SetupModeError, startDraft } from './setup-mode.js';
+import { systemProbe } from './setup-steps.js';
+import { gitRemoteRepo } from './install.js';
+import { actionPlan, ACTIONS, isActionId, systemActionDeps } from './setup-actions.js';
+import { ClaudeSignin, claudeServerView, systemSigninDeps } from './claude-signin.js';
+import { GhLogin, GhLoginError } from './gh-login.js';
+import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState } from './intake/discord-setup.js';
+import { INTAKE_FILE } from './intake/config.js';
+import { checkRootStep } from './console/root-steps.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView } from './tailscale-setup.js';
+import { readSecretBody } from './console/secrets.js';
+import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
+import { incidentsView } from './watchdog/view.js';
+import { effectiveRouting, ROUTING } from './routing.js';
+import { refuseKeyInUrl } from './dashboard-key-url.js';
+/**
+ * What the Settings page shows: the config's shape and choices, read-only.
+ * Commands, connection fingerprints and deploy details stay out; editing
+ * happens in the project's config folder, through review like any change.
+ */
+/** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+export function settingsForViewer(cfg) {
+    const v = settingsView(cfg);
+    return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true };
+}
+/** WHY: the dashboard's cfg is the repo's; the panel shows what runs, so the instance's settings go over it (item 32). */
+export function routingInEffect(o) {
+    let cfg = o.cfg;
+    try {
+        if (o.policyFile)
+            cfg = applySettings(o.cfg, PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings);
+    }
+    catch {
+        // WHY: the Instance settings panel reports an unreadable policy; this panel still shows the repo's routing.
+    }
+    return effectiveRouting(cfg.agents).map((r) => ({ ...r, task: ROUTING[r.key].task }));
+}
+export function settingsView(cfg, routing = routingInEffect({ cfg, policyFile: null })) {
+    return {
+        configDir: BRAND.configDir,
+        project: { name: cfg.project.project.name, repo: cfg.project.project.repo, landMode: cfg.project.land_mode, runtime: cfg.project.agent_runtime },
+        owners: cfg.project.owners,
+        reports: cfg.project.reports,
+        governor: cfg.project.governor,
+        agents: {
+            budget: cfg.agents.daily_budget_usd,
+            roles: Object.entries(cfg.agents.roles).map(([name, r]) => ({ name, enabled: r.enabled, model: r.model, count: r.count ?? null })),
+        },
+        routing,
+        tests: { gates: cfg.tests.gates, batchMax: cfg.tests.land.batch_max, nightlyAt: cfg.tests.nightly_at ?? null, tiers: Object.keys(cfg.tests.tiers ?? {}), baselineParser: !!cfg.tests.failures },
+        review: cfg.review ? { levels: Object.fromEntries(Object.entries(cfg.review.levels).map(([k, v]) => [k, v.when])) } : null,
+        guardrails: { rules: cfg.guardrails.rules.length, protectedPaths: cfg.guardrails.protected_paths, secretPaths: cfg.guardrails.secret_paths.length, network: cfg.guardrails.network ? 'restricted' : 'open', preApproved: cfg.guardrails.pre_approved },
+        deploy: cfg.deploy ? { environments: cfg.deploy.environments.map((e) => ({ name: e.name, production: e.production })), prodRead: !!cfg.deploy.prod_read } : null,
+    };
+}
+/** The updater's drain in force now (src/update-drain.ts), with what is still finishing; null when none. Read-only. */
+export function drainView(dir, now = Date.now()) {
+    const d = updateDrain(dir, now);
+    if (!d)
+        return null;
+    const slots = slotStatus(dir);
+    return { since: d.since, until: d.until, to: d.to, testRuns: testSlotsHeld(dir).length + (slots.fullRun ? 1 : 0), agents: slots.agents.length };
+}
+export function firstRunStart(o) {
+    if (o.setupMode)
+        return { kind: 'unsupported', why: "the coordinator starts from this checkout's own config, and it has none yet: finish the repo config first" };
+    if (o.instance) {
+        const unit = instanceUnit(o.instance);
+        // The machine helper's commands run through the coordinator (src/machine-requests.ts), and the coordinator is the
+        // thing that isn't running: its add-project would start the unit, but nothing would pick the request up.
+        const helper = checkRootStep('add-project', [o.instance, o.cfg.project.project.repo]);
+        return {
+            kind: 'owner-command',
+            unit,
+            command: `sudo bash ${join(engineRoot(), 'scripts', 'setup', 'service.sh')} ${o.instance}`,
+            why: `the dashboard never runs sudo, and the machine helper's commands${helper.allowed ? ' (add-project would start it)' : ''} are run by the coordinator, which is what isn't running: an owner runs this at a root shell on the machine`,
+        };
+    }
+    const spec = localServiceSpec(o.root, o.cfg);
+    const change = serviceChange(spec.label);
+    if (!change)
+        return { kind: 'unsupported', why: 'agents need macOS, Linux or WSL2; on native Windows run the coordinator on another machine' };
+    return { kind: 'local', label: spec.label, file: change.path, manager: change.manager, commands: change.commands, program: spec.program, log: spec.logFile };
+}
+/**
+ * The emergency stop as the dashboard shows it, read-only: whether one is in
+ * force on this machine now (the STOP file), and whether this instance's
+ * coordinator has halted for it (its own emergency.stop event since then).
+ */
+export function stopStatus(inForce, record) {
+    const since = inForce?.at ? Date.parse(inForce.at) : NaN;
+    const halted = !!inForce && !!record.lastStop && (Number.isNaN(since) || Date.parse(record.lastStop.at) >= since) && !(record.lastResume && Date.parse(record.lastResume) > Date.parse(record.lastStop.at));
+    return {
+        inForce,
+        /** This coordinator acknowledged it: halted its agents (how many were running) and starts none. */
+        halted: halted ? { at: record.lastStop.at, running: record.lastStop.running } : null,
+        lastStop: record.lastStop,
+        lastResume: record.lastResume,
+    };
+}
+export { mayAnswer };
+/** What a slot or lock held by anyone but this instance shows as: that it is held, never by whom or for what. */
+export const ELSEWHERE = 'another instance or job on this machine';
+/**
+ * The machine's slot and lock holders as one instance's dashboard may show them. The slots are shared by every
+ * instance on the machine, and a holder's owner names its project, issue or run; so only this instance's own
+ * holders keep it (its agent slots and land gate, `<cli> <project> ...`; its test slots, `<actor> ...`). Any
+ * other holder is counted, with its slot and since when, as held elsewhere: no owner, no pid. Fails closed: a
+ * holder that doesn't name this instance is someone else's.
+ */
+export function ownHolders(o) {
+    const mine = (owner) => owner.startsWith(`${BRAND.cli} ${o.project} `) || owner.startsWith(`${o.actor} `);
+    return (h) => {
+        if (mine(h.owner))
+            return h;
+        const { owner: _owner, pid: _pid, ...rest } = h;
+        return { ...rest, owner: ELSEWHERE, elsewhere: true };
+    };
+}
+/** The identity each request was resolved to, for as long as the request lives. */
+const resolved = new WeakMap();
+/**
+ * The session behind a request on an instance's dashboard, once the server has resolved it (after the token
+ * check): the person and their role from the repo, the hub's sign-in time. CSRF is the hub's to check (it
+ * refuses a write without the session's token before forwarding), and the break-glass is a bearer token, not
+ * a cookie, so csrfOk is true for any request that got here. Null before or without that.
+ */
+export const dashboardSession = (req) => resolved.get(req) ?? null;
+/** Who may read the next report's preview (spend, and the throughput section): the instance's owners and writers. */
+export const mayReadReports = (role) => isWriter(role);
+/** Who may read intake reports (redacted, but people's words): the instance's owners and writers. */
+export const mayReadIntake = (role) => isWriter(role);
+/** Who may read throughput (what runs cost, where PRs waited): the instance's owners and writers. */
+export const mayReadThroughput = (role) => isWriter(role);
+/** Who may read what waits on the owner (the digest): the instance's owners and writers. */
+export const mayReadDigest = (role) => isWriter(role);
+/**
+ * Who may read agent runs (every route under /api/runs: a run's record, its live feed, a research run's
+ * searches and pages): the instance's owners and writers. Writing to a run (a console message, a stop)
+ * stays the owner's alone, checked on those routes as well.
+ */
+export const mayReadRuns = (role) => isWriter(role);
+/** Why a reader is refused something that is the owners' and writers' to read. */
+const writersOnly = (what, who) => `${what} for the instance's owners and writers (admin or write on its repo); @${who.login} is a ${who.role}`;
+/**
+ * Every path that serves agent runs, which the run-reading gate covers whatever route is added there:
+ * everything under /api/runs, the list of live runs (/api/live), and the Board's Watch (/api/board/watch/<run>).
+ */
+export const isRunsPath = (pathname) => pathname === '/api/runs' || pathname.startsWith('/api/runs/') || pathname === '/api/live' || pathname.startsWith('/api/board/watch/');
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.woff2': 'font/woff2' };
+/**
+ * A page of the engine's docs on its public repository, from package.json (docs aren't in the package);
+ * null when the package names no https repository.
+ */
+export function docsUrl(page, repository = enginePackage().repository) {
+    const raw = typeof repository === 'string' ? repository : repository?.url;
+    if (typeof raw !== 'string')
+        return null;
+    const base = raw.replace(/^git\+/, '').replace(/\.git$/, '');
+    return /^https:\/\/[^/\s]+\/[^\s]+$/.test(base) ? `${base}/blob/main/docs/${page}.md` : null;
+}
+const enginePackage = () => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+/**
+ * Which log and state a dashboard reads. A project checkout's own, or, with
+ * an instance, that instance's: run it as the instance's coordinator user,
+ * the only user that can read (and, for answers, write) the instance's log.
+ */
+export function dashboardSite(root, instance, dir = instancesDir()) {
+    const i = instance ? loadInstance(instance, dir) : null;
+    const s = i ? siteForInstance(i) : siteForRoot(root);
+    // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
+    const logs = { unit: instance ? `${BRAND.cli}-${instance}.service` : null, file: join(s.stateDir, 'coordinator.log') };
+    // The backlog the coordinator files to, made when first needed: an instance's with its App's tokens.
+    const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
+    // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
+    const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
+    return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE) } : {}) };
+}
+/**
+ * A chat answer as this dashboard's user may see it: the owner gets it whole; anyone else the answer and its
+ * citations, never a draft or a proposal (the coordinator answers them read-only already; this holds it here too).
+ */
+export function chatAnswerFor(f, owner) {
+    if (owner || f.state !== 'answered')
+        return f;
+    return { ...f, answer: { ...f.answer, issueDraft: null, actions: [], refusedActions: [], readOnly: true } };
+}
+/** Where a filed chat draft is recorded, so the same draft is never filed twice. */
+const filedPath = (stateDir, id) => join(stateDir, 'chat', 'filed', `${id}.json`);
+/**
+ * What the health view reads: the OS adapter's snapshot of the machine, the
+ * harness's slice and this instance's service (when there is one), and the
+ * volumes of the checkout and the state dir.
+ */
+export function healthStats(o) {
+    return machineStats({ units: [`${BRAND.cli}.slice`, ...(o.serviceUnit ? [o.serviceUnit] : [])], paths: [...new Set([o.root, o.stateDir])] });
+}
+/**
+ * The machine-wide settings as the Settings page shows them: the agent slot cap now (and its bounds), whether
+ * engine updates are on (null when the updater isn't set up here), who may change them, and their history:
+ * the helper's change log and the updater's log, newest first.
+ */
+export function machineView(o) {
+    const owner = o.cfg.project.owners.default;
+    const slots = slotStatus(o.slotsDir);
+    const updates = updateSettings(o.machine?.updatesConfigPath ?? UPDATES_CONFIG);
+    const ownersFile = o.machineOwnersFile ?? MACHINE_OWNERS_FILE;
+    const machineOwner = !!o.breakGlass || isMachineOwner(o.user, ownersFile);
+    return {
+        owner,
+        user: o.user,
+        /** The machine's owners (src/machine-owners.ts): only they (or the break-glass) may change these. */
+        machineOwners: machineOwners(ownersFile),
+        /** Whether this person is one of them (true on the break-glass). */
+        machineOwner,
+        /** An instance owner who is a machine owner; the server checks the device again on each change. */
+        canChange: isOwner(o.role) && machineOwner,
+        /** What a change needs besides, for the page to say (nothing on the break-glass). */
+        needs: o.breakGlass ? null : 'one of the console\'s allowed devices',
+        /** Whether this request came from one (the hub says, on this view's read as on a change; always on the break-glass). */
+        deviceReady: !!o.breakGlass || !!o.deviceOk,
+        helper: MACHINE_HELPER,
+        slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
+        testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
+        updates: updates ? { configured: true, enabled: updates.enabled, branch: updates.branch, requiredChecks: updates.required_checks } : { configured: false, enabled: null },
+        /** The updater's setup (src/updater-setup.ts): installed or not, its channel, the release signers listed, and the same steps as a script. */
+        updater: updaterSetup({ ...(o.machine?.updatesConfigPath ? { updatesConfigPath: o.machine.updatesConfigPath } : {}), ...(o.machine?.signersPath ? { signersPath: o.machine.signersPath } : {}), ...(o.machine?.pendingSignersPath ? { pendingPath: o.machine.pendingSignersPath } : {}) }),
+        changes: machineChanges(o.machine?.changesPath ?? MACHINE_CHANGES).reverse(),
+        history: updateLog(o.machine?.updatesLogPath ?? UPDATES_LOG).reverse(),
+        /** Changes asked for here, for the coordinator to run: pending, running, then done, failed, refused or interrupted. Newest first. */
+        requests: (o.requests ?? []).filter((r) => r.via === 'settings').slice(-20).reverse(),
+    };
+}
+/** The runs live now, for the Agents page; their held messages' text only for the owner, who may control them. */
+export function liveView(o) {
+    const owner = o.cfg.project.owners.default;
+    const canControl = isOwner(o.role);
+    return { owner, canControl, runs: liveRuns(o.stateDir).map((r) => ({ ...r, pending: canControl ? r.pending : r.pending.map((m) => ({ id: m.id, by: m.by, at: m.at, text: '' })) })) };
+}
+/**
+ * A run's feed after `after`; while the run is live but its feed isn't written yet, nothing so far (not an error).
+ * Reading it is the runs gate's to allow (the owner and the writers), as for the rest of a run's record; only a
+ * message or a stop is the owner's alone (sendMessage, stopRun).
+ */
+function feedOrWait(o, run, after) {
+    const f = readFeed(o.stateDir, run, after);
+    if (f)
+        return f;
+    if (liveRuns(o.stateDir).some((r) => r.run === run))
+        return { items: [], ended: false };
+    throw new ConsoleError(`no feed for run ${run}`);
+}
+/**
+ * What the run page's console needs: whether the run is live, whether this user may message it (the owner and the
+ * writers) or stop it (the owner), its messages held until the agent's turn ends, and the console's events for it
+ * (queued, delivered, dropped, stopped, refused), oldest first. Messages' text stays the owner's to read.
+ */
+export function consoleView(o, run) {
+    const owner = o.cfg.project.owners.default;
+    const canControl = isOwner(o.role);
+    const live = liveRuns(o.stateDir).find((r) => r.run === run) ?? null;
+    const events = readEvents(o.eventsDb)
+        .filter((e) => e.type.startsWith('console.') && (e.payload.run === run))
+        .map((e) => {
+        const p = e.payload;
+        return { at: e.ts, type: e.type.slice('console.'.length), id: p.id ?? null, by: p.by ?? null, text: canControl ? (p.text ?? null) : null, why: p.why ?? null };
+    });
+    const settled = new Set(events.filter((e) => e.type === 'message_delivered' || e.type === 'message_dropped').map((e) => e.id));
+    const held = events.filter((e) => e.type === 'message_queued' && !settled.has(e.id));
+    return { owner, canControl, canMessage: isWriter(o.role), live: !!live, pending: canControl ? (live?.pending ?? []) : [], held, events };
+}
+/**
+ * Where each instance setting lives in the repo's config, or null when the repo's config can't set it.
+ * Every setting key must say (a Record over SettingKey): a new key without a place doesn't compile.
+ */
+const REPO_PLACE = {
+    workers: { file: 'agents.yaml', path: ['roles', 'workers', 'count'] },
+    daily_budget_usd: { file: 'agents.yaml', path: ['daily_budget_usd'] },
+    'ci_repair.enabled': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'enabled'] },
+    'ci_repair.max_fixes_per_pr': { file: 'agents.yaml', path: ['roles', 'ci_repair', 'max_fixes_per_pr'] },
+    run_windows: { file: 'config.yaml', path: ['agent_runtime', 'run_windows'] },
+    stuck_guard: null,
+    'research.max_searches_per_day': null,
+    'research.max_fetches_per_day': null,
+    'research.max_usd_per_day': null,
+    'research.repo_access': null,
+    // Intake's caps default from intake.yaml in the instance home, never from the repo's config.
+    'intake.reports_per_sender_per_day': null,
+    'intake.drafts_per_day': null,
+    'intake.max_usd_per_day': null,
+};
+const defines = (obj, path) => {
+    let at = obj;
+    for (const k of path) {
+        if (at === null || typeof at !== 'object' || !Object.hasOwn(at, k))
+            return false;
+        at = at[k];
+    }
+    return at !== undefined && at !== null;
+};
+/** The repo's config files as written, before the schema's defaults: what the repo itself defines. Unreadable: none. */
+export function repoConfigFiles(dir) {
+    const cache = new Map();
+    return (file) => {
+        if (!cache.has(file)) {
+            let raw;
+            try {
+                raw = parseDocument(readFileSync(join(dir, file), 'utf8')).toJS();
+            }
+            catch {
+                raw = undefined;
+            }
+            cache.set(file, raw);
+        }
+        return cache.get(file);
+    };
+}
+/**
+ * Where a setting's value in effect comes from: the instance's policy when it sets the key (its dotted path),
+ * else the repo's config when that defines it, else the engine's own default.
+ */
+export function settingSource(key, instance, repo) {
+    if (defines(instance, key.split('.')))
+        return 'instance';
+    const place = REPO_PLACE[key];
+    return place && defines(repo(place.file), place.path) ? 'repo' : 'engine';
+}
+/** The instance's agents (workers) in effect: its policy's setting, else the repo's; read only, for the Trust panel. */
+export function instanceAgents(o) {
+    let settings = {};
+    try {
+        if (o.policyFile)
+            settings = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS()).settings;
+    }
+    catch {
+        // an unreadable policy: the repo's value
+    }
+    return Number(currentValue(o.cfg, settings, 'workers'));
+}
+/**
+ * The Settings page's instance section: each setting's value in effect and where it comes from (the
+ * instance's policy, the repo's config, or the engine's default), the bounds a new value must keep (the machine's limits and
+ * the policy's own ceilings), and whether this dashboard's user, the owner, may change them.
+ */
+export function instanceSettingsView(o) {
+    const owner = o.cfg.project.owners.default;
+    const base = { owner, user: o.user, canChange: !!o.policyFile && isOwner(o.role), keys: [...SETTING_KEYS] };
+    if (!o.policyFile)
+        return { ...base, available: false, why: "settings belong to an instance: this dashboard serves a checkout, whose config comes from the repo" };
+    let limits = null;
+    let limitsError = null;
+    try {
+        limits = loadLimits(o.limitsPath);
+    }
+    catch (e) {
+        limitsError = e.message;
+    }
+    let policy;
+    try {
+        policy = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS());
+    }
+    catch (e) {
+        return { ...base, canChange: false, available: false, why: `the instance policy can't be read: ${e.message.split('\n')[0]}` };
+    }
+    const s = policy.settings;
+    const repo = repoConfigFiles(o.cfg.dir);
+    return {
+        ...base,
+        canChange: base.canChange && !limitsError,
+        available: true,
+        limits,
+        limitsError,
+        ceilings: { max_workers: policy.agents.max_workers, daily_usd: policy.budget.daily_usd },
+        settings: SETTING_KEYS.map((key) => ({ key, value: currentValue(o.cfg, s, key), source: settingSource(key, s, repo) })),
+    };
+}
+/** A research run for its page: each search, each fetch (refused or not), and every cap it stopped at. */
+export function researchView(events, run) {
+    const capped = events.filter((e) => e.type === 'research.capped' && e.payload.run === run).map((e) => String(e.payload.why ?? ''));
+    return { ...researchForRun(events, run), capped };
+}
+/** Open PRs, and those needing a person: waiting on their review, or a CI fix that gave up. */
+export const prCounts = (prs) => ({
+    open: prs.filter((p) => p.state === 'open').length,
+    needYou: prs.filter((p) => p.phase === 'waiting' || p.phase === 'gave_up').length,
+});
+/**
+ * Whether this instance merges its own PRs now, read-only, from the same three
+ * places the coordinator reads: the instance policy's kill switch (auto_merge,
+ * re-read every time), the repo's review.yaml merge.auto, and the stop file a
+ * red main after an auto-merge leaves until the operator clears it. Without an
+ * instance (a checkout) there is no policy, so nothing auto-merges.
+ */
+export function autoMergeState(o) {
+    let policy = null;
+    let policyProblem = null;
+    if (o.policyFile) {
+        const r = readPolicy(o.policyFile);
+        if (r.policy)
+            policy = r.policy.auto_merge;
+        else {
+            policy = false;
+            policyProblem = `the instance policy can't be read (${r.errors.map((e) => e.message).join('; ') || 'unreadable'}), so auto-merge counts as off`;
+        }
+    }
+    const stopFile = join(o.stateDir, 'auto-merge-stopped.json');
+    let stopped = null;
+    if (existsSync(stopFile)) {
+        try {
+            stopped = String(JSON.parse(readFileSync(stopFile, 'utf8')).reason ?? 'stopped');
+        }
+        catch {
+            stopped = 'the stop file is unreadable';
+        }
+    }
+    const on = policy === true && o.repoAuto !== false && !stopped;
+    const why = !o.policyFile
+        ? 'no instance: only an instance merges its own PRs'
+        : policy !== true
+            ? (policyProblem ?? "the instance policy's kill switch (auto_merge) is off")
+            : o.repoAuto === false
+                ? "the repo's review.yaml turns auto-merge off"
+                : stopped
+                    ? `stopped: ${stopped}; the operator clears it`
+                    : 'on: PRs the merge rules allow merge themselves';
+    return { on, policy, repo: o.repoAuto, stopped, why };
+}
+/**
+ * How the default branch is guarded, for the dashboard: "GitHub enforced" or the harness's own guard, the main watch (or off,
+ * or not known yet), the last commit the watch checked, and, while an unaccounted commit's stop is in force, its alert.
+ * Read-only, from the watch's state file and the log. A viewer is sent the mode only (viewer-events.ts).
+ */
+export function protectionState(o) {
+    const view = protectionView(join(o.stateDir, 'main-watch.json'), o.repo);
+    const stop = readStopFile(o.stateDir);
+    const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
+    const p = last?.payload;
+    const alert = stop && stop.by === 'main_watch' && p ? { at: last.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert } : null;
+    // Each acceptance, and the commit the watch applied it to (main_watch.accepted), if it has yet.
+    const applied = new Map(o.events.filter((e) => e.type === 'main_watch.accepted').map((e) => [e.payload.id, e.payload.sha]));
+    const accepted = view.accepted.map((a) => ({ id: a.id, sha: a.sha, pr: a.pr, head: a.head, by: a.by, reason: a.reason, at: a.at, appliedTo: applied.get(a.id) ?? null }));
+    return { ...view, accepted, alert, directPush: lastDirectPush(o.events), stopped: stop?.reason ?? null, canClear: isOwner(o.role) && !!stop, canAccept: isOwner(o.role) && view.mode === 'main_watch' };
+}
+/**
+ * The last commit that landed without a PR, and its ops-channel alert (src/direct-push-alert.ts): posted, how many
+ * owners it mentioned, and why nobody was (or why it wasn't posted, or that the alert is off); null when none.
+ */
+export function lastDirectPush(events) {
+    const e = events.filter((x) => x.type === 'main_watch.direct_push').at(-1);
+    if (!e)
+        return null;
+    const p = e.payload;
+    const a = events
+        .filter((x) => x.type === 'main_watch.direct_push_alert')
+        .map((x) => x.payload)
+        .filter((x) => x.sha === p.sha)
+        .at(-1);
+    const status = !p.alert ? 'off' : !a ? 'pending' : a.ok ? 'posted' : 'not_posted';
+    const note = !p.alert ? 'the direct-push alert is off (config.yaml main_watch.direct_push_alert: false)' : (a?.note ?? null);
+    return { at: e.ts, sha: p.sha, url: p.url, kind: p.kind, pusher: p.pusher, status, mentioned: a?.mentioned ?? 0, note };
+}
+/** The PRs whose merge the main watch has judged already (accounted, accepted or not): none of them can be accepted. */
+export function judgedPrs(events) {
+    const out = new Set();
+    for (const e of events) {
+        if (e.type !== 'main_watch.checked' && e.type !== 'main_watch.unaccounted' && e.type !== 'main_watch.accepted')
+            continue;
+        const n = e.payload.number;
+        if (n)
+            out.add(n);
+    }
+    return [...out];
+}
+/** What an accept request names: `pr` (a number), or `sha`; null when neither, or both. */
+export function acceptTarget(body) {
+    const hasSha = body.sha !== undefined && body.sha !== null && body.sha !== '';
+    const hasPr = body.pr !== undefined && body.pr !== null && body.pr !== '';
+    if (hasSha === hasPr)
+        return null;
+    return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
+}
+function readStopFile(stateDir) {
+    const file = join(stateDir, 'auto-merge-stopped.json');
+    if (!existsSync(file))
+        return null;
+    try {
+        const j = JSON.parse(readFileSync(file, 'utf8'));
+        return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null };
+    }
+    catch {
+        return { reason: 'the stop file is unreadable', by: null };
+    }
+}
+/** An admin resumes auto-merge from the dashboard: the stop file goes, and merge.resumed records who did. */
+export function clearAutoMergeStop(o) {
+    const stop = readStopFile(o.stateDir);
+    if (!stop)
+        return { ok: false, error: 'auto-merge is not stopped' };
+    rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+    const log = new EventLog(o.eventsDb);
+    try {
+        log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+    }
+    finally {
+        log.close();
+    }
+    return { ok: true, reason: stop.reason };
+}
+const journalctl = (unit, lines) => {
+    const r = spawnSync('journalctl', ['--unit', unit, '--output', 'json', '--lines', String(lines), '--no-pager', '--quiet'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
+    return { status: r.status, stdout: r.stdout ?? '', stderr: `${r.stderr ?? ''}${r.error ? r.error.message : ''}` };
+};
+const clip = (s) => redactString(s.length > 2000 ? `${s.slice(0, 2000)} …` : s);
+/**
+ * The coordinator's service log, read-only, as the dashboard's user (the
+ * instance's coordinator user): its unit's journal, or else its log file.
+ * An unprivileged user reads only journal files it owns: with the journal
+ * kept on disk and split per user (systemd's default), that is exactly its
+ * own service's lines, and no other instance's.
+ */
+export function readServiceLog(src, lines = 200, read = journalctl) {
+    let problem = null;
+    if (src.unit) {
+        const r = read(src.unit, lines);
+        if (r.status === 0) {
+            const entries = [];
+            for (const l of r.stdout.split('\n')) {
+                if (!l.trim())
+                    continue;
+                try {
+                    const j = JSON.parse(l);
+                    const msg = typeof j.MESSAGE === 'string' ? j.MESSAGE : Array.isArray(j.MESSAGE) ? Buffer.from(j.MESSAGE).toString('utf8') : '';
+                    const us = Number(j.__REALTIME_TIMESTAMP);
+                    entries.push({ at: Number.isFinite(us) && us > 0 ? new Date(us / 1000).toISOString() : null, priority: j.PRIORITY !== undefined && /^\d$/.test(j.PRIORITY) ? Number(j.PRIORITY) : null, message: clip(msg) });
+                }
+                catch {
+                    // not a journal record
+                }
+            }
+            if (entries.length)
+                return { source: 'journal', unit: src.unit, entries, problem: null };
+            problem = `no lines of ${src.unit} this user can read. Either the service hasn't logged yet, or the journal isn't kept on disk split per user, so the service's own user can't read its lines: run scripts/setup/journal.sh on the machine (as an admin).`;
+        }
+        else {
+            problem = `journalctl couldn't read ${src.unit}: ${(r.stderr || `exit ${r.status}`).trim().split('\n').pop()}`;
+        }
+    }
+    if (src.file && existsSync(src.file)) {
+        const text = readFileSync(src.file, 'utf8');
+        const entries = text.split('\n').filter((l) => l.trim()).slice(-lines).map((message) => ({ at: null, priority: null, message: clip(message) }));
+        return { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };
+    }
+    return { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };
+}
+/** WHY: a checkout's dashboard and `dashboard --detach` (src/dashboard-detach.ts) must agree, or a rerun prints another URL. */
+export const LOCAL_DASHBOARD_PORT = 4317;
+/** An instance's dashboard port, the same every time (so a tunnel to it can be set up once): 4400-4899, from its name. */
+export const instancePort = (name) => 4400 + (createHash('sha256').update(name).digest().readUInt32BE(0) % 500);
+/** Where the built web UI is served from: dist/web next to this module's dist/src (`npm run build:web` writes it there). */
+export const DEFAULT_WEB_DIR = fileURLToPath(new URL('../web/', import.meta.url));
+/** Whether the web UI is built where the dashboard serves it. */
+export const webUiBuilt = (dir = DEFAULT_WEB_DIR) => existsSync(join(dir, 'index.html'));
+/**
+ * Whether a request carries this token in its bearer header, compared in constant time. INVARIANT: never from the
+ * URL; a key in a URL is refused before this is asked (src/dashboard-key-url.ts).
+ */
+export function tokenGiven(req, _url, token) {
+    const given = (req.headers.authorization ?? '').replace(/^Bearer /, '');
+    const a = Buffer.from(given);
+    const b = Buffer.from(token);
+    return a.length === b.length && timingSafeEqual(a, b);
+}
+/** The built UI; anything unknown falls back to index.html (client-side routes). Never a file outside webDir. */
+/** The marker a hub puts on the page it serves, so the UI asks for the hub's instances only there (else /api/hub is a 404). */
+export const HUB_MARKER = '<meta name="dashboard-hub" content="1">';
+export function serveStatic(webDir, url, res, opts = {}) {
+    const rel = normalize(decodeURIComponent(url.pathname)).replace(/^([/\\])+/, '');
+    let file = resolve(webDir, rel);
+    if (!file.startsWith(resolve(webDir) + sep) && file !== resolve(webDir))
+        return json(res, 403, { error: 'forbidden' });
+    if (!existsSync(file) || !extname(file))
+        file = join(webDir, 'index.html');
+    if (!existsSync(file)) {
+        res.writeHead(503, { 'content-type': 'text/plain' });
+        res.end('dashboard UI not built: run `npm run build:web` in the engine');
+        return;
+    }
+    const type = MIME[extname(file)] ?? 'application/octet-stream';
+    const html = extname(file) === '.html';
+    // WHY: vite names every file under assets/ by its content's hash, so a name is never reused for other bytes.
+    const hashed = !html && file.startsWith(resolve(webDir, 'assets') + sep);
+    const headers = { 'content-type': type, 'cache-control': html ? 'no-store' : hashed ? IMMUTABLE : 'max-age=3600' };
+    const enc = compressibleType(type) ? requestEncoding(res.req) : null;
+    if (compressibleType(type))
+        headers.vary = 'accept-encoding';
+    if (html) {
+        const page = readFileSync(file, 'utf8');
+        const body = Buffer.from(opts.hub ? (page.includes('</head>') ? page.replace('</head>', `${HUB_MARKER}</head>`) : `${HUB_MARKER}${page}`) : page);
+        return send(res, 200, headers, body, enc);
+    }
+    const st = statSync(file);
+    if (!enc || st.size < MIN_COMPRESS_BYTES)
+        return send(res, 200, headers, readFileSync(file), null);
+    staticCompressed.get(file, `${st.size}:${st.mtimeMs}`, () => readFileSync(file), enc).then((body) => {
+        res.writeHead(200, { ...headers, 'content-encoding': enc, 'content-length': String(body.length) });
+        res.end(body);
+    }, () => send(res, 200, headers, readFileSync(file), null));
+}
+/** Content-hashed built files: the same name is always the same bytes, so a browser keeps them a year without asking. */
+export const IMMUTABLE = 'public, max-age=31536000, immutable';
+const staticCompressed = new StaticCompressed();
+/**
+ * Compress the built UI's assets now, in the background (zlib's pool), so the first person to load it doesn't wait for
+ * it: the hub does this when it starts. Anything that fails is compressed on its first request instead.
+ */
+export function warmStatic(webDir) {
+    const dir = join(webDir, 'assets');
+    let names;
+    try {
+        names = readdirSync(dir);
+    }
+    catch {
+        return;
+    }
+    for (const n of names) {
+        const file = join(dir, n);
+        if (!compressibleType(MIME[extname(file)] ?? ''))
+            continue;
+        try {
+            const st = statSync(file);
+            if (st.size < MIN_COMPRESS_BYTES)
+                continue;
+            for (const enc of ['br', 'gzip'])
+                staticCompressed.get(file, `${st.size}:${st.mtimeMs}`, () => readFileSync(file), enc).catch(() => { });
+        }
+        catch {
+            // compressed on its first request instead
+        }
+    }
+}
+/** Send a body, compressed with `enc` when given and worth it. */
+function send(res, status, headers, body, enc) {
+    if (enc && body.length >= MIN_COMPRESS_BYTES) {
+        const out = compress(body, enc);
+        res.writeHead(status, { ...headers, 'content-encoding': enc, 'content-length': String(out.length) });
+        return void res.end(out);
+    }
+    res.writeHead(status, { ...headers, 'content-length': String(body.length) });
+    res.end(body);
+}
+export function dashboardToken(stateDir) {
+    const f = join(stateDir, 'dashboard-token');
+    if (existsSync(f))
+        return readFileSync(f, 'utf8').trim();
+    mkdirSync(stateDir, { recursive: true });
+    const t = randomBytes(24).toString('base64url');
+    writeFileSync(f, t, { mode: 0o600 });
+    return t;
+}
+function readEvents(dbPath, after = 0) {
+    if (!existsSync(dbPath))
+        return [];
+    const db = openReadOnly(dbPath);
+    try {
+        const rows = db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id').all(after);
+        return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
+    }
+    finally {
+        db.close();
+    }
+}
+/**
+ * A JSON answer, never stored by a browser or a proxy. Compressed only for a view COMPRESSIBLE_API lists (the BREACH
+ * check, src/dashboard-compress.ts) and a client that accepts it.
+ */
+export function json(res, status, body) {
+    const req = res.req;
+    const view = mayCompressApi(new URL(req?.url ?? '/', 'http://127.0.0.1').pathname);
+    send(res, status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...(view ? { vary: 'accept-encoding' } : {}) }, Buffer.from(JSON.stringify(body)), view ? requestEncoding(req) : null);
+}
+async function readBody(req) {
+    const chunks = [];
+    let size = 0;
+    for await (const c of req) {
+        size += c.length;
+        if (size > 64_000)
+            throw new Error('body too large');
+        chunks.push(c);
+    }
+    return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+}
+export function startDashboard(opts) {
+    const host = opts.host ?? '127.0.0.1';
+    try {
+        assertLoopbackHost(host);
+    }
+    catch (e) {
+        return Promise.reject(e);
+    }
+    const token = dashboardToken(opts.stateDir);
+    const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
+    const viewsFile = join(opts.stateDir, 'dashboard-views.json');
+    /**
+     * Each live-stream client, with its role: a viewer is told only of the event types it may see. A signed-in
+     * person's role is read again (from the role cache) before each change goes out, so someone removed from the
+     * repo stops getting this instance's changes once the cache says so, even on a stream opened before.
+     */
+    const clients = new Map();
+    // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
+    const eventCache = new EventCache(opts.eventsDb);
+    let lastId = eventCache.lastId();
+    const owners = opts.cfg.project.owners;
+    const repo = opts.cfg.project.project.repo;
+    /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
+    const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
+    /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
+    const setupCache = new Map();
+    let lastFresh = 0;
+    const actionDeps = () => ({ ...systemActionDeps(), ...opts.setupActions });
+    /**
+     * The config the first-run page acts on: a checkout's as its working tree has it now (a merged config PR comes in by
+     * a fast-forward, so the next step sees it without a restart), else the one this dashboard started with (a server
+     * instance's, and setup mode's stand-in). A config that doesn't load now keeps the one it started with.
+     */
+    const liveCfg = () => {
+        if (opts.instance || opts.setupMode)
+            return opts.cfg;
+        try {
+            return loadConfig(opts.root);
+        }
+        catch {
+            return opts.cfg;
+        }
+    };
+    const actionContext = (cfg = liveCfg()) => ({ mode: opts.instance ? 'server' : 'local', root: opts.root, cfg });
+    const checkoutGit = () => opts.checkoutGit ?? systemGit(opts.root);
+    // INVARIANT: in setup mode the config is a stand-in, so only a fix that doesn't read it may run.
+    const planFor = (id, cfg = liveCfg()) => opts.setupMode && id !== 'install-tools' ? { id, step: ACTIONS[id].step, label: ACTIONS[id].label, available: false, why: "this checkout has no config yet: finish the repo config first", changes: [], commands: [] } : actionPlan(id, actionContext(cfg), actionDeps());
+    const setupRun = () => opts.setupMode?.run ?? ((cmd, args, o) => systemProbe().run(cmd, args, o));
+    const draft = newDraftJob();
+    const readSkips = () => {
+        try {
+            const j = JSON.parse(readFileSync(join(opts.stateDir, SKIPS_FILE), 'utf8'));
+            return Array.isArray(j.skipped) ? j.skipped.filter((x) => typeof x === 'string') : [];
+        }
+        catch {
+            return [];
+        }
+    };
+    // INVARIANT: one Fix action at a time, so two clicks can't install or write the same files at once.
+    let actionRunning = null;
+    // The first-run page's Sign in to Claude (local mode): one claude auth login at a time, audited when it ends.
+    let signinBy = null;
+    const signin = new ClaudeSignin({ ...systemSigninDeps(), ...opts.claudeSignin }, (state, detail) => {
+        setupCache.delete('claude-login');
+        if (signinBy)
+            audit(signinBy, 'first_run.claude_signin_ended', { state, detail: detail.slice(0, 300) });
+    });
+    /** Connect GitHub's device login (local mode): made on first use, one at a time. */
+    let ghLogin = null;
+    // What tailscale.sh status says (src/tailscale-setup.ts), kept 3 s (it runs tailscale twice); asked afresh before a step is
+    // recorded, and whenever the step's progress file has changed since: a step that just ended is shown with the status
+    // it left behind, never one read before it, so the next step is offered on the same read that shows it done.
+    let tailscaleCache = null;
+    const tailscaleNow = async (fresh = false) => {
+        const stamp = stepsStamp(opts.tailscaleDir ?? TAILSCALE_DIR);
+        if (!fresh && tailscaleCache && tailscaleCache.stamp === stamp && Date.now() - tailscaleCache.at < 3_000)
+            return tailscaleCache.status;
+        const status = await (opts.tailscaleStatus ?? tailscaleStatus)();
+        tailscaleCache = { at: Date.now(), stamp, status };
+        return status;
+    };
+    // The first-run page's Discord step (src/intake/discord-setup.ts), a server instance's only. The bot's own view
+    // (its application and channels) comes from a child process that reads the token itself: this process never does.
+    // Kept a minute, and one listing at a time, so the page's polls don't spend Discord's rate limit.
+    const instanceHome = opts.instance && opts.policyFile ? dirname(opts.policyFile) : null;
+    // INVARIANT: the engine's own cli.js by absolute path, or a stand-in set in code (tests, CI); anything else throws.
+    const discordCli = listingRunner(opts.discordListing);
+    let bot = null;
+    let botLoading = null;
+    const botNow = (fresh) => {
+        if (bot && Date.now() - bot.at < (fresh ? 5_000 : 60_000))
+            return Promise.resolve(bot.view);
+        botLoading ??= botView(opts.instance, discordCli)
+            .then((view) => ((bot = { at: Date.now(), view }), view))
+            .finally(() => (botLoading = null));
+        return botLoading;
+    };
+    // A pasted bot token (the setup console's paste box): its shape checked, then credentials.yaml pointed at the file.
+    const secretRules = instanceHome
+        ? {
+            [DISCORD_CREDENTIAL]: discordTokenRule({
+                instance: opts.instance,
+                credentialsFile: join(instanceHome, 'credentials.yaml'),
+                onStored: () => {
+                    bot = null;
+                    setupCache.delete('discord');
+                },
+            }),
+        }
+        : null;
+    /**
+     * Who is asking, or why not. The token is required either way. With a person named (the hub signed them in),
+     * their role is their permission on this instance's repo, never one the caller sends; without, it is the
+     * owner's break-glass, accepted only from this machine's loopback and never through a proxy.
+     */
+    const identify = async (req, url) => {
+        if (!tokenGiven(req, url, token))
+            return { status: 401, error: 'missing or wrong key; sign in through the hub, or give the key on the page (its file is printed by `dashboard` on this machine)' };
+        const named = req.headers[LOGIN_HEADER];
+        if (named !== undefined) {
+            if (!validLogin(named))
+                return { status: 400, error: 'not a GitHub login' };
+            const fresh = url.pathname === '/api/role' && req.headers[FRESH_HEADER] === '1';
+            const role = opts.roleOf ? await opts.roleOf(named, { fresh }) : null;
+            if (!role)
+                return { status: 403, login: named, error: `@${named} has no access to this instance: it needs at least read access to ${repo}` };
+            return { login: named, role, via: 'session', deviceOk: req.headers[DEVICE_HEADER] === '1' };
+        }
+        if (!breakGlassAllowed(req))
+            return { status: 403, error: "the token is the owner's break-glass: accepted only on this machine, never through a proxy" };
+        return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', deviceOk: false };
+    };
+    /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
+    const audit = (who, action, detail) => {
+        const log = new EventLog(opts.eventsDb);
+        try {
+            auditWrite(log, who, opts.instance ?? null, action, detail);
+        }
+        finally {
+            log.close();
+        }
+    };
+    const state = (who) => {
+        const events = eventCache.all();
+        // Folds of the events alone, kept until the log changes (the projection's "today" is part of its key).
+        const today = localDay();
+        const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
+        const posted = eventCache.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload));
+        const slots = slotStatus(opts.slotsDir);
+        const full = {
+            brand: { name: BRAND.name, cli: BRAND.cli },
+            setupMode: !!opts.setupMode,
+            project: { name: opts.cfg.project.project.name, repo: opts.cfg.project.project.repo, landMode: opts.cfg.project.land_mode },
+            user: who.login,
+            role: who.role,
+            via: who.via,
+            owners: opts.cfg.project.owners,
+            budget: opts.cfg.agents.daily_budget_usd,
+            slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents.map(holder), fullRun: slots.fullRun ? holder(slots.fullRun) : null },
+            ...p,
+            // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
+            activity: isWriter(who.role) ? p.activity : eventCache.memo('viewerActivity', viewerActivity),
+            // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
+            decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
+            // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
+            canReadIntake: mayReadIntake(who.role),
+            // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
+            canReadThroughput: mayReadThroughput(who.role),
+            // Whether this viewer may read the report preview, so the page asks for it only when it will get it.
+            canReadReports: mayReadReports(who.role),
+            // Whether this viewer may read agent runs, so the page asks for them only when it will get them.
+            canReadRuns: mayReadRuns(who.role),
+            // Whether this viewer may read what waits on the owner, so the page asks only when it will get it.
+            canReadDigest: mayReadDigest(who.role),
+            // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
+            canWrite: isWriter(who.role),
+            canReadAudit: isOwner(who.role),
+            // Whether this viewer may read the service log and the machine settings (the owners' and writers').
+            canReadLogs: isWriter(who.role),
+            canReadMachine: isWriter(who.role),
+            // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
+            costBasis: 'estimate',
+            emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
+            inbox: inbox(p, who.login),
+            // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
+            prCounts: prCounts(eventCache.memo('prsView', prsView).prs),
+            // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
+            protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
+            // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why; and
+            // whether it is on, with what turning it on would do while it is off.
+            ...(opts.cfg.tests.deploy_gate
+                ? {
+                    deployGate: {
+                        ...deployGateView(opts.stateDir, events, repo, opts.cfg.tests.deploy_gate.branch),
+                        enabled: opts.cfg.tests.deploy_gate.enabled,
+                        tiers: opts.cfg.tests.deploy_gate.tiers,
+                        postDeploy: !!opts.cfg.tests.deploy_gate.post_deploy,
+                    },
+                }
+                : {}),
+        };
+        // A viewer gets an allowlist of the state (viewer-events.ts): no costs, spend, budget or agent runs.
+        return isWriter(who.role) ? full : stateForViewer(full);
+    };
+    const server = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        // Every route, the page itself included: a key in the URL is refused, never accepted.
+        if (refuseKeyInUrl(url, res, [token]))
+            return;
+        try {
+            if (url.pathname.startsWith('/api/')) {
+                const id = await identify(req, url);
+                // The hub asks this of each instance, to list only the ones the person has a role on.
+                if (!('status' in id))
+                    resolved.set(req, { login: id.login, role: id.role, csrfOk: true, breakGlass: id.via === 'break-glass', deviceOk: id.deviceOk });
+                const sessionOf = opts.session ?? dashboardSession;
+                if (url.pathname === '/api/role' && req.method === 'GET') {
+                    if ('status' in id)
+                        return id.status === 403 && id.login ? json(res, 200, { login: id.login, role: null }) : json(res, id.status, { error: id.error });
+                    const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
+                    return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
+                }
+                if ('status' in id)
+                    return json(res, id.status, { error: id.error });
+                const who = id;
+                const isOwnerHere = isOwner(who.role);
+                // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
+                // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
+                if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    const target = acceptTarget(body);
+                    const reason = typeof body.reason === 'string' ? body.reason.slice(0, 600) : '';
+                    const refuse = (status, error) => {
+                        audit(who, 'main_watch.accept_refused', { target, reason, status, error });
+                        return json(res, status, { error });
+                    };
+                    if (!isOwnerHere)
+                        return refuse(403, `only the instance's owners (admin on ${repo}) may accept a commit as a bootstrap merge; @${who.login} is a ${who.role}`);
+                    if (!target)
+                        return refuse(400, 'name either a commit sha or a PR number');
+                    const branch = opts.cfg.project.project.default_branch;
+                    const r = acceptMerge({ stateFile: join(opts.stateDir, 'main-watch.json'), git: opts.acceptGit ?? acceptGit(opts.root, 'origin', branch), branch, target, reason, by: who.login, judgedPrs: judgedPrs(eventCache.all()) });
+                    if (!r.ok)
+                        return refuse(r.status, r.error);
+                    const a = r.acceptance;
+                    audit(who, 'main_watch.accept', { id: a.id, sha: a.sha, pr: a.pr, head: a.head, base: a.base, reason: a.reason });
+                    return json(res, 200, { ok: true, acceptance: a });
+                }
+                // Viewers are read-only: every write is refused before any route sees it, whatever route is added later.
+                if (req.method !== 'GET' && req.method !== 'HEAD' && !isWriter(who.role))
+                    return json(res, 403, { error: `@${who.login} is a viewer here (read on ${repo}): read-only` });
+                if (url.pathname === '/api/state' && req.method === 'GET')
+                    return json(res, 200, state(who));
+                // The Board: every task in flight by stage, with the actions this person may take on each (src/board.ts).
+                // Everyone with a role reads it; a viewer gets only the allowlisted card fields (no runs, agents or costs).
+                // Each action is refused again by the route it calls (decide, the console).
+                if (url.pathname === '/api/board' && req.method === 'GET') {
+                    const slots = slotStatus(opts.slotsDir);
+                    const board = boardView({ events: eventCache.all(), instance: opts.instance ?? opts.cfg.project.project.name, role: who.role, canReadDigest: mayReadDigest(who.role), live: liveRuns(opts.stateDir), slots: { cap: slots.cap, running: slots.agents.length }, usage: opts.processUsage ?? ((g) => processGroupUsage(g)) });
+                    return json(res, 200, who.role === 'owner' || who.role === 'writer' ? board : boardForViewer(board));
+                }
+                // The test runs (src/testrun/): everyone with a role reads them; a viewer gets tier pass or fail only.
+                if (url.pathname === '/api/test-runs' && req.method === 'GET') {
+                    const held = testSlotsHeld(opts.slotsDir);
+                    return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) } }));
+                }
+                // The audit log: every write made on this dashboard, newest first; the owners' to read.
+                if (url.pathname === '/api/audit' && req.method === 'GET') {
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `the audit log is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+                    return json(res, 200, { entries: eventCache.all().filter((e) => e.type === 'dashboard.audit').reverse().slice(0, 500).map((e) => ({ id: e.id, at: e.ts, ...e.payload })) });
+                }
+                // The setup console's asks (src/console/routes.ts): its own body handling, so a pasted secret never reaches readBody or the error below.
+                if (await handleAskRoute(req, res, url, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, session: sessionOf, ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), ...(opts.machineOwnersFile ? { machineOwnersFile: opts.machineOwnersFile } : {}), ...(secretRules ? { secretRules } : {}) }))
+                    return;
+                // The next report's preview (with the throughput section, which the posted report leaves out): the owner's and
+                // the writers', like the throughput it carries.
+                if (url.pathname === '/api/report' && req.method === 'GET') {
+                    if (!mayReadReports(who.role))
+                        return json(res, 403, { error: writersOnly('the report preview is', who) });
+                    const events = eventCache.all();
+                    const last = [...events].reverse().find((e) => e.type === 'report.posted');
+                    return json(res, 200, { report: buildReport(events, opts.cfg, { since: last ? new Date(last.ts) : new Date(Date.now() - 12 * 3_600_000), throughput: true }).markdown });
+                }
+                // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
+                // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
+                if (url.pathname === '/api/settings' && req.method === 'GET')
+                    return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
+                if (url.pathname === '/api/events' && req.method === 'GET') {
+                    const all = eventCache.after(Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
+                    // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
+                    const evs = isWriter(who.role) ? all : forViewers(all);
+                    const issue = url.searchParams.get('issue');
+                    // One issue's whole history, or the recent tail of everything.
+                    return json(res, 200, issue ? evs.filter((e) => e.payload.issue === Number(issue)) : evs.slice(-500));
+                }
+                if (url.pathname === '/api/logs' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the service log is', who) });
+                    const lines = Math.min(1000, Math.max(1, Number(url.searchParams.get('lines') ?? 200) || 200));
+                    return json(res, 200, readServiceLog(opts.logs ?? { unit: null, file: null }, lines, opts.journalReader));
+                }
+                // Agent runs are the owner's and the writers' to read: one gate in front of every path that serves them.
+                if (isRunsPath(url.pathname) && !mayReadRuns(who.role))
+                    return json(res, 403, { error: writersOnly('agent runs are', who) });
+                // The Board's Watch: the run's live feed so far, for those the runs gate lets through (the owner and the writers).
+                const watch = url.pathname.match(/^\/api\/board\/watch\/([A-Za-z0-9_-]+)$/);
+                if (watch && req.method === 'GET') {
+                    try {
+                        return json(res, 200, feedOrWait(opts, watch[1], Number(url.searchParams.get('after') ?? -1)));
+                    }
+                    catch (e) {
+                        if (e instanceof ConsoleError)
+                            return json(res, 404, { error: e.message });
+                        throw e;
+                    }
+                }
+                // Agent runs, as the runner recorded them in this state dir: an issue's list, or one run in full.
+                if (url.pathname === '/api/runs' && req.method === 'GET') {
+                    const issue = Number(url.searchParams.get('issue'));
+                    if (!Number.isInteger(issue) || issue <= 0)
+                        return json(res, 400, { error: 'issue must be a number' });
+                    return json(res, 200, runsForIssue(opts.stateDir, issue));
+                }
+                // The chat: ask a question (a request the coordinator answers), poll for the answer, and, for the owner,
+                // file a draft it proposed: the stored draft, validated again here, with `ready`, through this instance's backlog.
+                if (url.pathname === '/api/chat' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    try {
+                        // `key`: the client's request key, so a retried POST is the same question, not a second turn.
+                        const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}) });
+                        audit(who, 'chat.asked', { id: asked.id });
+                        return json(res, 200, asked);
+                    }
+                    catch (e) {
+                        if (e instanceof ChatError)
+                            return json(res, 400, { error: e.message });
+                        throw e;
+                    }
+                }
+                const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
+                if (chat) {
+                    const f = chatAnswer(opts.stateDir, chat[1]);
+                    if (!f)
+                        return json(res, 404, { error: `no chat question ${chat[1]}` });
+                    if (!chat[2] && req.method === 'GET') {
+                        const rec = existsSync(filedPath(opts.stateDir, chat[1])) ? JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]), 'utf8')) : null;
+                        const filed = typeof rec?.number === 'number' ? { number: rec.number } : null;
+                        return json(res, 200, { ...chatAnswerFor(f, isOwnerHere), owner: isOwnerHere, filed });
+                    }
+                    if (chat[2] && req.method === 'POST') {
+                        if (!isOwnerHere)
+                            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may file a draft; @${who.login} is a ${who.role}` });
+                        if (f.state !== 'answered' || !f.answer.issueDraft)
+                            return json(res, 400, { error: 'this answer has no issue draft' });
+                        if (existsSync(filedPath(opts.stateDir, chat[1])))
+                            return json(res, 409, { error: 'this draft was filed already', ...JSON.parse(readFileSync(filedPath(opts.stateDir, chat[1]), 'utf8')) });
+                        // The draft as the answer file has it, never one from the request, checked again as the harness will.
+                        const d = validateDraft(f.answer.issueDraft.title, f.answer.issueDraft.body);
+                        if (!d.ok)
+                            return json(res, 400, { error: `the draft isn't one the harness can take: ${d.why}` });
+                        if (!opts.backlog)
+                            return json(res, 400, { error: 'this dashboard has no backlog to file to' });
+                        // Claimed before filing (created only if absent), so two confirms at once file it once; released if filing fails.
+                        mkdirSync(join(opts.stateDir, 'chat', 'filed'), { recursive: true });
+                        try {
+                            writeFileSync(filedPath(opts.stateDir, chat[1]), JSON.stringify({ filing: true, at: new Date().toISOString(), by: who.login }), { mode: 0o600, flag: 'wx' });
+                        }
+                        catch {
+                            return json(res, 409, { error: 'this draft is being filed already' });
+                        }
+                        let number;
+                        try {
+                            number = await opts.backlog().createIssue(d.title, d.body, ['ready']);
+                        }
+                        catch (e) {
+                            rmSync(filedPath(opts.stateDir, chat[1]), { force: true });
+                            throw e;
+                        }
+                        writeFileSync(filedPath(opts.stateDir, chat[1]), JSON.stringify({ number, at: new Date().toISOString(), by: who.login }), { mode: 0o600 });
+                        audit(who, 'chat.draft_filed', { id: chat[1], issue: number });
+                        return json(res, 200, { ok: true, number });
+                    }
+                }
+                // A research run's searches and fetches (refusals marked) and where it stopped at a cap; who may read it
+                // is the runs gate's to say (the owner and the writers), as for the rest of the run.
+                const research = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/research$/);
+                if (research && req.method === 'GET')
+                    return json(res, 200, researchView(eventCache.all(), research[1]));
+                // The console: the live runs, one run's live feed (SSE while it runs), and the owner's message and stop.
+                if (url.pathname === '/api/live' && req.method === 'GET')
+                    return json(res, 200, liveView({ ...opts, user: who.login, role: who.role }));
+                const con = url.pathname.match(/^\/api\/runs\/([A-Za-z0-9_-]+)\/(feed|live|console|message|stop)$/);
+                if (con) {
+                    const [, run, what] = con;
+                    const consoleError = (e) => {
+                        if (!(e instanceof ConsoleError))
+                            throw e;
+                        return json(res, /only the owner/.test(e.message) ? 403 : /isn't live|no feed/.test(e.message) ? 404 : 400, { error: e.message });
+                    };
+                    if (what === 'console' && req.method === 'GET')
+                        return json(res, 200, consoleView({ ...opts, user: who.login, role: who.role }, run));
+                    if (what === 'feed' && req.method === 'GET') {
+                        try {
+                            return json(res, 200, feedOrWait(opts, run, Number(url.searchParams.get('after') ?? -1)));
+                        }
+                        catch (e) {
+                            return consoleError(e);
+                        }
+                    }
+                    if (what === 'live' && req.method === 'GET') {
+                        let after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? -1);
+                        if (!Number.isInteger(after))
+                            after = -1;
+                        try {
+                            feedOrWait(opts, run, after); // the run must have a feed or be live
+                        }
+                        catch (e) {
+                            return consoleError(e);
+                        }
+                        res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+                        res.write('retry: 2000\nevent: hello\ndata: {}\n\n');
+                        let done = false;
+                        const tick = () => {
+                            if (done)
+                                return;
+                            let f;
+                            try {
+                                f = feedOrWait(opts, run, after);
+                            }
+                            catch {
+                                return;
+                            }
+                            for (const it of f.items) {
+                                res.write(`id: ${it.seq}\nevent: item\ndata: ${JSON.stringify(it)}\n\n`);
+                                after = it.seq;
+                            }
+                            if (f.ended) {
+                                done = true;
+                                clearInterval(poll);
+                                clearInterval(keep);
+                                res.write('event: end\ndata: {}\n\n');
+                                res.end();
+                            }
+                        };
+                        const poll = setInterval(tick, opts.pollMs ?? 500);
+                        const keep = setInterval(() => !done && res.write(': ping\n\n'), 25_000);
+                        req.on('close', () => {
+                            done = true;
+                            clearInterval(poll);
+                            clearInterval(keep);
+                        });
+                        tick();
+                        return;
+                    }
+                    if ((what === 'message' || what === 'stop') && req.method === 'POST') {
+                        const body = (await readBody(req));
+                        try {
+                            const r = what === 'message' ? sendMessage({ stateDir: opts.stateDir, cfg: opts.cfg, run, text: String(body.text ?? ''), by: who.login, owner: isOwnerHere, writer: isWriter(who.role) }) : stopRun({ stateDir: opts.stateDir, cfg: opts.cfg, run, by: who.login, owner: isOwnerHere });
+                            audit(who, what === 'message' ? 'console.message' : 'console.stop', { run, request: r.id });
+                            return json(res, 200, { ok: true, ...r });
+                        }
+                        catch (e) {
+                            return consoleError(e);
+                        }
+                    }
+                }
+                if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
+                    const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
+                    return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });
+                }
+                // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
+                if (url.pathname === '/api/prs' && req.method === 'GET') {
+                    return json(res, 200, { ...prsView(eventCache.all()), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
+                }
+                // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
+                // Intake: each report (redacted) and what became of it, and the numbers for the health panel. The owner's
+                // and the writers' to read, like the runs.
+                if (url.pathname === '/api/intake' && req.method === 'GET') {
+                    if (!mayReadIntake(who.role))
+                        return json(res, 403, { error: writersOnly('intake reports are', who) });
+                    const events = eventCache.all();
+                    return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
+                }
+                // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
+                // tuning each. The owner's and the writers' to read, like the runs it is made of.
+                if (url.pathname === '/api/throughput' && req.method === 'GET') {
+                    if (!mayReadThroughput(who.role))
+                        return json(res, 403, { error: writersOnly('throughput is', who) });
+                    return json(res, 200, throughput(eventCache.all()));
+                }
+                // Repeated feedback (src/checks-from-feedback.ts): the constraints people's "no"s cluster into, each with its
+                // count, its evidence links and its proposal. People's words, so the owner's and the writers', like the runs.
+                if (url.pathname === '/api/constraints' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('repeated feedback is', who) });
+                    const c = opts.cfg.project.checks_from_feedback;
+                    return json(res, 200, constraintsView(eventCache.all(), { writers: opts.cfg.project.owners.writers, enabled: c.enabled, minSightings: c.min_sightings, maxPerWeek: c.max_proposals_per_week, now: new Date() }));
+                }
+                // Trust (src/trust.ts): read-only measurement, so GET only; nothing it serves changes slots, caps or merges.
+                // A viewer gets only the figures the viewer-events allowlist permits, and never cost.
+                if (url.pathname === '/api/trust') {
+                    if (req.method !== 'GET')
+                        return json(res, 405, { error: 'the trust numbers are read-only' });
+                    const view = trustView(eventCache.all(), { agents: instanceAgents(opts) });
+                    return json(res, 200, isWriter(who.role) ? view : trustForViewer(view, VIEWER_EVENTS));
+                }
+                // Metrics (src/merge-metrics.ts deliveryMetrics): merges, main red, time to green, reverts and fix-forward, PR CI
+                // wall-clock, agent startup, flake rate and the slow tests. Read-only, the owner's and the writers' (test names
+                // and CI timings, like throughput).
+                if (url.pathname === '/api/metrics') {
+                    if (req.method !== 'GET')
+                        return json(res, 405, { error: 'the metrics are read-only' });
+                    if (!mayReadThroughput(who.role))
+                        return json(res, 403, { error: writersOnly('the metrics are', who) });
+                    return json(res, 200, { ...deliveryMetrics(eventCache.all(), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
+                }
+                // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
+                // and writers' to read; only an owner clears a test from quarantine, audited.
+                // Harness evals (src/harness-evals/): each run's success rate, cost, wall-clock and human interventions, and the
+                // change from its baseline. What runs cost: the owners' and writers', like the flaky tests and throughput.
+                if (url.pathname === '/api/harness-evals' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: `the harness evals are for the instance's owners and writers; @${who.login} is a ${who.role}` });
+                    return json(res, 200, { ...harnessEvalView(eventCache.all()), enabled: opts.cfg.project.harness_evals.enabled });
+                }
+                if (url.pathname === '/api/flaky' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: `the flaky tests are for the instance's owners and writers; @${who.login} is a ${who.role}` });
+                    return json(res, 200, { ...flakyView(eventCache.all(), { now: new Date(), releaseAfter: opts.cfg.project.flaky.release_after_passes }), canClear: isOwnerHere });
+                }
+                if (url.pathname === '/api/flaky/clear' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may clear a test from quarantine; @${who.login} is a ${who.role}` });
+                    const log = new EventLog(opts.eventsDb);
+                    try {
+                        const r = releaseByOwner(log, body.test, who.login);
+                        if (!r.ok)
+                            return json(res, r.status, { error: r.error });
+                        audit(who, 'flaky.cleared', { test: body.test });
+                        return json(res, 200, { ok: true });
+                    }
+                    finally {
+                        log.close();
+                    }
+                }
+                // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
+                // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
+                if (url.pathname === '/api/learnings' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the learnings are', who) });
+                    return json(res, 200, { ...learningsView(eventCache.all()), canPromote: isOwnerHere });
+                }
+                if (url.pathname === '/api/learnings/promote' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may promote a learning to AGENTS.md; @${who.login} is a ${who.role}` });
+                    const log = new EventLog(opts.eventsDb);
+                    try {
+                        const refused = promoteRefusal(learningsView(log.read()), body.fingerprint, body.line);
+                        if (refused)
+                            return json(res, refused.status, { error: refused.error });
+                        log.append('learning.promote_requested', { fingerprint: body.fingerprint, line: body.line.trim(), by: who.login }, who.login, 'human');
+                        audit(who, 'learning.promoted', { fingerprint: body.fingerprint });
+                        return json(res, 200, { ok: true });
+                    }
+                    finally {
+                        log.close();
+                    }
+                }
+                // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
+                // (what the daily GitHub comment posts). The owner's and the writers', like runs.
+                if (url.pathname === '/api/waiting' && req.method === 'GET') {
+                    if (!mayReadDigest(who.role))
+                        return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
+                    const digest = waitingOnYou(eventCache.all());
+                    return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
+                }
+                // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and
+                // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
+                if (url.pathname === '/api/usage' && req.method === 'GET') {
+                    const v = usageView(eventCache.all());
+                    return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null });
+                }
+                if (url.pathname === '/api/health' && req.method === 'GET') {
+                    let stats = null;
+                    try {
+                        stats = (opts.machineStats ?? (() => healthStats({ serviceUnit: opts.logs?.unit ?? null, root: opts.root, stateDir: opts.stateDir })))();
+                    }
+                    catch {
+                        // no stats: the view says unknown
+                    }
+                    const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
+                    // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
+                    const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
+                    // WHY: the proxy's internal host is the machine's network layout: writers only, as costs are.
+                    return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, docs: { backups: docsUrl('backups') } });
+                }
+                // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
+                // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
+                if (url.pathname === '/api/health/incidents' && req.method === 'GET')
+                    return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
+                // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
+                if (url.pathname === '/api/instance-settings' && req.method === 'GET')
+                    return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
+                if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
+                    if (!opts.policyFile)
+                        return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
+                    const body = (await readBody(req));
+                    try {
+                        const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
+                        audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
+                        return json(res, 200, { ok: true, ...r });
+                    }
+                    catch (e) {
+                        if (e instanceof SettingsError)
+                            return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
+                        throw e;
+                    }
+                }
+                // The first-run page: every setup step checked live (src/setup-steps.ts, the same checks doctor runs), what init
+                // recorded, what this mode can't do, and what Start would change. Re-check (?fresh=1) checks everything again,
+                // at most every 3 s.
+                if (url.pathname === '/api/first-run' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+                    const fresh = url.searchParams.get('fresh') === '1' && Date.now() - lastFresh > 3_000;
+                    if (fresh)
+                        lastFresh = Date.now();
+                    const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, context: { ...opts.setupContext, skipped: readSkips() } };
+                    // A server instance's record is the machine's (src/init.ts serverInitFile), readable by its coordinator group.
+                    const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.setupMode ? (gitRemoteRepo(opts.root) ?? '') : opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
+                    // Each open action's plan, shown before its button does anything (all local reads: no network).
+                    const actions = {};
+                    // WHY: a done step's fix can be run again (from Settings' Setup list), so every action's plan is here.
+                    const cfgNow = liveCfg();
+                    for (const s of view.setup?.groups.flatMap((g) => g.steps) ?? [])
+                        if (s.fix.kind === 'action' && isActionId(s.fix.action))
+                            actions[s.fix.action] = planFor(s.fix.action, cfgNow);
+                    const policy = opts.policyFile ? policyForm(opts.policyFile, opts.limitsPath) : null;
+                    // A checkout's config as the default branch has it (what a change is proposed against); a server's is add-project's.
+                    let repoConfig = null;
+                    if (!opts.instance) {
+                        try {
+                            repoConfig = repoConfigForm(loadConfigAt(opts.root, `origin/${opts.cfg.project.project.default_branch}`));
+                        }
+                        catch (e) {
+                            repoConfig = { error: e.message.split('\n').slice(0, 2).join(' ') };
+                        }
+                    }
+                    const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
+                    return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, ...setup });
+                }
+                // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
+                // without confirm, what it would do; every run and refusal audited.
+                if (url.pathname.startsWith('/api/first-run/setup/')) {
+                    const what = url.pathname.slice('/api/first-run/setup/'.length);
+                    const file = join(opts.stateDir, INIT_FILE);
+                    if (!opts.setupMode)
+                        return json(res, 404, { error: 'not in setup mode: this checkout has its config' });
+                    if (req.method === 'GET' && what === 'repos')
+                        return isWriter(who.role) ? json(res, 200, pushableRepos(setupRun())) : json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+                    if (req.method === 'GET' && what === 'draft')
+                        return json(res, 200, draft);
+                    if (req.method !== 'POST' || !['origin', 'answers', 'draft', 'merge'].includes(what))
+                        return json(res, 404, { error: `no setup route ${what}` });
+                    const body = ((await readBody(req)) ?? {});
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.setup_refused', { what, why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!isOwnerHere)
+                        return refused(403, `only the owners may set this checkout up; @${who.login} is a ${who.role}`);
+                    try {
+                        if (what === 'origin') {
+                            const plan = originPlan(opts.root, body.repo);
+                            if (body.confirm !== true)
+                                return json(res, 200, { ok: true, commands: plan.commands.map((c) => c.join(' ')), confirmed: false });
+                            setOrigin(opts.root, plan.repo, setupRun());
+                            audit(who, 'first_run.setup_origin', { repo: plan.repo });
+                            return json(res, 200, { ok: true, repo: plan.repo, confirmed: true });
+                        }
+                        if (what === 'answers') {
+                            const r = saveAnswers(file, opts.root, body.answers && typeof body.answers === 'object' ? body.answers : {});
+                            audit(who, 'first_run.setup_answers', { saved: r.saved });
+                            return json(res, 200, { ok: true, ...r });
+                        }
+                        if (what === 'draft') {
+                            if (body.confirm !== true)
+                                return refused(400, 'Draft runs your project\'s commands on a scratch copy of the default branch: confirm it ({"confirm": true})');
+                            void startDraft({ root: opts.root, file, job: draft, ...(opts.setupMode.io ? { io: opts.setupMode.io } : {}) });
+                            audit(who, 'first_run.setup_draft', {});
+                            return json(res, 202, { ok: true, draft });
+                        }
+                        const m = setupPrMerge(file, opts.root, setupRun());
+                        if (body.confirm !== true)
+                            return json(res, 200, { ok: true, number: m.number, url: m.url, command: m.command.join(' '), confirmed: false });
+                        const r = setupRun()(m.command[0], m.command.slice(1), { cwd: opts.root });
+                        if (r.status !== 0)
+                            return refused(502, `GitHub didn't merge PR #${m.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`);
+                        audit(who, 'first_run.setup_merge', { number: m.number, method: m.command.at(-1) });
+                        // The merged config comes into this checkout as `init` brings it: a fetch and a fast-forward.
+                        if (!draft.running)
+                            void startDraft({ root: opts.root, file, job: draft, ...(opts.setupMode.io ? { io: opts.setupMode.io } : {}) });
+                        return json(res, 200, { ok: true, number: m.number, confirmed: true });
+                    }
+                    catch (e) {
+                        if (e instanceof SetupModeError)
+                            return refused(e.status, e.message);
+                        throw e;
+                    }
+                }
+                // The checks GitHub ran on the default branch's tip: what the Repo config form offers as required checks.
+                if (url.pathname === '/api/first-run/checks-seen' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+                    const branch = opts.cfg.project.project.default_branch;
+                    const sha = spawnSync('git', ['rev-parse', `origin/${branch}`], { cwd: opts.root, encoding: 'utf8' }).stdout.trim();
+                    if (!/^[0-9a-f]{40}$/.test(sha))
+                        return json(res, 200, { checks: [], error: `origin/${branch} isn't fetched here` });
+                    const gh = actionDeps().gh;
+                    const runs = gh(['api', `repos/${repo}/commits/${sha}/check-runs`, '--jq', '.check_runs[].name']);
+                    const statuses = gh(['api', `repos/${repo}/commits/${sha}/status`, '--jq', '.statuses[].context']);
+                    if (runs.status !== 0 && statuses.status !== 0)
+                        return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
+                    const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
+                    return json(res, 200, { checks, sha });
+                }
+                // The Repo config form (src/config-change.ts): without confirm, what the values would change on the default
+                // branch (nothing written); with it, that change proposed as a PR of its own. Owners only; audited.
+                if (url.pathname === '/api/first-run/repo-config' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const values = body.values && typeof body.values === 'object' ? body.values : {};
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.config_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (opts.instance)
+                        return refused(400, "a server instance's config changes through its repo's PRs, not this form");
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may propose a config change; @${who.login} is a ${who.role}`);
+                    try {
+                        if (body.confirm !== true)
+                            return json(res, 200, { ok: true, changes: planConfigChange({ root: opts.root, cfg: liveCfg(), values }), confirmed: false });
+                        const gh = actionDeps().gh;
+                        const r = proposeConfigChange({ root: opts.root, cfg: liveCfg(), values, by: who.login, io: { gh: (args) => gh(args) } });
+                        audit(who, 'first_run.config_proposed', { changes: r.changes, branch: r.branch, url: r.url });
+                        return json(res, 200, { ok: true, ...r, confirmed: true });
+                    }
+                    catch (e) {
+                        if (e instanceof ConfigChangeError)
+                            return refused(400, e.message);
+                        return refused(500, e.message.split('\n')[0] ?? 'failed');
+                    }
+                }
+                // Merge a PR the Repo config form proposed, then bring this checkout up to the merged default branch (a
+                // fast-forward only, src/checkout-sync.ts), so the next step reads the new config. Owners only; without confirm,
+                // what it would run; audited.
+                if (url.pathname === '/api/first-run/repo-config/merge' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.config_merge_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (opts.instance || opts.setupMode)
+                        return refused(400, opts.instance ? "a server instance's config changes through its repo's PRs, not this form" : 'in setup mode the setup PR merges from the setup card');
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may merge a config PR; @${who.login} is a ${who.role}`);
+                    const cfgNow = liveCfg();
+                    const branch = cfgNow.project.project.default_branch;
+                    const gh = actionDeps().gh;
+                    try {
+                        const m = configPrMerge({ repo: cfgNow.project.project.repo, base: branch, number: body.number, gh: (args) => gh(args) });
+                        const then = `then this checkout's ${branch} is fast-forwarded to origin's (only a fast-forward: refused if it has local changes or diverged)`;
+                        if (body.confirm !== true)
+                            return json(res, 200, { ok: true, number: m.number, url: m.url, command: m.command.join(' '), then, confirmed: false });
+                        const r = gh(m.command.slice(1));
+                        if (r.status !== 0)
+                            return refused(502, `GitHub didn't merge PR #${m.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`);
+                        const ff = fastForwardCheckout(branch, checkoutGit());
+                        setupCache.clear();
+                        audit(who, 'first_run.config_merged', { number: m.number, method: m.command.at(-1), synced: ff.ok, detail: ff.detail.slice(0, 300) });
+                        return json(res, 200, { ok: true, number: m.number, merged: true, synced: ff.ok, detail: ff.detail, confirmed: true });
+                    }
+                    catch (e) {
+                        if (e instanceof ConfigChangeError)
+                            return refused(400, e.message);
+                        throw e;
+                    }
+                }
+                // The Policy form (src/policy-edit.ts): without confirm, the change these values would make (nothing written);
+                // with it, that change written. The owners only; refusals and writes audited.
+                if (url.pathname === '/api/first-run/policy' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const values = body.values && typeof body.values === 'object' ? body.values : {};
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.policy_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!opts.policyFile)
+                        return refused(400, "the policy is a server instance's: this dashboard serves a checkout");
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may change its policy; @${who.login} is a ${who.role}`);
+                    const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) };
+                    try {
+                        if (body.confirm !== true)
+                            return json(res, 200, { ok: true, changes: planPolicy(o).changes, confirmed: false });
+                        const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login });
+                        setupCache.delete('policy');
+                        audit(who, 'first_run.policy', { changes });
+                        return json(res, 200, { ok: true, changes, confirmed: true });
+                    }
+                    catch (e) {
+                        if (e instanceof PolicyEditError)
+                            return refused(400, e.message);
+                        throw e;
+                    }
+                }
+                // Skip a step on the first-run page, or undo that: the owners only, audited. The checks themselves don't change.
+                if (url.pathname === '/api/first-run/skip' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const step = String(body.step ?? '');
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may skip a setup step; @${who.login} is a ${who.role}` });
+                    if (!SETUP_STEPS.some((s) => s.id === step))
+                        return json(res, 404, { error: `no setup step ${step.slice(0, 40)}` });
+                    const skips = new Set(readSkips());
+                    if (body.skip === false)
+                        skips.delete(step);
+                    else
+                        skips.add(step);
+                    mkdirSync(opts.stateDir, { recursive: true });
+                    writeFileSync(join(opts.stateDir, SKIPS_FILE), JSON.stringify({ skipped: [...skips].sort() }) + '\n', { mode: 0o600 });
+                    audit(who, 'first_run.skip', { step, skip: body.skip !== false });
+                    return json(res, 200, { ok: true, skipped: [...skips].sort() });
+                }
+                // A Fix action (src/setup-actions.ts): the owners only, after they confirmed the plan the page showed; every run
+                // and refusal audited. Its step is checked again on the next poll.
+                const actionMatch = /^\/api\/first-run\/actions\/([a-z-]+)$/.exec(url.pathname);
+                if (actionMatch && req.method === 'POST') {
+                    const id = actionMatch[1];
+                    const body = ((await readBody(req)) ?? {});
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.action_refused', { action: id.slice(0, 40), why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!isActionId(id))
+                        return refused(404, `no first-run action ${id}`);
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may run a first-run fix; @${who.login} is a ${who.role}`);
+                    const cfgNow = liveCfg();
+                    const plan = planFor(id, cfgNow);
+                    if (!plan.available)
+                        return refused(409, `not run: ${plan.why ?? 'not available here'}`);
+                    if (body.confirm !== true)
+                        return refused(400, `${plan.label} changes this machine: review what it shows, then confirm it ({"confirm": true})`);
+                    if (actionRunning)
+                        return refused(409, `${actionRunning} is running: one fix at a time`);
+                    actionRunning = id;
+                    try {
+                        const r = await ACTIONS[id].run(actionContext(cfgNow), actionDeps()).catch((e) => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
+                        setupCache.delete(plan.step);
+                        audit(who, 'first_run.action', { action: id, ok: r.ok, detail: r.detail.slice(0, 300) });
+                        return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
+                    }
+                    finally {
+                        actionRunning = null;
+                    }
+                }
+                // Sign in to Claude (src/claude-signin.ts). Local: the relayed `claude auth login`, its link for the owners only.
+                // Server: the agents' token goes into add-project's paste box (the existing paste_secret ask) or credentials.sh.
+                if (url.pathname === '/api/first-run/claude-signin' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+                    if (opts.instance) {
+                        const asks = asksFrom(eventCache.all().filter((e) => ASK_EVENTS.includes(e.type)));
+                        return json(res, 200, { mode: 'server', canAct: isOwnerHere, ...claudeServerView({ instance: opts.instance, asks, role: who.role, engineRoot: engineRoot(), ...(opts.claudeAccountDir ? { accountDir: opts.claudeAccountDir } : {}) }) });
+                    }
+                    return json(res, 200, { mode: 'local', canAct: isOwnerHere, ...signin.view(isOwnerHere) });
+                }
+                if ((url.pathname === '/api/first-run/claude-signin' || url.pathname === '/api/first-run/claude-signin/cancel') && req.method === 'POST') {
+                    const cancel = url.pathname.endsWith('/cancel');
+                    const body = ((await readBody(req)) ?? {});
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.claude_signin_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may sign this machine in to Claude; @${who.login} is a ${who.role}`);
+                    // INVARIANT: a server's agents never sign in through the dashboard's own claude: their login is a pasted setup token.
+                    if (opts.instance)
+                        return refused(409, "a server instance's agents sign in with a token from claude setup-token, pasted into Add project's paste box or credentials.sh's hidden prompt; the dashboard never runs claude auth login there");
+                    if (cancel) {
+                        if (!signin.cancel(`cancelled by @${who.login}`))
+                            return refused(409, 'no Claude sign-in is running');
+                        audit(who, 'first_run.claude_signin_cancelled', {});
+                        return json(res, 200, { ok: true });
+                    }
+                    if (body.confirm !== true)
+                        return refused(400, "Sign in runs claude auth login as this machine's user: review what it shows, then confirm it ({\"confirm\": true})");
+                    if (signin.running)
+                        return refused(409, 'a Claude sign-in is running already: one at a time');
+                    signinBy = who;
+                    signin.start();
+                    audit(who, 'first_run.claude_signin', { state: signin.view(false).state });
+                    return json(res, 200, { ok: true, ...signin.view(true) });
+                }
+                // Connect GitHub (local mode, src/gh-login.ts): `gh auth login --web` run for the person, its one-time code shown,
+                // done once `gh auth status` says so. The instance's owners only; starting and cancelling are audited. The token
+                // stays in gh's own store: nothing here reads it. A server instance works as its GitHub App, never a gh login.
+                if (url.pathname === '/api/first-run/gh-login') {
+                    const refused = (status, error) => {
+                        if (req.method !== 'GET')
+                            audit(who, 'first_run.gh_login_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may connect GitHub here; @${who.login} is a ${who.role}`);
+                    if (opts.instance)
+                        return refused(409, "a server instance works as its GitHub App, not a gh login: the agents' App is Add project's step");
+                    ghLogin ??= new GhLogin(opts.ghLogin);
+                    try {
+                        if (req.method === 'GET') {
+                            const v = ghLogin.poll();
+                            if (v.state === 'done')
+                                setupCache.delete('gh-login');
+                            return json(res, 200, v);
+                        }
+                        if (req.method === 'POST') {
+                            const v = ghLogin.start();
+                            audit(who, 'first_run.gh_login', { state: v.state === 'done' ? 'signed-in-already' : 'started' });
+                            return json(res, 200, v);
+                        }
+                        if (req.method === 'DELETE') {
+                            const v = ghLogin.cancel();
+                            audit(who, 'first_run.gh_login', { state: 'cancelled' });
+                            return json(res, 200, v);
+                        }
+                        return json(res, 405, { error: 'GET, POST or DELETE' });
+                    }
+                    catch (e) {
+                        if (e instanceof GhLoginError)
+                            return refused(e.status, e.message);
+                        throw e;
+                    }
+                }
+                // The Discord step (src/intake/discord-setup.ts). Reading it, loading the bot's channels and reviewing a change
+                // write nothing; the owners only act, each write confirmed, and every write and refusal is audited.
+                if (url.pathname === '/api/first-run/discord' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+                    if (!instanceHome)
+                        return json(res, 200, { available: false, why: "Discord intake is a server instance's: this dashboard serves a checkout, and local mode has no Discord wiring" });
+                    const all = asksFrom(eventCache.all().filter((e) => ASK_EVENTS.includes(e.type)));
+                    return json(res, 200, discordSetupView({ instance: opts.instance, home: instanceHome, asks: all, role: who.role, engineRoot: engineRoot() }));
+                }
+                if (url.pathname.startsWith('/api/first-run/discord/')) {
+                    const what = url.pathname.slice('/api/first-run/discord/'.length);
+                    const refused = (status, error) => {
+                        audit(who, 'first_run.discord_refused', { what: what.slice(0, 20), why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!instanceHome)
+                        return json(res, 400, { error: "Discord intake is a server instance's: this dashboard serves a checkout" });
+                    const ownersOnly = `only the instance's owners (admin on ${repo}) may set up its Discord bot; @${who.login} is a ${who.role}`;
+                    // The bot's application, invite link and channels, as the bot sees them. Nothing is written.
+                    if (what === 'channels' && req.method === 'GET') {
+                        if (!isOwnerHere)
+                            return json(res, 403, { error: ownersOnly });
+                        const t = tokenState(join(instanceHome, 'credentials.yaml'));
+                        if (!t.configured || !t.present)
+                            return json(res, 409, { error: t.error ?? 'no bot token is stored for this instance yet: paste it first' });
+                        try {
+                            return json(res, 200, await botNow(url.searchParams.get('fresh') === '1'));
+                        }
+                        catch (e) {
+                            if (e instanceof DiscordSetupError)
+                                return json(res, e.status, { error: e.message });
+                            throw e;
+                        }
+                    }
+                    // Open the paste box for the token: a paste_secret ask, answered through the setup console's secret route.
+                    if (what === 'token-ask' && req.method === 'POST') {
+                        const body = ((await readBody(req)) ?? {});
+                        if (!isOwnerHere)
+                            return refused(403, ownersOnly);
+                        if (body.confirm !== true)
+                            return refused(400, 'opening the paste box records an ask in this instance\'s log: confirm it ({"confirm": true})');
+                        const log = new EventLog(opts.eventsDb);
+                        try {
+                            const r = tokenAsk(log, opts.instance, who.login);
+                            if (r.created)
+                                audit(who, 'first_run.discord_token_ask', { ask: r.ask.id });
+                            return json(res, 200, { ok: true, ask: { ...r.ask, canAnswer: true }, created: r.created });
+                        }
+                        finally {
+                            log.close();
+                        }
+                    }
+                    // intake.yaml: without confirm, the exact change these picks make (nothing written); with it, and the hash of
+                    // the change that was shown, that change written.
+                    if (what === 'intake' && req.method === 'POST') {
+                        const body = ((await readBody(req)) ?? {});
+                        if (!isOwnerHere)
+                            return refused(403, ownersOnly);
+                        const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values) ? body.values : {};
+                        try {
+                            const o = { path: join(instanceHome, INTAKE_FILE), values, channels: (await botNow(false)).channels };
+                            if (body.confirm !== true) {
+                                const { text: _text, ...plan } = planIntake(o);
+                                return json(res, 200, { ok: true, confirmed: false, ...plan });
+                            }
+                            if (typeof body.expect !== 'string')
+                                return refused(400, 'a confirm names the change it confirms (expect: the hash the review returned)');
+                            const { text: _text, ...plan } = applyIntake({ ...o, expect: body.expect });
+                            setupCache.delete('discord');
+                            audit(who, 'first_run.discord_intake', { file: plan.file, creates: plan.creates, changes: plan.changes });
+                            return json(res, 200, { ok: true, confirmed: true, ...plan });
+                        }
+                        catch (e) {
+                            if (e instanceof DiscordSetupError)
+                                return refused(e.status, e.message);
+                            throw e;
+                        }
+                    }
+                    return json(res, 404, { error: 'not found' });
+                }
+                // Start: the coordinator's service, as `up` starts it. The instance's owners only, after they confirmed the change
+                // the page showed; recorded in the audit either way. A server instance's is an owner's root command, never run here.
+                if (url.pathname === '/api/first-run/start' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const plan = firstRunStart(opts);
+                    const refused = (status, error, extra = {}) => {
+                        audit(who, 'first_run.start_refused', { why: error.slice(0, 300) });
+                        return json(res, status, { error, ...extra });
+                    };
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may start the coordinator; @${who.login} is a ${who.role}`);
+                    if (plan.kind === 'owner-command')
+                        return refused(409, `not started from here: ${plan.why}`, { command: plan.command });
+                    if (plan.kind === 'unsupported')
+                        return refused(409, plan.why);
+                    if (body.confirm !== true)
+                        return refused(400, 'Start changes this machine: review the change it shows, then confirm it ({"confirm": true})');
+                    const r = (opts.startService ?? installService)(localServiceSpec(opts.root, opts.cfg));
+                    setupCache.delete('service');
+                    audit(who, 'first_run.start', { label: plan.label, file: r.path, started: r.started, detail: r.detail.slice(0, 300) });
+                    return json(res, r.started ? 200 : 500, r.started ? { ok: true, ...r } : { error: `not started: ${r.detail}`, ...r });
+                }
+                // The setup console's Add project (src/console/add-project.ts): owners and writers see the runs, and whether
+                // they may start one now. The one way to start one is POST /api/machine/add-project, below, which checks it all again.
+                if (url.pathname === `/api/${DEVICE_VIEWS.addProject}` && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('adding a project is', who) });
+                    const requester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
+                    return json(res, 200, addProjectView(eventCache.all().filter((e) => ADD_PROJECT_EVENTS.includes(e.type)), { role: who.role, requester }, { ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) }));
+                }
+                // Add project's repo picker (src/setup/repo-picker.ts): an account's repos the agents' App can be installed on,
+                // the signed-in person's own account by default. Read-only: it starts nothing, and the start checks it all again.
+                if (url.pathname === `/api/${DEVICE_VIEWS.addProject}/repos` && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('adding a project is', who) });
+                    const login = who.via === 'break-glass' ? null : who.login;
+                    return json(res, 200, await listInstallableRepos({ owner: url.searchParams.get('owner') || login || '', login }));
+                }
+                // Machine-wide settings (the slot cap, engine updates) and their history, for owners and writers. Only the
+                // instance's owner who is also a machine owner, on an allowed device (or the break-glass),
+                // may ask for a change (src/machine-owners.ts); it's recorded for the coordinator, which runs the machine helper
+                // (src/machine-requests.ts): this server's unit forbids sudo, and it never tries.
+                const machine = () => machineView({ ...opts, user: who.login, role: who.role, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk, requests: machineRequests(eventCache.all().filter((e) => MACHINE_EVENTS.includes(e.type))) });
+                // The Machine page's Updates panel: the engine installed now, the last install, any rollback or hold and why,
+                // and the canary's last result (docs/canary.md). For owners and writers, like the machine settings.
+                if (url.pathname === '/api/updates' && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('engine updates are', who) });
+                    return json(res, 200, updatesPanel(updateLog(opts.machine?.updatesLogPath ?? UPDATES_LOG), updateSettings(opts.machine?.updatesConfigPath ?? UPDATES_CONFIG), installedEngine(opts.machine?.enginePath ?? ENGINE_CURRENT), drainView(opts.slotsDir)));
+                }
+                if (url.pathname === `/api/${DEVICE_VIEWS.machine}` && req.method === 'GET') {
+                    if (!isWriter(who.role))
+                        return json(res, 403, { error: writersOnly('the machine settings are', who) });
+                    return json(res, 200, machine());
+                }
+                if (url.pathname === '/api/machine' && req.method === 'POST') {
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may change machine settings; @${who.login} is a ${who.role}` });
+                    const body = (await readBody(req));
+                    const args = settingArgs(body.what, body.value);
+                    if ('error' in args)
+                        return json(res, 400, { error: args.error });
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        r = requestMachineChange(log, { args, requester: { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk }, via: 'settings', ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+                    }
+                    catch (e) {
+                        if (e instanceof MachineRequestError)
+                            return json(res, e.status, { error: e.message });
+                        throw e;
+                    }
+                    finally {
+                        log.close();
+                    }
+                    audit(who, 'machine.changed', { what: body.what, value: body.value, request: r.id });
+                    return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
+                }
+                // The updater's setup (src/updater-setup.ts): install it, put it on the release channel, stage a release signer
+                // for an admin to confirm at a root shell (or discard a staged one). Two calls each: /review answers with
+                // exactly what would run and change and records nothing; the change itself needs confirm: true. Then the same
+                // gate and path as any machine change. No step here adds a signer: the helper it reaches can't.
+                if ((url.pathname === '/api/machine/updater' || url.pathname === '/api/machine/updater/review') && req.method === 'POST') {
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may set the updater up; @${who.login} is a ${who.role}` });
+                    const body = (await readBody(req));
+                    const plan = updaterPlan(body, machine().updater);
+                    if ('error' in plan)
+                        return json(res, plan.status ?? 400, { error: plan.error });
+                    if (url.pathname.endsWith('/review'))
+                        return json(res, 200, { ok: true, plan });
+                    if (body.confirm !== true)
+                        return json(res, 400, { error: 'this changes the machine: review what it shows (POST /api/machine/updater/review), then confirm it ({"confirm": true})' });
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        r = requestMachineChange(log, { args: plan.args, requester: { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk }, via: 'settings', ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+                    }
+                    catch (e) {
+                        if (e instanceof MachineRequestError)
+                            return json(res, e.status, { error: e.message });
+                        throw e;
+                    }
+                    finally {
+                        log.close();
+                    }
+                    // A public key and its principal are not secrets: the audit says exactly what was staged, and by whom.
+                    audit(who, 'machine.updater', { step: plan.step, args: plan.args, ...(plan.signer ? { fingerprint: plan.signer.fingerprint } : {}), request: r.id });
+                    return json(res, 200, { ok: true, pending: true, request: r, machine: machine() });
+                }
+                // Add a project to this machine: the machine helper's add-project, run by the coordinator (it streams each step
+                // into this log as add_project.step). The same gate as any machine change: this instance's owner, and a machine
+                // owner on an allowed device (or the break-glass).
+                if (url.pathname === '/api/machine/add-project' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    // A refusal is audited too: what was asked for (cut short), and why.
+                    const refused = (status, error) => {
+                        audit(who, 'machine.add_project_refused', { name: String(body.name ?? '').slice(0, 40), repo: String(body.repo ?? '').slice(0, 200), why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) may add a project; @${who.login} is a ${who.role}`);
+                    // This machine's sudo rule leaves add-project out: no request (it could only fail at sudo); the root command instead.
+                    const manual = addProjectManual(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {});
+                    if (manual)
+                        return refused(409, `${manual.why}: ${addProjectCommand(typeof body.name === 'string' ? body.name.trim() : '', typeof body.repo === 'string' ? body.repo.trim() : '')}`);
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        r = requestAddProject(log, { name: body.name, repo: body.repo, requester: { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk }, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}) });
+                    }
+                    catch (e) {
+                        if (e instanceof MachineRequestError)
+                            return refused(e.status, e.message);
+                        throw e;
+                    }
+                    finally {
+                        log.close();
+                    }
+                    audit(who, 'machine.add_project', { name: r.args[1], repo: r.args[2], request: r.id });
+                    return json(res, 200, { ok: true, pending: true, request: r });
+                }
+                // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
+                // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
+                const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
+                const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
+                const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
+                if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
+                    if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile))
+                        return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
+                    const events = eventCache.all().filter((e) => MACHINE_EVENTS.includes(e.type));
+                    return json(res, 200, claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }));
+                }
+                // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
+                if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    const action = String(body.action ?? '').slice(0, 20);
+                    if (!isOwnerHere) {
+                        audit(who, 'machine.claude_account_refused', { action, why: 'not an owner here' });
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may switch the Claude account; @${who.login} is a ${who.role}` });
+                    }
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, dir: accountDir, ...ownersOpt });
+                    }
+                    catch (e) {
+                        if (e instanceof MachineRequestError) {
+                            auditWrite(log, who, opts.instance ?? null, 'machine.claude_account_refused', { action, why: e.message.slice(0, 300) });
+                            return json(res, e.status, { error: e.message });
+                        }
+                        throw e;
+                    }
+                    finally {
+                        log.close();
+                    }
+                    audit(who, 'machine.claude_account', { action, request: r.id });
+                    return json(res, 200, { ok: true, pending: true, request: r });
+                }
+                // Tailscale and HTTPS for the hub (src/tailscale-setup.ts): the machine owners' screen, on a server instance only.
+                // What tailscale says now, the four steps, the last one's progress, and, while `up` waits, its login link: for
+                // a machine owner (or the break-glass) and nobody else, and never in an event or the audit.
+                if (url.pathname === `/api/${DEVICE_VIEWS.tailscale}` && req.method === 'GET') {
+                    res.setHeader('cache-control', 'no-store');
+                    // A local checkout has no hub, and anyone but a machine owner has no screen: both are told only that (the
+                    // Machine page asks on every visit, so this is an answer, not an error).
+                    if (!opts.instance || !mayViewTailscale(accountRequester, opts.machineOwnersFile))
+                        return json(res, 200, noTailscaleView(who.login, opts.instance ?? null));
+                    const events = eventCache.all().filter((e) => MACHINE_EVENTS.includes(e.type));
+                    return json(res, 200, tailscaleView({ status: await tailscaleNow(url.searchParams.get('fresh') === '1'), dir: opts.tailscaleDir ?? TAILSCALE_DIR, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance, ...ownersOpt }));
+                }
+                // Run one step: a machine request (`tailscale <step>`, two fixed words) that the coordinator runs through the
+                // machine helper, after the owner confirmed what the screen showed. Every request and refusal is audited.
+                if (url.pathname === '/api/machine/tailscale' && req.method === 'POST') {
+                    const body = ((await readBody(req)) ?? {});
+                    // The audit names the step only when it is one of the four: anything else a caller sent is never written down.
+                    const action = isTailscaleAction(body.action) ? body.action : 'not a step';
+                    const refused = (status, error) => {
+                        audit(who, 'machine.tailscale_refused', { action, why: error.slice(0, 300) });
+                        return json(res, status, { error });
+                    };
+                    if (!opts.instance)
+                        return refused(404, 'Tailscale for the hub is set up on a server instance; this is a local checkout');
+                    if (!isOwnerHere)
+                        return refused(403, `only the instance's owners (admin on ${repo}) who are machine owners may set up Tailscale; @${who.login} is a ${who.role}`);
+                    if (body.confirm !== true)
+                        return refused(400, 'a Tailscale step changes this machine: review what it shows, then confirm it ({"confirm": true})');
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        r = requestTailscale(log, { action: body.action, status: await tailscaleNow(true), requester: accountRequester, dir: opts.tailscaleDir ?? TAILSCALE_DIR, ...ownersOpt });
+                    }
+                    catch (e) {
+                        if (e instanceof MachineRequestError)
+                            return refused(e.status, e.message);
+                        throw e;
+                    }
+                    finally {
+                        log.close();
+                    }
+                    tailscaleCache = null;
+                    audit(who, 'machine.tailscale', { action, request: r.id });
+                    return json(res, 200, { ok: true, pending: true, request: r });
+                }
+                // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,
+                // an error, an event or the audit (which records only that it was stored).
+                if (url.pathname === '/api/claude-account/token' && req.method === 'POST') {
+                    if (!isOwnerHere) {
+                        req.resume();
+                        return json(res, 403, { error: `only the instance's owners who are machine owners may paste the token; @${who.login} is a ${who.role}` });
+                    }
+                    try {
+                        const value = await readSecretBody(req);
+                        storeSwitchToken({ value, instance: opts.instance ?? opts.cfg.project.project.name, who: { role: who.role, requester: accountRequester }, dir: accountDir, ...(opts.secretsHome ? { home: opts.secretsHome } : {}), ...ownersOpt });
+                    }
+                    catch (e) {
+                        if (e instanceof ClaudeTokenError || e instanceof AskError)
+                            return json(res, e.status, { error: e.message });
+                        return json(res, 500, { error: "the token couldn't be stored" });
+                    }
+                    audit(who, 'claude_account.token', { stored: true });
+                    return json(res, 200, { ok: true });
+                }
+                if (url.pathname === '/api/checks' && req.method === 'GET') {
+                    const issue = Number(url.searchParams.get('issue'));
+                    if (!Number.isInteger(issue) || issue <= 0)
+                        return json(res, 400, { error: 'issue must be a number' });
+                    return json(res, 200, checkResults(eventCache.all(), issue));
+                }
+                // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
+                // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a
+                // viewer couldn't see before; run links only for those the runs gate lets through.
+                if (url.pathname === '/api/goal-graph' && req.method === 'GET') {
+                    const issue = Number(url.searchParams.get('issue'));
+                    if (!Number.isInteger(issue) || issue <= 0)
+                        return json(res, 400, { error: 'issue must be a number' });
+                    const all = eventCache.all();
+                    const runs = mayReadRuns(who.role);
+                    const live = runs ? liveRuns(opts.stateDir) : [];
+                    const runOf = (n) => live.find((r) => r.issue === n)?.run ?? runsForIssue(opts.stateDir, n).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0]?.id ?? null;
+                    return json(res, 200, goalGraph({ events: isWriter(who.role) ? all : forViewers(all), goal: issue, ...(runs ? { runOf } : {}) }));
+                }
+                if (url.pathname === '/api/stream' && req.method === 'GET') {
+                    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' });
+                    const since = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? lastId);
+                    res.write(`retry: 3000\nid: ${Math.max(since, lastId)}\nevent: hello\ndata: {}\n\n`);
+                    clients.set(res, { role: who.role, login: who.via === 'session' ? who.login : null });
+                    req.on('close', () => clients.delete(res));
+                    return;
+                }
+                // Clear the auto-merge stop (a red main after an auto-merge, or the main watch's unaccounted commit): an admin's
+                // only, audited, and the one way auto-merge resumes from the dashboard.
+                if (url.pathname === '/api/auto-merge/clear' && req.method === 'POST') {
+                    if (!isOwnerHere)
+                        return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may resume auto-merge; @${who.login} is a ${who.role}` });
+                    const r = clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login });
+                    if (!r.ok)
+                        return json(res, 409, { error: r.error });
+                    audit(who, 'auto_merge.cleared', { reason: r.reason });
+                    return json(res, 200, { ok: true });
+                }
+                if (url.pathname === '/api/decide' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    // Said by voice (src/voice.ts): the claim only adds checks, here (an owner, a focused and visible tab) and in
+                    // the decide path (approve only, never what voice may not approve). Every voice refusal is audited too.
+                    const claim = voiceClaim(body);
+                    const id = String(body.id ?? '');
+                    const refusedByVoice = (status, error) => (audit(who, 'voice.refused', { action: 'decision.answered', id, why: error, by: BY_VOICE }), json(res, status, { error }));
+                    if (claim.voice) {
+                        const no = voiceRefusal(who, claim, repo);
+                        if (no)
+                            return refusedByVoice(403, no);
+                    }
+                    const log = new EventLog(opts.eventsDb);
+                    let r;
+                    try {
+                        // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
+                        r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, ...(claim.voice ? { voice: true } : {}) });
+                    }
+                    finally {
+                        log.close();
+                    }
+                    if (!r.ok)
+                        return claim.voice ? refusedByVoice(r.status, r.error) : json(res, r.status, { error: r.error });
+                    return json(res, 200, { ok: true, event: r.event });
+                }
+                // A spoken idea the owner confirmed (src/intake/voice.ts): left for the coordinator's intake, which takes it
+                // through the same triage and approval as a Discord message. Voice only, owners only, focused and visible.
+                if (url.pathname === '/api/voice/intake' && req.method === 'POST') {
+                    const body = (await readBody(req));
+                    const claim = voiceClaim(body);
+                    if (!claim.voice)
+                        return json(res, 400, { error: 'this route takes only spoken ideas; file anything else on GitHub or through the Ask panel' });
+                    const no = voiceRefusal(who, claim, repo) ?? voiceIntakeRefusal(opts.intakeFile);
+                    if (no) {
+                        audit(who, 'voice.refused', { action: 'intake.voice', why: no, by: BY_VOICE });
+                        return json(res, 403, { error: no });
+                    }
+                    const text = typeof body.text === 'string' ? body.text.trim() : '';
+                    if (!text)
+                        return json(res, 400, { error: 'nothing was said' });
+                    if (text.length > VOICE_MAX_CHARS)
+                        return json(res, 400, { error: `the idea is over ${VOICE_MAX_CHARS} characters` });
+                    const { id: voiceId } = submitVoiceIntake({ stateDir: opts.stateDir, text, by: who.login });
+                    // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
+                    audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
+                    return json(res, 200, { ok: true, id: voiceId });
+                }
+                if (url.pathname === '/api/views') {
+                    if (req.method === 'GET')
+                        return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);
+                    if (req.method === 'PUT') {
+                        const views = await readBody(req);
+                        if (!Array.isArray(views) || views.length > 50)
+                            return json(res, 400, { error: 'views must be an array (max 50)' });
+                        writeFileSync(viewsFile, JSON.stringify(views, null, 2));
+                        audit(who, 'views.saved', { count: views.length });
+                        return json(res, 200, { ok: true });
+                    }
+                }
+                return json(res, 404, { error: 'not found' });
+            }
+            serveStatic(webDir, url, res);
+        }
+        catch (e) {
+            json(res, 500, { error: e.message });
+        }
+    });
+    // The coordinator writes the log from another process: poll it and fan new events out.
+    const poll = setInterval(() => {
+        if (!clients.size)
+            return;
+        const fresh = eventCache.after(lastId);
+        if (!fresh.length)
+            return;
+        lastId = fresh.at(-1).id;
+        const visible = fresh.filter((e) => e.type !== 'coordinator.tick');
+        const change = (types) => `id: ${lastId}\nevent: change\ndata: ${JSON.stringify({ lastId, types: [...new Set(types)] })}\n\n`;
+        const all = change(visible.map((e) => e.type));
+        const forViewer = visible.filter((e) => viewerMaySee(e.type));
+        const viewer = forViewer.length ? change(forViewer.map((e) => e.type)) : null;
+        const send = (c, role) => {
+            if (isWriter(role))
+                c.write(all);
+            else if (viewer)
+                c.write(viewer);
+        };
+        for (const [c, k] of clients) {
+            if (!k.login) {
+                send(c, k.role);
+                continue;
+            }
+            // A person: their role now, or the stream ends (no role: nothing more of this instance reaches them).
+            void (opts.roleOf ? opts.roleOf(k.login) : Promise.resolve(null)).then((role) => {
+                if (!clients.has(c))
+                    return;
+                if (!role) {
+                    clients.delete(c);
+                    return void c.end();
+                }
+                clients.set(c, { ...k, role });
+                send(c, role);
+            }, () => {
+                clients.delete(c);
+                c.end();
+            });
+        }
+    }, opts.pollMs ?? 1000);
+    const ping = setInterval(() => {
+        for (const c of clients.keys())
+            c.write(': ping\n\n');
+    }, 25_000);
+    return new Promise((resolveStart) => {
+        server.listen(opts.port ?? 0, host, () => {
+            const addr = server.address();
+            const port = typeof addr === 'object' && addr ? addr.port : 0;
+            resolveStart({
+                server,
+                // INVARIANT: no key in the URL; the page asks for it (keyFile names where it is).
+                url: `http://${host.includes(':') ? `[${host}]` : host}:${port}`,
+                keyFile: join(opts.stateDir, 'dashboard-token'),
+                token,
+                close: () => new Promise((r) => {
+                    clearInterval(poll);
+                    clearInterval(ping);
+                    signin.cancel('the dashboard stopped');
+                    for (const c of clients.keys())
+                        c.end();
+                    server.close(() => r());
+                    // WHY: a browser's kept-alive socket can carry one more request (its live stream reconnecting) after
+                    // close() stopped listening, and close() then never finishes: setup mode's hand-over hung on it.
+                    server.closeAllConnections();
+                }),
+            });
+        });
+    });
+}
+//# sourceMappingURL=dashboard.js.map

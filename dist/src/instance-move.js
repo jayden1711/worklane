@@ -1,0 +1,134 @@
+// `export` / `import`: move an instance's config and history from one machine to another (a laptop in local mode to
+// a server), with no ssh between them: one file, carried however you like.
+//
+// The bundle (gzipped JSON) holds the state dir (the event log as a consistent snapshot, init's checklist, the main
+// watch's place, findings) and the repo's config dir. Never secrets or what belongs to this machine alone: the
+// dashboard token, anything named like a token, key or credential, locks, logs, worktrees, slots. What was left out is
+// listed, never silently dropped.
+//
+// Import writes the state into the target's state dir and refuses one that already has history (--force replaces
+// it). The config dir is the repo's, kept in git: written only into a checkout that has none; otherwise the files
+// that differ are listed, to commit in a PR.
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative, sep } from 'node:path';
+import { openWaiting } from './events/open.js';
+import { BRAND } from './brand.js';
+import { writeGroupOnly, writeOwnerOnly } from './os/index.js';
+export const BUNDLE_FORMAT = `${BRAND.cli}-bundle`;
+const EVENTS = 'events.db';
+/** Left out of a bundle: secrets, and what only makes sense on the machine it was made on. */
+const LEAVE_OUT = [
+    [/(^|\/)dashboard-token$|token|secret|credential|\.pem$|\.key$/i, 'a secret'],
+    [/\.lock$|\.lock\/|(^|\/)locks?\//, 'a lock'],
+    [/\.log(\.\d+)?$/, 'a log'],
+    [/(^|\/)(worktrees|slots|tasks|dep-cache|chat\/pending)\//, "this machine's working files"],
+    [/\.tmp$|-wal$|-shm$|-journal$/, 'a temporary file'],
+];
+function walk(dir) {
+    if (!existsSync(dir))
+        return [];
+    return readdirSync(dir).flatMap((f) => {
+        const p = join(dir, f);
+        const st = statSync(p);
+        return st.isDirectory() ? walk(p).map((x) => `${f}/${x}`) : st.isFile() ? [f] : [];
+    });
+}
+const posix = (p) => p.split(sep).join('/');
+/** The event log as one consistent file, even while a coordinator writes to it. */
+function snapshot(db) {
+    const dir = mkdtempSync(join(tmpdir(), 'export-'));
+    try {
+        const d = openWaiting(db);
+        try {
+            d.exec(`VACUUM INTO '${join(dir, EVENTS).replace(/'/g, "''")}'`);
+        }
+        finally {
+            d.close();
+        }
+        return readFileSync(join(dir, EVENTS));
+    }
+    finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+}
+export function exportBundle(o) {
+    const files = [];
+    const left = [];
+    for (const p of walk(o.stateDir).map(posix).sort()) {
+        // The event log's own WAL and shared-memory files are in its snapshot already.
+        if (p === `${EVENTS}-wal` || p === `${EVENTS}-shm`)
+            continue;
+        const why = LEAVE_OUT.find(([re]) => re.test(p))?.[1];
+        if (why) {
+            left.push({ path: `state/${p}`, why });
+            continue;
+        }
+        const data = p === EVENTS ? snapshot(join(o.stateDir, p)) : readFileSync(join(o.stateDir, p));
+        files.push({ path: `state/${p}`, data: data.toString('base64') });
+    }
+    const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
+    for (const p of cfgDir ? walk(cfgDir).map(posix).sort() : [])
+        files.push({ path: `config/${p}`, data: readFileSync(join(cfgDir, p)).toString('base64') });
+    const bundle = { format: BUNDLE_FORMAT, version: 1, createdAt: (o.now ?? new Date()).toISOString(), from: { repo: o.repo, host: o.host }, files };
+    mkdirSync(dirname(o.out), { recursive: true });
+    // The history names people and issues: the bundle is its maker's alone.
+    writeOwnerOnly(o.out, gzipSync(JSON.stringify(bundle)).toString('base64'));
+    return { file: o.out, files: files.map((f) => f.path), left };
+}
+export function readBundle(file) {
+    let b;
+    try {
+        b = JSON.parse(gunzipSync(Buffer.from(readFileSync(file, 'utf8'), 'base64')).toString('utf8'));
+    }
+    catch {
+        throw new Error(`${file} is not a ${BRAND.cli} export bundle`);
+    }
+    if (b.format !== BUNDLE_FORMAT)
+        throw new Error(`${file} is not a ${BRAND.cli} export bundle`);
+    if (b.version !== 1)
+        throw new Error(`${file} is a version ${b.version} bundle; this engine reads version 1: update the engine`);
+    for (const f of b.files) {
+        if (!/^(state|config)\//.test(f.path) || f.path.split('/').some((s) => s === '..' || s === '') || f.path.includes('\\'))
+            throw new Error(`${file}: refused, a path outside the bundle's places: ${f.path}`);
+    }
+    return b;
+}
+export function importBundle(o) {
+    const b = readBundle(o.file);
+    if (existsSync(join(o.stateDir, EVENTS)) && !o.force)
+        throw new Error(`${o.stateDir} already has history (${EVENTS}): nothing imported. Pass --force to replace it (export it first if it matters)`);
+    const r = { state: [], config: [], configDiffers: [], skipped: [] };
+    const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
+    const hasConfig = cfgDir !== null && existsSync(cfgDir);
+    for (const f of b.files) {
+        const data = Buffer.from(f.data, 'base64');
+        const rel = f.path.slice(f.path.indexOf('/') + 1);
+        if (f.path.startsWith('state/')) {
+            // init's checklist is the machine's it was walked on; an instance walks its own (server mode).
+            if (o.instance && rel === 'init.json') {
+                r.skipped.push({ path: f.path, why: "init's checklist from the other machine; run init here" });
+                continue;
+            }
+            const to = join(o.stateDir, rel);
+            mkdirSync(dirname(to), { recursive: true });
+            writeGroupOnly(to, data);
+            r.state.push(f.path);
+        }
+        else if (cfgDir) {
+            const to = join(cfgDir, rel);
+            if (!hasConfig) {
+                mkdirSync(dirname(to), { recursive: true });
+                writeFileSync(to, data);
+                r.config.push(f.path);
+            }
+            else if (!existsSync(to) || !readFileSync(to).equals(data))
+                r.configDiffers.push(posix(relative(o.root, to)));
+        }
+        else
+            r.skipped.push({ path: f.path, why: 'no checkout to put the config in' });
+    }
+    return r;
+}
+//# sourceMappingURL=instance-move.js.map
