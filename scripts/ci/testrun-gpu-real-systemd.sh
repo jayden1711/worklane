@@ -18,12 +18,17 @@ CLI="$PWD/dist/src/cli.js"
 t="$(mktemp -d)"
 chmod 0755 "$t"
 made=()
+# WHY: test-user.sh check fails on a protected path made after the install (no ACL denies it to the test user): an
+# /etc/worklane this step's root script makes goes again at the end, as on a runner it never existed.
+etc_was=0; [ -d /etc/worklane ] && etc_was=1
 cleanup() {
   for n in ${made[@]+"${made[@]}"}; do sudo rm -f -- "$n"; done
   sudo rmdir /dev/nvidia-caps 2>/dev/null || true
   sudo bash scripts/setup/testrun-gpu.sh disable ci >/dev/null 2>&1 || true
   sudo rm -f /etc/worklane/testrun-gpu.json /etc/tmpfiles.d/worklane-gpu.conf
   sudo rm -rf /run/worklane/gpu
+  sudo rmdir /run/worklane 2>/dev/null || true
+  [ "$etc_was" = 1 ] || sudo rmdir /etc/worklane 2>/dev/null || true
   rm -rf "$t"
 }
 trap cleanup EXIT
@@ -177,4 +182,8 @@ f_end="$(tail -n 1 "$t/gpu-hold-f.out")"
 grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f since " "$t/hold2.err" || { cat "$t/hold2.err" >&2; fail "gpu hold didn't say who held the GPU"; }
 [ "$(cat "$t/hold2.start")" -ge "$f_end" ] || fail "gpu hold's command ran before the GPU run ended"
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
+# Nothing of this step is left for the steps after it: the sandbox's own check still passes.
+cleanup
+trap - EXIT
+sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed' || { sudo bash scripts/setup/test-user.sh check ci | grep FAIL >&2; fail "test-user.sh check ci fails after this step"; }
 echo "OK: GPU test runs, off and on, one per GPU, and gpu hold, on real systemd"

@@ -123,7 +123,9 @@ case "$cmd" in
     ;;
 esac
 
-install -d -o root -g root -m 0755 "$(dirname "$GPU_FILE")"
+# Made only when missing (scripts/setup/machine.sh makes it): an existing one keeps its mode and ACLs (test-user.sh
+# denies each test user /etc/worklane by an ACL entry).
+[ -d "$(dirname "$GPU_FILE")" ] || install -d -o root -g root -m 0755 "$(dirname "$GPU_FILE")"
 file_text | put_file root root 0644 "$GPU_FILE"
 echo "wrote $GPU_FILE"
 # The locks from boot on: /run/worklane and its gpu directory root's 0755, one root 0644 file per listed GPU.
