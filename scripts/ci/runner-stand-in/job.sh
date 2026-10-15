@@ -39,7 +39,12 @@ if [ -n "$(docker ps -aq)" ]; then bad "an earlier job's container is still here
 img=alpine:3.20
 # An HTTPS fetch (DNS, TLS, a response) of a page with no per-address quota: GitHub's unauthenticated API has one, and
 # the runner's address is shared.
-if out="$(docker run --rm "$img" wget -q -T 10 -O /dev/null https://github.com/ 2>&1)"; then ok "a container reaches the internet (https://github.com/)"; else bad "a container can't reach the internet: $out"; fi
+# The image first, on its own: a pull that fails is not a container that can't reach the internet (#495's job 116653994521
+# showed only "Unable to find image" and no reason).
+if out="$(docker pull -q "$img" 2>&1)"; then ok "pulled $img"; else bad "docker pull $img: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+# Not -q: wget's own error, and its exit status, on the one PROBE line.
+rc=0; out="$(docker run --rm "$img" wget -T 10 -O /dev/null https://github.com/ 2>&1)" || rc=$?
+if [ "$rc" = 0 ]; then ok "a container reaches the internet (https://github.com/)"; else bad "a container can't reach the internet (exit $rc): $(printf '%s' "$out" | tr '\n' ' ')"; fi
 for u in "http://$HOST_IP:$LISTEN_PORT/" "http://10.0.2.2:$LISTEN_PORT/"; do
   if out="$(docker run --rm "$img" wget -q -T 5 -O- "$u" 2>&1)"; then bad "a container reached $u"; else ok "a container can't reach $u (${out##*$'\n'})"; fi
 done
