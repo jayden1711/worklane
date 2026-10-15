@@ -1,8 +1,7 @@
 // WHY (#469): an empty required_checks in PR mode means no PR is ever marked ready, so nothing ever merges, and
 // before this nothing said so. The loader still accepts it (an existing config keeps loading and its coordinator
 // keeps starting), but it is a config problem everywhere a person looks: the config_invalid incident (raised by the
-// coordinator's live-config check), doctor's and the first-run page's "Required checks named" step, and `init`,
-// which won't finish until a choice is made.
+// coordinator's live-config check), and doctor's and the first-run page's "Required checks named" step.
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 

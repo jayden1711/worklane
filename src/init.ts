@@ -30,10 +30,7 @@ import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly }
 import { coordinatorUser } from './setup/app-manifest.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
-import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
-import { ciChoiceProblem } from './ci-choice.js';
-import { ProjectConfig } from './config/schema.js';
-import { parse as parseYaml } from 'yaml';
+import { varLibPath } from './os/system-paths.js';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';

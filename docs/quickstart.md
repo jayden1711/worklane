@@ -188,7 +188,7 @@ worklane dashboard --root /tmp/worklane-demo/shop --user example-owner
 
 ## No CI yet
 
-A PR is marked ready only once the checks named in `required_checks` pass, so an empty list means nothing ever merges. It is never left silent. The coordinator raises `config_invalid` naming it, doctor and the First-run page's **Required checks named** step stay blocked with the fix, and `worklane init` won't finish. A repo with no CI adds one in that step with **Add a starter CI…**:
+A PR is marked ready only once the checks named in `required_checks` pass, so an empty list means nothing ever merges. It is never left silent. The coordinator raises `config_invalid` naming it, and doctor and the First-run page's **Required checks named** step stay blocked with the fix. A repo with no CI adds one in that step with **Add a starter CI…**:
 
 - It drafts `.github/workflows/ci.yml` from the detected toolchain and test command.
 - The workflow has one job, `test`, which is the check name.
