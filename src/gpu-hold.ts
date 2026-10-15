@@ -4,12 +4,14 @@
 // command ends. Without --gpu it holds every GPU root's file lists for any instance.
 //
 // WHY: the harness's own runs take the lock; your jobs don't, unless they go through this. Nothing here asks the
-// driver (no nvidia-smi): it is the lock and nothing else.
+// driver (no nvidia-smi): it is the lock and nothing else. Only the <cli>-gpu group's one member (the owner; root's
+// scripts/setup/testrun-gpu.sh holder) can open a lock: anyone who could would be able to keep the GPU runs waiting.
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { BRAND } from './brand.js';
 import { flockHolders, holdFlocksInOrder } from './os/index.js';
-import { gpuCommands, gpuFilePath, gpuIndices, gpuLockPath, readGpuFile } from './testrun/gpu.js';
+import { GPU_GROUP, gpuCommands, gpuFilePath, gpuIndices, gpuLockPath, readGpuFile } from './testrun/gpu.js';
 
 export interface GpuHoldDeps {
   /** Root's file (tests: one of their own) and the uid that must own it. */
@@ -30,6 +32,19 @@ export function parseGpuHold(args: readonly string[]): { gpus: number[]; command
     gpus.push(Number(opts[++i]));
   }
   return { gpus: [...new Set(gpus)].sort((a, b) => a - b), command: args.slice(at + 1) };
+}
+
+/** Whether this user is refused a lock (EACCES/EPERM on its directory or the file), as a non-member of the GPU group is. */
+export function lockDenied(path: string): boolean {
+  for (const [p, mode] of [[dirname(path), constants.X_OK], [path, constants.R_OK]] as const) {
+    try {
+      accessSync(p, mode);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') return true;
+    }
+  }
+  return false;
 }
 
 /** Who holds a GPU's lock, as far as this user can tell: the helper's note in the file, and the holders' pids. */
@@ -62,6 +77,12 @@ export async function gpuHoldCommand(args: readonly string[], d: GpuHoldDeps = {
     gpus = gpuIndices(f);
   }
   const lock = d.lockPath ?? gpuLockPath;
+  // INVARIANT: only the GPU group's members (the owner) can open a lock; anyone else is told so, before anything runs.
+  const denied = gpus.find((g) => lockDenied(lock(g)));
+  if (denied !== undefined) {
+    err(`gpu hold: only a member of the ${GPU_GROUP} group may hold a GPU, and this user can't open ${lock(denied)}. Root makes the owner its one member: ${gpuCommands('<name>').holder}; then log in again. Agent, test and coordinator users never can.`);
+    return 2;
+  }
   const missing = gpus.filter((g) => !existsSync(lock(g)));
   if (missing.length) {
     err(`gpu hold: no lock file for GPU ${missing.join(', ')} (${lock(missing[0]!)}): root's script makes one for each GPU it lists (${gpuCommands('<name>').status})`);
