@@ -162,6 +162,13 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
 
+### Siri Shortcuts
+
+`dashboards.sh --siri` adds the hub's Siri gateway, a listener of its own on 127.0.0.1:4397 that `tailscale.sh
+serve-siri` publishes on the tailnet's port 8443: "Hey Siri, tell" leaves an idea in the Inbox and "Hey Siri, ask"
+answers aloud at a viewer's level, with a per-device token an owner makes in Settings, Siri devices. See
+[docs/siri.md](siri.md).
+
 ## The owner terminal
 
 The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
