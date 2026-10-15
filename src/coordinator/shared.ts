@@ -92,7 +92,7 @@ export interface CoordinatorDeps {
   /** Nightly queuing (tests inject this). */
   nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
-  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number } };
+  machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number; freeGb?: number } };
   /**
    * The harness eval suite (src/harness-evals/; tests inject these): the suite run itself, the engine commit running
    * here, and whether src/ changed between two engine commits. Absent: the real ones.

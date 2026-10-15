@@ -52,6 +52,48 @@ export interface Decision {
   voiceRefused?: string | null;
 }
 
+/** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
+export interface DecisionDetail {
+  id: string;
+  kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'pr';
+  issue: number | null;
+  owner: string;
+  question: string;
+  options: { option: string; does: string; cannot: string; recommended: boolean }[];
+  recommendation: string;
+  askedAt: string;
+  answer: { by: string; answer: string; at: string } | null;
+  canAnswer: boolean;
+  ifNothing: string;
+  /** A viewer's: why the rest isn't here. */
+  withheld: string | null;
+  title?: string | null;
+  summary?: { happened: string; agent: string | null };
+  reasoning?: string[];
+  receipts?: string[];
+  findings?: { list: { claim: string; evidence: string; file?: string; line?: number; severity?: string; confidence?: string }[]; confidence: string | null; unverified: string[] } | null;
+  change?: { base: string | null; head: string | null; files: { path: string; added: number | null; removed: number | null }[]; filesMore: number; level: string | null; levelReasons: string[]; source: 'asked' | 'log' } | null;
+  verdict?: { patch_correct: boolean; test_correct: boolean; confidence: string; confidenceReason: string | null; advice: string; unread: string[]; unverifiedClaims: string[]; designChange: boolean | null; designReason: string | null } | null;
+  tests?: { check: string; status: string; duration_ms: number | null; tail?: string }[] | null;
+  tampered?: string[];
+  pr?: { number: number; url: string; head: string; phase: string; draft: boolean; checks: { name: string; outcome: string }[]; checksOnHead: boolean; waitReasons: string[]; why: { category: string; text: string }[] } | null;
+  impact?: { flags: { flag: 'money-path' | 'auth' | 'secrets'; files: string[] | null }[]; others: string[]; note: string | null };
+  runs?: { id: string; role: string; model: string; startedAt: string; endedAt: string | null; reason: string | null }[] | null;
+  auth?: { failed: { at: string; role: string; detail: string }[]; held: { login: string; detail: string; since: string } | null };
+  diff?: 'owner' | 'owners-only' | 'none';
+  prBody?: boolean;
+  ownerOnly?: string | null;
+}
+/** A decision's change as a diff (owners only), or why there's none. */
+export type DecisionDiff = { diff: string; truncated: boolean } | { diff: null; why: string };
+/** A decision's PR body: its fail-without and "never" sections (null: the body has none), or why it couldn't be read. */
+export interface DecisionPrBody {
+  pr: number | null;
+  failWithout: string | null;
+  never: string | null;
+  why: string | null;
+}
+
 /** One step of an agent run: a shell command or a file write. */
 export interface RunStep {
   kind: 'command' | 'write';
@@ -274,7 +316,8 @@ export interface State {
   landQueue: { issue: number; title: string; head: string; level: string; queuedAt: string; deferred: string | null }[];
   /** Direct landing's batches (`land`) and PR mode's (`pr`, with its PRs); a viewer's have no tip or detail. */
   batches: { id: string; kind?: 'land' | 'pr'; issues: number[]; prs?: number[]; tip?: string; outcome: string; detail?: string; at: string }[];
-  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string } | null;
+  /** The last hold or release; `banner` while held (absent from older servers). */
+  governor: { held: boolean; reason: string | null; load: number | null; freeDiskPct: number | null; at: string; banner?: HoldBanner | null } | null;
   /** The machine-wide emergency stop, read-only: in force now, and whether this coordinator has halted for it. */
   /** Open PRs, and those needing a person (waiting on review, or a CI fix that gave up). */
   prCounts?: { open: number; needYou: number };
@@ -378,7 +421,9 @@ export interface Settings {
   project: { name: string; repo: string; landMode: string; runtime: unknown };
   owners: State['owners'];
   reports: { times: string[]; to: string[] };
-  governor: { max_load?: number; min_free_disk_pct: number };
+  governor: { max_load?: number; min_free_disk_pct: number; min_free_disk_gb?: number };
+  /** The disk floor on this machine now; null when it can't be measured (absent from older servers). */
+  diskFloor?: DiskFloor | null;
   agents: { budget: number; roles: { name: string; enabled: boolean; model: string; count: number | null }[] };
   /** INVARIANT: `from` null means the engine's default (item 32). */
   routing: { key: string; task: string; value: string | number | boolean | string[]; from: string | null }[];
@@ -979,6 +1024,8 @@ export interface FirstRunStep {
   at: string | null;
 }
 export interface FirstRun {
+  /** The machine check: the disk floor now (null in setup mode or unmeasurable; absent from older servers). */
+  diskFloor?: DiskFloor | null;
   recorded: boolean;
   mode: 'local' | 'server' | null;
   steps: FirstRunStep[];
@@ -1627,6 +1674,8 @@ export interface WaitItem {
   sha?: string;
   /** A PR left to the owner as high-risk: each category it touches, plainly, with its first file ("changes the merge policy: src/merge-policy.ts"). */
   why?: { category: string; text: string }[];
+  /** A decision or a held plan: its id, for its detail page (/decisions/<id>). */
+  decision?: string;
 }
 /** A PR merged on its own since the last digest, for sampling: its review level and the evaluator's confidence. */
 export interface MergedItem {
@@ -1704,6 +1753,27 @@ export interface BoardData {
   slots: { cap: number; running: number };
   /** The Landing column's PR batches (absent from older servers). */
   batches?: BoardBatch[];
+  /** Why dispatch holds now, with its numbers and fix (a viewer's without fix or link); null or absent when it doesn't. */
+  hold?: HoldBanner | null;
+}
+
+/** A governor hold as the Board and First run show it (src/governor-holds.ts holdBanner). */
+export interface HoldBanner {
+  kind: string;
+  title: string;
+  numbers: string | null;
+  /** When it ends on its own (ISO): shown as "wait until <local time>". */
+  wait: string | null;
+  fix: string | null;
+  link: { path: string; label: string } | null;
+  since: string;
+}
+
+/** The disk floor on this machine now (src/governor-holds.ts diskFloorCheck), as doctor checks it. */
+export interface DiskFloor {
+  level: 'ok' | 'warn';
+  detail: string;
+  room: { freeGb: number; totalGb: number; freePct: number; floorGb: number; estGb: number; afterGb: number; shortGb: number; held: boolean };
 }
 
 /**

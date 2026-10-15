@@ -2,6 +2,7 @@
 // reports) are folds over these; nothing keeps private state.
 import { z } from 'zod';
 import { STAGES } from '../stage-label.js';
+import { HOLD_KINDS } from '../governor-holds.js';
 
 const issue = z.number().int().positive();
 const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -696,7 +697,32 @@ export const EventSchemas = {
   'emergency.stop': z.strictObject({ by: z.string(), reason: z.string(), running: z.number().int() }),
   'emergency.resume': z.strictObject({ instance: z.string() }),
   'nightly.queued': z.strictObject({ day: z.string(), jobs: z.array(z.string()) }),
-  'governor.hold': z.strictObject({ reason: z.string(), load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
+  /** Dispatch holds: `kind` and `facts` (the numbers when it began) say why, for the Board's banner (src/governor-holds.ts); absent on older events. */
+  'governor.hold': z.strictObject({
+    reason: z.string(),
+    load: z.number().nullable(),
+    free_disk_pct: z.number().nullable(),
+    kind: z.enum(HOLD_KINDS).optional(),
+    facts: z
+      .strictObject({
+        free_gb: z.number(),
+        total_gb: z.number(),
+        floor_gb: z.number(),
+        floor_min_gb: z.number(),
+        floor_pct: z.number(),
+        est_gb: z.number(),
+        load: z.number(),
+        max_load: z.number(),
+        spent_usd: z.number(),
+        budget_usd: z.number(),
+        until: z.string(),
+        cap: z.number(),
+        running: z.number(),
+        windows: z.string(),
+      })
+      .partial()
+      .optional(),
+  }),
   'governor.release': z.strictObject({ load: z.number().nullable(), free_disk_pct: z.number().nullable() }),
   /** A ready task waits: it would change a hotspot file a running task changes too (`by`). Recorded once per wait. */
   'hotspot.held': z.strictObject({ issue, by: issue, files: z.array(z.string()), reason: z.string() }),

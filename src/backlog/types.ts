@@ -82,6 +82,8 @@ export interface PullRequest {
   draft: boolean;
   state: 'open' | 'closed' | 'merged';
   title: string;
+  /** Its description (Markdown), as the tracker has it: a decision's detail reads its fail-without and never sections. */
+  body?: string;
   /** GitHub's merge check: null while it's still computing. */
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */

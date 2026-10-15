@@ -36,6 +36,7 @@ import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
 import { readRun, runsForIssue } from './run-record.js';
+import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
 import { gpuFilePath, gpuOptIn } from './testrun/gpu.js';
@@ -47,7 +48,8 @@ import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
-import { copyFileCommand, cpuCount, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { copyFileCommand, cpuCount, diskFree, flockHolders, installService, loopbackPeerIsMe, serviceChange, type ServiceSpec } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
 import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUsage } from './os/stats.js';
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
@@ -107,6 +109,15 @@ import { refuseKeyInUrl } from './dashboard-key-url.js';
  * happens in the project's config folder, through review like any change.
  */
 /** The settings as a viewer (read on the repo) sees them: the project part the Settings page shows them, nothing else. */
+/** The disk floor on this machine now (src/governor-holds.ts), as doctor checks it: Settings' and First run's numbers; null when it can't be measured. */
+export function diskFloorNow(o: Pick<DashboardOptions, 'root' | 'cfg'>, measure: (path: string) => { freeGb: number; totalGb: number } = diskFree) {
+  try {
+    return diskFloorCheck(measure(o.root), o.cfg.project.governor, o.cfg.tests.worktree.est_size_gb);
+  } catch {
+    return null;
+  }
+}
+
 export function settingsForViewer(cfg: Config) {
   const v = settingsView(cfg);
   return { configDir: v.configDir, project: v.project, owners: v.owners, reports: v.reports, forViewer: true as const };
@@ -154,6 +165,8 @@ export function drainView(dir?: string, now = Date.now()): UpdatesDrain | null {
 export interface DashboardOptions {
   root: string;
   cfg: Config;
+  /** The disk's free and total GB at a path, for the disk floor's numbers (tests stand in for it); absent: the real one. */
+  diskFree?: (path: string) => { freeGb: number; totalGb: number };
   eventsDb: string;
   stateDir: string;
   /** The login recorded for the break-glass (the token used on this machine with no person named): the owner's. */
@@ -949,6 +962,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
   const eventCache = new EventCache(opts.eventsDb);
   let lastId = eventCache.lastId();
+  // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
+  const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
 
   const owners = opts.cfg.project.owners;
   const repo = opts.cfg.project.project.repo;
@@ -1218,7 +1233,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         }
         // Settings: agents, budgets, tests, guardrails and deploys are the owners' and writers'; a viewer gets the project part.
         // discordSetup: whether this dashboard has the First run page's Discord step (a server instance's only).
-        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome } : settingsForViewer(opts.cfg));
+        if (url.pathname === '/api/settings' && req.method === 'GET') return json(res, 200, isWriter(who.role) ? { ...settingsView(opts.cfg, routingInEffect(opts)), discordSetup: !!instanceHome, diskFloor: diskFloorNow(opts, opts.diskFree) } : settingsForViewer(opts.cfg));
         if (url.pathname === '/api/events' && req.method === 'GET') {
           const all = eventCache.after(Number(url.searchParams.get('after') ?? 0)).filter((e) => e.type !== 'coordinator.tick');
           // A viewer sees only the allowlisted event types and fields (viewer-events.ts): never runs, agents or costs.
@@ -1462,6 +1477,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             log.close();
           }
         }
+        // A decision's (or held PR's) detail, asked when its page opens (src/decision-detail.ts): a viewer gets only a
+        // viewer's fields; …/diff is the owners' (from this checkout's git), …/pr the owners' and writers' (the PR body).
+        if (url.pathname.startsWith('/api/decisions/') && req.method === 'GET') {
+          const [raw = '', part, ...more] = url.pathname.slice('/api/decisions/'.length).split('/');
+          if (more.length || (part !== undefined && part !== 'diff' && part !== 'pr')) return json(res, 404, { error: 'no such view' });
+          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
+          if (!detail) return json(res, 404, { error: 'no such decision' });
+          if (part === undefined) return json(res, 200, detail);
+          if (part === 'diff') {
+            if (!isOwnerHere) return json(res, 403, { error: `a change's diff is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+            const c = detail.change;
+            return json(res, 200, c?.base && c.head ? await decisionDiff(opts.root, c.base, c.head) : { diff: null, why: 'no commits recorded for this change' });
+          }
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly("a PR's body is", who) });
+          const pr = detail.pr;
+          if (!pr) return json(res, 200, { pr: null, failWithout: null, never: null, why: 'no PR' });
+          if (!opts.backlog) return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: 'this dashboard has no backlog to read the PR from' });
+          const kept = prBodies.get(pr.number);
+          const body = kept && Date.now() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
+          if (body !== kept?.body) prBodies.set(pr.number, { at: Date.now(), body });
+          try {
+            return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
+          } catch (e) {
+            prBodies.delete(pr.number);
+            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR: ${(e as Error).message}` });
+          }
+        }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
@@ -1542,7 +1584,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             }
           }
           const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
-          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, ...setup });
+          return json(res, 200, { ...view, start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, diskFloor: opts.setupMode ? null : diskFloorNow(opts, opts.diskFree), ...setup });
         }
         // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
         // without confirm, what it would do; every run and refusal audited.

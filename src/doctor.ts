@@ -14,7 +14,8 @@ import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
 import { INTAKE_FILE } from './intake/config.js';
@@ -51,7 +52,7 @@ export function apiKeyCheck(file: string, agentUser: string | null, access = fil
   return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo; /** For tests: the disk's free and total GB at a path. */ disk?: (path: string) => { freeGb: number; totalGb: number } } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -90,6 +91,17 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
       const what = p.policy ? 'within the policy' : 'policy unreadable';
       if (!errs.length) add(`policy ${p.name}`, 'ok', what);
       else add(`policy ${p.name}`, 'fail', errs.map((e) => `${e.file}${e.path ? ` at ${e.path}` : ''}: ${e.message}`).join('\n'));
+    }
+  }
+
+  // The disk floor (src/governor-holds.ts): under it, or under it after one more worktree, the coordinator starts
+  // nothing, so doctor says so with the same numbers and fix the Board's banner gives.
+  if (cfg) {
+    try {
+      const c = diskFloorCheck((opts.disk ?? diskFree)(root), cfg.project.governor, cfg.tests.worktree.est_size_gb);
+      add('disk floor', c.level, c.detail);
+    } catch (e) {
+      add('disk floor', 'warn', `can't measure the free disk at ${root}: ${(e as Error).message}`);
     }
   }
 
