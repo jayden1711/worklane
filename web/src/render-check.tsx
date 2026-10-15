@@ -7,6 +7,8 @@ import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFor
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
+import { AttachButton, AttachmentList, DropHint, SentAttachments, type Pending } from './components/ChatAttachments';
+import type { ChatAttachment } from './api';
 import { ComposerMic, MicInterim } from './voice/Mic';
 import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
 import { TalkStatus } from './voice/TalkBack';
@@ -38,6 +40,7 @@ import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { FirstTaskForm, IgnoredIssues } from './components/FirstTask';
 import { RepoConfigForm } from './components/RepoConfigForm';
 import type { StarterCi as StarterCiView } from './api';
 import { StarterCi } from './components/StarterCi';
@@ -119,6 +122,12 @@ export const renderStopBanner = (state: State) => renderToStaticMarkup(<StopBann
 export const renderDeployGate = (gate: DeployGate) => renderToStaticMarkup(<DeployGateStatus gate={gate} />);
 export const renderProtection = (protection: Protection, brand: string) => renderToStaticMarkup(<ProtectionStatus protection={protection} brand={brand} />);
 export const renderMainWatchAlert = (protection: Protection) => renderToStaticMarkup(<MainWatchAlert protection={protection} />);
+export const renderAttachmentList = (items: Pending[]) => renderToStaticMarkup(<AttachmentList items={items} onRemove={() => {}} onAnyway={() => {}} />);
+export const renderAttachButton = (role: string | undefined, disabled = false) => renderToStaticMarkup(<AttachButton role={role} disabled={disabled} accept={['png', 'pdf']} onFiles={() => {}} />);
+export const renderDropHint = (active: boolean) => renderToStaticMarkup(<DropHint active={active} />);
+export const renderSentAttachments = (items: ChatAttachment[]) => renderToStaticMarkup(<SentAttachments items={items} instance={null} />);
+export { filesOf, fmtSize, mayAttach, precheck, safeBlob } from './components/ChatAttachments';
+export { attachmentNameHeader } from './api';
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
@@ -211,6 +220,9 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
 };
 export const renderSetupModeHidden = (path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
 export { nextStep } from './pages/FirstRun';
+/** #468: Your first task's form (its picks loaded, a preview shown), and the Issues page's "Not picked up". */
+export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?: { title: string; body: string } } = {}) => renderToStaticMarkup(<FirstTaskForm canEdit={o.canEdit ?? true} initial={info as never} initialPreview={o.preview ?? null} onDone={() => {}} />);
+export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIssues initial={data as never} />);
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 

@@ -30,6 +30,7 @@ import { recordProfileSwitches } from './claude-profiles.js';
 import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
 import { machineStats } from './os/stats.js';
+import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
 import { pushProblems } from './push-check.js';
 import { needsPlan, PLAN_DISALLOWED, PLAN_TOOLS, planBrief, type Plan } from './plan-mode.js';
 import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pickDispatch, type FileIndex, type Hold } from './hotspots.js';
@@ -113,6 +114,7 @@ export class Coordinator extends HarnessEvals {
     // The config as the default branch has it now, before anything below reads it (src/config/live.ts).
     await step('config', () => this.refreshConfig(), undefined);
     await step('settings', () => this.refreshSettings(), undefined);
+    await step('chat attachments', () => this.sweepChatAttachments(), undefined);
     // A usage-limit pause whose reset has passed ends here, before anything below would start a run.
     await step('usage', () => this.resumeIfDue(), false);
     // A Claude login the API refused is checked with one tiny real call (every 10 min at most, at once on the owner's
@@ -400,6 +402,7 @@ export class Coordinator extends HarnessEvals {
         context,
         question: q.question,
         by: q.by,
+        ...(q.attachments?.length ? { attachments: q.attachments } : {}),
         runner: this.d.runner,
         stateDir: this.d.stateDir,
         bundleRoot: bundle.root,
@@ -495,6 +498,15 @@ export class Coordinator extends HarnessEvals {
     this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
     this.configLoads();
     if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
+  }
+
+  private attachmentsSweptAt = 0;
+
+  /** The chat's attachments past their retention days (src/chat-attachments.ts) are deleted: checked once an hour. */
+  sweepChatAttachments(now = Date.now()): void {
+    if (now - this.attachmentsSweptAt < 3_600_000) return;
+    this.attachmentsSweptAt = now;
+    sweepAttachments(this.d.stateDir, attachmentCaps(this.d.settings?.().settings ?? {}).retention_days, new Date(now));
   }
 
   /**

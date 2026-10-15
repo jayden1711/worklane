@@ -63,8 +63,11 @@ export interface BoardCard {
     live: string | null;
     usage: ProcessGroupUsage | null;
   } | null;
-  /** Why it waits on the owner (the digest's), when it does; `detail` only for those who may read the digest. */
-  waiting: { kind: WaitKind; label: string; detail: string | null; since: string } | null;
+  /**
+   * Why it waits on the owner (the digest's), when it does; `detail`, and `reasons` (each of a PR hold's reasons whole,
+   * one chip each), only for those who may read the digest.
+   */
+  waiting: { kind: WaitKind; label: string; detail: string | null; reasons: string[] | null; since: string } | null;
   /** The open decision on it. */
   decision: { id: string; kind: string; question: string; options: string[]; recommendation: string } | null;
   level: string | null;
@@ -246,7 +249,7 @@ export function boardView(i: BoardInput): BoardView {
       since: wait?.since ?? startedAt,
       checks,
       run: r ? { role: r.role, model: r.model, startedAt: r.startedAt, lastHeartbeat: r.lastHeartbeat, note: r.note, live, usage: group !== undefined ? (usage.get(group) ?? null) : null } : null,
-      waiting: wait ? { kind: wait.kind, label: WAIT_LABEL[wait.kind], detail: i.canReadDigest ? wait.detail : null, since: wait.since } : null,
+      waiting: wait ? { kind: wait.kind, label: WAIT_LABEL[wait.kind], detail: i.canReadDigest ? wait.detail : null, reasons: i.canReadDigest && wait.reasons?.length ? wait.reasons : null, since: wait.since } : null,
       decision: d ? { id: d.id, kind: d.kind, question: d.question, options: d.options, recommendation: d.recommendation } : null,
       level: t.level,
       batch: batch ? { status: batch.status, id: batch.batch } : null,
@@ -291,7 +294,7 @@ export function boardForViewer(b: BoardView): Record<string, unknown> {
   out.cards = b.cards.map((c) => {
     const v = pick(c, VIEWER_CARD_FIELDS)!;
     if (v.pr) v.pr = pick(v.pr, VIEWER_PR_FIELDS);
-    if (v.waiting) v.waiting = { ...pick(v.waiting, VIEWER_WAIT_FIELDS), detail: null };
+    if (v.waiting) v.waiting = { ...pick(v.waiting, VIEWER_WAIT_FIELDS), detail: null, reasons: null };
     if (v.decision) v.decision = pick(v.decision, VIEWER_DECISION_FIELDS);
     if (v.batch) v.batch = pick(v.batch, VIEWER_CARD_BATCH_FIELDS);
     return { ...v, actions: { watch: null, steer: false, answer: false, approve: null } };

@@ -53,6 +53,8 @@ interface World {
   service: boolean | null;
   units: Set<string>;
   linger: boolean | null;
+  /** #468: an issue labelled ready exists on GitHub. */
+  readyIssue?: boolean;
 }
 
 /** Each minimal real call the login's proof made (its arguments). */
@@ -77,6 +79,7 @@ function probeFor(w: World): SetupProbe {
       if (cmd === 'gh' && a === 'auth status') return { status: w.ghIn ? 0 : 1, stdout: '', stderr: '' };
       if (cmd === 'gh' && a.endsWith('--jq .permissions.push')) return { status: 0, stdout: `${w.push}\n`, stderr: '' };
       if (cmd === 'gh' && a.endsWith('/protection --silent')) return w.protectedMain === true ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: typeof w.protectedMain === 'string' ? w.protectedMain : 'gh: Branch not protected (HTTP 404)' };
+      if (cmd === 'gh' && a.includes('/issues?labels=ready&state=all&per_page=1')) return { status: 0, stdout: w.readyIssue ? '1\n' : '0\n', stderr: '' };
       if (cmd === 'tailscale' && a === 'status --json') return { status: w.tailscale ? 0 : 1, stdout: w.tailscale ?? '', stderr: '' };
       return { status: 1, stdout: '', stderr: `no stand-in for ${cmd} ${a}` };
     },
@@ -169,6 +172,7 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
   },
   service: { mode: 'local', on: (_f, w) => void (w.service = true), off: () => {}, done: /dev\.\S+ is running/, not: /isn't running/ },
   linger: { mode: 'local', on: (_f, w) => void (w.linger = true), off: (_f, w) => void (w.linger = false) },
+  'first-task': { mode: 'local', on: (_f, w) => void (w.readyIssue = true), off: () => {}, done: /an issue is labelled ready/, not: /no issue is labelled ready yet/ },
 };
 
 function editConfig(f: Fx, edit: (yaml: string) => string) {
@@ -399,7 +403,7 @@ test('doctor and the first-run page show the same steps with the same states', a
     const groupsDoctor = doc.filter((c) => /^setup [a-z-]+$/.test(c.name) && page.groups.some((g) => `setup ${g.id}` === c.name)).map((c) => [c.name, c.level === 'ok']);
     assert.deepEqual(groupsDoctor, groupsPage);
     assert.deepEqual(groupsPage.filter(([, ready]) => !ready).map(([n]) => n), ['setup claude']);
-    assert.deepEqual(fromPage.filter(([, done]) => !done).map(([n]) => n), ['engine', 'path', 'docker', 'claude-login', 'required-checks', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
+    assert.deepEqual(fromPage.filter(([, done]) => !done).map(([n]) => n), ['engine', 'path', 'docker', 'claude-login', 'required-checks', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service', 'first-task'].map((id) => `setup step ${id}`));
     // Live: signed in since, both see it at once (Re-check), not when init next runs.
     w.claudeIn = true;
     assert.equal(stepIn((await s.get('example-owner', true)).body.setup, 'claude-login')!.done, true);

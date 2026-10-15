@@ -14,7 +14,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
-import { firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
+import { CI_CHOICE_EXIT, firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
 import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/os/index.js';
 import { srvCheckoutPath } from '../src/os/system-paths.js';
@@ -307,7 +307,8 @@ test('init, server mode: the true status. A failed or waiting add-project step i
 test('init (#469), local mode: a config with no CI chosen (an empty required_checks, PR mode) is never "all done": the repo-config step says why and the fix; chosen, it finishes', async () => {
   const root = repo(false);
   const t = world();
-  assert.equal(await initCommand(t.args({ target: root }), t.io), 1, t.out());
+  assert.equal(await initCommand(t.args({ target: root }), t.io), CI_CHOICE_EXIT, t.out());
+  assert.equal(CI_CHOICE_EXIT, 5, "bootstrap.sh reads it as 5: it ends at the wizard's URL then");
   const s = readInitState(localInitFile(root))!;
   assert.equal(s.steps['repo-config']!.status, 'failed');
   assert.match(s.steps['repo-config']!.detail, /^\.worklane\/ valid \(example-org\/example-shop\), hooks installed; but required_checks is empty and no CI is chosen: no PR is ever marked ready, so nothing ever merges\. Fix: on the dashboard's First-run page, "Required checks named": add the starter CI .* Then run `worklane init` again \(it picks up here\)$/);
@@ -327,7 +328,7 @@ test('init (#469), server mode: the same refusal, judged on the checkout add-pro
   mkdirSync(dirname(checkout), { recursive: true });
   execFileSync('git', ['clone', '-q', upstream, checkout]);
   const first = ok();
-  assert.equal(await initCommand(first.args({ target: 'example-org/shop', mode: 'server', instance: 'shopz' }), first.io, () => true), 1, first.out());
+  assert.equal(await initCommand(first.args({ target: 'example-org/shop', mode: 'server', instance: 'shopz' }), first.io, () => true), CI_CHOICE_EXIT, first.out());
   const s = readInitState(serverInitFile('shopz'))!;
   assert.equal(s.steps['repo-config']!.status, 'failed');
   assert.match(s.steps['repo-config']!.detail, /required_checks is empty and no CI is chosen/);
@@ -391,7 +392,7 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   // its order (linger only where loginctl answers: Linux), a step not done a warning, never a failure.
   assert.deepEqual(names(setup).filter((n) => !n.startsWith('setup step ')), ['setup tools', 'setup claude', 'setup github', 'setup repo-config', 'setup protection', 'setup discord']);
   assert.ok(setup.filter((c) => !c.name.startsWith('setup step ')).every((c) => c.level === 'ok'), JSON.stringify(setup));
-  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
+  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service', 'first-task'].map((id) => `setup step ${id}`));
   assert.ok(setup.every((c) => c.level !== 'fail'), JSON.stringify(setup));
   for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup step ${id}`)!.level, 'ok', id);
   const off = local.filter((c) => c.level === 'off');

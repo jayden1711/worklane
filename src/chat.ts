@@ -23,6 +23,7 @@ import { CHAT_SCHEMA, rolePrompt } from './roles.js';
 import { readRun, RUNS_DIR, type RunSummary } from './run-record.js';
 import type { AgentRunner } from './runner.js';
 import { SETTING_KEYS } from './settings.js';
+import { ATTACHMENT_ID, attachmentPrompt, MAX_ATTACHMENTS } from './chat-attachments.js';
 
 export const CHAT_HISTORY = join('chat', 'history.jsonl');
 const RECENT_EVENTS = 200;
@@ -224,6 +225,8 @@ export interface ChatTurnOptions {
   repo: string;
   /** What's left of today's budget: the turn's cap is at most this. */
   remainingUsd: number;
+  /** Attachment ids on the question (src/chat-attachments.ts): read from the instance's state, given as data. */
+  attachments?: string[];
   /** Records the turn's cost (the coordinator emits run.cost with role chat). */
   onCost?: (r: { costUsd: number; model: string; turns: number }) => void;
   now?: () => Date;
@@ -234,11 +237,18 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
   const owner = o.cfg.project.owners.default;
   const readOnly = !o.by || o.by.toLowerCase() !== owner.toLowerCase();
   const turn = `${(o.now ?? (() => new Date()))().getTime()}-${randomBytes(3).toString('hex')}`;
-  const dir = writeBundle(o.bundleRoot, turn, o.gid, bundleFiles(o.context));
+  // Attachments: text inline in the prompt, images and PDFs in the bundle for Read; all of it data, never instructions.
+  const attached = attachmentPrompt(o.stateDir, o.attachments ?? [], join(o.bundleRoot, turn));
+  const dir = writeBundle(o.bundleRoot, turn, o.gid, bundleFiles(o.context), attached.binary);
   // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty.
   const previous = readOnly ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
   const role = o.cfg.agents.roles.chief_of_staff;
   const model = role?.model ?? 'sonnet';
+  // WHY: the copies in the bundle are for this turn only; afterwards only the instance's state holds the file, so the
+  // retention days (sweepAttachments) are the only place it lives on.
+  const dropCopies = () => {
+    for (const f of Object.keys(attached.binary)) rmSync(join(dir, f), { force: true });
+  };
   const r = await o.runner.run({
     role: 'chat',
     stateDir: o.stateDir,
@@ -251,6 +261,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
       readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
       '',
       `Question: ${o.question}`,
+      ...(attached.text ? ['', attached.text] : []),
     ].join('\n'),
     appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
     cwd: o.repo,
@@ -262,7 +273,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     jsonSchema: CHAT_SCHEMA,
     stallMs: 10 * 60_000,
     timeoutMs: 20 * 60_000,
-  });
+  }).finally(dropCopies);
   o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
   const s = (r.reason === 'succeeded' ? r.structured : undefined) as { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[]; summary?: unknown } | undefined;
   const answer = s?.answer ? redactString(s.answer) : `The chat run ended without an answer (${r.reason}).`;
@@ -318,6 +329,8 @@ export interface ChatRequest {
   at: string;
   by: string;
   question: string;
+  /** Attachment ids (src/chat-attachments.ts), checked by the dashboard when asked. */
+  attachments?: string[];
 }
 
 export type ChatAnswerFile = { v: 1; id: string; at: string } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
@@ -338,12 +351,14 @@ export const CHAT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
  * Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id.
  * With a `key`, a retried or double-submitted ask returns the first one's id and runs no second turn.
  */
-export function askChat(o: { stateDir: string; question: string; by: string; key?: string; now?: Date }): { id: string } {
+export function askChat(o: { stateDir: string; question: string; by: string; key?: string; attachments?: string[]; now?: Date }): { id: string } {
   const question = o.question.trim();
   if (!question) throw new ChatError('the question is empty');
   if (question.length > MAX_QUESTION) throw new ChatError(`the question is over ${MAX_QUESTION} characters`);
   if (!o.by) throw new ChatError('who is asking is unknown');
   if (o.key !== undefined && !CHAT_KEY.test(o.key)) throw new ChatError('the request key must be 8-128 letters, digits, _ or -');
+  const attachments = o.attachments ?? [];
+  if (attachments.length > MAX_ATTACHMENTS || attachments.some((a) => !ATTACHMENT_ID.test(a))) throw new ChatError('attachments must be at most ' + MAX_ATTACHMENTS + ' attachment ids');
   const d = chatDirs(o.stateDir);
   const keyName = o.key === undefined ? null : createHash('sha256').update(`${o.by.toLowerCase()}\0${o.key}`).digest('hex').slice(0, 32);
   if (keyName) {
@@ -358,7 +373,7 @@ export function askChat(o: { stateDir: string; question: string; by: string; key
   const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
   writeJson(d.answers, id, { v: 1, id, at: now.toISOString(), state: 'pending' });
   if (keyName) writeJson(d.keys, keyName, { id });
-  writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question });
+  writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question, ...(attachments.length ? { attachments } : {}) });
   return { id };
 }
 
@@ -398,7 +413,7 @@ export function takeChatRequests(stateDir: string): ChatRequest[] {
     const p = join(d, f);
     try {
       const r = JSON.parse(readFileSync(p, 'utf8')) as ChatRequest;
-      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') out.push(r);
+      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') out.push({ ...r, attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [] });
     } catch {
       // unreadable: dropped
     }

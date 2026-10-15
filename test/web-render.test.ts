@@ -61,6 +61,8 @@ interface Render {
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
+  renderFirstTask(info: unknown, o?: { canEdit?: boolean; preview?: { title: string; body: string } }): string;
+  renderIgnored(data: unknown): string;
   renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
@@ -1380,7 +1382,7 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   const f = firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: null });
   const html = r.renderFirstRun(f);
   // Grouped as the registry groups them, local mode's only.
-  assert.deepEqual([...html.matchAll(/data-testid="first-run-group" data-group="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'tools', 'claude', 'github', 'repo-config', 'protection', 'extras', 'service']);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-group" data-group="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'tools', 'claude', 'github', 'repo-config', 'protection', 'extras', 'service', 'first-task']);
   const steps = [...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`);
   assert.ok(steps.includes('tools:done'), 'tools are all on PATH (live, not from init.json)');
   assert.ok(steps.includes('claude-login:todo'), 'signed out, per claude auth status');
@@ -1568,6 +1570,35 @@ test("the first-run page in setup mode: the banner; the origin picker; auto-conf
   const normal = r.renderFirstRun({ ...f, setup: open, autoConfig, canAct: true }, { open: 'questions' });
   assert.match(normal, /data-testid="first-run-coming"/, 'outside setup mode: what to do today');
   assert.doesNotMatch(normal, /setup-question/);
+});
+
+test('#468 Your first task: the form (title, outcome, done_when picks from the repo\'s tests, context), its preview with the label, the template; on a server one line, no form; and the first-run page offers it after Start', () => {
+  const info = { local: true, why: null, template: { label: 'ready', body: '**Outcome:** <x>\n\n```done_when\n- test: "<t>"\n```' }, tests: ['test/a.test.ts', 'test/b.test.ts'] };
+  const html = r.renderFirstTask(info);
+  assert.match(html, /data-testid="first-task-form"[\s\S]*?data-testid="first-task-title"[\s\S]*?data-testid="first-task-outcome"[\s\S]*?data-testid="first-task-check-kind"[\s\S]*?data-testid="first-task-test"[\s\S]*?<datalist id="first-task-tests"><option value="test\/a\.test\.ts"><\/option><option value="test\/b\.test\.ts">[\s\S]*?data-testid="first-task-context"[\s\S]*?data-testid="first-task-review"/);
+  assert.match(html, /data-testid="first-task-template"[\s\S]*?add the label (<!-- -->)?ready[\s\S]*?data-testid="first-task-template-body"[^>]*>\*\*Outcome:\*\*[\s\S]*?```done_when/);
+  const preview = r.renderFirstTask(info, { preview: { title: 'T', body: '```done_when\n- command: |\n    true\n```' } });
+  assert.match(preview, /data-testid="first-task-preview"[\s\S]*?```done_when[\s\S]*?Filed with the label ready[\s\S]*?data-testid="first-task-file"[^>]*>File it/);
+  const server = r.renderFirstTask({ ...info, local: false, why: "on a server an issue filed from this page would be its GitHub App's" });
+  assert.match(server, /data-testid="first-task-server"[^>]*>Not from here: on a server/);
+  assert.doesNotMatch(server, /first-task-form|first-task-review/);
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const page = r.renderFirstRun(f);
+  assert.match(page, /data-group="service"[\s\S]*?data-group="first-task"[\s\S]*?data-step="first-task"[\s\S]*?data-fix="form"[^>]*>File one</);
+  const srv = r.renderFirstRun(firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop', start: { kind: 'owner-command', unit: 'u', command: 'c', why: 'w' } }));
+  assert.match(srv, /data-testid="first-run-first-task-server"[^>]*>Your first task: open an issue on GitHub with a ```done_when block and the ready label\. There is no form for it on a server/);
+  assert.doesNotMatch(srv, /data-step="first-task"/);
+});
+
+test('#468 the Issues page\'s "Not picked up": each issue with its reasons; Add ready and Edit for a writer, the reasons alone for a viewer; on a server, why no button', () => {
+  const issues = [{ issue: 3, title: 'no label', url: 'https://github.com/o/r/issues/3', author: 'someone-else', labels: [], reasons: [{ kind: 'no-ready', text: 'no ready label', fix: 'add-ready' }, { kind: 'contract', text: 'no ```done_when block in the issue body', fix: 'edit' }] }];
+  const writer = r.renderIgnored({ issues, error: null, canFix: true, local: true });
+  assert.match(writer, /data-testid="issue-ignored" data-issue="3"[\s\S]*?data-kind="no-ready"[\s\S]*?no ready label[\s\S]*?data-testid="issue-ignored-add-ready"[^>]*>Add ready[\s\S]*?data-kind="contract"[\s\S]*?no ```done_when block[\s\S]*?href="https:\/\/github\.com\/o\/r\/issues\/3"[^>]*data-testid="issue-ignored-edit"/);
+  const viewer = r.renderIgnored({ issues, error: null, canFix: false, local: true });
+  assert.match(viewer, /no ready label/);
+  assert.doesNotMatch(viewer, /issue-ignored-add-ready|issue-ignored-edit/);
+  assert.match(r.renderIgnored({ issues: [], error: null, canFix: true, local: true }), /data-testid="issues-ignored-none"/);
+  assert.match(r.renderIgnored({ issues, error: null, canFix: false, local: false }), /On a server, add the label on GitHub/);
 });
 
 test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {
@@ -1766,6 +1797,33 @@ test("the Board's Landing column shows the PR batches, and a card where its PR s
   assert.match(vhtml, /data-status="red">/, "a viewer's batch: its status, no detail");
   assert.doesNotMatch(vhtml, /returned #12/);
   assert.doesNotMatch(clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, batches: [] }, error: null }])), /data-testid="board-batches"/, 'no batches: no strip');
+});
+
+test("#471: a card's waiting reasons show in full, one chip each, wrapping inside the card; never cut off", () => {
+  const long = [
+    'doubt: evaluator confidence medium: the change was not run against the zero-quantity line the issue names, so done_when passing does not show that case is handled',
+    'high-risk: migration (migrations/001_orders.sql, migrations/002_order_lines.sql, migrations/003_order_index.sql and 4 more)',
+    `eval: role evaluator-verdict scored lower, 7/10 → 6/10 (~$1.20): case 9 "A planted problem that the checks miss": pass → fail; ${'x'.repeat(120)}`,
+  ];
+  const card = { ...boards.owner.cards[0]!, column: 'waiting', waiting: { kind: 'needs_owner', label: 'PRs waiting for you to review and merge', detail: long.join('; '), reasons: long, since: '2026-01-01T00:00:00Z' } };
+  const html = clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, cards: [card] }, error: null }]));
+  const chips = [...html.matchAll(/<li class="([^"]*)" data-testid="board-card-reason">([^<]*)<\/li>/g)];
+  assert.equal(chips.length, 3, 'one chip per reason');
+  const unescape = (t: string) => t.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, '&');
+  assert.deepEqual(chips.map((m) => unescape(m[2]!)), long, 'every reason whole');
+  for (const [, cls] of chips) {
+    assert.doesNotMatch(cls!, /truncate|line-clamp|text-ellipsis|nowrap/, 'nothing cuts a chip off');
+    assert.match(cls!, /wrap-anywhere/, 'a long word wraps instead of overflowing');
+  }
+  assert.match(html, /<ul class="[^"]*flex-wrap[^"]*" data-testid="board-card-reasons"/, 'chips wrap onto new lines');
+  const wait = /data-testid="board-card-wait">([\s\S]*?)<\/ul><\/div>/.exec(html)![1]!;
+  assert.doesNotMatch(wait, /truncate|line-clamp|text-ellipsis/, 'nothing in the wait cuts a reason off');
+  // No reasons (a viewer, or a wait with only a line): the line in full, unclamped.
+  const plain = clean(() => r.renderBoard([{ name: null, data: { ...boards.owner, cards: [{ ...card, waiting: { ...card.waiting, reasons: null, detail: long[0] } }] }, error: null }]));
+  assert.doesNotMatch(plain, /board-card-reason/);
+  const line = /data-testid="board-card-wait">([\s\S]*?)<\/div><\/div>/.exec(plain)![1]!;
+  assert.ok(line.includes(long[0]!), 'the whole line');
+  assert.doesNotMatch(line, /truncate|line-clamp|text-ellipsis/, 'unclamped');
 });
 
 test('each role sees only its actions on the Board: viewers none; writers Watch, Steer and Answer what they may; the owner also Approves', () => {
@@ -3214,7 +3272,7 @@ test("the Repo config form with no required check (#469): the starter CI, last i
   // A config already on No CI has no starter CI to offer.
   assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, ci: 'none' } }, { starter: offered }), /starter-ci/);
   // The PR and Land pages' note, only under No CI.
-  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs\.</);
+  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs, and every tier runs on each merge commit on main, which is judged by them\.</);
   assert.equal(r.renderCiNote({ kind: 'github', means: null }), '');
   assert.equal(r.renderCiNote(undefined), '');
   // A config that names a check has nothing to add: no starter CI.

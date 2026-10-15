@@ -4,12 +4,15 @@ import { listViews, saveViews, type Filters, type SavedView, type State, type Ta
 import { navigate, pageKey, typing } from '../App';
 import { ago, Avatar, Badge, Button, Card, cx, Empty, Kbd, LevelBadge, STATUS_LABEL, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
 import { Header } from '../components/Header';
+import { IgnoredIssues } from '../components/FirstTask';
 
 const TABS: { key: string; label: string; statuses: TaskStatus[] }[] = [
   { key: 'current', label: 'Current', statuses: ['claimed', 'reproducing', 'building', 'verifying', 'evaluating', 'awaiting_decision', 'queued', 'blocked'] },
   { key: 'planning', label: 'Planning', statuses: ['ready'] },
   { key: 'backlog', label: 'Backlog', statuses: ['triage', 'released'] },
   { key: 'done', label: 'Done', statuses: ['landed', 'done'] },
+  // #468: open issues the harness isn't working on, and why (its own read of the open issues, not the event log's tasks).
+  { key: 'ignored', label: 'Not picked up', statuses: [] },
 ];
 
 const BOARD_COLUMNS: { label: string; statuses: TaskStatus[] }[] = [
@@ -187,7 +190,7 @@ export function Issues({ state }: { state: State }) {
           {mode === 'list' &&
             TABS.map((t) => (
               <button key={t.key} data-testid="issues-tab" onClick={() => setTab(t.key)} className={cx('rounded-full px-2.5 py-1 text-[12.5px]', tab === t.key ? 'bg-surface font-medium text-ink shadow-btn' : 'text-ink-2 hover:text-ink')}>
-                {t.label} <span className="text-xs text-muted-foreground">{state.tasks.filter((x) => t.statuses.includes(x.status)).length}</span>
+                {t.label} {t.key !== 'ignored' && <span className="text-xs text-muted-foreground">{state.tasks.filter((x) => t.statuses.includes(x.status)).length}</span>}
               </button>
             ))}
           <span className="mx-2 h-4 w-px bg-border" />
@@ -233,7 +236,9 @@ export function Issues({ state }: { state: State }) {
         </div>
       </div>
       <div className="p-6">
-        {!rows.length ? (
+        {mode === 'list' && tab === 'ignored' && !anyFilter ? (
+          <IgnoredIssues />
+        ) : !rows.length ? (
           <Empty title="No issues match" hint={anyFilter ? 'Clear the filters or pick another view.' : 'Issues appear once the coordinator has seen them on the backlog.'} />
         ) : mode === 'list' ? (
           <div className="space-y-4">
