@@ -26,6 +26,11 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
 9. **After it installs on each release-channel machine** (the updater takes the new tag): when the release changes the machine helper's sudoers rules, rerun them as root, once, with every instance on that machine: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`. Until then, coordinators can't run the helper's new commands (sudo refuses them), and nothing else changes. Not before the install: the rules must match the installed helper.
    - **0.5.1:** yes. It adds the Claude account profile commands (`claude-account profile-add|remove|use <profile>`, `failover … back|stay`, and `login <profile>` if #495 is in).
 10. **GPU test runs, after it installs on a release-channel machine that has an NVIDIA GPU** (0.5.1 adds the `worklane-gpu` group): if you'll use `worklane gpu hold`, make yourself the GPU lock's holder once, then log in again: `sudo bash /opt/worklane/current/scripts/setup/testrun-gpu.sh holder <your user>`. Not before the install. Turning GPU runs on for an instance (`testrun-gpu.sh enable …`) is separate, and needs the owner's go per machine.
+11. **Siri Shortcut, after it installs on the release-channel machine that runs the hub** (0.5.1 adds it, #507), once, in this order:
+   - root: `sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri` (publishes 8443 on the tailnet, never Funnel);
+   - root: `sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --siri <your usual options> <every instance>` (the same run as before, plus `--siri`: lets the hub read each instance's Siri gateway token);
+   - on a Mac: sign the two Shortcuts once (`shortcuts sign`, docs/siri.md), and sign again only when a Shortcut changes;
+   - in the Tailscale admin console: the tailnet ACL that limits port 8443 to your phone (docs/siri.md gives it).
 
 ## Publishing by hand
 
