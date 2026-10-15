@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { redactString } from '../events/redact.js';
 import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
-import { USAGE_INCIDENT } from '../usage-limit.js';
+import { FAILOVER_INCIDENT, USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
 import { DEPLOY_GATE_INCIDENT, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT } from '../deploy-gate/config.js';
 import { TASK_BUDGET_INCIDENT } from '../coordinator/loop-control.js';
@@ -28,8 +28,11 @@ export const REOPEN_MS = 15 * 60_000;
 /** Resolved incidents kept for the history. */
 export const HISTORY = 200;
 
-/** red: something is down or unsafe and work stops; amber: it will be, or work is slow, unless someone acts. */
-export type Severity = 'red' | 'amber';
+/**
+ * red: something is down or unsafe and work stops; amber: it will be, or work is slow, unless someone acts; info: a
+ * notice, nothing to do (it never colours an instance's status).
+ */
+export type Severity = 'red' | 'amber' | 'info';
 
 /** The kinds the watchdog raises itself (and the usage pause the coordinator raises), each with its fixed title and severity. Other modules may raise their own. */
 export const KINDS = {
@@ -52,12 +55,17 @@ export const KINDS = {
   update_signer_added: { title: 'A release signer was added for engine updates', severity: 'amber' },
   // A notice too: someone staged a signer from a dashboard (trusted for nothing until confirmed at a root shell).
   update_signer_staged: { title: 'A release signer was staged for engine updates', severity: 'amber' },
+  // A notice too (scripts/setup/claude-account.sh, through the machine change log): an agents' Claude account profile
+  // was added, staged, confirmed, chosen or removed. Closes by itself a day later.
+  claude_profile_changed: { title: "The agents' Claude account changed", severity: 'amber' },
   test_sandbox: { title: 'The test sandbox check is failing', severity: 'red' },
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
   update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
+  // Raised by the coordinator (src/claude-failover.ts): a usage limit moved this instance to its next Claude account.
+  [FAILOVER_INCIDENT]: { title: 'Claude usage limit: moved to the next account', severity: 'info' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.
   [CONFIG_INCIDENT]: { title: 'The config on the default branch is invalid', severity: 'amber' },
   // Raised by the coordinator (src/deploy-gate/gate.ts): someone moved the deploy branch; the gate refuses to move it.
@@ -224,6 +232,6 @@ export type HealthStatus = 'green' | 'amber' | 'red';
 
 /** An instance's status from the open incidents about it and about the machine. */
 export function healthStatus(incidents: Incident[], instance: string | null): HealthStatus {
-  const mine = incidents.filter((x) => !x.resolvedAt && (x.instance === null || x.instance === instance));
+  const mine = incidents.filter((x) => !x.resolvedAt && x.severity !== 'info' && (x.instance === null || x.instance === instance));
   return mine.some((x) => x.severity === 'red') ? 'red' : mine.length ? 'amber' : 'green';
 }

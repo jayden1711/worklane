@@ -11,7 +11,8 @@
 #     change to /var/lib/worklane/machine-changes.jsonl and the journal. And `add-project <name> <owner/repo>`,
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
 #     And `claude-account status|switch`, the Claude account switch (claude-account.sh): status runs it; switch starts
-#     it as its own unit, taking the token from the asking instance's dashboard.
+#     it as its own unit, taking the token from the asking instance's dashboard. And the account profiles (issue #464):
+#     `claude-account profile-add|remove|use <profile>`, each its own unit, for the asking coordinator's instance alone.
 #     And the engine updater's setup: `install-updater` (the installed engine's updates.sh, no arguments),
 #     `set-update-channel release` (updates.json's channel, nothing else; following main is updates.sh --channel main,
 #     at a root shell) and `stage-update-signer <principal> ssh-ed25519 <public key>`, which records a release signer
@@ -21,7 +22,7 @@
 #     And `tailscale install|up|serve|public-url`, which start tailscale.sh with that one word as its own unit: the
 #     pinned, signed install; `tailscale up` with no auth key; https 443 to the hub's sign-in port; the hub's URL.
 #   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
-#     listed one by one), and add-project, stage-update-signer and discard-update-signer with arguments of their
+#     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
 #     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
@@ -62,14 +63,14 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo> and stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>"
+say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, and claude-account profile-add|remove|use <profile> (its own instance only)"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 if sudo_regex_ok; then
-  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer and discard-update-signer rules are installed"
+  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are installed"
   left_out='[]'
 else
-  echo "REFUSED: the add-project, stage-update-signer and discard-update-signer rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
-  left_out='["add-project","stage-update-signer","discard-update-signer"]'
+  echo "REFUSED: the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
+  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles"]'
 fi
 # For the dashboard (0644, written whole): which of the helper's commands this machine's sudo rule leaves out, so a
 # page shows the root command for them instead of a button that would only fail.
@@ -111,6 +112,16 @@ for u in "${users[@]}"; do
   done
   if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" stage-update-signer owner@example.com ssh-ed25519 "$probe_key" >/dev/null 2>&1; then
     echo "FAIL: sudo $(sudo_version) should match the stage-update-signer pattern, and $u can't run it" >&2; exit 1
+  fi
+  if sudo_regex_ok; then
+    for ok in "profile-add work" "remove work" "use work" "use default" "failover work+default back" "failover off stay"; do
+      # shellcheck disable=SC2086 # each case is its words
+      sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $ok >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the claude-account $ok pattern, and $u can't run it" >&2; exit 1; }
+    done
+    for bad in "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x" "failover work+default back ci" "failover off stay alpha" "failover work,default back" "failover work+Home back" "failover work maybe" "failover work+default back --for x"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $bad >/dev/null 2>&1; then echo "FAIL: $u may run claude-account $bad" >&2; exit 1; fi
+    done
   fi
   if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
     echo "FAIL: sudo $(sudo_version) should match the add-project pattern, and $u can't run it" >&2; exit 1

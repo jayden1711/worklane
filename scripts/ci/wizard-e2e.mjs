@@ -299,6 +299,22 @@ async function local() {
     // shows them, or a note, ABOVE the field (run 38541318584's click landed where the field had been). The signal: that
     // answer in the checks block (a check offered, or the note), bounded.
     await until('the checks GitHub ran, or the note', () => evaluate(`(() => { const b = ${q(`${p} ${tid('repo-config-checks')}`)}; return !!b && (!!b.querySelector('[data-testid="repo-config-check"]') || !!b.querySelector('p')); })()`), 30_000, 200);
+    // #469, both paths. No check named yet: the starter CI, last in the form. Its file goes to GitHub's new-file page,
+    // prefilled, for the person to commit; nothing here pushes it.
+    await waitFor(`${p} ${tid('starter-ci')}`);
+    const refs = () => sh('git', ['-C', st('git/example/alpha.git'), 'for-each-ref', '--format=%(refname) %(objectname)']).out;
+    const refsBefore = refs();
+    await click(`${p} ${tid('starter-ci-add')}`);
+    await waitText(`${p} ${tid('starter-ci-summary')}`, /for every PR and every push to main, as the check `test`/);
+    const href = await evaluate(`${q(`${p} ${tid('starter-ci-confirm')}`)}.href`);
+    const ci = new URL(href);
+    assert.equal(`${ci.origin}${ci.pathname}`, 'https://github.com/example/alpha/new/main');
+    assert.equal(ci.searchParams.get('filename'), '.github/workflows/ci.yml');
+    assert.match(ci.searchParams.get('value'), /^permissions:\n {2}contents: read$/m);
+    assert.match(ci.searchParams.get('value'), /^ {2}test:\n {4}name: test$/m);
+    assert.equal(refs(), refsBefore, 'nothing pushed');
+    // No CI: this repo's tests.yaml has no test_run, so it isn't offered; it says to add the starter CI instead.
+    await waitText(`${p} ${tid('no-ci-refused')}`, /add the starter CI/);
     await type(`${p} ${tid('repo-config-check-name')}`, 'test');
     await click(`${p} ${tid('repo-config-check-add')}`);
     await click(`${p} ${tid('repo-config-review')}`);

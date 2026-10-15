@@ -23,11 +23,11 @@ function OpenIncident({ x, targeted }: { x: Incident; targeted: boolean }) {
   return (
     <Card id={`incident-${x.id}`} data-testid="incident" data-severity={x.severity} data-targeted={targeted || undefined} className={cx('primitive-card-pad scroll-mt-16', targeted && 'ring-2 ring-blue')}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <StatusDot status={x.severity} />
+        <StatusDot status={x.severity === 'info' ? 'green' : x.severity} />
         <span className="text-[13.5px] font-medium text-ink" data-testid="incident-title">
           {x.title}
         </span>
-        <Badge tone={x.severity === 'red' ? 'danger' : 'warn'}>{where(x)}</Badge>
+        <Badge tone={x.severity === 'red' ? 'danger' : x.severity === 'info' ? 'info' : 'warn'}>{where(x)}</Badge>
         <span className="ml-auto text-[12px] tabular-nums text-ink-3" title={x.since} data-testid="incident-since">
           since {ago(x.since)}
         </span>

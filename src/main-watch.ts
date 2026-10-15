@@ -378,6 +378,8 @@ export interface MainWatchDeps {
   branch: string;
   /** The loaded config's required_checks: whether to watch at all, and the fallback when a commit's own can't be read. */
   required: () => string[];
+  /** Why there is nothing to judge commits by, when the config says (No CI, src/ci-none.ts); null: the plain reason. */
+  offWhy?: () => string | null;
   api: MainWatchApi;
   git: WatchGit;
   /** The harness's own merge whose merge commit is `sha` (merge.done), or null. */
@@ -443,7 +445,7 @@ export class MainWatch {
     const s = this.state();
     const required = this.d.required();
     if (!required.length) {
-      this.setMode(s, 'off', 'no required_checks in config.yaml to judge commits by');
+      this.setMode(s, 'off', this.d.offWhy?.() ?? 'no required_checks in config.yaml to judge commits by');
       return writeWatchState(this.d.stateFile, s);
     }
     if (s.mode === null || s.mode === 'off' || this.now - s.protectionAt >= PROTECTION_RECHECK_MS) {

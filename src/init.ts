@@ -30,7 +30,10 @@ import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly }
 import { coordinatorUser } from './setup/app-manifest.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MODES, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
-import { varLibPath } from './os/system-paths.js';
+import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
+import { ciChoiceProblem } from './ci-choice.js';
+import { ProjectConfig } from './config/schema.js';
+import { parse as parseYaml } from 'yaml';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
@@ -386,7 +389,49 @@ async function tailscale(c: InitContext): Promise<StepResult> {
   return t ? asStep(t) : { status: 'skipped', detail: 'optional, not on a tailnet: the dashboard stays on this machine (docs/dashboard.md sets up Tailscale sign-in)' };
 }
 
-const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': repoConfig, coordinator, protection, discord, tailscale };
+/**
+ * The project configs a choice of CI is judged on: the checkout's working tree and its origin/<default> as last
+ * fetched (server mode: the coordinator keeps it fetched; read as root, so git is told the coordinator's checkout is
+ * safe). A choice in either counts: one merged on GitHub and fetched, or one pulled into the checkout. Empty: nothing
+ * readable here.
+ */
+function projectsForCiChoice(c: InitContext): Pick<ProjectConfig, 'land_mode' | 'required_checks' | 'ci'>[] {
+  const root = c.mode === 'local' ? c.root : c.instance && c.repo ? srvCheckoutPath(c.instance, c.repo.split('/')[1]!) : null;
+  if (!root || !existsSync(join(root, BRAND.configDir, 'config.yaml'))) return [];
+  const out: ProjectConfig[] = [];
+  try {
+    out.push(loadConfig(root).project);
+  } catch {
+    // the repo-config step reports an invalid config
+  }
+  const branch = out[0]?.project.default_branch ?? 'main';
+  const r = c.io.run('git', ['-c', `safe.directory=${root}`, 'show', `origin/${branch}:${BRAND.configDir}/config.yaml`], { cwd: root });
+  if (r.status === 0) {
+    try {
+      const p = ProjectConfig.safeParse(parseYaml(r.stdout));
+      if (p.success) out.push(p.data);
+    } catch {
+      // unparseable on the branch: the coordinator's config_invalid incident says so
+    }
+  }
+  return out;
+}
+
+/**
+ * WHY (#469): init never finishes on a config that can never mark a PR ready (an empty required_checks in PR mode):
+ * the repo-config step stays failed, saying what to choose, until the choice is on the default branch.
+ */
+const withCiChoice =
+  (run: (c: InitContext, act: boolean) => Promise<StepResult>) =>
+  async (c: InitContext, act: boolean): Promise<StepResult> => {
+    const r = await run(c, act);
+    if (r.status !== 'done') return r;
+    const ps = projectsForCiChoice(c);
+    const problem = ps.length && ps.every((p) => ciChoiceProblem(p)) ? ciChoiceProblem(ps[0]!) : null;
+    return problem ? { status: 'failed', detail: `${r.detail}; but ${problem}. Then run \`${BRAND.cli} init\` again (it picks up here)` } : r;
+  };
+
+const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': withCiChoice(repoConfig), coordinator, protection, discord, tailscale };
 
 export interface ChecklistItem extends StepDef {
   status: StepStatus;
