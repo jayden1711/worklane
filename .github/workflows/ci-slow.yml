@@ -2257,8 +2257,10 @@ jobs:
           printf '{"network":{"allowedDomains":[]},"filesystem":{"denyRead":[],"allowWrite":["."],"denyWrite":[]}}' > "$d/settings.json" && chmod 0644 "$d/settings.json"
           c='import socket;s=socket.socket(socket.AF_UNIX);s.connect("/run/p6/s.sock");print("connected",s.recv(9))'
           echo "PROBE P6.unsandboxed $(sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" python3 -c "$c" 2>&1 | tail -n 1)"
-          echo "PROBE P6.srt-defaults $(cd "$h" && sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" node "$d/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js" python3 -c "$c" 2>&1 | tail -n 2 | tr '\n' ' ')"
-          echo "PROBE P6.srt-lane-settings $(cd "$h" && sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" node "$d/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js" --settings "$d/settings.json" python3 -c "$c" 2>&1 | tail -n 2 | tr '\n' ' ')"
+          srt="$d/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js"
+          echo "PROBE P6.srt-defaults $(sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" sh -c 'cd "$HOME" && node "$1" python3 -c "$2"' _ "$srt" "$c" 2>&1 | tail -n 3 | tr '\n' ' ')"
+          echo "PROBE P6.srt-lane-settings $(sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" sh -c 'cd "$HOME" && node "$1" --settings "$3" python3 -c "$2"' _ "$srt" "$c" "$d/settings.json" 2>&1 | tail -n 3 | tr '\n' ' ')"
+          echo "PROBE P6.srt-control $(sudo -u wl-probe-agent env -i PATH="$PATH" HOME="$h" sh -c 'cd "$HOME" && node "$1" --settings "$2" echo sandboxed-ok' _ "$srt" "$d/settings.json" 2>&1 | tail -n 3 | tr '\n' ' ')"
 
   auth-probe-real-users:
     # The watchdog's Claude sign-in probe on a real host: instance.sh's coordinator and agent users (separate homes,

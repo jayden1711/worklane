@@ -95,8 +95,8 @@ set +e
 as CLAUDE_CODE_PLUGIN_CACHE_DIR="$W/empty-root" "$CL" plugin marketplace add "$W/mkt" > "$W/p2-add.log" 2>&1; rc1=$?
 as CLAUDE_CODE_PLUGIN_CACHE_DIR="$W/empty-root" "$CL" plugin install probe-two@probe-mkt > "$W/p2-install.log" 2>&1; rc2=$?
 set -e
-probe P2.marketplace-add "rc=$rc1 $(tail -n 1 "$W/p2-add.log")"
-probe P2.install "rc=$rc2 $(tail -n 1 "$W/p2-install.log")"
+probe P2.marketplace-add "rc=$rc1 $(tr '\n' ' ' < "$W/p2-add.log" | head -c 600)"
+probe P2.install "rc=$rc2 $(tr '\n' ' ' < "$W/p2-install.log" | head -c 600)"
 probe P2.empty-root-after "$(find "$W/empty-root" -mindepth 1 | head -5 | tr '\n' ' ')(end)"
 probe P2.user-plugins-ignored "$(init CLAUDE_CODE_PLUGIN_CACHE_DIR="$W/empty-root" "$CL" --strict-mcp-config)"
 
@@ -115,7 +115,7 @@ rm -f "$W/plug/pm/mcp-log.jsonl"
 echo "{\"mcpServers\":{\"probecfg\":{\"command\":\"node\",\"args\":[\"$W/plug/pm/server.js\"]}}}" > "$W/mcp.json"
 [ -n "$U" ] && chown "$U" "$W/mcp.json"
 probe P7.init "$(init "$CL" "${FLAGS[@]}" --mcp-config "$W/mcp.json")"
-probe P7.received "$(grep -v '"started"' "$W/plug/pm/mcp-log.jsonl" 2>/dev/null | tr '\n' ' ' | head -c 3000)"
+grep -v '"started"' "$W/plug/pm/mcp-log.jsonl" 2>/dev/null | while IFS= read -r l; do probe P7.received "$l"; done
 
 # P8: claude plugin validate --strict, with no network (unshare -n, as root in CI), on a good and a bad plugin.
 mkdir -p "$W/bad/.claude-plugin" && echo '{"name":"bad","hooks":"../x.json"}' > "$W/bad/.claude-plugin/plugin.json"
