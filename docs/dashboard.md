@@ -263,7 +263,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
 | The agents' GitHub App | server | `sudo bash scripts/setup/add-project.sh <name> <owner/repo> (its app step: the App through the manifest flow, installed on that one repo)` |
 | Default branch known | local | `git fetch origin <branch>, then git remote set-head origin --auto` |
-| Auto-config questions answered | local | `worklane init --answer <id>=<choice> (or answer init's questions in a terminal)` |
+| Auto-config questions answered | local | `worklane init --mode local` |
 | .worklane/ valid and on the default branch | local, server | `worklane init (drafts the config and proposes it as a PR), then gh pr merge <number>, then worklane init again (it fast-forwards)` |
 | Hooks for local runs installed | local | `worklane install` |
 | Owners and writers set | local, server | `a reviewed commit (PR) to .worklane/config.yaml (owners.writers, required_checks) and .worklane/agents.yaml (daily_budget_usd, roles.workers count and model)` |
@@ -575,8 +575,9 @@ server refuses a viewer every attachment route (403), downloads included. Code: 
   hex digits); the uploader's file name is kept only in the record beside it, for display and the download's name,
   never as a path. Never in the repo, the logs, events or URLs (the name travels in the `X-Attachment-Name` header).
   The audit event (`chat.attachment_added`) records only the id, name, type, size and sha256. Files are deleted
-  after 30 days by default (`settings.chat_attachments.retention_days`); the coordinator sweeps about once an hour,
-  and removes uploads left half-written.
+  after 30 days by default (`settings.chat_attachments.retention_days`), except a file a chat Project holds (kept
+  until it is taken off the Project or the Project is deleted); the coordinator sweeps about once an hour, and removes
+  uploads left half-written.
 - **Secrets:** a text file is scanned on upload with the engine's secret patterns and, where it is installed,
   gitleaks. A hit is not attached: the chip says which kinds it looks like (a GitHub token, a private key; never the
   value) and offers **Attach anyway**. The matched value is never logged, echoed or stored anywhere but the file;
@@ -594,15 +595,58 @@ server refuses a viewer every attachment route (403), downloads included. Code: 
   into the turn's bundle for the Read tool to view, and deleted from it when the turn ends (the state keeps the only
   copy, for its retention days); Office files are named and described, never unpacked or opened. Text the answer
   reads, like the question itself, is part of the chat run's own Claude session.
+- **Who opens one:** its uploader, or someone who can see a chat Project that holds it. Anyone else is refused (403)
+  even knowing its id, an owner included. Deleting one is the same: its uploader, or the creator of a Project that
+  holds it; the sweeps still remove what they remove. A question, a conversation message or a Project takes only its sender's
+  own uploads; someone else's id reads as unknown.
 - **API:** `POST /api/chat/attachments` (the body is the file; `X-Attachment-Name`, URI-encoded; `X-Attach-Anyway: 1`
-  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or an owner),
+  after a warning), `GET|DELETE /api/chat/attachments/<id>` (removal: who attached it, or the creator of a Project holding it;
+  nobody else, owners included),
   `GET /api/chat/attachments/limits`, and `attachments: [<id>, ...]` on `POST /api/chat`. Anything that refers to a
   file names only its id.
+
+## Chat: conversations and Projects
+
+The owners and writers get a sidebar in the Ask panel (`src/chat-conversations.ts`, `src/chat-routes.ts`,
+`web/src/components/Conversations.tsx`): their own multi-turn conversations, the Projects they can see, and the
+quick single-shot question, unchanged. A viewer never sees it, and every route refuses them (403).
+- **A conversation** keeps its thread: each answer is given the conversation's earlier turns, the newest that fit
+  (at most 12 turns and 24,000 characters, each question and answer clipped to 4,000); older ones are left out, never
+  summarised, and the prompt says how many. It is its creator's only: nobody else lists, reads, asks in, renames or
+  deletes it, the instance's owners included (to anyone else it reads as not there, 404). An untitled one takes its
+  first question's opening words. A message can carry chat attachments, its sender's own, within the same caps.
+- **A Project** has a name, custom instructions and shared files (chat attachments, at most 10, within the
+  per-question size cap). It is its creator's until an **owner** shares it, with all the instance's owners and
+  writers: they see it read-only and start their own (still private) conversations in it. Only its creator edits or
+  deletes it; a writer can't share one, nor edit an owner's shared one. A shared Project stays shared only while its
+  creator is still an owner. Its files stay past the attachment retention days while it holds them; one taken off, or
+  the Project deleted, is deleted at once unless another Project still holds it.
+- **What the answer sees:** the earlier turns and the Project's instructions go into the turn's prompt as data, each
+  block between markers carrying a random nonce (as attachments are framed), never into the system prompt: they steer
+  tone, focus and format only, and the prompt says nothing in them overrides the chat's rules. The message's files
+  and the Project's go through the attachment framing above. Same tools (Read, Glob, Grep), same read-only rule for
+  anyone but the instance's default owner. A conversation turn neither reads nor writes the single-shot chat's
+  summary and history, and its run record and bundle are removed when the turn ends.
+- **Nothing runs from it:** an answer's issue draft and proposals are the single-shot chat's own: a draft is filed
+  only through its confirm, by an owner, once (`POST .../turns/<turn>/file-issue`); each proposal opens the flow that
+  already confirms that change.
+- **Kept:** in the instance's state dir (`chat/conversations/<id>/`, `chat/projects/<id>.json`; 0600 files, redacted),
+  never the repo, logs or events (the audit carries ids only). No retention limit: a conversation or Project lasts
+  until its creator deletes it, and delete is a hard delete (its turns, any question still waiting, its filed-draft
+  records and its messages' files). When someone loses their role here, all of theirs is out of reach at once (every
+  route asks their role; their shared Projects disappear from others' view) and is deleted 30 days later by the
+  coordinator's hourly sweep; a role given back before then keeps it. The sweep does nothing while the instance's
+  default owner doesn't read as an owner (roles can't be trusted then). A turn cut off by a restart is refused once,
+  never run again.
+- **API:** `GET|POST /api/chat/conversations` (`?cursor=&limit=&project=`), `GET|PATCH|DELETE
+  /api/chat/conversations/<id>`, `POST /api/chat/conversations/<id>/messages` (`{ text, attachments?, key? }`; the
+  text only ever in the body), `POST /api/chat/conversations/<id>/turns/<turn>/file-issue`, `GET|POST
+  /api/chat/projects`, `GET|PATCH|DELETE /api/chat/projects/<id>`.
 
 ## Chat model, effort and budget
 
 Under the Ask panel's question box, the owners and the writers pick the model and effort one answer runs on. A
-viewer never sees the picker, and the server refuses a viewer's pick (403). Code: `src/chat-pick.ts`
+viewer never sees the picker, and the server refuses a viewer every chat POST (403). Code: `src/chat-pick.ts`
 (`chatRunOptions`), `web/src/components/ChatPicker.tsx`.
 
 - **Models:** only the Anthropic models agents.yaml `routing` names (every key in effect) and
@@ -616,12 +660,13 @@ viewer never sees the picker, and the server refuses a viewer's pick (403). Code
 - **Budget:** each conversation has a cap, `roles.chief_of_staff.conversation_budget_usd` in agents.yaml (default
   $5); it is config only, never set from the dashboard. Before each answer the coordinator checks it: at or over it,
   the question is refused. The answer's own cap is the least of `roles.chief_of_staff.budget_usd` (default $1),
-  what's left of the conversation's cap and what's left of the day's budget. The chat has one conversation per
-  instance for now, counted over the machine's local day.
+  what's left of the conversation's cap and what's left of the day's budget. A conversation (above) counts over its
+  whole life, under the id the server keeps for it (never one the client sends). Quick single-shot questions share
+  one stream per instance, counted over the machine's local day.
 - **Cost:** each answer shows its estimated cost, the model it ran on, and the conversation's spend against its cap.
   Each answer's `run.cost` event carries its conversation.
 - **API:** `GET /api/chat/options` (what this person may pick: models, efforts, the default, the cap) and
-  `pick: { model?, effort? }` on `POST /api/chat`. The coordinator checks the pick again before the answer runs.
+  `pick: { model?, effort? }` on `POST /api/chat` and on a conversation's `POST …/messages`. The coordinator checks the pick again before the answer runs.
 
 ## Pull requests
 

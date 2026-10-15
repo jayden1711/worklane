@@ -1,6 +1,6 @@
 // Settings, Siri devices (docs/siri.md): each phone's token, when it was last used and from which Tailscale device,
 // and Revoke. Owners make a token here (shown once, never again) from an allowed console device; writers see the list.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, useView } from '../api';
 import { ago, Badge, Button, Card } from './ui';
 
@@ -119,10 +119,16 @@ export function SiriDevicesCard({ view, made, error, busy, onCreate, onRevoke, o
   );
 }
 
-/** Settings' Siri devices card: shown to the owners and writers of a server instance. */
-export function SiriDevices() {
+/**
+ * Settings' Siri devices card: shown to the owners and writers of a server instance. `onLoaded`: called once its first
+ * answer (the view, or an error) is in, for the page's in-order loading (#455).
+ */
+export function SiriDevices({ onLoaded }: { onLoaded?: () => void } = {}) {
   const [dep, setDep] = useState(0);
-  const { data } = useView<SiriDevicesView>('/api/siri-devices', dep);
+  const { data, error: loadError } = useView<SiriDevicesView>('/api/siri-devices', dep);
+  useEffect(() => {
+    if (data || loadError) onLoaded?.();
+  }, [data, loadError, onLoaded]);
   const [made, setMade] = useState<{ name: string; token: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

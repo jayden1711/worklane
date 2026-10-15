@@ -9,6 +9,8 @@ import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
 import { AttachButton, AttachmentList, DropHint, SentAttachments, type Pending } from './components/ChatAttachments';
 import type { ChatAttachment } from './api';
+import { ConversationSidebarView, ConversationThreadView, ProjectEditorView, type ChatView } from './components/Conversations';
+import type { ChatProject, ConversationData, ConversationItem, ProjectItem } from './api';
 import { ComposerMic, MicInterim } from './voice/Mic';
 import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
 import { TalkStatus } from './voice/TalkBack';
@@ -16,7 +18,7 @@ import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
-import { InstanceList, NAV, NavDrawer, NavMenu, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
 import { Header } from './components/Header';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
@@ -127,6 +129,10 @@ export const renderAttachButton = (role: string | undefined, disabled = false) =
 export const renderDropHint = (active: boolean) => renderToStaticMarkup(<DropHint active={active} />);
 export const renderSentAttachments = (items: ChatAttachment[]) => renderToStaticMarkup(<SentAttachments items={items} instance={null} />);
 export { filesOf, fmtSize, mayAttach, precheck, safeBlob } from './components/ChatAttachments';
+export const renderConversationSidebar = (conversations: ConversationItem[], projects: ProjectItem[], view: ChatView = { kind: 'quick' }) => renderToStaticMarkup(<ConversationSidebarView conversations={conversations} projects={projects} view={view} onSelect={() => {}} onNew={() => {}} onRename={() => {}} onDelete={() => {}} />);
+export const renderConversationThread = (data: ConversationData) => renderToStaticMarkup(<ConversationThreadView data={data} cli="wl" />);
+export const renderProjectEditor = (project: ChatProject | null, owner: boolean, me: string) => renderToStaticMarkup(<ProjectEditorView project={project} owner={owner} me={me} attach={<span data-slot="attach" />} onSave={() => {}} onDelete={() => {}} onNewConversation={() => {}} />);
+export { mayConverse } from './components/Conversations';
 export { attachmentNameHeader } from './api';
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
@@ -179,7 +185,7 @@ export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage 
 export const renderKeyPage = (help: { file: string; copy: string | null } | null = null) => renderToStaticMarkup(<KeyPage help={help} />);
 export const renderKeyForm = (error: string | null = null) => renderToStaticMarkup(<KeyForm hub={false} initialError={error} />);
 export { needsKey, tryKey } from './api';
-export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} />);
+export const renderWhoAmI = (state: Pick<State, 'user' | 'role' | 'via'>, o: { hubPage?: boolean } = {}) => renderToStaticMarkup(<WhoAmI state={state} onSignOut={() => {}} hubPage={!!o.hubPage} />);
 export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<AuditLogView entries={entries} />);
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], now?: number) => renderToStaticMarkup(<BoardView boards={boards} {...(now !== undefined ? { now } : {})} />);
@@ -218,6 +224,8 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     </NavMenu.Provider>,
   );
 };
+export const renderSetupModeHidden = (path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
+export { nextStep } from './pages/FirstRun';
 /** #468: Your first task's form (its picks loaded, a preview shown), and the Issues page's "Not picked up". */
 export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?: { title: string; body: string } } = {}) => renderToStaticMarkup(<FirstTaskForm canEdit={o.canEdit ?? true} initial={info as never} initialPreview={o.preview ?? null} onDone={() => {}} />);
 export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIssues initial={data as never} />);

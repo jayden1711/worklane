@@ -535,7 +535,8 @@ export function probeMe(servedByHub: boolean, get: typeof fetch = fetch, auth = 
     .then((m) => (m && (m.login || m.breakGlass) ? m : null))
     .catch(() => null);
 }
-const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
+/** Whether the hub served this page (its sign-in or break-glass port); false on an instance's own dashboard. */
+export const servedByHub = inBrowser && !!document.querySelector('meta[name="dashboard-hub"]');
 export const me: Promise<Me | null> = probeMe(servedByHub);
 /** Whether this page needs a sign-in: a hub page, with no session and no break-glass token. */
 export const needsSignIn: Promise<boolean> = me.then((m) => servedByHub && !m);
@@ -1113,6 +1114,11 @@ export interface FirstRunRepoConfig {
   owner: string;
   branch: string;
   repo: string;
+  /** The workers' models the engine supports (src/config-change.ts WORKER_MODELS) and its default; absent from older servers. */
+  models?: string[];
+  defaultModel?: string;
+  /** #468: the config's worker model is listed (an alias, or a full Anthropic model id); absent from older servers. */
+  modelListed?: boolean;
 }
 export interface ConfigChange {
   file: string;
@@ -1622,6 +1628,31 @@ export async function chatAttachmentBlob(instance: string | null, id: string): P
 export const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
 export const chatAnswer = (instance: string | null, id: string) => chatCall<ChatAnswerFile>(instance, `/api/chat/${id}`);
 export const fileChatDraft = (instance: string | null, id: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/${id}/file-issue`, { method: 'POST', body: '{}' });
+
+/** Chat conversations and Projects on one instance (src/chat-conversations.ts): owners' and writers' only. */
+export interface ConversationItem { id: string; title: string; project: string | null; updatedAt: string; createdAt: string }
+export interface ProjectItem { id: string; name: string; owner: string; shared: boolean; files: number; updatedAt: string; mine: boolean }
+/** A Project as the server shows it: its files as attachments (the ones still there). */
+export interface ChatProject { id: string; owner: string; name: string; instructions: string; files: ChatAttachment[]; shared: boolean; createdAt: string; updatedAt: string }
+export interface Conversation { id: string; owner: string; title: string; project: string | null; createdAt: string; updatedAt: string }
+/** A turn as the server shows it: the message and its files, and the answer file as the single-shot chat's (what this person may see of it). */
+export type ConversationTurnView = ChatAnswerFile & { by: string; text: string; attachments: ChatAttachment[]; filed?: { number: number } | null };
+export interface ConversationData { conversation: Conversation; project: { id: string; name: string } | null; turns: ConversationTurnView[] }
+export interface Paged<T> { items: T[]; next: string | null }
+const enc = encodeURIComponent;
+export const listConversations = (instance: string | null, cursor?: string | null) => chatCall<Paged<ConversationItem>>(instance, `/api/chat/conversations${cursor ? `?cursor=${enc(cursor)}` : ''}`);
+export const newConversation = (instance: string | null, project: string | null) => chatCall<{ conversation: Conversation }>(instance, '/api/chat/conversations', { method: 'POST', body: JSON.stringify({ project }) });
+export const getConversation = (instance: string | null, id: string) => chatCall<ConversationData>(instance, `/api/chat/conversations/${enc(id)}`);
+export const renameConversation = (instance: string | null, id: string, title: string) => chatCall<{ conversation: Conversation }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) });
+export const deleteConversation = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'DELETE' });
+/** The message goes in the body, never the URL; `key` makes a retried send the same turn. */
+export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
+export const fileConversationDraft = (instance: string | null, id: string, turn: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/conversations/${enc(id)}/turns/${enc(turn)}/file-issue`, { method: 'POST', body: '{}' });
+export const listProjects = (instance: string | null, cursor?: string | null) => chatCall<Paged<ProjectItem>>(instance, `/api/chat/projects${cursor ? `?cursor=${enc(cursor)}` : ''}`);
+export const getProject = (instance: string | null, id: string) => chatCall<{ project: ChatProject }>(instance, `/api/chat/projects/${enc(id)}`);
+export const saveProject = (instance: string | null, id: string | null, p: { name: string; instructions: string; files: string[]; shared?: boolean }) =>
+  chatCall<{ project: ChatProject }>(instance, id ? `/api/chat/projects/${enc(id)}` : '/api/chat/projects', { method: id ? 'PATCH' : 'POST', body: JSON.stringify(p) });
+export const deleteProject = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/projects/${enc(id)}`, { method: 'DELETE' });
 
 /** Intake (GET /api/intake): each report, redacted, and what became of it; and the numbers for the health panel. */
 export interface IntakeReport {

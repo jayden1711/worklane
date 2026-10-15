@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { evalRolesOptions, recordingAsk, roleReport } from '../src/eval-roles.js';
 import { CASE_WRITER_SCHEMA, caseWriterPrompt, contractOf, HELD_OUT_ENV, heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } from '../src/held-out.js';
+import { REPLIER_ROLE, REPLY_STAGES } from '../src/intake/replier.js';
 import { runHook } from '../src/hook.js';
 import { instructionEvalReasons } from '../src/merge-policy.js';
 import { defaultRolePrompt, defaultRoles } from '../src/roles.js';
@@ -91,6 +92,14 @@ test('isolation: the case writer gets the role\'s contract lines only, never the
     assert.equal(parseCases(r.md).length, 3);
   }
   assert.throws(() => contractOf('Just do your best.'), /doesn't follow the contract/);
+});
+
+test("case writer: it gets the values the engine can send a role's input: the replier's stages, the same ones its prompt lists (#188-#190)", () => {
+  const prompt = defaultRolePrompt(REPLIER_ROLE);
+  const writer = caseWriterPrompt(REPLIER_ROLE, contractOf(prompt));
+  assert.ok(writer.includes(`\n- stage: ${REPLY_STAGES.join(', ')}\n`), 'every stage a caller can give, as one list');
+  const listed = prompt.split('\n').find((l) => l.startsWith('- The stages:'))!;
+  for (const s of REPLY_STAGES) assert.match(listed, new RegExp(`\\b${s} \\(`), `the prompt's stage list names ${s}`);
 });
 
 test('isolation: an agent session is denied the held-out store, by tool and by shell argument; the owner is not', { skip: !posix && 'POSIX paths' }, async () => {

@@ -26,6 +26,7 @@ import { OFFSITE_FILE } from './offsite-backup.js';
 import { lingerEnabled, nodePathProblem, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
+import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceUnit, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
@@ -374,6 +375,31 @@ function defaultBranch(k: Checking): string | null {
   return head.status === 0 ? head.stdout.trim().replace(/^origin\//, '') || null : null;
 }
 
+/** What the main watch does for a branch GitHub doesn't protect (src/main-watch.ts), said the same way everywhere. */
+export const MAIN_WATCH_GUARDS = "the harness's main watch guards it instead: once the coordinator runs, a commit that didn't land through a reviewed PR with its checks green stops auto-merge and raises an alert";
+
+export type ProtectionState = 'protected' | 'unprotected' | 'plan' | 'no-access' | 'unknown';
+
+/**
+ * WHY (#468): GitHub's answer to `GET repos/{repo}/branches/{branch}/protection`, in words: never a bare HTTP code.
+ * 200: protected. 404 "Branch not protected": it could be, and isn't. 403 asking to upgrade or go public: a private
+ * repo on a free plan, where GitHub can't protect a branch at all. Any other 404 or 403: this gh login can't read
+ * it (the protection API answers only a repo admin). Anything else: what gh said, its first line.
+ */
+export function protectionAnswer(r: Pick<RunResult, 'status' | 'stderr' | 'stdout'>, branch: string): { state: ProtectionState; detail: string } {
+  if (r.status === 0) return { state: 'protected', detail: `GitHub enforces protection on ${branch}` };
+  const said = `${r.stderr}\n${r.stdout}`;
+  const code = said.match(/HTTP (\d{3})/)?.[1];
+  const real = 'For real protection: make the repo public, or move it to a paid GitHub plan (Pro, Team or Enterprise)';
+  if (/upgrade to github pro|make this repository public|not available for this repository|Upgrade to/i.test(said) || (code === '403' && /plan/i.test(said)))
+    return { state: 'plan', detail: `GitHub can't protect branches on this repo: a private repo on a free plan has no branch protection or rulesets. ${MAIN_WATCH_GUARDS[0]!.toUpperCase()}${MAIN_WATCH_GUARDS.slice(1)}. ${real}` };
+  if (/branch not protected/i.test(said)) return { state: 'unprotected', detail: `${branch} isn't protected on GitHub yet: Protect requires your checks before anything merges into it. Until then, ${MAIN_WATCH_GUARDS}` };
+  if (code === '404' || code === '403' || /not found|resource not accessible|must have admin/i.test(said))
+    return { state: 'no-access', detail: `your gh login can't read ${branch}'s protection: GitHub shows it only to the repo's admins. Ask an admin to check the repo's Settings, Branches (or Rules)` };
+  const first = (said.trim().split('\n')[0] ?? '').replace(/\s*\(HTTP \d{3}\)\s*$/, '').replace(/^gh:\s*/, '');
+  return { state: 'unknown', detail: `couldn't ask GitHub about ${branch}'s protection${first ? `: ${first}` : ''}` };
+}
+
 /** The registry: every step of the audit's table (rows 1-33), in the order the page shows them. */
 export const SETUP_STEPS: readonly SetupStep[] = [
   // Install
@@ -609,7 +635,8 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     reach: 'some',
     today: `Answer them in the terminal (\`${BRAND.cli} init\` asks), or \`${BRAND.cli} init --answer <id>=<choice>\`.`,
     fix: { kind: 'form', form: 'setup-config', label: 'Answer' },
-    automation: `${BRAND.cli} init --answer <id>=<choice> (or answer init's questions in a terminal)`,
+    // WHY (#468): one complete line to copy, nothing to fill in: init, run in this checkout, asks the same questions.
+    automation: `${BRAND.cli} init --mode local`,
     detect: (k) => {
       if (existsSync(join(k.c.root, BRAND.configDir, 'config.yaml'))) return ok(`${BRAND.configDir}/ is here: nothing to ask`);
       return k.c.openQuestions ? no(`${k.c.openQuestions} question${k.c.openQuestions === 1 ? '' : 's'} open (shown below)`) : ok('none open');
@@ -716,7 +743,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     detect: (k) => {
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet');
-      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}`);
+      // WHY (#468): a model the engine doesn't list is a warning here, never a refusal: the step stays done.
+      const models = modelWarnings(cfg.agents);
+      return ok(`daily budget $${cfg.agents.daily_budget_usd}, ${cfg.guardrails.rules.length} guardrail rules${cfg.review ? ', review levels set' : ''}${models.length ? `; warning: ${models.join('; ')}` : ''}`);
     },
   },
   {
@@ -776,13 +805,11 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const b = defaultBranch(k) ?? 'main';
       const watch = readWatchState(join(k.c.stateDir, 'main-watch.json'));
       if (watch.mode === 'github') return ok(`GitHub enforces protection on ${b}`);
-      if (watch.mode === 'main_watch') return ok(`GitHub doesn't protect ${b}: the main watch guards it`);
+      if (watch.mode === 'main_watch') return ok(`GitHub doesn't protect ${b}; ${MAIN_WATCH_GUARDS}`);
       if (!k.c.repo) return no('no GitHub origin: nothing to protect yet');
       if (!k.p.which('gh')) return no(`can't ask GitHub: gh isn't installed`);
-      const r = k.p.run('gh', ['api', `repos/${k.c.repo}/branches/${b}/protection`, '--silent']);
-      if (r.status === 0) return ok(`GitHub enforces protection on ${b}`);
-      const code = r.stderr.match(/HTTP (\d{3})/)?.[1];
-      return no(`GitHub doesn't protect ${b}${code ? ` (HTTP ${code})` : ''}: every change still lands through a PR you merge`);
+      const a = protectionAnswer(k.p.run('gh', ['api', `repos/${k.c.repo}/branches/${b}/protection`, '--silent']), b);
+      return a.state === 'protected' ? ok(a.detail) : no(a.detail);
     },
   },
   // Policy (server)

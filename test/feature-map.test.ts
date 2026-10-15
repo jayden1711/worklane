@@ -74,7 +74,8 @@ test('every page file is in the feature map, and every mapped file exists', () =
 test('the sidebar rows and their g shortcuts match the feature map', () => {
   const nav = navRows(app);
   // Every row of the NAV list was read: a row in a shape the reader doesn't know would otherwise be skipped.
-  const listed = app.slice(app.indexOf('const NAV'), app.indexOf('];', app.indexOf('const NAV'))).match(/\{ to: '/g) ?? [];
+  // (and setup mode's one row, First run: #468)
+  const listed = [...(app.slice(app.indexOf('const NAV'), app.indexOf('];', app.indexOf('const NAV'))).match(/\{ to: '/g) ?? []), ...(app.match(/const FIRST_RUN_NAV = \{ to: '/g) ?? [])];
   assert.ok(nav.length >= 10, 'the NAV list was found');
   assert.equal(nav.length, listed.length, 'every NAV row was read');
   for (const n of nav) {

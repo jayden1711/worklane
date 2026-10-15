@@ -1,8 +1,8 @@
-import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useState, type ComponentType, type ReactNode } from 'react';
+import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
-import { healthPass, hub, hubNow, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
+import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
@@ -161,6 +161,34 @@ export const NAV = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings' },
 ];
 
+/** First run: the one page in setup mode (it isn't in NAV: once configured, Settings links to it). */
+export const FIRST_RUN_NAV = { to: '/first-run', label: 'First run', icon: ListChecks, chord: 'f', testId: 'nav-first-run' };
+
+/**
+ * WHY (#468): in setup mode (no config yet) nothing but First run has anything to show, so the sidebar, the command
+ * menu and the `g` chords offer First run alone. (The Setup console is a server's; setup mode is a checkout's only.)
+ */
+export const navFor = (state: Pick<State, 'setupMode'> | null) => (state?.setupMode ? [FIRST_RUN_NAV] : NAV);
+
+/** Setup mode, at the address of a page that isn't shown yet: what it needs, and the way to First run. */
+export function SetupModeHidden({ path }: { path: string }) {
+  const page = NAV.find((n) => (n.to === '/' ? path === '/' : path.startsWith(n.to)))?.label ?? 'This page';
+  return (
+    <div data-testid="setup-mode-hidden">
+      <Header title={page} sub="not set up yet" />
+      <div className="mx-auto max-w-3xl space-y-2 p-4 sm:p-6">
+        <p className="text-[13px] text-ink" data-testid="setup-mode-hidden-why">
+          {page} shows once this checkout has its config, and it has none yet.
+        </p>
+        <p className="text-[12.5px] text-ink-2">First run sets it up: it picks the GitHub repo, drafts the config, and merges its PR. Every page opens here after that.</p>
+        <a href="/first-run" onClick={(e) => (e.preventDefault(), navigate('/first-run'))} className="inline-flex h-7 items-center rounded-full bg-ink px-3 text-[12.5px] font-medium text-surface hover:opacity-90" data-testid="setup-mode-hidden-link">
+          Open First run
+        </a>
+      </div>
+    </div>
+  );
+}
+
 function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; setOpen: (v: boolean) => void; state: State | null; toggleTheme: () => void }) {
   const go = (to: string) => {
     setOpen(false);
@@ -180,7 +208,7 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
             <Command.List className="max-h-[50vh] overflow-y-auto p-1.5">
               <Command.Empty className="p-6 text-center text-[13px] text-ink-3">No results.</Command.Empty>
               <Command.Group heading="Pages">
-                {NAV.map((n) => (
+                {navFor(state).map((n) => (
                   <Item key={n.to} onSelect={() => go(n.to)} hint={`g ${n.chord}`}>
                     <n.icon className="size-4" /> {n.label}
                   </Item>
@@ -266,18 +294,23 @@ export function SignInPage({ brand, local = false }: { brand?: string; local?: b
 
 const ROLE_LABEL: Record<string, string> = { owner: 'owner', writer: 'writer', viewer: 'viewer' };
 
-/** Who this page is for and their role here; a signed-in person can sign out (the owner's break-glass has no session). */
-export function WhoAmI({ state, onSignOut }: { state: Pick<State, 'user' | 'role' | 'via'>; onSignOut?: () => void }) {
+/**
+ * Who this page is for and their role here; a signed-in person can sign out (the key has no session).
+ * WHY (#468): the key with no person named is "break-glass" only on the hub's break-glass port; on a checkout's (or an
+ * instance's) own dashboard it is simply the owner on this machine, and "break-glass" there read as an alarm.
+ */
+export function WhoAmI({ state, onSignOut, hubPage = servedByHub }: { state: Pick<State, 'user' | 'role' | 'via'>; onSignOut?: () => void; hubPage?: boolean }) {
   const glass = state.via === 'break-glass';
+  const how = !glass ? null : hubPage ? 'break-glass' : 'this machine';
   return (
     <div className="mx-2 flex items-center gap-2 px-2 pt-2 text-[11.5px] text-ink-3" data-testid="who-am-i">
-      <span className="min-w-0 truncate" title={glass ? "the owner's break-glass on this machine" : state.role === 'viewer' ? 'signed in with GitHub; read-only here' : 'signed in with GitHub'}>
+      <span className="min-w-0 truncate" title={!glass ? (state.role === 'viewer' ? 'signed in with GitHub; read-only here' : 'signed in with GitHub') : hubPage ? "the owner's break-glass on this machine" : "this dashboard's key, on this machine"}>
         <span className="font-medium text-ink-2" data-testid="who-login">@{state.user}</span>
         {state.role && (
           <span data-testid="who-role">
             {' · '}
             {ROLE_LABEL[state.role] ?? state.role}
-            {glass ? ' (break-glass)' : ''}
+            {how ? ` (${how})` : ''}
           </span>
         )}
       </span>
@@ -362,7 +395,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   const { state, error, live, pulse, refresh } = useLiveState();
   usePrefetch(!!state, scope?.current ?? null);
   // The Claude usage limit: every instance's pause (a banner on every page) and usage (the Overview's lines).
-  const usage = useUsage(state?.lastId);
+  const { usage, answered: usageAnswered } = useUsage(state?.lastId);
   const now = useNow(usage.some((u) => u.paused));
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
@@ -370,6 +403,8 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   const [nav, setNav] = useState(false);
   useEffect(() => setNav(false), [path]);
   const [voice] = useVoicePrefs();
+  const navNow = useRef(NAV);
+  navNow.current = navFor(state);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -380,7 +415,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
       }
       if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (Date.now() < chordUntil) {
-        const n = NAV.find((x) => x.chord === e.key);
+        const n = navNow.current.find((x) => x.chord === e.key);
         chordUntil = 0;
         if (n) {
           e.preventDefault();
@@ -416,8 +451,12 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   let page: React.ReactNode;
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
-  // WHY: setup mode (no config yet) serves the first-run page alone, whatever the address.
-  else if (state.setupMode) page = <FirstRunPage state={state} />;
+  // The page waits for the usage's first answer too: a pause's banner goes above it, and appearing after the page
+  // would move every control on it (#455: 83 px). The usage is asked for at the same time as the state; a usage that
+  // hasn't answered in USAGE_WAIT_MS (3 s) no longer holds the page.
+  else if (!usageAnswered) page = <Loading />;
+  // WHY: setup mode (no config yet) serves the first-run page alone; any other page's address says what it needs (#468).
+  else if (state.setupMode) page = path === '/' || path === '/first-run' ? <FirstRunPage state={state} /> : <SetupModeHidden path={path} />;
   else if (path === '/inbox') page = <InboxPage state={state} />;
   else if (path === '/waiting') page = <WaitingPage state={state} />;
   else if (path === '/decisions') page = <Decisions state={state} />;
@@ -461,7 +500,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
           <SidebarBody {...sidebar} />
         </NavDrawer>
         <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
-        {state && <ChatPanel cli={state.brand.cli} role={state.role} />}
+        {state && <ChatPanel cli={state.brand.cli} role={state.role} user={state.user} />}
         {state && <WakeWord role={state.role} brand={state.brand.name} />}
         {state && <VoiceControl state={state} prefs={voice} />}
       </div>
@@ -498,7 +537,7 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
         <Search className="size-3.5" /> Search <span className="ml-auto"><Kbd>⌘K</Kbd></span>
       </button>
       <nav className="mt-3 flex flex-col gap-px px-2" aria-label="Pages">
-        {NAV.map((n) => (
+        {navFor(state).map((n) => (
           <SidebarRow
             key={n.to}
             href={n.to}
@@ -506,7 +545,7 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
             label={n.label}
             count={counts[n.to]}
             countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
-            active={n.to === '/' ? path === '/' : path.startsWith(n.to)}
+            active={n === FIRST_RUN_NAV ? path === '/' || path === '/first-run' : n.to === '/' ? path === '/' : path.startsWith(n.to)}
             onSelect={() => navigate(n.to)}
             testId={n.testId}
           />

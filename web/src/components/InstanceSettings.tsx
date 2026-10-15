@@ -274,7 +274,8 @@ export function proposedSetting(search: string): { key: string; value: unknown }
   }
 }
 
-export function InstanceSettings() {
+/** `onLoaded`: called once its first answer (the data, or an error it shows) is in, for the page's in-order panels. */
+export function InstanceSettings({ onLoaded }: { onLoaded?: () => void } = {}) {
   const [data, setData] = useState<InstanceSettingsData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [n, setN] = useState(0);
@@ -283,6 +284,9 @@ export function InstanceSettings() {
       .then((d) => (setData(d), setError(null)))
       .catch((e: Error) => setError(e.message));
   }, [n]);
+  useEffect(() => {
+    if (data || error !== null) onLoaded?.();
+  }, [data, error, onLoaded]);
   if (error) return <div className="text-[13px] text-red" data-testid="instance-settings">Can't load the instance settings: {error}</div>;
   if (!data) return null;
   return <InstanceSettingsView data={data} onChanged={() => setN((x) => x + 1)} proposed={n === 0 ? proposedSetting(window.location.search) : null} />;

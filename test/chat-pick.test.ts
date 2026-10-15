@@ -115,3 +115,35 @@ test("over HTTP: the options per role; a viewer's pick is refused (403), a write
     await d.close();
   }
 });
+
+test("a conversation's cap can't be reset by minting ids: a writer posting a made-up or another person's conversation id is refused, and a pick in their own is recorded under its server id", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'chat-pick-conv-'));
+  const { dir: root } = exampleProject();
+  const eventsDb = join(dir, 'events.db');
+  new EventLog(eventsDb).close();
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), attachmentScan: null });
+  const url = d.url.split('/?')[0]!;
+  const h = (who: string) => ({ authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(who) });
+  const create = async (who: string) => ((await (await fetch(`${url}/api/chat/conversations`, { method: 'POST', headers: h(who), body: '{}' })).json()) as { conversation: { id: string } }).conversation.id;
+  const say = (who: string, id: string, pick?: object) => fetch(`${url}/api/chat/conversations/${id}/messages`, { method: 'POST', headers: h(who), body: JSON.stringify({ text: 'why?', ...(pick ? { pick } : {}) }) });
+  const reqs = join(dir, 'chat', 'requests');
+  const requests = () => {
+    try {
+      return readdirSync(reqs).map((f) => JSON.parse(readFileSync(join(reqs, f), 'utf8')) as { conversation?: string; pick?: object; picker?: string });
+    } catch {
+      return [];
+    }
+  };
+  try {
+    const owners = await create('example-owner');
+    const mine = await create('example-collaborator');
+    assert.equal((await say('example-collaborator', 'c-0123456789abcdef')).status, 404, 'a made-up id');
+    assert.equal((await say('example-collaborator', owners)).status, 404, "another person's conversation");
+    assert.equal(requests().length, 0, 'nothing asked, nothing to charge');
+    assert.equal((await say('example-collaborator', mine, { model: 'opus' })).status, 400, "a writer's pick above the default's tier");
+    assert.equal((await say('example-collaborator', mine, { model: 'haiku' })).status, 200);
+    assert.deepEqual(requests().map((r) => [r.conversation, r.pick, r.picker]), [[mine, { model: 'haiku' }, 'writer']]);
+  } finally {
+    await d.close();
+  }
+});

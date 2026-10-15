@@ -116,8 +116,11 @@ async function statusOf(ctor: RecognitionCtor | null, lang: string): Promise<OnD
   return ctor ? { recognizer: true, availability: await onDevice(ctor, lang) } : { recognizer: false };
 }
 
-/** The section, for an owner only; anyone else gets nothing. */
-export function VoiceSettings({ owner, brand }: { owner: boolean; brand?: string | undefined }) {
+/**
+ * The section, for an owner only; anyone else gets nothing. `onLoaded`: called once the browser's on-device check has
+ * answered (at once for anyone else), for the page's in-order panels: its answer adds a line and a button.
+ */
+export function VoiceSettings({ owner, brand, onLoaded }: { owner: boolean; brand?: string | undefined; onLoaded?: () => void }) {
   const [prefs, setPrefs] = useVoicePrefs();
   const [status, setStatus] = useState<OnDeviceStatus | null>(null);
   const [installing, setInstalling] = useState(false);
@@ -126,6 +129,9 @@ export function VoiceSettings({ owner, brand }: { owner: boolean; brand?: string
   useEffect(() => {
     if (owner) void statusOf(speechCtor(), lang).then(setStatus);
   }, [owner, lang]);
+  useEffect(() => {
+    if (!owner || status) onLoaded?.();
+  }, [owner, status, onLoaded]);
   useEffect(() => {
     if (!owner) return;
     const s = synthOf();

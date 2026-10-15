@@ -21,9 +21,11 @@ import { effectiveRouting, route } from './routing.js';
 export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const;
 export type ChatEffort = (typeof CHAT_EFFORTS)[number];
 
-/** Main's chat has one conversation per instance; conversations (multi-turn history) will pass their own ids. */
+/**
+ * The single-shot chat's one stream per instance (POST /api/chat): its spend counts here, a day at a time. A
+ * conversation (src/chat-conversations.ts) counts under its own id, over its whole life.
+ */
 export const MAIN_CONVERSATION = 'default';
-export const CONVERSATION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /**
  * A conversation's cap when agents.yaml sets none. WHY $5: five answers at the per-answer default ($1,
@@ -103,7 +105,7 @@ export type ChatRunOptions = { ok: true; model: string; effort?: ChatEffort; max
  * every answer (the dashboard checks the pick too, to refuse early); `picker` is the role the dashboard read.
  */
 export function chatRunOptions(o: { agents: Agents; picker: Picker; pick?: ChatPick; conversation: string; spentUsd: number; dailyLeftUsd: number }): ChatRunOptions {
-  if (!CONVERSATION_ID.test(o.conversation)) return { ok: false, why: 'not a conversation id' };
+  if (!o.conversation) return { ok: false, why: 'no conversation' };
   const refused = pickRefusal(o.agents, o.picker, o.pick);
   if (refused) return { ok: false, why: refused };
   const capUsd = conversationCapUsd(o.agents);
