@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { updateLog, updateSettings } from '../src/updates.js';
+import { lastCheck, updateLog, updateSettings, updatesPanel } from '../src/updates.js';
 import { repoRoot } from './helpers.js';
 
 const updaterSrc = join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs');
@@ -26,7 +26,7 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   run(deps: object): Promise<string>;
   journalLine(event: string, sha: string | null, reason: unknown): string;
   makeNote(o: { readState(): unknown; writeState(s: unknown): void; log(e: Record<string, unknown>): void; print(line: string): void }): (event: string, sha: string | null, reason: string) => string;
-  realDeps(print?: (line: string) => void): { note(event: string, sha: string | null, reason: string): string };
+  realDeps(print?: (line: string) => void, files?: Record<string, string>): { note(event: string, sha: string | null, reason: string): string; checked(s: Record<string, unknown>): void };
   BUILD_SCRIPT: string;
 };
 
@@ -182,6 +182,39 @@ test('run: off does nothing; up to date does nothing', async () => {
   const same = machine({ installed: () => NEW });
   assert.equal(await u.run(same.deps), 'current');
   assert.ok(!same.calls.some((c) => c.startsWith('systemd-run')));
+});
+
+test('regression (#465): a main pass with nothing newer records when and on which channel in the state file, and logs nothing', async () => {
+  const checked: Record<string, unknown>[] = [];
+  const same = machine({ installed: () => NEW, installedVersion: () => '0.5.0', now: () => Date.parse('2026-10-15T12:00:00Z'), checked: (s: Record<string, unknown>) => checked.push(s) });
+  assert.equal(await u.run(same.deps), 'current');
+  assert.deepEqual(checked, [{ event: 'current', at: '2026-10-15T12:00:00.000Z', channel: 'main', sha: NEW, version: '0.5.0', newest: NEW }]);
+  assert.deepEqual(same.logs, [], 'updates.jsonl stays a log of changes');
+});
+
+test('regression (#465): the real deps write a current pass to the state file and not to the log; the dashboard reads it back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'upd-state-'));
+  const files = { log: join(dir, 'updates.jsonl'), state: join(dir, 'update-state.json'), held: join(dir, 'held.json'), drain: join(dir, 'drain.json') };
+  const real = u.realDeps(() => {}, files);
+  real.checked({ event: 'current', at: '2026-10-15T12:00:00.000Z', channel: 'release', sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' });
+  assert.equal(existsSync(files.log), false, 'nothing logged');
+  assert.deepEqual(lastCheck(files.state), { at: '2026-10-15T12:00:00.000Z', channel: 'release', sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' });
+  // A refusal or wait (deps.note) is not a check that found it up to date.
+  real.note('waiting', 'b'.repeat(40), 'checks pending');
+  assert.equal(lastCheck(files.state), null);
+  assert.equal(lastCheck(join(dir, 'missing.json')), null);
+  writeFileSync(files.state, JSON.stringify({ event: 'current', at: 'not a date', channel: 'release' }));
+  assert.equal(lastCheck(files.state), null);
+});
+
+test('the Updates panel shows the last up-to-date check only while it is about the engine installed now (#465)', () => {
+  const check = { at: '2026-10-15T12:00:00.000Z', channel: 'release' as const, sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' };
+  const installed = { sha: 'a'.repeat(40), version: '0.5.0' };
+  assert.deepEqual(updatesPanel([], null, installed, null, check).lastCheck, check);
+  assert.equal(updatesPanel([], null, installed).lastCheck, null);
+  assert.equal(updatesPanel([], null, { sha: 'b'.repeat(40), version: '0.5.1' }, null, check).lastCheck, null, 'another engine since');
+  const install = { at: '2026-10-15T13:00:00.000Z', event: 'installed' as const, from: 'a'.repeat(40), to: 'a'.repeat(40) };
+  assert.equal(updatesPanel([install], null, installed, null, check).lastCheck, null, 'an install after it');
 });
 
 test('run: a fast-forward with green checks on a quiet machine is built unprivileged, switched to and kept when healthy', async () => {
@@ -432,6 +465,10 @@ test('setup: off by default, units validated before they\'re installed, a timer 
   assert.match(s, /systemd-analyze verify "\$check"/);
   assert.match(s, /mv -f "\$tmp" "\/etc\/systemd\/system\/\$file"/);
   assert.match(s, /OnUnitActiveSec=10min/);
+  // Either channel: the unit doesn't claim main (#465).
+  const description = /put_unit worklane-update\.service "\[Unit\]\nDescription=(.*)/.exec(s)![1]!;
+  assert.doesNotMatch(description, /install main when/);
+  assert.match(description, /signed release or main commit/);
   assert.match(s, /install -o root -g root -m 0755 "\$src" "\$tmp"/);
   const analyze = process.platform === 'linux' && spawnSync('systemd-analyze', ['--version']).status === 0;
   if (analyze) {

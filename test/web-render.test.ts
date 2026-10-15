@@ -730,6 +730,10 @@ test('the Updates panel: the engine installed, the last update, a rollback held 
   for (const id of ['updates-panel', 'updates-installed', 'updates-last', 'updates-rollback', 'updates-rollback-reason', 'updates-canary', 'updates-canary-last', 'updates-canary-why']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
   assert.match(html, /data-testid="updates-installed"[\s\S]*?v0\.4\.1[\s\S]*?aaaaaaaaaaaa/);
   assert.match(html, /data-testid="updates-last"[\s\S]*?aaaaaaaaaaaa → bbbbbbbbbbbb/);
+  // The last pass that found nothing newer (#465): when, on which channel, the version; no row without one.
+  assert.doesNotMatch(html, /data-testid="updates-last-check"/);
+  const checked = r.renderUpdatesPanel({ ...data, lastCheck: { at, channel: 'release', sha: 'a'.repeat(40), version: '0.5.0', newest: 'v0.5.0' } });
+  assert.match(checked, /data-testid="updates-last-check"[\s\S]*?3h ago[\s\S]*?on (<!-- -->)?release(<!-- -->)?: up to date \((<!-- -->)?v0\.5\.0/);
   assert.match(html, /rolled back: canary failed[\s\S]*?held[\s\S]*?timed out after 121 minutes/);
   assert.match(html, /data-testid="updates-canary-last"[\s\S]*?timed out[\s\S]*?after installing bbbbbbbbbbbb · 2 h 01 min[\s\S]*?href="https:\/\/github\.com\/example-org\/canary-scratch\/pull\/7"[^>]*>PR #(<!-- -->)?7/);
   // Passed, a daily one, and nothing rolled back.
