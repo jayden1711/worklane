@@ -77,7 +77,7 @@ test(
       const base = d.url;
       // The key goes in the tab's session storage, as the page's key form keeps it: never in a URL.
       await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(d.token)}); } catch {}` });
-      for (const page of ['decisions', 'inbox']) {
+      for (const page of ['decisions', 'inbox', 'decisions', 'inbox', 'decisions', 'inbox', 'decisions', 'inbox', 'decisions', 'inbox']) {
         await cdp.send('Page.navigate', { url: `${base}/${page}` });
         await until(`the ${page} page's two decisions`, () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-${page}"] [data-decision="d-old-prose"]') && !!document.querySelector('[data-decision="d-option"]')`), 20_000);
         const card = `document.querySelector('[data-testid="page-${page}"] [data-decision="d-old-prose"]')`;
