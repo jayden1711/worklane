@@ -9,7 +9,7 @@ import type { RunHost } from './host.js';
 import { asRoot } from '../os/system-paths.js';
 
 /** The protocol this engine speaks: the helper's PROTOCOL must equal it (a test checks the script's). */
-export const HELPER_PROTOCOL = 7;
+export const HELPER_PROTOCOL = 8;
 
 /** The one reinstall that fixes an outdated helper: only the helper, from the installed engine, nothing else changed. */
 export const helperFix = (instance: string) =>

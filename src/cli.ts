@@ -174,6 +174,10 @@ usage: ${BRAND.cli} <command> [options]
                                    helper, slots, lock and limits as a PR's run; prints each value's wall time,
                                    the tiers' status, CPU and memory, and their suites' durations. Posts no
                                    check; refused while the machine has a test run or full run going
+  gpu hold [--gpu N]... -- <command> [args...]
+                                   run your own GPU job under the same per-GPU lock the test runs' GPU
+                                   commands take (waits, saying who holds it); without --gpu, every GPU
+                                   root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
   decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
@@ -930,6 +934,17 @@ async function main(argv: string[]): Promise<number> {
     case 'testrun': {
       const m = await import('./testrun/measure-cli.js');
       return m.measureCommand(instanceOpt, sub, rest);
+    }
+
+    case 'gpu': {
+      if (sub !== 'hold') {
+        console.error(commandUsage('gpu'));
+        return 2;
+      }
+      // WHY: the command after -- is taken from the line as given: the global --root/--instance parsing must never
+      // take an option of the person's own command.
+      const m = await import('./gpu-hold.js');
+      return m.gpuHoldCommand(argv.slice(argv.indexOf('hold') + 1));
     }
 
     case 'stuck-scan': {

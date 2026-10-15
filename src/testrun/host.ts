@@ -16,6 +16,7 @@ import { SPARSE_MAX, sparseDirProblem } from '../checkout.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
+import { gpuLine, type GpuGrant } from './gpu.js';
 import { libexecPath } from '../os/system-paths.js';
 
 export const SANDBOX_HELPER = libexecPath('testrun');
@@ -35,6 +36,16 @@ export interface ExecResult {
    * timeout"; its exit code is then non-zero, not null), or the host's own timer. Never for a cancellation.
    */
   timedOut?: boolean;
+  /** The sandbox unit's result as systemd-run's summary gives it ("success", "exit-code", "timeout", "signal", ...). */
+  unitResult?: string | null;
+  /** Only for a command that asked for the GPU: what the helper granted (./gpu.ts), or null when it said nothing. */
+  gpu?: GpuGrant | null;
+}
+
+/** What a command asks of its host besides its environment. */
+export interface ExecOptions {
+  /** Ask for the GPU (a tier's `gpu: true`): granted only as root's file says (./gpu.ts). */
+  gpu?: boolean;
 }
 
 /**
@@ -218,8 +229,11 @@ export interface RunHost {
   shared(name: string): Promise<string>;
   /** The run's own Postgres: a unique container and a port the daemon picks, on loopback. */
   startDb(id: string, db: RunDbSpec): Promise<RunDatabase>;
-  /** Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). */
-  exec(id: string, command: string, env: Record<string, string>, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult>;
+  /**
+   * Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). With `o.gpu`, the
+   * sandbox helper may grant the GPU; a wait for it counts against `timeoutMs`.
+   */
+  exec(id: string, command: string, env: Record<string, string>, timeoutMs: number, signal?: AbortSignal, o?: ExecOptions): Promise<ExecResult>;
   /** The sandbox's own boundary check; a check that can't run is not ok. */
   check(): Promise<{ ok: boolean; detail: string }>;
   /** Remove everything of the run: its processes, containers, volumes and files. `left`: what is still there. */
@@ -391,18 +405,25 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       if (r.code !== 0 || !m) throw fail('db-start', `starting run ${id}'s database`, r);
       return { url: postgresUrl(Number(m[1]), m[2]!, db.name), port: Number(m[1]), container: `${BRAND.cli}-test-${instance}-${id}` };
     },
-    async exec(id, command, env, timeoutMs, signal) {
+    async exec(id, command, env, timeoutMs, signal, o = {}) {
       checkId(id);
       // INVARIANT: no variable's value is ever in an argv. sudo logs its whole command line to the journal and any
       // user can read a process's argv (ps, /proc/<pid>/cmdline); DATABASE_URL carries the run's database password.
       // The run's variables go on stdin, each NAME=value ended by a NUL (no value can hold one).
       const vars = runVars(env);
-      // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left).
-      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
+      // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left). A GPU
+      // command's wait for its GPU counts against the same timeout (the helper gives the unit only what is left), so
+      // the backstop covers the wait too.
+      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), ...(o.gpu ? ['--gpu'] : []), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
       // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
+      // So is the helper's GPU line, the first of all when the command asked for the GPU.
       const s = systemdRunStats(r.stderr);
-      const timedOut = s.result === 'timeout' || (r.code === null && !signal?.aborted);
-      return { code: r.code, out: r.without(s.own), stats: s.stats, err: cut(r.stderr, s.own), timedOut };
+      const g = o.gpu ? gpuLine(r.stderr) : { grant: null, own: [] };
+      const own = [...g.own, ...s.own];
+      // A GPU still held at the run's timeout: no unit ran, and the command's time was spent waiting.
+      const held = o.gpu && g.grant !== null && !g.grant.granted && g.grant.why.startsWith('still held');
+      const timedOut = s.result === 'timeout' || held || (r.code === null && !signal?.aborted);
+      return { code: r.code, out: r.without(own), stats: s.stats, err: cut(r.stderr, own), timedOut, unitResult: s.result, ...(o.gpu ? { gpu: g.grant } : {}) };
     },
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
@@ -515,14 +536,15 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       }
       throw new SetupStepError('db-start', `${container} wasn't ready after ${db.readyS}s`, '');
     },
-    async exec(id, command, env, timeoutMs, signal) {
+    async exec(id, command, env, timeoutMs, signal, eo = {}) {
       checkId(id);
       const dir = runDir(id);
       const [file, args] = shellCommand(command);
       // Exactly these variables: never this process's own environment.
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
-      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
+      // The local host has no GPU to grant: a command that asks is told so, as the helper would.
+      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted, ...(eo.gpu ? { gpu: { granted: false as const, why: 'the local host grants no GPU' } } : {}) };
     },
     async check() {
       return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };

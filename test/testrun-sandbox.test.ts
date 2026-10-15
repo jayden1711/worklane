@@ -251,7 +251,7 @@ test('isolation: the sandbox helper gives a run no secret or harness variable, a
   // starts it clean) beyond the fixed variables and the run's checked ones (from a root-only file), and no Docker socket.
   const src = readFileSync(helperSrc, 'utf8');
   const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
-  for (const s of ['--slice="$SLICE" --uid="$user" --gid="$user"', '-p NoNewPrivileges=yes', '-p ProtectSystem=strict', '-p ProtectHome=tmpfs', '-p PrivateTmp=yes', '-p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d"', 'inaccessible="-$sock_dir -$root/docker -$root/docker-home"', 'envfile=(-p "EnvironmentFile=$ENV_FILE")']) {
+  for (const s of ['--slice="$SLICE" --uid="$user" --gid="$user"', '-p NoNewPrivileges=yes', '-p ProtectSystem=strict', '-p ProtectHome=tmpfs', '-p PrivateTmp=yes', '-p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d"', 'inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"', 'envfile=(-p "EnvironmentFile=$ENV_FILE")']) {
     assert.ok(exec.includes(s), s);
   }
   assert.doesNotMatch(exec, /--setenv=[A-Z_]*=\$\{?[A-Z]/, 'no variable passed through from the caller');
@@ -707,8 +707,10 @@ test('regression: a run\'s ${...} is bash\'s, never systemd-run\'s (--expand-env
   const src = readFileSync(helperSrc, 'utf8');
   const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
   assert.ok(exec.includes('cmd="$(systemd_command "$(systemd_version)" "$2")"'));
-  assert.ok(exec.includes('  systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
-  assert.ok(exec.includes('    /bin/bash -o pipefail -c "$cmd" || rc=$?\n'), 'the command goes as systemd_command made it');
+  assert.ok(exec.includes('  local -a run=(systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
+  assert.ok(exec.includes('    /bin/bash -o pipefail -c "$cmd")\n'), 'the command goes as systemd_command made it');
+  // Run as built, on both paths (a GPU command's in the background, so a TERM can stop its unit first).
+  assert.ok(exec.includes('    "${run[@]}" || rc=$?\n') && exec.includes('    "${run[@]}" &\n'));
 });
 
 test('a directory left out: the helper takes exactly what the engine\'s config takes', { skip: !posix && 'bash' }, () => {
