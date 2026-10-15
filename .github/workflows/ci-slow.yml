@@ -2252,6 +2252,13 @@ jobs:
           (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {treeHash} from '$E/tree.js'; if (treeHash(process.argv[1]) !== process.argv[2]) process.exit(1)" "$s" "$tree")
           sudo -u wl-ci /usr/local/bin/worklane plugins show --instance ci | grep -q "^kit "
           tail -n 3 /var/lib/worklane/machine-changes.jsonl | grep -q '"what":"plugins.ci.confirmed"'
+          # What a run of each role would load, as the coordinator computes it before every run (src/plugins/run.ts).
+          run_ids() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {pluginsForRun} from '$E/run.js'; const h = process.argv[1]; const r = pluginsForRun({instance: 'ci', instanceHome: h, role: process.argv[2]}); console.log(r.ids.join(',') + ' ' + r.dirs.join(',') + ' ' + r.pluginRoot)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" "$1"); }
+          [ "$(run_ids builder)" = "kit $s /var/lib/worklane/plugins/store/ci/.empty-root" ]
+          [ "$(run_ids reviewer | cut -d' ' -f1)" = "" ]
+          [ "$(stat -c '%U %a' /var/lib/worklane/plugins/store/ci/.empty-root)" = "root 555" ]
+          # The agent user can't install a plugin where runs look (probe P2), nor write the approved copy.
+          if sudo -u wl-ci-agent sh -c "mkdir /var/lib/worklane/plugins/store/ci/.empty-root/x || touch '$s/x'" 2> /dev/null; then echo "the agent wrote under the plugin store" >&2; exit 1; fi
           # Remove, through the helper: the entry goes; nothing else is touched.
           sudo -u wl-ci sudo -n "$HELPER" plugin-remove kit
           jq -e '.entries == []' /etc/worklane/plugins/ci.json

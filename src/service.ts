@@ -57,6 +57,7 @@ import { directLandStartGate, localRemote, type Protection } from './direct-land
 import { incidentSink, watchdogForInstance } from './watchdog/wire.js';
 import type { IncidentSink } from './usage-limit.js';
 import type { IntakeConfig } from './intake/report.js';
+import { pluginsForRun } from './plugins/run.js';
 
 /** The coordinator's umask when agents run as their own user: group read/write (agents share the group), nothing for others. */
 export const INSTANCE_UMASK = 0o007;
@@ -254,7 +255,9 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // WHY: item 38. A build routed to another vendor's CLI (policy opt-in only) runs as the lane's agent user, never as this one.
   const lanes = laneRuns(i);
   const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
-  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login);
+  // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
+  const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
+  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins);
   return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => latestSwitch(switchedOnto(i.name), profileSwitchedAt(i.name)), superfan: superfanView(i.name, i.stateDir), ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 

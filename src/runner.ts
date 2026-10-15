@@ -19,6 +19,7 @@ import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
+import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 
@@ -396,16 +397,21 @@ export interface RetryOptions {
   budgetMs?: number;
 }
 
+/** Settings every instance run carries (Claude Code settings reference: each one only takes something away). */
+export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiConnectors: true, allowedMcpServers: [] as unknown[] } as const;
+
 /**
  * The claude command line. The prompt is not on it: command lines are public
  * on the machine and sudo logs them to the journal, so the prompt goes on
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
-export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string): string[] {
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = []): string[] {
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
+  // One flag per approved plugin directory (root's store), never a folder of them: exactly what was checked.
+  for (const d of pluginDirs) args.push('--plugin-dir', d);
   if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
   // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
   if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
@@ -462,6 +468,12 @@ export class CliRunner implements AgentRunner {
      * Unset: the user's own claudeConfigDir, as always.
      */
     private login?: { resolve: (r: RunAs) => RunAs; credentialFiles: (r: RunAs) => string[] },
+    /**
+     * An instance's approved plugins for a run of this role (src/plugins/run.ts): root's allowlist, checked against
+     * root's store before every run. Throws when the allowlist or a copy can't be trusted: the run doesn't start.
+     * Set for every instance run: it also pins the plugin root and the MCP and skill-shell locks below.
+     */
+    private plugins?: (o: { role: string }) => PluginRun,
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -546,7 +558,19 @@ export class CliRunner implements AgentRunner {
     if (this.lanes && !lane) return { reason: 'failed', detail: `unknown lane "${laneName}"; not starting`, costUsd: 0, turns: 0, model: req.model };
     if (req.resume !== undefined && !SESSION_ID.test(req.resume)) return { reason: 'failed', detail: `not a session id: ${JSON.stringify(req.resume.slice(0, 80))}; not starting`, costUsd: 0, turns: 0, model: req.model };
     const runAs = this.userOf(laneName);
-    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint } : env;
+    // Approved plugins: for the instance's own agent user only (never an eval lane's user, Q14), and checked now.
+    const asAgentUser = !runAs || !this.runAs || runAs.user === this.runAs.user;
+    let plugins: PluginRun | null = null;
+    if (this.plugins) {
+      try {
+        plugins = asAgentUser && !req.provider ? this.plugins({ role: req.role }) : { dirs: [], ids: [], pluginRoot: null };
+      } catch (e) {
+        return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
+      }
+    }
+    // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't install.
+    const pluginEnv: Record<string, string> = plugins?.pluginRoot ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: plugins.pluginRoot } : {};
+    const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint, ...pluginEnv } : { ...env, ...pluginEnv };
     // The instance's guardrails, or no run: never an agent run without its hooks, or with a project file that
     // could loosen them.
     let guard: Settings | null = null;
@@ -594,20 +618,23 @@ export class CliRunner implements AgentRunner {
     // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),
     // for runs as the instance's agent user only; a lane running as another user (the eval user) never gets it.
     const asAgent = !runAs || !this.runAs || runAs.user === this.runAs.user;
-    const settings = req.provider
+    const keyed = req.provider
       ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(req.provider.keyFile) }
       : this.runtime === 'api_key' && this.apiKeyFile && asAgent
         ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(this.apiKeyFile) }
         : pinned;
+    // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
+    // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
+    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS } : keyed;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
     const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
-      const argv = cliArgs(req, settings, systemPromptFile);
+      const argv = cliArgs(req, settings, systemPromptFile, plugins?.dirs ?? []);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : env, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn
@@ -618,6 +645,8 @@ export class CliRunner implements AgentRunner {
       let rateLimited: RateLimitInfo | null = null;
       let assistantError: string | null = null;
       let ended: TerminalReason | null = null;
+      /** Set when the session's init event shows something loaded that this run didn't pass. */
+      let loadProblem: string | null = null;
       let buf = '';
       let stderr = '';
       let inputOpen = true;
@@ -691,6 +720,10 @@ export class CliRunner implements AgentRunner {
             }
           }
           req.onLine?.(j);
+          if (plugins && j.type === 'system' && j.subtype === 'init' && !loadProblem) {
+            loadProblem = loadedSetProblem(j as InitLoaded, { pluginDirs: plugins.dirs, mcpServers: [] });
+            if (loadProblem) kill('failed');
+          }
           if (j.type === 'assistant' || j.type === 'result') started();
           // claude marks the API's refusal of its login on the assistant message it reports it in.
           if (j.type === 'assistant' && (j as { error?: unknown }).error === 'authentication_failed') assistantError = 'authentication_failed';
@@ -732,6 +765,7 @@ export class CliRunner implements AgentRunner {
           const v = stuck.stopped;
           return done({ reason: 'stuck', detail: `stopped as stuck: the same ${v.tool} call failed ${v.failures} times in a row: ${v.input.slice(0, 200)}`, ...base });
         }
+        if (loadProblem) return done({ reason: 'failed', detail: `${loadProblem}; stopped`, ...base });
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
         // The subscription's usage limit (or a provider's rate limit): claude's rate_limit_event, a 429 it gave up on,
         // or its own words for the limit in an error result. Its text is kept: it may name the reset time.
