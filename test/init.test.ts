@@ -392,7 +392,7 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   // its order (linger only where loginctl answers: Linux), a step not done a warning, never a failure.
   assert.deepEqual(names(setup).filter((n) => !n.startsWith('setup step ')), ['setup tools', 'setup claude', 'setup github', 'setup repo-config', 'setup protection', 'setup discord']);
   assert.ok(setup.filter((c) => !c.name.startsWith('setup step ')).every((c) => c.level === 'ok'), JSON.stringify(setup));
-  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service'].map((id) => `setup step ${id}`));
+  assert.deepEqual(names(setup).filter((n) => n.startsWith('setup step ') && n !== 'setup step linger'), ['engine', 'path', 'tools', 'docker', 'claude-login', 'gh-login', 'origin', 'default-branch', 'questions', 'config-on-main', 'hooks', 'owners', 'required-checks', 'agents-config', 'pre-commit', 'fingerprints', 'protection', 'deploy-gate', 'service', 'first-task'].map((id) => `setup step ${id}`));
   assert.ok(setup.every((c) => c.level !== 'fail'), JSON.stringify(setup));
   for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.equal(setup.find((c) => c.name === `setup step ${id}`)!.level, 'ok', id);
   const off = local.filter((c) => c.level === 'off');

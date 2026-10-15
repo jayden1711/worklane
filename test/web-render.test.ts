@@ -61,6 +61,8 @@ interface Render {
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
   renderFirstRunPage(state: unknown): string;
   renderSetupScreens(steps: unknown[]): string;
+  renderFirstTask(info: unknown, o?: { canEdit?: boolean; preview?: { title: string; body: string } }): string;
+  renderIgnored(data: unknown): string;
   renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
@@ -1373,7 +1375,7 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   const f = firstRun(file, { root: '/r', repo: 'example-org/example-shop', instance: null });
   const html = r.renderFirstRun(f);
   // Grouped as the registry groups them, local mode's only.
-  assert.deepEqual([...html.matchAll(/data-testid="first-run-group" data-group="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'tools', 'claude', 'github', 'repo-config', 'protection', 'extras', 'service']);
+  assert.deepEqual([...html.matchAll(/data-testid="first-run-group" data-group="([a-z-]+)"/g)].map((m) => m[1]), ['install', 'tools', 'claude', 'github', 'repo-config', 'protection', 'extras', 'service', 'first-task']);
   const steps = [...html.matchAll(/data-testid="first-run-step" data-step="([a-z-]+)" data-status="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`);
   assert.ok(steps.includes('tools:done'), 'tools are all on PATH (live, not from init.json)');
   assert.ok(steps.includes('claude-login:todo'), 'signed out, per claude auth status');
@@ -1557,6 +1559,35 @@ test("the first-run page in setup mode: the banner; the origin picker; auto-conf
   const normal = r.renderFirstRun({ ...f, setup: open, autoConfig, canAct: true }, { open: 'questions' });
   assert.match(normal, /data-testid="first-run-coming"/, 'outside setup mode: what to do today');
   assert.doesNotMatch(normal, /setup-question/);
+});
+
+test('#468 Your first task: the form (title, outcome, done_when picks from the repo\'s tests, context), its preview with the label, the template; on a server one line, no form; and the first-run page offers it after Start', () => {
+  const info = { local: true, why: null, template: { label: 'ready', body: '**Outcome:** <x>\n\n```done_when\n- test: "<t>"\n```' }, tests: ['test/a.test.ts', 'test/b.test.ts'] };
+  const html = r.renderFirstTask(info);
+  assert.match(html, /data-testid="first-task-form"[\s\S]*?data-testid="first-task-title"[\s\S]*?data-testid="first-task-outcome"[\s\S]*?data-testid="first-task-check-kind"[\s\S]*?data-testid="first-task-test"[\s\S]*?<datalist id="first-task-tests"><option value="test\/a\.test\.ts"><\/option><option value="test\/b\.test\.ts">[\s\S]*?data-testid="first-task-context"[\s\S]*?data-testid="first-task-review"/);
+  assert.match(html, /data-testid="first-task-template"[\s\S]*?add the label (<!-- -->)?ready[\s\S]*?data-testid="first-task-template-body"[^>]*>\*\*Outcome:\*\*[\s\S]*?```done_when/);
+  const preview = r.renderFirstTask(info, { preview: { title: 'T', body: '```done_when\n- command: |\n    true\n```' } });
+  assert.match(preview, /data-testid="first-task-preview"[\s\S]*?```done_when[\s\S]*?Filed with the label ready[\s\S]*?data-testid="first-task-file"[^>]*>File it/);
+  const server = r.renderFirstTask({ ...info, local: false, why: "on a server an issue filed from this page would be its GitHub App's" });
+  assert.match(server, /data-testid="first-task-server"[^>]*>Not from here: on a server/);
+  assert.doesNotMatch(server, /first-task-form|first-task-review/);
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const page = r.renderFirstRun(f);
+  assert.match(page, /data-group="service"[\s\S]*?data-group="first-task"[\s\S]*?data-step="first-task"[\s\S]*?data-fix="form"[^>]*>File one</);
+  const srv = r.renderFirstRun(firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'o/r', instance: 'shop', start: { kind: 'owner-command', unit: 'u', command: 'c', why: 'w' } }));
+  assert.match(srv, /data-testid="first-run-first-task-server"[^>]*>Your first task: open an issue on GitHub with a ```done_when block and the ready label\. There is no form for it on a server/);
+  assert.doesNotMatch(srv, /data-step="first-task"/);
+});
+
+test('#468 the Issues page\'s "Not picked up": each issue with its reasons; Add ready and Edit for a writer, the reasons alone for a viewer; on a server, why no button', () => {
+  const issues = [{ issue: 3, title: 'no label', url: 'https://github.com/o/r/issues/3', author: 'someone-else', labels: [], reasons: [{ kind: 'no-ready', text: 'no ready label', fix: 'add-ready' }, { kind: 'contract', text: 'no ```done_when block in the issue body', fix: 'edit' }] }];
+  const writer = r.renderIgnored({ issues, error: null, canFix: true, local: true });
+  assert.match(writer, /data-testid="issue-ignored" data-issue="3"[\s\S]*?data-kind="no-ready"[\s\S]*?no ready label[\s\S]*?data-testid="issue-ignored-add-ready"[^>]*>Add ready[\s\S]*?data-kind="contract"[\s\S]*?no ```done_when block[\s\S]*?href="https:\/\/github\.com\/o\/r\/issues\/3"[^>]*data-testid="issue-ignored-edit"/);
+  const viewer = r.renderIgnored({ issues, error: null, canFix: false, local: true });
+  assert.match(viewer, /no ready label/);
+  assert.doesNotMatch(viewer, /issue-ignored-add-ready|issue-ignored-edit/);
+  assert.match(r.renderIgnored({ issues: [], error: null, canFix: true, local: true }), /data-testid="issues-ignored-none"/);
+  assert.match(r.renderIgnored({ issues, error: null, canFix: false, local: false }), /On a server, add the label on GitHub/);
 });
 
 test('the first-run page: Skip on a step not done (owners), skipped shown and Undo; each screen names its command; a done step opened from Settings runs again; Settings lists every screen', () => {

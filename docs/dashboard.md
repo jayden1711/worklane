@@ -271,6 +271,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
 | The coordinator running | local | `worklane up` |
+| An issue ready for the harness | local | `gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>` |
 
 ## Tailscale and HTTPS from the dashboard
 
