@@ -23,7 +23,7 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, serviceRunning, systemUnitActive } from './os/index.js';
+import { lingerEnabled, nodePathProblem, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
@@ -51,6 +51,10 @@ export interface SetupProbe {
   systemUnitActive(unit: string): boolean | null;
   /** Linux: whether this user's services outlive a login session; null elsewhere. */
   linger(): boolean | null;
+  /** This user's service file for a label and the node it runs (src/os/index.ts serviceProgram); absent: not asked. */
+  serviceProgram?(label: string): { file: string; node: string } | null;
+  /** Whether a path exists (the service's node); the real file system when absent. */
+  exists?(path: string): boolean;
 }
 
 export function systemProbe(): SetupProbe {
@@ -63,6 +67,7 @@ export function systemProbe(): SetupProbe {
     serviceRunning,
     systemUnitActive,
     linger: () => lingerEnabled(),
+    serviceProgram: (label) => serviceProgram(label),
   };
 }
 
@@ -974,6 +979,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       const cfg = k.cfg();
       if (isErr(cfg)) return no('no valid config yet: the coordinator needs one');
       const label = serviceLabel(cfg);
+      // WHY (#468): a service that runs node by a path an upgrade deleted (or will) stops at its next restart.
+      const svc = k.p.serviceProgram?.(label) ?? null;
+      const bad = svc ? nodePathProblem(svc.node, k.p.exists ?? existsSync) : null;
+      if (svc && bad) return no(`${svc.file} ${bad}: run \`${BRAND.cli} up\` to rewrite it with a stable node (Homebrew's bin/node, or this node's own path)`);
       const up = k.p.serviceRunning(label);
       if (up === null) return no('no service manager here (agents need macOS, Linux or WSL2)');
       return up ? ok(`${label} is running`) : no(`${label} isn't running`);

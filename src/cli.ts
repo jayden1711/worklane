@@ -61,7 +61,7 @@ import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
 import { intakeCheckCommand } from './intake/check.js';
-import { installService, uninstallService } from './os/index.js';
+import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -710,6 +710,9 @@ async function main(argv: string[]): Promise<number> {
       const cfg = loadConfig(root);
       const r = installService(localServiceSpec(root, cfg));
       console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(projectStateDir(root), 'coordinator.log')}`);
+      // WHY (#468): said at install, when the only node is one an upgrade deletes.
+      const node = stableNodePath();
+      if (node.why) console.error(`warning: ${node.why}`);
       return r.started ? 0 : 1;
     }
 
