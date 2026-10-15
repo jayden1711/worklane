@@ -1137,9 +1137,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         return json(res, 200, { proof: dashboardProof(token, req.socket.localPort ?? 0, nonce) });
       }
       // The key page's help, before any key: where the key's file is and a command that copies it (#467), never the key.
-      // Only to this OS user's own process on this machine (Linux and macOS check it; elsewhere loopback alone), never
-      // through a proxy or the hub, and only under a loopback Host, so a site the browser reached through DNS rebinding
-      // can't read it.
+      // Only to a process on this machine, never through a proxy or the hub, and only under a loopback Host, so a site
+      // the browser reached through DNS rebinding can't read it. On Linux, only this OS user's own process (the kernel's
+      // socket table); on macOS and Windows any local process can read the path (never the key: the file is 0600).
       if (url.pathname === KEY_HELP_PATH && req.method === 'GET') {
         const local = req.socket.localPort;
         const me = req.socket.remotePort !== undefined && local !== undefined ? loopbackPeerIsMe(req.socket.remotePort, local) : false;

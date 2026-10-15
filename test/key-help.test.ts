@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { KEY_HELP_PATH, loopbackHostHeader, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { copyFileCommand, loopbackPeerIsMe, lsofListsClient, shellQuote } from '../src/os/index.js';
+import { copyFileCommand, loopbackPeerIsMe, shellQuote } from '../src/os/index.js';
 import { exampleProject, exampleRoles } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -103,16 +103,10 @@ test("the key page's help: on this machine, with no key, the file and its copy c
   }
 });
 
-test('who may have the help: a loopback Host for this port; the connecting process is this OS user (Linux: the kernel; macOS: lsof)', () => {
+test('who may have the help: a loopback Host for this port; on Linux, the connecting process is this OS user (the kernel); elsewhere loopback alone', () => {
   for (const h of ['127.0.0.1:4317', 'localhost:4317', 'LOCALHOST:4317', '[::1]:4317']) assert.equal(loopbackHostHeader(h, 4317), true, h);
   for (const h of [undefined, '', '127.0.0.1', '127.0.0.1:4318', 'evil.example:4317', '127.0.0.1.evil.example:4317', 'localhost.:4317']) assert.equal(loopbackHostHeader(h, 4317), false, String(h));
   assert.equal(loopbackHostHeader('127.0.0.1:4317', undefined), false);
-  // lsof -Fn as a normal macOS user lists only that user's processes: the client end listed means the client is ours.
-  const out = 'p84222\nf13\nn127.0.0.1:60440->127.0.0.1:4317\nf14\nn127.0.0.1:4317->127.0.0.1:60440\n';
-  assert.equal(lsofListsClient(out, 60440, 4317), true);
-  assert.equal(lsofListsClient('p1\nf14\nn127.0.0.1:4317->127.0.0.1:60440\n', 60440, 4317), false, 'only our own (server) end: the client is someone else\'s');
-  assert.equal(lsofListsClient('', 60440, 4317), false);
-  assert.equal(lsofListsClient('p1\nn[::1]:60440->[::1]:4317\n', 60440, 4317), true);
-  assert.equal(lsofListsClient('p1\nn127.0.0.1:60441->127.0.0.1:4317\n', 60440, 4317), false, 'another connection');
   assert.equal(loopbackPeerIsMe(1, 2, 'win32'), null, 'no check there: loopback alone');
+  assert.equal(loopbackPeerIsMe(1, 2, 'darwin'), null, 'macOS: loopback and the Host check alone (the owner, 2026-10-15)');
 });
