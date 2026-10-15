@@ -6,6 +6,7 @@
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
+import { REPLIER_ROLE, REPLY_STAGES } from './intake/replier.js';
 import { CONTRACT_PARTS } from './role-contract.js';
 import { ownerOnlyDir, writeOwnerOnly } from './os/index.js';
 import { assertNotPairwise, neutralDir, parseCases, type Ask, type EvalCase } from './skilleval.js';
@@ -75,14 +76,28 @@ export const CASE_WRITER_SCHEMA = {
   },
 } as const;
 
-/** The case writer's whole input: the role's name and its contract lines. No prompt text, no existing cases. */
+/**
+ * The values a role's input can take, from the code that builds it, for the roles whose contract names an input
+ * without listing its values. Without them the writer invents values the engine never sends (#188-#190: replier
+ * cases at stages no caller can give it), and those cases judge a situation the role can't meet.
+ */
+export const ROLE_INPUT_VALUES: Readonly<Record<string, readonly string[]>> = {
+  [REPLIER_ROLE]: [`stage: ${REPLY_STAGES.join(', ')}`],
+};
+
+/**
+ * The case writer's whole input: the role's name, its contract lines and its input's values (ROLE_INPUT_VALUES,
+ * from code). No prompt text, no existing cases.
+ */
 export function caseWriterPrompt(role: string, contract: string, n = HELD_OUT_CASES): string {
+  const values = ROLE_INPUT_VALUES[role] ?? [];
   return [
     `Write ${n} held-out eval cases for an AI agent role named "${role}". You see only the role's contract below, not its full instructions.`,
     '',
     'Contract:',
     contract,
     '',
+    ...(values.length ? ['The values its input can take (the engine never sends any other; keep every situation within them):', ...values.map((v) => `- ${v}`), ''] : []),
     'Each case tests one thing the contract requires or forbids, in a concrete situation the role could meet. The agent under test sees only the situation and writes what it would do; a judge then answers yes or no to each rubric item about that one plan.',
     '- situation: 2 to 5 short facts, written to the agent ("You ..."), with everything needed to act. Never hint at the right answer.',
     '- correct: 1 to 3 actions or claims the plan must contain, each checkable with a plain yes/no from the plan alone.',
