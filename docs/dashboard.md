@@ -599,6 +599,30 @@ server refuses a viewer every attachment route (403), downloads included. Code: 
   `GET /api/chat/attachments/limits`, and `attachments: [<id>, ...]` on `POST /api/chat`. Anything that refers to a
   file names only its id.
 
+## Chat model, effort and budget
+
+Under the Ask panel's question box, the owners and the writers pick the model and effort one answer runs on. A
+viewer never sees the picker, and the server refuses a viewer's pick (403). Code: `src/chat-pick.ts`
+(`chatRunOptions`), `web/src/components/ChatPicker.tsx`.
+
+- **Models:** only the Anthropic models agents.yaml `routing` names (every key in effect) and
+  `roles.chief_of_staff.model`. A pick can only narrow to one of them; it never adds a model or a provider. Open
+  models (`local`, `hosted:<name>`, `cli:<agent>`) never run chat. The owner may pick any of them; a writer only one
+  at or below the default's price tier (haiku < sonnet < opus); a model of no known tier is refused for a writer.
+  The instance's `model_cap` still caps whatever is picked.
+- **Default:** `routing.chat`, else `roles.chief_of_staff.model`, else sonnet. Leaving the picker on "default" runs
+  on it.
+- **Effort:** low, medium or high, passed to claude as `--effort`; "default" sets nothing (the CLI's own default).
+- **Budget:** each conversation has a cap, `roles.chief_of_staff.conversation_budget_usd` in agents.yaml (default
+  $5); it is config only, never set from the dashboard. Before each answer the coordinator checks it: at or over it,
+  the question is refused. The answer's own cap is the least of `roles.chief_of_staff.budget_usd` (default $1),
+  what's left of the conversation's cap and what's left of the day's budget. The chat has one conversation per
+  instance for now, counted over the day (UTC, like the daily budget).
+- **Cost:** each answer shows its estimated cost, the model it ran on, and the conversation's spend against its cap.
+  Each answer's `run.cost` event carries its conversation.
+- **API:** `GET /api/chat/options` (what this person may pick: models, efforts, the default, the cap) and
+  `pick: { model?, effort? }` on `POST /api/chat`. The coordinator checks the pick again before the answer runs.
+
 ## Pull requests
 
 In PR mode, the **Pull requests** page (`g p`) shows every PR the harness opened, from its own events:

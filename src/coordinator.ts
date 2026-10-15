@@ -29,6 +29,7 @@ import { runMachineRequests } from './coordinator/machine-requests.js';
 import { recordProfileSwitches } from './claude-profiles.js';
 import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatRequest } from './chat.js';
+import { chatRunOptions, conversationSpentUsd, MAIN_CONVERSATION } from './chat-pick.js';
 import { siriPass } from './coordinator/siri.js';
 import { machineStats } from './os/stats.js';
 import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
@@ -386,6 +387,11 @@ export class Coordinator extends HarnessEvals {
       if (disk) return refuse(`paused: ${disk}; it resumes on its own once there is room`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
       if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
+      // The picker and the conversation's cap (src/chat-pick.ts), checked here, before the answer runs, whatever the dashboard checked.
+      const conversation = q.conversation ?? MAIN_CONVERSATION;
+      const spent = conversationSpentUsd(this.d.log.read(0, ['run.cost']), conversation);
+      const run = chatRunOptions({ agents: this.d.cfg.agents, picker: q.picker ?? 'viewer', ...(q.pick ? { pick: q.pick } : {}), conversation, spentUsd: spent, dailyLeftUsd: left });
+      if (!run.ok) return refuse(run.why);
       const events = this.d.log.read();
       const context = {
         instance: this.d.instance,
@@ -410,9 +416,10 @@ export class Coordinator extends HarnessEvals {
         gid: bundle.gid,
         repo: this.d.repo,
         remainingUsd: left,
-        onCost: (r) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+        run: { model: run.model, ...(run.effort ? { effort: run.effort } : {}), maxBudgetUsd: run.maxBudgetUsd },
+        onCost: (r) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns, conversation }),
       });
-      writeChatAnswer(this.d.stateDir, q.id, { answer: a });
+      writeChatAnswer(this.d.stateDir, q.id, { answer: { ...a, conversation: { id: conversation, spentUsd: spent + a.costUsd, capUsd: run.capUsd } } });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
     } catch (e) {
       if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);

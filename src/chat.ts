@@ -24,6 +24,7 @@ import { readRun, RUNS_DIR, type RunSummary } from './run-record.js';
 import type { AgentRunner } from './runner.js';
 import { SETTING_KEYS } from './settings.js';
 import { ATTACHMENT_ID, attachmentPrompt, MAX_ATTACHMENTS } from './chat-attachments.js';
+import { CHAT_EFFORTS, CONVERSATION_ID, type ChatEffort, type ChatPick } from './chat-pick.js';
 
 export const CHAT_HISTORY = join('chat', 'history.jsonl');
 const RECENT_EVENTS = 200;
@@ -152,6 +153,10 @@ export interface ChatAnswer {
   /** Not the owner: no drafts and no proposals. */
   readOnly: boolean;
   costUsd: number;
+  /** What the answer ran on (src/chat-pick.ts), and its conversation's spend after it against the cap. */
+  model?: string;
+  effort?: ChatEffort;
+  conversation?: { id: string; spentUsd: number; capUsd: number };
 }
 
 /** A draft issue the harness can check: the five parts, checked by the contract parser (checkDraftedIssue). */
@@ -227,6 +232,8 @@ export interface ChatTurnOptions {
   remainingUsd: number;
   /** Attachment ids on the question (src/chat-attachments.ts): read from the instance's state, given as data. */
   attachments?: string[];
+  /** The answer's model, effort and cap, from chatRunOptions (src/chat-pick.ts); unset: chief_of_staff's model and remainingUsd. */
+  run?: { model: string; effort?: ChatEffort; maxBudgetUsd: number };
   /** Records the turn's cost (the coordinator emits run.cost with role chat). */
   onCost?: (r: { costUsd: number; model: string; turns: number }) => void;
   now?: () => Date;
@@ -243,7 +250,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
   // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty.
   const previous = readOnly ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
   const role = o.cfg.agents.roles.chief_of_staff;
-  const model = role?.model ?? 'sonnet';
+  const model = o.run?.model ?? role?.model ?? 'sonnet';
   // WHY: the copies in the bundle are for this turn only; afterwards only the instance's state holds the file, so the
   // retention days (sweepAttachments) are the only place it lives on.
   const dropCopies = () => {
@@ -266,10 +273,12 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
     cwd: o.repo,
     model,
+    ...(o.run?.effort ? { effort: o.run.effort } : {}),
     allowedTools: CHAT_TOOLS,
     disallowedTools: NOT_ALLOWED,
     maxTurns: 30,
-    maxBudgetUsd: Math.max(0.05, Math.min(role?.budget_usd ?? 1, o.remainingUsd)),
+    // WHY: chatRunOptions' cap is already the least of the role's, the conversation's and the day's: no floor over it.
+    maxBudgetUsd: o.run ? o.run.maxBudgetUsd : Math.max(0.05, Math.min(role?.budget_usd ?? 1, o.remainingUsd)),
     jsonSchema: CHAT_SCHEMA,
     stallMs: 10 * 60_000,
     timeoutMs: 20 * 60_000,
@@ -290,6 +299,8 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     refusedActions: acts.filter((a): a is string => typeof a === 'string'),
     readOnly,
     costUsd: r.costUsd,
+    model: r.model || model,
+    ...(o.run?.effort ? { effort: o.run.effort } : {}),
   };
   // The conversation, kept per instance: only the owner's turns, redacted, 0600.
   if (!readOnly) {
@@ -331,6 +342,11 @@ export interface ChatRequest {
   question: string;
   /** Attachment ids (src/chat-attachments.ts), checked by the dashboard when asked. */
   attachments?: string[];
+  /** The picker's choice (src/chat-pick.ts), and the role the dashboard read for the asker; checked again before the turn. */
+  pick?: ChatPick;
+  picker?: 'owner' | 'writer';
+  /** The conversation the answer's spend counts against; MAIN_CONVERSATION when unset. */
+  conversation?: string;
 }
 
 export type ChatAnswerFile = { v: 1; id: string; at: string } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
@@ -344,6 +360,17 @@ function writeJson(dir: string, id: string, v: unknown) {
   renameSync(tmp, join(dir, `${id}.json`));
 }
 
+/** A pick's shape (which models a person may pick is chatRunOptions'): a model name and a listed effort; null when it isn't one. */
+function cleanPick(p: unknown): ChatPick | null {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return null;
+  const { model, effort, ...extra } = p as Record<string, unknown>;
+  if (Object.keys(extra).length) return null;
+  if (model !== undefined && (typeof model !== 'string' || !model || model.length > 200)) return null;
+  if (effort !== undefined && !(CHAT_EFFORTS as readonly unknown[]).includes(effort)) return null;
+  if (model === undefined && effort === undefined) return null;
+  return { ...(model !== undefined ? { model: model as string } : {}), ...(effort !== undefined ? { effort: effort as ChatEffort } : {}) };
+}
+
 /** A client's request key: the same (asker, key) is one question, however often it is sent. */
 export const CHAT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
 
@@ -351,7 +378,7 @@ export const CHAT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
  * Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id.
  * With a `key`, a retried or double-submitted ask returns the first one's id and runs no second turn.
  */
-export function askChat(o: { stateDir: string; question: string; by: string; key?: string; attachments?: string[]; now?: Date }): { id: string } {
+export function askChat(o: { stateDir: string; question: string; by: string; key?: string; attachments?: string[]; pick?: ChatPick; picker?: 'owner' | 'writer'; conversation?: string; now?: Date }): { id: string } {
   const question = o.question.trim();
   if (!question) throw new ChatError('the question is empty');
   if (question.length > MAX_QUESTION) throw new ChatError(`the question is over ${MAX_QUESTION} characters`);
@@ -359,6 +386,10 @@ export function askChat(o: { stateDir: string; question: string; by: string; key
   if (o.key !== undefined && !CHAT_KEY.test(o.key)) throw new ChatError('the request key must be 8-128 letters, digits, _ or -');
   const attachments = o.attachments ?? [];
   if (attachments.length > MAX_ATTACHMENTS || attachments.some((a) => !ATTACHMENT_ID.test(a))) throw new ChatError('attachments must be at most ' + MAX_ATTACHMENTS + ' attachment ids');
+  const pick = cleanPick(o.pick);
+  if (o.pick !== undefined && !pick) throw new ChatError(`a pick is a routing model and an effort (${CHAT_EFFORTS.join(', ')})`);
+  if (pick && !o.picker) throw new ChatError("viewers can't pick the chat's model or effort");
+  if (o.conversation !== undefined && !CONVERSATION_ID.test(o.conversation)) throw new ChatError('not a conversation id');
   const d = chatDirs(o.stateDir);
   const keyName = o.key === undefined ? null : createHash('sha256').update(`${o.by.toLowerCase()}\0${o.key}`).digest('hex').slice(0, 32);
   if (keyName) {
@@ -373,7 +404,7 @@ export function askChat(o: { stateDir: string; question: string; by: string; key
   const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
   writeJson(d.answers, id, { v: 1, id, at: now.toISOString(), state: 'pending' });
   if (keyName) writeJson(d.keys, keyName, { id });
-  writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question, ...(attachments.length ? { attachments } : {}) });
+  writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question, ...(attachments.length ? { attachments } : {}), ...(pick ? { pick, picker: o.picker } : {}), ...(o.conversation ? { conversation: o.conversation } : {}) });
   return { id };
 }
 
@@ -413,7 +444,17 @@ export function takeChatRequests(stateDir: string): ChatRequest[] {
     const p = join(d, f);
     try {
       const r = JSON.parse(readFileSync(p, 'utf8')) as ChatRequest;
-      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') out.push({ ...r, attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [] });
+      if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string') {
+        const { pick: rawPick, picker, conversation, ...rest } = r;
+        const pick = cleanPick(rawPick);
+        out.push({
+          ...rest,
+          attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [],
+          // A pick without a role the dashboard read is no pick: the answer runs on the default.
+          ...(pick && (picker === 'owner' || picker === 'writer') ? { pick, picker } : {}),
+          ...(typeof conversation === 'string' && CONVERSATION_ID.test(conversation) ? { conversation } : {}),
+        });
+      }
     } catch {
       // unreadable: dropped
     }

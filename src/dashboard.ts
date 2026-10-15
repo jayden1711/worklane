@@ -37,6 +37,7 @@ import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
 import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswerFile } from './chat.js';
+import { chatPickerView, pickRefusal, type ChatPick, type Picker } from './chat-pick.js';
 import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
@@ -1456,13 +1457,22 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           return json(res, 405, { error: 'not a method here' });
         }
+        // The chat's model and effort picker (src/chat-pick.ts): what this person may pick, from routing in effect.
+        const picker: Picker = isOwnerHere ? 'owner' : isWriter(who.role) ? 'writer' : 'viewer';
+        if (url.pathname === '/api/chat/options' && req.method === 'GET') return json(res, 200, chatPickerView(liveCfg().agents, picker));
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
+          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown; pick?: unknown };
           try {
+            // A viewer never gets here (no POST for a viewer: 403 above). A pick is checked here to refuse early, and again by
+            // the coordinator before the answer runs. No conversation id is taken from the client: main's chat is one
+            // conversation (MAIN_CONVERSATION), so a new id can't reset its cap.
+            const pick = body.pick === undefined || body.pick === null ? undefined : (body.pick as ChatPick);
+            const pickWhy = pick && typeof pick === 'object' ? pickRefusal(liveCfg().agents, picker, pick) : null;
+            if (pickWhy) return json(res, 400, { error: pickWhy });
             const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts)).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
-            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}), ...(pick && picker !== 'viewer' ? { pick, picker } : {}) });
+            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}), ...(pick ? { pick } : {}) });
             return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });

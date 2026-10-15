@@ -2886,6 +2886,29 @@ test("chat: someone who isn't the owner gets a read-only answer; a spent budget 
   assert.equal(runner.calls.length, 1, 'no run for a refused question');
 });
 
+test("chat: the picker and the conversation's cap are checked before the answer runs: the pick's model and effort, the cap passed on, refused once spent", { skip }, async () => {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [] }, costUsd: 0.5 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  // A writer's pick within the default's tier runs; one without the role the dashboard read runs on the default.
+  const picked = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-collaborator', pick: { model: 'haiku', effort: 'low' }, picker: 'writer' });
+  await c.checkChat();
+  assert.deepEqual([runner.calls[0]!.model, runner.calls[0]!.effort, runner.calls[0]!.maxBudgetUsd], ['haiku', 'low', 1]);
+  const a = chatAnswer(f.stateDir, picked.id) as { answer: { conversation: object } };
+  assert.deepEqual(a.answer.conversation, { id: 'default', spentUsd: 0.5, capUsd: 5 });
+  assert.equal((lastOf(f.log, 'run.cost') as { conversation: string }).conversation, 'default');
+  // A writer's pick above the default's tier, written past the dashboard: refused, no run.
+  const above = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-collaborator', pick: { model: 'opus' }, picker: 'writer' });
+  await c.checkChat();
+  assert.equal(chatAnswer(f.stateDir, above.id)!.state, 'refused');
+  // The conversation's cap ($5 by default) spent: refused before any run.
+  f.log.append('run.cost', { issue: null, role: 'chat', model: 'm', usd: 4.5, turns: 1, conversation: 'default' }, 'alice');
+  const spent = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-owner' });
+  await c.checkChat();
+  assert.match((chatAnswer(f.stateDir, spent.id) as { why: string }).why, /this conversation's budget \(\$5\) is spent/);
+  assert.equal(runner.calls.length, 1, 'no run for a refused question');
+});
+
 test('chat: a chat turn and a worker run on the same Claude login never overlap (the chat holds the login lock too)', { skip: (skip || process.platform === 'win32') && 'POSIX stand-in for claude' }, async () => {
   const f = fixture();
   f.cfg.tests.runner.changed = 'true';
