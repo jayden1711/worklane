@@ -161,7 +161,7 @@ export interface ProposeIo {
  * Propose the change as a PR: a scratch worktree of origin/<default>, the edited files, the config loaded from it,
  * one commit, pushed to a branch of its own (never the default branch), and a PR opened. The worktree is removed after.
  */
-export function proposeConfigChange(o: { root: string; cfg: Config; values: Partial<Record<keyof RepoConfigValues, unknown>>; by: string; io?: Partial<ProposeIo> }): { changes: ConfigChange[]; branch: string; url: string } {
+export function proposeConfigChange(o: { root: string; cfg: Config; values: Partial<Record<keyof RepoConfigValues, unknown>>; by: string; io?: Partial<ProposeIo> }): { changes: ConfigChange[]; branch: string; url: string; head: string } {
   const git = o.io?.git ?? realGit;
   const gh = o.io?.gh ?? spawnGh;
   const base = o.cfg.project.project.default_branch;
@@ -191,7 +191,7 @@ export function proposeConfigChange(o: { root: string; cfg: Config; values: Part
     const body = [`Proposed from the ${BRAND.name} first-run page by @${o.by}. Merge it to apply; nothing changes until then.`, '', '| file | key | from | to |', '|---|---|---|---|', ...changes.map((c) => `| ${c.file} | ${c.key} | \`${JSON.stringify(c.from)}\` | \`${JSON.stringify(c.to)}\` |`)].join('\n');
     const pr = gh(['pr', 'create', '--repo', repo, '--base', base, '--head', branch, '--title', msg, '--body', body], o.root);
     if (pr.status !== 0) throw new ConfigChangeError(`${branch} is pushed, but opening its PR failed: ${pr.stderr.trim().split('\n')[0] ?? ''}`);
-    return { changes, branch, url: pr.stdout.trim().split('\n').pop() ?? '' };
+    return { changes, branch, url: pr.stdout.trim().split('\n').pop() ?? '', head: sha };
   } finally {
     try {
       removeWorktree(wt, name);

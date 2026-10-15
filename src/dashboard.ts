@@ -1061,8 +1061,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   let prsAt = 0;
   const configPrsNow = (who: Who, fresh: boolean): ConfigPrRecord[] => {
     if (opts.instance) return [];
-    const setupPr = readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.pr;
-    if (setupPr?.number && !readConfigPrs(opts.stateDir).some((p) => p.number === setupPr.number)) trackConfigPr(opts.stateDir, { number: setupPr.number, url: setupPr.url, kind: 'setup', base: liveCfg().project.project.default_branch });
+    // INVARIANT (#468, the owner): only the PRs this page opened itself (its own record), never found by branch name.
     const prs = readConfigPrs(opts.stateDir);
     if (!prs.some((p) => !(p.state === 'merged' && p.synced) && p.state !== 'closed') || (!fresh && Date.now() - prsAt < 15_000)) return prs;
     prsAt = Date.now();
@@ -1097,15 +1096,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const gh = ghNow();
     const base = baseNow();
     const approver = approverOf(who, gh);
-    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver, gh, setupPr: readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.pr?.number ?? null });
+    const plan = planConfigPrMerge({ repo: repoNow(), base, number, approver, gh, records: readConfigPrs(opts.stateDir) });
     const then = `then this checkout's ${base} is fast-forwarded to origin's (only a fast-forward: refused if it has local changes or diverged)`;
     if (!confirm) return { status: 200, body: { ok: true, number: plan.number, url: plan.url, merged: plan.merged, command: plan.command.join(' '), then, confirmed: false } };
     if (!plan.merged) {
       const r = gh(plan.command.slice(1));
       if (r.status !== 0) return { status: 502, body: { error: `GitHub didn't merge PR #${plan.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`, url: plan.url } };
     }
-    const kind = readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.pr?.number === plan.number ? 'setup' : 'config';
-    const before = trackConfigPr(opts.stateDir, { number: plan.number, url: plan.url, kind, base });
+    const before = readConfigPrs(opts.stateDir).find((p) => p.number === plan.number)!;
     const after = settle(who, before, refreshConfigPr({ ...before, synced: false }, { repo: repoNow(), gh, git: checkoutGit() }));
     audit(who, 'first_run.config_merged', { number: plan.number, approver, here: !plan.merged, method: plan.command[6]?.replace(/^--/, '') ?? null, synced: after.synced, detail: (after.synced ? mergedLine(after) : (after.why ?? '')).slice(0, 300) });
     setupCache.clear();
@@ -1908,7 +1906,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               if (body.confirm !== true) return json(res, 200, { ok: true, admin, then: admin ? 'opens the setup PR, then merges it here as your approval (if GitHub allows it), and brings the config into this checkout' : 'opens the setup PR for you to merge on GitHub; this page notices the merge', confirmed: false });
               if (draft.running) return refused(409, 'the draft is still running');
               const pr = await proposeDraft({ file, root: opts.root, ...(opts.setupMode.io ? { io: opts.setupMode.io } : {}) });
-              trackConfigPr(opts.stateDir, { number: pr.number, url: pr.url, kind: 'setup', base: baseNow() });
+              trackConfigPr(opts.stateDir, { number: pr.number, url: pr.url, kind: 'setup', base: baseNow(), head: pr.head });
               audit(who, 'first_run.setup_proposed', { number: pr.number, url: pr.url, admin });
               if (!admin) return json(res, 200, { ok: true, number: pr.number, url: pr.url, merged: false, why: `PR #${pr.number} opened: merge it on GitHub (only the repo's admins can merge it from here)`, confirmed: true });
               let m: ReturnType<typeof mergeConfigPrHere>;
@@ -1969,7 +1967,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             audit(who, 'first_run.config_proposed', { changes: r.changes, branch: r.branch, url: r.url });
             // #468: followed like every config PR: merged anywhere, this checkout is brought to it.
             const n = Number(/\/pull\/(\d+)$/.exec(r.url)?.[1] ?? 0);
-            if (n > 0) trackConfigPr(opts.stateDir, { number: n, url: r.url, kind: 'config', base: liveCfg().project.project.default_branch });
+            if (n > 0) trackConfigPr(opts.stateDir, { number: n, url: r.url, kind: 'config', base: liveCfg().project.project.default_branch, head: r.head });
             return json(res, 200, { ok: true, ...r, confirmed: true });
           } catch (e) {
             if (e instanceof ConfigChangeError) return refused(400, e.message);

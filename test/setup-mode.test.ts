@@ -67,7 +67,7 @@ function ghStandIn(bare: string, o: { admin?: boolean; refuse?: string } = {}) {
     if (a.startsWith('api repos/')) return { status: 0, stdout: 'false,true,true\n', stderr: '' };
     if (a.startsWith('pr list')) return { status: 0, stdout: '', stderr: '' };
     if (a.startsWith('pr create')) return { status: 0, stdout: 'https://github.com/example-org/example-shop/pull/7\n', stderr: '' };
-    if (a.startsWith('pr view') && a.includes('--json state,headRefName')) return { status: 0, stdout: JSON.stringify({ ...pr, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null, headRefName: SETUP_BRANCH, baseRefName: 'main', url: 'https://github.com/example-org/example-shop/pull/7', title: `Add ${BRAND.name} config` }), stderr: '' };
+    if (a.startsWith('pr view') && a.includes('--json state,headRefName')) return { status: 0, stdout: JSON.stringify({ ...pr, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null, headRefName: SETUP_BRANCH, headRefOid: execFileSync('git', ['rev-parse', `refs/heads/${SETUP_BRANCH}`], { cwd: bare, encoding: 'utf8' }).trim(), baseRefName: 'main', url: 'https://github.com/example-org/example-shop/pull/7', title: `Add ${BRAND.name} config` }), stderr: '' };
     if (a.startsWith('pr view')) return { status: 0, stdout: `${pr.state}\n`, stderr: '' };
     if (a.startsWith('pr merge')) {
       if (o.refuse) return { status: 1, stdout: '', stderr: o.refuse };

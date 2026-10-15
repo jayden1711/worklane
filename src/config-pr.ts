@@ -23,6 +23,8 @@ export interface ConfigPrRecord {
   kind: 'setup' | 'config';
   /** The default branch it merges into: the branch the checkout is fast-forwarded on. */
   base: string;
+  /** INVARIANT (#468, the owner): the commit this page pushed for it when it opened it; only that PR, at that head, merges here. */
+  head: string | null;
   state: 'open' | 'merged' | 'closed' | 'unknown';
   mergedBy: string | null;
   mergedAt: string | null;
@@ -45,6 +47,7 @@ export const ownBranch = (head: string | undefined) => !!head && (head === SETUP
 interface PrView {
   state?: string;
   headRefName?: string;
+  headRefOid?: string;
   baseRefName?: string;
   url?: string;
   title?: string;
@@ -53,7 +56,7 @@ interface PrView {
 }
 
 export function readPr(gh: Gh, repo: string, n: number): PrView {
-  const v = gh(['pr', 'view', String(n), '--repo', repo, '--json', 'state,headRefName,baseRefName,url,title,mergedAt,mergedBy']);
+  const v = gh(['pr', 'view', String(n), '--repo', repo, '--json', 'state,headRefName,headRefOid,baseRefName,url,title,mergedAt,mergedBy']);
   if (v.status !== 0) throw new ConfigChangeError(`can't read PR #${n} on ${repo}: ${v.stderr.trim().split('\n')[0] ?? ''}`);
   try {
     return JSON.parse(v.stdout) as PrView;
@@ -112,7 +115,7 @@ export function writeConfigPrs(stateDir: string, prs: ConfigPrRecord[]): void {
 }
 
 /** A PR the page proposed (or found init's setup PR): kept once, by number. */
-export function trackConfigPr(stateDir: string, p: { number: number; url: string; kind: ConfigPrRecord['kind']; base: string }): ConfigPrRecord {
+export function trackConfigPr(stateDir: string, p: { number: number; url: string; kind: ConfigPrRecord['kind']; base: string; head: string | null }): ConfigPrRecord {
   const prs = readConfigPrs(stateDir);
   const have = prs.find((x) => x.number === p.number);
   if (have) return have;
@@ -152,14 +155,16 @@ export interface MergePlan {
  * open PR gets the gh command (the repo's first allowed method, the subject naming the approver); a merged one needs
  * none. Refused otherwise; nothing is merged here.
  */
-export function planConfigPrMerge(o: { repo: string; base: string; number: unknown; approver: string; gh: Gh; setupPr: number | null }): MergePlan {
+export function planConfigPrMerge(o: { repo: string; base: string; number: unknown; approver: string; gh: Gh; records: readonly ConfigPrRecord[] }): MergePlan {
   const n = Number(o.number);
   if (!Number.isInteger(n) || n <= 0) throw new ConfigChangeError('number: the PR number the page proposed');
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(o.approver)) throw new ConfigChangeError('the approver must be a GitHub login');
+  // INVARIANT (#468, the owner): only a PR this page opened itself, as its own record has it (number and the head it
+  // pushed), never one matched by its branch name: anyone who can push a branch can name it worklane/config-*.
+  const own = o.records.find((r) => r.number === n);
+  if (!own?.head) throw new ConfigChangeError(`PR #${n} isn't one this page opened: merge it on GitHub`);
   const pr = readPr(o.gh, o.repo, n);
-  // INVARIANT (#468): the setup branch merges from here only as the setup PR init itself proposed (its recorded number),
-  // never as any PR someone opens from a branch of that name.
-  if (pr.headRefName === SETUP_BRANCH && n !== o.setupPr) throw new ConfigChangeError(`PR #${n} is from ${SETUP_BRANCH} but isn't the setup PR this checkout proposed${o.setupPr ? ` (#${o.setupPr})` : ''}: merge it on GitHub`);
+  if (pr.headRefOid !== own.head) throw new ConfigChangeError(`PR #${n}'s head is ${(pr.headRefOid ?? 'unknown').slice(0, 7)}, not ${own.head.slice(0, 7)}, the commit this page pushed for it: something else was pushed to it, so merge it on GitHub`);
   if (!ownBranch(pr.headRefName)) throw new ConfigChangeError(`PR #${n} isn't one this page proposed (its branch is ${pr.headRefName ?? 'unknown'}, not ${SETUP_BRANCH} or ${CONFIG_BRANCH_PREFIX}...): merge it on GitHub`);
   if (pr.baseRefName !== o.base) throw new ConfigChangeError(`PR #${n} is against ${pr.baseRefName ?? 'unknown'}, not ${o.base}`);
   if (pr.state === 'MERGED') return { number: n, url: pr.url ?? '', merged: true, command: [] };

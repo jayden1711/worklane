@@ -11,6 +11,7 @@ import { BRAND } from '../src/brand.js';
 import { fastForwardCheckout, systemGit } from '../src/checkout-sync.js';
 import { loadConfig } from '../src/config/load.js';
 import { CONFIG_BRANCH_PREFIX } from '../src/config-change.js';
+import { trackConfigPr } from '../src/config-pr.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
@@ -51,10 +52,12 @@ function github(bare: string, pr: { head: string; state?: string; base?: string 
   const calls: string[][] = [];
   const ok = (stdout: string): RunResult => ({ status: 0, stdout, stderr: '' });
   let state = pr.state ?? 'OPEN';
+  // The PR branch's head on "GitHub" (none for a branch that isn't there).
+  const oid = () => { try { return execFileSync('git', ['rev-parse', `refs/heads/${pr.head}`], { cwd: bare, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
   const gh = (args: string[]): RunResult => {
     calls.push(args);
     const a = args.join(' ');
-    if (a.startsWith('pr view 7 ')) return ok(JSON.stringify({ state, headRefName: pr.head, baseRefName: pr.base ?? 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: state === 'MERGED' ? '2026-10-15T12:00:00Z' : null, mergedBy: state === 'MERGED' ? { login: 'example-owner' } : null }));
+    if (a.startsWith('pr view 7 ')) return ok(JSON.stringify({ state, headRefName: pr.head, headRefOid: oid(), baseRefName: pr.base ?? 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: state === 'MERGED' ? '2026-10-15T12:00:00Z' : null, mergedBy: state === 'MERGED' ? { login: 'example-owner' } : null }));
     if (a.startsWith(`api repos/${REPO} --jq`)) return ok('false,true,false\n');
     if (a.startsWith(`pr merge 7 --repo ${REPO} --squash `)) {
       execFileSync('git', ['update-ref', 'refs/heads/main', `refs/heads/${pr.head}`], { cwd: bare });
@@ -64,16 +67,18 @@ function github(bare: string, pr: { head: string; state?: string; base?: string 
     if (a.includes('/protection')) return args.includes('PUT') ? ok('{}') : { status: 1, stdout: '', stderr: 'gh: Branch not protected (HTTP 404)' };
     return { status: 1, stdout: '', stderr: `no stand-in for gh ${a}` };
   };
-  return { gh, calls };
+  return { gh, calls, oid };
 }
 
 const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
 
-async function dashboard(dir: string, gh: (args: string[]) => RunResult) {
+/** `own`: PR #7 is one the page opened itself, at this head (#468: only those merge from the page). */
+async function dashboard(dir: string, gh: (args: string[]) => RunResult, own?: string | null) {
   const stateDir = projectStateDir(dir);
   mkdirSync(stateDir, { recursive: true });
   // The config it starts with: the checkout's now, before any change.
   const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'lc-slots-')), webDir: mkdtempSync(join(tmpdir(), 'lc-web-')), setupProbe: probe, setupActions: { gh } });
+  if (own !== undefined) trackConfigPr(stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: own });
   const base = d.url.split('/?')[0]!;
   const h = (user: string) => ({ authorization: `Bearer ${d.token}`, ...asPerson(user), 'content-type': 'application/json' });
   const actions = async () => ((await (await fetch(`${base}/api/first-run?fresh=1`, { headers: h('example-owner') })).json()) as { actions: Record<string, ActionPlan> }).actions;
@@ -116,8 +121,8 @@ test('the first-run actions use the checkout\'s config now: required checks merg
 test('Merge a Repo config PR from the page: the command shown first, owners only, only the form\'s own PR; then the checkout is fast-forwarded and the next step reads the new config', async () => {
   const { dir, bare, other } = fixture();
   const branch = proposeChecks(other);
-  const { gh, calls } = github(bare, { head: branch });
-  const s = await dashboard(dir, gh);
+  const { gh, calls, oid } = github(bare, { head: branch });
+  const s = await dashboard(dir, gh, oid());
   try {
     const before = git(dir, 'rev-parse', 'HEAD');
     assert.equal((await s.post('/api/first-run/repo-config/merge', 'example-collaborator', { number: 7, confirm: true })).status, 403);
@@ -140,8 +145,9 @@ test('Merge a Repo config PR from the page: the command shown first, owners only
     await s.d.close();
   }
   // Only a PR from the page's own branches into the default branch; closed is said as such. (#468: MERGED is not refused.)
-  for (const [pr, why] of [[{ head: 'someone/else' }, /isn't one this page proposed/], [{ head: branch, state: 'CLOSED' }, /was closed without merging: nothing to merge; propose it again/], [{ head: branch, base: 'release' }, /is against release, not main/]] as const) {
-    const t = await dashboard(fixture().dir, github(bare, pr).gh);
+  for (const [pr, why] of [[{ head: 'someone/else' }, /isn't one this page opened/], [{ head: branch, state: 'CLOSED' }, /was closed without merging: nothing to merge; propose it again/], [{ head: branch, base: 'release' }, /is against release, not main/]] as const) {
+    const g = github(bare, pr);
+    const t = await dashboard(fixture().dir, g.gh, g.oid());
     try {
       const r = await t.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7, confirm: true });
       assert.equal(r.status, 400);
@@ -195,7 +201,8 @@ test('the fast-forward never overwrites the person\'s work: local changes, a div
   const viaPage = fixture();
   const b = proposeChecks(viaPage.other);
   writeFileSync(join(viaPage.dir, 'README.md'), 'my edit\n');
-  const s = await dashboard(viaPage.dir, github(viaPage.bare, { head: b }).gh);
+  const gp = github(viaPage.bare, { head: b });
+  const s = await dashboard(viaPage.dir, gp.gh, gp.oid());
   try {
     const before = git(viaPage.dir, 'rev-parse', 'HEAD');
     const r = await s.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7, confirm: true });

@@ -42,6 +42,9 @@ function fixture() {
   return { dir, bare, other, head };
 }
 
+/** The commit at the PR branch's head on "GitHub", as the page pushed it (what its record keeps). */
+const headOf = (f: { bare: string; head: string }) => execFileSync('git', ['rev-parse', `refs/heads/${f.head}`], { cwd: f.bare, encoding: 'utf8' }).trim();
+
 /** GitHub as gh shows it: one PR (#7) in the state the test sets; a merge (the page's, or GitHub's own) moves main. */
 function github(f: ReturnType<typeof fixture>) {
   const calls: string[][] = [];
@@ -53,7 +56,7 @@ function github(f: ReturnType<typeof fixture>) {
   const gh = (args: string[]): RunResult => {
     calls.push(args);
     const a = args.join(' ');
-    if (a.startsWith('pr view 7 ')) return { status: 0, stdout: JSON.stringify({ state: pr.state, headRefName: f.head, baseRefName: 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: pr.mergedAt, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null }), stderr: '' };
+    if (a.startsWith('pr view 7 ')) return { status: 0, stdout: JSON.stringify({ state: pr.state, headRefName: f.head, headRefOid: headOf(f), baseRefName: 'main', url: `https://github.com/${REPO}/pull/7`, title: 'Config from the first-run page: required_checks', mergedAt: pr.mergedAt, mergedBy: pr.mergedBy ? { login: pr.mergedBy } : null }), stderr: '' };
     if (a.startsWith(`api repos/${REPO} --jq [`)) return { status: 0, stdout: 'true,true,false\n', stderr: '' };
     if (a === 'api user --jq .login') return { status: 0, stdout: 'example-owner\n', stderr: '' };
     if (a.startsWith('pr merge 7 ')) {
@@ -65,7 +68,7 @@ function github(f: ReturnType<typeof fixture>) {
   return { gh, calls, pr, mergeElsewhere };
 }
 
-const rec = (base = 'main'): ConfigPrRecord => ({ number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base, state: 'open', mergedBy: null, mergedAt: null, synced: false, sha: null, why: null, retry: false, command: null, checkedAt: null });
+const rec = (base = 'main'): ConfigPrRecord => ({ number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base, head: null, state: 'open', mergedBy: null, mergedAt: null, synced: false, sha: null, why: null, retry: false, command: null, checkedAt: null });
 
 test('#468 a config PR followed to its end: open; closed without merging (said, never an error); merged elsewhere (the checkout fast-forwarded, who and when kept); and nothing asked again once synced', () => {
   const f = fixture();
@@ -153,7 +156,7 @@ test('#468 through the page: Merge here (the one path) merges as the approver an
   const g = github(f);
   const s = await dashboard(f.dir, g.gh);
   try {
-    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main' });
+    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: headOf(f) });
     assert.equal((await s.get()).configPrs[0]!.state, 'open');
     assert.equal((await s.post('/api/first-run/config-pr', 'example-collaborator', { number: 7, action: 'merge', confirm: true })).status, 403);
     const plan = await s.post('/api/first-run/config-pr', 'example-owner', { number: 7, action: 'merge' });
@@ -179,7 +182,7 @@ test('#468 through the page: Merge here (the one path) merges as the approver an
   const ge = github(e);
   const t = await dashboard(e.dir, ge.gh);
   try {
-    trackConfigPr(t.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main' });
+    trackConfigPr(t.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: headOf(e) });
     ge.mergeElsewhere('someone-on-github');
     const pr = (await t.get()).configPrs[0]!;
     assert.deepEqual([pr.state, pr.synced, pr.mergedBy], ['merged', true, 'someone-on-github']);
@@ -195,7 +198,7 @@ test("#468 the dashboard's own key: the approver is the gh login merging it now,
   const g = github(f);
   const s = await dashboard(f.dir, g.gh, 'your-github-handle');
   try {
-    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main' });
+    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: headOf(f) });
     const plan = await s.post('/api/first-run/config-pr', null, { number: 7, action: 'merge' });
     assert.equal(plan.status, 200, JSON.stringify(plan.body));
     assert.match(String(plan.body.command), /--subject .* \(#7\), approved by example-owner on the first-run page --body $/);
@@ -207,15 +210,33 @@ test("#468 the dashboard's own key: the approver is the gh login merging it now,
   }
 });
 
-test('#468 a PR from the setup branch merges from here only as the setup PR this checkout proposed', async () => {
-  const { planConfigPrMerge } = await import('../src/config-pr.js');
-  const { SETUP_BRANCH } = await import('../src/auto-config.js');
-  const gh = (args: string[]): RunResult => {
-    const a = args.join(' ');
-    if (a.startsWith('pr view 9 ')) return { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefName: SETUP_BRANCH, baseRefName: 'main', url: `https://github.com/${REPO}/pull/9`, title: 't' }), stderr: '' };
-    if (a.startsWith(`api repos/${REPO} --jq [`)) return { status: 0, stdout: 'true,true,false\n', stderr: '' };
-    return { status: 1, stdout: '', stderr: 'no stand-in' };
-  };
-  for (const setupPr of [null, 4]) assert.throws(() => planConfigPrMerge({ repo: REPO, base: 'main', number: 9, approver: 'example-owner', gh, setupPr }), /isn't the setup PR this checkout proposed/);
-  assert.equal(planConfigPrMerge({ repo: REPO, base: 'main', number: 9, approver: 'example-owner', gh, setupPr: 9 }).number, 9);
+test('#468 only the PRs this page opened: an agent-pushed worklane/config-* PR is not listed and is refused; nor is the page\'s own once its head moved', async () => {
+  const f = fixture();
+  const g = github(f);
+  // An agent pushes a branch the page's prefix names, and opens PR #9 from it: the page never opened it.
+  git(f.other, 'checkout', '-q', '-b', `${CONFIG_BRANCH_PREFIX}agent`, 'origin/main');
+  appendFileSync(join(f.other, BRAND.configDir, 'config.yaml'), '\nrequired_checks: [anything]\n');
+  git(f.other, 'commit', '-qam', 'agent config');
+  git(f.other, 'push', '-q', 'origin', `${CONFIG_BRANCH_PREFIX}agent`);
+  const agentHead = git(f.other, 'rev-parse', 'HEAD');
+  const gh = (args: string[]): RunResult => (args.join(' ').startsWith('pr view 9 ') ? { status: 0, stdout: JSON.stringify({ state: 'OPEN', headRefName: `${CONFIG_BRANCH_PREFIX}agent`, headRefOid: agentHead, baseRefName: 'main', url: `https://github.com/${REPO}/pull/9`, title: 'agent' }), stderr: '' } : g.gh(args));
+  const s = await dashboard(f.dir, gh);
+  try {
+    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: headOf(f) });
+    assert.deepEqual((await s.get()).configPrs.map((p) => p.number), [7], 'the agent\'s PR is not listed');
+    const refused = await s.post('/api/first-run/config-pr', 'example-owner', { number: 9, action: 'merge', confirm: true });
+    assert.equal(refused.status, 400);
+    assert.match(String(refused.body.error), /^PR #9 isn't one this page opened: merge it on GitHub$/);
+    // The page's own PR, but something else pushed to it since: refused too.
+    git(f.other, 'checkout', '-q', f.head);
+    appendFileSync(join(f.other, 'README.md'), 'pushed later\n');
+    git(f.other, 'commit', '-qam', 'later');
+    git(f.other, 'push', '-q', 'origin', f.head);
+    const moved = await s.post('/api/first-run/config-pr', 'example-owner', { number: 7, action: 'merge', confirm: true });
+    assert.equal(moved.status, 400);
+    assert.match(String(moved.body.error), /the commit this page pushed for it: something else was pushed to it/);
+    assert.equal(g.calls.some((c) => c[0] === 'pr' && c[1] === 'merge'), false, 'nothing merged');
+  } finally {
+    await s.d.close();
+  }
 });

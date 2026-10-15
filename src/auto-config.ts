@@ -74,8 +74,8 @@ export interface AutoConfigState {
   questions: Question[];
   verified: Verification[];
   base: string | null;
-  /** The setup PR, once opened. */
-  pr: { number: number | null; url: string; branch: string } | null;
+  /** The setup PR, once opened; `head`: the commit this run pushed for it (null: an open PR kept from before, not pushed here). */
+  pr: { number: number | null; url: string; branch: string; head?: string | null } | null;
   /**
    * WHY (#468): the drafted config held for the person to preview before any PR (the dashboard's draft): the top-level
    * YAML files as drafted (and edited on the page), the commit it was drafted on, and the PR body. Absent from the
@@ -756,6 +756,7 @@ async function commitAndOpen(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' |
   const listed = await o.io.gh(['pr', 'list', '--repo', o.repo, '--head', SETUP_BRANCH, '--state', 'open', '--json', 'number,url', '--jq', '.[0] | "\\(.number) \\(.url)"'], o.root);
   let number: number | null = null;
   let url = '';
+  let pushed: string | null = null;
   const m = /^(\d+) (\S+)/.exec(listed.status === 0 ? listed.stdout.trim() : '');
   if (m) {
     [number, url] = [Number(m[1]), m[2]!];
@@ -777,8 +778,9 @@ async function commitAndOpen(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' |
     url = created.stdout.trim().split('\n').pop() ?? '';
     const n = /\/pull\/(\d+)/.exec(url)?.[1];
     number = n ? Number(n) : null;
+    pushed = head;
   }
-  o.state.pr = { number, url, branch: SETUP_BRANCH };
+  o.state.pr = { number, url, branch: SETUP_BRANCH, head: pushed };
   o.save();
   return { kind: 'proposed', detail: `proposed in PR ${number ? `#${number} ` : ''}(${url}), from ${SETUP_BRANCH}: review and merge it, then run \`${BRAND.cli} init\` again (it picks up here)` };
 }

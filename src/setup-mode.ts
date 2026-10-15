@@ -229,7 +229,7 @@ export function editDraft(file: string, root: string, values: Record<string, unk
 }
 
 /** WHY (#468): Confirm on the preview: the held draft proposed as the setup PR (auto-config's own push and PR). */
-export async function proposeDraft(o: { file: string; root: string; io?: InitIo }): Promise<{ number: number; url: string }> {
+export async function proposeDraft(o: { file: string; root: string; io?: InitIo }): Promise<{ number: number; url: string; head: string | null }> {
   const s = stateOf(o.file, o.root);
   const repo = gitRemoteRepo(o.root);
   if (!repo) throw new SetupModeError('no GitHub origin yet: pick the repo first');
@@ -245,7 +245,7 @@ export async function proposeDraft(o: { file: string; root: string; io?: InitIo 
     },
   });
   if (r.kind !== 'proposed' || !s.autoConfig?.pr?.number) throw new SetupModeError(r.kind === 'proposed' ? 'the PR was opened, but its number could not be read' : 'detail' in r ? r.detail : `not proposed (${r.kind})`, 502);
-  return { number: s.autoConfig.pr.number, url: s.autoConfig.pr.url };
+  return { number: s.autoConfig.pr.number, url: s.autoConfig.pr.url, head: s.autoConfig.pr.head ?? null };
 }
 
 /**

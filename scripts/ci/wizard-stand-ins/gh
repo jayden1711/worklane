@@ -99,9 +99,11 @@ case "${1:-} ${2:-}" in
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
         set -- $(cat "$d/prs/$n")
         # With --jq (.state): the state alone. Without it, gh prints the JSON fields asked for.
+        # headRefOid: the branch's commit now, as GitHub reports a PR's head.
+        oid=$(git -C "$d/git/$1.git" rev-parse --verify -q "refs/heads/$3" || true)
         if [ -n "$jq" ]; then echo "$4"
-        elif [ "$4" = MERGED ]; then printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s","mergedBy":{"login":"%s"},"mergedAt":"%s"}\n' "$4" "$2" "$3" "$1" "$n" "${5:-example-owner}" "${6:-}"
-        else printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","url":"https://github.com/%s/pull/%s"}\n' "$4" "$2" "$3" "$1" "$n"; fi ;;
+        elif [ "$4" = MERGED ]; then printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","headRefOid":"%s","url":"https://github.com/%s/pull/%s","mergedBy":{"login":"%s"},"mergedAt":"%s"}\n' "$4" "$2" "$3" "$oid" "$1" "$n" "${5:-example-owner}" "${6:-}"
+        else printf '{"state":"%s","baseRefName":"%s","headRefName":"%s","headRefOid":"%s","url":"https://github.com/%s/pull/%s"}\n' "$4" "$2" "$3" "$oid" "$1" "$n"; fi ;;
       merge)
         [ -f "$d/prs/$n" ] || { echo "gh: no pull request $n" >&2; exit 1; }
         set -- $(cat "$d/prs/$n")
