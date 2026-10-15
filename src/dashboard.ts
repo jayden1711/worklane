@@ -36,6 +36,7 @@ import { answerDecision, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
 import { readRun, runsForIssue } from './run-record.js';
+import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
@@ -945,6 +946,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
   const eventCache = new EventCache(opts.eventsDb);
   let lastId = eventCache.lastId();
+  // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
+  const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
 
   const owners = opts.cfg.project.owners;
   const repo = opts.cfg.project.project.repo;
@@ -1454,6 +1457,33 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true });
           } finally {
             log.close();
+          }
+        }
+        // A decision's (or held PR's) detail, asked when its page opens (src/decision-detail.ts): a viewer gets only a
+        // viewer's fields; …/diff is the owners' (from this checkout's git), …/pr the owners' and writers' (the PR body).
+        if (url.pathname.startsWith('/api/decisions/') && req.method === 'GET') {
+          const [raw = '', part, ...more] = url.pathname.slice('/api/decisions/'.length).split('/');
+          if (more.length || (part !== undefined && part !== 'diff' && part !== 'pr')) return json(res, 404, { error: 'no such view' });
+          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
+          if (!detail) return json(res, 404, { error: 'no such decision' });
+          if (part === undefined) return json(res, 200, detail);
+          if (part === 'diff') {
+            if (!isOwnerHere) return json(res, 403, { error: `a change's diff is for the instance's owners (admin on ${repo}); @${who.login} is a ${who.role}` });
+            const c = detail.change;
+            return json(res, 200, c?.base && c.head ? await decisionDiff(opts.root, c.base, c.head) : { diff: null, why: 'no commits recorded for this change' });
+          }
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly("a PR's body is", who) });
+          const pr = detail.pr;
+          if (!pr) return json(res, 200, { pr: null, failWithout: null, never: null, why: 'no PR' });
+          if (!opts.backlog) return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: 'this dashboard has no backlog to read the PR from' });
+          const kept = prBodies.get(pr.number);
+          const body = kept && Date.now() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
+          if (body !== kept?.body) prBodies.set(pr.number, { at: Date.now(), body });
+          try {
+            return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
+          } catch (e) {
+            prBodies.delete(pr.number);
+            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR: ${(e as Error).message}` });
           }
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
