@@ -2238,8 +2238,8 @@ jobs:
           v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
           npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@$v"
           claude --version
-      - name: an instance's users (instance.sh)
-        run: sudo bash scripts/setup/instance.sh probe
+      - name: the machine (machine.sh, for bwrap's user namespaces) and an instance's users (instance.sh)
+        run: sudo bash scripts/setup/machine.sh && sudo bash scripts/setup/instance.sh probe
       - name: P1-P5, P7, P8 as the agent user
         run: sudo env PATH="$PATH" bash scripts/ci/plugin-probes.sh /var/tmp/plugin-probes wl-probe-agent | tee "$RUNNER_TEMP/probes.txt"
       - name: P6, a Unix socket from inside sandbox-runtime (the library Claude Code's sandbox is built on), as the agent user
