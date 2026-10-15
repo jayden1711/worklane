@@ -186,7 +186,15 @@ export interface InitContext {
 export interface StepResult {
   status: Exclude<StepStatus, 'pending'>;
   detail: string;
+  /** Failed only for want of a CI choice (#469): the wizard makes it (init's exit CI_CHOICE_EXIT). */
+  ciChoice?: true;
 }
+
+/**
+ * init's exit when everything before it is done and only the CI choice is missing (#469): bootstrap then still starts
+ * the dashboard and prints the wizard's URL, where the choice is made (Required checks named).
+ */
+export const CI_CHOICE_EXIT = 5;
 
 /** A registry detector's answer as a walked step's result. */
 const asStep = (d: Detected): StepResult => ({ status: d.done ? 'done' : 'failed', detail: d.detail });
@@ -428,7 +436,7 @@ const withCiChoice =
     if (r.status !== 'done') return r;
     const ps = projectsForCiChoice(c);
     const problem = ps.length && ps.every((p) => ciChoiceProblem(p)) ? ciChoiceProblem(ps[0]!) : null;
-    return problem ? { status: 'failed', detail: `${r.detail}; but ${problem}. Then run \`${BRAND.cli} init\` again (it picks up here)` } : r;
+    return problem ? { status: 'failed', detail: `${r.detail}; but ${problem}. Then run \`${BRAND.cli} init\` again (it picks up here)`, ciChoice: true } : r;
   };
 
 const RUN: Record<StepId, (c: InitContext, act: boolean) => Promise<StepResult>> = { tools, claude, github, 'repo-config': withCiChoice(repoConfig), coordinator, protection, discord, tailscale };
@@ -489,7 +497,7 @@ export async function runInit(c: InitContext, file: string): Promise<number> {
       c.state.finishedAt = null;
       save();
       if (c.mode === 'local' && s.id === 'repo-config' && c.root && !existsSync(join(c.root, BRAND.configDir))) await offerSetupPage(c);
-      return 1;
+      return r.ciChoice ? CI_CHOICE_EXIT : 1;
     }
   }
   c.state.finishedAt = now();

@@ -3135,7 +3135,7 @@ test("the Repo config form with no required check (#469): the starter CI, last i
   // A config already on No CI has no starter CI to offer.
   assert.doesNotMatch(r.renderRepoConfigForm({ ...c, values: { ...c.values, ci: 'none' } }, { starter: offered }), /starter-ci/);
   // The PR and Land pages' note, only under No CI.
-  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs\.</);
+  assert.match(r.renderCiNote({ kind: 'none', means: 'No CI (ci: none): …' }), /data-testid="ci-none-note"[^>]*>No CI \(ci: none\): …\. The main watch can&#x27;t judge merges by checks; auto-merge relies on this machine&#x27;s runs, and every tier runs on each merge commit on main, which is judged by them\.</);
   assert.equal(r.renderCiNote({ kind: 'github', means: null }), '');
   assert.equal(r.renderCiNote(undefined), '');
   // A config that names a check has nothing to add: no starter CI.

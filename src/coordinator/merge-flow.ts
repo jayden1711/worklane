@@ -1,6 +1,6 @@
 // The merge-policy flow: watching opened PRs, the merge decision, waiting for the owner, the light check, and
 // main's checks after a merge (revert on red).
-import { startRefusal } from '../testrun/gate.js';
+import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
@@ -91,7 +91,8 @@ export abstract class MergeFlow extends FixRuns {
         diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },
       config: () => this.d.cfg.project.fix_forward,
-      required: () => this.d.cfg.project.required_checks,
+      required: () => this.requiredChecks(),
+      checks: (sha) => this.headChecksOf(sha),
       probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
       // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
       get testRuns() {
@@ -699,11 +700,16 @@ export abstract class MergeFlow extends FixRuns {
       const m = e.payload as EventPayload<'merge.done'>;
       if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
       this.mainPolled.set(m.sha, now);
-      const required = this.d.cfg.project.required_checks;
+      const required = this.requiredChecks();
+      // WHY (#469): nothing to judge by is never "green": no result is recorded (the config_invalid incident and the
+      // first-run step say why); a merge is never marked green with nothing checked.
+      if (!required.length) continue;
+      // No CI: every test_run tier (fast and full) runs on the merge commit, in the sandbox; judged from the log.
+      if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
       // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
       // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
       // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
-      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.d.backlog.checks(m.sha)) });
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.headChecksOf(m.sha)) });
       if (gate.wait) continue;
       const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
@@ -720,6 +726,39 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       if (failed.length) await this.mainWentRed(m, failed);
     }
+  }
+
+  /** No CI: merge commits whose tier runs this process started (or found already queued in the log). */
+  private readonly mainRuns = new Set<string>();
+
+  /**
+   * No CI (#469): run every test_run tier, fast and full, on merge commit `sha` in the sandbox, once (a restart finds
+   * them queued in the log). Their results land in the event log as testrun.finished, which is all main is judged by.
+   * Held at the start gate, or test runs off: nothing starts now, the next poll tries again, and the main check's
+   * timeout says so if it never can.
+   */
+  private startMainRuns(sha: string) {
+    if (this.mainRuns.has(sha)) return;
+    if (this.d.log.read(0, ['testrun.queued']).some((e) => (e.payload as EventPayload<'testrun.queued'>).sha === sha)) {
+      this.mainRuns.add(sha);
+      return;
+    }
+    const tr = this.liveTestRuns;
+    if (!tr) return;
+    const tiers = (this.d.cfg.tests.test_run?.tiers ?? []).map((t) => t.name);
+    if (!tiers.length) return;
+    this.mainRuns.add(sha);
+    void (async () => {
+      try {
+        this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+        // Every tier, fast and full, in one run (as the deploy gate's post-merge run asks for them).
+        await tr.startTestRun({ repo: this.d.repo, sha, kind: 'full', prs: [], tiers });
+      } catch (e) {
+        // Held, or failed to start: try again on a later poll.
+        this.mainRuns.delete(sha);
+        if (!(e instanceof TestRunHeld)) this.emit('coordinator.error', { instance: this.d.instance, where: `No CI runs on ${sha.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
+      }
+    })();
   }
 
   /** A real red after auto-merging `m`: fix-forward takes it (coordinator/fix-forward.ts), unless the branch was red already. */
