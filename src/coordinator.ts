@@ -16,6 +16,7 @@ import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { changeContext, investigationContext, summaryContext } from './decision-context.js';
 import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { evalRouting } from './eval-routing.js';
@@ -963,7 +964,7 @@ export class Coordinator extends HarnessEvals {
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
         if (lvl.level === 'L3') {
-          await this.ask('land', n, owner, `Approve landing #${n} (${lvl.level})?`, ['approve', 'reject'], verdict.patch_correct ? 'approve' : 'reject', [`head ${head.slice(0, 8)}`, ...lvl.reasons, `evaluator: ${verdict.confidence}; ${verdict.advice || 'no concerns'}`]);
+          await this.ask('land', n, owner, `Approve landing #${n} (${lvl.level})?`, ['approve', 'reject'], verdict.patch_correct ? 'approve' : 'reject', [`head ${head.slice(0, 8)}`, ...lvl.reasons, `evaluator: ${verdict.confidence}; ${verdict.advice || 'no concerns'}`], changeContext({ base, head, files: change.files, level: lvl, verdict, checks, tampered: change.tampered }));
         } else {
           this.emit('land.queued', { issue: n, head, level: lvl.level });
         }
@@ -1124,7 +1125,7 @@ export class Coordinator extends HarnessEvals {
     await this.d.backlog.removeLabel(n, 'agent:working');
     await this.d.backlog.addLabels(n, ['in-review']);
     // The option it recommends is the recommendation; its reasoning, whole, is the detail's last line.
-    await this.ask('question', n, owner, 'How should this proceed?', [...INVESTIGATION_OPTIONS], s.recommended ?? '', [`confidence ${s.confidence}`, `${s.findings.length} finding(s)`, ...(s.recommendation?.trim() ? [`${RECOMMENDATION_PREFIX}${s.recommendation.trim()}`] : [])]);
+    await this.ask('question', n, owner, 'How should this proceed?', [...INVESTIGATION_OPTIONS], s.recommended ?? '', [`confidence ${s.confidence}`, `${s.findings.length} finding(s)`, ...(s.recommendation?.trim() ? [`${RECOMMENDATION_PREFIX}${s.recommendation.trim()}`] : [])], investigationContext(s));
   }
 
   private async reproduce(issue: Issue, doneWhen: DoneWhenList, base: string, workerPath: string): Promise<{ path: string; hash: string } & { unavailable?: string }> {
@@ -1258,7 +1259,7 @@ export class Coordinator extends HarnessEvals {
       return this.build(issue, doneWhen, path, taskFile, repro, [...feedback, '', section], attempt, plan, researched + 1, noOpenModel, more);
     }
     if (s.ask) {
-      await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '', ...(s.ask.detail ? [`${RECOMMENDATION_PREFIX}${s.ask.detail}`] : [])]);
+      await this.ask('question', n, owner, s.ask.question, s.ask.options, s.ask.recommendation, [s.summary ?? '', ...(s.ask.detail ? [`${RECOMMENDATION_PREFIX}${s.ask.detail}`] : [])], summaryContext(s.summary));
       return { stop: true as const };
     }
     if (s.blocked) {

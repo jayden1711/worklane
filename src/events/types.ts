@@ -19,6 +19,62 @@ const CheckRunSchema = z.strictObject({
   kind: z.literal('browser').optional(),
 });
 
+/**
+ * What a decision rests on, recorded where it is asked so the dashboard's detail view (src/decision-detail.ts) shows
+ * it whole: the change (its commits, files, review level and why, the review categories it falls in), the
+ * evaluator's verdict and the checks at the head asked about, and an investigation's or a worker's own findings
+ * and summary. Every field is optional: a kind records what it has, an older event has none, and the view says
+ * plainly what was not recorded. Never sent to a viewer (src/viewer-events.ts lists the fields a viewer gets).
+ */
+export const DecisionContextSchema = z.strictObject({
+  base: sha.optional(),
+  head: sha.optional(),
+  files: z.array(z.strictObject({ path: z.string().max(500), added: z.number().int().nonnegative(), removed: z.number().int().nonnegative() })).max(300).optional(),
+  /** More files changed than `files` lists. */
+  files_more: z.number().int().positive().optional(),
+  level: z.enum(['L0', 'L1', 'L2', 'L3']).optional(),
+  level_reasons: z.array(z.string().max(1000)).max(50).optional(),
+  /** The review categories the change falls in (src/review.ts computeLevel): money-path, auth, secrets and the like, each with its files. */
+  categories: z.record(z.string().max(100), z.array(z.string().max(500)).max(50)).optional(),
+  verdict: z
+    .strictObject({
+      patch_correct: z.boolean(),
+      test_correct: z.boolean(),
+      confidence: z.enum(['high', 'medium', 'low']),
+      advice: z.string().max(4000),
+      /** Why the evaluator gave that confidence, when its verdict says (absent: it gave none). */
+      confidence_reason: z.string().max(2000).optional(),
+      unread: z.array(z.string().max(500)).max(100).optional(),
+      unverified_claims: z.array(z.string().max(1000)).max(50).optional(),
+      design_change: z.boolean().optional(),
+      design_reason: z.string().max(2000).optional(),
+    })
+    .optional(),
+  checks: z.array(z.strictObject({ check: z.string().max(300), status: z.enum(['pass', 'fail', 'unavailable', 'skipped']), duration_ms: z.number().int().nonnegative().optional(), tail: z.string().max(2000).optional() })).max(100).optional(),
+  /** The tamper guard's flags on the change. */
+  tampered: z.array(z.string().max(1000)).max(50).optional(),
+  /** The asking agent's own summary (an investigation's answer, a worker's summary), whole. */
+  summary: z.string().max(8000).optional(),
+  /** Each finding as the agent gave it, with the file and line its evidence names (read from the evidence, when it names one). */
+  findings: z
+    .array(
+      z.strictObject({
+        claim: z.string().max(4000),
+        evidence: z.string().max(4000),
+        file: z.string().max(500).optional(),
+        line: z.number().int().positive().optional(),
+        severity: z.string().max(40).optional(),
+        confidence: z.enum(['high', 'medium', 'low']).optional(),
+      }),
+    )
+    .max(100)
+    .optional(),
+  /** The agent's overall confidence in its findings. */
+  confidence: z.enum(['high', 'medium', 'low']).optional(),
+  /** What the agent could not confirm. */
+  unverified: z.array(z.string().max(1000)).max(50).optional(),
+});
+
 export const EventSchemas = {
   // backlog and ownership
   'issue.seen': z.strictObject({ issue, title: z.string(), labels: z.array(z.string()), author: z.string(), owner: z.string().nullable(), actionable: z.boolean(), why: z.string() }),
@@ -298,7 +354,7 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake', 'delegation']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()) }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake', 'delegation']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()), context: DecisionContextSchema.optional() }),
   /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
   'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
   /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */
