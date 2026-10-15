@@ -37,13 +37,18 @@ export function SetupScreensView({ steps }: { steps: SetupStepView[] }) {
   );
 }
 
-/** For owners and writers (the first-run checklist is theirs); nothing for anyone else. */
-export function SetupScreens() {
+/**
+ * For owners and writers (the first-run checklist is theirs); nothing for anyone else. `onLoaded`: called once its
+ * answer (the steps, or a refusal that shows nothing) is in, for the page's in-order panels.
+ */
+export function SetupScreens({ onLoaded }: { onLoaded?: () => void } = {}) {
   const [steps, setSteps] = useState<SetupStepView[] | null>(null);
   useEffect(() => {
     getFirstRun()
       .then((f) => setSteps(withScreen(f.setup?.groups.flatMap((g) => g.steps) ?? [])))
-      .catch(() => setSteps(null));
+      .catch(() => setSteps(null))
+      .finally(() => onLoaded?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return steps?.length ? <SetupScreensView steps={steps} /> : null;
 }
