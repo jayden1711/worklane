@@ -395,7 +395,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   const { state, error, live, pulse, refresh } = useLiveState();
   usePrefetch(!!state, scope?.current ?? null);
   // The Claude usage limit: every instance's pause (a banner on every page) and usage (the Overview's lines).
-  const usage = useUsage(state?.lastId);
+  const { usage, answered: usageAnswered } = useUsage(state?.lastId);
   const now = useNow(usage.some((u) => u.paused));
   const [theme, toggleTheme] = useTheme();
   const [menu, setMenu] = useState(false);
@@ -451,6 +451,10 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   let page: React.ReactNode;
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
+  // The page waits for the usage's first answer too: a pause's banner goes above it, and appearing after the page
+  // would move every control on it (#455: 83 px). The usage is asked for at the same time as the state; a usage that
+  // hasn't answered in USAGE_WAIT_MS (3 s) no longer holds the page.
+  else if (!usageAnswered) page = <Loading />;
   // WHY: setup mode (no config yet) serves the first-run page alone; any other page's address says what it needs (#468).
   else if (state.setupMode) page = path === '/' || path === '/first-run' ? <FirstRunPage state={state} /> : <SetupModeHidden path={path} />;
   else if (path === '/inbox') page = <InboxPage state={state} />;

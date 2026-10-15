@@ -38,8 +38,15 @@ export function useNow(on: boolean): number {
 /**
  * Every instance's usage this page can read: shown at once from what was kept (web/src/cache.ts), re-read every 30 s,
  * and the instance shown's again whenever its event log moves (`lastId`; the others' logs don't move with it).
+ * `answered`: every instance's first answer (or failure) is in, or was kept, or USAGE_WAIT_MS has passed: until then
+ * the page waits, so a banner never appears above controls already on screen (#455: a pause's banner answering last
+ * moved every page 83 px). The bound keeps a usage request that hangs from holding every page on Loading; an answer
+ * after it may still add the banner late.
  */
-export function useUsage(lastId: number | undefined): UsageInfo[] {
+/** The longest a page waits for the usage's first answer before it shows anyway. */
+export const USAGE_WAIT_MS = 3_000;
+
+export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answered: boolean } {
   const names = (): (string | null)[] => {
     const h = hubNow();
     return h ? h.instances.filter((i) => i.up).map((i) => i.name) : [null];
@@ -48,19 +55,22 @@ export function useUsage(lastId: number | undefined): UsageInfo[] {
   got.current ??= new Map(names().map((n) => [n, peek<UsageInfo>(viewUrl('/api/usage', n))?.data ?? null]));
   const shown = () => names().flatMap((n) => (got.current.get(n) ? [got.current.get(n)!] : []));
   const [usage, setUsage] = useState<UsageInfo[]>(shown);
+  const [answered, setAnswered] = useState(() => names().every((n) => got.current.get(n)));
   const gone = useRef(false);
   const load = async (which: (string | null)[]) => {
     await hub;
     await Promise.all(which.map(async (n) => got.current.set(n, await (n ? instanceApi<UsageInfo>(n, '/api/usage') : api<UsageInfo>('/api/usage')).catch(() => null))));
-    if (!gone.current) setUsage(shown());
+    if (!gone.current) (setUsage(shown()), setAnswered(true));
   };
   useEffect(() => {
     gone.current = false;
     void load(names());
     const t = window.setInterval(() => void load(names()), 30_000);
+    const bound = window.setTimeout(() => setAnswered(true), USAGE_WAIT_MS);
     return () => {
       gone.current = true;
       window.clearInterval(t);
+      window.clearTimeout(bound);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -73,7 +83,7 @@ export function useUsage(lastId: number | undefined): UsageInfo[] {
     void load([scopeNowOrNull()?.current ?? null]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastId]);
-  return usage;
+  return { usage, answered };
 }
 
 /** The owner's re-check of a refused login: the coordinator makes one tiny real call on its next tick. */
