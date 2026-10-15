@@ -62,6 +62,8 @@ export interface WaitItem {
   sha?: string;
   /** For a PR left to the owner as high-risk: each category it touches, plainly, with its first file (merge-policy.ts whyHighRisk). */
   why?: { category: string; text: string }[];
+  /** For a decision or a held plan: the decision's id, so the dashboard opens its detail (/decisions/<id>). */
+  decision?: string;
 }
 
 /** A PR the harness merged on its own, for the owner's morning sampling. */
@@ -175,19 +177,19 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: { since?: Date; 
     if (e.type !== 'decision.asked') continue;
     const p = e.payload as { id: string; kind: string; issue: number | null; owner: string; question: string };
     if (answered.has(p.id) || p.kind === 'plan') continue;
-    add('awaiting_decision', e.ts, p.issue, null, `@${p.owner}: ${p.question.split('\n')[0]!.slice(0, 160)}`);
+    add('awaiting_decision', e.ts, p.issue, null, `@${p.owner}: ${p.question.split('\n')[0]!.slice(0, 160)}`, { decision: p.id });
   }
 
   // Plans held for the owner, until decided.
-  const planHeld = new Map<number, { ts: string; reasons: string[] }>();
+  const planHeld = new Map<number, { ts: string; reasons: string[]; decision: string | null }>();
   for (const e of evs) {
-    const p = e.payload as { issue: number; held?: boolean; reasons?: string[] };
+    const p = e.payload as { issue: number; held?: boolean; reasons?: string[]; decision?: string | null };
     if (e.type === 'plan.posted') {
-      if (p.held) planHeld.set(p.issue, { ts: e.ts, reasons: p.reasons ?? [] });
+      if (p.held) planHeld.set(p.issue, { ts: e.ts, reasons: p.reasons ?? [], decision: p.decision ?? null });
       else planHeld.delete(p.issue);
     } else if (e.type === 'plan.decided') planHeld.delete(p.issue);
   }
-  for (const [issue, h] of planHeld) add('plan_held', h.ts, issue, null, h.reasons.length ? h.reasons.join('; ') : 'held for your approval');
+  for (const [issue, h] of planHeld) add('plan_held', h.ts, issue, null, h.reasons.length ? h.reasons.join('; ') : 'held for your approval', h.decision ? { decision: h.decision } : {});
 
   // PRs left for the owner to review and merge: not merged automatically, or a conflict fix gave up.
   const needsOwner = new Map<number, { ts: string; issue: number; detail: string; why?: { category: string; text: string }[] }>();

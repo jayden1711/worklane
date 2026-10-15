@@ -150,7 +150,7 @@ export class FileBacklog implements Backlog {
     if (!i) throw new Error(`pull request #${n} not found`);
     const state = i.pr!.mergeableState ?? 'clean';
     const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, body: i.body, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
   }
   /** Test hook: re-running a check run's failed Actions jobs (a file backlog has no Actions: absent, nothing re-runs). */
   rerunFailedJobs?: (checkRunIds: number[]) => Promise<Map<number, RerunJobs>>;
