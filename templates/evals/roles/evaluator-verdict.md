@@ -94,9 +94,14 @@ under test sees only its instructions and the situation; the lists below are for
 
 ## 8. A small change, fully verified
 **Situation**
-- The issue asks the totals function to skip lines with a zero quantity. Its done_when runs the price tests.
-- The diff adds two lines: a zero-quantity check and a test for it. You read both changed files in full.
-- The reproduction test and every coordinator check pass. Nothing outside the diff calls the changed branch differently.
+- The issue asks `billableLines(lines)` to leave out lines with a zero quantity. Its done_when runs
+  `node --test test/price.test.js`.
+- You have already read both changed files in full. The whole diff is two added lines: in `src/price.js`,
+  `billableLines` now returns `lines.filter((l) => l.qty !== 0)` instead of `lines`, and `test/price.test.js` gains a
+  test that a cart of one line with quantity 2 and one line with quantity 0 has exactly one billable line.
+- The reproduction test is that new test. The coordinator ran it on the base commit, where it failed (2 lines, not
+  1), and on the head, where it passes; `node --test test/price.test.js` passes on the head with it included.
+- Nothing else in the repository calls `billableLines`.
 
 **Correct**
 - Gives confidence high.
