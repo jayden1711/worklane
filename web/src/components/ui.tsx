@@ -56,16 +56,28 @@ export function Avatar({ login, title, size = 20 }: { login: string | null | und
   return <PersonAvatar login={login} title={title} size={size} />;
 }
 
+/**
+ * A person's picture, in a box of exactly `size` whatever the picture does: loading, loaded at any shape, or failed.
+ * WHY (#452): the bare <img> took its height from the page's `img { height: auto }`, so once GitHub's picture failed
+ * the broken image grew to its alt text's height (18 px to 52 px) until the initials replaced it; every decision card
+ * grew 30 px for that moment, and a click aimed at a card below landed 60 px off.
+ */
 function PersonAvatar({ login, title, size }: { login: string; title: string | undefined; size: number }) {
   const [failed, setFailed] = useState(false);
-  if (failed) {
-    return (
-      <span title={title ?? `@${login}`} className="inline-flex items-center justify-center rounded-full bg-muted font-medium uppercase text-muted-foreground" style={{ width: size, height: size, fontSize: Math.max(8, size * 0.42) }}>
-        {login.replace(/[^a-z0-9]/gi, '').slice(0, 2)}
-      </span>
-    );
-  }
-  return <img src={`https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`} alt={login} title={title ?? `@${login}`} width={size} height={size} className="rounded-full bg-muted" onError={() => setFailed(true)} />;
+  return (
+    <span
+      title={title ?? `@${login}`}
+      className="inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-muted font-medium uppercase text-muted-foreground"
+      style={{ width: size, height: size, fontSize: Math.max(8, size * 0.42) }}
+      data-avatar={login}
+    >
+      {failed ? (
+        login.replace(/[^a-z0-9]/gi, '').slice(0, 2)
+      ) : (
+        <img src={`https://github.com/${encodeURIComponent(login)}.png?size=${size * 2}`} alt={login} width={size} height={size} className="block max-w-none rounded-full" style={{ width: size, height: size }} onError={() => setFailed(true)} />
+      )}
+    </span>
+  );
 }
 
 export const STATUS_LABEL: Record<TaskStatus, string> = {

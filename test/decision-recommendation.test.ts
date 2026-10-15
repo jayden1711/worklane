@@ -6,7 +6,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { findChrome, launchChrome, until, type Cdp } from '../src/browser/cdp.js';
+import { findChrome, launchChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { RECOMMENDATION_PREFIX, settleRecommendation } from '../src/decision-ask.js';
@@ -143,6 +143,85 @@ test(
     }
   },
 );
+
+/** A 1 x 3 PNG: a person's picture taller than it is wide. */
+const TALL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAADCAIAAADdv/LVAAAADklEQVR4nGNwaDjAAMUAGYwEgS6QGrIAAAAASUVORK5CYII=';
+
+// #452: on CI the Show more toggle moved 60 px between the click's read and its press, from (438, 494) to (438, 434).
+// Each card's avatar is a picture from GitHub; when it failed, the broken image grew from 18 px to its alt text's
+// height until the initials replaced it, so each card above the toggle grew 30 px for that moment. Here every picture
+// request is held until the page is drawn and every control on screen noted, then answered (failed, or a picture taller than
+// wide), and where each control is gets read in the image's own error or load event, before the page's
+// handler runs, and again once it has settled: none may have moved. Then the toggle is clicked where it is.
+for (const outcome of ['fails', 'is taller than wide'] as const) {
+  test(
+    `Inbox and Decisions in a real Chrome: a person's picture that ${outcome} moves no control on the page (#452)`,
+    { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
+    async (ctx) => {
+      await oneChromeAtATime(ctx);
+      const prev = process.env[`${BRAND.envPrefix}_STATE_DIR`];
+      process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'rec-statedir-'));
+      const demo = await seedDemo(join(mkdtempSync(join(tmpdir(), 'rec-demo-')), 'demo')).finally(() => {
+        if (prev === undefined) delete process.env[`${BRAND.envPrefix}_STATE_DIR`];
+        else process.env[`${BRAND.envPrefix}_STATE_DIR`] = prev;
+      });
+      const log = new EventLog(demo.eventsDb);
+      log.append('decision.asked', { id: 'd-option', kind: 'question', issue: null, owner: 'example-owner', question: 'Which export format?', options: ['csv', 'json'], recommendation: 'csv', receipts: [] }, 'coordinator');
+      log.append('decision.asked', { id: 'd-old-prose', kind: 'question', issue: null, owner: 'example-owner', question: 'How should this proceed?', options: ['approve-fix', 'investigate-more', 'close'], recommendation: LONG_PROSE, receipts: ['confidence high'] }, 'coordinator');
+      log.close();
+      const d = await startDashboard({ root: demo.root, cfg: loadConfig(demo.root), eventsDb: demo.eventsDb, stateDir: mkdtempSync(join(tmpdir(), 'rec-state-')), user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'rec-slots-')) });
+      const b = await launchChrome(chrome!, { width: 1280, height: 1000 });
+      try {
+        const cdp = b.cdp;
+        await cdp.send('Page.enable');
+        await cdp.send('Runtime.enable');
+        await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `try { sessionStorage.setItem('dash-token', ${JSON.stringify(d.token)}); } catch {}` });
+        // Each page asks for the pictures again, rather than taking the first page's from the cache.
+        await cdp.send('Network.enable');
+        await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+        const held: string[] = [];
+        cdp.on('Fetch.requestPaused', (p) => void held.push(p.requestId as string));
+        await cdp.send('Fetch.enable', { patterns: [{ urlPattern: 'https://github.com/*', requestStage: 'Request' }] });
+        for (const page of ['decisions', 'inbox']) {
+          held.length = 0;
+          await cdp.send('Page.navigate', { url: `${d.url}/${page}` });
+          const card = `document.querySelector('[data-testid="page-${page}"] [data-decision="d-old-prose"]')`;
+          await until(`the ${page} page's two decisions, and a picture asked for`, async () => held.length > 0 && (await js<boolean>(cdp, `!!${card} && !!document.querySelector('[data-testid="page-${page}"] [data-decision="d-option"]')`)), 20_000);
+          await sleep(300);
+          // Every control on screen and where it is; read again in each picture's own event, before the page's handler.
+          const noted = await js<string[]>(
+            cdp,
+            `(() => {
+              const name = (e) => (e.closest('[data-decision]')?.dataset.decision ?? '') + ' ' + (e.dataset.testid || e.dataset.option || (e.textContent || '').trim().slice(0, 30));
+              window.__noted = [...document.querySelectorAll('[data-testid="page-${page}"] button')].filter((e) => { const r = e.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < innerHeight; })
+                .map((e) => { const r = e.getBoundingClientRect(); return { e, name: name(e), x: r.x, y: r.y }; });
+              window.__moved = () => window.__noted.filter((n) => { if (!n.e.isConnected) return true; const r = n.e.getBoundingClientRect(); return Math.abs(r.x - n.x) > ${STEADY_PX} || Math.abs(r.y - n.y) > ${STEADY_PX}; })
+                .map((n) => n.name + ': (' + Math.round(n.x) + ', ' + Math.round(n.y) + ') -> ' + (n.e.isConnected ? '(' + Math.round(n.e.getBoundingClientRect().x) + ', ' + Math.round(n.e.getBoundingClientRect().y) + ')' : 'gone'));
+              window.__atImage = [];
+              for (const type of ['error', 'load']) addEventListener(type, (ev) => { if (ev.target instanceof HTMLImageElement) window.__atImage.push(...window.__moved().map((m) => 'at its ' + type + ': ' + m)); }, true);
+              return window.__noted.map((n) => n.name);
+            })()`,
+          );
+          assert.ok(noted.some((n) => n.includes('decision-recommendation-toggle')), `${page}: the toggle is on screen (${noted.join('; ')})`);
+
+          for (const requestId of held.splice(0)) {
+            if (outcome === 'fails') await cdp.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
+            else await cdp.send('Fetch.fulfillRequest', { requestId, responseCode: 200, responseHeaders: [{ name: 'Content-Type', value: 'image/png' }], body: TALL_PNG });
+          }
+          await until(`every picture on the ${page} page answered`, async () => !held.length && (await js<boolean>(cdp, `[...document.querySelectorAll('img')].every((i) => i.complete)`)), 20_000);
+          await sleep(300);
+          const moved = await js<string[]>(cdp, `[...new Set([...window.__atImage, ...window.__moved().map((m) => 'settled: ' + m)])]`);
+          assert.deepEqual(moved, [], `${page}: a picture that ${outcome} moved controls on screen (was -> now)`);
+
+          await click(cdp, `${card}.querySelector('[data-testid="decision-recommendation-toggle"]')`, `the ${page} page, decision d-old-prose`);
+        }
+      } finally {
+        await b.close();
+        await d.close();
+      }
+    },
+  );
+}
 
 // The click helper itself, on a page of its own: a covered target fails at once naming the cover, and a target its
 // ancestor is still moving into place is clicked where it ends up, while an endless pulse around it is not waited on.
