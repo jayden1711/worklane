@@ -16,7 +16,7 @@ import { writeLive } from '../src/console.js';
 import { EventLog } from '../src/events/log.js';
 import { tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester, machineOwnersFile, marksOf, MARKS, repoRoot, seedInstanceItems, type InstanceMarks } from './helpers.js';
 import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
@@ -1860,10 +1860,7 @@ test("Add project: the page's name and repo check gives the machine helper's ans
 });
 
 test("two instances on one machine: with one selected, no page shows any of the other's items; All instances shows both, labelled; the default is the selected one", async () => {
-  const marks: Record<'a' | 'b', InstanceMarks> = {
-    a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
-    b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
-  };
+  const marks: Record<'a' | 'b', InstanceMarks> = { a: { ...MARKS.a }, b: { ...MARKS.b } };
   // Both instances' coordinators hold slots in the machine's one slots dir, as on a real machine.
   const shared = mkdtempSync(join(tmpdir(), 'web-render-shared-slots-'));
   const servers: Record<string, Awaited<ReturnType<typeof startDashboard>>> = {};

@@ -60,7 +60,7 @@ import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { fullRunLock, tryAgentSlot } from '../src/slots.js';
 import { tryTestSlot } from '../src/testrun/slots.js';
-import { exampleProject, machineOwnersFile, repoRoot, marksOf, seedInstanceItems, type InstanceMarks } from './helpers.js';
+import { exampleProject, machineOwnersFile, repoRoot, marksOf, MARKS, seedInstanceItems } from './helpers.js';
 
 const CLIENT_ID = 'Iv1.testclient01';
 const CLIENT_SECRET = 'client-secret-for-tests';
@@ -121,10 +121,7 @@ const seenIssue = (issue: number, title: string) => ({ issue, title, labels: ['r
 const ask = (id: string, kind: 'question' | 'plan' | 'land') => ({ id, kind, issue: 1, owner: 'example-owner', question: `${kind}?`, options: ['approve', 'reject'], recommendation: 'approve', receipts: [] });
 
 /** Each instance's items when the set-up seeds them (src/dashboard.ts ownHolders tells holders apart by project and actor). */
-const MARKS: Record<'a' | 'b', InstanceMarks> = {
-  a: { project: 'alpha-proj', actor: 'wl-alpha@host', issue: 8101, pr: 8170, run: 'tr-alpha-1', title: 'Alpha-only' },
-  b: { project: 'beta-proj', actor: 'wl-beta@host', issue: 9201, pr: 9270, run: 'tr-beta-1', title: 'Beta-only' },
-};
+// The two instances' markers: test/helpers.ts MARKS (every number above any pid).
 
 /**
  * The whole set-up: a fake GitHub, two instances (each its own server, repo and log), the hub with sign-in, a mockable clock.

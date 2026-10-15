@@ -36,7 +36,7 @@ import { ALLOWED_SIGNERS, PENDING_SIGNERS } from '../src/updater-setup.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
 import { ephemeralStart, refusedPort } from './held-port.js';
-import { exampleProject, repoRoot } from './helpers.js';
+import { exampleProject, MARKS, repoRoot } from './helpers.js';
 import { homeMoved, isolatedEnv, onRealMachine, TEST_PRELOAD, testMachine } from './isolate.js';
 
 const testDir = join(repoRoot, 'test');
@@ -436,8 +436,8 @@ test(
     put(`etc/${cli}/watchdog.json`, JSON.stringify({ stall_hours: 1 }));
     put(`etc/${cli}/allowed_signers`, 'live@example.com ssh-ed25519 AAAA\n');
     put(`etc/systemd/system/${cli}-dashboard-hub.service`, '[Service]\n');
-    put(`var/lib/${cli}/updates.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: 'waiting', to: '9201', reason: 'beta-proj #9201 wl-beta@host tr-beta-1 Beta-only' })}\n`);
-    put(`var/lib/${cli}/machine-changes.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), by: 'wl-beta@host', what: 'slots.max_agents', from: 9201, to: 9270 })}\n`);
+    put(`var/lib/${cli}/updates.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), event: 'waiting', to: String(MARKS.b.issue), reason: `beta-proj #${MARKS.b.issue} wl-beta@host tr-beta-1 Beta-only` })}\n`);
+    put(`var/lib/${cli}/machine-changes.jsonl`, `${JSON.stringify({ at: new Date().toISOString(), by: 'wl-beta@host', what: 'slots.max_agents', from: MARKS.b.issue, to: MARKS.b.pr })}\n`);
     put(`usr/local/libexec/${cli}-machine`, `#!/bin/sh\necho ran >> "${join(live, 'helper-ran')}"\n`, 0o755);
     const before = filesUnder(live);
     const env: NodeJS.ProcessEnv = {
