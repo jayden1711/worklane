@@ -33,3 +33,27 @@ export function signingProblem(cfg, fileExists = existsSync) {
 export function canVerify(cfg) {
   return (cfg['gpg.format'] || 'openpgp') !== 'ssh' || !!cfg['gpg.ssh.allowedsignersfile'];
 }
+
+/**
+ * The allowed-signers file a release tag is verified against, or why there is none (SSH only; GPG checks its keyring).
+ * The repo's own `repoSigners` (.github/release-signers, what CI checks the pushed tag against) comes first, then the
+ * configured gpg.ssh.allowedSignersFile. A release never tags without one: the tag must verify before it's reported.
+ */
+export function releaseSigners(cfg, repoSigners, fileExists = existsSync) {
+  if ((cfg['gpg.format'] || 'openpgp') !== 'ssh') return { file: null, problem: null };
+  if (repoSigners && fileExists(repoSigners)) return { file: repoSigners, problem: null };
+  const own = (cfg['gpg.ssh.allowedsignersfile'] || '').replace(/^~(?=\/)/, homedir());
+  if (own && fileExists(own)) return { file: own, problem: null };
+  const why = own ? `gpg.ssh.allowedSignersFile names ${own}, which doesn't exist` : 'no allowed-signers file to verify the tag against';
+  return {
+    file: null,
+    problem: [
+      `${why}. A release tag is verified before it's reported, never left unverified. Set one up, then run this again:`,
+      '',
+      '  echo "release-signer namespaces=\"git\" $(cat ~/.ssh/id_ed25519.pub)" > ~/.ssh/allowed_signers',
+      '  git config --global gpg.ssh.allowedSignersFile ~/.ssh/allowed_signers',
+      '',
+      '(or release from a checkout whose .github/release-signers holds your key).',
+    ].join('\n'),
+  };
+}

@@ -149,7 +149,7 @@ chmod 0644 /var/lib/worklane/updates.jsonl
 
 say "the timer: every 10 minutes (the updater does nothing while updates are off)"
 put_unit worklane-update.service "[Unit]
-Description=worklane engine update: install main when it fast-forwards and its checks are green (off unless enabled)
+Description=worklane engine update: install the newest signed release or main commit (as updates.json's channel says) whose checks are green (off unless enabled)
 Wants=network-online.target
 After=network-online.target
 

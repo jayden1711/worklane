@@ -11,12 +11,12 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
    echo probe > /tmp/probe && ssh-keygen -Y sign -f <your key> -n git /tmp/probe
    ssh-keygen -Y verify -f .github/release-signers -I release-signer -n git -s /tmp/probe.sig < /tmp/probe
    ```
-4. **Cut it** in a clean, detached checkout at that commit: `node scripts/release.mjs X.Y.Z`.
+4. **Cut it** in a clean, detached checkout at that commit: `node scripts/release.mjs X.Y.Z`. It verifies the tag against the checkout's `.github/release-signers` (what CI checks), or your `gpg.ssh.allowedSignersFile` when the repo has none, and refuses before building when it can verify against neither. It ends with `vX.Y.Z: signed and verified`; on any failure after tagging (a bad signature, Ctrl-C) it deletes the tag and exits non-zero.
 5. **Push only behind the verify**, as a separate step, never batched after `release.mjs`:
    ```sh
    git tag -v vX.Y.Z && git push origin vX.Y.Z
    ```
-   If `release.mjs` failed, it can leave the tag behind (#457): `git tag -d vX.Y.Z` before retrying.
+   Push only after `release.mjs` has printed `vX.Y.Z: signed and verified`. A failed run leaves no tag (#457); if one is there from an older run, check it isn't pushed, then `git tag -d vX.Y.Z` (the script refuses to tag over it).
 6. **Watch `release.yml` on the tag:** the build, npx-init, the tag check (`verify the release tag`) and `npm stage publish`.
 7. **Approve** the staged version on npmjs.com (`@worklane/cli` → Staged Packages) with 2FA, then check:
    ```sh
