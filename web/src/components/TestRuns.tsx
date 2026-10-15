@@ -154,9 +154,13 @@ export function TestRunsView({ data, compact = false }: { data: TestRunsData; co
 }
 
 /** Loads one instance's test runs (null: this page's own server), again whenever `pulse` changes. */
-export function TestRunsPanel({ instance = null, pulse = 0, compact = false }: { instance?: string | null; pulse?: number; compact?: boolean }) {
+export function TestRunsPanel({ instance = null, pulse = 0, compact = false, onLoaded }: { instance?: string | null; pulse?: number; compact?: boolean; onLoaded?: () => void }) {
   // Shown at once from what was kept for this instance, then read again (web/src/cache.ts).
   const { data, error } = useView<TestRunsData>('/api/test-runs', pulse, instance);
+  const answered = !!data || !!error;
+  useEffect(() => {
+    if (answered) onLoaded?.();
+  }, [answered, onLoaded]);
   if (error && !data) return <div className="text-[12.5px] text-ink-3">Test runs: {error}</div>;
   return data ? <TestRunsView data={data} compact={compact} /> : null;
 }

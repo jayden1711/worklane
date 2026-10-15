@@ -298,13 +298,14 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
   );
 }
 
-export function MachineSettings() {
+export function MachineSettings({ onLoaded }: { onLoaded?: () => void }) {
   const [data, setData] = useState<MachineData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = () =>
     api<MachineData>('/api/machine')
       .then((d) => (setData(d), setError(null)))
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => setError(e.message))
+      .finally(() => onLoaded?.());
   useEffect(() => void load(), []);
   // While a request waits for the coordinator, look again every few seconds until it has run.
   const waiting = !!data && anyPending(data);

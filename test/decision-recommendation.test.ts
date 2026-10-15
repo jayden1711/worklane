@@ -13,7 +13,7 @@ import { RECOMMENDATION_PREFIX, settleRecommendation } from '../src/decision-ask
 import { seedDemo } from '../src/demo.js';
 import { EventLog } from '../src/events/log.js';
 import { INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, WORKER_SCHEMA } from '../src/roles.js';
-import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { REAL_CHROME_TIMEOUT, STEADY_PX, oneChromeAtATime, realChromeTests, webUiSkip } from './browser-helpers.js';
 import { exampleRoles, repoRoot } from './helpers.js';
 
 /** A long prose recommendation, as an older engine stored it (the one seen cut at "reconcile.js:472 (pin"). */
@@ -206,7 +206,7 @@ async function js<T>(cdp: Cdp, expression: string): Promise<T> {
  * nothing in the product changes.
  */
 async function click(cdp: Cdp, element: string, what: string = element) {
-  const at = await js<{ x: number; y: number; hit: string | null }>(
+  const at = await js<{ x: number; y: number; hit: string | null; moved: string | null }>(
     cdp,
     `(async () => {
       const e = ${element};
@@ -218,6 +218,12 @@ async function click(cdp: Cdp, element: string, what: string = element) {
       await Promise.all(moving.map((a) => a.finished.catch(() => {})));
       const r = e.getBoundingClientRect();
       const x = r.x + r.width / 2, y = r.y + r.height / 2;
+      // Read again two frames later, just before the press: a toggle that moved in between fails at once
+      // (test/browser-helpers.ts steadyCentre), never a press that lands on something else.
+      await Promise.race([new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))), new Promise((ok) => setTimeout(ok, 250))]);
+      const r2 = e.getBoundingClientRect();
+      const x2 = r2.x + r2.width / 2, y2 = r2.y + r2.height / 2;
+      if (!e.isConnected || Math.abs(x2 - x) > ${STEADY_PX} || Math.abs(y2 - y) > ${STEADY_PX}) return { x, y, hit: null, moved: 'from (' + Math.round(x) + ', ' + Math.round(y) + ') to ' + (e.isConnected ? '(' + Math.round(x2) + ', ' + Math.round(y2) + ')' : 'out of the page') };
       const h = document.elementFromPoint(x, y);
       const name = (n) => n ? '<' + n.tagName.toLowerCase() + [...n.attributes].map((a) => ' ' + a.name + '="' + a.value.slice(0, 60) + '"').join('') + '>' : 'nothing';
       const hit = h === e || (h && e.contains(h)) ? null : name(h);
@@ -237,9 +243,10 @@ async function click(cdp: Cdp, element: string, what: string = element) {
         for (const s of scrollers) (s === document.scrollingElement ? window : s).addEventListener('scroll', () => rec.scrolls.push(ms() + 'ms ' + (s === document.scrollingElement ? 'window' : 'main') + ' to ' + s.scrollTop), { passive: true });
         window.__clickRecord = rec;
       }
-      return { x, y, hit };
+      return { x, y, hit, moved: null };
     })()`,
   );
+  if (at.moved) throw new Error(`${what} moved between the read and the press: ${at.moved}`);
   if (at.hit) throw new Error(`the click at (${Math.round(at.x)}, ${Math.round(at.y)}) would land on ${at.hit}, not on ${element}`);
   for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
   try {

@@ -169,13 +169,15 @@ export function UpdatesPanelView({ data }: { data: UpdatesPanelData }) {
   );
 }
 
-export function UpdatesPanel() {
+export function UpdatesPanel({ onLoaded }: { onLoaded?: () => void }) {
   const [data, setData] = useState<UpdatesPanelData | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     api<UpdatesPanelData>('/api/updates')
       .then((d) => (setData(d), setError(null)))
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) => setError(e.message))
+      .finally(() => onLoaded?.());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   if (error) return <div className="text-[13px] text-red" data-testid="updates-panel">Can't load engine updates: {error}</div>;
   if (!data) return null;
