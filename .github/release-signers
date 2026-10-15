@@ -1,0 +1,6 @@
+# Release signers, in ssh-keygen's ALLOWED SIGNERS format: the keys whose SSH signature on a vX.Y.Z tag lets
+# release.yml stage that version on npm (scripts/verify-release-tag.mjs, principal release-signer, namespace git).
+# CI reads this file from origin/main, never from the tag's own commit. To rotate: add the new key on its own line
+# under the same principal in a PR, sign the next tag with it, then remove the old line in a later PR.
+# release-signer: ED25519 SHA256:6fOrFVztudof1JRskMhMAIIOrsNokcYdDXIf0xzC4p0
+release-signer namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDrZJujJFe8O2NNVMnBpmhScjFGElpl4GTjz0rmRR9NK

@@ -1913,7 +1913,10 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       const d = lastOf(t.f.log, 'merge.decided') as { auto: boolean; reasons: string[]; why: { category: string; text: string }[] };
       assert.equal(d.auto, false, path);
       assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${path}: ${d.reasons.join(' | ')}`);
-      assert.deepEqual(d.why, [{ category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
+      // A control under .github/ (outside workflows, which never reach a PR) is also CI config, a category that
+      // always waits (merge-policy.ts waitCategoriesOf): both reasons are true, so both are named, in that order.
+      const ci = path.startsWith('.github/') ? [{ category: 'ci-config', text: `changes the CI config: ${path}` }] : [];
+      assert.deepEqual(d.why, [...ci, { category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
       assert.ok(!t.pr().merged && t.f.log.read(0, ['merge.done']).length === 0, `${path}: never auto-merged`);
     }
   }
