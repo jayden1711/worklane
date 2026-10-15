@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,7 +25,9 @@ function fixture(how: 'throw' | 'wait'): { script: string; work: string } {
       'const cleanup = exitCleanup();',
       `cleanup.finally(() => rmSync(${JSON.stringify(work)}, { recursive: true, force: true }));`,
       "const c = cleanup.track(spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));",
-      'console.log(c.pid);',
+      // Plain text, never console.log(c.pid): under FORCE_COLOR (node --test in a terminal sets it) a logged number
+      // comes out coloured, "\u001b[33m1413842\u001b[39m", which is not a pid.
+      'process.stdout.write(`${c.pid}\\n`);',
       how === 'throw' ? "await new Promise((r) => setTimeout(r, 100)); throw new Error('halfway');" : 'setInterval(() => {}, 1000);',
     ].join('\n'),
   );
@@ -48,22 +50,55 @@ async function gone(pid: number) {
   return !alive(pid);
 }
 
-test('a dev script that throws halfway still stops what it started and removes its temporary directory', async () => {
+// Each runs twice: as CI runs it, and with FORCE_COLOR=1 as node --test sets it for its children in a terminal (the release
+// machine's release.mjs run, where a coloured pid failed both and the signal test then hung for half an hour).
+for (const color of [false, true]) {
+const env: NodeJS.ProcessEnv = { ...process.env };
+delete env.FORCE_COLOR;
+delete env.NO_COLOR;
+if (color) env.FORCE_COLOR = '1';
+const named = (what: string) => (color ? `${what} (FORCE_COLOR=1)` : what);
+
+/**
+ * Stop what a test started even when it fails part way, so a failure ends instead of hanging: the script's whole process
+ * group (it runs detached, in a group of its own, so its child goes with it), then the child it printed, if it is one.
+ */
+function stopAfter(t: { after: (fn: () => void) => void }, p: Pick<ChildProcess, 'pid' | 'exitCode' | 'signalCode'> | null, pid: () => number) {
+  t.after(() => {
+    if (p && p.exitCode === null && p.signalCode === null && isChildPid(p.pid) && process.platform !== 'win32') {
+      try {
+        process.kill(-p.pid, 'SIGKILL');
+      } catch {
+        // gone already
+      }
+    }
+    const c = pid();
+    if (isChildPid(c) && alive(c)) process.kill(c, 'SIGKILL');
+  });
+}
+
+test(named('a dev script that throws halfway still stops what it started and removes its temporary directory'), { timeout: 60_000 }, async (t) => {
   const { script, work } = fixture('throw');
-  const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 20_000 });
+  let child = 0;
+  stopAfter(t, null, () => child);
+  const r = spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 20_000, env });
   assert.notEqual(r.status, 0, 'it failed');
   assert.match(r.stderr, /halfway/);
   const pid = Number(r.stdout.trim());
+  child = pid;
   assert.ok(Number.isInteger(pid) && pid > 0, `no child pid from the script: stdout ${JSON.stringify(r.stdout)}, stderr ${JSON.stringify(r.stderr)}`);
   assert.ok(await gone(pid), `the child ${pid} is still running`);
   assert.equal(existsSync(work), false);
 });
 
-test('a dev script stopped by a signal stops what it started', { skip: process.platform === 'win32' && 'no POSIX signals to send on Windows' }, async () => {
+test(named('a dev script stopped by a signal stops what it started'), { skip: process.platform === 'win32' && 'no POSIX signals to send on Windows', timeout: 60_000 }, async (t) => {
   const { script, work } = fixture('wait');
-  const p = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'inherit'] });
+  const p = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'inherit'], env, detached: process.platform !== 'win32' });
+  let child = 0;
+  stopAfter(t, p, () => child);
   const printed = await new Promise<string>((ok) => p.stdout.once('data', (d: Buffer) => ok(d.toString())));
   const pid = Number(printed.trim());
+  child = pid;
   assert.ok(Number.isInteger(pid) && pid > 0, `no child pid from the script: ${JSON.stringify(printed)}`);
   const exited = new Promise<number | null>((ok) => p.on('exit', (code) => ok(code)));
   p.kill('SIGTERM');
@@ -71,6 +106,8 @@ test('a dev script stopped by a signal stops what it started', { skip: process.p
   assert.ok(await gone(pid), `the child ${pid} is still running`);
   assert.equal(existsSync(work), false);
 });
+
+}
 
 test('a pid of 0 or below is never a child: never stopped, never signalled', () => {
   // WHY (#312): a pid <= 0 names a process group; process.kill(0, ...) signals every process in this one.
