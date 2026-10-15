@@ -4,8 +4,9 @@
 // isolation is preloaded by every runner, never imported per file: a new test file gets it without doing anything.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -23,7 +24,7 @@ import { HELPER_RULES, MACHINE_CHANGES, MACHINE_HELPER } from '../src/machine.js
 import { MACHINE_OWNERS_FILE } from '../src/machine-owners.js';
 import { NETWORK_FILE } from '../src/network.js';
 import { SYSTEM_SLOTS, UPDATE_DRAIN_FILE } from '../src/os/index.js';
-import { devSlotsPath, SYSTEM_ROOT_VAR } from '../src/os/system-paths.js';
+import { devSlotsPath, serviceModeRefusal, SYSTEM_ROOT_VAR, systemRootRefusal, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 import { LIMITS_PATH } from '../src/settings.js';
 import { MACHINE_PATHS } from '../src/setup-steps.js';
 import { TAILSCALE_DIR, TAILSCALE_SCRIPT } from '../src/tailscale-setup.js';
@@ -34,7 +35,7 @@ import { ALLOWED_SIGNERS, PENDING_SIGNERS } from '../src/updater-setup.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
 import { refusedPort } from './held-port.js';
-import { repoRoot } from './helpers.js';
+import { exampleProject, repoRoot } from './helpers.js';
 import { homeMoved, isolatedEnv, onRealMachine, TEST_PRELOAD, testMachine } from './isolate.js';
 
 const testDir = join(repoRoot, 'test');
@@ -155,7 +156,7 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
   // macOS keeps the real HOME (test/isolate.ts homeMoved); everything above, derived from it, is still temporary.
   if (homeMoved) derived.push(['homedir()', homedir()], ["a child's HOME", childEnv().HOME!]);
   for (const [what, p] of derived) assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);
-  const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`);
+  const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE` && k !== TEST_TOKEN_VAR);
   assert.deepEqual(leaked, [], 'no engine setting from the shell');
 });
 
@@ -219,6 +220,97 @@ test("src/ names a machine location only in src/os/system-paths.ts: nothing can 
       });
   }
   assert.deepEqual(bad, [], 'build it with src/os/system-paths.ts (etcPath, varLibPath, libexecPath, ...), or asRoot for a command shown for a root shell');
+});
+
+/** A system root marked as the test preload marks one: a directory and mark file of this user's alone, and its token. */
+function markedRoot(): { root: string; token: string; env: NodeJS.ProcessEnv } {
+  const root = mkdtempSync(join(tmpdir(), 'marked-root-'));
+  chmodSync(root, 0o700);
+  const token = randomBytes(32).toString('hex');
+  writeFileSync(join(root, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+  return { root, token, env: { [SYSTEM_ROOT_VAR]: root, [TEST_TOKEN_VAR]: token } };
+}
+
+test(`${SYSTEM_ROOT_VAR} is honoured only in a process the test preload marked: never as root, never under systemd, never without the mark`, { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const uid = process.getuid!();
+  const ok = markedRoot();
+  assert.equal(systemRootRefusal({}, uid), null, 'unset: nothing to refuse');
+  assert.equal(systemRootRefusal(ok.env, uid), null, 'the preload marked it');
+  assert.equal(systemRootRefusal({ ...process.env }, uid), null, 'this test process is marked');
+  const refused: [string, NodeJS.ProcessEnv, number, RegExp][] = [
+    ['as root', ok.env, 0, /runs as root/],
+    ['started by systemd (INVOCATION_ID)', { ...ok.env, INVOCATION_ID: 'a'.repeat(32) }, uid, /systemd started this process \(INVOCATION_ID/],
+    ['started by systemd (JOURNAL_STREAM)', { ...ok.env, JOURNAL_STREAM: '8:12345' }, uid, /systemd started this process \(JOURNAL_STREAM/],
+    ['no token (a drop-in or a sudo that sets the root alone)', { [SYSTEM_ROOT_VAR]: ok.root }, uid, /doesn't carry the test preload's token/],
+    ['a token that is not the mark', { ...ok.env, [TEST_TOKEN_VAR]: 'b'.repeat(64) }, uid, /doesn't match its test mark/],
+    ['a relative root', { ...ok.env, [SYSTEM_ROOT_VAR]: 'root' }, uid, /not an absolute path/],
+  ];
+  // A root with no mark at all (another machine's files dropped in a directory): refused.
+  const bare = mkdtempSync(join(tmpdir(), 'bare-root-'));
+  chmodSync(bare, 0o700);
+  refused.push(['no mark', { [SYSTEM_ROOT_VAR]: bare, [TEST_TOKEN_VAR]: ok.token }, uid, /holds no test mark/]);
+  // A mark others may read or write, or a root others may write: anyone else could have put it there.
+  const open = markedRoot();
+  chmodSync(join(open.root, TEST_MARK_FILE), 0o644);
+  refused.push(['a mark others can read', open.env, uid, /test mark isn't this user's alone/]);
+  const shared = markedRoot();
+  chmodSync(shared.root, 0o777);
+  refused.push(['a root others can write', shared.env, uid, /directory isn't this user's alone/]);
+  // A symlinked mark: refused, not followed.
+  const linked = markedRoot();
+  const elsewhere = join(mkdtempSync(join(tmpdir(), 'mark-')), 'mark');
+  writeFileSync(elsewhere, `${linked.token}\n`, { mode: 0o600 });
+  rmSync(join(linked.root, TEST_MARK_FILE));
+  symlinkSync(elsewhere, join(linked.root, TEST_MARK_FILE));
+  refused.push(['a symlinked mark', linked.env, uid, /test mark isn't this user's alone/]);
+  for (const [what, env, u, re] of refused) {
+    const why = systemRootRefusal(env, u);
+    assert.match(why ?? '', re, what);
+    assert.match(why ?? '', new RegExp(`^${SYSTEM_ROOT_VAR} is set`), `${what}: names the variable`);
+  }
+});
+
+test('the service modes never run with the system root, marked or not; a command that ends does', () => {
+  const env = { [SYSTEM_ROOT_VAR]: '/x' };
+  for (const argv of [['coordinator', 'run'], ['coordinator', 'run', '--instance', 'shop'], ['--root', '/r', 'coordinator', 'run'], ['dashboard', '--service'], ['dashboard', '--instance', 'shop', '--service'], ['dashboard', '--hub', 'a=/s'], ['dashboard', '--hub-setup', '--public-url', 'https://h']]) {
+    assert.match(serviceModeRefusal(argv, env) ?? '', new RegExp(`^${SYSTEM_ROOT_VAR} is set, and .* is a service mode`), argv.join(' '));
+  }
+  for (const argv of [['coordinator', 'run', '--once'], ['dashboard', '--detach'], ['dashboard', '--background', '--port', '0'], ['dashboard'], ['doctor'], ['--version']]) assert.equal(serviceModeRefusal(argv, env), null, argv.join(' '));
+  assert.equal(serviceModeRefusal(['coordinator', 'run'], {}), null, 'unset: nothing to refuse');
+});
+
+test(`the CLI refuses ${SYSTEM_ROOT_VAR} where it isn't honoured: a non-zero exit naming it, before anything starts; marked, it runs`, { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const cli = join(repoRoot, 'dist', 'src', 'cli.js');
+  const { dir } = exampleProject();
+  const cliRun = (args: string[], env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8', env, timeout: 60_000 });
+  const ok = markedRoot();
+  const base = { ...childEnv(), ...ok.env };
+  const marked = cliRun(['--version'], base);
+  assert.equal(marked.status, 0, `marked, as the preload marks a test's children: ${marked.stderr}`);
+  const cases: [string, string[], NodeJS.ProcessEnv, RegExp][] = [
+    ['no mark (a drop-in setting the root alone)', ['--version'], { ...childEnv(), [SYSTEM_ROOT_VAR]: ok.root, [TEST_TOKEN_VAR]: '' }, /doesn't carry the test preload's token/],
+    ['started by systemd', ['--version'], { ...base, INVOCATION_ID: 'c'.repeat(32) }, /systemd started this process/],
+    ['started by systemd (journal)', ['doctor', '--root', dir], { ...base, JOURNAL_STREAM: '8:1' }, /systemd started this process/],
+    ['coordinator run', ['coordinator', 'run', '--root', dir], base, /`coordinator run` is a service mode/],
+    ['dashboard --service', ['dashboard', '--service', '--root', dir, '--port', '0'], base, /`dashboard --service` is a service mode/],
+    ['dashboard --hub', ['dashboard', '--hub', `a=${ok.root}`, '--port', '0', '--break-glass-port', '0'], base, /`dashboard --hub` is a service mode/],
+    ['dashboard --hub-setup', ['dashboard', '--hub-setup', '--public-url', 'https://hub.example.test', '--signin-dir', ok.root, '--port', '0'], base, /`dashboard --hub-setup` is a service mode/],
+  ];
+  for (const [what, args, env, re] of cases) {
+    const before = filesUnder(dir);
+    const r = cliRun(args, env);
+    assert.equal(r.status, 78, `${what}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`refused: ${SYSTEM_ROOT_VAR} is set`), what);
+    assert.match(r.stderr, re, what);
+    assert.equal(r.stdout, '', `${what}: nothing ran`);
+    assert.deepEqual(filesUnder(dir), before, `${what}: nothing written`);
+  }
+  // Any other way in (the updater imports engine modules): the first machine path a module builds throws.
+  const mod = pathToFileURL(join(repoRoot, 'dist', 'src', 'machine-owners.js')).href;
+  const imported = spawnSync(process.execPath, ['-e', `import(${JSON.stringify(mod)}).then(() => console.log('LOADED'), (e) => { console.log(e.name, e.message); process.exit(3); })`], { encoding: 'utf8', env: { ...childEnv(), [SYSTEM_ROOT_VAR]: ok.root, [TEST_TOKEN_VAR]: '' } });
+  assert.equal(imported.status, 3, imported.stdout + imported.stderr);
+  assert.match(imported.stdout, new RegExp(`^SystemRootRefused ${SYSTEM_ROOT_VAR} is set`));
+  assert.doesNotMatch(imported.stdout, /LOADED/);
 });
 
 test('a refused port is held: a connection there is refused, and nothing else can listen on it until it is closed', async () => {

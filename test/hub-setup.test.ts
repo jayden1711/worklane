@@ -13,6 +13,7 @@ import { BRAND } from '../src/brand.js';
 import { defaultAppPrefix, SETUP_COOKIE, SETUP_MAX_TRIES, SETUP_TOKEN_FILE, SetupOver, startSetupHub, type SetupHubOptions } from '../src/hub-setup.js';
 import { APP_SECRET, fakeGitHub } from './fake-github.js';
 import { engineCli, repoRoot } from './helpers.js';
+import { serviceModeEnv } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 const ORIGIN = 'https://hub.example.test';
@@ -225,7 +226,7 @@ test('setup mode listens on loopback only, and takes only an https origin', { sk
 
 test('the CLI: dashboard --hub-setup prints where the token is, never the token; once the secret exists it says setup mode is off and exits 0', { skip: !posix && 'POSIX modes' }, async () => {
   const d = dirs();
-  const env = { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: join(d.stateDir, '..', 'cli-state') };
+  const env = serviceModeEnv({ ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: join(d.stateDir, '..', 'cli-state') });
   const p = spawn(process.execPath, [engineCli, 'dashboard', '--hub-setup', '--service', '--port', '0', '--public-url', ORIGIN, '--signin-dir', d.signinDir], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let out = '';
   p.stdout.on('data', (c: Buffer) => (out += c.toString()));

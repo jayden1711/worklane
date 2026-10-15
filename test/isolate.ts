@@ -11,11 +11,12 @@
 // state. Here those all point into a fresh temporary directory, whatever the shell said. So do the machine's own
 // locations (src/os/system-paths.ts: /etc/<cli>, /var/lib/<cli>, the root helpers in /usr/local/libexec, /opt/<cli>,
 // /run/lock): on a live machine a test read the real machine owners, helper, updates log and settings.
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { SYSTEM_ROOT_VAR } from '../src/os/system-paths.js';
+import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
@@ -51,6 +52,17 @@ for (const [k, v] of Object.entries(isolatedEnv)) {
   process.env[k] = v;
 }
 
+// The mark that lets this process and its children use the system root above (src/os/system-paths.ts
+// systemRootRefusal): a fresh token, in the environment and in a file of this user's alone inside the root. A suite
+// run inside a service (a coordinator testing a PR) inherits systemd's markers; they say nothing about a test, and
+// would refuse the root, so they are dropped here.
+for (const k of SYSTEMD_MARKERS) delete process.env[k];
+const systemRoot = isolatedEnv[SYSTEM_ROOT_VAR]!;
+chmodSync(systemRoot, 0o700);
+const token = randomBytes(32).toString('hex');
+writeFileSync(join(systemRoot, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+process.env[TEST_TOKEN_VAR] = token;
+
 /**
  * Put these variables back to this process's isolated values, after a test pointed them somewhere of its own.
  * Never `delete` one of them (test/isolate.test.ts checks): unset, it falls back to the machine's own directory.
@@ -80,6 +92,18 @@ process.on('exit', () => {
     // best effort: a temporary directory left behind is harmless
   }
 });
+
+/**
+ * An environment for a service mode a test starts (`dashboard --hub`, `--hub-setup --service`): those never run
+ * with the system root (src/os/system-paths.ts serviceModeRefusal), so it and the test mark are left out. Only for a
+ * mode that reads no machine location.
+ */
+export function serviceModeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out = { ...env };
+  delete out[SYSTEM_ROOT_VAR];
+  delete out[TEST_TOKEN_VAR];
+  return out;
+}
 
 /** How a runner loads this: node's own flags, before --test (relative to the repo root, where every runner runs). */
 export const TEST_PRELOAD = ['--import', './dist/test/isolate.js'] as const;
