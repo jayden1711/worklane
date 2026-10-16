@@ -97,7 +97,7 @@ function agents(o: { writer?: string | null; alive?: string[] } = {}) {
     }
     const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
     const files = base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: files, ...(/both_sides_kept/.test(req.prompt) ? { both_sides_kept: true } : {}) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: files, ...(/both_sides_kept/.test(req.prompt) ? { both_sides_kept: true } : {}) } };
   });
 }
 

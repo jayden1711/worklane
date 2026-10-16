@@ -82,7 +82,7 @@ export function agents(over: Partial<Record<string, (r: RunRequest) => object>> 
     if (custom) return { structured: custom(req) };
     if (req.role === 'evaluator-repro') return { structured: writeRepro(req) };
     if (req.role === 'worker') return { structured: realFix(req) };
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
 }
 
@@ -103,7 +103,7 @@ export const failing = (id: number) => [{ name: 'ci', source: 'check_run' as con
 export const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
 /** A diligent evaluator that approves with high confidence and answers the design question. */
-export const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}) });
+export const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}) });
 /** An evaluator that also answers the conflict question. */
 export const approveBoth = (kept: boolean, confidence = 'high') => (req: RunRequest) => ({ ...approve()(req), confidence, ...(/both_sides_kept/.test(req.prompt) ? { both_sides_kept: kept } : {}) });
 

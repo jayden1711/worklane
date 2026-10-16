@@ -82,7 +82,7 @@ function runner(bad: (cwd: string) => void) {
       commitAll(req.cwd, 'Ignore non-positive quantities in totals');
       return { structured: { summary: 'fixed' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: [] } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: [] } };
   });
 }
 

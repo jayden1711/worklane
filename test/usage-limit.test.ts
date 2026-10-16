@@ -141,7 +141,7 @@ test('a usage-limit hit pauses the instance: no retry storm, tasks requeued (not
       if (limitedNow) return { reason: 'rate_limited', detail: "usage or rate limit reached: You've hit your limit", turns: 0, limit: limitHit({ info: { status: 'rejected', resetsAt: resetAt / 1000 }, text: '', now: Date.now() }) };
       return { structured: realFix(r) };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(r) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(r) } };
   });
   const chat = fakeChat();
   const config = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: ['100000000001'], people: { '100000000001': 'example-owner' }, asks_channel: ASKS, dashboard_url: DASH } });
