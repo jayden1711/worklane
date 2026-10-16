@@ -100,7 +100,8 @@ case "$cmd" in
 esac
 [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || { echo "the repo is owner/name, got $repo" >&2; exit 2; }
 [ -n "$name" ] || name="$(printf '%s' "${repo#*/}" | tr 'A-Z_.' 'a-z--')"
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "--name: lowercase letters, digits and dashes, at most 21 (the repo's name doesn't fit: give one)" >&2; exit 2; }
+why="$(ci_runner_name_problem "$name")"
+[ -z "$why" ] || { echo "--name: $why, got $name (the repo's name doesn't fit: give one)" >&2; exit 2; }
 [ -n "$label" ] || label="$name"
 [[ "$label" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}(,[A-Za-z0-9][A-Za-z0-9_.-]{0,40}){0,4}$ ]] || { echo "--label: up to 5 comma-separated labels of letters, digits, dots, dashes and underscores" >&2; exit 2; }
 [[ ",$label," != *,self-hosted,* ]] || { echo "--label: self-hosted is every runner's own label already; give this machine's own label instead" >&2; exit 2; }
