@@ -98,24 +98,13 @@ file_text() {
 # Every GPU index any instance lists, once each, ascending.
 all_indices() { for d in ${DEVS[@]+"${DEVS[@]}"}; do printf '%s\n' "${d//, /$'\n'}"; done | sed 's/^0*\([0-9]\)/\1/' | sort -n -u; }
 
-# Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line.
-agent_users() {
-  local u h f
-  while IFS=: read -r u _ _ _ _ h _; do
-    [[ "$u" == wl-* && -n "$h" && "$h" != / ]] || continue
-    for f in "$h"/.local/state/worklane/instances/*/instance.yaml; do
-      [ -f "$f" ] || continue
-      sed -n -e 's/^  agent_user: *//p' -e 's/^  eval_user: *//p' "$f" | tr -d "\"'" | sed 's/[[:space:]]*$//'
-    done
-  done < <(getent passwd)
-}
 # Why <user> may not hold a GPU's lock, or nothing.
 holder_refusal() {
   local u="$1" uid
   uid="$(id -u "$u" 2>/dev/null)" || { echo "no user $u"; return 0; }
   [ "$uid" -ge 1000 ] || { echo "$u is root or a system user (uid $uid)"; return 0; }
   [[ "$u" != wl-* ]] || { echo "$u is a harness user (wl-*): coordinators, test users and agent users never hold a GPU"; return 0; }
-  if agent_users | grep -qxF -- "$u"; then echo "$u is a user an instance's agents or evals run as (instance.yaml run_as)"; return 0; fi
+  if run_as_users | grep -qxF -- "$u"; then echo "$u is a user an instance's agents or evals run as (instance.yaml run_as)"; return 0; fi
   return 0
 }
 # The group's members, comma-separated ("" for none).

@@ -253,18 +253,18 @@ async function local() {
     assert.match(readFileSync(st('gh-calls'), 'utf8'), /^auth login --web --hostname github\.com --git-protocol https$/m);
   });
 
-  await screen('screen 4: the repo config in setup mode (auto-config drafts it, its PR, merged from the page)', async () => {
+  await screen('screen 4: the repo config in setup mode (auto-config drafts it, previewed, Confirm opens PR #1, merged here from the Config PRs list)', async () => {
     const p = await openFix('config-on-main');
     await waitFor(`${p} ${tid('setup-config')}`);
     await click(`${p} ${tid('setup-draft-button')}`);
     await click(`${p} ${tid('setup-draft-confirm')}`);
     // auto-config runs the project's own commands on a scratch worktree; an open question is answered on the page.
-    // Async by design; the signal: /api/first-run's own draft state (running, then a question or the PR).
+    // Async by design; the signal: /api/first-run's own draft state (running, then a question or the held draft).
     const asked = await until('the draft to finish or ask', async () => {
       const fr = await firstRun();
       if (fr.draft?.running) return null;
       if (fr.autoConfig?.questions?.length) return 'questions';
-      return fr.autoConfig?.pr ? 'pr' : (fr.draft?.result ? `result: ${JSON.stringify(fr.draft.result)}` : null);
+      return fr.autoConfig?.held ? 'held' : (fr.draft?.result ? `result: ${JSON.stringify(fr.draft.result)}` : null);
     }, 240_000, 1000);
     if (asked === 'questions') {
       await open('/first-run?step=config-on-main');
@@ -273,21 +273,37 @@ async function local() {
       await click(tid('setup-save-answers'));
       await click(tid('setup-draft-button'));
       await click(tid('setup-draft-confirm'));
-      // Async by design; the signal: the setup PR in /api/first-run's auto-config state.
-      await until('the setup PR', async () => (await firstRun()).autoConfig?.pr, 240_000, 1000);
-    } else assert.equal(asked, 'pr', `auto-config: ${asked}`);
+      // Async by design; the signal: the held draft in /api/first-run's auto-config state.
+      await until('the draft held for its preview', async () => (await firstRun()).autoConfig?.held, 240_000, 1000);
+    } else assert.equal(asked, 'held', `auto-config: ${asked}`);
+    // #468: the preview before any PR: the summary, then the files; nothing pushed yet.
+    assert.ok(!existsSync(st('prs/1')), 'no PR before Confirm');
     await open('/first-run?step=config-on-main');
-    await waitFor(tid('setup-pr'));
-    await click(tid('setup-merge-review'));
-    await waitText(tid('setup-merge-confirming'), /gh pr merge \d+ --repo example\/alpha --merge/);
-    await click(tid('setup-merge-confirm'));
+    await waitFor(tid('draft-preview'));
+    await waitText(tid('draft-summary-owners'), /owner @example-owner/);
+    assert.ok(await evaluate(`document.querySelectorAll('[data-testid="draft-file"]').length >= 4`), 'the drafted files, read-only');
+    await click(tid('draft-confirm'));
+    // Not the repo's admin here (the stand-in's default): the PR is opened, not merged; the Config PRs list follows it.
+    // The signal: PR #1's row in that list, open (the page re-reads the checklist when Confirm returns).
+    const row1 = '[data-testid="config-pr"][data-number="1"]';
+    await waitFor(`${row1}[data-state="open"]`, 60_000);
+    await waitText(tid('setup-pr'), /merge it under Config PRs below, or on GitHub/);
+    assert.match(readFileSync(st('prs/1'), 'utf8'), /^example\/alpha main worklane\/setup OPEN$/m);
+    // #468 item 15: PR #1 is merged here like every later config PR, then the checkout is fast-forwarded.
+    await click(`${row1} ${tid('config-pr-merge-review')}`);
+    await waitText(`${row1} ${tid('config-pr-merge-confirming')}`, /gh pr merge 1 --repo example\/alpha --merge --subject .*approved by example-owner on the first-run page/);
+    await click(`${row1} ${tid('config-pr-merge-confirm')}`);
     // The dashboard fast-forwards the checkout to the merged config and leaves setup mode on the same address.
     // Async by design; the signal: /api/first-run's setupMode turning false (the page hands over on it).
     await until('setup mode to hand over', async () => (await firstRun()).setupMode === false, 120_000, 1000);
     const bare = st('git/example/alpha.git');
     assert.equal(sh('git', ['-C', bare, 'cat-file', '-e', 'main:.worklane/config.yaml']).status, 0, 'the config is on main at "GitHub"');
-    assert.match(readFileSync(st('prs/1'), 'utf8'), /^example\/alpha main worklane\/setup MERGED$/m);
+    assert.match(readFileSync(st('prs/1'), 'utf8'), /^example\/alpha main worklane\/setup MERGED /m);
     assert.ok(existsSync(join(checkout, '.worklane', 'config.yaml')), 'the checkout has the config');
+    // #468 item 10: the page hands over onto First run itself, never the empty Board; the stale "run init again" box is gone.
+    await until('the page reloaded on First run', () => evaluate(`location.pathname === '/first-run' && !!${q(tid('page-first-run'))} && !!${q('[data-testid="config-pr"][data-number="1"][data-synced="true"]')}`), 60_000, 300);
+    assert.ok(!(await evaluate(`!!${q(tid('first-run-auto-config-pr'))}`)), 'no stale "merge it, then run init again"');
+    assert.match(readFileSync(st('gh-calls'), 'utf8'), /^pr merge 1 --repo example\/alpha --merge --subject .*approved by example-owner on the first-run page --body $/m, 'the approval in the merge subject');
   });
 
   let configPr = null;
@@ -329,26 +345,24 @@ async function local() {
     return { pr: n, head };
   });
 
-  await screen('screen 4: the config PR merged from the page; the checkout and the page have it when the merge reports done', async () => {
-    // INVARIANT (owner, #393): the page's merge fast-forwards the checkout as part of the merge action, so everything is
-    // checked right after the action's own result: no polling, no git pull, no dashboard restart.
-    // The merge panel (#403) appears once the form has proposed a PR: repo-config-merge, its review, confirm and result.
-    // Same page as the proposal (no reload): the panel follows the PR the form just opened.
-    const p = `${row('required-checks')} ${tid('first-run-fix-panel')}`;
-    await waitFor(`${p} ${tid('repo-config-merge')}`);
-    await click(`${p} ${tid('repo-config-merge-review')}`);
-    await waitText(`${p} ${tid('repo-config-merge-confirming')}`, /gh pr merge \d+ --repo example\/alpha --merge/);
-    await click(`${p} ${tid('repo-config-merge-confirm')}`);
-    // The action's own answer (the request returning), not a timer.
-    const done = await waitText(`${p} ${tid('repo-config-merge-result')}`, /merged/i);
-    const bare = st('git/example/alpha.git');
+  await screen('screen 4: the config PR merged outside the page (the CLI); the page sees it, fast-forwards the checkout, says who and where, and stays on First run', async () => {
+    // #468 item 9/12: merged anywhere, not only by this page's button: here with the CLI, as a person would.
     assert.ok(configPr, 'the config PR from the screen before');
-    assert.match(readFileSync(st(`prs/${configPr}`), 'utf8'), / MERGED$/m, 'merged at "GitHub" by the page');
-    assert.equal(sh('git', ['-C', checkout, 'rev-parse', 'HEAD']).out, sh('git', ['-C', bare, 'rev-parse', 'main']).out, 'the checkout is at the merged main');
+    const bare = st('git/example/alpha.git');
+    const merged = sh('gh', ['pr', 'merge', configPr, '--repo', 'example/alpha', '--merge']);
+    assert.equal(merged.status, 0, merged.err);
+    assert.match(readFileSync(st(`prs/${configPr}`), 'utf8'), / MERGED /m, 'merged at "GitHub", outside the page');
+    // The page's own Re-check (a person's, or its poll): it sees the merge and brings the checkout to it.
+    await open('/first-run');
+    await click(tid('first-run-recheck'));
+    const rowN = `[data-testid="config-pr"][data-number="${configPr}"]`;
+    // Async by design; the signal: the PR's row reading merged and in this checkout, bounded.
+    await until('the merged PR synced', () => evaluate(`!!${q(`${rowN}[data-synced="true"]`)}`), 60_000, 500);
+    const done = await waitText(`${rowN} ${tid('config-pr-done')}`, /Merged by @example-owner at .*, checkout at [0-9a-f]{7}/);
+    assert.equal(sh('git', ['-C', checkout, 'rev-parse', 'HEAD']).out, sh('git', ['-C', bare, 'rev-parse', 'main']).out, 'the checkout is at the merged main, no git pull');
     assert.match(readFileSync(join(checkout, '.worklane', 'config.yaml'), 'utf8'), /required_checks:[\s\S]*- test/);
-    // On the same page (a reload within 10 s would serve the cached checklist): the merge triggers the page's own fresh
-    // re-check (onMerged); the signal is the step's line after that re-check, bounded.
     await waitText(row('required-checks'), /required: test/, 20_000);
+    assert.equal(await evaluate('location.pathname'), '/first-run', 'still on First run');
     return { result: done };
   });
 }
