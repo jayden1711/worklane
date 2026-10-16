@@ -491,15 +491,60 @@ const MCP_SERVER_NAME = /^[A-Za-z0-9_-]{1,40}$/;
 const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
 const MCP_HOSTS = new RegExp(`^(?:none|(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+(?:\\+(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+)*)$`);
 const MCP_SECRETS = /^(?:none|[A-Z][A-Z0-9_]{1,63}(?:\+[A-Z][A-Z0-9_]{1,63})*)$/;
+// Root's allowlist of hosts plugins may come from (scripts/setup/plugins.sh hosts): root:root, not writable by others.
+// Absent: github.com alone. Present but not root's, writable by others or malformed: no host at all.
+const PLUGIN_HOSTS_FILE = '/etc/worklane/plugin-hosts.json';
+const HOST_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+function pluginHosts(file = PLUGIN_HOSTS_FILE, ownerUid = 0) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return ['github.com'];
+  }
+  if (!st.isFile() || st.uid !== ownerUid || (st.mode & 0o022) !== 0) return [];
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(v.hosts) && v.hosts.every((h) => typeof h === 'string' && HOST_NAME.test(h) && require('node:net').isIP(h) === 0) ? v.hosts : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Why a plugin's URL may not be fetched (null when it may): exactly https://, one allowed host by name, no address. */
+function pluginUrlProblem(url, hosts) {
+  if (typeof url !== 'string' || !url.startsWith('https://')) return 'the source must start with https://';
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return 'the source is not a URL';
+  }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port || u.search || u.hash) return 'the source must be https://<host>/<path>, with no user, port, query or fragment';
+  const host = u.hostname;
+  // WHATWG URL already turned decimal, octal and hex IPv4 spellings into dotted form; IPv6 comes bracketed.
+  if (host.startsWith('[') || require('node:net').isIP(host) !== 0) return `the source names an address (${host}), not a host`;
+  if (!hosts.includes(host)) return `${host} is not a host plugins may come from`;
+  return null;
+}
+
+/** Why a subdirectory may not be fetched (null when it may): plain relative segments, never absolute or "..". */
+function pluginPathProblem(p) {
+  if (typeof p !== 'string' || !p) return 'no subdirectory';
+  if (p.startsWith('/') || p.includes('\\')) return 'the subdirectory must be relative';
+  if (p.split('/').some((x) => x === '..' || x === '.' || x === '')) return 'the subdirectory may not hold "..", "." or empty segments';
+  return PLUGIN_PATH.test(p) ? null : 'the subdirectory holds characters outside A-Z a-z 0-9 . _ -';
+}
 
 /** The plugin step a list asks for, or null when it is anything else. */
-function parsePlugin(args) {
+function parsePlugin(args, hosts = pluginHosts()) {
   const [cmd, id] = args;
   if (typeof id !== 'string' || !PLUGIN_ID.test(id)) return null;
   if (cmd === 'plugin-fetch' && (args.length === 4 || args.length === 5)) {
     const [, , url, sha, sub] = args;
-    if (!PLUGIN_URL.test(url) || !PLUGIN_SHA.test(sha)) return null;
-    if (sub !== undefined && (!PLUGIN_PATH.test(sub) || sub.split('/').some((p) => p === '.' || p === '..'))) return null;
+    if (!PLUGIN_URL.test(url) || pluginUrlProblem(url, hosts) || !PLUGIN_SHA.test(sha)) return null;
+    if (sub !== undefined && pluginPathProblem(sub)) return null;
     return { action: 'fetch', id, url, sha, ...(sub !== undefined ? { path: sub } : {}) };
   }
   if (cmd === 'plugin-stage' && args.length === 4 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3])) return { action: 'stage', id, digest: args[2], roles: args[3] };
@@ -643,4 +688,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePlugin, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePlugin, pluginHosts, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

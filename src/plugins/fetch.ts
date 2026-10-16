@@ -12,7 +12,7 @@ import { treeFiles, treeHashOf, type TreeFile } from './tree.js';
 
 export const SHA = /^[0-9a-f]{40}$/;
 /** An https git URL on a named host: no credentials in it, no query, no fragment. */
-export const GIT_URL = /^https:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?\/[A-Za-z0-9._~/-]+$/;
+export const GIT_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~/-]+$/;
 /** A subdirectory inside the repository: plain segments only. */
 export const SUBDIR = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
 
@@ -33,9 +33,16 @@ export function sourceProblem(s: GitSource, o: { allowFileUrls?: boolean } = {})
   return null;
 }
 
-/** git, with nothing from the machine or the user: no system or global config, no prompts, no hooks, no LFS. */
-function git(cwd: string, home: string, args: string[], allowFile: boolean): string {
-  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', ...(allowFile ? ['-c', 'protocol.file.allow=always'] : []), '-c', 'submodule.recurse=false', '-c', 'core.symlinks=true', '-c', 'advice.detachedHead=false', ...args], {
+/**
+ * git, with nothing from the machine or the user: no system or global config, no prompts, no hooks, no LFS; no
+ * redirect followed (a host can't send the fetch elsewhere); and, when `pin` is given (host:443:address), only that
+ * address for that host (http.curloptResolve), so DNS can't change it after it was checked (src/plugins/hosts.ts).
+ */
+export function gitSafety(allowFile: boolean, pin?: string): string[] {
+  return ['-c', 'http.followRedirects=false', ...(pin ? ['-c', `http.curloptResolve=${pin}`] : []), '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', ...(allowFile ? ['-c', 'protocol.file.allow=always'] : []), '-c', 'submodule.recurse=false', '-c', 'core.symlinks=true', '-c', 'advice.detachedHead=false'];
+}
+function git(cwd: string, home: string, args: string[], allowFile: boolean, pin?: string): string {
+  return execFileSync('git', [...gitSafety(allowFile, pin), ...args], {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -49,7 +56,7 @@ function git(cwd: string, home: string, args: string[], allowFile: boolean): str
  * Fetch `s` into `dest` (which must not exist): the files of exactly that commit, at `s.path`, with no .git. Symlinks
  * are copied as symlinks so the tree hash refuses them; nothing is followed. Throws FetchError.
  */
-export function fetchGitPlugin(s: GitSource, dest: string, o: { allowFileUrls?: boolean } = {}): void {
+export function fetchGitPlugin(s: GitSource, dest: string, o: { allowFileUrls?: boolean; pin?: string } = {}): void {
   const why = sourceProblem(s, o);
   if (why) throw new FetchError(why);
   if (existsSync(dest)) throw new FetchError(`${dest} already exists`);
@@ -58,21 +65,22 @@ export function fetchGitPlugin(s: GitSource, dest: string, o: { allowFileUrls?: 
   try {
     mkdirSync(repo);
     const allow = !!o.allowFileUrls;
-    git(repo, work, ['init', '-q'], allow);
-    git(repo, work, ['remote', 'add', 'origin', s.url], allow);
+    const g = (cwd: string, home: string, args: string[]) => git(cwd, home, args, allow, o.pin);
+    g(repo, work, ['init', '-q']);
+    g(repo, work, ['remote', 'add', 'origin', s.url]);
     try {
-      git(repo, work, ['fetch', '-q', '--depth', '1', '--no-tags', 'origin', s.sha], allow);
+      g(repo, work, ['fetch', '-q', '--depth', '1', '--no-tags', 'origin', s.sha]);
     } catch (e) {
       throw new FetchError(`commit ${s.sha} could not be fetched from ${s.url}: ${String((e as { stderr?: string }).stderr ?? (e as Error).message).trim().split('\n').pop()}`);
     }
-    git(repo, work, ['checkout', '-q', '--detach', 'FETCH_HEAD'], allow);
-    const head = git(repo, work, ['rev-parse', 'HEAD'], allow).trim();
+    g(repo, work, ['checkout', '-q', '--detach', 'FETCH_HEAD']);
+    const head = g(repo, work, ['rev-parse', 'HEAD']).trim();
     if (head !== s.sha) throw new FetchError(`fetched ${head}, not ${s.sha}`);
     const from = s.path ? join(repo, ...s.path.split('/')) : repo;
     if (!existsSync(from)) throw new FetchError(`${s.path} is not in commit ${s.sha}`);
     // git archive of the subtree: the committed files only (never the .git dir), with their modes, links as links.
     const tar = join(work, 'tree.tar');
-    git(repo, work, ['archive', '--format=tar', '-o', tar, s.path ? `HEAD:${s.path}` : 'HEAD'], allow);
+    g(repo, work, ['archive', '--format=tar', '-o', tar, s.path ? `HEAD:${s.path}` : 'HEAD']);
     mkdirSync(dest, { recursive: true });
     execFileSync('tar', ['-xf', tar, '-C', dest, '--no-same-owner'], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C' } });
   } finally {
