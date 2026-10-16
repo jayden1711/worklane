@@ -9,7 +9,9 @@
 #         runner's user) and udev's step (the installed fixer) make the stand-ins root:worklane-gpu-dev 0660, as the
 #         fixed driver does at boot; check then says PASS. Outside any sandbox, an agent user, the test user and the
 #         coordinator get EACCES on every node (they got through on 0666: the same probe, before); the owner gets
-#         through. At the end, revert takes its files away and leaves the group.
+#         through. check's nvidia-uvm part, on a copy whose module directory and uvm node are stand-ins (no driver
+#         here): PASS with nvidia_uvm "loaded" and a uvm node the member opens; FAIL when the module isn't loaded,
+#         and FAIL when the member can't open the node. At the end, revert takes its files away and leaves the group.
 #   off:  no root file: every node absent in a run that asks for the GPU, and in one that doesn't
 #   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check and the
 #         0660 nodes' permission (the unit's own worklane-gpu-dev group; never worklane-gpu, and the lock stays out of
@@ -128,13 +130,39 @@ grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_De
 [ "$(stat -c '%U:%G %a' /etc/udev/rules.d/99-worklane-gpu-devices.rules)" = 'root:root 644' ] || fail "the udev rule isn't root:root 0644"
 [ "$(stat -c '%U:%G %a' /usr/local/libexec/worklane-gpu-devices)" = 'root:root 755' ] || fail "the fixer isn't root:root 0755"
 grep -q 'RUN+="/usr/local/libexec/worklane-gpu-devices"' /etc/udev/rules.d/99-worklane-gpu-devices.rules || fail "the udev rule doesn't run the fixer"
-if ls -a /etc/modprobe.d /etc/udev/rules.d /usr/local/libexec | grep -q '\.tmp$'; then fail "a temp file was left"; fi
+[ "$(stat -c '%U:%G %a' /etc/modules-load.d/worklane-gpu-devices.conf)" = 'root:root 644' ] && grep -qx nvidia-uvm /etc/modules-load.d/worklane-gpu-devices.conf || fail "the modules-load file (nvidia-uvm at boot)"
+if ls -a /etc/modprobe.d /etc/modules-load.d /etc/udev/rules.d /usr/local/libexec | grep -q '\.tmp$'; then fail "a temp file was left"; fi
 # udev's step, as on the driver's "add" (no driver here to send one): the installed fixer, as root.
 sudo /usr/local/libexec/worklane-gpu-devices
 for n in "${ALL_NODES[@]}"; do [ "$(stat -c '%U:%G %a' "$n")" = 'root:worklane-gpu-dev 660' ] || fail "$n is $(stat -c '%U:%G %a' "$n") after the fixer"; done
-rc=0; sudo bash scripts/setup/gpu-devices.sh check > "$t/check-after" 2>&1 || rc=$?
-tail -n 1 "$t/check-after"
+# check's nvidia-uvm part needs a loaded driver, which isn't here: a copy of the script whose only two differences are
+# the module directory (nvidia_uvm "loaded" while $t/sysmod/nvidia_uvm exists) and the uvm node it opens as a member
+# (a stand-in with the null device's numbers, so it really opens, root:worklane-gpu-dev 0660 as the fixed driver's).
+cs="$t/wl/scripts"
+mkdir -p "$cs/setup" "$cs/machine" "$t/sysmod/nvidia_uvm"
+cp scripts/setup/lib.sh "$cs/setup/"; cp scripts/machine/worklane-gpu-devices.sh "$cs/machine/"
+sed -e "s|^SYS_MODULE=/sys/module\$|SYS_MODULE=$t/sysmod|" -e "s|^UVM_NODE=/dev/nvidia-uvm\$|UVM_NODE=/dev/worklane-uvm-standin|" scripts/setup/gpu-devices.sh > "$cs/setup/gpu-devices.sh"
+[ "$(diff scripts/setup/gpu-devices.sh "$cs/setup/gpu-devices.sh" | grep -c '^>')" = 2 ] || fail "the stubbed check isn't the script with just its two paths changed"
+sudo mknod -m 0660 /dev/worklane-uvm-standin c 1 3; made+=(/dev/worklane-uvm-standin)
+sudo chown root:worklane-gpu-dev /dev/worklane-uvm-standin
+# stub_check <name>: the stubbed check's output to $t/<name>; its exit code on stdout.
+stub_check() { local rc=0; sudo bash "$cs/setup/gpu-devices.sh" check > "$t/$1" 2>&1 || rc=$?; echo "$rc"; }
+rc="$(stub_check check-after)"
+grep -E 'nvidia_uvm module|opens /dev/worklane-uvm-standin' "$t/check-after"; tail -n 1 "$t/check-after"
 [ "$rc" = 0 ] && tail -n 1 "$t/check-after" | grep -q '^PASS: every NVIDIA device node is root:worklane-gpu-dev' || { cat "$t/check-after" >&2; fail "check on 0660 root:worklane-gpu-dev nodes: exit $rc"; }
+grep -qx '  the nvidia_uvm module: loaded' "$t/check-after" && grep -qx "  $me (a member) opens /dev/worklane-uvm-standin: ok" "$t/check-after" || { cat "$t/check-after" >&2; fail "check didn't report the module loaded and the member opening the uvm node"; }
+echo "== check FAILs when nvidia_uvm isn't loaded"
+rmdir "$t/sysmod/nvidia_uvm"
+rc="$(stub_check check-nouvm)"
+grep -A3 '^FAIL: ' "$t/check-nouvm"
+[ "$rc" = 1 ] && grep -q "^  - the nvidia_uvm module isn't loaded" "$t/check-nouvm" || { cat "$t/check-nouvm" >&2; fail "check with nvidia_uvm not loaded: exit $rc"; }
+mkdir "$t/sysmod/nvidia_uvm"
+echo "== check FAILs when the member can't open the uvm node"
+sudo chgrp root /dev/worklane-uvm-standin
+rc="$(stub_check check-noopen)"
+grep -A3 '^FAIL: ' "$t/check-noopen"
+[ "$rc" = 1 ] && grep -q "^  - $me, a member of worklane-gpu-dev, can't open /dev/worklane-uvm-standin" "$t/check-noopen" || { cat "$t/check-noopen" >&2; fail "check with a uvm node the member can't open: exit $rc"; }
+sudo rm -f /dev/worklane-uvm-standin
 echo "== an agent user, the test user, the coordinator and any other user, directly: EACCES on every node"
 for u in "${DENIED[@]}"; do
   id -nG "$u" | tr ' ' '\n' | grep -qx worklane-gpu-dev && fail "$u is in the device group"
@@ -328,7 +356,7 @@ grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f s
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
 echo "== revert: its files go, the group stays"
 sudo bash scripts/setup/gpu-devices.sh revert
-for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices; do [ ! -e "$f" ] || fail "revert left $f"; done
+for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices; do [ ! -e "$f" ] || fail "revert left $f"; done
 getent group worklane-gpu-dev > /dev/null || fail "revert removed the group"
 # Nothing of this step is left for the steps after it: the sandbox's own check still passes.
 cleanup

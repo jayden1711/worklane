@@ -22,7 +22,8 @@
 #     runs /usr/local/libexec/worklane-gpu-devices after it, on the same events.
 #   - nvidia-modprobe makes nvidia-uvm and nvidia-uvm-tools 0666 root:root whatever the options say, and it is setuid
 #     root: any user could set them back. apply takes its setuid bit away (dpkg-statoverride, so a package upgrade
-#     keeps it off); nodes are made at boot by udev, as root, so nothing needs it setuid.
+#     keeps it off); nodes are made at boot by udev, as root, so nothing needs it setuid. And since it then can't load
+#     nvidia-uvm on demand for a user, /etc/modules-load.d/worklane-gpu-devices.conf loads it at every boot.
 #
 # Never in the group: root (needs none), any harness user (wl-*: coordinators, test users, agent users) or a user an
 # instance's agents or evals run as (instance.yaml run_as). nvidia-persistenced, the driver's own daemon user, is
@@ -37,6 +38,11 @@ FIXER=/usr/local/libexec/worklane-gpu-devices
 FIXER_SRC="$(cd "$(dirname "$0")/../machine" && pwd)/worklane-gpu-devices.sh"
 NV_PARAMS=/proc/driver/nvidia/params
 DEV=/dev
+# nvidia-uvm (CUDA needs it): loaded at boot from this file, since without a setuid nvidia-modprobe nothing loads it on
+# demand. check reads whether it is loaded from $SYS_MODULE, and opens $UVM_NODE as a member.
+MODULES_LOAD=/etc/modules-load.d/worklane-gpu-devices.conf
+SYS_MODULE=/sys/module
+UVM_NODE=/dev/nvidia-uvm
 PERSISTENCED_USER=nvidia-persistenced
 usage="usage: gpu-devices.sh check | apply --users <user>[,<user>...] | revert"
 
@@ -100,7 +106,7 @@ member_refusal() {
 }
 
 check() {
-  local n p fails=() m pid u comm open seen gid v name val mp r
+  local n p fails=() m pid u comm open seen gid v name val mp r mem out
   say "the NVIDIA device nodes (each must be root:$GROUP, 0660 or stricter)"
   local any=0
   while IFS= read -r n; do
@@ -155,6 +161,34 @@ check() {
     seen=1
   done
   [ -n "$seen" ] || echo "  nobody"
+
+  say "nvidia-uvm (CUDA needs it; loaded at boot by $MODULES_LOAD, never on demand)"
+  if [ "$any" = 1 ] || [ -d "$SYS_MODULE/nvidia" ]; then
+    if [ -d "$SYS_MODULE/nvidia_uvm" ]; then echo "  the nvidia_uvm module: loaded"; else
+      echo "  the nvidia_uvm module: NOT loaded"
+      fails+=("the nvidia_uvm module isn't loaded ($MODULES_LOAD loads it at boot: run apply, then reboot)")
+    fi
+    if [ -f "$MODULES_LOAD" ]; then echo "  $MODULES_LOAD: present"; else echo "  no $MODULES_LOAD"; fi
+    # Opened as a member, the way a granted user opens it (check runs as root, which opens anything): the first member
+    # that is a person's login (uid 1000 or more).
+    mem=""
+    for u in $(members | tr ',' ' '); do
+      if [ "$(id -u "$u" 2>/dev/null || echo 0)" -ge 1000 ]; then mem="$u"; break; fi
+    done
+    if [ -z "$mem" ]; then
+      echo "  opening $UVM_NODE as a member: skipped, $GROUP has no member that is a person's login (uid 1000 or more)"
+    elif [ ! -c "$UVM_NODE" ]; then
+      echo "  no $UVM_NODE"
+      fails+=("no $UVM_NODE to open")
+    elif out="$(cd / && runuser -u "$mem" -- sh -c 'exec 3<>"$1"' _ "$UVM_NODE" 2>&1)"; then
+      echo "  $mem (a member) opens $UVM_NODE: ok"
+    else
+      echo "  $mem (a member) can't open $UVM_NODE: $out"
+      fails+=("$mem, a member of $GROUP, can't open $UVM_NODE: ${out:-no reason given}")
+    fi
+  else
+    echo "  no NVIDIA driver loaded: nothing to check"
+  fi
 
   say "the $GROUP group"
   if [ -z "$gid" ]; then
@@ -244,6 +278,16 @@ apply() {
   mv -f "$tmp" "$MODPROBE_FILE"
   sed 's/^/  /' "$MODPROBE_FILE"
 
+  say "$MODULES_LOAD"
+  install -d -o root -g root -m 0755 "$(dirname "$MODULES_LOAD")"
+  tmp="$(dirname "$MODULES_LOAD")/.$(basename "$MODULES_LOAD").tmp"
+  rm -f "$tmp"
+  install -o root -g root -m 0644 /dev/null "$tmp"
+  printf '# Written by scripts/setup/gpu-devices.sh: nvidia-uvm at every boot (nvidia-modprobe, no longer setuid, cannot load it on demand).\nnvidia-uvm\n' > "$tmp"
+  grep -qx 'nvidia-uvm' "$tmp" || { rm -f "$tmp"; echo "the modules-load file came out wrong; nothing installed" >&2; exit 1; }
+  mv -f "$tmp" "$MODULES_LOAD"
+  echo "installed $MODULES_LOAD (systemd-modules-load reads only *.conf, so the temp was never live)"
+
   say "$UDEV_RULE"
   install -d -o root -g root -m 0755 "$(dirname "$UDEV_RULE")"
   tmp="$(dirname "$UDEV_RULE")/.$(basename "$UDEV_RULE").tmp"
@@ -285,15 +329,15 @@ Done; nothing changes on the running system until the driver loads again. Next:
      (Reloading the driver instead means stopping everything that uses the GPU, the display manager and
      nvidia-persistenced included, then rmmod and modprobe of nvidia_uvm, nvidia_drm, nvidia_modeset and nvidia. An
      rmmod while anything holds the GPU fails or can hang the machine: don't, unless you must.)
-  2. Then: sudo bash $0 check   (must say PASS)
+  2. Then: sudo bash $0 check   (must say PASS, with the nvidia_uvm module loaded and a member opening $UVM_NODE)
   3. id <your user>   (must list $GROUP; a session from before step 1 doesn't have it: log in again)
 EOF
 }
 
 revert() {
   local p
-  say "removing $MODPROBE_FILE, $UDEV_RULE and $FIXER"
-  rm -f -- "$MODPROBE_FILE" "$UDEV_RULE" "$FIXER"
+  say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE and $FIXER"
+  rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$FIXER"
   udevadm control --reload 2>/dev/null || true
   p="$(command -v nvidia-modprobe 2>/dev/null || true)"
   if [ -n "$p" ]; then
