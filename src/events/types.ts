@@ -371,6 +371,16 @@ export const EventSchemas = {
     /** The model whose verdict this is (tiered evaluation), and the cheap model it was escalated from, if it was. */
     model: z.string().optional(),
     escalated_from: z.string().optional(),
+    /** The cross-family evaluator's second verdict on a protected change (src/cross-eval.ts), when routing turns it on. */
+    cross_family: z
+      .strictObject({
+        provider: z.string(),
+        outcome: z.enum(['agrees', 'disagrees', 'not_run']),
+        patch_correct: z.boolean().optional(),
+        confidence: z.enum(['high', 'medium', 'low']).optional(),
+        reason: z.string().max(2000).optional(),
+      })
+      .optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions

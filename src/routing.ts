@@ -26,6 +26,8 @@ export const ROUTING = {
   eval_cheap: { default: 'sonnet' as string, task: 'the evaluator, for changes at eval_cheap_levels' },
   eval_cheap_levels: { default: ['L0'] as Level[], task: 'review levels judged by eval_cheap (the rest: the evaluator role\'s model)' },
   eval_escalate: { default: true as boolean, task: 'a failed or uncertain eval_cheap verdict is judged once more by the evaluator role\'s model' },
+  // WHY: off by default (the owner, v0.5.1); a second family's verdict can only hold a protected change, never pass one.
+  eval_cross_family: { default: 'off' as string, task: 'protected changes: a second verdict from another model family (a hosted provider, hosted:<name>); a disagreement holds the PR with both reasons. off: none' },
 };
 
 export type RoutingKey = keyof typeof ROUTING;

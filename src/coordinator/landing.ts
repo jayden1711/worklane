@@ -323,6 +323,7 @@ export abstract class Landing extends Decisions {
       '',
       `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
       `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.confidence_reason ? ` (${verdict.confidence_reason.slice(0, 1000)})` : verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
+      ...(verdict?.cross_family ? [`**Cross-family evaluator (${verdict.cross_family.provider}):** ${verdict.cross_family.outcome === 'not_run' ? `not run: ${verdict.cross_family.reason ?? ''}` : `${verdict.cross_family.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.cross_family.confidence}; ${verdict.cross_family.outcome === 'agrees' ? 'agrees' : 'DISAGREES: held for a human'}${verdict.cross_family.reason ? ` (${verdict.cross_family.reason.slice(0, 500)})` : ''}`}`] : []),
       ...evalLines(this.instructionResults(n)),
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
