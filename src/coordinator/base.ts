@@ -21,7 +21,8 @@ import { type FileIndex } from '../hotspots.js';
 import { runIssue } from '../run-record.js';
 import { emergencyStop, slotStatus } from '../slots.js';
 import { updateDrain } from '../update-drain.js';
-import { diskHold, diskRoom, nextUtcDay, type Hold } from '../governor-holds.js';
+import { diskHold, diskRoom, type Hold } from '../governor-holds.js';
+import { localDay, nextLocalMidnight } from '../local-day.js';
 import type { PushGuard } from '../push-guard.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
 import type { TestRuns } from './pr-batch.js';
@@ -290,10 +291,10 @@ export abstract class CoordinatorBase {
       .at(-1)?.payload;
   }
 
-  /** USD spent today (UTC) by all runs, from the log. */
+  /** USD spent today (this machine's local day, as the dashboard shows it: src/local-day.ts) by all runs, from the log. */
   spentToday(): number {
-    const day = new Date().toISOString().slice(0, 10);
-    return this.d.log.read(0, ['run.cost']).filter((e) => e.ts.startsWith(day)).reduce((s, e) => s + (e.payload as { usd: number }).usd, 0);
+    const day = localDay();
+    return this.d.log.read(0, ['run.cost']).filter((e) => localDay(e.ts) === day).reduce((s, e) => s + (e.payload as { usd: number }).usd, 0);
   }
 
   /** An emergency stop is in force (read now, not only at the last check): nothing lands and nothing merges. */
@@ -312,7 +313,7 @@ export abstract class CoordinatorBase {
     const maxLoad = this.d.cfg.project.governor.max_load ?? cpuCount() * 2;
     const budget = this.d.cfg.agents.daily_budget_usd;
     const spent = this.spentToday();
-    if (spent >= budget) return { kind: 'budget', reason: `daily budget $${budget} reached`, load, freeDiskPct: disk.freePct, facts: { spent_usd: spent, budget_usd: budget, until: nextUtcDay(Date.now()).toISOString() } }; // spentToday's day: UTC, by the wall clock
+    if (spent >= budget) return { kind: 'budget', reason: `daily budget $${budget} reached`, load, freeDiskPct: disk.freePct, facts: { spent_usd: spent, budget_usd: budget, until: nextLocalMidnight().toISOString() } }; // spentToday's day: local, by the wall clock
     if (load !== null && load > maxLoad) return { kind: 'load', reason: `machine load ${load.toFixed(0)} > ${maxLoad}`, load, freeDiskPct: disk.freePct, facts: { load, max_load: maxLoad } };
     // WHY: the floor is the larger of an absolute GB and a share of the disk (#470), not a flat share.
     const room = diskRoom({ freeGb: disk.freeGb ?? (disk.freePct / 100) * disk.totalGb, totalGb: disk.totalGb }, this.d.cfg.project.governor, est);

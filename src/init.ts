@@ -28,6 +28,7 @@ import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
+import { instanceNameProblem } from './instance-name.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, protectionAnswer, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
@@ -662,8 +663,9 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
     return 2;
   }
   const instance = a.instance ?? repo.split('/')[1]!.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 21);
-  if (!/^[a-z][a-z0-9-]{0,20}$/.test(instance)) {
-    io.say(`init: instance name "${instance}": lowercase letters, digits and dashes, starting with a letter (give --instance <name>)`);
+  const why = instanceNameProblem(instance);
+  if (why) {
+    io.say(`init: instance name "${instance}": ${why} (give --instance <name>)`);
     return 2;
   }
   if (!root()) {

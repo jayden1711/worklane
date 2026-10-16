@@ -1,5 +1,6 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
+import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
@@ -179,6 +180,11 @@ export const ProjectConfig = z.strictObject({
    * run (at most `max_usd`) looks for tech debt and anti-patterns. Findings go to one log issue; a fix is filed only
    * for a pattern seen 3+ times, at most `max_prs` per run, never in a high-risk or safety-floor path.
    */
+  /**
+   * Automations (docs/automations.md): the repo can only tighten the instance's policy: turn them off, or lower the
+   * runs a day or the dollars a day all of them may use. Definitions are never in the repo.
+   */
+  automations: AutomationsRepo,
   gardener: z
     .strictObject({
       enabled: z.boolean().default(false),

@@ -5,11 +5,13 @@
 //   <instances dir>/<name>/state/            event log, locks, worktree records
 // The repo's own config folder keeps project behavior (tests, review levels,
 // skills) and is reviewed like code; it may only tighten the instance policy.
+import { AutomationsPolicy } from './automations/schema.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
+import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
 import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
@@ -22,7 +24,12 @@ import { fileURLToPath } from 'node:url';
 /** The engine's CLI, for hooks a lane adds itself (dist/src/cli.js beside this file). */
 const ENGINE_CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 
-const name = z.string().regex(/^[a-z][a-z0-9-]{0,40}$/, 'lowercase letters, digits and dashes');
+// An instance's own users and units are never another's (src/instance-name.ts); an instance that runs as its owner's
+// user may keep a longer name than a machine's (INSTANCE_FILE_NAME_MAX).
+const name = z.string().superRefine((s, ctx) => {
+  const why = instanceNameProblem(s, INSTANCE_FILE_NAME_MAX);
+  if (why) ctx.addIssue({ code: 'custom', message: why });
+});
 
 export const InstanceFile = z.strictObject({
   version: z.literal(1),
@@ -139,6 +146,8 @@ export const PolicyFile = z.strictObject({
    * protection API answers 403 or 404); off, it doesn't. Read on every pass.
    */
   main_watch: z.enum(['auto', 'off']).default('auto'),
+  /** Automations (docs/automations.md): off until an owner turns them on; the caps over all of them. */
+  automations: AutomationsPolicy,
   /** Instance settings that win over the repo's: worker count, daily budget, CI fix runs, run windows. */
   settings: InstanceSettings.default({}),
   /**
@@ -367,7 +376,8 @@ export function setResolveHome(f: (user: string) => string | null): void {
 }
 
 export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir(), agentUser = `${instanceName}-agent`, agentHome = resolveHome(agentUser) ?? `${homesRoot()}/${agentUser}`): string {
-  if (!name.safeParse(instanceName).success) throw new Error(`instance name "${instanceName}": lowercase letters, digits and dashes`);
+  const why = instanceNameProblem(instanceName, INSTANCE_FILE_NAME_MAX);
+  if (why) throw new Error(`instance name "${instanceName}": ${why}`);
   const home = join(dir, instanceName);
   if (existsSync(home)) throw new Error(`instance "${instanceName}" already exists at ${home}`);
   mkdirSync(join(home, 'state'), { recursive: true, mode: 0o700 });

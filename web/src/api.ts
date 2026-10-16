@@ -1471,7 +1471,9 @@ export const PROJECT_NAME = /^[a-z][a-z0-9-]{0,20}$/;
 export const PROJECT_REPO = /^([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})\/([A-Za-z0-9_.-]{1,100})$/;
 /** Why this name and repo won't be accepted; null when they will. */
 export function addProjectInvalid(name: string, repo: string): string | null {
-  if (!PROJECT_NAME.test(name) || name === 'dash' || /-(agent|eval|work)$/.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters, not "dash" and not ending in -agent, -eval or -work.';
+  if (!PROJECT_NAME.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters.';
+  // Names whose machine users or units would be another's (src/instance-name.ts has why for each).
+  if (/^(dash|hub|hub-setup|update|tailscale|claude-account|agent|eval|work)$|^(test|ci|dashboard)-|-(agent|eval|work)$/.test(name)) return `The machine already uses that name for something else: not ${name}.`;
   const m = PROJECT_REPO.exec(repo);
   if (!m || m[2] === '.' || m[2] === '..') return 'The repo is owner/name, as on GitHub.';
   return null;
@@ -2162,3 +2164,51 @@ export async function healthPass(refresh: () => Promise<HubInfo | null> = refres
   const all = await load(h);
   return { hub: h, status: statusOf(all), why: whyOf(all) };
 }
+
+/** Extend -> Automations (src/automations/view.ts): the owners' and writers' view. */
+export type AutomationAction = 'create' | 'edit' | 'delete' | 'pause' | 'resume' | 'run';
+export interface AutomationDef {
+  id: string;
+  name: string;
+  owner?: string;
+  enabled?: boolean;
+  trigger: { kind: 'schedule'; cron: string } | { kind: 'github'; on: string; label?: string; command?: string } | { kind: 'discord'; command: string };
+  mode: 'task' | 'report';
+  template: { title: string; outcome: string; done_when: ({ test: string } | { command: string; expect?: string })[]; trigger_text?: 'quoted' | 'none' };
+  budget: { per_run_usd: number; per_day_usd: number };
+  limits?: { runs_per_day: number; cooldown_minutes: number };
+  chain?: { accept_from: string[] };
+}
+export interface AutomationItem extends AutomationDef {
+  owner: string;
+  enabled: boolean;
+  limits: { runs_per_day: number; cooldown_minutes: number };
+  when: string;
+  summary: string[];
+  next: string | null;
+  today: { runs: number; spentUsd: number };
+  runs: { run: string; at: string; trigger: { kind: string; ref: string | null; by: string | null }; depth: number; outcome: string; costUsd: number | null; outputs: { kind: string; number: number }[] }[];
+  refused: { at: string; trigger: string; why: string }[];
+  pausedBy: { by: string; role: string; why: string | null; at: string } | null;
+}
+export interface AutomationsView {
+  unavailable?: string;
+  limits: { enabled: boolean; off: string | null; maxRunsPerDay: number; maxConcurrent: number; dailyUsd: number };
+  timezone: string;
+  today: { runs: number; spentUsd: number };
+  error: string | null;
+  digest: string;
+  actions: AutomationAction[];
+  automations: AutomationItem[];
+}
+export interface AutomationPlan {
+  ok: boolean;
+  confirmed: boolean;
+  action: AutomationAction;
+  id: string;
+  changes: string[];
+  summary: string[];
+  digest?: string;
+}
+/** Review (no digest, no confirm: nothing written) or Confirm (with the review's digest) one change to the automations. */
+export const changeAutomation = (body: { action: AutomationAction; id?: string; automation?: AutomationDef; digest?: string; confirm?: boolean }) => api<AutomationPlan>('/api/automations', { method: 'POST', body: JSON.stringify(body) });

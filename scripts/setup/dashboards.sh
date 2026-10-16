@@ -191,7 +191,7 @@ done
 
 state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
-  [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
+  need_instance_name "$name"
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   [ -d "$(state_of "$name")" ] || { echo "no state for instance $name at $(state_of "$name"); run engine.sh with it first" >&2; exit 1; }
   # An ACL on the way to the token would expose anything there that others may read: refuse first.
