@@ -2558,7 +2558,8 @@ jobs:
           [ "$(grep -n 'no process of wl-' "$F/rm4.out" | head -1 | cut -d: -f1)" -lt "$(grep -n 'removed user wl-delta' "$F/rm4.out" | head -1 | cut -d: -f1)" ]
           [ "$(sudo stat -c '%U:%G %a' /var/lib/worklane/agent-slots/delta-suid)" = "root:root 755" ]
           [ "$(sudo stat -c '%U:%G %a' /etc/worklane-ci-canary)" = "nobody:nogroup 640" ]
-          [ "$(sudo stat -c '%U:%G' /var/lib/worklane/agent-slots/delta-link)" = "root:root" ]
+          # The link itself is root's now; its group, the slot directory's agent-slots (not delta's), is kept.
+          [ "$(sudo stat -c '%U:%G' /var/lib/worklane/agent-slots/delta-link)" = "root:agent-slots" ]
           [ "$(sudo stat -c '%u' /var/tmp/delta-leftover)" = "$delta_uid" ]
           rc_="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.rechowned.txt')" && lo="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.left-owned.txt')"
           for f in "$rc_" "$lo"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ]; done
