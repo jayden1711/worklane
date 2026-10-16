@@ -44,6 +44,14 @@
 #       directory of its own in that user's home, which no agent user can read), then its path is written into the
 #       instance's credentials.yaml (intake.discord_token) through the engine's config code, the rest kept. The
 #       dashboard's equivalent is the First run page's Discord step (its paste box).
+#   bash scripts/setup/credentials.sh <name> intake-slack
+#       Slack intake (docs/intake.md 2.7): the Slack app's two tokens, the app-level token (xapp-, for Socket Mode)
+#       then the bot token (xoxb-). Each pasted at a hidden prompt, or one per line on stdin when there is no terminal;
+#       never an argument, never echoed; each shape-checked. Installed for wl-<name> only (0400, beside the Discord
+#       token), then their paths written into credentials.yaml (intake.slack_app_token, intake.slack_bot_token).
+#   bash scripts/setup/credentials.sh <name> intake-linear
+#       Linear intake (docs/intake.md 2.8): a personal API key (lin_api_), made with only Read and Create comments,
+#       limited to the one team. The same way in and the same place; credentials.yaml intake.linear_api_key.
 #
 # The App's permissions (checked by app-permissions.mjs): Contents read/write (fetch, push task branches,
 # lease refs), Issues read/write (the backlog), Pull requests read/write (open PRs; Worklane never merges),
@@ -71,8 +79,8 @@ if [ "${1:-}" = dashboard-signin ]; then
   echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
   exit 0
 fi
-name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ... | credentials.sh dashboard-signin}"
-what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord ...}"
+name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord|intake-slack|intake-linear ... | credentials.sh dashboard-signin}"
+what="${2:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord|intake-slack|intake-linear ...}"
 flag="${3:-}"
 coord="wl-$name" agent="wl-$name-agent" eval_user="wl-$name-eval"
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -83,6 +91,24 @@ intake_dir="$(home_of "$coord")/.config/$name-intake"
 install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
+}
+# An intake instance's credentials.yaml must be there to write into: said before any secret is asked for.
+intake_creds_ready() {
+  id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
+  local creds
+  creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
+  sudo -u "$coord" test -f "$creds" || { echo "no $creds yet: the instance's GitHub credential comes first (credentials.sh $name github-app ...); nothing installed" >&2; exit 1; }
+}
+# One secret at a hidden prompt, or one line of stdin when there is no terminal; whitespace removed. Never echoed.
+read_secret() {
+  local prompt="$1" value=""
+  if [ -t 0 ]; then
+    read -rsp "$prompt" value || true
+    echo >&2
+  else
+    IFS= read -r value || true
+  fi
+  printf '%s' "$value" | tr -d '[:space:]'
 }
 
 case "$what" in
@@ -251,6 +277,33 @@ JS
     run_as "$coord" 'worklane instance set-discord-token "$1" --file "$2"' "$name" "$intake_dir/discord-token"
     echo "next, as $coord: worklane discord channels --instance $name   (the channels the bot can see, read-only)"
     echo "then intake.yaml in the instance home (docs/intake.md; or the dashboard's First run page, Discord), and restart the instance."
+    ;;
+  intake-slack)
+    intake_creds_ready
+    # The same shapes the dashboard's paste box checks (src/intake/source-setup.ts SLACK_APP_TOKEN_SHAPE, SLACK_BOT_TOKEN_SHAPE).
+    app="$(read_secret "Paste the Slack app-level token (xapp-...), then Enter (it is not shown): ")"
+    [[ "$app" =~ ^xapp-[0-9]+-[A-Za-z0-9-]{20,250}$ ]] || { app=""; echo "that doesn't look like a Slack app-level token (xapp-...); nothing installed" >&2; exit 1; }
+    bot="$(read_secret "Paste the Slack bot token (xoxb-...), then Enter (it is not shown): ")"
+    [[ "$bot" =~ ^xoxb-[A-Za-z0-9-]{20,250}$ ]] || { app=""; bot=""; echo "that doesn't look like a Slack bot token (xoxb-...); nothing installed" >&2; exit 1; }
+    say "install the Slack tokens for $coord only ($intake_dir/slack-app-token and slack-bot-token, 0400, in a 0700 directory)"
+    install_secret "$intake_dir/slack-app-token" "$app"; app=""
+    install_secret "$intake_dir/slack-bot-token" "$bot"; bot=""
+    say "write their paths into $name's credentials.yaml, as $coord"
+    run_as "$coord" 'worklane instance set-intake-credential "$1" slack_app_token --file "$2"' "$name" "$intake_dir/slack-app-token"
+    run_as "$coord" 'worklane instance set-intake-credential "$1" slack_bot_token --file "$2"' "$name" "$intake_dir/slack-bot-token"
+    echo "next, as $coord: worklane slack view --instance $name   (the workspace, channels and people the app can see, read-only)"
+    echo "then intake.yaml in the instance home (docs/intake.md 2.7; or the dashboard's First run page, Intake sources, Slack), and restart the instance."
+    ;;
+  intake-linear)
+    intake_creds_ready
+    key="$(read_secret "Paste the Linear API key (lin_api_...), then Enter (it is not shown): ")"
+    [[ "$key" =~ ^lin_api_[A-Za-z0-9]{20,100}$ ]] || { key=""; echo "that doesn't look like a Linear API key (lin_api_...); nothing installed" >&2; exit 1; }
+    say "install the Linear key for $coord only ($intake_dir/linear-api-key, 0400, in a 0700 directory)"
+    install_secret "$intake_dir/linear-api-key" "$key"; key=""
+    say "write its path into $name's credentials.yaml, as $coord"
+    run_as "$coord" 'worklane instance set-intake-credential "$1" linear_api_key --file "$2"' "$name" "$intake_dir/linear-api-key"
+    echo "next, as $coord: worklane linear view --instance $name   (the teams, labels and people the key can see, read-only)"
+    echo "then intake.yaml in the instance home (docs/intake.md 2.8; or the dashboard's First run page, Intake sources, Linear), and restart the instance."
     ;;
   *) echo "unknown credential $what" >&2; exit 2 ;;
 esac
