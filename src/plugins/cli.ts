@@ -48,7 +48,7 @@ const engine = () => ({ node: process.execPath, engineCli: fileURLToPath(new URL
  * read-only, nothing writable that the broker reads or runs; root reads one line of its output as data.
  */
 function quarantine(instance: string, id: string, runtime: McpRuntime, codeDir: string): SnapshotResult {
-  const r = runThrowawaySnapshot({ ...engine(), runtime, codeDir, unit: `${BRAND.cli}-mcp-snapshot-${instance}-${id}-${process.pid}` });
+  const r = runThrowawaySnapshot({ ...engine(), runtime, codeDir, unit: `${BRAND.cli}-mcp-snapshot-${instance}_${id}_${process.pid}` });
   return { snapshot: r.snapshot, error: r.error, withSecrets: false, network: [] };
 }
 

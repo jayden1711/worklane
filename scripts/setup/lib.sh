@@ -290,11 +290,12 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ]; then echo "worklane-$n.service is the machine's own"
-  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
   elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
-  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  elif [[ "$n" == plugin-fetch-* ]]; then echo "worklane-$n.service is the plugin fetch of instance ${n#plugin-fetch-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
   fi
 }
 instance_name_ok() { [ -z "$(instance_name_problem "$1")" ]; }
@@ -306,7 +307,7 @@ need_instance_name() { local why; why="$(instance_name_problem "$1")"; [ -z "$wh
 ci_runner_name_problem() {
   local n="$1"
   if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
-  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "wl-ci-$n is instance ci's $n name"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "wl-ci-$n is instance ci's $n name"
   elif [[ "$n" =~ ^(.+)-(docker|reset)$ ]]; then echo "worklane-ci-$n@.service is CI runner ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} unit"
   fi
 }

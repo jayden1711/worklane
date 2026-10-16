@@ -17,7 +17,7 @@ export const INSTANCE_NAME_MAX = 21;
 export const INSTANCE_FILE_NAME_MAX = 41;
 
 /** What each name the scripts make is derived from: an instance name, a CI runner name, or nothing (a fixed name). */
-export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy';
+export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy' | 'snapshot';
 /** Every user, group and systemd unit the setup scripts make, with <n> the instance or runner name. */
 export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: NameOf }[] = [
   { pattern: 'wl-<n>', of: 'instance' },
@@ -30,6 +30,15 @@ export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: Nam
   { pattern: `${BRAND.cli}-<n>.service`, of: 'instance' },
   { pattern: `${BRAND.cli}-dashboard-<n>.service`, of: 'instance' },
   { pattern: `${BRAND.cli}-test-<n>-docker.service`, of: 'instance' },
+  // The MCP broker (scripts/setup/mcp-broker.sh): its user, its two socket groups, its unit (one template for all).
+  { pattern: 'wl-<n>-mcp', of: 'instance' },
+  { pattern: 'wl-<n>-mcpc', of: 'instance' },
+  { pattern: 'wl-<n>-mcpctl', of: 'instance' },
+  { pattern: `${BRAND.cli}-mcp@.service`, of: 'fixed' },
+  // A plugin fetch or preview (the machine helper's plugin steps), one at a time per instance.
+  { pattern: `${BRAND.cli}-plugin-fetch-<n>.service`, of: 'instance' },
+  // A throwaway snapshot run (src/mcp/throwaway.ts): <instance>_<id>_<pid>. No instance or fixed name holds an underscore.
+  { pattern: `${BRAND.cli}-mcp-snapshot-<n>_<n>_<n>.service`, of: 'snapshot' },
   // A test run's transient unit: <instance>_<run id>_<pid>. Neither part holds an underscore, so it is one run's alone.
   { pattern: `${BRAND.cli}-test-<n>_<n>_<n>.service`, of: 'test-run' },
   // The same, as a helper before protocol 9 named it (<instance>-<run id>-<pid>), which an update can leave behind: never
@@ -58,11 +67,12 @@ export function instanceNameProblem(s: unknown, max = INSTANCE_NAME_MAX): string
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `${BRAND.cli}-dashboard-${s}.service is the dashboard hub's`;
   if (s === 'update' || s === 'tailscale' || s === 'claude-account') return `${BRAND.cli}-${s}.service is the machine's own`;
-  if (s === 'agent' || s === 'eval' || s === 'work') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
+  if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
   if (s.startsWith('dashboard-')) return `${BRAND.cli}-${s}.service is the dashboard of instance ${s.slice(10)}`;
-  const m = /^(.+)-(agent|eval|work)$/.exec(s);
+  if (s.startsWith('plugin-fetch-')) return `${BRAND.cli}-${s}.service is the plugin fetch of instance ${s.slice(13)}`;
+  const m = /^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$/.exec(s);
   if (m) return `wl-${s} is instance ${m[1]}'s ${m[2]} name`;
   return null;
 }
@@ -79,7 +89,7 @@ export function instanceNameOk(s: unknown): s is string {
  */
 export function ciRunnerNameProblem(s: unknown): string | null {
   if (typeof s !== 'string' || !/^[a-z][a-z0-9-]{0,20}$/.test(s)) return `lowercase letters, digits and dashes, starting with a letter, at most ${INSTANCE_NAME_MAX}`;
-  if (s === 'agent' || s === 'eval' || s === 'work') return `wl-ci-${s} is instance ci's ${s} name`;
+  if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `wl-ci-${s} is instance ci's ${s} name`;
   const m = /^(.+)-(docker|reset)$/.exec(s);
   if (m) return `${BRAND.cli}-ci-${s}@.service is CI runner ${m[1]}'s ${m[2]} unit`;
   return null;

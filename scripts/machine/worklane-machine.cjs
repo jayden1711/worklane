@@ -153,11 +153,12 @@ function instanceNameProblem(s) {
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `worklane-dashboard-${s}.service is the dashboard hub's`;
   if (s === 'update' || s === 'tailscale' || s === 'claude-account') return `worklane-${s}.service is the machine's own`;
-  if (s === 'agent' || s === 'eval' || s === 'work') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
+  if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
   if (s.startsWith('dashboard-')) return `worklane-${s}.service is the dashboard of instance ${s.slice(10)}`;
-  const m = /^(.+)-(agent|eval|work)$/.exec(s);
+  if (s.startsWith('plugin-fetch-')) return `worklane-${s}.service is the plugin fetch of instance ${s.slice(13)}`;
+  const m = /^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$/.exec(s);
   if (m) return `wl-${s} is instance ${m[1]}'s ${m[2]} name`;
   return null;
 }

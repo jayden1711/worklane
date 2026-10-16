@@ -96,11 +96,12 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ]; then echo "worklane-$n.service is the machine's own"
-  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
   elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
-  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  elif [[ "$n" == plugin-fetch-* ]]; then echo "worklane-$n.service is the plugin fetch of instance ${n#plugin-fetch-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
   fi
 }
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|exec|wipe|check|version ..."
