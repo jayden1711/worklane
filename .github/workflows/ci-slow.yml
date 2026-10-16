@@ -2314,7 +2314,8 @@ jobs:
           [ "$rc" = 1 ] && grep -q 'refused: delta has work in flight; nothing changed' "$F/rm0.err" && grep -q 'worklane-delta.service, is active' "$F/rm0.err"
           id wl-delta && id wl-delta-agent && sudo test -d /srv/worklane/delta && sudo test -f /etc/sudoers.d/worklane-delta
           if sudo test -e /var/lib/worklane/removed; then echo "the refused run exported or removed something" >&2; exit 1; fi
-          changed="$(sudo find /etc/worklane /etc/sudoers.d /etc/systemd/system /var/lib/worklane -xdev -newer "$F/rm-mark" ! -name '*.lock' ! -path '/var/lib/worklane/agent-slots/*' ! -name 'machine-changes.jsonl' ! -name 'updates.jsonl' 2>/dev/null || true)"
+          # The slot directory itself is left out like its files: running coordinators take and drop their locks there.
+          changed="$(sudo find /etc/worklane /etc/sudoers.d /etc/systemd/system /var/lib/worklane -xdev -newer "$F/rm-mark" ! -name '*.lock' ! -path '/var/lib/worklane/agent-slots' ! -path '/var/lib/worklane/agent-slots/*' ! -name 'machine-changes.jsonl' ! -name 'updates.jsonl' 2>/dev/null || true)"
           [ -z "$changed" ] || { echo "the refused run changed: $changed" >&2; exit 1; }
           echo "RM_ID=$id" >> "$GITHUB_ENV"; echo "RM_URL=$url" >> "$GITHUB_ENV"
       - name: "instance-remove: --print lists every item; a process of delta's users refuses it; no terminal and a wrong typed name change nothing"
