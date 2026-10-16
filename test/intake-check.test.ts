@@ -55,18 +55,18 @@ test('intake check: a valid file prints "valid" and what is on, and nothing else
   const { dir, file } = instances(VALID);
   const r = run({ dir });
   assert.equal(r.code, 0);
-  assert.deepEqual(r.out, [`${file}: valid`, 'discord: on, 2 channels', 'superfan: on, channel 100000000000000005', 'github: on']);
+  assert.deepEqual(r.out, [`${file}: valid`, 'discord: on, 2 channels', 'superfan: on, channel 100000000000000005', 'github: on', 'slack: off', 'linear: off']);
   assert.deepEqual(r.err, []);
   // INVARIANT: who is who (sender ids, logins) and the server id stay in the file.
   for (const secret of [SENDER, 'example-owner', 'example-maintainer', '900000000000000001']) assert.ok(!r.out.join('\n').includes(secret), secret);
 
   // Sources off, and a warning the loader gives (Discord on, nobody allowed), named by --instance.
   writeFileSync(file, 'version: 1\n', { mode: 0o600 });
-  assert.deepEqual(run({ dir, instance: 'shop' }).out.slice(1), ['discord: off', 'superfan: off', 'github: off']);
+  assert.deepEqual(run({ dir, instance: 'shop' }).out.slice(1), ['discord: off', 'superfan: off', 'github: off', 'slack: off', 'linear: off']);
   writeFileSync(file, 'version: 1\ndiscord: { enabled: true, guild: "900000000000000001", channels: ["100000000000000001"] }\n', { mode: 0o600 });
   const w = run({ dir, instance: 'shop' });
   assert.equal(w.code, 0);
-  assert.deepEqual(w.out.slice(1), ['discord: on, 1 channel', 'superfan: off', 'github: off', 'warning: discord is on but discord.allowed_senders is empty: no Discord message will be accepted']);
+  assert.deepEqual(w.out.slice(1), ['discord: on, 1 channel', 'superfan: off', 'github: off', 'slack: off', 'linear: off', 'warning: discord is on but discord.allowed_senders is empty: no Discord message will be accepted']);
 });
 
 test('intake check: an invalid file prints every schema error with its path and exits 1', () => {
@@ -142,7 +142,7 @@ test("doctor: the instance's intake.yaml is a failing line when invalid, ok when
   assert.ok(bad!.detail.includes(`${BRAND.cli} intake check --instance shop`));
 
   writeFileSync(file, VALID, { mode: 0o600 });
-  assert.deepEqual(line(), { name: 'intake shop', level: 'ok', detail: 'intake.yaml valid: discord: on, 2 channels; superfan: on, channel 100000000000000005; github: on' });
+  assert.deepEqual(line(), { name: 'intake shop', level: 'ok', detail: 'intake.yaml valid: discord: on, 2 channels; superfan: on, channel 100000000000000005; github: on; slack: off; linear: off' });
   writeFileSync(file, 'version: 1\ndiscord: { enabled: true, guild: "900000000000000001" }\n', { mode: 0o600 });
   assert.equal(line()?.level, 'warn');
   rmSync(file);
