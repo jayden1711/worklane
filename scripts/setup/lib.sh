@@ -248,6 +248,18 @@ ensure_instance_home() {
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
 
+# Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
+# a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
+run_as_users() {
+  local u h f
+  while IFS=: read -r u _ _ _ _ h _; do
+    [[ "$u" == wl-* && -n "$h" && "$h" != / ]] || continue
+    for f in "$h"/.local/state/worklane/instances/*/instance.yaml; do
+      [ -f "$f" ] || continue
+      sed -n -e 's/^  agent_user: *//p' -e 's/^  eval_user: *//p' "$f" | tr -d "\"'" | sed 's/[[:space:]]*$//'
+    done
+  done < <(getent passwd)
+}
 # Why a name can't be an instance's (printed; nothing when it can): lowercase letters, digits and dashes, at most 21,
 # and never a name whose users, group or units are already another's (wl-test-<x> is instance x's test user, wl-ci-<x>
 # a CI runner's, wl-<x>-agent instance x's agent, wl-dash the viewer; worklane-dashboard-<x>.service x's dashboard).

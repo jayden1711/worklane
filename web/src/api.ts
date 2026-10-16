@@ -1082,7 +1082,39 @@ export interface FirstRun {
   /** Setup mode: the checkout's own config loads now (the dashboard takes over shortly). */
   configReady?: boolean;
   draft?: DraftJob;
+  /** #468: every config PR the page proposed (and init's setup PR), followed to its end; absent from older servers. */
+  configPrs?: ConfigPr[];
 }
+/** A config PR as the page follows it (src/config-pr.ts): open, closed, or merged and this checkout brought to it. */
+export interface ConfigPr {
+  number: number;
+  url: string;
+  kind: 'setup' | 'config';
+  base: string;
+  state: 'open' | 'merged' | 'closed' | 'unknown';
+  mergedBy: string | null;
+  mergedAt: string | null;
+  synced: boolean;
+  sha: string | null;
+  why: string | null;
+  retry: boolean;
+  command: string | null;
+}
+/** #468: the held draft's preview (src/setup-mode.ts draftView): its summary and its files, read-only. */
+export interface HeldDraftView {
+  summary: { owner: string; writers: string[]; tests: { slot: string; command: string }[]; dailyBudgetUsd: number; models: { role: string; model: string }[]; waits: string[]; autoMerge: string } | null;
+  error: string | null;
+  files: { name: string; text: string }[];
+  values: RepoConfigValues | null;
+  at: string;
+}
+type ConfigPrAnswer = { ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string | null; why?: string; admin?: boolean };
+/** Merge one of the page's config PRs here, or fast-forward this checkout to a merged one (confirm false: what it would do). */
+export const configPrAction = (number: number, action: 'merge' | 'sync', confirm: boolean) => api<ConfigPrAnswer>('/api/first-run/config-pr', { method: 'POST', body: JSON.stringify({ number, action, confirm }) });
+/** The preview's Change: what these values change in the held draft (confirm: the draft changed). */
+export const setupDraftValues = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean }>('/api/first-run/setup/draft-values', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/** The preview's Confirm: the setup PR opened, and merged here when the person is the repo's admin and GitHub allows it. */
+export const setupPropose = () => api<ConfigPrAnswer>('/api/first-run/setup/propose', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export interface DraftJob {
   running: boolean;
   startedAt: string | null;
@@ -1094,7 +1126,6 @@ export const getSetupRepos = () => api<{ repos: string[]; error?: string }>('/ap
 export const setupOrigin = (repo: string, confirm: boolean) => api<{ ok: boolean; commands?: string[]; repo?: string; confirmed: boolean }>('/api/first-run/setup/origin', { method: 'POST', body: JSON.stringify({ repo, confirm }) });
 export const setupAnswers = (answers: Record<string, string>) => api<{ ok: boolean; saved: string[] }>('/api/first-run/setup/answers', { method: 'POST', body: JSON.stringify({ answers }) });
 export const setupDraft = () => api<{ ok: boolean; draft: DraftJob }>('/api/first-run/setup/draft', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-export const setupMerge = (confirm: boolean) => api<{ ok: boolean; number: number; url?: string; command?: string; confirmed: boolean }>('/api/first-run/setup/merge', { method: 'POST', body: JSON.stringify({ confirm }) });
 export interface RepoConfigValues {
   writers: string[];
   required_checks: string[];
@@ -1173,9 +1204,6 @@ export interface StarterCi {
 }
 export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
-/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
-export const mergeRepoConfig = (number: number, confirm: boolean) =>
-  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
@@ -1284,6 +1312,8 @@ export interface FirstRunAutoConfig {
   pr: { number: number | null; url: string } | null;
   /** The command that answers a question. */
   answer: string;
+  /** #468: the drafted config held for its preview (setup mode), before any PR; absent from older servers. */
+  held?: HeldDraftView | null;
 }
 export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fresh ? '?fresh=1' : ''}`);
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
