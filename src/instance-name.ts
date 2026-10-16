@@ -17,7 +17,7 @@ export const INSTANCE_NAME_MAX = 21;
 export const INSTANCE_FILE_NAME_MAX = 41;
 
 /** What each name the scripts make is derived from: an instance name, a CI runner name, or nothing (a fixed name). */
-export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run';
+export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy';
 /** Every user, group and systemd unit the setup scripts make, with <n> the instance or runner name. */
 export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: NameOf }[] = [
   { pattern: 'wl-<n>', of: 'instance' },
@@ -30,10 +30,11 @@ export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: Nam
   { pattern: `${BRAND.cli}-<n>.service`, of: 'instance' },
   { pattern: `${BRAND.cli}-dashboard-<n>.service`, of: 'instance' },
   { pattern: `${BRAND.cli}-test-<n>-docker.service`, of: 'instance' },
-  // A test run's transient unit: the instance, the run's id and a process id. Never another kind's (the last part is
-  // digits, never docker; an instance's own unit can't start with test-). Two instances' runs are told apart by the
-  // testrun helper, not by these rules: instance a's run b-1 and instance a-b's run 1 share a prefix.
-  { pattern: `${BRAND.cli}-test-<n>-<n>-<n>.service`, of: 'test-run' },
+  // A test run's transient unit: <instance>_<run id>_<pid>. Neither part holds an underscore, so it is one run's alone.
+  { pattern: `${BRAND.cli}-test-<n>_<n>_<n>.service`, of: 'test-run' },
+  // The same, as a helper before protocol 9 named it (<instance>-<run id>-<pid>), which an update can leave behind: never
+  // another kind's (the last part is digits), but two instances' can be equal, so the helper tells them apart by User=.
+  { pattern: `${BRAND.cli}-test-<n>-<n>-<n>.service`, of: 'test-run-legacy' },
   { pattern: `${BRAND.cli}-ci-<n>@.service`, of: 'runner' },
   { pattern: `${BRAND.cli}-ci-<n>-docker@.service`, of: 'runner' },
   { pattern: `${BRAND.cli}-ci-<n>-reset@.service`, of: 'runner' },

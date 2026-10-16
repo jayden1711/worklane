@@ -128,16 +128,25 @@ test('ENGINE_NAMES lists every user, group and unit the scripts make, and no two
     owner.set(made, by);
   };
   for (const e of ENGINE_NAMES) if (e.of === 'fixed') claim(e.pattern, 'the machine');
-  // A test run's unit: never any other kind's name (its last part is a process id: digits).
+  // A legacy test run's unit (before protocol 9): never any other kind's name (its last part is a process id: digits).
+  const legacy = ENGINE_NAMES.find((e) => e.of === 'test-run-legacy')!.pattern;
+  assert.equal(legacy, `${BRAND.cli}-test-<n>-<n>-<n>.service`);
   const runUnit = new RegExp(`^${BRAND.cli}-test-[a-z0-9-]+-[0-9]+\\.service$`);
-  for (const e of ENGINE_NAMES) if (e.of === 'test-run') assert.equal(e.pattern, `${BRAND.cli}-test-<n>-<n>-<n>.service`);
-  const runs = [...owner.keys()].filter((k) => runUnit.test(k));
-  assert.deepEqual(runs, [], 'no fixed name looks like a test run\'s unit');
+  const fill = (p: string, ...parts: string[]) => parts.reduce((s, x) => s.replace('<n>', x), p);
+  // WHY the helper checks User= for these: two instances' legacy units can be the same name.
+  assert.equal(fill(legacy, 'a', 'b-c', '1'), fill(legacy, 'a-b', 'c', '1'));
+  assert.deepEqual([...owner.keys()].filter((k) => runUnit.test(k)), [], 'no fixed name looks like a test run\'s unit');
   for (const n of names) {
     for (const e of ENGINE_NAMES) {
       if (e.of === 'instance' && instanceNameOk(n)) claim(e.pattern.replace('<n>', n), `instance ${n}`);
       if (e.of === 'runner' && ciRunnerNameProblem(n) === null) claim(e.pattern.replace('<n>', n), `CI runner ${n}`);
     }
   }
-  assert.deepEqual([...owner.keys()].filter((k) => runUnit.test(k)), [], 'no instance or runner name looks like a test run\'s unit');
+  assert.deepEqual([...owner.keys()].filter((k) => runUnit.test(k)), [], 'no instance or runner name looks like a legacy test run\'s unit');
+  // A test run's unit now: each (instance, run id) pair has its own, and none is any other kind's. Run ids take the
+  // helper's shape ([a-z0-9][a-z0-9-]{0,47}); instance a's run b-c and instance a-b's run c are told apart here.
+  const run = ENGINE_NAMES.find((e) => e.of === 'test-run')!.pattern;
+  const short = [...names].filter((n) => n.split('-').length <= 2);
+  for (const n of short.filter((x) => instanceNameOk(x))) for (const id of short) claim(fill(run, n, id, '1'), `instance ${n}'s run ${id}`);
+  assert.notEqual(fill(run, 'a', 'b-a', '1'), fill(run, 'a-b', 'a', '1'));
 });
