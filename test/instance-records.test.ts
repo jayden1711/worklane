@@ -283,7 +283,7 @@ test("only an experiment job's own output volume is the engine's mount to unmoun
   assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha/jobs/j-3/vol`), false, 'a tmpfs at the place');
   assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), false, "another instance's volume, named for alpha");
   assert.equal(is('alpha-2', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), true);
-  for (const m of [`/var/lib/${cli}-exp/alpha/jobs/j-1/vol/x`, `/var/lib/${cli}-exp/alpha/jobs/j-1`, `/var/lib/${cli}-exp/alpha/jobs/J-1/vol`, `/home/wl-alpha/vol`]) assert.equal(is('alpha', m), false, m);
+  for (const m of [`/var/lib/${cli}-exp/alpha/jobs/j-1/vol/x`, `/var/lib/${cli}-exp/alpha/jobs/j-1`, `/var/lib/${cli}-exp/alpha/jobs/J-1/vol`, `/srv/elsewhere/vol`]) assert.equal(is('alpha', m), false, m);
 });
 
 test("instance-remove.sh revokes the instance's Siri device tokens, as its coordinator, before it exports; none works after", () => {
