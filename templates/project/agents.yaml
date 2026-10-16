@@ -34,5 +34,7 @@ instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
 # The older model_routing and eval_routing sections still load, as aliases.
 # routing: { build: sonnet, build_high_risk: opus, escalate_after: 2, planner: sonnet, research: sonnet,
 #            intake_triage: sonnet, intake_replier: haiku, intake_summary: haiku, intake_thread: sonnet,
-#            stage_judge: sonnet, eval_answer: sonnet, reflection: haiku }
+#            stage_judge: sonnet, eval_answer: sonnet, reflection: haiku, chat: sonnet }
+# routing.chat is the dashboard chat's default model (else roles.chief_of_staff.model); its picker offers only the
+# models routing names. roles.chief_of_staff.conversation_budget_usd caps one chat conversation's spend (default 5).
 routing: { eval_cheap: sonnet, eval_cheap_levels: [L0], eval_escalate: true }

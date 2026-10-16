@@ -36,6 +36,7 @@ import { chatDirs, ChatError, chatTurn, CHAT_ID, CHAT_KEY, CONVERSATION_ID, MAX_
 import { attachmentsFor, attachmentView, readAttachment, removeAttachment, type AttachmentCaps, type AttachmentMeta, type AttachmentView } from './chat-attachments.js';
 import { isWriter, type RoleOf } from './dashboard-auth.js';
 import { redact } from './events/redact.js';
+import type { ChatPick } from './chat-pick.js';
 import { RUNS_DIR } from './run-record.js';
 
 export { CONVERSATION_ID };
@@ -433,7 +434,7 @@ export function deleteConversation(o: { stateDir: string; id: string; by: string
  * question the coordinator needs) goes to the same queue the single-shot chat uses. Attachments are the asker's
  * own uploads, within the per-message caps. With a `key`, a retried ask returns the first one's id.
  */
-export function askInConversation(o: { stateDir: string; id: string; by: string; text: unknown; attachments?: unknown; key?: unknown; caps: AttachmentCaps; now?: Date }): { id: string } {
+export function askInConversation(o: { stateDir: string; id: string; by: string; text: unknown; attachments?: unknown; key?: unknown; pick?: ChatPick; picker?: 'owner' | 'writer'; caps: AttachmentCaps; now?: Date }): { id: string } {
   const c = conversationFor(o.stateDir, o.id, o.by);
   let question: string;
   try {
@@ -457,7 +458,8 @@ export function askInConversation(o: { stateDir: string; id: string; by: string;
   // A conversation that still has the default title takes its first question's opening words.
   writeMeta(o.stateDir, { ...c, title: first && c.title === DEFAULT_TITLE ? clip(question.replace(/\s+/g, ' '), 60) : c.title, updatedAt: now.toISOString() });
   if (keyName) writeJson(d.keys, keyName, { id });
-  const request: ChatRequest = { v: 1, id, at: now.toISOString(), by: o.by, question, conversation: c.id };
+  // The conversation id is this one's, read back above as the asker's own (conversationFor), never the client's as sent.
+  const request: ChatRequest = { v: 1, id, at: now.toISOString(), by: o.by, question, conversation: c.id, ...(o.pick && o.picker ? { pick: o.pick, picker: o.picker } : {}) };
   writeJson(d.requests, id, request);
   return { id };
 }
