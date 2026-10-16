@@ -2337,7 +2337,7 @@ jobs:
           hub=/etc/systemd/system/worklane-dashboard-hub.service
           grep -q -- '--hub ci=[^ ,]* ' "$hub" && grep -q -- ' --siri-port 4397' "$hub" && grep -q -- "--client-id $RM_ID --public-url $RM_URL " "$hub"
           if grep -q 'delta' "$hub"; then echo "the hub still serves delta" >&2; exit 1; fi
-          grep -qxF "$RM_HELPER ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
+          sudo grep -qxF "$RM_HELPER ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
           sudo -n -l -U wl-ci "$HELPER" set-slots 1 >/dev/null
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci worklane-beta; do systemctl is-active "$u.service"; done
           sudo tail -n 1 /var/lib/worklane/machine-changes.jsonl | jq -e '.what=="instance.removed" and .from=="delta"'
