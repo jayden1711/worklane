@@ -149,7 +149,8 @@ export function systemdRunStats(stderr: string): { stats: SystemdRunStats; own: 
   const stats: SystemdRunStats = { cpuS: null, memPeakMb: null };
   // The unit's result ("success", "exit-code", "timeout", ...), from that final block only.
   let result: string | null = null;
-  const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9-]+\\.service(?:; invocation ID: [0-9a-f]{32})?\n)`).exec(stderr);
+  // The unit's name: <cli>-test-<name>_<id>_<pid> (protocol 9), or <cli>-test-<name>-<id>-<pid> from a helper before it.
+  const unit = new RegExp(`(?:^|\n)(Running as unit: ${BRAND.cli}-test-[a-z0-9_-]+\\.service(?:; invocation ID: [0-9a-f]{32})?\n)`).exec(stderr);
   if (unit) own.push([unit.index + unit[0].length - unit[1]!.length, unit.index + unit[0].length]);
   // The last "Finished with result: " whose rest is all summary; the line may follow a run's last unended line.
   for (let at = stderr.lastIndexOf('Finished with result: '); at >= 0; at = at === 0 ? -1 : stderr.lastIndexOf('Finished with result: ', at - 1)) {

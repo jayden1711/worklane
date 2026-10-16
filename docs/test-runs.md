@@ -53,7 +53,7 @@ test_run:
 - A run's own commands read the store and never write it: in the sandbox (below) everything outside the run's directory, the caches and the shared directories is read-only. `check` proves it on the host: its probe run reads its commit through the store and fails to write the store's objects, refs or files.
 - `tests.yaml` `checkout.sparse_exclude` (directories no test reads, such as design files and art) is left out of the checkout (sparse; the commit still has them). A tier that needs them sets `full_checkout: true`, and then its whole run checks everything out (a run's tiers share one workspace).
 - The workspace has no remote URL and an empty credential helper, `core.hooksPath=/dev/null`, and nothing of the coordinator's `.git/config` or anyone's global config. Neither has the store.
-- The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>-<id>-*` in `worklane-test.slice`, as the test user, with:
+- The test user never reads the coordinator's checkout, and has no path back to it to write. Each command runs as a transient unit `worklane-test-<name>_<id>_<pid>` (underscores: neither an instance name nor a run id can hold one, so no instance's run shares another's name; `wipe` also checks the unit's `User=` before stopping it, and so cleans units an older helper named `worklane-test-<name>-<id>-<pid>` only when they are its own) in `worklane-test.slice`, as the test user, with:
 
 - a read-only system (`ProtectSystem=strict`), no `/home`, `/root` or `/run/user` (`ProtectHome=tmpfs`);
 - every protected path above inaccessible, and the Docker socket too, so only the helper starts containers;

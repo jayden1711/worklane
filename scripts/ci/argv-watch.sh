@@ -15,6 +15,6 @@ while [ ! -e "$stop" ]; do
     [ -n "$u" ] || continue
     systemctl show "$u" 2>&1
     systemctl cat "$u" 2>&1
-  done < <(systemctl list-units --all --plain --no-legend "worklane-test-$name-*" 2>/dev/null)
+  done < <(systemctl list-units --all --plain --no-legend "worklane-test-${name}_*" "worklane-test-$name-*" 2>/dev/null)
   sleep 0.1
 done
