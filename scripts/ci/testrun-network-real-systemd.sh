@@ -129,7 +129,7 @@ ex() {
   local i="$1" id="$2"; shift 2
   mkrun "$i" "$id"
   : > "$t/seen"
-  as_ "$i" exec "$id" 60 "$@" -- "$probe" < /dev/null > "$t/$id.out" 2> "$t/$id.err" || { cat "$t/$id.err" >&2; fail "$id exited non-zero"; }
+  as_ "$i" exec "$id" 60 "$@" -- "$probe" < /dev/null > "$t/$id.out" 2> "$t/$id.err" || { cat "$t/$id.err" >&2; sudo journalctl --no-pager -n 40 -u "worklane-test-${i}_${id}_net_*" >&2 || true; fail "$id exited non-zero"; }
   sed "s/^/  $id: /" "$t/$id.out"
   as_ "$i" wipe "$id" > /dev/null
 }
