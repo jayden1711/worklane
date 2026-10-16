@@ -122,6 +122,8 @@ export interface RunRecord {
   truncated: boolean;
   /** Why a run that didn't succeed ended: Claude's error text or its stderr's tail (redacted). Absent in older records. */
   detail?: string;
+  /** What the session loaded beyond Claude Code itself (approved plugins and MCP servers). */
+  loaded?: { plugins: string[]; mcpServers: string[] };
 }
 
 /** An issue's runs without their steps (GET /api/runs?issue=n). */
@@ -2165,6 +2167,95 @@ export async function healthPass(refresh: () => Promise<HubInfo | null> = refres
   return { hub: h, status: statusOf(all), why: whyOf(all) };
 }
 
+// ---------- Extend: Plugins (src/plugins/dashboard.ts) ----------
+
+export interface PluginTool {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchema?: unknown;
+}
+export interface PluginRecord {
+  kind: 'plugin' | 'mcp';
+  id: string;
+  roles: string[];
+  [k: string]: unknown;
+}
+export interface PluginEntry {
+  id: string;
+  kind: 'plugin' | 'mcp';
+  label: string;
+  on: boolean;
+  reach: string[];
+  roles?: string[];
+  digest?: string;
+  confirmed_at?: string;
+  staged_by?: string;
+  record?: PluginRecord;
+}
+export interface PluginPreview {
+  kind: 'plugin' | 'mcp';
+  id: string;
+  fetched_at: string;
+  source?: { url: string; sha: string; path?: string };
+  inspection?: { name: string | null; version: string | null; refusals: string[]; skills: string[]; agents: string[]; commands: string[]; bin: string[]; flags: string[]; mcpServers: { name: string; envNames: string[] }[]; files: { path: string; size: number }[] };
+  materialized?: { tree: string; transform: string[] } | null;
+  runtime?: { type: 'plugin' | 'npm'; plugin?: string; server?: string; package?: string; version?: string; argv: string[] };
+  envNames?: string[];
+  snapshot?: { serverName: string | null; instructions: string | null; tools: PluginTool[] } | null;
+  snapshotError?: string | null;
+  snapshotWithSecrets?: boolean;
+  snapshotNetwork?: string[];
+  flags?: string[];
+  refusals?: string[];
+  /** For an update: how it differs from the approved one (files; an MCP server's tools). */
+  diff?: { added: string[]; removed: string[]; changed: string[]; tools?: { added: string[]; removed: string[]; changed: { name: string; fields: string[] }[]; instructions: boolean } } | null;
+}
+export interface PluginUpdate {
+  id: string;
+  kind: 'plugin' | 'npm';
+  from: string;
+  to: string;
+  fetch: Record<string, string>;
+}
+export interface PluginPending {
+  id: string;
+  roles: string[];
+  digest: string;
+  staged_at: string;
+  staged_by: string;
+  network?: string[];
+  secrets?: string[];
+  command: string;
+}
+export interface PluginsView {
+  available: boolean;
+  why?: string;
+  role?: 'owner' | 'writer';
+  instance?: string;
+  problem?: string | null;
+  offProblem?: string | null;
+  entries?: PluginEntry[];
+  waiting?: number;
+  pending?: PluginPending[];
+  previews?: PluginPreview[];
+  fetchStatus?: { id: string; state: string; reason: string; at: string } | null;
+  blocked?: Record<string, { at: string; diff: { added: string[]; removed: string[]; changed: { name: string; fields: string[] }[]; instructions: boolean } }> | null;
+  requests?: { id: string; args: string[]; status: string; detail: string; at: string }[];
+  updates?: { at: string | null; updates: PluginUpdate[] };
+  audit?: { at: string; action: string; login?: string; by?: string; root?: boolean; detail?: unknown }[];
+}
+export interface PluginReview {
+  ok: boolean;
+  confirmed: boolean;
+  digest?: string;
+  command?: string;
+  record?: PluginRecord;
+  current?: { digest: string; record: PluginRecord } | null;
+  changes?: string[];
+}
+export const getPlugins = () => api<PluginsView>('/api/plugins');
+export const pluginAction = (action: 'fetch' | 'stage' | 'withdraw' | 'remove' | 'toggle', body: Record<string, unknown>) => api<PluginReview>(`/api/plugins/${action}`, { method: 'POST', body: JSON.stringify(body) });
 /** Extend -> Automations (src/automations/view.ts): the owners' and writers' view. */
 export type AutomationAction = 'create' | 'edit' | 'delete' | 'pause' | 'resume' | 'run' | 'rotate' | 'unbind';
 export interface AutomationDef {

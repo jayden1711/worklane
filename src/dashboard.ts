@@ -101,6 +101,8 @@ import { SETUP_STEPS, type DetectCache, type SetupContext, type SetupProbe } fro
 /** The steps skipped on the first-run page, in the dashboard's state dir. */
 export const SKIPS_FILE = 'first-run-skips.json';
 import { applyPolicy, planPolicy, policyForm, PolicyEditError } from './policy-edit.js';
+import { handlePluginsRoute } from './plugins/dashboard.js';
+import { brokerStatus } from './mcp/client.js';
 import { ConfigChangeError, planConfigChange, proposeConfigChange, repoConfigForm } from './config-change.js';
 import { isRepoAdmin, mergedLine, planConfigPrMerge, readConfigPrs, refreshConfigPr, saveConfigPr, syncMerged, trackConfigPr, type ConfigPrRecord, type Gh } from './config-pr.js';
 import { configReady, draftView, editDraft, newDraftJob, originPlan, proposeDraft, pushableRepos, saveAnswers, setOrigin, SetupModeError, startDraft, type Run as SetupRun } from './setup-mode.js';
@@ -1390,6 +1392,21 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
+        // The Plugins page (src/plugins/dashboard.ts): owners and writers read, owners act; every refusal audited.
+        if (
+          await handlePluginsRoute(req, res, url, {
+            instance: opts.instance ?? null,
+            instanceHome: opts.instance && opts.policyFile ? dirname(opts.policyFile) : null,
+            eventsDb: opts.eventsDb,
+            stateDir: opts.stateDir,
+            blocked: () => (opts.instance ? brokerStatus(opts.instance) : Promise.resolve(null)),
+            who: { login: who.login, role: who.role, breakGlass: who.via === 'break-glass' },
+            readBody,
+            json,
+            audit: (action, detail) => audit(who, action, detail),
+          })
+        )
+          return;
         if (req.method === 'POST' && isProfileRoute(url.pathname)) {
           const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), audit, readBody });
           return json(res, r.status, r.body);
