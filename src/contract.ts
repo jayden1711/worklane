@@ -24,5 +24,7 @@ export const TaskFile = z.strictObject({
   done_when: DoneWhen.min(1),
   /** Repo-relative files the agent must not change (e.g. a frozen reproduction test). */
   frozen: z.array(z.string()).default([]),
+  /** Repo-relative paths the agent must not even read (an experiment's eval and the harness's config): denied like secrets. */
+  hidden: z.array(z.string()).default([]),
 });
 export type TaskFile = z.infer<typeof TaskFile>;

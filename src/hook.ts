@@ -59,14 +59,15 @@ function log(root: string, file: string, entry: object) {
 const isAgent = (env: NodeJS.ProcessEnv) => env[`${BRAND.envPrefix}_AGENT`] === '1';
 
 /**
- * The guardrails with the task's frozen paths added. A task file that is named but can't be read or parsed is
+ * The guardrails with the task's frozen paths (and its hidden ones, unreadable too) added. A task file that is named but can't be read or parsed is
  * an error, never "no frozen paths": the caller refuses the call rather than run without the guard.
  */
 function withFrozen(g: Config['guardrails'], taskFile: string | undefined): { guardrails: Config['guardrails'] } | { error: string } {
   if (!taskFile) return { guardrails: g };
   try {
-    const frozen = TaskFile.parse(JSON.parse(readFileSync(taskFile, 'utf8'))).frozen;
-    return { guardrails: frozen.length ? { ...g, protected_paths: [...g.protected_paths, ...frozen] } : g };
+    const { frozen, hidden } = TaskFile.parse(JSON.parse(readFileSync(taskFile, 'utf8')));
+    // Hidden paths (an experiment's eval and scorer, the harness's config) are never read either: denied as secrets.
+    return { guardrails: { ...g, protected_paths: [...g.protected_paths, ...frozen, ...hidden], secret_paths: [...g.secret_paths, ...hidden] } };
   } catch (e) {
     return { error: (e as Error).message.split('\n')[0]!.slice(0, 200) };
   }

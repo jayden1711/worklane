@@ -3,9 +3,12 @@
 // no approval can start it. Below them, a job above the instance's thresholds waits for an owner in the Inbox.
 import type { Study } from './study.js';
 
-/** The instance's thresholds (owner, 2026-10-15: 20 minutes to start with). Never above root's caps. */
-export const APPROVE_DEFAULTS = { above_minutes: 20, above_gb: 20 } as const;
-export type Thresholds = { above_minutes: number; above_gb: number };
+/**
+ * The instance's threshold (owner, 2026-10-15): a job whose output quota (its loop-mounted volume, the disk it may
+ * fill) is above 20 GB waits for an owner. Time needs none: root's max_minutes (20 to start) is a cap, not a threshold.
+ */
+export const APPROVE_DEFAULTS = { above_gb: 20 } as const;
+export type Thresholds = { above_gb: number };
 
 /** What root's file allows this instance (src/experiments/root-file.ts reads it). */
 export interface RootCaps {
@@ -18,7 +21,6 @@ export interface RootCaps {
 }
 
 export interface JobAsk {
-  minutes: number;
   gpus: number;
   output_gb: number;
   /** The first job of a study version: a person sees the baseline run once. */
@@ -30,7 +32,6 @@ export interface JobAsk {
 export function approvalReasons(j: JobAsk, t: Thresholds): string[] {
   const r: string[] = [];
   if (j.first) r.push('the first job of this study version');
-  if (j.minutes > t.above_minutes) r.push(`${j.minutes} min is above ${t.above_minutes} min`);
   if (j.gpus > 1) r.push(`${j.gpus} GPUs`);
   if (j.output_gb > t.above_gb) r.push(`${j.output_gb} GB of output is above ${t.above_gb} GB`);
   if (j.lockfile) r.push('the dependency lockfile changed');
@@ -41,6 +42,7 @@ export function approvalReasons(j: JobAsk, t: Thresholds): string[] {
 export function rootRefusal(s: Study, root: RootCaps | null): string | null {
   if (!root) return 'experiments are not on for this instance in root\'s file';
   if (s.job.max_minutes > root.max_minutes) return `${s.job.max_minutes} min a job is above root's ${root.max_minutes}`;
+  for (const z of s.ladder) if ((z.max_minutes ?? s.job.max_minutes) > root.max_minutes) return `the ${z.name} size's ${z.max_minutes} min is above root's ${root.max_minutes}`;
   if (s.job.gpus > root.devices.length) return `${s.job.gpus} GPUs a job, root's file lists ${root.devices.length}`;
   if (s.job.output_gb > root.output_gb) return `${s.job.output_gb} GB a job is above root's ${root.output_gb}`;
   if (s.budget.gpu_hours_per_day > root.gpu_hours_per_day) return `${s.budget.gpu_hours_per_day} GPU-hours a day is above root's ${root.gpu_hours_per_day}`;

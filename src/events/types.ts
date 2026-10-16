@@ -978,7 +978,21 @@ export const EventSchemas = {
   // Experiment studies (src/experiments/, docs/experiments.md): one session proposes one job; the coordinator writes
   // every entry of the study's research log from these, and the agent never writes the log itself.
   /** A session (or a confirm run) begins entry `n` of `study` at `version`, from `parent` (null: the study's own commit). */
-  'experiment.session': z.strictObject({ study: z.string(), version: z.string(), session: z.string(), n: z.number().int().positive(), kind: z.enum(['baseline', 'exploit', 'explore', 'confirm']), parent: z.number().int().positive().nullable(), of: z.number().int().positive().optional() }),
+  'experiment.session': z.strictObject({
+    study: z.string(),
+    version: z.string(),
+    session: z.string(),
+    n: z.number().int().positive(),
+    kind: z.enum(['baseline', 'exploit', 'explore', 'combine', 'seed']),
+    parent: z.number().int().positive().nullable(),
+    /** A stage-2 seed: its candidate, its arm, and the size and seed it runs at. */
+    of: z.number().int().positive().optional(),
+    arm: z.enum(['candidate', 'best']).optional(),
+    size: z.number().int().nonnegative().default(0),
+    seed: z.number().int().positive().default(1),
+    /** A combine session: the winner whose change it puts on the best. */
+    combines: z.number().int().positive().optional(),
+  }),
   /** The session's one proposal, checked: its change committed at `commit` (a local ref, never pushed). `approval`: why an owner approves it first (empty: none). */
   'experiment.proposed': z.strictObject({
     study: z.string(),
@@ -987,6 +1001,8 @@ export const EventSchemas = {
     n: z.number().int().positive(),
     job: z.string(),
     hypothesis: z.string().max(200),
+    /** The one thing this hypothesis changes, in the session's words (a combine session: what it combines). */
+    variable: z.string().max(200).default(''),
     motivation: z.string().max(600),
     expected_effect: z.string().max(200),
     config: z.record(z.string(), z.union([z.string(), z.number()])),
@@ -1013,10 +1029,32 @@ export const EventSchemas = {
     gpu_minutes: z.number().nonnegative(),
     waited_s: z.number().int().nonnegative(),
     tail: z.string().max(2000),
-    decision: z.enum(['keep', 'discard', 'crash', 'stopped', 'pending_confirm']),
+    decision: z.enum(['keep', 'screened_out', 'stage2', 'seed', 'crash', 'stopped']),
     value: z.number().nullable(),
+    /** A candidate that passed the screen: the best its stage 2 is measured against. */
+    vs: z.number().int().positive().optional(),
     why: z.string().max(500),
+    /** The helper's own clock around each step (ms). */
+    timings: z.strictObject({ train_ms: z.number().nonnegative(), predict_ms: z.number().nonnegative(), score_ms: z.number().nonnegative() }).optional(),
   }),
+  /** A candidate's stage-2 judgment at one size: mean ± spread of both arms, the budget each used, and what follows. */
+  'experiment.judged': z.strictObject({
+    study: z.string(),
+    version: z.string(),
+    n: z.number().int().positive(),
+    decision: z.enum(['keep', 'discard', 'ladder', 'held', 'winner']),
+    why: z.string().max(500),
+    stage2: z.strictObject({ size: z.number().int().nonnegative(), meanCandidate: z.number().nullable(), meanBest: z.number().nullable(), spread: z.number().nullable(), seeds: z.number().int().positive(), minutesCandidate: z.number().nonnegative(), minutesBest: z.number().nonnegative() }),
+    value: z.number().nullable().optional(),
+    after: z.enum(['keep', 'winner']).optional(),
+  }),
+  /** An owner's verdict on a held result: accept (it counts) or reject (discarded). */
+  'experiment.verdict': z.strictObject({ study: z.string(), n: z.number().int().positive(), answer: z.enum(['accept', 'reject']), by: z.string() }),
+  /**
+   * The tampering monitor's reading of one session's whole transcript (a cheaper model, on the coordinator's side).
+   * Its findings go to the owner and the hold, never to any session.
+   */
+  'experiment.monitor': z.strictObject({ study: z.string(), version: z.string(), session: z.string(), n: z.number().int().positive(), flagged: z.boolean(), findings: z.array(z.string().max(300)).max(10), cost_usd: z.number().nonnegative() }),
   /** What one experimenter session cost (real money): the study's spend counts these, on the local day. */
   'experiment.cost': z.strictObject({ study: z.string(), session: z.string(), usd: z.number().nonnegative() }),
   /** A person's change to a study through the dashboard's Review -> Confirm. */

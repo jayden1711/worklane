@@ -5,7 +5,7 @@
 // branch in their own worktree; everything outward-facing happens here.
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -22,7 +22,7 @@ import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { evalRouting } from './eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REFLECTION_SCHEMA, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
-import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
+import { compareInstructions, engineRoleCases, instructionTargets, neutralDir, parseCases, runnerAsk } from './skilleval.js';
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
@@ -64,7 +64,7 @@ import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
-import { EXPERIMENTER_DENIED, EXPERIMENTER_TOOLS, ExperimentLoop, type ExperimentHost } from './coordinator/experiments.js';
+import { EXPERIMENTER_DENIED, EXPERIMENTER_TOOLS, ExperimentLoop, MONITOR_SCHEMA, TRANSCRIPT_MAX, transcriptLine, type ExperimentHost } from './coordinator/experiments.js';
 import { EXP_HELPER, expJobDir } from './experiments/helper.js';
 import { PROPOSAL_SCHEMA } from './experiments/proposal.js';
 import { readRootFile } from './experiments/root-file.js';
@@ -1787,6 +1787,8 @@ export class Coordinator extends AutomationRuns {
   /** What the loop may use of this coordinator: its log, git, runner and the helper, nothing more. */
   private experimentHost(x: NonNullable<typeof this.d.experiments>): ExperimentHost {
     const workers = this.d.cfg.agents.roles.workers!;
+    // The monitor reads on the cheaper model routing gives a reflection (the short read-only run before a retry).
+    const monitorModel = routeRun(this.d.cfg, 'reflection');
     const show = (commit: string, path: string) => {
       const r = spawnSync('git', ['show', `${commit}:${path}`], { cwd: this.d.repo, maxBuffer: 64 * 1024 * 1024 });
       return r.status === 0 ? r.stdout : null;
@@ -1796,6 +1798,7 @@ export class Coordinator extends AutomationRuns {
       pinsFile: x.pinsFile,
       configDir: BRAND.configDir,
       model: workers.model,
+      monitorModel,
       events: () => this.d.log.read(),
       emit: (type, payload) => void this.emit(type, payload),
       now: () => this.d.now?.() ?? new Date(),
@@ -1813,8 +1816,13 @@ export class Coordinator extends AutomationRuns {
         const branch = `${BRAND.cli}/${o.name}`;
         const taskFile = join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `${o.name}.json`);
         const { path, setupErrors } = createWorktree(this.wt, o.name, branch, o.commit);
+        const lines: string[] = [];
+        let size = 0;
         try {
-          this.writeTask(taskFile, { id: o.name, done_when: [{ manual: 'the coordinator checks the change and runs it as one job' }], frozen: o.frozen });
+          // The eval isn't in the session's copy at all (the hook denies its paths too); it is put back before the
+          // change is read, so the session's diff never shows it gone and anything written there is overwritten.
+          for (const h of o.hide) if (!h.includes('*')) rmSync(join(path, h), { force: true, recursive: true });
+          this.writeTask(taskFile, { id: o.name, done_when: [{ manual: 'the coordinator checks the change and runs it as one job' }], frozen: o.frozen, hidden: o.hide });
           const r: RunResult = setupErrors.length
             ? { reason: 'failed', detail: `the worktree's setup failed: ${setupErrors.join('; ')}`, costUsd: 0, turns: 0, model: o.name }
             : await this.d.runner.run({
@@ -1833,9 +1841,18 @@ export class Coordinator extends AutomationRuns {
                 taskFile,
                 stallMs: 20 * 60_000,
                 timeoutMs: this.commandTimeoutMs,
+                // The whole transcript, for the tampering monitor on this side only.
+                onStreamLine: (j) => {
+                  const t = transcriptLine(j);
+                  if (!t || size > TRANSCRIPT_MAX * 2) return;
+                  lines.push(t);
+                  size += t.length;
+                },
               });
           this.emit('run.cost', { issue: null, role: 'experimenter', model: r.model, usd: r.costUsd, turns: r.turns });
-          return then(r, path);
+          const files = o.hide.filter((h) => !h.includes('*'));
+          if (files.length) execFileSync('git', ['checkout', o.commit, '--', ...files], { cwd: path, stdio: 'ignore' });
+          return await then(r, path, lines.join('\n'));
         } finally {
           try {
             removeWorktree(this.wt, o.name);
@@ -1844,6 +1861,17 @@ export class Coordinator extends AutomationRuns {
           }
         }
       },
+      monitor: (prompt, maxBudgetUsd) => {
+        const cwd = neutralDir();
+        return this.d.runner
+          .run({ env: {}, role: 'experiment-monitor', stateDir: this.d.stateDir, prompt, cwd, model: monitorModel, allowedTools: [], disallowedTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task'], maxTurns: 2, maxBudgetUsd, jsonSchema: MONITOR_SCHEMA, stallMs: 10 * 60_000, timeoutMs: this.commandTimeoutMs })
+          .then((r) => {
+            this.emit('run.cost', { issue: null, role: 'experiment-monitor', model: r.model, usd: r.costUsd, turns: r.turns });
+            return r;
+          })
+          .finally(() => rmSync(cwd, { recursive: true, force: true }));
+      },
+      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Extend -> Experiments`),
       commitChange: (path, parent, message) => {
         removeSandboxPlaceholders(path);
         this.git(path, 'add', '-A');
