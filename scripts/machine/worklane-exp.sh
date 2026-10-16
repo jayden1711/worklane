@@ -557,7 +557,8 @@ job() {
   install -d -o root -g root -m 0700 "$d/out" "$d/pred"
   cp -R --no-preserve=ownership,mode -- "$vol/out/." "$d/out/"
   cp -R --no-preserve=ownership,mode -- "$vol/pred/." "$d/pred/"
-  umount "$vol" && VOL_MOUNT= && rm -f -- "$img" && rmdir -- "$vol"
+  # Only once the volume is unmounted is $vol a plain directory again (rm never crosses into a mount: --one-file-system).
+  umount "$vol" && VOL_MOUNT= && rm -f -- "$img" && rm -rf --one-file-system -- "$vol"
   chown -R root:"$coord" "$d/out"; chmod -R u=rwX,g=rX,o= "$d/out"
   chown -R root:"$suser" "$d/pred"; chmod -R u=rwX,g=rX,o= "$d/pred"
   # 5. The predictions' format gate (PRED_GATE), then the score: the scorer, its sealed copy, the predictions and
