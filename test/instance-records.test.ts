@@ -389,3 +389,24 @@ test("instance-remove.sh revokes the instance's Siri device tokens, as its coord
   assert.ok(readDevices(stateDir).every((d) => d.revokedBy === 'instance removed'));
   assert.deepEqual(revokeAllDevices(stateDir, 'instance removed'), [], 'again: nothing left to revoke');
 });
+
+test("a rename keeps the old instance home's directories but state/: archived whole, 0600, and listed by path and size", { skip: !posix && 'bash, tar, find' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'keep-'));
+  const home = join(root, 'alpha');
+  for (const [p, data] of [['state/events.db', 'history'], ['git-hooks/pre-push', '#!/bin/sh\n'], ['notes/keep-me.txt', 'twelve bytes'], ['.hidden/x', 'x']] as const) {
+    mkdirSync(dirname(join(home, p)), { recursive: true });
+    writeFileSync(join(home, p), data);
+  }
+  writeFileSync(join(home, 'instance.yaml'), 'name: alpha\n');
+  const tarf = join(root, 'a.tar');
+  const list = join(root, 'a.txt');
+  const r = spawnSync('bash', ['-c', 'source "$1"; archive_dirs "$2" "$3" "$4"', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), home, tarf, list], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const names = spawnSync('tar', ['-tf', tarf], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean).sort();
+  assert.ok(names.includes('notes/keep-me.txt') && names.includes('git-hooks/pre-push') && names.includes('.hidden/x'), names.join(' '));
+  assert.ok(!names.some((n) => n.startsWith('state')), 'never the state: that is the export');
+  assert.ok(!names.includes('instance.yaml'), 'only directories: the files are carried');
+  assert.deepEqual(readFileSync(list, 'utf8').trim().split('\n'), ['.hidden/x\t1', 'git-hooks/pre-push\t10', 'notes/keep-me.txt\t12']);
+  assert.match(r.stdout, /notes\/keep-me\.txt\t12/);
+  for (const f of [tarf, list]) assert.equal(statSync(f).mode & 0o777, 0o600, f);
+});

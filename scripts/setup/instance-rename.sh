@@ -34,6 +34,8 @@
 #             canary, incidents, staged signers, the init record (instance-records.cjs rekey)
 #   services  <new>'s test user when <old> had one, its GPU grant (testrun-gpu.sh disable <old>, enable <new>, the same
 #             GPUs), its coordinator (service.sh, with <old>'s limits), the machine helper's rule and the hub with <new>
+#   keep      the old instance home's directories but state/ (not carried, nor in the export) archived, root's 0600,
+#             with a listing of every file by path and size beside it
 #   remove    instance-remove.sh <old> --yes: <old>'s users, units, files and anything left of its (it exports again)
 # A failed step stops there, saying how to go on (rerun the same command) and, before `services`, how to undo it all
 # (--abort: <new> removed, <old>'s records and unit put back; <old> left stopped). Once <new> has run, the way back is
@@ -73,7 +75,7 @@ done_step() { grep -qx "$1" "$progress" 2>/dev/null; }
 mark() { echo "$1" >> "$progress"; }
 inst_dir() { echo "$(home_of "wl-$1")/.local/state/worklane/instances/$1"; }
 unit=/etc/systemd/system/worklane-$old.service
-STEPS=(park export users home checkout import records services remove)
+STEPS=(park export users home checkout import records services keep remove)
 
 # --- what there is
 
@@ -114,6 +116,7 @@ show_plan() {
       import) printf "  import   %s's history into %s; Siri device tokens revoked; open asks asked again for %s\n" "$old" "$new" "$new" ;;
       records) printf "  records  %s\n" "$(records plan "$old" | cut -f1 | grep -vx gpu | tr '\n' ' ')" ;;
       services) printf '  services %s%s, worklane-%s.service, the machine helper rule and the hub with %s\n' "$(user_exists "wl-test-$old" && echo "test user wl-test-$new, ")" "$(records plan "$old" | cut -f1 | grep -qx gpu && echo "the GPU grant, ")" "$new" "$new" ;;
+      keep) printf "  keep     %s's instance home directories but state/ -> %s/%s-to-%s-<time>.home-dirs.tar (root's 0600), listed by path and size\n" "$old" "$ARCHIVE" "$old" "$new" ;;
       remove) printf '  remove   instance-remove.sh %s --yes\n' "$old" ;;
     esac
   done
@@ -330,6 +333,15 @@ step_services() {
     # shellcheck disable=SC2086 # one word per instance name
     bash "$here/dashboards.sh" "${args[@]}" $names
   fi
+}
+
+# The directories of the old instance home that aren't its state (git-hooks/ and any other: not carried, so not in the
+# export either), archived root's 0600 with a listing of every file by path and size, before the removal deletes the home.
+step_keep() {
+  local stamp; stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  [ -d "$(inst_dir "$old")" ] || { echo "no instance home of $old's left"; return 0; }
+  archive_dirs "$(inst_dir "$old")" "$ARCHIVE/$old-to-$new-$stamp.home-dirs.tar" "$ARCHIVE/$old-to-$new-$stamp.home-dirs.txt"
+  chown root:root "$ARCHIVE/$old-to-$new-$stamp".home-dirs.* 2>/dev/null || true
 }
 
 step_remove() {

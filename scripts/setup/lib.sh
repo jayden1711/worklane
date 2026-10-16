@@ -271,6 +271,30 @@ engine_volume() {
   [ "$back" = "${m%/vol}/vol.img" ]
 }
 
+# Every directory directly in <dir> but state/ (an instance home's: git-hooks/ and any other), archived whole into
+# <tar> (links kept as links, never followed) and listed in <list>, "<path>\t<size in bytes>" for each file (a link:
+# "link"), sorted;
+# both 0600. Prints the listing. Nothing to archive: neither is written, and it says so.
+#   archive_dirs <dir> <tar> <list>
+archive_dirs() {
+  local dir="$1" tarf="$2" list="$3" x dirs=()
+  for x in "$dir"/*/ "$dir"/.[!.]*/; do
+    x="${x%/}"
+    [ -d "$x" ] && [ ! -L "$x" ] || continue
+    [ "${x##*/}" != state ] || continue
+    dirs+=("${x##*/}")
+  done
+  if [ "${#dirs[@]}" -eq 0 ]; then echo "no directory in $dir but state/: nothing to archive"; return 0; fi
+  (umask 077; tar -C "$dir" -cf "$tarf" -- "${dirs[@]}")
+  # A link is listed as one (its target never read): "<path>\tlink".
+  (umask 077; cd "$dir" && find "${dirs[@]}" \( -type f -o -type l \) | LC_ALL=C sort | while IFS= read -r x; do
+    if [ -L "$x" ]; then printf '%s\tlink\n' "$x"; else printf '%s\t%s\n' "$x" "$(wc -c < "$x" | tr -d ' ')"; fi
+  done > "$list")
+  chmod 0600 "$tarf" "$list"
+  echo "archived ${dirs[*]} from $dir to $tarf; the files (path, bytes), also in $list:"
+  sed 's/^/  /' "$list"
+}
+
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.

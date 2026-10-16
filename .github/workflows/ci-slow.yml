@@ -2478,6 +2478,10 @@ jobs:
           command -v nft >/dev/null 2>&1 || sudo apt-get install -y -q nftables >/dev/null
           sudo bash scripts/setup/experiments.sh install ci > "$F/rn-exp.log" 2>&1 || { tail -n 40 "$F/rn-exp.log"; exit 1; }
           exp_uids="$(id -u wl-exp-ci) $(id -u wl-score-ci)"
+          # A directory in ci's instance home that isn't its state: not carried, so kept in the history archive.
+          ci_inst="$home/.local/state/worklane/instances/ci"
+          sudo install -d -o wl-ci -g wl-ci -m 0700 "$ci_inst/notes"
+          printf 'kept across the rename\n' | sudo install -o wl-ci -g wl-ci -m 0600 /dev/stdin "$ci_inst/notes/keep-me.txt"
           sudo bash scripts/setup/instance-rename.sh ci kilo --print | tee "$F/rn4-print.txt"
           grep -q 'it would refuse now, while:' "$F/rn4-print.txt" && grep -q 'worklane-ci.service, is active' "$F/rn4-print.txt"
           sudo systemctl stop worklane-ci.service
@@ -2525,6 +2529,12 @@ jobs:
           sudo jq -e '(.instances|has("ci")|not) and (.instances|has("kilo")|not)' /etc/worklane/testrun-gpu.json
           grep -q "note: ci's GPU grant (GPU 0) is not moved: ci has no test user" "$F/rn5.out"
           grep -qF "dropped  experiments.sh remove ci (experiments aren't moved" "$F/rn5.out"
+          # The old home's notes/ survived into the archive, root's 0600, listed by path and size.
+          kt="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/ci-to-kilo-*.home-dirs.tar')"; kl="${kt%.tar}.txt"
+          for f in "$kt" "$kl"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ] || { sudo stat -c '%n %U:%G %a' "$f"; exit 1; }; done
+          [ "$(sudo tar -xOf "$kt" notes/keep-me.txt)" = "kept across the rename" ]
+          sudo grep -qxF "$(printf 'notes/keep-me.txt\t23')" "$kl"
+          grep -qF "$(printf 'notes/keep-me.txt\t23')" "$F/rn5.out"
           grep -qF "  - experiments.sh remove ci (experiments aren't moved" "$F/rn5.out"
           grep -qF "  - /var/lib/worklane/agent-slots/discord-claim-ci.json (the new name's coordinator writes its own" "$F/rn5.out"
           for u in wl-exp-ci wl-score-ci wl-exp-kilo wl-score-kilo; do if id "$u" 2>/dev/null; then echo "$u is left" >&2; exit 1; fi; done
