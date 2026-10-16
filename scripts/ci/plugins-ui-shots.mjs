@@ -2,7 +2,7 @@
 // CI only (ci-slow.yml, plugins-ui): screenshots of the Extend page for the Plugins PR, light and dark, desktop and
 // phone, through scripts/dev/control-dashboard.mjs. The demo is a checkout, which has no plugins of its own, so the
 // page's own /api/plugins answers are replaced in the browser by fixtures (below) after the page loads: what is shown
-// is the real page rendering those answers. "Before" is the base branch's build: the sidebar without Extend.
+// is the real page rendering those answers. "Before" is the base branch's build: Extend with Automations alone.
 //   node scripts/ci/plugins-ui-shots.mjs <out dir> <base checkout, built>
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -46,18 +46,18 @@ for (const theme of ['light', 'dark']) {
     const tag = `${theme}-${vp}`;
     const view = ['--theme', theme, '--viewport', size];
     const drawer = vp === 'phone' ? [{ op: 'click', target: 'testid:nav-menu' }, { op: 'wait', ms: 400 }] : [];
-    // Before: the base branch's sidebar (no Extend).
-    run(`before-sidebar-${tag}`, [{ op: 'open', page: 'board' }, ...drawer, shot(`before-sidebar-${tag}`)], [...view, '--engine', base, '--as', 'owner']);
+    // Before: the base branch's Extend page (Automations alone).
+    run(`before-extend-${tag}`, [{ op: 'open', page: 'extend' }, shot(`before-extend-${tag}`)], [...view, '--engine', base, '--as', 'owner']);
     // After: the sidebar with Extend; the owner's empty state; the list with one update to review; Review open; the
     // machine step; the writer's read-only view.
     run(`after-${tag}`, [
       { op: 'open', page: 'board' }, ...drawer, shot(`after-sidebar-${tag}`),
-      { op: 'open', page: 'extend' }, stub(ownerEmpty), settle, { op: 'wait', target: 'testid:plugins-empty' }, shot(`after-empty-${tag}`),
+      { op: 'open', page: 'extend' }, { op: 'click', target: 'testid:extend-tab-plugins' }, stub(ownerEmpty), settle, { op: 'wait', target: 'testid:plugins-empty' }, shot(`after-empty-${tag}`),
       stub(owner), settle, { op: 'wait', target: 'testid:plugin-preview' }, shot(`after-list-${tag}`),
       { op: 'click', target: 'testid:plugin-review-button' }, { op: 'wait', target: 'testid:plugin-review' }, shot(`after-review-${tag}`),
       stub(pending), settle, { op: 'wait', target: 'testid:plugins-pending' }, shot(`after-machine-step-${tag}`),
       { op: 'console' },
     ], [...view, '--as', 'owner']);
-    run(`writer-${tag}`, [{ op: 'open', page: 'extend' }, stub(writer), settle, { op: 'wait', target: 'testid:plugins-writer-note' }, shot(`after-writer-${tag}`), { op: 'console' }], [...view, '--as', 'writer']);
+    run(`writer-${tag}`, [{ op: 'open', page: 'extend' }, { op: 'click', target: 'testid:extend-tab-plugins' }, stub(writer), settle, { op: 'wait', target: 'testid:plugins-writer-note' }, shot(`after-writer-${tag}`), { op: 'console' }], [...view, '--as', 'writer']);
   }
 }

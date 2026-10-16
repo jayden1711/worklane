@@ -1,11 +1,12 @@
 name: ui shots
-# Screenshots of the Extend page (Plugins) for a PR that changes it: before (the base branch's sidebar) and after, light
+# Screenshots of the Extend page (Plugins) for a PR that changes it: before (the base branch's Extend page) and after, light
 # and dark, desktop and phone, as an owner and a writer (scripts/ci/plugins-ui-shots.mjs), uploaded as an artifact.
 # Pull requests only, and only when that page changes: not a push check, not a batch, not an updater check.
 on:
   pull_request:
     paths:
       - web/src/pages/Extend.tsx
+      - web/src/components/Plugins.tsx
       - src/plugins/dashboard.ts
       - scripts/ci/plugins-ui-shots.mjs
 concurrency:
