@@ -29,6 +29,7 @@ import { runMachineRequests } from './coordinator/machine-requests.js';
 import { recordProfileSwitches } from './claude-profiles.js';
 import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatAnswer, type ChatRequest } from './chat.js';
+import { chatRunOptions, conversationSpentUsd, DEFAULT_PERSON_DAILY_USD, MAIN_CONVERSATION, nextLocalMidnight, personSpentUsd } from './chat-pick.js';
 import { siriPass } from './coordinator/siri.js';
 import { machineStats } from './os/stats.js';
 import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
@@ -64,7 +65,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { HarnessEvals } from './coordinator/harness-evals.js';
+import { AutomationRuns } from './coordinator/automations.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { AUTH_FAILED_CHAT_TEXT } from './claude-auth-failure.js';
@@ -91,7 +92,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends HarnessEvals {
+export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -155,6 +156,7 @@ export class Coordinator extends HarnessEvals {
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
+    await step('automations', () => this.checkAutomations(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -390,6 +392,15 @@ export class Coordinator extends HarnessEvals {
       if (disk) return refuse(`paused: ${disk}; it resumes on its own once there is room`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
       if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
+      // The picker and the conversation's cap (src/chat-pick.ts), checked here, before the answer runs, whatever the dashboard checked.
+      const conversation = q.conversation ?? MAIN_CONVERSATION;
+      const costs = this.d.log.read(0, ['run.cost']);
+      const spent = conversationSpentUsd(costs, conversation);
+      // The per-person cap, for anyone but an owner: `q.by` is the login the dashboard's signed-in session named (never
+      // the client's body), and whether they're an owner is asked here, not read from the request.
+      const person = (await this.chatOwner(q.by)) ? null : { capUsd: this.d.settings?.().settings.chat?.person_daily_usd ?? DEFAULT_PERSON_DAILY_USD, spentUsd: personSpentUsd(costs, q.by), resets: nextLocalMidnight() };
+      const run = chatRunOptions({ agents: this.d.cfg.agents, picker: q.picker ?? 'viewer', ...(q.pick ? { pick: q.pick } : {}), conversation, spentUsd: spent, dailyLeftUsd: left, person });
+      if (!run.ok) return refuse(run.why);
       const events = this.d.log.read();
       const context = {
         instance: this.d.instance,
@@ -413,14 +424,27 @@ export class Coordinator extends HarnessEvals {
         gid: bundle.gid,
         repo: this.d.repo,
         remainingUsd: left,
-        onCost: (r: { costUsd: number; model: string; turns: number }) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+        run: { model: run.model, ...(run.effort ? { effort: run.effort } : {}), maxBudgetUsd: run.maxBudgetUsd },
+        // The spend counts against the conversation the request names: one the dashboard wrote after checking it is the
+        // asker's (askInConversation), and conversationTurn checks that again before anything runs or costs.
+        onCost: (r: { costUsd: number; model: string; turns: number }) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns, conversation, by: q.by }),
       };
       const a = q.conversation ? await conversationTurn({ ...turn, request: q, ...(this.d.roleOf ? { roleOf: this.d.roleOf } : {}) }) : await chatTurn({ ...turn, ...(q.attachments?.length ? { attachments: q.attachments } : {}) });
-      write({ answer: a });
+      write({ answer: { ...a, conversation: { id: conversation, spentUsd: spent + a.costUsd, capUsd: run.capUsd } } });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
     } catch (e) {
       if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);
       refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
+    }
+  }
+
+  /** Whether a chat asker is one of the instance's owners: their role on the repo, else (no lookup here) owners.default. A failed lookup: not an owner. */
+  private async chatOwner(by: string): Promise<boolean> {
+    if (!this.d.roleOf) return by.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase();
+    try {
+      return (await this.d.roleOf(by)) === 'owner';
+    } catch {
+      return false;
     }
   }
 
@@ -627,7 +651,7 @@ export class Coordinator extends HarnessEvals {
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
       // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
       const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
-      const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? this.automationTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -955,6 +979,9 @@ export class Coordinator extends HarnessEvals {
           this.emit('optimize.result', { issue: n, target: optimizing.target ?? '', head: null, outcome: 'discarded', why, before: optimizing.baseline, after: null, gain: null, pct: null, noise: null });
           return await this.optimizeDiscard(n, why, optimizing.baseline);
         }
+        // An automation's task (src/coordinator/automations.ts): what its budgets have left is a hard stop before every attempt.
+        const auto = this.automationLeft(n);
+        if (auto && auto.usd < 0.1) return await this.block(n, owner, `stopped: ${auto.why}.`);
         // The issue's budget: an incident at 85%, stopped at 100%.
         const budget = this.taskBudget(n);
         if (budget.raised) budgetRaised = true;
@@ -1295,8 +1322,8 @@ export class Coordinator extends HarnessEvals {
       route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
-      // An optimization task's run is also capped at what its week's budget has left (a hard stop).
-      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : [])),
+      // An optimization task's run is also capped at what its week's budget has left (a hard stop); an automation's task at what its budgets have left.
+      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : []), ...(this.automationLeft(n) ? [Math.max(0.01, this.automationLeft(n)!.usd)] : [])),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,

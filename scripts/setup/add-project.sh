@@ -47,7 +47,7 @@ while [ "$#" -gt 0 ]; do
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
-instance_name_ok "$name" || { echo "instance name $name: lowercase letters, digits and dashes, starting with a letter, at most 21; not dash, and not ending in -agent, -eval or -work" >&2; exit 2; }
+need_instance_name "$name"
 repo_ok "$repo" || { echo "repo $repo: a GitHub owner/name" >&2; exit 2; }
 [ -z "$public_url" ] || [[ "$public_url" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub's https origin" >&2; exit 2; }
 [ -z "$client_id" ] || [[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id" >&2; exit 2; }

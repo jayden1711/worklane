@@ -85,8 +85,8 @@ test('intake config and credentials are strict: text-message (SMS) settings and 
 test('credentials.sh installs each intake secret for the coordinator user only, 0400, never echoing it', () => {
   const s = readFileSync(join(repoRoot, 'scripts', 'setup', 'credentials.sh'), 'utf8');
   assert.ok(s.includes('  intake-discord)'));
-  assert.deepEqual(s.match(/^  intake-[a-z]+\)/gm), ['  intake-discord)'], 'the chat bot is the only intake credential');
+  assert.deepEqual(s.match(/^  intake-[a-z]+\)/gm), ['  intake-discord)', '  intake-slack)', '  intake-linear)'], 'the chat bot, the Slack app and the Linear key are the intake credentials');
   assert.match(s, /install_secret\(\) \{[\s\S]*?sudo -u "\$coord"[\s\S]*?chmod 0400/);
-  for (const v of ['token', 'secret']) assert.doesNotMatch(s, new RegExp(`echo[^\\n]*\\$${v}\\b`), `never echoes $${v}`);
+  for (const v of ['token', 'secret', 'app', 'bot', 'key']) assert.doesNotMatch(s, new RegExp(`echo[^\\n]*\\$${v}\\b`), `never echoes $${v}`);
   assert.equal((s.match(/read -rsp/g) ?? []).length >= 3, true, 'secrets are read without echo');
 });

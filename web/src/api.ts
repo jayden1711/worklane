@@ -1082,7 +1082,39 @@ export interface FirstRun {
   /** Setup mode: the checkout's own config loads now (the dashboard takes over shortly). */
   configReady?: boolean;
   draft?: DraftJob;
+  /** #468: every config PR the page proposed (and init's setup PR), followed to its end; absent from older servers. */
+  configPrs?: ConfigPr[];
 }
+/** A config PR as the page follows it (src/config-pr.ts): open, closed, or merged and this checkout brought to it. */
+export interface ConfigPr {
+  number: number;
+  url: string;
+  kind: 'setup' | 'config';
+  base: string;
+  state: 'open' | 'merged' | 'closed' | 'unknown';
+  mergedBy: string | null;
+  mergedAt: string | null;
+  synced: boolean;
+  sha: string | null;
+  why: string | null;
+  retry: boolean;
+  command: string | null;
+}
+/** #468: the held draft's preview (src/setup-mode.ts draftView): its summary and its files, read-only. */
+export interface HeldDraftView {
+  summary: { owner: string; writers: string[]; tests: { slot: string; command: string }[]; dailyBudgetUsd: number; models: { role: string; model: string }[]; waits: string[]; autoMerge: string } | null;
+  error: string | null;
+  files: { name: string; text: string }[];
+  values: RepoConfigValues | null;
+  at: string;
+}
+type ConfigPrAnswer = { ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string | null; why?: string; admin?: boolean };
+/** Merge one of the page's config PRs here, or fast-forward this checkout to a merged one (confirm false: what it would do). */
+export const configPrAction = (number: number, action: 'merge' | 'sync', confirm: boolean) => api<ConfigPrAnswer>('/api/first-run/config-pr', { method: 'POST', body: JSON.stringify({ number, action, confirm }) });
+/** The preview's Change: what these values change in the held draft (confirm: the draft changed). */
+export const setupDraftValues = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean }>('/api/first-run/setup/draft-values', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/** The preview's Confirm: the setup PR opened, and merged here when the person is the repo's admin and GitHub allows it. */
+export const setupPropose = () => api<ConfigPrAnswer>('/api/first-run/setup/propose', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export interface DraftJob {
   running: boolean;
   startedAt: string | null;
@@ -1094,7 +1126,6 @@ export const getSetupRepos = () => api<{ repos: string[]; error?: string }>('/ap
 export const setupOrigin = (repo: string, confirm: boolean) => api<{ ok: boolean; commands?: string[]; repo?: string; confirmed: boolean }>('/api/first-run/setup/origin', { method: 'POST', body: JSON.stringify({ repo, confirm }) });
 export const setupAnswers = (answers: Record<string, string>) => api<{ ok: boolean; saved: string[] }>('/api/first-run/setup/answers', { method: 'POST', body: JSON.stringify({ answers }) });
 export const setupDraft = () => api<{ ok: boolean; draft: DraftJob }>('/api/first-run/setup/draft', { method: 'POST', body: JSON.stringify({ confirm: true }) });
-export const setupMerge = (confirm: boolean) => api<{ ok: boolean; number: number; url?: string; command?: string; confirmed: boolean }>('/api/first-run/setup/merge', { method: 'POST', body: JSON.stringify({ confirm }) });
 export interface RepoConfigValues {
   writers: string[];
   required_checks: string[];
@@ -1173,9 +1204,6 @@ export interface StarterCi {
 }
 export const getStarterCi = () => api<StarterCi>('/api/first-run/starter-ci');
 /** Preview (nothing written) or propose as a PR the config change these values make. */
-/** Merge a PR the Repo config form proposed (confirm false: what it would run), then fast-forward this checkout to it. */
-export const mergeRepoConfig = (number: number, confirm: boolean) =>
-  api<{ ok: boolean; number: number; confirmed: boolean; url?: string; command?: string; then?: string; merged?: boolean; synced?: boolean; detail?: string }>('/api/first-run/repo-config/merge', { method: 'POST', body: JSON.stringify({ number, confirm }) });
 export const changeRepoConfig = (values: Partial<RepoConfigValues>, confirm: boolean) => api<{ ok: boolean; changes: ConfigChange[]; confirmed: boolean; url?: string; branch?: string }>('/api/first-run/repo-config', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunPolicyField {
   key: string;
@@ -1219,7 +1247,8 @@ export type SetupFix =
   | { kind: 'signin'; label: string }
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
-  | { kind: 'discord'; label: string };
+  | { kind: 'discord'; label: string }
+  | { kind: 'source'; source: SourceKind; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -1283,6 +1312,8 @@ export interface FirstRunAutoConfig {
   pr: { number: number | null; url: string } | null;
   /** The command that answers a question. */
   answer: string;
+  /** #468: the drafted config held for its preview (setup mode), before any PR; absent from older servers. */
+  held?: HeldDraftView | null;
 }
 export const getFirstRun = (fresh = false) => api<FirstRun>(`/api/first-run${fresh ? '?fresh=1' : ''}`);
 /** Start the coordinator's service (the first-run page's Start), after the person confirmed the change it showed. */
@@ -1383,6 +1414,53 @@ export const openDiscordTokenAsk = () => api<{ ok: boolean; ask: Ask }>('/api/fi
 /** Review (no `expect`: nothing written) or write the intake.yaml change these picks make; a write names the reviewed change's hash. */
 export const changeDiscordIntake = (values: Record<string, DiscordFormValue>, expect?: string) =>
   api<DiscordIntakePlan>('/api/first-run/discord/intake', { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
+/** The first-run page's Slack and Linear steps (src/intake/source-setup.ts), as GET /api/first-run/<slack|linear> serves them. */
+export type SourceKind = 'slack' | 'linear';
+export type SourceFormValue = boolean | string | string[] | null;
+export interface SourceCred {
+  credential: string;
+  key: string;
+  title: string;
+  configured: boolean;
+  file: string | null;
+  present: boolean;
+  error: string | null;
+  ask: (Ask & { kind: 'paste_secret' }) | null;
+}
+export type SourceSetup =
+  | { available: false; why: string }
+  | {
+      available: true;
+      kind: SourceKind;
+      instance: string;
+      canAct: boolean;
+      portal: string;
+      creds: SourceCred[];
+      intake: { file: string; exists: boolean; error: string | null; values: Record<string, SourceFormValue>; warnings: string[]; allowed: number; trusted: number };
+      form: { key: string; kind: 'boolean' | 'team' | 'ids' | 'label'; what: string }[];
+      slack?: { manifest: string; scopes: { scope: string; why: string }[] };
+      linear?: { permissions: { name: string; why: string }[] };
+      automation: { token: string; view: string; file: string; keys: string[]; restart: string };
+    };
+/** What the source's secret can see, from a child process on the instance that reads it itself; this page never sees it. */
+export type SourceView =
+  | { kind: 'slack'; team: { id: string; name: string }; bot: { user: string }; channels: { id: string; name: string; member: boolean }[]; members: { id: string; name: string }[]; at: string }
+  | {
+      kind: 'linear';
+      organization: { name: string };
+      viewer: { id: string; name: string };
+      teams: { id: string; name: string; key: string; labels: { id: string; name: string }[]; members: { id: string; name: string }[] }[];
+      labels: { id: string; name: string }[];
+      at: string;
+    };
+export type SourceIntakePlan = DiscordIntakePlan;
+export const getSourceSetup = (kind: SourceKind) => api<SourceSetup>(`/api/first-run/${kind}`);
+export const getSourceView = (kind: SourceKind, fresh = false) => api<SourceView>(`/api/first-run/${kind}/view${fresh ? '?fresh=1' : ''}`);
+/** Open the paste box for one of the source's secrets (a paste_secret ask); the secret itself goes through pasteSecret. */
+export const openSourceTokenAsk = (kind: SourceKind, credential: string) => api<{ ok: boolean; ask: Ask }>(`/api/first-run/${kind}/token-ask`, { method: 'POST', body: JSON.stringify({ confirm: true, credential }) });
+/** Review (no `expect`: nothing written) or write the intake.yaml change these picks make. */
+export const changeSourceIntake = (kind: SourceKind, values: Record<string, SourceFormValue>, expect?: string) =>
+  api<SourceIntakePlan>(`/api/first-run/${kind}/intake`, { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
@@ -1393,7 +1471,9 @@ export const PROJECT_NAME = /^[a-z][a-z0-9-]{0,20}$/;
 export const PROJECT_REPO = /^([A-Za-z0-9](?:-?[A-Za-z0-9]){0,38})\/([A-Za-z0-9_.-]{1,100})$/;
 /** Why this name and repo won't be accepted; null when they will. */
 export function addProjectInvalid(name: string, repo: string): string | null {
-  if (!PROJECT_NAME.test(name) || name === 'dash' || /-(agent|eval|work)$/.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters, not "dash" and not ending in -agent, -eval or -work.';
+  if (!PROJECT_NAME.test(name)) return 'The name is lowercase letters, digits and dashes, starting with a letter, at most 21 characters.';
+  // Names whose machine users or units would be another's (src/instance-name.ts has why for each).
+  if (/^(dash|hub|hub-setup|update|tailscale|claude-account|agent|eval|work)$|^(test|ci|dashboard)-|-(agent|eval|work)$/.test(name)) return `The machine already uses that name for something else: not ${name}.`;
   const m = PROJECT_REPO.exec(repo);
   if (!m || m[2] === '.' || m[2] === '..') return 'The repo is owner/name, as on GitHub.';
   return null;
@@ -1578,13 +1658,23 @@ export interface ChatAnswer {
   refusedActions: string[];
   readOnly: boolean;
   costUsd: number;
+  /** What it ran on, and its conversation's spend after it against the cap (src/chat-pick.ts). */
+  model?: string;
+  effort?: ChatEffort;
+  conversation?: { id: string; spentUsd: number; capUsd: number };
 }
+export type ChatEffort = 'low' | 'medium' | 'high';
+/** The chat's model and effort choice: unset fields run on routing's default and the CLI's default effort. */
+export interface ChatPick { model?: string; effort?: ChatEffort }
+/** What this person may pick on an instance (src/chat-pick.ts chatPickerView): a viewer gets canPick false and no models. */
+export interface ChatPickerOptions { canPick: boolean; models: string[]; efforts: ChatEffort[]; defaultModel: string; capUsd: number }
 export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean; filed: { number: number } | null } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
 
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
+export const chatPickerOptions = (instance: string | null) => chatCall<ChatPickerOptions>(instance, '/api/chat/options');
 
 /** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
 export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
@@ -1636,7 +1726,7 @@ export const getConversation = (instance: string | null, id: string) => chatCall
 export const renameConversation = (instance: string | null, id: string, title: string) => chatCall<{ conversation: Conversation }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) });
 export const deleteConversation = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'DELETE' });
 /** The message goes in the body, never the URL; `key` makes a retried send the same turn. */
-export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}) }) });
+export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
 export const fileConversationDraft = (instance: string | null, id: string, turn: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/conversations/${enc(id)}/turns/${enc(turn)}/file-issue`, { method: 'POST', body: '{}' });
 export const listProjects = (instance: string | null, cursor?: string | null) => chatCall<Paged<ProjectItem>>(instance, `/api/chat/projects${cursor ? `?cursor=${enc(cursor)}` : ''}`);
 export const getProject = (instance: string | null, id: string) => chatCall<{ project: ChatProject }>(instance, `/api/chat/projects/${enc(id)}`);
@@ -1664,9 +1754,19 @@ export interface IntakeHealth {
   dropped: Record<string, number>;
   reportToMerged: { count: number; medianMinutes: number | null };
 }
+/** One chat source's state for the Intake page's strip (counts only, never an id or a secret). */
+export interface IntakeSourceSummary {
+  name: 'discord' | SourceKind;
+  state: 'on' | 'off' | 'none' | 'invalid';
+  detail: string;
+}
 export interface IntakeView {
   reports: IntakeReport[];
   health: IntakeHealth;
+  /** A server instance's chat sources; null where there are none (local mode). */
+  sources?: IntakeSourceSummary[] | null;
+  /** Whether this person may set the sources up (an owner of a server instance). */
+  canSetUpSources?: boolean;
 }
 
 /** Throughput (GET /api/throughput, src/throughput.ts): merges, cost per merged PR by stage, waits, the top costs. */
@@ -2064,3 +2164,51 @@ export async function healthPass(refresh: () => Promise<HubInfo | null> = refres
   const all = await load(h);
   return { hub: h, status: statusOf(all), why: whyOf(all) };
 }
+
+/** Extend -> Automations (src/automations/view.ts): the owners' and writers' view. */
+export type AutomationAction = 'create' | 'edit' | 'delete' | 'pause' | 'resume' | 'run';
+export interface AutomationDef {
+  id: string;
+  name: string;
+  owner?: string;
+  enabled?: boolean;
+  trigger: { kind: 'schedule'; cron: string } | { kind: 'github'; on: string; label?: string; command?: string } | { kind: 'discord'; command: string };
+  mode: 'task' | 'report';
+  template: { title: string; outcome: string; done_when: ({ test: string } | { command: string; expect?: string })[]; trigger_text?: 'quoted' | 'none' };
+  budget: { per_run_usd: number; per_day_usd: number };
+  limits?: { runs_per_day: number; cooldown_minutes: number };
+  chain?: { accept_from: string[] };
+}
+export interface AutomationItem extends AutomationDef {
+  owner: string;
+  enabled: boolean;
+  limits: { runs_per_day: number; cooldown_minutes: number };
+  when: string;
+  summary: string[];
+  next: string | null;
+  today: { runs: number; spentUsd: number };
+  runs: { run: string; at: string; trigger: { kind: string; ref: string | null; by: string | null }; depth: number; outcome: string; costUsd: number | null; outputs: { kind: string; number: number }[] }[];
+  refused: { at: string; trigger: string; why: string }[];
+  pausedBy: { by: string; role: string; why: string | null; at: string } | null;
+}
+export interface AutomationsView {
+  unavailable?: string;
+  limits: { enabled: boolean; off: string | null; maxRunsPerDay: number; maxConcurrent: number; dailyUsd: number };
+  timezone: string;
+  today: { runs: number; spentUsd: number };
+  error: string | null;
+  digest: string;
+  actions: AutomationAction[];
+  automations: AutomationItem[];
+}
+export interface AutomationPlan {
+  ok: boolean;
+  confirmed: boolean;
+  action: AutomationAction;
+  id: string;
+  changes: string[];
+  summary: string[];
+  digest?: string;
+}
+/** Review (no digest, no confirm: nothing written) or Confirm (with the review's digest) one change to the automations. */
+export const changeAutomation = (body: { action: AutomationAction; id?: string; automation?: AutomationDef; digest?: string; confirm?: boolean }) => api<AutomationPlan>('/api/automations', { method: 'POST', body: JSON.stringify(body) });

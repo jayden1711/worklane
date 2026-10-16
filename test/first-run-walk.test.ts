@@ -116,9 +116,9 @@ test('#468 in a real Chrome: a configured checkout\'s first run, the owner on th
     await open(`${d.url}/first-run`, tools);
     assert.equal(await js<string>(cdp, `${q(tools)}.dataset.expanded`), 'false');
     assert.equal(await js<boolean>(cdp, `!!${q(`${tools} [data-testid="first-run-fix-panel"]`)}`), false);
-    // 2, configured: every page in the sidebar, First run among none of them (Settings links to it).
+    // 2, configured: every page in the sidebar (Extend too: the owner here is the break-glass owner), First run among none of them (Settings links to it).
     const nav = await js<string[]>(cdp, `[...document.querySelectorAll('aside nav[aria-label="Pages"] a')].map((a) => a.dataset.testid)`);
-    assert.equal(nav.length, 18, nav.join(', '));
+    assert.equal(nav.length, 19, nav.join(', '));
     assert.ok(!nav.includes('nav-first-run'));
   } finally {
     await b.close();

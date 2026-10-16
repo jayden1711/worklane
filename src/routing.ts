@@ -21,6 +21,8 @@ export const ROUTING = {
   eval_answer: { default: 'sonnet' as string, task: 'eval answers' },
   // WHY: a few lines from a rejection and a diff: the cheap tier (#338).
   reflection: { default: 'haiku' as string, task: "the read-only reflection before a worker's retry" },
+  // WHY: the dashboard chat's model until now was roles.chief_of_staff.model, else sonnet; that stays its fallback.
+  chat: { default: 'sonnet' as string, task: "the dashboard chat's default model (the picker offers only models routing names)" },
   eval_cheap: { default: 'sonnet' as string, task: 'the evaluator, for changes at eval_cheap_levels' },
   eval_cheap_levels: { default: ['L0'] as Level[], task: 'review levels judged by eval_cheap (the rest: the evaluator role\'s model)' },
   eval_escalate: { default: true as boolean, task: 'a failed or uncertain eval_cheap verdict is judged once more by the evaluator role\'s model' },
@@ -59,6 +61,7 @@ export function route<K extends RoutingKey>(a: RoutingSource, key: K): RouteValu
     build_high_risk: [[w?.hard_issues_model, 'roles.workers.hard_issues_model']],
     research: [[r?.model, 'roles.researcher.model']],
     intake_triage: [[r?.model, 'roles.researcher.model'], [w?.model, 'roles.workers.model']],
+    chat: [[(a.roles.chief_of_staff as { model?: string } | undefined)?.model, 'roles.chief_of_staff.model']],
   };
   for (const [v, at] of fallbacks[key] ?? []) if (v !== undefined) return { key, value: v as Routing[K], from: at };
   return { key, value: ROUTING[key].default as Routing[K], from: null };
