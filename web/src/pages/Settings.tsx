@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { useView, type Settings, type ViewerSettings } from '../api';
+import { getPlugins, useView, type Settings, type ViewerSettings } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
 import { Loading } from '../components/patterns';
@@ -16,6 +16,25 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">{title}</div>
       <dl className="divide-y text-sm">{children}</dl>
     </Card>
+  );
+}
+
+/** Where what agents use beyond the repo is set: a read-only count, linking to Extend. Nothing for a viewer (refused). */
+function PluginsRow() {
+  const [n, setN] = useState<{ on: number; all: number } | null>(null);
+  useEffect(() => {
+    getPlugins().then(
+      (v) => v.available && setN({ on: (v.entries ?? []).filter((e) => e.on).length, all: (v.entries ?? []).length }),
+      () => {},
+    );
+  }, []);
+  if (!n) return null;
+  return (
+    <Row k="Plugins">
+      <a href="/extend/plugins" className="text-blue-ink hover:underline" data-testid="settings-plugins" onClick={(e) => (e.preventDefault(), navigate('/extend/plugins'))}>
+        {n.all ? `${n.on} enabled${n.all > n.on ? ` (${n.all - n.on} off)` : ''}` : 'none'}
+      </a>
+    </Row>
   );
 }
 
@@ -205,6 +224,7 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
                                 ))}
                               </ul>
                             </Row>
+                            <PluginsRow />
                           </Section>
 
                           <RoutingSection routes={full.routing} configDir={s.configDir} />

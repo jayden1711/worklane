@@ -83,6 +83,8 @@ systemctl restart "worklane-mcp@$name.service"
 for _ in $(seq 20); do [ -S "/run/worklane-mcp-$name/broker.sock" ] && [ -S "/run/worklane-mcp-$name/control.sock" ] && break; sleep 0.5; done
 for s in broker control; do stat -c "%n %U:%G %a" "/run/worklane-mcp-$name/$s.sock"; done
 
-say "the coordinator joins the control group on its next start"
-if systemctl is-active -q "worklane-$name.service"; then systemctl restart "worklane-$name.service"; echo "restarted worklane-$name.service"; fi
+say "the coordinator and its dashboard join the control group on their next start"
+for u in "worklane-$name.service" "worklane-dashboard-$name.service"; do
+  if systemctl is-active -q "$u"; then systemctl restart "$u"; echo "restarted $u"; fi
+done
 echo "OK: the broker for $name runs as $mcp; install a server's secret with: bash $0 $name secret <id> <NAME> (value on stdin)"

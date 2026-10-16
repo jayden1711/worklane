@@ -100,6 +100,8 @@ export class Broker {
     } catch {
       return JSON.stringify({ ok: false, error: 'not JSON' });
     }
+    // For the Plugins page: which servers the rug-pull check blocked, with what changed. Never a secret or a ticket.
+    if (m.op === 'status') return JSON.stringify({ ok: true, blocked: this.blocked() });
     if (typeof m.ticket !== 'string' || !TICKET.test(m.ticket)) return JSON.stringify({ ok: false, error: 'a ticket is 64 hex characters' });
     if (m.op === 'add') {
       if (typeof m.role !== 'string' || !/^[a-z][a-z0-9-]{0,30}$/.test(m.role)) return JSON.stringify({ ok: false, error: 'role must be a role name' });

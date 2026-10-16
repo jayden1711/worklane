@@ -1,7 +1,7 @@
 import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { Activity, BarChart3, Menu, X, Bot, Puzzle, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type State } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
@@ -57,6 +57,7 @@ const Deploys = lazyPage(() => import('./pages/Deploys').then((m) => m.Deploys))
 const Reports = lazyPage(() => import('./pages/Reports').then((m) => m.Reports));
 const SettingsPage = lazyPage(() => import('./pages/Settings').then((m) => m.SettingsPage));
 const LogsPage = lazyPage(() => import('./pages/Logs').then((m) => m.LogsPage));
+const ExtendPage = lazyPage(() => import('./pages/Extend').then((m) => m.ExtendPage));
 const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
 const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
 const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
@@ -77,6 +78,7 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/intake/, IntakePage],
   [/^\/land/, Landing],
   [/^\/agents/, Agents],
+  [/^\/extend/, ExtendPage],
   [/^\/activity/, ActivityPage],
   [/^\/deploys/, Deploys],
   [/^\/reports/, Reports],
@@ -152,6 +154,9 @@ export const NAV = [
   { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
   { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
+  // Extend: what agents may use beyond the repo. Plugins now; Automations takes a tab here when it lands (one entry, not two).
+  // Owners and writers only: a viewer would find nothing on it, so it isn't offered (the server refuses them too).
+  { to: '/extend', label: 'Extend', icon: Puzzle, chord: 'x', testId: 'nav-extend', roles: ['owner', 'writer'] as const },
   { to: '/activity', label: 'Activity', icon: History, chord: 'e', testId: 'nav-activity' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
@@ -168,7 +173,8 @@ export const FIRST_RUN_NAV = { to: '/first-run', label: 'First run', icon: ListC
  * WHY (#468): in setup mode (no config yet) nothing but First run has anything to show, so the sidebar, the command
  * menu and the `g` chords offer First run alone. (The Setup console is a server's; setup mode is a checkout's only.)
  */
-export const navFor = (state: Pick<State, 'setupMode'> | null) => (state?.setupMode ? [FIRST_RUN_NAV] : NAV);
+export const navFor = (state: Pick<State, 'setupMode' | 'role'> | null) =>
+  state?.setupMode ? [FIRST_RUN_NAV] : NAV.filter((n) => !('roles' in n) || (state?.role !== undefined && (n.roles as readonly string[]).includes(state.role)));
 
 /** Setup mode, at the address of a page that isn't shown yet: what it needs, and the way to First run. */
 export function SetupModeHidden({ path }: { path: string }) {
@@ -469,6 +475,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/land') page = <Landing state={state} />;
   else if (path === '/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
+  else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
   else if (path === '/activity') page = <ActivityPage state={state} />;
   else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;

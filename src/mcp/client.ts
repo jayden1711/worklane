@@ -74,3 +74,14 @@ export function mcpRunArgs(instance: string, run: McpRun, node: string, engineCl
     names: run.servers.map((s) => s.id),
   };
 }
+
+/** The broker's blocked servers (the Plugins page): null when the instance has no broker or it doesn't answer. */
+export async function brokerStatus(instance: string, path = mcpRunPath(instance, CONTROL_SOCKET)): Promise<Record<string, unknown> | null> {
+  if (!existsSync(path)) return null;
+  try {
+    const r = await ask(path, { op: 'status' });
+    return r.ok === true && r.blocked && typeof r.blocked === 'object' ? (r.blocked as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}

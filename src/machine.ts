@@ -41,6 +41,11 @@ function runHelper(args: string[], exec: Exec): MachineResult {
   }
 }
 
+/** One plugin or MCP step through the helper (src/plugins/steps.ts checked its shape), for the asking coordinator's instance. */
+export function pluginStep(args: readonly string[], exec: Exec = defaultExec): MachineResult {
+  return runHelper([...args], exec);
+}
+
 /** Set the machine's agent slot cap (1..16) through the helper. */
 export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
   if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX}, not ${n}` };

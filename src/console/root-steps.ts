@@ -6,7 +6,8 @@ import type { EventLog } from '../events/log.js';
 import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { pluginStepOk, PLUGIN_STEPS } from '../plugins/steps.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, pluginStep, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -117,6 +118,17 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     streams: true,
     run: () => ({ ok: false, error: 'add-project streams its steps: the coordinator runs it with its own runner' }),
   },
+  // Plugins and MCP servers (src/plugins/, src/mcp/): fetch, preview, snapshot, stage, withdraw and remove, for the asking
+  // instance only. None confirms: an admin does that at a root shell (scripts/setup/plugins.sh confirm).
+  ...PLUGIN_STEPS.map(
+    (command): RootStepRule => ({
+      command,
+      what: `${command.replace('-', ' ')} (scripts/setup/plugins.sh, for this instance only; nothing is approved until a root admin confirms)`,
+      usage: `${command} <id> ...`,
+      allows: (a) => pluginStepOk([command, ...a]),
+      run: (a, exec) => pluginStep([command, ...a], exec),
+    }),
+  ),
 ];
 
 export type RootStepCheck = { allowed: true; rule: RootStepRule } | { allowed: false; why: string };
