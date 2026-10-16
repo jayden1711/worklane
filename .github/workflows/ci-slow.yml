@@ -2296,6 +2296,7 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview kit-notes kit notes && wait_status kit-notes
           p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           jq -c '{snapshotError, tools: (.snapshot.tools // null | if . then map(.name) else . end)}' "$p"
+          if ! jq -e '.snapshot' "$p" >/dev/null; then readlink -f /usr/local/bin/node; sudo find /var/lib/worklane/plugins/store/ci -maxdepth 4 -printf '%M %u:%g %p\n' | head -30; fi
           jq -e '.snapshot.tools | map(.name) == ["echo"]' "$p"
           jq -e '.snapshotWithSecrets == false and .envNames == ["NOTES_TOKEN"]' "$p"
           # Named test: a snapshot run that tries to write into the broker's paths (its home and caches, its state, the

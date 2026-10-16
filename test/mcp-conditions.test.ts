@@ -78,3 +78,12 @@ test('(2) the snapshot job starts the server from its code and prints its tools 
   const out = JSON.parse(await snapshotJob(dir, [process.execPath, '${CLAUDE_PLUGIN_ROOT}/server.js'])) as { snapshot: { tools: { name: string }[] } };
   assert.deepEqual(out.snapshot.tools.map((t) => t.name), ['echo']);
 });
+
+test('(2) a server that dies at start: the snapshot job says why, with its last stderr lines or the spawn error', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'code-'));
+  writeFileSync(join(dir, 'server.js'), `process.stderr.write('Error: Cannot find module x\\n'); process.exit(1);`);
+  const died = JSON.parse(await snapshotJob(dir, [process.execPath, '${CLAUDE_PLUGIN_ROOT}/server.js'])) as { error: string };
+  assert.match(died.error, /Cannot find module x/);
+  const missing = JSON.parse(await snapshotJob(dir, [join(dir, 'no-such-command')])) as { error: string };
+  assert.match(missing.error, /ENOENT/);
+});

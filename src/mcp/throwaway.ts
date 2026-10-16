@@ -60,6 +60,12 @@ export function parseSnapshotOutput(stdout: string, status: number | null, stder
 export async function snapshotJob(codeDir: string, argv: string[]): Promise<string> {
   const runtime: McpRuntime = { type: 'plugin', plugin: 'x', tree: `wl-tree-v1:sha256:${'0'.repeat(64)}`, server: 'x', argv };
   const child = launchServer({ engineCli: '', node: '', runtime, codeDir, secrets: {}, network: [], scratchDir: `/tmp/mcp-snapshot-${process.pid}`, denyRead: [], unsandboxed: true });
+  // Why it didn't start, for the owner reviewing it (no secrets here: a throwaway run has none): its last stderr lines,
+  // or the spawn error (a command not found).
+  let stderr = '';
+  child.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-2000)));
+  let spawnError = '';
+  child.on('error', (e) => (spawnError = e.message));
   const kill = setTimeout(() => child.kill('SIGKILL'), 60_000);
   try {
     const up = await connectUpstream(child, { clientName: 'snapshot', timeoutMs: 30_000 });
@@ -68,7 +74,8 @@ export async function snapshotJob(codeDir: string, argv: string[]): Promise<stri
     return JSON.stringify({ snapshot });
   } catch (e) {
     child.kill('SIGKILL');
-    return JSON.stringify({ error: (e as Error).message });
+    const tail = [spawnError, stderr.trim().split('\n').slice(-3).join(' | ')].filter(Boolean).join('; ');
+    return JSON.stringify({ error: `${(e as Error).message}${tail ? ` (${tail})` : ''}`.slice(0, 500) });
   } finally {
     clearTimeout(kill);
   }
