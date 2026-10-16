@@ -191,6 +191,8 @@ test('GPU on for the instance: PrivateDevices=yes kept, exactly nvidiactl, nvidi
     const c = h.call('fast-a-1');
     assert.ok(props(c!.argv).includes('PrivateDevices=yes'), 'PrivateDevices=yes kept');
     assert.deepEqual(deviceProps(c!.argv), [`BindPaths=${d('nvidiactl')}`, `DeviceAllow=${d('nvidiactl')} rw`, `BindPaths=${d('nvidia-uvm')}`, `DeviceAllow=${d('nvidia-uvm')} rw`, `BindPaths=${d('nvidia0')}`, `DeviceAllow=${d('nvidia0')} rw`]);
+    // The nodes' device group (scripts/setup/gpu-devices.sh), for this unit alone; never the locks' group.
+    assert.deepEqual(props(c!.argv).filter((p) => p.startsWith('SupplementaryGroups=')), ['SupplementaryGroups=worklane-gpu-dev']);
     const all = c!.argv.join('\n');
     for (const never of ['nvidia-uvm-tools', 'nvidia-modeset', 'nvidia-caps', '/dri', 'nvidia1']) assert.ok(!all.includes(never), `${never} is never in the unit`);
     // The GPU locks are inaccessible to every run, GPU or not.
@@ -202,6 +204,7 @@ test('GPU on for the instance: PrivateDevices=yes kept, exactly nvidiactl, nvidi
     const plain = h.exec('fast-a-3', 60, false);
     assert.doesNotMatch(plain.stderr, /gpu/);
     assert.deepEqual(deviceProps(h.call('fast-a-3').argv), []);
+    assert.ok(!props(h.call('fast-a-3').argv).some((p) => p.startsWith('SupplementaryGroups=')), 'no device group for a run that does not ask');
     // After the command, the lock's note is emptied and it is free.
     assert.equal(readFileSync(join(h.lockDir, '0.lock'), 'utf8'), '');
   } finally {
@@ -345,6 +348,7 @@ test('the GPU locks are root\'s and the GPU group\'s alone (0750 directory, 0640
       assert.equal(n.status, 0, n.stderr);
       assert.match(n.stderr.split('\n')[0]!, why);
       assert.deepEqual(deviceProps(h.call('fast-a-3').argv), []);
+    assert.ok(!props(h.call('fast-a-3').argv).some((p) => p.startsWith('SupplementaryGroups=')), 'no device group for a run that does not ask');
       rmSync(join(h.dir, 'sd'), { recursive: true });
       mkdirSync(join(h.dir, 'sd'));
     }
