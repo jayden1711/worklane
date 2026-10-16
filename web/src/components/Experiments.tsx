@@ -28,6 +28,8 @@ studies:
     budget: { gpu_hours_per_day: 4, agent_usd_per_day: 5, agent_usd_total: 60, max_jobs: 200 }
 `;
 
+/** What a reviewed change is called: a held result's verdict reads as accept or reject, not as a job's approval. */
+const planLabel = (p: ExpPlan) => (p.changes[0]?.startsWith('result #') ? (p.action === 'approve' ? 'accept result' : 'reject result') : ACTION_LABEL[p.action].toLowerCase());
 const fmt = (n: number | null | undefined) => (n === null || n === undefined ? '–' : String(Number(n.toPrecision(5))));
 
 function CopyButton({ text, label, ...p }: { text: string; label: string; 'data-testid': string }) {
@@ -152,7 +154,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
           ← All studies
         </button>
         <h2 className="text-[15px] font-semibold text-ink">{s.id}</h2>
-        {s.started ? <Badge tone={s.paused || s.broken || s.phase === 'awaiting_approval' ? 'warn' : s.phase === 'idle' && s.hold ? 'neutral' : 'ok'}>{s.broken ? 'Paused: 3 failures' : s.paused ? 'Paused' : s.phase === 'running' ? 'Running' : s.phase === 'awaiting_approval' ? 'Waiting for you' : 'On'}</Badge> : <Badge>Not started</Badge>}
+        {s.started ? <Badge tone={s.paused || s.broken || s.phase === 'awaiting_approval' || s.held ? 'warn' : s.phase === 'idle' && s.hold ? 'neutral' : 'ok'}>{s.broken ? 'Paused: 3 failures' : s.paused ? 'Paused' : s.phase === 'running' ? 'Running' : s.phase === 'awaiting_approval' || s.held ? 'Waiting for you' : 'On'}</Badge> : <Badge>Not started</Badge>}
         {s.started && <span className="text-[12px] text-ink-3">version {s.version.slice(0, 8)} · {Math.round(s.exploration.share * 100)}% of runs explore</span>}
         <div className="flex w-full flex-wrap gap-1.5 sm:ml-auto sm:w-auto" data-testid="experiment-actions">
           {shown.map((a) => (
@@ -168,7 +170,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
       {err && <p className="text-[12.5px] text-red" data-testid="experiment-error">{err}</p>}
       {plan && (
         <div className="max-w-xl space-y-2 rounded-lg bg-blue-tint p-3" data-testid="experiment-review">
-          <div className="text-[12.5px] font-medium text-ink">Review: {ACTION_LABEL[plan.action].toLowerCase()}</div>
+          <div className="text-[12.5px] font-medium text-ink">Review: {planLabel(plan)}</div>
           <ul className="space-y-0.5 text-[12.5px] text-ink" data-testid="experiment-review-summary">
             {plan.summary.map((l) => (
               <li key={l} className="break-words">
@@ -190,7 +192,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
               Cancel
             </Button>
             <Button size="sm" onClick={() => void confirm()} disabled={busy} data-testid="experiment-confirm">
-              Confirm {ACTION_LABEL[plan.action].toLowerCase()}
+              Confirm {planLabel(plan)}
             </Button>
           </div>
         </div>
