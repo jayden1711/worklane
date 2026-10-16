@@ -77,7 +77,7 @@ function expHelper() {
     `[ "$1" = --version ] && { echo "systemd 255 (test)"; exit 0; }
 n="$(date +%s%N)-$$"
 printf '%s\\n' "$@" > "${sd}/$n.argv"
-case "$*" in *-score-*) cat '${dir}/score' 2>/dev/null ;; esac
+case "$*" in *_score_*) cat '${dir}/score' 2>/dev/null ;; esac
 exit 0`,
   );
   for (const t of ['systemctl', 'chown', 'chgrp', 'mount', 'umount', 'mkfs.ext4']) stub(t, 'exit 0');
