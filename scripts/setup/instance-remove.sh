@@ -171,7 +171,11 @@ fi
 # --- the registry's items, in its order
 
 say "remove $name"
-shared_done=""
+# The shared files' records first, all at once, while every one of them is still there (the GPU grant too, which
+# testrun-gpu.sh then takes out): what each held is kept in the archive before anything changes.
+records remove "$name" "$kept"
+chmod 0600 "$kept"
+echo "kept what the shared files held for $name: $kept"
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
 for line in "${ITEMS[@]}"; do
   IFS=$'\t' read -r k w when <<<"$line"
@@ -189,14 +193,7 @@ for line in "${ITEMS[@]}"; do
       systemctl reset-failed "$w" 2>/dev/null || true
       echo "removed unit $w"
       ;;
-    shared)
-      # The shared files' records all at once, after the units are stopped and before the users: what is taken is kept first.
-      [ -z "$shared_done" ] || continue
-      shared_done=1
-      records remove "$name" "$kept"
-      chmod 0600 "$kept"
-      echo "kept what the shared files held for $name: $kept"
-      ;;
+    shared) ;; # taken out above, all at once
     sudoers) exists sudoers "$w" && remove_sudoers "$w" && echo "removed the sudoers file $w" ;;
     path) exists path "$w" && rm -rf --one-file-system -- "$w" && echo "removed $w" ;;
     user)
