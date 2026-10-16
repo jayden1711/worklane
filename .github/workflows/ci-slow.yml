@@ -2401,11 +2401,11 @@ jobs:
           init '{"allowedMcpServers":[{"serverCommand":["/usr/local/bin/node","/elsewhere/cli.js","mcp-connect","ci","kit-notes"]}]}' | tee "$F/cc2.json"
           jq -e 'map(select(.status == "connected")) | length == 0' "$F/cc2.json"
           # A rug pull: the server's tools change; the next session is refused and the server is blocked.
-          sudo touch /var/tmp/kit-rugpull
+          sudo touch /etc/kit-rugpull
           talk "$ticket" > "$F/mcp-rug.out" || true
           if jq -s -e 'map(select(.id == 2)) | length > 0' "$F/mcp-rug.out" > /dev/null; then echo "a changed server was served" >&2; exit 1; fi
           sudo jq -e '."kit-notes".diff.changed == [{"name":"echo","fields":["description"]}]' /var/lib/worklane-mcp-ci/state/blocked.json
-          sudo rm -f /var/tmp/kit-rugpull
+          sudo rm -f /etc/kit-rugpull
           sudo rm -rf "$cc" "$h"
       - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
         run: sudo bash scripts/ci/disk-full-coordinator.sh ci
