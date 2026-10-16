@@ -232,6 +232,25 @@ hub_keep_args() {
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
 }
 
+# The mount points at or under what an instance's removal deletes (its users' homes, its paths in the registry), one
+# a line: instance-remove.sh and instance-rename.sh refuse while there is any, as rm --one-file-system would stop at
+# each part way.
+instance_mounts() {
+  local k w p m roots=()
+  while IFS=$'\t' read -r k w _; do
+    case "$k" in
+      user) if user_exists "$w"; then roots+=("$(home_of "$w")"); fi ;;
+      path) roots+=("$w") ;;
+    esac
+  done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$1")
+  findmnt -rn -o TARGET 2>/dev/null | while read -r m; do
+    for p in "${roots[@]}"; do
+      if [[ -n "$p" && "$p" != / && ( "$m" == "$p" || "$m" == "$p"/* ) ]]; then echo "$m"; fi
+    done
+  done | sort -u
+  return 0
+}
+
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.
