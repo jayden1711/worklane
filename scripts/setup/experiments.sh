@@ -211,7 +211,8 @@ install_cmd() {
   say "sudoers: $coord may run $helper $name ..., nothing else"
   install_sudoers "worklane-exp-$name" "$(sudoers_rule)"
   say "check"
-  "$helper" "$name" check || { echo "fix the FAIL lines, then run install again" >&2; exit 1; }
+  # As root, not as whoever ran sudo: the helper reads SUDO_USER as its caller, and refuses anyone but wl-<name>.
+  env -u SUDO_USER "$helper" "$name" check || { echo "fix the FAIL lines, then run install again" >&2; exit 1; }
   echo
   echo "next: sudo bash $0 set $name --devices 0 --max-minutes 60 --gpu-hours 8 --output-gb 50"
   echo "      bash $0 data hash <path>; then sudo bash $0 data add $name <id> --from <path> --sha256 <hex> --visibility job|scorer"
@@ -285,7 +286,7 @@ case "$cmd" in
   install) install_cmd ;;
   set) set_cmd ;;
   data) if [ "$sub" = add ]; then data_add; else data_remove; fi ;;
-  check) need_installed; "$helper" "$name" check ;;
+  check) need_installed; env -u SUDO_USER "$helper" "$name" check ;;
   status) need_installed; cat "$rfile"; ls -l "$root/data" ;;
   remove) remove_cmd ;;
   update-helper) if [ -f "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-exp.sh"; then echo "$helper already matches"; else install_helper; fi ;;
