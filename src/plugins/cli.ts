@@ -11,6 +11,7 @@ import { createInterface } from 'node:readline';
 import { isRoot } from '../os/index.js';
 import { AllowlistError, parseRoles, readAllowlist } from './approval.js';
 import { fetchGitPlugin, sourceProblem } from './fetch.js';
+import { curlResolve, pinnedAddress, pluginUrlProblem, readPluginHosts } from './hosts.js';
 import { confirm, confirmPlan, describeRecord, ingest, remove, stage, takeFetchSlot, withdraw } from './root-ops.js';
 
 const USAGE = 'usage: plugins fetch-job|fetch-slot|ingest|stage|withdraw|remove|confirm|show [options] (see src/plugins/cli.ts)';
@@ -56,7 +57,13 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       const s = source();
       const why = sourceProblem(s);
       if (why) throw new Error(why);
-      fetchGitPlugin(s, o.out!);
+      // Root's hosts only, by name; the name resolved once, to public addresses only, and git pinned to the one checked.
+      const allowed = readPluginHosts();
+      if (allowed.problem) throw new Error(`plugin hosts: ${allowed.problem}`);
+      const bad = pluginUrlProblem(s.url, allowed.hosts);
+      if (bad) throw new Error(bad);
+      const host = new URL(s.url).hostname;
+      fetchGitPlugin(s, o.out!, { pin: curlResolve(host, await pinnedAddress(host)) });
       console.log(`fetched ${s.url}${s.path ? ` (${s.path})` : ''} at ${s.sha}`);
       return 0;
     }

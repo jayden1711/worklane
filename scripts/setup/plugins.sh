@@ -4,6 +4,7 @@
 #   bash scripts/setup/plugins.sh confirm <instance> <id> sha256:<digest>   an admin, at a root shell: approve a staged plugin
 #   bash scripts/setup/plugins.sh remove <instance> <id>                    take an approved plugin away
 #   bash scripts/setup/plugins.sh show <instance>                           what the instance's agents may load
+#   bash scripts/setup/plugins.sh hosts <host> [<host>...]                  the hosts plugins may be fetched from (default github.com)
 #   bash scripts/setup/plugins.sh fetch <instance> <id> <https url> <sha> [<path>]
 #                                                                           the machine helper's plugin-fetch, as its own unit
 #
@@ -26,7 +27,7 @@ FETCH_DIR=/var/lib/private/$FETCH_STATE
 STATUS_DIR=/var/lib/worklane/plugins/fetch-status   # one JSON file per instance: the last fetch's state, for the dashboard
 PATH_ENV=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-usage() { sed -n '4,8p' "$0" | sed 's/^#   //' >&2; exit 2; }
+usage() { sed -n '4,9p' "$0" | sed 's/^#   //' >&2; exit 2; }
 instance_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ ]] && [ "$1" != dash ]; }
 id_ok() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]; }
 
@@ -49,6 +50,19 @@ case "$cmd" in
   remove)
     [ "$#" -eq 2 ] && instance_ok "$1" && id_ok "$2" || usage
     exec "$NODE" "$CLI" plugins remove --instance "$1" --id "$2"
+    ;;
+  hosts)
+    # Root's allowlist of plugin hosts: names only (never an address), root:root 0644, read by the machine helper and
+    # the fetch. Written whole: these hosts and no other.
+    [ "$#" -ge 1 ] || usage
+    for h in "$@"; do
+      [[ "$h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ && ! "$h" =~ ^[0-9.]+$ ]] || { echo "$h: a host name (lowercase, with a dot), never an address" >&2; exit 2; }
+    done
+    list="$(printf '"%s",' "$@")"
+    tmp="/etc/worklane/.plugin-hosts.json.$$"
+    printf '{"hosts":[%s]}\n' "${list%,}" > "$tmp"
+    chown root:root "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" /etc/worklane/plugin-hosts.json
+    echo "plugins may be fetched from: $*"
     ;;
   show)
     [ "$#" -eq 1 ] && instance_ok "$1" || usage
