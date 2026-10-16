@@ -29,6 +29,7 @@ import { runMachineRequests } from './coordinator/machine-requests.js';
 import { recordProfileSwitches } from './claude-profiles.js';
 import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatAnswer, type ChatRequest } from './chat.js';
+import { chatRunOptions, conversationSpentUsd, DEFAULT_PERSON_DAILY_USD, MAIN_CONVERSATION, nextLocalMidnight, personSpentUsd } from './chat-pick.js';
 import { siriPass } from './coordinator/siri.js';
 import { machineStats } from './os/stats.js';
 import { attachmentCaps, sweepAttachments } from './chat-attachments.js';
@@ -399,6 +400,15 @@ export class Coordinator extends HarnessEvals {
       if (disk) return refuse(`paused: ${disk}; it resumes on its own once there is room`);
       const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
       if (left <= 0) return refuse(`the daily budget ($${this.d.cfg.agents.daily_budget_usd}) is spent`);
+      // The picker and the conversation's cap (src/chat-pick.ts), checked here, before the answer runs, whatever the dashboard checked.
+      const conversation = q.conversation ?? MAIN_CONVERSATION;
+      const costs = this.d.log.read(0, ['run.cost']);
+      const spent = conversationSpentUsd(costs, conversation);
+      // The per-person cap, for anyone but an owner: `q.by` is the login the dashboard's signed-in session named (never
+      // the client's body), and whether they're an owner is asked here, not read from the request.
+      const person = (await this.chatOwner(q.by)) ? null : { capUsd: this.d.settings?.().settings.chat?.person_daily_usd ?? DEFAULT_PERSON_DAILY_USD, spentUsd: personSpentUsd(costs, q.by), resets: nextLocalMidnight() };
+      const run = chatRunOptions({ agents: this.d.cfg.agents, picker: q.picker ?? 'viewer', ...(q.pick ? { pick: q.pick } : {}), conversation, spentUsd: spent, dailyLeftUsd: left, person });
+      if (!run.ok) return refuse(run.why);
       const events = this.d.log.read();
       const context = {
         instance: this.d.instance,
@@ -422,14 +432,27 @@ export class Coordinator extends HarnessEvals {
         gid: bundle.gid,
         repo: this.d.repo,
         remainingUsd: left,
-        onCost: (r: { costUsd: number; model: string; turns: number }) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns }),
+        run: { model: run.model, ...(run.effort ? { effort: run.effort } : {}), maxBudgetUsd: run.maxBudgetUsd },
+        // The spend counts against the conversation the request names: one the dashboard wrote after checking it is the
+        // asker's (askInConversation), and conversationTurn checks that again before anything runs or costs.
+        onCost: (r: { costUsd: number; model: string; turns: number }) => this.emit('run.cost', { issue: null, role: 'chat', model: r.model, usd: r.costUsd, turns: r.turns, conversation, by: q.by }),
       };
       const a = q.conversation ? await conversationTurn({ ...turn, request: q, ...(this.d.roleOf ? { roleOf: this.d.roleOf } : {}) }) : await chatTurn({ ...turn, ...(q.attachments?.length ? { attachments: q.attachments } : {}) });
-      write({ answer: a });
+      write({ answer: { ...a, conversation: { id: conversation, spentUsd: spent + a.costUsd, capUsd: run.capUsd } } });
       this.emit('chat.turn', { id: q.id, by: q.by, read_only: a.readOnly, citations: a.citations.length, draft: a.issueDraft ? (a.issueDraft.ok ? 'valid' : 'refused') : 'none', actions: a.actions.length, cost_usd: a.costUsd, refused: null });
     } catch (e) {
       if (e instanceof AuthPaused) return refuse(AUTH_FAILED_CHAT_TEXT);
       refuse(`the chat turn failed: ${(e as Error).message.slice(0, 300)}`);
+    }
+  }
+
+  /** Whether a chat asker is one of the instance's owners: their role on the repo, else (no lookup here) owners.default. A failed lookup: not an owner. */
+  private async chatOwner(by: string): Promise<boolean> {
+    if (!this.d.roleOf) return by.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase();
+    try {
+      return (await this.d.roleOf(by)) === 'owner';
+    } catch {
+      return false;
     }
   }
 

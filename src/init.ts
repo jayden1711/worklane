@@ -181,6 +181,8 @@ export interface InitContext {
   timeout?: number;
   /** Server mode: add-project's run in this init, once it has run (it runs at most once). */
   handedOff?: { code: number; last: string };
+  /** WHY (#468): the first-run page's draft: hold the drafted config for its preview instead of proposing it at once. */
+  hold?: boolean;
 }
 
 export interface StepResult {
@@ -333,7 +335,9 @@ export const autoConfig: AutoConfig = async (c) => {
     ...(c.answers ? { given: c.answers } : {}),
     io: { git: (args, cwd) => c.io.run('git', args, { cwd }), gh: (args, cwd) => c.io.run('gh', args, { cwd }), ask: (q) => (c.interactive ? c.io.ask(q) : Promise.resolve(null)), say: c.io.say },
     save: () => c.save?.(),
+    ...(c.hold ? { hold: true } : {}),
   });
+  if (r.kind === 'drafted') return { status: 'done', detail: r.detail };
   if (r.kind !== 'merged') return { status: 'failed', detail: r.detail };
   // Merged: bring this checkout up to it when it's on the default branch (a fast-forward only), else say so.
   const on = c.io.run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: c.root! }).stdout.trim();
