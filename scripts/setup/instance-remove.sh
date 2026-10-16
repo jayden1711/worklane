@@ -41,8 +41,15 @@ for a in "$@"; do
   esac
 done
 [ -n "$name" ] && { [ -z "$print" ] || [ -z "$yes" ]; } || { echo "$usage" >&2; exit 2; }
-# The shape every instance name has had (instance.sh's); dash is the hub's viewer, never an instance.
+# The instance-name rules (lib.sh instance_name_problem). One exception: an instance made before those rules, under
+# a name they now refuse, is still there to remove; then only the shape every name has had is needed, and its users
+# must be its own (the overlap check below).
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ && "$name" != dash ]] || { echo "instance name $name: lowercase letters, digits and dashes, starting with a letter, at most 21; not dash" >&2; exit 2; }
+name_note="$(instance_name_problem "$name")"
+if [ -n "$name_note" ]; then
+  user_exists "wl-$name" || { echo "instance name $name: $name_note" >&2; exit 2; }
+  echo "note: $name is a name the instance-name rules refuse now ($name_note); it exists on this machine, so it can be removed" >&2
+fi
 as_root "$@"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Never through a coordinator's sudo, even one a rule might let through by mistake.

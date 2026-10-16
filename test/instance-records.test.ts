@@ -146,6 +146,19 @@ test('instance-remove.sh and the registry are reachable from no sudoers rule and
   assert.match(script, /^\[\[ "\$\{SUDO_USER:-\}" != wl-\* \]\] \|\| \{ echo "instance-remove is an admin's/m, 'it refuses a coordinator\'s sudo');
 });
 
+test("the hub's settings kept for a rewrite: client id, URL, console user and devices, and both gateways", { skip: !posix && 'bash' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'hub-'));
+  const unit = join(dir, 'hub.service');
+  const keep = (exec: string) => {
+    writeFileSync(unit, `[Service]\nExecStart=${exec}\n`);
+    const r = spawnSync('bash', ['-c', 'source "$1"; HUB_UNIT="$2"; hub_keep_args', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), unit], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim().split('\n');
+  };
+  assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d --siri-port 4397 --hooks-port 4396 --console-user admin --console-devices tag:me`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example', '--console-user', 'admin', '--console-devices', 'tag:me', '--siri', '--hooks']);
+  assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example']);
+});
+
 test('instance-remove.sh takes one name and --print or --yes, before anything else', { skip: !posix && 'bash' }, () => {
   const run = (...a: string[]) => spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), ...a], { encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
   for (const a of [[], ['--print'], ['a', 'b'], ['a', '--print', '--yes'], ['a', '--force'], ['Bad'], ['dash'], ['a/b'], ['-a'], ['a'.repeat(22)]]) {
