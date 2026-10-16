@@ -81,15 +81,18 @@ test('regression: instance aa\'s wipe of run b or b-1 never stops instance aa-b\
     // Run b's fetch (docs/test-runs.md "Network"), and one of aa-b's run 1 named the same way.
     [`${c}-test-aa_b_fetch_302.service`]: 'wl-test-aa',
     [`${c}-test-aa-b_1_fetch_102.service`]: 'wl-test-aa-b',
+    // Run b's network (slirp4netns, root's: no User=), and aa-b's run 1's.
+    [`${c}-test-aa_b_net_303.service`]: '',
+    [`${c}-test-aa-b_1_net_103.service`]: '',
   };
   const h = helperAs('aa', units);
   try {
     const b = h.run('wipe', 'b');
     assert.equal(b.status, 0, b.stderr);
-    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`], 'wipe b: run b\'s own units only (its command\'s and its fetch\'s)');
+    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`, `${c}-test-aa_b_net_303.service`], 'wipe b: run b\'s own units only (its command\'s, its fetch\'s and its network\'s)');
     const b1 = h.run('wipe', 'b-1');
     assert.equal(b1.status, 0, b1.stderr);
-    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`, `${c}-test-aa-b-1-101.service`], 'wipe b-1: the old-named unit that is aa\'s, never aa-b\'s of the same shape');
+    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`, `${c}-test-aa_b_net_303.service`, `${c}-test-aa-b-1-101.service`], 'wipe b-1: the old-named unit that is aa\'s, never aa-b\'s of the same shape');
   } finally {
     h.done();
   }

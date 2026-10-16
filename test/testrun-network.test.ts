@@ -123,14 +123,18 @@ function netHelper() {
   stub('systemd-run', `[ "$1" = --version ] && { echo "systemd 255 (test)"; exit 0; }
 printf '%s\\n' "$@" > "${sd}/$(date +%s%N)-$$.argv"
 echo ran`);
-  for (const t of ['systemctl', 'chown']) stub(t, 'exit 0');
+  stub('chown', 'exit 0');
+  // systemctl: a run unit's main process, for slirp_start; nothing else.
+  stub('systemctl', '[ "$1 $2 $3" = "show -p MainPID" ] && { echo 4242; exit 0; }; exit 0');
+  // ip: this host's addresses, a loopback and a public one.
+  stub('ip', 'printf "1: lo    inet 127.0.0.1/8 scope host lo\\n2: eth0    inet 203.0.113.5/24 brd x scope global eth0\\n2: eth0    inet6 2001:db8::5/64 scope global\\n"');
   stub('getent', 'exit 0');
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
   const gnuStat = spawnSync(real('stat')!, ['--version']).status === 0;
   stub('stat', gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`);
-  for (const t of ['git', 'cp', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'rm']) {
+  for (const t of ['git', 'cp', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'rm', 'seq', 'readlink']) {
     const p = real(t);
     if (p && !existsSync(join(bin, t))) symlinkSync(p, join(bin, t));
   }
@@ -141,7 +145,13 @@ echo ran`);
   chmodSync(etc, 0o755);
   const file = join(etc, 'testrun-network.json');
   const resolv = join(dir, 'resolv.conf');
-  writeFileSync(resolv, 'nameserver 127.0.0.53\noptions edns0\nnameserver 203.0.113.9 ; not an address alone\n');
+  writeFileSync(resolv, 'nameserver 127.0.0.53\noptions edns0\n');
+  // resolved's upstream list: its loopback stub never taken, a line with more than an address never taken.
+  const upstream = join(dir, 'upstream.conf');
+  writeFileSync(upstream, 'nameserver 127.0.0.53\nnameserver 203.0.113.9 ; not an address alone\nnameserver 198.51.100.53\n');
+  const slirp = join(dir, 'slirp4netns');
+  writeFileSync(slirp, '#!/bin/sh\n');
+  chmodSync(slirp, 0o755);
   const base = join(dir, 'base');
   const tmpBase = join(dir, 't');
   let src = readFileSync(helperSrc, 'utf8');
@@ -154,6 +164,8 @@ echo ran`);
     [/^user="wl-test-\$name"$/m, `user=${me}`],
     [/^NET_FILE=\S+$/m, `NET_FILE=${file}`],
     [/^RESOLV_CONF=\S+$/m, `RESOLV_CONF=${resolv}`],
+    [/^RESOLV_UPSTREAM=\S+$/m, `RESOLV_UPSTREAM=${upstream}`],
+    [/^SLIRP=\S+$/m, `SLIRP=${slirp}`],
   ] as const) {
     assert.match(src, re);
     src = src.replace(re, to);
@@ -178,13 +190,18 @@ echo ran`);
     writeFileSync(file, networkFileText({ instances }));
     chmodSync(file, mode);
   };
-  /** The unit's -p properties of the newest systemd-run call. */
-  const lastProps = () => {
-    const f = spawnSync('ls', [sd], { encoding: 'utf8' }).stdout.split('\n').filter((x) => x.endsWith('.argv')).sort().pop();
-    const argv = f ? readFileSync(join(sd, f), 'utf8').trim().split('\n') : [];
-    return { argv, props: argv.filter((_, i) => argv[i - 1] === '-p') };
-  };
-  return { dir, base, file, run, exec, mkRun, grant, lastProps, done: () => rmSync(dir, { recursive: true, force: true }) };
+  const calls = () =>
+    spawnSync('ls', [sd], { encoding: 'utf8' })
+      .stdout.split('\n')
+      .filter((x) => x.endsWith('.argv'))
+      .sort()
+      .map((f) => readFileSync(join(sd, f), 'utf8').trim().split('\n'));
+  const withProps = (argv: string[]) => ({ argv, props: argv.filter((_, i) => argv[i - 1] === '-p') });
+  /** The newest run unit's systemd-run call (never a network unit's), and its -p properties. */
+  const lastProps = () => withProps(calls().filter((a) => !a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(x))).pop() ?? []);
+  /** The network units' systemd-run calls (slirp_start), oldest first. */
+  const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
+  return { dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 // The LAN ranges a granted run or a fetch never reaches (RFC 1918, RFC 6598, ULA), with link-local, multicast and
@@ -220,23 +237,32 @@ test('the key claim: a run has no network by default (PrivateNetwork=yes, an emp
   }
 });
 
-test('granted by root\'s file: the host\'s network minus the LAN, link-local and multicast; the machine\'s resolvers allowed; nothing else of the sandbox changes', { skip: !posix && 'bash' }, () => {
+test('granted by root\'s file: its own namespace and loopback still (never the host\'s), and slirp4netns for public addresses only: never the host\'s loopback or its addresses, the LAN, link-local or multicast', { skip: !posix && 'bash' }, () => {
   const h = netHelper();
   try {
     h.exec('fast-b-0', []);
-    const before = h.lastProps().props.filter((p) => !NO_NET.includes(p));
+    const before = h.lastProps().props;
+    assert.deepEqual(h.netCalls(), [], 'no network unit for a run that has none');
     h.grant({ shop: ['e2e', 'setup'] });
-    const r = h.exec('fast-b-1', ['--network', 'e2e']);
+    const r = h.exec('fast-b-1', ['--network', 'e2e'], 'echo hi');
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /^worklane-testrun: network granted \(e2e; public addresses and the machine's DNS only\)\n/);
-    const { props } = h.lastProps();
-    assert.ok(!props.includes('PrivateNetwork=yes'));
-    assert.ok(props.includes(`IPAddressDeny=${LAN_DENY}`), props.join(' | '));
-    assert.ok(props.includes('IPAddressAllow=127.0.0.53'), 'only a nameserver line\'s address, nothing else from resolv.conf');
-    assert.ok(props.includes('RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK'));
+    const { argv, props } = h.lastProps();
+    for (const p of NO_NET) assert.ok(props.includes(p), `${p}: a granted run keeps its own network namespace and an empty /run`);
+    assert.ok(!props.some((p) => p.startsWith('IPAddress')), 'its own namespace: no address rules needed on it');
+    const resolvBind = props.find((p) => p.startsWith('BindReadOnlyPaths='));
+    assert.ok(resolvBind && /\.resolv:/.test(resolvBind), props.join(' | '));
+    assert.match(argv.at(-1)!, /^n=0; until grep -qs "\^tap0" \/proc\/net\/route; do .*; done; echo hi$/, 'the command waits for its network first');
     // Every other property the same as a run without the network (the unit's name and paths aside).
     const norm = (ps: string[]) => ps.map((p) => p.replace(/fast-b-\d/g, 'ID').replace(/\/t\/[0-9a-f]{8}/g, '/t/HASH'));
-    assert.deepEqual(norm(props.filter((p) => !p.startsWith('IPAddress') && !p.startsWith('RestrictAddressFamilies='))), norm(before.filter((p) => !p.startsWith('RestrictAddressFamilies='))));
+    assert.deepEqual(norm(props.filter((p) => !p.startsWith('BindReadOnlyPaths='))), norm(before));
+    // Its network: one slirp4netns unit, bound to the run's, joining its main process's namespace.
+    const [net] = h.netCalls();
+    assert.ok(net, 'a network unit');
+    assert.deepEqual(net.argv.slice(-8), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-sandbox', '--enable-seccomp', '4242', 'tap0']);
+    assert.ok(net.props.some((p) => /^BindsTo=worklane-test-shop_fast-b-1_\d+\.service$/.test(p)));
+    assert.ok(net.props.includes(`IPAddressDeny=127.0.0.0/8 ::1/128 ${LAN_DENY} 127.0.0.1/32 203.0.113.5/32 2001:db8::5/128`), net.props.join(' | '));
+    assert.ok(net.props.includes('IPAddressAllow=198.51.100.53'), 'only the upstream DNS server: never resolved\'s loopback stub');
     // Argument parsing: each option once, a tier's name only.
     for (const bad of [['--network'], ['--network', 'e2e', '--network', 'e2e'], ['--network', 'E2E'], ['--network', '../x'], ['--gpu', '--gpu'], ['--frob']]) {
       const x = h.exec('fast-b-2', bad);
@@ -247,7 +273,7 @@ test('granted by root\'s file: the host\'s network minus the LAN, link-local and
   }
 });
 
-test('fetch: the host\'s network minus its loopback and the LAN; no run\'s TMPDIR; only its own cache writable; npm only, a cache the helper made', { skip: !posix && 'bash' }, () => {
+test('fetch: its own namespace with slirp4netns as a granted run\'s; no run\'s TMPDIR; only its own cache writable; npm only, a cache the helper made', { skip: !posix && 'bash' }, () => {
   const h = netHelper();
   try {
     h.mkRun('fast-c-1');
@@ -258,8 +284,9 @@ test('fetch: the host\'s network minus its loopback and the LAN; no run\'s TMPDI
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /^worklane-testrun: fetch npm \(no script run; public addresses and the machine's DNS only\)\n/);
     const { argv, props } = h.lastProps();
-    assert.ok(props.includes(`IPAddressDeny=127.0.0.0/8 ::1/128 ${LAN_DENY}`), props.join(' | '));
-    assert.ok(props.includes('IPAddressAllow=127.0.0.53'));
+    assert.ok(argv.some((x) => /^--unit=worklane-test-shop_fast-c-1_fetch_\d+$/.test(x)));
+    for (const p of NO_NET) assert.ok(props.includes(p), p);
+    assert.ok(h.netCalls().length === 1 && h.netCalls()[0]!.argv.includes('--disable-host-loopback'), 'its network is slirp4netns\'s');
     assert.ok(props.includes(`TemporaryFileSystem=${join(h.dir, 't')}:ro`), 'no run\'s TMPDIR, so no database socket');
     assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-c-1', 'fetch')}`, `ReadWritePaths=${join(h.base, 'shop', 'cache', `npm-${key}`)}`]);
     assert.ok(argv.includes(`--setenv=npm_config_cache=${join(h.base, 'shop', 'cache', `npm-${key}`)}`));

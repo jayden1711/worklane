@@ -18,8 +18,10 @@
 # loopback only) and an empty, read-only /run (no system daemon's socket: resolved, D-Bus, avahi, nscd and the like
 # would reach the network for it). A command that asks (exec --network <tier>) gets the network only when root's own
 # file, $NET_FILE (root:root 0644, written by scripts/setup/testrun-network.sh), lists that tier for this instance:
-# then the host's network, minus the LAN, link-local and multicast addresses (IPAddressDeny=), the machine's DNS
-# resolvers allowed. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
+# then it keeps its own network namespace and loopback, and slirp4netns (a unit of its own, started here) gives that
+# namespace outbound NAT to public addresses only: never the host's loopback (--disable-host-loopback, and its unit's
+# IPAddressDeny= has 127.0.0.0/8), the host's own addresses, the LAN, link-local or multicast; the machine's upstream DNS
+# servers allowed. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
 # can only name a tier root listed for its own instance. On stderr, after any GPU line: "worklane-testrun: network
 # granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
 # a fixed npm download of what the lockfile pins, with no script run, that never reaches this host's loopback or LAN.
@@ -107,7 +109,11 @@ GPU_MIN_SYSTEMD=255
 # reaches this host's loopback (its services); a granted run keeps it (its own test servers, its database's socket
 # needs none). Every unit's address families: no raw sockets, no packet sockets, no Bluetooth, nothing but these.
 NET_FILE=/etc/worklane/testrun-network.json
+# The machine's upstream DNS servers: resolved's list of them when there is one (its stub, 127.0.0.53, is the host's
+# loopback, which a run never reaches), else resolv.conf's. Loopback servers are never taken.
+RESOLV_UPSTREAM=/run/systemd/resolve/resolv.conf
 RESOLV_CONF=/etc/resolv.conf
+SLIRP=/usr/bin/slirp4netns
 # Prefixes only: systemd-run's transient IPAddressDeny= refuses the names a unit file takes (link-local, multicast,
 # localhost: "Failed to parse IP address prefix"). Link-local is 169.254.0.0/16 and fe80::/10, multicast 224.0.0.0/4
 # and ff00::/8. WHY the private ranges are built from their first octets: the repo's denylist refuses any literal
@@ -197,9 +203,12 @@ run_unit() { printf 'worklane-test-%s_%s_%s' "$name" "$1" "$2"; }
 run_units() {
   local id="$1" u owner
   local new="^worklane-test-${name}_${id}_(fetch_)?[0-9]+[.]service\$" old="^worklane-test-${name}-${id}-[0-9]+[.]service\$"
+  # A granted run's network (slirp_start): root's, so no User=; its name is this run's alone (the underscores).
+  local net="^worklane-test-${name}_${id}_net_[0-9]+[.]service\$"
   while read -r u _; do
-    [[ "$u" =~ $new || "$u" =~ $old ]] || continue
+    [[ "$u" =~ $new || "$u" =~ $old || "$u" =~ $net ]] || continue
     owner="$(systemctl show -p User --value "$u" 2>/dev/null)" || continue
+    if [[ "$u" =~ $net ]]; then [ -z "$owner" ] && printf '%s\n' "$u"; continue; fi
     [ "$owner" = "$user" ] && printf '%s\n' "$u"
   done < <(systemctl list-units --all --plain --no-legend --full "worklane-test-${name}_${id}_*" "worklane-test-${name}-${id}-*" 2>/dev/null)
   return 0
@@ -635,44 +644,85 @@ net_granted() {
   return 1
 }
 
-# The machine's DNS resolvers (/etc/resolv.conf's nameserver lines, at most 3), one per line: the addresses a fetch or a
-# granted run may reach although they are loopback or on the LAN. Only an address, never anything else from the file.
+# The machine's upstream DNS servers ($RESOLV_UPSTREAM, else $RESOLV_CONF; nameserver lines, at most 3), one per line,
+# never a loopback one: what a granted run's or a fetch's resolv.conf names, and the only addresses its slirp4netns may
+# reach although they are on the LAN. Only an address, never anything else from the file.
 resolvers() {
-  local l a k=0
-  [ -r "$RESOLV_CONF" ] || return 0
+  local l a k=0 f="$RESOLV_UPSTREAM"
+  [ -r "$f" ] || f="$RESOLV_CONF"
+  [ -r "$f" ] || return 0
   while IFS= read -r l || [ -n "$l" ]; do
     [[ "$l" =~ ^nameserver[[:space:]]+([0-9a-fA-F:.]{2,45})[[:space:]]*$ ]] || continue
     a="${BASH_REMATCH[1]}"
     [[ "$a" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || ( "$a" == *:* && "$a" =~ ^[0-9a-fA-F:]+$ ) ]] || continue
+    [[ "$a" =~ ^127\. || "$a" == ::1 ]] && continue
     printf '%s\n' "$a"
     k=$((k + 1)); [ "$k" -lt 3 ] || break
-  done < "$RESOLV_CONF"
+  done < "$f"
   return 0
 }
 
-# The unit properties of a run with no network (NET_PROPS), or of one granted it.
+# This host's own addresses (each as a /32 or /128), one per line: a granted run's slirp4netns never reaches them, so no
+# service of this host's is reachable through any of its addresses.
+host_addrs() {
+  ip -o addr show 2>/dev/null | awk '{ split($4, a, "/"); print a[1] ($3 == "inet6" ? "/128" : "/32") }' | grep -E '^[0-9a-fA-F:.]+/(32|128)$' || true
+}
+
+# The unit properties of a run with no network (NET_PROPS), or of one granted it (or a fetch): both its own network
+# namespace (PrivateNetwork=yes: its own loopback only) and an empty /run (a daemon's socket there would reach the
+# network for it: resolved, D-Bus, avahi); a granted one also gets a resolv.conf naming the upstream servers ($1 the
+# file), bound where the host's resolv.conf points, and its network from slirp_start (below).
 NET_PROPS=()
+RESOLV_FILE=
 net_props() {
-  local granted="$1" fetch="${2:-0}" allow
-  NET_PROPS=(-p "RestrictAddressFamilies=$FAMILIES")
-  if [ "$granted" -eq 0 ]; then
-    # WHY /run too: a daemon's socket there would reach the network for the run (resolved's lookups, D-Bus, avahi).
-    NET_PROPS+=(-p PrivateNetwork=yes -p TemporaryFileSystem=/run:ro)
-    return 0
-  fi
+  local granted="$1" target
+  NET_PROPS=(-p "RestrictAddressFamilies=$FAMILIES" -p PrivateNetwork=yes -p TemporaryFileSystem=/run:ro)
+  [ "$granted" -eq 1 ] || return 0
+  if [ -L "$ENV_DIR" ]; then die "$ENV_DIR is a symlink"; fi
+  [ -d "$ENV_DIR" ] || mkdir -m 0700 -- "$ENV_DIR" 2>/dev/null || [ -d "$ENV_DIR" ] || die "can't make $ENV_DIR"
+  RESOLV_FILE="$ENV_DIR/$name.$NET_ID.$$.resolv"
+  ( umask 022; set -C; resolvers | sed 's/^/nameserver /' > "$RESOLV_FILE" ) || die "can't write $RESOLV_FILE"
+  target="$(readlink -f "$RESOLV_CONF" 2>/dev/null || echo "$RESOLV_CONF")"
+  NET_PROPS+=(-p "BindReadOnlyPaths=$RESOLV_FILE:$target")
+}
+
+# The command a granted run's unit runs: it waits for its network (slirp4netns's tap0 and its route) first, at most 15 s.
+# No ${...}: systemd expands those itself.
+NET_WAIT='n=0; until grep -qs "^tap0" /proc/net/route; do n=$((n + 1)); if [ "$n" -ge 150 ]; then echo "worklane-testrun: the run'"'"'s network did not come up" >&2; exit 125; fi; sleep 0.1; done; '
+
+# Give unit <unit>'s network namespace its network: slirp4netns, in a unit of its own (<unit's name>'s run_unit with
+# net_<pid>), bound to the run's unit (it stops with it), as root only to join that namespace and make tap0, then
+# sandboxed by itself (its own mount namespace, every capability dropped, seccomp). Its unit's IPAddressDeny= is where the
+# boundary is: the host's loopback, its own addresses, the LAN, link-local and multicast; the upstream DNS servers
+# allowed. <pid> is the backgrounded systemd-run, so a run that is already over is never waited for.
+slirp_start() {
+  local unit="$1" pid="$2" id="$3" main="" i allow ha
+  for i in $(seq 100); do
+    main="$(systemctl show -p MainPID --value "$unit.service" 2>/dev/null || true)"
+    [[ "$main" =~ ^[1-9][0-9]*$ ]] && break
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  [[ "$main" =~ ^[1-9][0-9]*$ ]] || return 1
   allow="$(resolvers | tr '\n' ' ')"
-  if [ "$fetch" -eq 1 ]; then NET_PROPS+=(-p "IPAddressDeny=$NET_LOOPBACK $NET_DENY"); else NET_PROPS+=(-p "IPAddressDeny=$NET_DENY"); fi
-  [ -z "${allow// /}" ] || NET_PROPS+=(-p "IPAddressAllow=${allow% }")
+  ha="$(host_addrs | tr '\n' ' ')"
+  systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
+    -p "BindsTo=$unit.service" -p "After=$unit.service" -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes \
+    -p PrivateTmp=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
+    -p RestrictSUIDSGID=yes -p LockPersonality=yes -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
+    -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
+    "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp "$main" tap0
 }
 
 # What exec leaves behind on any exit: the run's variables file, and the notes in the GPU locks it held.
 exec_cleanup() {
   if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
+  if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE"; fi
   gpu_unlock
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" started locking waited runtime unit pid
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" granted=0 started locking waited runtime unit pid
   local -a envfile=() noexpand=() gpuprops=()
   local usage="usage: exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
   [ "$#" -ge 2 ] || die "$usage"
@@ -725,10 +775,16 @@ exec_run() {
     fi
   fi
   # Network (above): none, unless asked for a tier that root's file grants it to. Only asking prints a line.
-  if [ -n "$net" ] && net_granted "$net"; then
+  NET_ID="$id"
+  if [ -n "$net" ] && net_granted "$net" && [ -x "$SLIRP" ]; then
+    granted=1
     net_props 1
+    # The command waits for its network first (NET_WAIT), the same command otherwise.
+    cmd="$(systemd_command "$(systemd_version)" "$NET_WAIT$2")"
+    cmd="${cmd#*$'\n'}"
     echo "worklane-testrun: network granted ($net; public addresses and the machine's DNS only)" >&2
   else
+    if [ -n "$net" ] && [ -z "$NET_WHY" ]; then NET_WHY="no $SLIRP on this machine (scripts/setup/test-user.sh install puts it there)"; fi
     net_props 0
     [ -z "$net" ] || echo "worklane-testrun: network none ($NET_WHY)" >&2
   fi
@@ -759,20 +815,22 @@ exec_run() {
     --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user"
     /bin/bash -o pipefail -c "$cmd")
-  if [ "${#gpuprops[@]}" -eq 0 ]; then
+  if [ "${#gpuprops[@]}" -eq 0 ] && [ "$granted" -eq 0 ]; then
     "${run[@]}" || rc=$?
   else
     # WHY: the GPU's lock must never be let go while the unit runs. bash runs a trap only once a foreground child
     # ends, so systemd-run goes in the background and is waited for: a TERM (sudo passes the coordinator's on) stops
-    # the unit first, and the locks go with this helper after it. systemd-run keeps the lock fds open too.
+    # the unit first, and the locks go with this helper after it. systemd-run keeps the lock fds open too. A granted
+    # run's network is started once its unit has a main process (slirp_start), so it goes in the background too.
     trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
     "${run[@]}" &
     pid=$!
+    if [ "$granted" -eq 1 ]; then slirp_start "$unit" "$pid" "$id" || echo "worklane-testrun: the run's network could not be started" >&2; fi
     wait "$pid" || rc=$?
     trap - TERM INT HUP
   fi
   exec_cleanup
-  ENV_FILE=
+  ENV_FILE= RESOLV_FILE=
   return "$rc"
 }
 
@@ -781,7 +839,7 @@ exec_run() {
 # TMPDIR (where a database's socket is) and no workspace it can write. Root's grant is never needed: no code of the
 # repo's runs here, only npm, on files the helper copied.
 fetch_cmd() {
-  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d fd dir cmd flag inaccessible p unit rc=0
+  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d fd dir cmd flag inaccessible p unit pid rc=0
   local -a noexpand=()
   [ "$#" -eq 5 ] || die "usage: fetch <id> npm <cache> <key> <timeout_s>"
   valid_id "$id"
@@ -795,14 +853,18 @@ fetch_cmd() {
   fd="$d/fetch"
   as_user rm -rf -- "$fd"
   as_user mkdir -m 0700 -- "$fd" "$fd/home" || die "can't make $fd"
-  cmd="$(systemd_command "$(systemd_version)" "$FETCH_NPM")"
+  [ -x "$SLIRP" ] || die "fetch: no $SLIRP on this machine (scripts/setup/test-user.sh install puts it there)"
+  cmd="$(systemd_command "$(systemd_version)" "$NET_WAIT$FETCH_NPM")"
   flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
   [ -z "$flag" ] || noexpand=("$flag")
   inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
-  net_props 1 1
+  NET_ID="$id"
+  trap 'if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE"; fi' EXIT
+  net_props 1
   unit="$(run_unit "$id" "fetch_$$")"
   echo "worklane-testrun: fetch npm (no script run; public addresses and the machine's DNS only)" >&2
+  trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
   systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} --unit="$unit" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$fd" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
@@ -812,7 +874,11 @@ fetch_cmd() {
     -p TemporaryFileSystem="$TMP_BASE:ro" -p "InaccessiblePaths=$inaccessible" \
     --setenv=HOME="$fd/home" --setenv=TMPDIR=/tmp --setenv=PATH=/usr/local/bin:/usr/bin:/bin --setenv=LANG=C.UTF-8 --setenv=CI=1 \
     --setenv=USER="$user" --setenv=LOGNAME="$user" --setenv=npm_config_cache="$dir" \
-    /bin/bash -o pipefail -c "$cmd" < /dev/null || rc=$?
+    /bin/bash -o pipefail -c "$cmd" < /dev/null &
+  pid=$!
+  slirp_start "$unit" "$pid" "$id" || echo "worklane-testrun: the fetch's network could not be started" >&2
+  wait "$pid" || rc=$?
+  trap - TERM INT HUP
   as_user rm -rf -- "$fd" || true
   return "$rc"
 }
