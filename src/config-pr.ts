@@ -160,7 +160,7 @@ export function planConfigPrMerge(o: { repo: string; base: string; number: unkno
   if (!Number.isInteger(n) || n <= 0) throw new ConfigChangeError('number: the PR number the page proposed');
   if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(o.approver)) throw new ConfigChangeError('the approver must be a GitHub login');
   // INVARIANT (#468, the owner): only a PR this page opened itself, as its own record has it (number and the head it
-  // pushed), never one matched by its branch name: anyone who can push a branch can name it worklane/config-*.
+  // pushed), never one matched by its branch name: anyone who can push a branch can give it the page's branch prefix.
   const own = o.records.find((r) => r.number === n);
   if (!own?.head) throw new ConfigChangeError(`PR #${n} isn't one this page opened: merge it on GitHub`);
   const pr = readPr(o.gh, o.repo, n);
