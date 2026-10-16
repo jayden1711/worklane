@@ -111,6 +111,11 @@ export const InstanceSettings = z.strictObject({
       retention_days: z.number().int().min(1).max(365).optional(),
     })
     .optional(),
+  /**
+   * The dashboard chat (src/chat-pick.ts): what one person who isn't an owner may spend on chat answers in a local
+   * day, across all their conversations. Here, in the owner's policy.yaml, so no writer can raise it. Absent: $10.
+   */
+  chat: z.strictObject({ person_daily_usd: z.number().positive().max(1000).optional() }).optional(),
 });
 export type InstanceSettings = z.infer<typeof InstanceSettings>;
 

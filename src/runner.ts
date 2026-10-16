@@ -38,6 +38,11 @@ export interface RunRequest {
   appendSystemPrompt?: string;
   cwd: string;
   model: string;
+  /**
+   * claude --effort (2.1.296: low, medium, high, xhigh, max); unset: the CLI's default. Only the dashboard chat sets
+   * it, from a fixed list (src/chat-pick.ts CHAT_EFFORTS); cliArgs puts nothing else on the command line.
+   */
+  effort?: 'low' | 'medium' | 'high';
   allowedTools: string[];
   disallowedTools?: string[];
   maxTurns: number;
@@ -399,6 +404,8 @@ export interface RetryOptions {
 
 /** Settings every instance run carries (Claude Code settings reference: each one only takes something away). */
 export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiConnectors: true, allowedMcpServers: [] as unknown[] } as const;
+/** The --effort values cliArgs passes (a mistyped one from anywhere is dropped, never put on the command line). */
+const EFFORTS = new Set(['low', 'medium', 'high']);
 
 /**
  * The claude command line. The prompt is not on it: command lines are public
@@ -407,6 +414,7 @@ export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiC
  */
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = []): string[] {
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+  if (req.effort && EFFORTS.has(req.effort)) args.push('--effort', req.effort);
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
