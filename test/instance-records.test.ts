@@ -131,9 +131,16 @@ test('the registry check sees a new feature\'s per-instance root records, in a s
 });
 
 test('instance-remove.sh and the registry are reachable from no sudoers rule and no machine helper command', () => {
-  for (const f of ['scripts/setup/lib.sh', 'scripts/machine/worklane-machine.cjs', 'scripts/setup/machine-helper.sh', 'scripts/setup/test-user.sh']) {
+  for (const f of ['scripts/machine/worklane-machine.cjs', 'scripts/setup/machine-helper.sh', 'scripts/setup/test-user.sh', 'scripts/setup/console-shell.sh']) {
     const src = readFileSync(join(repoRoot, f), 'utf8');
-    assert.doesNotMatch(src, /instance-remove|instance-records/, `${f} names the removal`);
+    assert.doesNotMatch(src, /instance-(remove|rename|records)/, `${f} names the removal`);
+  }
+  // The machine helper's sudoers rule as lib.sh writes it (every pattern on, as on a new sudo): none of it.
+  if (posix) {
+    const r = spawnSync('bash', ['-c', `source "$1"; sudo_regex_ok() { return 0; }; machine_sudoers wl-alpha wl-beta`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^wl-alpha, wl-beta ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
+    assert.doesNotMatch(r.stdout, /instance|setup\//, 'the rule names no setup script and no instance step');
   }
   const script = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
   assert.match(script, /^\[\[ "\$\{SUDO_USER:-\}" != wl-\* \]\] \|\| \{ echo "instance-remove is an admin's/m, 'it refuses a coordinator\'s sudo');

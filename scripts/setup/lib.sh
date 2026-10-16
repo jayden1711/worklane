@@ -47,6 +47,9 @@ install_sudoers() {
   echo "installed /etc/sudoers.d/$name"
 }
 
+# Whether a sudoers file install_sudoers wrote is there.
+sudoers_installed() { [ -e "/etc/sudoers.d/$1" ]; }
+
 # Remove a sudoers file installed by install_sudoers (absent: nothing to do).
 remove_sudoers() {
   [[ "$1" =~ ^[a-z][a-z0-9-]*$ ]] || { echo "remove_sudoers: bad name $1" >&2; return 1; }
@@ -218,6 +221,42 @@ hub_option() {
 }
 # The instances the hub serves (its --hub <name>=<state>,...), one per line.
 hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
+
+# The hub's own settings, to run dashboards.sh again with another list of instances and nothing else changed: one word
+# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, and --siri when it has the gateway).
+hub_keep_args() {
+  local v
+  printf '%s\n' --client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)"
+  v="$(hub_option --console-user)"; [ -z "$v" ] || printf '%s\n' --console-user "$v"
+  v="$(hub_option --console-devices)"; [ -z "$v" ] || printf '%s\n' --console-devices "$v"
+  [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
+}
+
+# What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
+# refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
+# instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.
+instance_in_flight() {
+  local name="$1" st k u uids=() pid uid cg comm
+  st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
+  case "$st" in active | activating | deactivating | reloading) echo "its coordinator, worklane-$name.service, is $st: let its runs finish, then: sudo systemctl stop worklane-$name.service" ;; esac
+  while IFS=$'\t' read -r k u _; do
+    [ "$k" = user ] && user_exists "$u" && uids+=("$(id -u "$u")")
+  done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$name")
+  if [ "${#uids[@]}" -gt 0 ]; then
+    for pid in /proc/[0-9]*; do
+      uid="$(stat -c %u "$pid" 2>/dev/null)" || continue
+      [[ " ${uids[*]} " == *" $uid "* ]] || continue
+      cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null || true)"
+      case "$cg" in */worklane-dashboard-"$name".service | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
+      comm="$(cat "$pid/comm" 2>/dev/null || true)"
+      echo "process ${pid#/proc/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${cg##*/}"
+    done
+  fi
+  if [ -n "$(ls -A "/var/lib/worklane-test/$name/runs" 2>/dev/null)" ]; then
+    echo "test runs in progress: $(ls -1 "/var/lib/worklane-test/$name/runs" | tr '\n' ' ')(let them finish, or wipe them with the sandbox helper)"
+  fi
+  return 0
+}
 
 # Where the instances' checkouts live (instance.sh makes $SRV_ROOT/<name>), and the engine's command.
 SRV_ROOT=/srv/worklane

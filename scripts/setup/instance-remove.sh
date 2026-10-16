@@ -60,7 +60,7 @@ exists() { # <kind> <what>: whether that item is on this machine
     user) user_exists "$2" ;;
     group) getent group "$2" >/dev/null 2>&1 ;;
     unit) [ -e "/etc/systemd/system/$2" ] || [ -e "/etc/systemd/system/$2.d" ] || systemctl is-enabled -q "$2" 2>/dev/null ;;
-    sudoers) [ -e "/etc/sudoers.d/$2" ] ;;
+    sudoers) sudoers_installed "$2" ;;
     path) [ -e "$2" ] ;;
     shared) printf '%s\n' "$shared_plan" | cut -f1 | grep -qx "$2" ;;
     via) local w; for w in $3; do exists "${w%%:*}" "${w#*:}" && return 0; done; return 1 ;;
@@ -82,31 +82,6 @@ refuse() { echo "refused: $*" >&2; exit 1; }
 # A user of this instance that is another instance's (an older machine, before instance names were guarded).
 collide="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [[ "$k" == user || "$k" == group ]] && echo "$w"; done | grep -Fxf <(other_users) || true)"
 [ -z "$collide" ] || refuse "$(echo "$collide" | tr '\n' ' ')is also another instance's user or group on this machine (instance names that overlap): remove it by hand"
-
-in_flight() {
-  local u st uids=() pid uid cg comm unitname
-  st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
-  case "$st" in active | activating | deactivating | reloading) echo "its coordinator, worklane-$name.service, is $st: let its runs finish, then: sudo systemctl stop worklane-$name.service" ;; esac
-  for line in "${ITEMS[@]}"; do
-    IFS=$'\t' read -r k u _ <<<"$line"
-    [ "$k" = user ] && user_exists "$u" && uids+=("$(id -u "$u")")
-  done
-  if [ "${#uids[@]}" -gt 0 ]; then
-    for pid in /proc/[0-9]*; do
-      uid="$(stat -c %u "$pid" 2>/dev/null)" || continue
-      [[ " ${uids[*]} " == *" $uid "* ]] || continue
-      cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null || true)"
-      unitname="${cg##*/}"
-      # Its dashboard and its test Docker daemon go with the removal; a user's own systemd manager (linger) too.
-      case "$cg" in */worklane-dashboard-"$name".service | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
-      comm="$(cat "$pid/comm" 2>/dev/null || true)"
-      echo "process ${pid#/proc/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${unitname:-no unit}"
-    done
-  fi
-  if [ -d "/var/lib/worklane-test/$name/runs" ] && [ -n "$(ls -A "/var/lib/worklane-test/$name/runs" 2>/dev/null)" ]; then
-    echo "test runs in progress: $(ls -1 "/var/lib/worklane-test/$name/runs" | tr '\n' ' ')(let them finish, or wipe them with the sandbox helper)"
-  fi
-}
 
 # --- the plan
 
@@ -151,12 +126,15 @@ github_steps() {
 
 if [ -n "$print" ]; then
   show_plan
-  busy="$(in_flight)"
+  busy="$(instance_in_flight "$name")"
   [ -z "$busy" ] || { echo; echo "it would refuse now, while:"; printf '%s\n' "$busy" | sed 's/^/  /'; }
   exit 0
 fi
 
-busy="$(in_flight)"
+# One at a time with add-project and instance-rename: they rewrite the same machine-wide rules.
+exec 9> "$ADD_PROJECT_LOCK"
+flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
+busy="$(instance_in_flight "$name")"
 if [ -n "$busy" ]; then
   echo "refused: $name has work in flight; nothing changed:" >&2
   printf '%s\n' "$busy" | sed 's/^/  /' >&2
@@ -219,7 +197,7 @@ for line in "${ITEMS[@]}"; do
       chmod 0600 "$kept"
       echo "kept what the shared files held for $name: $kept"
       ;;
-    sudoers) exists sudoers "$w" && remove_sudoers "$w" && echo "removed /etc/sudoers.d/$w" ;;
+    sudoers) exists sudoers "$w" && remove_sudoers "$w" && echo "removed the sudoers file $w" ;;
     path) exists path "$w" && rm -rf --one-file-system -- "$w" && echo "removed $w" ;;
     user)
       user_exists "$w" || continue
@@ -254,10 +232,7 @@ fi
 if hub_instances | grep -qx "$name"; then
   hub_now="$(remaining_hub | tr '\n' ' ')"
   if [ -n "$hub_now" ]; then
-    args=(--client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)")
-    v="$(hub_option --console-user)"; [ -z "$v" ] || args+=(--console-user "$v")
-    v="$(hub_option --console-devices)"; [ -z "$v" ] || args+=(--console-devices "$v")
-    [ -z "$(hub_option --siri-port)" ] || args+=(--siri)
+    mapfile -t args < <(hub_keep_args)
     # shellcheck disable=SC2086 # one word per instance name
     bash "$here/dashboards.sh" "${args[@]}" $hub_now
   else
