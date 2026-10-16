@@ -281,6 +281,8 @@ The next step reads the new config with no restart and no `git pull`.
 | Default branch protected | local, server | `gh api --method PUT repos/<owner/repo>/branches/<branch>/protection --input <body.json>, the body from config.yaml required_checks and protection.strict (src/branch-protection.ts classicChecks)` |
 | The instance's policy | server | `the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch` |
 | Discord intake and chat | server | `sudo bash scripts/setup/credentials.sh <name> intake-discord (the bot token), then intake.yaml in the instance home (guild, channels, owners, people; docs/intake.md) and a restart of the instance` |
+| Slack intake | server | `sudo bash scripts/setup/credentials.sh <name> intake-slack (the two tokens), then intake.yaml in the instance home (slack.enabled, team, channels, allowed_senders; docs/intake.md 2.7) and a restart of the instance` |
+| Linear intake | server | `sudo bash scripts/setup/credentials.sh <name> intake-linear (the API key), then intake.yaml in the instance home (linear.enabled, team, label, allowed_senders; docs/intake.md 2.8) and a restart of the instance` |
 | Reachable over Tailscale (HTTPS) | server | `sudo bash scripts/setup/tailscale.sh install, then up, serve and public-url (one step each; status reads only)` |
 | Engine updater set up | server | `sudo bash scripts/setup/updates.sh [--channel release] [--signer <principal> ssh-ed25519 <public key>] (or --confirm-signer SHA256:<fingerprint> for a signer staged on the Machine page), then sudo /usr/local/libexec/worklane-machine set-updates on` |
 | The instance's coordinator running | server | `sudo bash scripts/setup/service.sh <name> (add-project.sh runs it)` |
@@ -326,6 +328,37 @@ What it can change, all as the instance's coordinator user (the user its dashboa
 What it can never do: read or show the token (the dashboard's process never opens the token file; the bot's application id, its invite link and its channels come from a child process, `<cli> discord channels --instance <name> --json`, which reads the token itself, asks only Discord's own API (its base URL is a constant: nothing can point it at another host) and prints names and ids only, `GET /api/first-run/discord/channels`, owners only; the child is always the installed engine's own `cli.js`, by absolute path: no PATH lookup, option, environment variable, config key or request changes which program runs); write any other file, or any other key of `intake.yaml` (who may send, people, owners and trusted stay by hand); post, read or change anything on Discord (the child process makes GET requests only); restart the instance (it shows the command); or run anything as root. A hub forwards these calls to the instance's own dashboard like every other, so the hub's user never holds the token either.
 
 The invite link asks for exactly four permissions (View Channels, Send Messages, Create Public Threads, Send Messages in Threads; integer `309237648384`) and the `bot` scope. Creating the bot and turning on its Message Content Intent stay in Discord's developer portal: the step links there, and says whether the intent is on once the bot's view is loaded.
+
+## Slack and Linear: intake sources beside Discord
+
+The First run page's **Intake sources** group (its id stays `discord`, so `setup discord` still names it) holds three
+steps: Discord (above), **Slack** and **Linear** (`src/intake/source-setup.ts`, `web/src/components/SourceSetup.tsx`).
+The Intake page shows the three side by side (on, off, not set up, or refused), with counts only; an owner's card links
+to its step. Each is optional; nothing is on until intake.yaml turns it on and the instance restarts.
+
+- **Nothing set up:** the step says what the source does, how it connects (Slack: outbound over Socket Mode; Linear:
+  polling Linear's API; no public address either way), and offers one first action: **Create the Slack app from the
+  manifest** (Socket Mode, the `app_mention` event, the bot scopes `app_mentions:read`, `chat:write`, `users:read`,
+  `channels:read`, nothing else) or **Create a Linear API key** (Read and Create comments, the one team). The later
+  steps follow once it is taken. A writer gets the same words and no button.
+- **The secrets.** Slack's app-level token (`xapp-`) and bot token (`xoxb-`), or the Linear key (`lin_api_`): each a
+  paste box (a `paste_secret` ask for `intake-slack-app`, `intake-slack-bot` or `intake-linear`,
+  `POST /api/first-run/<slack|linear>/token-ask`), shape-checked, straight to a 0400 file, and `credentials.yaml`
+  `intake.slack_app_token`, `slack_bot_token` or `linear_api_key` pointed at it (`setIntakeCredential`, as
+  `credentials.sh <name> intake-slack|intake-linear` does).
+- **What it sees:** `GET /api/first-run/<slack|linear>/view`, owners only: a child process, `<cli> slack view` or
+  `<cli> linear view --instance <name> --json`, run by the same runner as the Discord listing, which reads the secret
+  itself and prints names and ids only (the workspace, its public channels, its people; or the teams, their labels and
+  members).
+- **The picks:** `POST /api/first-run/<slack|linear>/intake`: without `confirm`, the exact diff of intake.yaml (nothing
+  written); with `confirm` and the reviewed hash, that change, 0600, renamed into place. It writes only `slack.enabled`,
+  `slack.team`, `slack.channels`, or `linear.enabled`, `linear.team`, `linear.label`, each id from the view.
+
+What it can never do: read or show a secret (the dashboard's process never opens a secret file); write who may send
+(`slack.allowed_senders`, `linear.allowed_senders`) or who is trusted (they stay in intake.yaml by hand, and the step
+only counts them); write any other key or file; post or change anything on Slack or Linear (the view makes read
+requests only); restart the instance; or act for a writer or a viewer (every write route is the owners', each refusal
+audited).
 
 ## Switching the agents' Claude account
 

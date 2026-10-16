@@ -39,7 +39,7 @@ import { Agents } from './pages/Agents';
 import { Decisions } from './pages/Decisions';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
-import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
+import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
 import { ConfigPrList, ConfigPrRow } from './components/ConfigPr';
@@ -52,6 +52,8 @@ import { CiNote } from './components/CiNote';
 import { ClaudeSigninView } from './components/ClaudeSignin';
 import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
+import { SourceSetupView } from './components/SourceSetup';
+import type { IntakeSourceSummary, SourceIntakePlan, SourceSetup, SourceView, SourceFormValue } from './api';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { GoalGraphView } from './components/GoalGraph';
@@ -181,6 +183,9 @@ export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boo
 export const renderClaudeSignin = (v: ClaudeSigninData, o: { confirming?: boolean } = {}) => renderToStaticMarkup(<ClaudeSigninView v={v} initialConfirming={!!o.confirming} onChanged={() => {}} />);
 export const renderDiscordSetup = (v: DiscordSetup, o: { bot?: DiscordBot; botError?: string; tokenConfirming?: boolean; plan?: DiscordIntakePlan; values?: Record<string, DiscordFormValue> } = {}) =>
   renderToStaticMarkup(<DiscordSetupView v={v} bot={o.bot ?? null} botError={o.botError ?? null} initialTokenConfirming={!!o.tokenConfirming} initialPlan={o.plan ?? null} {...(o.values ? { initialValues: o.values } : {})} />);
+export const renderSourceSetup = (v: SourceSetup, o: { view?: SourceView; started?: boolean; confirming?: string; plan?: SourceIntakePlan; values?: Record<string, SourceFormValue> } = {}) =>
+  renderToStaticMarkup(<SourceSetupView v={v} view={o.view ?? null} initialStarted={!!o.started} initialConfirming={o.confirming ?? null} initialPlan={o.plan ?? null} {...(o.values ? { initialValues: o.values } : {})} />);
+export const renderIntakeSources = (sources: IntakeSourceSummary[], canSetUp: boolean) => renderToStaticMarkup(<IntakeSources sources={sources} canSetUp={canSetUp} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);

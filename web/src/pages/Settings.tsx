@@ -150,9 +150,9 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
                       {/* WHY: only where the step exists: a server instance's dashboard, for its owners and writers. */}
                       {full?.discordSetup && (
                         <div className="pt-2" data-testid="settings-discord">
-                          The Discord bot (its token, invite link and channels) is set up, and changed later, in the{' '}
+                          The intake sources (Discord, Slack and Linear: their tokens, channels and teams) are set up, and changed later, in the{' '}
                           <a href="/first-run?open=discord" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/first-run?open=discord'))} data-testid="settings-discord-link">
-                            First run page's Discord step
+                            First run page's Intake sources
                           </a>
                           .
                         </div>
