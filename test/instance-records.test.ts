@@ -11,13 +11,16 @@ import { dirname, join, relative } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
 
-interface Item { kind: string; what: string; when?: string[]; by: string }
+interface Item { kind: string; what: string; when?: string[]; by: string; rename: string }
 const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as {
   ITEMS: Item[];
   NOT_RECORDS: { what: string; why: string }[];
   SHARED_FILES: { at: string; item?: string; why?: string }[];
   plan: (name: string, prefix?: string) => Record<string, unknown>;
   remove: (name: string, archive: string, prefix?: string) => Record<string, unknown>;
+  rekey: (old: string, nu: string, archive: string, prefix?: string) => string[];
+  carry: (h: Record<string, string>, from: string, to: string) => ({ from: string; to: string } | { skipped: string })[];
+  moveText: (text: string, h: Record<string, string>) => string;
 };
 const cli = BRAND.cli;
 const posix = process.platform !== 'win32';
@@ -115,6 +118,8 @@ test('every file under /etc/<cli> and /var/lib/<cli> the scripts and the engine 
   }
   assert.deepEqual(unknown, [], `root files scripts/setup/instance-records.cjs doesn't classify; add each to SHARED_FILES:\n${unknown.join('\n')}`);
   for (const s of reg.SHARED_FILES) assert.ok(Boolean(s.item) !== Boolean(s.why), `${s.at}: an item or a why, exactly one`);
+  // And every item says what a rename does with it.
+  for (const i of reg.ITEMS) assert.ok(['new', 'rekey', 'move', 'drop'].includes(i.rename), `${i.what}: rename is new, rekey, move or drop`);
 });
 
 test('the registry check sees a new feature\'s per-instance root records, in a script and in src/', () => {
@@ -142,13 +147,23 @@ test('instance-remove.sh and the registry are reachable from no sudoers rule and
     assert.match(r.stdout, /^wl-alpha, wl-beta ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
     assert.doesNotMatch(r.stdout, /instance|setup\//, 'the rule names no setup script and no instance step');
   }
-  const script = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
-  assert.match(script, /^\[\[ "\$\{SUDO_USER:-\}" != wl-\* \]\] \|\| \{ echo "instance-remove is an admin's/m, 'it refuses a coordinator\'s sudo');
+  for (const f of ['instance-remove', 'instance-rename']) {
+    const script = readFileSync(join(repoRoot, 'scripts', 'setup', `${f}.sh`), 'utf8');
+    assert.match(script, new RegExp(`^\\[\\[ "\\$\\{SUDO_USER:-\\}" != wl-\\* \\]\\] \\|\\| \\{ echo "${f} is an admin's`, 'm'), `${f} refuses a coordinator's sudo`);
+  }
+});
+
+test('instance-rename.sh takes two names (the new one as add-project takes it) and one of --print, --yes or --abort, before anything else', { skip: !posix && 'bash' }, () => {
+  const run = (...a: string[]) => spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh'), ...a], { encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
+  for (const a of [[], ['a'], ['a', 'a'], ['a', 'b', 'c'], ['a', 'b-agent'], ['a', 'b-work'], ['a', 'dash'], ['a', 'B'], ['dash', 'b'], ['a', 'b', '--print', '--yes'], ['a', 'b', '--yes', '--abort'], ['a', 'b', '--force'], ['a', 'b'.repeat(22)]]) {
+    const r = run(...a);
+    assert.equal(r.status, 2, `${JSON.stringify(a)}: ${r.stderr}`);
+  }
 });
 
 test('instance-remove.sh takes one name and --print or --yes, before anything else', { skip: !posix && 'bash' }, () => {
   const run = (...a: string[]) => spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), ...a], { encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' } });
-  for (const a of [[], ['--print'], ['a', 'b'], ['a', '--print', '--yes'], ['a', '--force'], ['Bad'], ['dash'], ['a/b'], ['-a'], ['a'.repeat(22)]]) {
+  for (const a of [[], ['--print'], ['a', 'b'], ['a', '--print', '--yes'], ['a', '--force'], ['Bad'], ['dash'], ['a/b'], ['-a'], ['a'.repeat(22)], ['a', '--exported', '/var/lib/worklane/removed/a-20261015T000000Z.bundle'], ['a', '--yes', '--exported', '/tmp/a.bundle'], ['a', '--yes', '--exported']]) {
     const r = run(...a);
     assert.equal(r.status, 2, `${JSON.stringify(a)}: ${r.stderr}`);
   }
@@ -253,4 +268,76 @@ test("the incident store is changed under its lock: a coordinator's write in pro
   assert.ok(Date.now() - t0 >= 300, 'it waited for the holder');
   assert.deepEqual(read(root, `/var/lib/${cli}/agent-slots/incidents.json`).incidents.map((x: { id: string }) => x.id), ['2', '3']);
   assert.ok(!existsSync(lock), 'and let go of the lock');
+});
+
+// --- moving one instance's records to a new name (instance-rename.sh)
+
+test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a rerun after a stop part way finishes it; two instances' records are never merged", () => {
+  const root = machine();
+  const init = (n: string) => join(root, `/var/lib/${cli}/init/${n}.json`);
+  mkdirSync(dirname(init('alpha')), { recursive: true });
+  writeFileSync(init('alpha'), JSON.stringify({ version: 1, mode: 'server', instance: 'alpha' }));
+  writeFileSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha.json`), '{}');
+  writeFileSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha-2.json`), '{}');
+  const moved = reg.rekey('alpha', 'bravo', join(root, 'archive', 'r.json'), root);
+  assert.deepEqual(moved.sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'init', 'pending-signers']);
+
+  const p = read(root, `/var/lib/${cli}/claude-account/profiles.json`);
+  assert.deepEqual(Object.keys(p.active).sort(), ['alpha-2', 'beta', 'bravo']);
+  assert.deepEqual(p.active.bravo, { profile: 'work', since: 'x' });
+  assert.deepEqual(p.switched_at, { 'alpha-2': 'y', bravo: 'x' });
+  assert.deepEqual(Object.keys(p.failover.instances).sort(), ['beta', 'bravo']);
+  assert.deepEqual(Object.keys(p.profiles.work.users).sort(), ['wl-alpha-2-agent', 'wl-beta-agent', 'wl-bravo-agent']);
+  assert.deepEqual([p.profiles.work.users['wl-bravo-agent'].instance, p.profiles.work.users['wl-bravo-agent'].user], ['bravo', 'wl-bravo-agent']);
+  assert.equal(p.profiles.mine.instance, 'bravo');
+  const st = read(root, `/var/lib/${cli}/claude-account/status.json`).users.map((u: { instance: string; user: string }) => `${u.instance}:${u.user}`);
+  assert.deepEqual(st, ['bravo:wl-bravo-agent', 'bravo:wl-bravo-eval', 'alpha-2:wl-alpha-2-agent', 'beta:wl-beta-agent']);
+  assert.equal(readFileSync(join(root, `/var/lib/${cli}/claude-account/paused`), 'utf8'), 'alpha-2\nbravo\nbeta\n');
+  assert.equal(read(root, `/etc/${cli}/updates.json`).canary.instance, 'bravo');
+  assert.ok(existsSync(join(root, `/var/lib/${cli}/canary.json`)), 'the canary run in progress stays: same repo, same canary');
+  const inc = read(root, `/var/lib/${cli}/agent-slots/incidents.json`).incidents.map((x: { id: string; instance: string; key: string }) => `${x.id}:${x.instance}:${x.key}`);
+  assert.deepEqual(inc, [`1:bravo:${cli}-bravo.service`, `2:alpha-2:${cli}-alpha-2.service`, '3:null:disk', '4:bravo:bravo#12']);
+  assert.deepEqual(read(root, `/var/lib/${cli}/pending-signers.json`).pending.map((x: { instance: string }) => x.instance), ['bravo', 'beta']);
+  assert.ok(!existsSync(init('alpha')));
+  assert.equal(read(root, `/var/lib/${cli}/init/bravo.json`).instance, 'bravo');
+  assert.ok(!existsSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha.json`)) && existsSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha-2.json`)));
+  assert.deepEqual(read(root, `/etc/${cli}/testrun-gpu.json`).instances.alpha, { devices: [0] }, "the GPU grant is testrun-gpu.sh's to move");
+  assert.equal(JSON.parse(readFileSync(join(root, 'archive', 'r.json'), 'utf8')).records.canary.canary.instance, 'alpha', 'what alpha had, kept first');
+
+  // Rerun: nothing of alpha's is left to move.
+  assert.deepEqual(reg.rekey('alpha', 'bravo', join(root, 'archive', 'r2.json'), root), []);
+  // alpha-2 onto beta, which has records in the same files: refused, nothing changes.
+  const before = readFileSync(join(root, `/var/lib/${cli}/claude-account/profiles.json`), 'utf8');
+  assert.throws(() => reg.rekey('alpha-2', 'beta', join(root, 'archive', 'r3.json'), root), /both have records in .*claude-profiles/);
+  assert.equal(readFileSync(join(root, `/var/lib/${cli}/claude-account/profiles.json`), 'utf8'), before);
+});
+
+test("carry moves the old instance home's files to the new name's paths and users, never another instance's, and lists the files they name outside it", () => {
+  const root = mkdtempSync(join(tmpdir(), 'carry-'));
+  const h = { old: 'alpha', nu: 'bravo', oldHome: join(root, 'home/wl-alpha'), newHome: join(root, 'home/wl-bravo'), oldAgent: join(root, 'home/wl-alpha-agent'), newAgent: join(root, 'home/wl-bravo-agent') };
+  const from = join(h.oldHome, `.local/state/${cli}/instances/alpha`);
+  const to = join(h.newHome, `.local/state/${cli}/instances/bravo`);
+  mkdirSync(join(from, 'state'), { recursive: true });
+  mkdirSync(join(from, 'git-hooks'), { recursive: true });
+  mkdirSync(to, { recursive: true });
+  mkdirSync(join(h.oldAgent, 'keys'), { recursive: true });
+  writeFileSync(join(h.oldAgent, 'keys', 'api'), 'k');
+  writeFileSync(join(from, 'instance.yaml'), `version: 1\nname: alpha\nrepos:\n  - path: /srv/${cli}/alpha/shop\n    repo: o/shop\nrun_as:\n  agent_user: wl-alpha-agent\n  agent_home: ${h.oldAgent}\n`);
+  writeFileSync(join(from, 'credentials.yaml'), `github: { kind: app, app_id: 1, installation_id: 2, key_path: ${h.oldHome}/.config/alpha-app/private-key.pem }\nagent_api_key: ${h.oldAgent}/keys/api\nother: /srv/${cli}/alpha-2/x\n`, { mode: 0o600 });
+  writeFileSync(join(from, 'policy.yaml'), 'version: 1\nauto_merge: false\n');
+  writeFileSync(join(from, 'state', 'events.db'), 'not carried');
+  writeFileSync(join(to, 'instance.yaml'), 'version: 1\nname: bravo\n');
+  const out = reg.carry(h, from, to);
+  assert.deepEqual(out.filter((x) => 'from' in x), [{ from: join(h.oldAgent, 'keys', 'api'), to: join(h.newAgent, 'keys', 'api') }]);
+  assert.deepEqual(out.filter((x) => 'skipped' in x), [{ skipped: join(from, 'git-hooks') }]);
+  const inst = readFileSync(join(to, 'instance.yaml'), 'utf8');
+  assert.match(inst, /^name: bravo$/m);
+  assert.match(inst, new RegExp(`path: /srv/${cli}/bravo/shop$`, 'm'));
+  assert.match(inst, /agent_user: wl-bravo-agent$/m);
+  const cred = readFileSync(join(to, 'credentials.yaml'), 'utf8');
+  assert.ok(cred.includes(`${h.newHome}/.config/bravo-app/private-key.pem`) && cred.includes(`${h.newAgent}/keys/api`));
+  assert.ok(cred.includes(`/srv/${cli}/alpha-2/x`), "another instance's path stays as it was");
+  assert.ok(!existsSync(join(to, 'state')), 'the state comes by import, never by carry');
+  if (posix) assert.equal(statSync(join(to, 'credentials.yaml')).mode & 0o777, 0o600);
+  assert.equal(readFileSync(join(to, 'policy.yaml'), 'utf8'), 'version: 1\nauto_merge: false\n');
 });

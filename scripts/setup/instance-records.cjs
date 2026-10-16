@@ -8,7 +8,13 @@
 //   node instance-records.cjs plan <name>               the shared files' records <name> has, one a line (changes nothing)
 //   node instance-records.cjs remove <name> <archive>   take <name>'s records out of the shared files, keeping what was
 //                                                       taken in <archive> (root's, 0600) first
-// As root, from instance-remove.sh only: no sudoers rule and no helper command names this file.
+//   node instance-records.cjs rekey <old> <new> <archive>   move <old>'s records in the shared files to <new> (and its
+//                                                       init record), keeping what they were in <archive> first
+//   node instance-records.cjs carry <old> <new> <from dir> <to dir> <old home> <new home> <old agent home> <new agent home> [<old eval home> <new eval home>]
+//                                                       the old instance home's files (never its state) into the new
+//                                                       one, every path and user in them moved to the new name's;
+//                                                       prints each file they name outside it, "<from>\t<to>", to copy
+// As root, from instance-remove.sh and instance-rename.sh only: no sudoers rule and no helper command names this file.
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -25,30 +31,36 @@ const NAME = /^[a-z][a-z0-9-]{0,20}$/;
 //   group    groupdel
 //   shared   a record inside a shared root file, taken out by `remove` here
 // <name> stands for the instance's name. Order is the order of removal: users and the state go last, after the export.
+// And what instance-rename.sh does with each, `rename`:
+//   new     the new name gets its own, from the script that makes it (instance.sh, service.sh, ...); the old one goes
+//           with the old name's removal
+//   rekey   the old name's records become the new name's, in place (`rekey` here; the GPU grant: testrun-gpu.sh)
+//   move    the file itself moves to the new name (`rekey` here)
+//   drop    the old one goes, and the new name gets none until it makes its own
 const ITEMS = [
-  { kind: 'via', what: 'test-user.sh remove <name>', when: ['user:wl-test-<name>', 'path:/var/lib/worklane-test/<name>', 'unit:worklane-test-<name>-docker.service', 'sudoers:worklane-test-<name>'], by: 'test-user.sh install' },
-  { kind: 'via', what: 'testrun-gpu.sh disable <name>', when: ['shared:gpu'], by: 'testrun-gpu.sh enable' },
-  { kind: 'unit', what: 'worklane-dashboard-<name>.service', by: 'dashboards.sh' },
-  { kind: 'unit', what: 'worklane-<name>.service', by: 'service.sh' },
-  { kind: 'unit', what: 'worklane-test-<name>-docker.service', by: 'test-user.sh install' },
-  { kind: 'shared', what: 'gpu', by: 'testrun-gpu.sh enable' },
-  { kind: 'shared', what: 'claude-profiles', by: 'claude-account.sh profile-add|use|failover' },
-  { kind: 'shared', what: 'claude-status', by: 'claude-account.sh status|switch, add-project.sh' },
-  { kind: 'shared', what: 'claude-paused', by: 'claude-account.sh switch' },
-  { kind: 'shared', what: 'canary', by: 'docs/canary.md (an admin, in updates.json)' },
-  { kind: 'shared', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
-  { kind: 'shared', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
-  { kind: 'path', what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
-  { kind: 'path', what: '/var/lib/worklane/init/<name>.json', by: 'init --mode server (src/init.ts serverInitFile)' },
-  { kind: 'sudoers', what: 'worklane-test-<name>', by: 'test-user.sh install' },
-  { kind: 'sudoers', what: 'worklane-<name>', by: 'instance.sh' },
-  { kind: 'path', what: '/var/lib/worklane-test/<name>', by: 'test-user.sh install' },
-  { kind: 'path', what: '/srv/worklane/<name>', by: 'instance.sh, checkout.sh' },
-  { kind: 'user', what: 'wl-test-<name>', by: 'test-user.sh install' },
-  { kind: 'user', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
-  { kind: 'user', what: 'wl-<name>-agent', by: 'instance.sh' },
-  { kind: 'user', what: 'wl-<name>', by: 'instance.sh (its home: the instance state, its App key and credentials)' },
-  { kind: 'group', what: 'wl-<name>-work', by: 'instance.sh' },
+  { kind: 'via', rename: 'new', what: 'test-user.sh remove <name>', when: ['user:wl-test-<name>', 'path:/var/lib/worklane-test/<name>', 'unit:worklane-test-<name>-docker.service', 'sudoers:worklane-test-<name>'], by: 'test-user.sh install' },
+  { kind: 'via', rename: 'rekey', what: 'testrun-gpu.sh disable <name>', when: ['shared:gpu'], by: 'testrun-gpu.sh enable' },
+  { kind: 'unit', rename: 'new', what: 'worklane-dashboard-<name>.service', by: 'dashboards.sh' },
+  { kind: 'unit', rename: 'new', what: 'worklane-<name>.service', by: 'service.sh' },
+  { kind: 'unit', rename: 'new', what: 'worklane-test-<name>-docker.service', by: 'test-user.sh install' },
+  { kind: 'shared', rename: 'rekey', what: 'gpu', by: 'testrun-gpu.sh enable' },
+  { kind: 'shared', rename: 'rekey', what: 'claude-profiles', by: 'claude-account.sh profile-add|use|failover' },
+  { kind: 'shared', rename: 'rekey', what: 'claude-status', by: 'claude-account.sh status|switch, add-project.sh' },
+  { kind: 'shared', rename: 'rekey', what: 'claude-paused', by: 'claude-account.sh switch' },
+  { kind: 'shared', rename: 'rekey', what: 'canary', by: 'docs/canary.md (an admin, in updates.json)' },
+  { kind: 'shared', rename: 'rekey', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
+  { kind: 'shared', rename: 'rekey', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
+  { kind: 'path', rename: 'drop', what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
+  { kind: 'path', rename: 'move', what: '/var/lib/worklane/init/<name>.json', by: 'init --mode server (src/init.ts serverInitFile)' },
+  { kind: 'sudoers', rename: 'new', what: 'worklane-test-<name>', by: 'test-user.sh install' },
+  { kind: 'sudoers', rename: 'new', what: 'worklane-<name>', by: 'instance.sh' },
+  { kind: 'path', rename: 'new', what: '/var/lib/worklane-test/<name>', by: 'test-user.sh install' },
+  { kind: 'path', rename: 'new', what: '/srv/worklane/<name>', by: 'instance.sh, checkout.sh' },
+  { kind: 'user', rename: 'new', what: 'wl-test-<name>', by: 'test-user.sh install' },
+  { kind: 'user', rename: 'new', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
+  { kind: 'user', rename: 'new', what: 'wl-<name>-agent', by: 'instance.sh' },
+  { kind: 'user', rename: 'new', what: 'wl-<name>', by: 'instance.sh (its home: the instance state, its App key and credentials)' },
+  { kind: 'group', rename: 'new', what: 'wl-<name>-work', by: 'instance.sh' },
 ];
 
 // What names an instance in the scripts and src/ without being a record of its own: each is part of an item above
@@ -97,6 +109,7 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/signers-state.json', why: "the updater's record of the signers file's hash" },
   { at: '/var/lib/worklane/verify.git', why: "the updater's verification clone of the engine" },
   { at: '/var/lib/worklane/tailscale', why: "tailscale.sh's steps for the hub: the asking coordinator's login link only while `up` waits" },
+  { at: '/var/lib/worklane/renames', why: "instance-rename.sh's progress and the parked coordinator unit of a rename under way (root's 0700)" },
   { at: '/var/lib/worklane/removed', why: "instance-remove.sh's archive of removed instances' history (root's 0700)" },
   { at: '/var/lib/worklane-ci', why: "ci-runner.sh's runners: no instance" },
   { at: '/var/lib/worklane-build', why: "the updater's build directory: no instance" },
@@ -354,6 +367,86 @@ const SHARED = {
   },
 };
 
+/** One of <old>'s users or unit names as <new>'s; anything else as it was. */
+function userAs(u, old, nu) {
+  for (const [a, b] of [[`wl-${old}`, `wl-${nu}`], [`wl-${old}-agent`, `wl-${nu}-agent`], [`wl-${old}-eval`, `wl-${nu}-eval`], [`wl-test-${old}`, `wl-test-${nu}`]]) if (u === a) return b;
+  return u;
+}
+/** An incident's key, when it names <old>: its name alone, <old>#<issue>, its units or its users. */
+function keyAs(k, old, nu) {
+  if (k === old) return nu;
+  if (typeof k === 'string' && k.startsWith(`${old}#`)) return `${nu}${k.slice(old.length)}`;
+  for (const [a, b] of [[`worklane-${old}.service`, `worklane-${nu}.service`], [`worklane-dashboard-${old}.service`, `worklane-dashboard-${nu}.service`], [`worklane-test-${old}-docker.service`, `worklane-test-${nu}-docker.service`]]) if (k === a) return b;
+  return userAs(k, old, nu);
+}
+
+/** Each shared file's records of <old> made <new>'s, in place: { file, rekey(prefix, old, new) -> what changed (null: nothing) }. */
+const REKEY = {
+  'claude-profiles': (prefix, old, nu) => {
+    const f = at(prefix, P.profiles);
+    const p = readJson(f);
+    if (!profileRecords(p, old)) return null;
+    for (const k of ['active', 'switched_at']) if (p[k] && Object.prototype.hasOwnProperty.call(p[k], old)) { p[k][nu] = p[k][old]; delete p[k][old]; }
+    if (p.failover && p.failover.instances && p.failover.instances[old]) { p.failover.instances[nu] = p.failover.instances[old]; delete p.failover.instances[old]; }
+    for (const e of Object.values(p.profiles || {})) {
+      if (!e || typeof e !== 'object') continue;
+      if (e.instance === old) e.instance = nu;
+      const users = {};
+      for (const [u, r] of Object.entries(e.users || {})) {
+        if (r && r.instance === old) users[userAs(u, old, nu)] = { ...r, instance: nu, user: userAs(r.user, old, nu) };
+        else users[u] = r;
+      }
+      if (e.users) e.users = users;
+    }
+    writeKeeping(f, JSON.stringify(p) + '\n');
+    return true;
+  },
+  'claude-status': (prefix, old, nu) => {
+    const f = at(prefix, P.status);
+    const s = readJson(f);
+    if (!(s && Array.isArray(s.users) && s.users.some((u) => u && u.instance === old))) return null;
+    s.users = s.users.map((u) => (u && u.instance === old ? { ...u, instance: nu, user: userAs(u.user, old, nu) } : u));
+    writeKeeping(f, JSON.stringify(s) + '\n');
+    return true;
+  },
+  'claude-paused': (prefix, old, nu) => {
+    const f = at(prefix, P.paused);
+    const lines = pausedLines(f);
+    if (!lines.includes(old)) return null;
+    const next = [...new Set(lines.map((l) => (l === old ? nu : l)))];
+    writeKeeping(f, next.join('\n') + '\n');
+    return true;
+  },
+  canary: (prefix, old, nu) => {
+    const f = at(prefix, P.updates);
+    const u = readJson(f);
+    if (!(u && u.canary && u.canary.instance === old)) return null;
+    u.canary.instance = nu;
+    writeKeeping(f, JSON.stringify(u, null, 2) + '\n');
+    return true;
+  },
+  incidents: (prefix, old, nu) => {
+    const dir = at(prefix, P.slots);
+    const f = path.join(dir, INCIDENTS);
+    if (!fs.existsSync(f)) return null;
+    return withLock(path.join(dir, INCIDENTS_LOCK), () => {
+      const j = readJson(f);
+      if (!(j && Array.isArray(j.incidents) && j.incidents.some((x) => x && x.instance === old))) return null;
+      j.incidents = j.incidents.map((x) => (x && x.instance === old ? { ...x, instance: nu, key: keyAs(x.key, old, nu) } : x));
+      writeKeeping(f, JSON.stringify(j), 0o660);
+      return true;
+    });
+  },
+  'pending-signers': (prefix, old, nu) => {
+    const f = at(prefix, P.pending);
+    const j = readJson(f);
+    if (!(j && Array.isArray(j.pending) && j.pending.some((e) => e && e.instance === old))) return null;
+    j.pending = j.pending.map((e) => (e && e.instance === old ? { ...e, instance: nu, by: userAs(e.by, old, nu) } : e));
+    writeKeeping(f, JSON.stringify(j) + '\n');
+    return true;
+  },
+};
+
 function pausedLines(file) {
   try {
     return fs.readFileSync(file, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -410,6 +503,100 @@ function remove(name, archive, prefix = '') {
   return taken;
 }
 
+/**
+ * Move <old>'s records in the shared files to <new> (never the GPU grant: testrun-gpu.sh's own disable and enable do
+ * that, in its strict form), its init record to <new>.json, and drop its Discord claim (<new>'s coordinator makes its
+ * own). What <old> had is kept in <archive> first.
+ */
+function rekey(old, nu, archive, prefix = '') {
+  if (!NAME.test(old) || !NAME.test(nu) || old === nu) throw new Error('rekey: two different instance names');
+  // Two instances' records are never merged: a file where both have some stops it. (A file where only <new> has some
+  // was moved by an earlier run that stopped part way.)
+  const before = plan(old, prefix);
+  const both = Object.keys(plan(nu, prefix)).filter((id) => id !== 'gpu' && before[id]);
+  if (both.length) throw new Error(`${old} and ${nu} both have records in ${both.join(', ')}: nothing moved`);
+  writeArchive(archive, { instance: old, renamed_to: nu, at: new Date().toISOString(), records: before });
+  const moved = [];
+  for (const [id, f] of Object.entries(REKEY)) if (f(prefix, old, nu)) moved.push(id);
+  const init = (n) => at(prefix, `/var/lib/worklane/init/${n}.json`);
+  if (fs.existsSync(init(old))) {
+    const j = readJson(init(old)) || {};
+    if (j.instance === old) j.instance = nu;
+    writeKeeping(init(old), JSON.stringify(j, null, 2) + '\n', 0o640);
+    fs.renameSync(init(old), init(nu));
+    moved.push('init');
+  }
+  fs.rmSync(at(prefix, `${P.slots}/discord-claim-${old}.json`), { force: true });
+  return moved;
+}
+
+const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** A name or path as a whole: not followed by a character that would make it a longer one. */
+const whole = (x) => new RegExp(`${esc(x)}(?![A-Za-z0-9_.-])`, 'g');
+
+/**
+ * The text with every path and user of <old> made <new>'s: its homes, its config dirs, its state, its checkout root,
+ * its users, and instance.yaml's name. Throws, naming what is left, when anything of <old>'s would remain.
+ */
+function moveText(text, h) {
+  const { old, nu } = h;
+  const pairs = [
+    [`${h.oldHome}/.config/${old}-`, `${h.newHome}/.config/${nu}-`],
+    [`${h.oldHome}/.local/state/worklane/instances/${old}`, `${h.newHome}/.local/state/worklane/instances/${nu}`],
+    ...(h.oldEval ? [[h.oldEval, h.newEval]] : []),
+    [h.oldAgent, h.newAgent],
+    [h.oldHome, h.newHome],
+    [`/srv/worklane/${old}`, `/srv/worklane/${nu}`],
+    [`wl-${old}-agent`, `wl-${nu}-agent`],
+    [`wl-${old}-eval`, `wl-${nu}-eval`],
+    [`wl-${old}`, `wl-${nu}`],
+  ];
+  let out = text;
+  for (const [a, b] of pairs) out = out.replace(a.endsWith('-') ? new RegExp(esc(a), 'g') : whole(a), b);
+  out = out.replace(new RegExp(`^name: *${esc(old)} *$`, 'm'), `name: ${nu}`);
+  const left = [h.oldHome, h.oldAgent, ...(h.oldEval ? [h.oldEval] : []), `/srv/worklane/${old}`, `wl-${old}`].filter((x) => whole(x).test(out));
+  if (new RegExp(`^name: *${esc(old)} *$`, 'm').test(out)) left.push(`name: ${old}`);
+  if (left.length) throw new Error(`still names ${left.join(', ')} after the move`);
+  return out;
+}
+
+/**
+ * The old instance home's files (never its state/) into the new one: each regular file, its text moved to the new
+ * name's (moveText), its mode kept; the new home's own instance.yaml replaced by the old one's, moved. Everything is
+ * worked out before anything is written. Returns the files they name outside the instance home, to copy: [from, to].
+ */
+function carry(h, fromDir, toDir) {
+  const out = [];
+  const plan = [];
+  for (const e of fs.readdirSync(fromDir, { withFileTypes: true })) {
+    if (e.name === 'state') continue;
+    const src = path.join(fromDir, e.name);
+    if (!e.isFile()) {
+      out.push({ skipped: src });
+      continue;
+    }
+    const text = fs.readFileSync(src, 'utf8');
+    let moved;
+    try {
+      moved = moveText(text, h);
+    } catch (err) {
+      throw new Error(`${src}: ${err.message}; nothing carried`);
+    }
+    plan.push([path.join(toDir, e.name), moved, fs.statSync(src).mode & 0o777]);
+    for (const m of text.matchAll(new RegExp(`(?:${[h.oldHome, h.oldAgent, ...(h.oldEval ? [h.oldEval] : [])].map(esc).join('|')})/[^\\s"'#,}\\]]+`, 'g'))) {
+      const from = m[0];
+      if (from.startsWith(`${h.oldHome}/.local/state/worklane/instances/${h.old}/`) || from.startsWith(`${h.oldHome}/.config/${h.old}-`)) continue; // the state, and the config dirs: carried whole
+      if (fs.existsSync(from) && !out.some((x) => x.from === from)) out.push({ from, to: moveText(from, h) });
+    }
+  }
+  for (const [file, text, mode] of plan) {
+    fs.writeFileSync(`${file}.carry.tmp`, text, { mode });
+    fs.chmodSync(`${file}.carry.tmp`, mode);
+    fs.renameSync(`${file}.carry.tmp`, file);
+  }
+  return out;
+}
+
 function writeArchive(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const tmp = `${file}.${process.pid}.tmp`;
@@ -420,13 +607,13 @@ function writeArchive(file, data) {
 
 function main(argv) {
   const [cmd, name, archive] = argv;
-  const usage = 'usage: instance-records.cjs items <name> | plan <name> | remove <name> <archive file>';
+  const usage = 'usage: instance-records.cjs items <name> | plan <name> | remove <name> <archive file> | rekey <old> <new> <archive file> | carry <old> <new> <from dir> <to dir> <old home> <new home> <old agent home> <new agent home> [<old eval home> <new eval home>]';
   if (!NAME.test(name || '')) {
     process.stderr.write(`${usage}\n`);
     return 2;
   }
   if (cmd === 'items') {
-    for (const i of items(name)) process.stdout.write(`${i.kind}\t${i.what}${i.when ? `\t${i.when.join(' ')}` : ''}\n`);
+    for (const i of items(name)) process.stdout.write(`${i.kind}\t${i.what}\t${i.when ? i.when.join(' ') : '-'}\t${i.rename}\n`);
     return 0;
   }
   if (typeof process.getuid === 'function' && process.getuid() !== 0) {
@@ -443,11 +630,25 @@ function main(argv) {
     if (!Object.keys(taken).length) process.stdout.write(`no ${name} records left in the shared files\n`);
     return 0;
   }
+  if (cmd === 'carry' && NAME.test(archive || '') && argv.length >= 9) {
+    const [, old, nu, from, to, oldHome, newHome, oldAgent, newAgent, oldEval, newEval] = argv;
+    if (![from, to, oldHome, newHome, oldAgent, newAgent].every((x) => path.isAbsolute(x) && x !== '/')) throw new Error('carry: absolute directories');
+    for (const x of carry({ old, nu, oldHome, newHome, oldAgent, newAgent, ...(oldEval && newEval ? { oldEval, newEval } : {}) }, from, to)) {
+      if (x.skipped) process.stderr.write(`not carried (not a file): ${x.skipped}\n`);
+      else process.stdout.write(`${x.from}\t${x.to}\n`);
+    }
+    return 0;
+  }
+  if (cmd === 'rekey' && NAME.test(archive || '') && argv[3] && path.isAbsolute(argv[3])) {
+    const moved = rekey(name, archive, argv[3]);
+    process.stdout.write(moved.length ? `moved ${name}'s records to ${archive}: ${moved.join(', ')}\n` : `no ${name} records in the shared files\n`);
+    return 0;
+  }
   process.stderr.write(`${usage}\n`);
   return 2;
 }
 
-module.exports = { ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, ARCHIVE_DIR, items, plan, remove, withLock, writeKeeping };
+module.exports = { ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, REKEY, ARCHIVE_DIR, items, plan, remove, rekey, carry, moveText, withLock, writeKeeping };
 
 if (require.main === module) {
   try {
