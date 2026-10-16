@@ -2257,6 +2257,162 @@ jobs:
           path=/api/tailscale; api > "$F/ts-view5.json"
           jq -e '.status.serve and .next==null and (.steps|map(.done)|all)' "$F/ts-view5.json"
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
+      - name: "plugins: through the helper as ci's coordinator, a throwaway user fetches this commit's fixture and root keeps a preview; a stage grants nothing; the coordinator can't confirm or write the allowlist; root confirms only with the id typed back; remove only deletes"
+        env:
+          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          url="https://github.com/${{ github.repository }}.git"
+          st=/var/lib/worklane/plugins/fetch-status/ci.json
+          E=/opt/worklane/current/dist/src/plugins
+          fetch() { # <id> <fixture>: through the helper, as the coordinator; waits for the fetch unit's result
+            sudo -u wl-ci sudo -n "$HELPER" plugin-fetch "$1" "$url" "$FIXTURE_SHA" "test/fixtures/plugins/$2"
+            for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done
+            sudo jq -c . "$st"
+          }
+          digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/approval.js'; import {readPreview, recordOf} from '$E/root-ops.js'; console.log(approvalDigest(recordOf(readPreview('ci', process.argv[1]), process.argv[2].split('+'))))" "$1" "$2"); }
+          fetch kit kit
+          [ "$(sudo jq -r .state "$st")" = done ]
+          p=/var/lib/worklane/plugins/previews/ci/kit
+          [ "$(stat -c '%U %a' "$p/preview.json")" = "root 644" ]
+          jq -e '.inspection.refusals == [] and .inspection.skills == ["review"] and .inspection.agents == ["reviewer"] and (.inspection.mcpServers | map(.name)) == ["notes"]' "$p/preview.json"
+          test ! -e "$p/tree/.mcp.json"   # the broker, never Claude Code, runs a plugin's MCP server
+          if find "$p" ! -user root | grep -q .; then echo "the preview isn't all root's" >&2; exit 1; fi
+          # Refused fixture: previewed with its reasons, and nothing can stage it.
+          fetch refused refused
+          jq -e '.materialized == null and (.inspection.refusals | any(test("allowed-tools")))' /var/lib/worklane/plugins/previews/ci/refused/preview.json
+          if sudo -u wl-ci sudo -n "$HELPER" plugin-stage refused "sha256:$(printf 'a%.0s' $(seq 64))" builder; then echo "a refused plugin was staged" >&2; exit 1; fi
+          # Stage: only the digest the preview and roles make now.
+          d="$(digest kit builder)"
+          if sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$(digest kit reviewer)" builder; then echo "a digest for other roles was staged" >&2; exit 1; fi
+          sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder
+          jq -e --arg d "$d" '.entries | any(.instance == "ci" and .id == "kit" and .digest == $d and .staged_by == "wl-ci")' /var/lib/worklane/plugins/pending.json
+          test ! -e /etc/worklane/plugins/ci.json   # staged is trusted for nothing
+          # The coordinator can't confirm: no helper command, plugins.sh refuses its sudo, and the allowlist isn't writable to it.
+          if sudo -n -l -U wl-ci "$HELPER" plugin-confirm kit "$d" > /dev/null 2>&1; then echo "the coordinator may confirm" >&2; exit 1; fi
+          if sudo -n -l -U wl-ci bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit "$d" > /dev/null 2>&1; then echo "the coordinator may run plugins.sh" >&2; exit 1; fi
+          if sudo env SUDO_USER=wl-ci bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit "$d" < /dev/null 2> "$F/pc.err"; then echo "plugins.sh confirmed for a coordinator" >&2; exit 1; fi
+          grep -q "a coordinator may only stage" "$F/pc.err"
+          sudo install -d -o root -g root -m 0755 /etc/worklane/plugins
+          if sudo -u wl-ci sh -c 'echo x > /etc/worklane/plugins/ci.json' 2> /dev/null; then echo "the coordinator wrote the allowlist" >&2; exit 1; fi
+          # Root at a terminal: a wrong id typed confirms nothing; the right one confirms.
+          printf 'kits\n' | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit $d" /dev/null > "$F/pc1.out" 2>&1 || true
+          grep -q 'not confirmed: nothing changed' "$F/pc1.out"
+          test ! -e /etc/worklane/plugins/ci.json
+          printf 'kit\n' | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci kit $d" /dev/null | tee "$F/pc2.out"
+          grep -q 'confirmed kit for ci' "$F/pc2.out"
+          grep -q "roles:      builder" "$F/pc2.out"
+          [ "$(stat -c '%U %G %a' /etc/worklane/plugins/ci.json)" = "root root 644" ]
+          tree="$(jq -r '.entries[0].record.tree' /etc/worklane/plugins/ci.json)"
+          s="/var/lib/worklane/plugins/store/ci/kit/${tree#wl-tree-v1:sha256:}"
+          if find "$s" ! -user root -o -perm /022 | grep -q .; then echo "the store copy isn't root's alone" >&2; exit 1; fi
+          (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {treeHash} from '$E/tree.js'; if (treeHash(process.argv[1]) !== process.argv[2]) process.exit(1)" "$s" "$tree")
+          sudo -u wl-ci /usr/local/bin/worklane plugins show --instance ci | grep -q "^kit "
+          tail -n 3 /var/lib/worklane/machine-changes.jsonl | grep -q '"what":"plugins.ci.confirmed"'
+          # What a run of each role would load, as the coordinator computes it before every run (src/plugins/run.ts).
+          run_ids() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {pluginsForRun} from '$E/run.js'; const h = process.argv[1]; const r = pluginsForRun({instance: 'ci', instanceHome: h, role: process.argv[2]}); console.log(r.ids.join(',') + ' ' + r.dirs.join(',') + ' ' + r.pluginRoot)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" "$1"); }
+          [ "$(run_ids builder)" = "kit $s /var/lib/worklane/plugins/store/ci/.empty-root" ]
+          [ "$(run_ids reviewer | cut -d' ' -f1)" = "" ]
+          [ "$(stat -c '%U %a' /var/lib/worklane/plugins/store/ci/.empty-root)" = "root 555" ]
+          # The agent user can't install a plugin where runs look (probe P2), nor write the approved copy.
+          if sudo -u wl-ci-agent sh -c "mkdir /var/lib/worklane/plugins/store/ci/.empty-root/x || touch '$s/x'" 2> /dev/null; then echo "the agent wrote under the plugin store" >&2; exit 1; fi
+          # Remove, through the helper: the entry goes; nothing else is touched.
+          sudo -u wl-ci sudo -n "$HELPER" plugin-remove kit
+          jq -e '.entries == []' /etc/worklane/plugins/ci.json
+          test -d "$s"   # runs in flight keep their copy
+      - name: "MCP broker: wl-ci-mcp alone reads the server's secret; the server is snapshotted in quarantine, approved by root, and reached by the agent only through the broker with its run's ticket; a rug pull blocks it; a real claude admits only the connector"
+        env:
+          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          url="https://github.com/${{ github.repository }}.git"
+          st=/var/lib/worklane/plugins/fetch-status/ci.json
+          E=/opt/worklane/current/dist/src
+          CLI="$E/cli.js"
+          wait_status() { for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done; sudo jq -c . "$st"; }
+          digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/plugins/approval.js'; import {readPreview, recordOf} from '$E/plugins/root-ops.js'; const p = readPreview('ci', process.argv[1]); const m = process.argv[3] ? {network: process.argv[3] === 'none' ? [] : process.argv[3].split('+'), secrets: process.argv[4] === 'none' ? [] : process.argv[4].split('+')} : undefined; console.log(approvalDigest(recordOf(p, process.argv[2].split('+'), m)))" "$@"); }
+          confirm() { printf '%s\n' "$1" | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci $1 $2" /dev/null | tail -n 1; }
+          # The broker: its user, groups and unit.
+          sudo bash scripts/setup/mcp-broker.sh ci | tee "$F/mcp-setup.log"
+          systemctl is-active "worklane-mcp@ci"
+          [ "$(stat -c '%U:%G %a' /run/worklane-mcp-ci/broker.sock)" = "wl-ci-mcp:wl-ci-mcpc 660" ]
+          [ "$(stat -c '%U:%G %a' /run/worklane-mcp-ci/control.sock)" = "wl-ci-mcp:wl-ci-mcpctl 660" ]
+          # The plugin again (the plugins step removed it), then its server previewed in quarantine.
+          sudo -u wl-ci sudo -n "$HELPER" plugin-fetch kit "$url" "$FIXTURE_SHA" test/fixtures/plugins/kit && wait_status kit
+          d="$(digest kit builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder && confirm kit "$d"
+          sudo -u wl-ci sudo -n "$HELPER" mcp-preview kit-notes kit notes && wait_status kit-notes
+          p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
+          jq -c '{snapshotError, tools: (.snapshot.tools // null | if . then map(.name) else . end)}' "$p"
+          if ! jq -e '.snapshot' "$p" >/dev/null; then readlink -f /usr/local/bin/node; sudo find /var/lib/worklane/plugins/store/ci -maxdepth 4 -printf '%M %u:%g %p\n' | head -30; fi
+          jq -e '.snapshot.tools | map(.name) == ["echo"]' "$p"
+          jq -e '.snapshotWithSecrets == false and .envNames == ["NOTES_TOKEN"]' "$p"
+          # Named test: a snapshot run that tries to write into the broker's paths (its home and caches, its state, the
+          # plugin store and previews, /etc and /opt) fails at every one, and nothing it tried exists afterwards.
+          sudo -u wl-ci sudo -n "$HELPER" plugin-fetch escape "$url" "$FIXTURE_SHA" test/fixtures/plugins/escape && wait_status escape
+          d="$(digest escape builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage escape "$d" builder && confirm escape "$d"
+          sudo -u wl-ci sudo -n "$HELPER" mcp-preview escape-probe escape probe && wait_status escape-probe
+          tries="$(jq -r '.snapshot.tools[0].description' /var/lib/worklane/plugins/previews/ci/escape-probe/preview.json)"
+          echo "$tries" | tr ' ' '\n'
+          echo "$tries" | grep -q 'wl-ci-mcp/escaped=denied'
+          echo "$tries" | grep -q 'worklane/plugins/store/ci/escaped=denied'
+          if echo "$tries" | grep -q 'WROTE'; then echo "the throwaway snapshot wrote where the broker reads" >&2; exit 1; fi
+          for f in "$(getent passwd wl-ci-mcp | cut -d: -f6)/escaped" "$(getent passwd wl-ci-mcp | cut -d: -f6)/.cache/escaped" /var/lib/worklane/plugins/store/ci/escaped /var/lib/worklane-mcp-ci/escaped /etc/worklane/escaped; do
+            if sudo test -e "$f"; then echo "$f exists" >&2; exit 1; fi
+          done
+          # Owner's condition (3): snapshots and previews are capped per hour (the 11th is refused).
+          for i in $(seq 1 10); do sudo node "$CLI" plugins fetch-slot --instance capcheck --kind snapshot; done
+          if sudo node "$CLI" plugins fetch-slot --instance capcheck --kind snapshot 2> "$F/cap.err"; then echo "an 11th snapshot this hour was allowed" >&2; exit 1; fi
+          grep -q 'snapshots or previews in the last hour' "$F/cap.err"
+          d="$(digest kit-notes builder none NOTES_TOKEN)"
+          sudo -u wl-ci sudo -n "$HELPER" mcp-stage kit-notes "$d" builder none NOTES_TOKEN
+          confirm kit-notes "$d" | grep -q 'confirmed kit-notes for ci'
+          # The secret: for wl-ci-mcp alone; the value never echoed.
+          tok="tok-$(openssl rand -hex 12)"; echo "::add-mask::$tok"
+          printf '%s\n' "$tok" | sudo bash scripts/setup/mcp-broker.sh ci secret kit-notes NOTES_TOKEN | tee "$F/mcp-secret.out"
+          if grep -qF "$tok" "$F/mcp-secret.out"; then echo "the secret was echoed" >&2; exit 1; fi
+          sf="$(getent passwd wl-ci-mcp | cut -d: -f6)/secrets/kit-notes/NOTES_TOKEN"
+          [ "$(sudo stat -c '%U %a' "$sf")" = "wl-ci-mcp 400" ]
+          for u in wl-ci wl-ci-agent; do if sudo -u "$u" cat "$sf" > /dev/null 2>&1; then echo "$u read the MCP secret" >&2; exit 1; fi; done
+          # The second snapshot of the APPROVED server: the broker's, with its secret (Q3); root keeps it as a preview.
+          sudo -u wl-ci sudo -n "$HELPER" mcp-snapshot kit-notes && wait_status kit-notes
+          jq -e '.snapshotWithSecrets == true and (.snapshot.tools | map(.name)) == ["echo"]' /var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
+          # A run's ticket, registered by the coordinator; the agent can't reach the control socket.
+          ticket="$(cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {registerRun} from '$E/mcp/client.js'; const r = await registerRun('ci', 'builder', 600000); console.log(r.ticket + ' ' + JSON.stringify(r.servers))")"
+          echo "${ticket#* }" | jq -e '. == [{"id":"kit-notes","tools":["echo"]}]'
+          ticket="${ticket%% *}"
+          if sudo -u wl-ci-agent /usr/local/bin/node -e "require('net').connect('/run/worklane-mcp-ci/control.sock').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"; then echo "the agent opened the control socket" >&2; exit 1; fi
+          # As the agent, through the connector: the approved tool, served by the broker; the server had its secret.
+          talk() { printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci"}}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi"}}}' '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"text":"hi","leak":"x"}}}' \
+            | (sleep 0; cat; sleep 6) | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin WORKLANE_MCP_TICKET="$1" timeout 20 /usr/local/bin/node "$CLI" mcp-connect ci kit-notes; }
+          talk "$ticket" > "$F/mcp-talk.out" || true
+          cat "$F/mcp-talk.out"
+          sudo journalctl -u "worklane-mcp@ci" --no-pager | tail -n 20
+          jq -s -e 'map(select(.id == 2))[0].result.tools | map(.name) == ["echo"]' "$F/mcp-talk.out"
+          jq -s -e 'map(select(.id == 3))[0].result.content[0].text == "echo hi (token present)"' "$F/mcp-talk.out"
+          jq -s -e 'map(select(.id == 4))[0].result.isError == true' "$F/mcp-talk.out"
+          if grep -qF "$tok" "$F/mcp-talk.out"; then echo "the secret reached the agent" >&2; exit 1; fi
+          # A forged ticket opens nothing.
+          talk "$(printf 'f%.0s' $(seq 64))" > "$F/mcp-forged.out" || true
+          if jq -s -e 'map(select(.id == 2)) | length > 0' "$F/mcp-forged.out" > /dev/null; then echo "a forged ticket was served" >&2; exit 1; fi
+          # A real claude (fake key: no model call), as the agent with the runner's flags: the connector is admitted by the
+          # allowedMcpServers lock and connects; another command line is not.
+          v="$(sed -n 's/^CLAUDE_VERSION=//p' scripts/bootstrap.sh)"
+          cc="$(mktemp -d /var/tmp/cc-XXXXXX)" && chmod 0755 "$cc" && sudo env PATH="$PATH" npm install -g --prefix "$cc" --no-audit --no-fund "@anthropic-ai/claude-code@$v" > /dev/null
+          # The config is written before the directory becomes the agent user's: the runner can't write there after.
+          h="$(mktemp -d /var/tmp/cch-XXXXXX)"
+          printf '{"mcpServers":{"kit-notes":{"type":"stdio","command":"/usr/local/bin/node","args":["%s","mcp-connect","ci","kit-notes"],"env":{"WORKLANE_MCP_TICKET":"%s"}}}}' "$CLI" "$ticket" > "$h/mcp.json" && chmod 0644 "$h/mcp.json"
+          sudo chown wl-ci-agent "$h"
+          init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$h" CLAUDE_CONFIG_DIR="$h/.claude" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd "$HOME" && { "$0"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config "$HOME/mcp.json" --settings "$1" || true; }' "$cc" "$1" 2>/dev/null | jq -c 'select(.type == "system" and .subtype == "init") | .mcp_servers'; }
+          # Only the init event is read: the session itself fails (a stand-in API key), so its exit status is not.
+          init "{\"allowedMcpServers\":[{\"serverCommand\":[\"/usr/local/bin/node\",\"$CLI\",\"mcp-connect\",\"ci\",\"kit-notes\"]}],\"disableClaudeAiConnectors\":true}" | tee "$F/cc1.json"
+          jq -e 'map(select(.name == "kit-notes" and .status == "connected")) | length == 1' "$F/cc1.json"
+          init '{"allowedMcpServers":[{"serverCommand":["/usr/local/bin/node","/elsewhere/cli.js","mcp-connect","ci","kit-notes"]}]}' | tee "$F/cc2.json"
+          jq -e 'map(select(.status == "connected")) | length == 0' "$F/cc2.json"
+          # A rug pull: the server's tools change; the next session is refused and the server is blocked.
+          sudo touch /etc/kit-rugpull
+          talk "$ticket" > "$F/mcp-rug.out" || true
+          if jq -s -e 'map(select(.id == 2)) | length > 0' "$F/mcp-rug.out" > /dev/null; then echo "a changed server was served" >&2; exit 1; fi
+          sudo jq -e '."kit-notes".diff.changed == [{"name":"echo","fields":["description"]}]' /var/lib/worklane-mcp-ci/state/blocked.json
+          sudo rm -f /etc/kit-rugpull
+          sudo rm -rf "$cc" "$h"
       - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
         run: sudo bash scripts/ci/disk-full-coordinator.sh ci
       - name: "instance-remove (v0.5.1): delta has a record in every root file that keys instances, beside ci's; refused, changing nothing, while delta's coordinator runs"

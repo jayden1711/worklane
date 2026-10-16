@@ -1,4 +1,3 @@
-import { ExtendPage } from './pages/Extend';
 import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
@@ -58,6 +57,7 @@ const Deploys = lazyPage(() => import('./pages/Deploys').then((m) => m.Deploys))
 const Reports = lazyPage(() => import('./pages/Reports').then((m) => m.Reports));
 const SettingsPage = lazyPage(() => import('./pages/Settings').then((m) => m.SettingsPage));
 const LogsPage = lazyPage(() => import('./pages/Logs').then((m) => m.LogsPage));
+const ExtendPage = lazyPage(() => import('./pages/Extend').then((m) => m.ExtendPage));
 const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
 const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
 const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
@@ -78,6 +78,7 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/intake/, IntakePage],
   [/^\/land/, Landing],
   [/^\/agents/, Agents],
+  [/^\/extend/, ExtendPage],
   [/^\/activity/, ActivityPage],
   [/^\/deploys/, Deploys],
   [/^\/reports/, Reports],

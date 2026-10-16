@@ -29,7 +29,7 @@ export interface MachineRequest {
   /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>, claude-account status|switch, tailscale install|up|serve|public-url. */
   args: string[];
   by: string;
-  via: 'settings' | 'ask' | 'add-project' | 'claude-account' | 'tailscale';
+  via: 'settings' | 'ask' | 'add-project' | 'claude-account' | 'tailscale' | 'plugins';
   ask: string | null;
   /** Asked for on the owner's break-glass (no person named), which needs no machine owner. */
   breakGlass: boolean;
@@ -127,4 +127,18 @@ export function requestAddProject(log: EventLog, r: { name: unknown; repo: unkno
   const open = machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.args[0] === 'add-project' && (x.status === 'pending' || x.status === 'running'));
   if (open) throw new MachineRequestError(`an add-project (${open.args[1]}) is already ${open.status}; wait for it to finish`, 409);
   return requestMachineChange(log, { args: ['add-project', r.name, r.repo], requester: r.requester, via: 'add-project', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
+}
+
+/**
+ * Record a plugin or MCP step (src/plugins/steps.ts) for the coordinator to run. Q13: the instance's owner may ask for
+ * one (the caller checked the role and CSRF): unlike a machine-wide change, no machine owner or console device is
+ * needed, because each step is for this instance alone (the helper takes it from sudo) and none approves anything (a
+ * root admin confirms at a root shell). The helper's allowlist is checked here, and again by the coordinator.
+ */
+export function requestPluginStep(log: EventLog, r: { args: string[]; by: string; breakGlass: boolean }): MachineRequest {
+  const why = machineRefusal(r.args);
+  if (why) throw new MachineRequestError(why, 400);
+  const id = `mr-${randomBytes(6).toString('hex')}`;
+  log.append('machine.requested', { id, args: [...r.args], by: r.by, via: 'plugins', ask: null, ...(r.breakGlass ? { breakGlass: true } : {}) }, r.by, 'human');
+  return machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.id === id)!;
 }
