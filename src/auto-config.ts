@@ -10,7 +10,7 @@
 // run one test file, a command that fails on the default branch) is a question with its choices. Init asks it on the
 // terminal, or records it for `init --answer <id>=<choice>` and the dashboard's First-run page; the answers are kept
 // in init's state, and the next run picks up from them.
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { BRAND } from './brand.js';
@@ -74,8 +74,25 @@ export interface AutoConfigState {
   questions: Question[];
   verified: Verification[];
   base: string | null;
-  /** The setup PR, once opened. */
-  pr: { number: number | null; url: string; branch: string } | null;
+  /** The setup PR, once opened; `head`: the commit this run pushed for it (null: an open PR kept from before, not pushed here). */
+  pr: { number: number | null; url: string; branch: string; head?: string | null } | null;
+  /**
+   * WHY (#468): the drafted config held for the person to preview before any PR (the dashboard's draft): the top-level
+   * YAML files as drafted (and edited on the page), the commit it was drafted on, and the PR body. Absent from the
+   * terminal's init, which proposes at once.
+   */
+  draft?: HeldDraft | null;
+}
+
+export interface HeldDraft {
+  /** The default branch and the commit the draft was made (and its commands run) on. */
+  branch: string;
+  base: string;
+  owner: string | null;
+  /** The config folder's top-level *.yaml files, by name. */
+  yaml: Record<string, string>;
+  body: string;
+  at: string;
 }
 
 export const emptyAutoConfig = (): AutoConfigState => ({ answers: {}, overrides: {}, accepted: [], questions: [], verified: [], base: null, pr: null });
@@ -537,11 +554,14 @@ export interface AutoConfigOptions {
   adjust?(cfgDir: string): void;
   /** Problems beyond the schema (an instance's policy), each one line: any stops the proposal. */
   check?(cfg: Config): string[];
+  /** WHY (#468): draft and hold it for a preview (state.draft); no branch is pushed and no PR opened until proposeHeldDraft. */
+  hold?: boolean;
 }
 
 export type AutoConfigResult =
   | { kind: 'questions'; open: Question[]; detail: string }
   | { kind: 'proposed'; detail: string }
+  | { kind: 'drafted'; detail: string }
   | { kind: 'merged'; branch: string }
   | { kind: 'failed'; detail: string };
 
@@ -693,7 +713,6 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
 }
 
 async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: string, base: string): Promise<AutoConfigResult> {
-  const git = (...args: string[]) => o.io.git(args, path);
   const login = await o.io.gh(['api', 'user', '--jq', '.login'], o.root);
   const owner = login.status === 0 && /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(login.stdout.trim()) ? login.stdout.trim() : o.owner;
   const cfgDir = join(path, BRAND.configDir);
@@ -707,6 +726,23 @@ async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: stri
   } catch (e) {
     return { kind: 'failed', detail: (e as Error).message.split('\n').slice(0, 3).join(' ') };
   }
+  const body = prBody(p, o.state, branch, base, owner);
+  if (o.hold) {
+    o.state.draft = { branch, base, owner: owner ?? null, yaml: topYaml(cfgDir), body, at: new Date().toISOString() };
+    o.save();
+    return { kind: 'drafted', detail: 'drafted: preview it on the first-run page, then Confirm proposes it as a PR' };
+  }
+  return commitAndOpen(o, path, branch, body);
+}
+
+/** The config folder's top-level YAML files as text, by name: what the preview shows and Confirm proposes. */
+function topYaml(cfgDir: string): Record<string, string> {
+  return Object.fromEntries(readdirSync(cfgDir).filter((f) => /\.ya?ml$/.test(f)).sort().map((f) => [f, readFileSync(join(cfgDir, f), 'utf8')]));
+}
+
+/** Commit the config folder in the scratch worktree, push it to the setup branch (never the default one) and open its PR. */
+async function commitAndOpen(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' | 'state' | 'save'>, path: string, branch: string, body: string): Promise<AutoConfigResult> {
+  const git = (...args: string[]) => o.io.git(args, path);
   const add = git('add', '--', BRAND.configDir);
   if (add.status !== 0) return { kind: 'failed', detail: `git add failed: ${add.stderr.trim()}` };
   const commit = git('commit', '-q', '-m', `Add ${BRAND.name} config (detected and checked on ${branch})`);
@@ -720,6 +756,7 @@ async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: stri
   const listed = await o.io.gh(['pr', 'list', '--repo', o.repo, '--head', SETUP_BRANCH, '--state', 'open', '--json', 'number,url', '--jq', '.[0] | "\\(.number) \\(.url)"'], o.root);
   let number: number | null = null;
   let url = '';
+  let pushed: string | null = null;
   const m = /^(\d+) (\S+)/.exec(listed.status === 0 ? listed.stdout.trim() : '');
   if (m) {
     [number, url] = [Number(m[1]), m[2]!];
@@ -736,13 +773,14 @@ async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: stri
       }
     }
     if (push.status !== 0) return { kind: 'failed', detail: `pushing ${SETUP_BRANCH} failed: ${push.stderr.trim().split('\n')[0] ?? ''}` };
-    const created = await o.io.gh(['pr', 'create', '--repo', o.repo, '--base', branch, '--head', SETUP_BRANCH, '--title', `Add ${BRAND.name} config`, '--body', prBody(p, o.state, branch, base, owner)], o.root);
+    const created = await o.io.gh(['pr', 'create', '--repo', o.repo, '--base', branch, '--head', SETUP_BRANCH, '--title', `Add ${BRAND.name} config`, '--body', body], o.root);
     if (created.status !== 0) return { kind: 'failed', detail: `${SETUP_BRANCH} is pushed, but opening its PR failed: ${created.stderr.trim().split('\n')[0] ?? ''}` };
     url = created.stdout.trim().split('\n').pop() ?? '';
     const n = /\/pull\/(\d+)/.exec(url)?.[1];
     number = n ? Number(n) : null;
+    pushed = head;
   }
-  o.state.pr = { number, url, branch: SETUP_BRANCH };
+  o.state.pr = { number, url, branch: SETUP_BRANCH, head: pushed };
   o.save();
   return { kind: 'proposed', detail: `proposed in PR ${number ? `#${number} ` : ''}(${url}), from ${SETUP_BRANCH}: review and merge it, then run \`${BRAND.cli} init\` again (it picks up here)` };
 }
@@ -768,4 +806,49 @@ function prBody(p: Plan, s: AutoConfigState, branch: string, base: string, owner
     owner ? `Owner and writer: @${owner} (the GitHub login that ran init); add others in config.yaml owners.` : 'Set the owners in config.yaml (owners.default, owners.writers) before merging.',
     'Review agents.yaml (budget, models), guardrails.yaml and review.yaml too: they start from the templates.',
   ].join('\n');
+}
+
+/**
+ * WHY (#468): Confirm on the preview. The held draft (as previewed, with any change made there) is committed on a
+ * scratch worktree of the commit it was drafted on, pushed to the setup branch and opened as the setup PR, as init's
+ * own proposal is. Nothing is pushed to the default branch. The draft is let go once its PR is open.
+ */
+export async function proposeHeldDraft(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' | 'state' | 'save' | 'worktreeRoot' | 'worktreeStateDir'>): Promise<AutoConfigResult> {
+  const d = o.state.draft;
+  if (!d) return { kind: 'failed', detail: 'nothing drafted to propose: draft the config first' };
+  if (o.state.pr?.number) return { kind: 'failed', detail: `already proposed in PR #${o.state.pr.number}` };
+  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
+  let path: string;
+  try {
+    path = createWorktree(wt, 'setup', SETUP_BRANCH, d.base).path;
+  } catch (e) {
+    return { kind: 'failed', detail: `couldn't make a scratch worktree of ${d.base.slice(0, 12)}: ${(e as Error).message.split('\n')[0]}` };
+  }
+  try {
+    const cfgDir = join(path, BRAND.configDir);
+    if (existsSync(cfgDir)) rmSync(cfgDir, { recursive: true, force: true });
+    scaffoldConfig(cfgDir, { name: o.repo.split('/')[1]!, repo: o.repo, defaultBranch: d.branch, ...(d.owner ? { owner: d.owner } : {}) });
+    for (const [f, text] of Object.entries(d.yaml)) {
+      if (!/^[A-Za-z0-9_-]+\.ya?ml$/.test(f)) return { kind: 'failed', detail: `not a config file name: ${f.slice(0, 60)}` };
+      writeFileSync(join(cfgDir, f), text);
+    }
+    try {
+      loadConfig(path);
+    } catch (e) {
+      return { kind: 'failed', detail: (e as Error).message.split('\n').slice(0, 3).join(' ') };
+    }
+    const r = await commitAndOpen(o, path, d.branch, d.body);
+    if (r.kind === 'proposed') {
+      o.state.draft = null;
+      o.save();
+    }
+    return r;
+  } finally {
+    try {
+      removeWorktree(wt, 'setup');
+    } catch {
+      // already gone
+    }
+    o.io.git(['branch', '-D', SETUP_BRANCH], o.root);
+  }
 }

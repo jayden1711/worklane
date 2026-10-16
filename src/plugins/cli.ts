@@ -17,6 +17,7 @@ import { createInterface } from 'node:readline';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BRAND } from '../brand.js';
 import { groupGid, isRoot, userHomeDir, userUid } from '../os/index.js';
 import { mcpStatePath } from '../os/system-paths.js';
 import { AllowlistError, HOST, parseRoles, readAllowlist, SECRET_NAME, type McpRecord, type McpRuntime } from './approval.js';
@@ -47,7 +48,7 @@ const engine = () => ({ node: process.execPath, engineCli: fileURLToPath(new URL
  * read-only, nothing writable that the broker reads or runs; root reads one line of its output as data.
  */
 function quarantine(instance: string, id: string, runtime: McpRuntime, codeDir: string): SnapshotResult {
-  const r = runThrowawaySnapshot({ ...engine(), runtime, codeDir, unit: `worklane-mcp-snapshot-${instance}-${id}-${process.pid}` });
+  const r = runThrowawaySnapshot({ ...engine(), runtime, codeDir, unit: `${BRAND.cli}-mcp-snapshot-${instance}-${id}-${process.pid}` });
   return { snapshot: r.snapshot, error: r.error, withSecrets: false, network: [] };
 }
 
