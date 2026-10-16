@@ -99,3 +99,29 @@ sudo bash scripts/setup/experiments.sh check <name>
   itself.
 - After a job, its outputs are root's (the coordinator reads them); the predictions are the scorer's. Nobody's job can
   write them again. The record (`record.json`) is root's.
+
+## On the dashboard: Extend -> Experiments
+
+Owners and writers see **Extend** in the sidebar (`g x`), with an **Experiments** tab beside Automations.
+
+- **Empty state** (no study defined): what a study does, three guarantees, and one action. If the machine isn't set up
+  for this instance, that action is **Copy setup command** (owners; run it in a root shell). Otherwise it's **Copy an
+  example study**, to commit as the repo's `experiments.yaml` (an owner merges it).
+- **A study** (`/extend/experiments/<id>`): its state and version; **Best so far** (value, change against the
+  baseline, a chart of the best over scored jobs); **Queue** (the entry in flight, why it waits for approval, or the
+  next round); **Spend today** (agent dollars, GPU-hours, dollars in all, jobs, each against its cap); and the
+  **research log**, newest first.
+- **Buttons** are only those this person may use and that apply now. Owners: Start (or start a new version), Approve
+  or Decline a waiting job, Resume, Archive. Writers: Pause, and Stop job while one runs. Viewers have no tab, and the
+  server sends them nothing.
+- **Review -> Confirm**: every action first shows what it would do and the exact change (for Start: the version, the
+  commit, each eval file's and data source's sha256). Confirm does exactly that, and is refused if anything moved since
+  the review. Every attempt is audited.
+
+### How a new user finds it
+1. The sidebar shows Extend; its second tab is Experiments.
+2. The empty state says what a study is; its one button copies the root command (or an example study, once set up).
+3. After the root script and a merged `experiments.yaml`, the study's card says "not started"; its page has Start, whose
+   Review shows the pins.
+4. The first job (the baseline) waits: the study shows "Waiting for you" with the reason, and Approve job.
+5. From then on each round adds a log row; holds, the circuit breaker and approvals show on the study's page.
