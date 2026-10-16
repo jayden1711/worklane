@@ -290,7 +290,7 @@ test('stopping a job stops only its own units: never another job\'s or another i
     `#!/bin/bash
 case "$1" in
   list-units) for u in ${Object.keys(units).join(' ')}; do case "$u" in $5) echo "$u loaded active running x";; esac; done ;;
-  show) case "${@: -1}" in ${Object.entries(units).map(([u, o]) => `${u}) echo ${o};;`).join(' ')} esac ;;
+  show) case "\${@: -1}" in ${Object.entries(units).map(([u, o]) => `${u}) echo ${o};;`).join(' ')} esac ;;
   kill|stop) shift; printf '%s\\n' "$@" | grep '\\.service$' >> '${join(h.dir, 'stopped')}' ;;
 esac
 exit 0
