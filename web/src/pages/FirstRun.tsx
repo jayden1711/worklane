@@ -8,6 +8,7 @@ import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, skipStep, st
 import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
 import { DiscordSetupPanel } from '../components/DiscordSetup';
+import { SourceSetupPanel } from '../components/SourceSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from '../components/Header';
 import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
@@ -369,9 +370,10 @@ function keepOpenSteps(ids: string[]) {
   }
 }
 
-function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; primary?: boolean; onSkip?: (skip: boolean) => void }) {
-  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord';
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
+function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSkip, canAct = true }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; primary?: boolean; onSkip?: (skip: boolean) => void; canAct?: boolean }) {
+  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' || s.fix.kind === 'source';
+  // WHY: a writer may read an intake source's step but do nothing there: its button says so (Show, not Set up).
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'source' && !canAct ? 'Show' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' || s.fix.kind === 'source' ? s.fix.label : 'Fix';
   // WHY: a done step with a screen on this page can be opened again (#468: any step expands and collapses): a form's
   // values changed, a sign-in or Discord redone, an action run again. Setup mode's origin and draft are the exception
   // (once done, there is nothing left for them to change). A skipped step stays closed until the skip is undone.
@@ -402,7 +404,7 @@ function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSki
           )}
           {offered && (
             <Button size="sm" variant={primary && !open ? 'default' : open || s.done ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind} {...(primary ? { 'data-primary': 'true' } : {})}>
-              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' ? 'Change' : 'Run again') : label}
+              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' || (s.fix.kind === 'source' && canAct) ? 'Change' : s.fix.kind === 'source' ? 'Show' : 'Run again') : label}
             </Button>
           )}
         </div>
@@ -494,7 +496,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; initialGhLogin?: GhLoginView | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, sources, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; sources?: Partial<Record<'slack' | 'linear', ReactNode>>; initialGhLogin?: GhLoginView | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -585,6 +587,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   rerun={rerun === s.id}
                   primary={next?.id === s.id && !(s.fix.kind === 'start' && startPressable)}
                   {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
+                  canAct={!!f.canAct}
                   action={
                     s.fix.kind === 'action' ? (
                       <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
@@ -594,6 +597,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       <GhLoginPanel canAct={!!f.canAct} command={s.fix.command} initial={initialGhLogin} onDone={recheck} />
                     ) : s.fix.kind === 'discord' ? (
                       (discord ?? <DiscordSetupPanel onChanged={() => onRecheck?.()} />)
+                    ) : s.fix.kind === 'source' ? (
+                      (sources?.[s.fix.source] ?? <SourceSetupPanel kind={s.fix.source} onChanged={() => onRecheck?.()} />)
                     ) : s.fix.kind === 'form' && s.fix.form === 'policy' && f.policy ? (
                       <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'repo-config' && f.repoConfig ? (
