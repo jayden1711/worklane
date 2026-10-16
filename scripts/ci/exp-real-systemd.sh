@@ -21,7 +21,9 @@ set -euo pipefail
 I2="${1:?the other instance}"
 H=/usr/local/libexec/worklane-exp
 t="$(mktemp -d)"; chmod 0755 "$t"
-cleanup() { sudo bash scripts/setup/experiments.sh remove ci >/dev/null 2>&1 || true; sudo bash scripts/setup/egress-firewall.sh revert >/dev/null 2>&1 || true; sudo rmdir /run/worklane/gpu 2>/dev/null || true; rm -rf "$t"; }
+# KEEP_FOR_REMOVE=1 (the job's next step, scripts/ci/instance-remove-exp.sh): ci's experiments, its egress rule and the
+# cut-off study at the end stay for instance-remove.sh to take away.
+cleanup() { if [ "${KEEP_FOR_REMOVE:-}" != 1 ]; then sudo bash scripts/setup/experiments.sh remove ci >/dev/null 2>&1 || true; sudo bash scripts/setup/egress-firewall.sh revert >/dev/null 2>&1 || true; fi; sudo rmdir /run/worklane/gpu 2>/dev/null || true; rm -rf "$t"; }
 trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 as_coord() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
@@ -206,5 +208,21 @@ out5="$(sudo cat /var/lib/worklane-exp/ci/jobs/ci-job-5/logs/train.log)"
 printf '%s\n' "$out5" | grep -E '^(BLOCKED|ESCAPED) '
 [ "$(printf '%s\n' "$out5" | grep -c '^BLOCKED ')" = 7 ] && ! printf '%s\n' "$out5" | grep -q '^ESCAPED ' || fail "the canary escaped a boundary"
 sudo rmdir /run/worklane/gpu
+
+if [ "${KEEP_FOR_REMOVE:-}" = 1 ]; then
+  echo "== a study cut off mid-job, its output volume left mounted (for instance-remove)"
+  as_coord create ci-job-6 "$sha" < "$t/b" >/dev/null
+  (spec 20 'sleep 600' | as_coord job ci-job-6 > "$t/job6.log" 2>&1 &)
+  v6=/var/lib/worklane-exp/ci/jobs/ci-job-6/vol
+  for _ in $(seq 1 120); do sudo mountpoint -q "$v6" && pgrep -u wl-exp-ci -x sleep >/dev/null && break; sleep 1; done
+  sudo mountpoint -q "$v6" || fail "job 6's volume never mounted"
+  # The helper killed outright (its own cleanup never runs), then its units stopped: the volume stays.
+  sudo pkill -KILL -f 'worklane-exp ci job ci-job-6' || true
+  as_coord stop ci-job-6 >/dev/null
+  for _ in $(seq 1 30); do pgrep -u wl-exp-ci >/dev/null || break; sleep 1; done
+  sudo mountpoint -q "$v6" || fail "job 6's volume went with its helper"
+  sudo losetup -j "/var/lib/worklane-exp/ci/jobs/ci-job-6/vol.img" | grep -q . || fail "no loop device on job 6's image"
+  echo "job 6 cut off; $v6 still mounted"
+fi
 
 echo "OK: experiment jobs on real systemd"
