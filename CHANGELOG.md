@@ -2,6 +2,109 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## v0.5.1 (2026-10-16)
+
+### Upgrading (from v0.5.0)
+
+- **Test runs have no network by default.** A run's commands get only their own loopback, and its database is a Unix socket (docs/test-runs.md "Network"). A `tests.yaml` `test_run.setup` that downloads fails every run after the update until its config changes:
+  - npm: move the downloads to `fetch: [{ npm: npm }]` and install with `npm ci --offline`. That needs no grant, unless an install script downloads at script time (Prisma engines, Puppeteer's Chrome).
+  - npm setups with install scripts that download, and pip, pnpm and yarn setups, need root's grant, `sudo bash scripts/setup/testrun-network.sh enable <instance> --tiers setup`, plus `setup_network: true` under `test_run`.
+  - v0.5.0 rejects `setup_network` (and `fetch`), so set them only after the machine has upgraded.
+
+### After install
+
+- **Rerun the machine helper's sudoers rules** as root, once per machine, with every instance on it: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>` (helper protocol 10). Until then, coordinators can't run the helper's new commands (sudo refuses them). Not before the install: the rules must match the installed helper (docs/releasing.md step 9).
+
+### Preview
+
+- **Slack and Linear intake** (#526) is a preview: it is tested only against fake Slack and Linear servers, never the real services.
+
+### Features
+
+- Pin the engine to v0.5.0: ENGINE_TAG now, ENGINE_COMMIT by pin-engine.mjs after the signed tag (draft until tagged) (#431)
+- Release: CI stages on npm (owner approves with 2FA), only for a tag signed by main's release-signers (#460)
+- Docs: lead with the npm install (npm i -g @worklane/cli, then worklane dashboard --detach); restore the npx hint in --help (#459)
+- Decision detail views (1/2): decisions record what they rest on (change, verdict, checks, findings with file:line) (#475)
+- Bootstrap with no https origin: always end with a working loopback URL and the ssh -L line; the App step points to screen 7 first (#425)
+- Package (0.5.1, after 0.5.0): the built engine's imports and dependencies are the same set (#444)
+- release.mjs: the tag exists afterwards only if it verified (#476)
+- dashboard --detach: prove the key without sending it (#477)
+- Updater: a channel-neutral unit Description; a current pass is recorded (#478)
+- Tests: a test's Chrome reaches nothing outside this machine (#462, part 1) (#479)
+- Dashboard key: its path on its own line, a quoted copy command, the same on the key page (#480)
+- Release: licenses.txt reproducible for a lockfile; release.yml never stages a tree that isn't the signed one (#481)
+- Chrome: never the macOS keychain on any engine or test launch (--use-mock-keychain --password-store=basic) (#435)
+- Decision detail views: /decisions/:id from every decision card, with role gating (PR 2 of 2) (#485)
+- Dashboard: people's pictures from the dashboard's own origin, never GitHub in the browser (#462, part 2) (#482)
+- Install downloads try a passing server error again (--retry 3); checksums unchanged (#492)
+- Test runs: per-instance, opt-in GPU for sandboxed runs (NVIDIA nodes only, off by default) (#493)
+- Real-Chrome lock: no pinned test count; launchTestChrome refuses without the lock (#494)
+- No CI (ci: none) judged by this machine's test runs from the event log; init never finishes without a CI choice (#469, part 2; stacks on #486) (#491)
+- GPU test runs: locks for the worklane-gpu group only (owner alone, never agents); a cut-off GPU run's head gets a failing check (#500)
+- Releasing: rerun machine-helper.sh per instance after a release that changes its sudoers installs (#501)
+- Evaluator: calibrated confidence with a required reason; compromised-component question on protected changes (#498)
+- GPU cut-off check: 'push again to run it' (#504)
+- Board: a card's waiting reasons in full, one chip per merge-policy reason (#497)
+- No CI: every tier runs on each merge commit and judges main; never green with nothing checked; unattended install ends at the wizard (#505)
+- Service (#468, part 3): run node by Homebrew's stable bin/node or its own path, never one on PATH; doctor and first run flag a versioned one (owner merges) (#490)
+- First run (#468, part 4): Your first task files an issue the harness takes (a checkout only); the Issues page says why an issue is ignored (owner merges) (#502)
+- Siri Shortcuts: tell and ask through the hub's own gateway, per-device tokens that reach nothing else (owner merges) (#507)
+- Claude account profiles (#464, part 3): sign an account in from the dashboard, the one-time code relayed once; staged until a root admin confirms it (#495)
+- Runner probe: pull the image first; a failed container fetch says wget's error and exit status (#506)
+- Package budget: tarball 1,650,000, unpacked 5,200,000 (0.5.1's growth) (#511)
+- No late answer moves a control on Settings, Inbox or Decisions (#503)
+- Releasing: Siri Shortcut steps after a 0.5.1 install (#510)
+- Held-out evals: the case writer gets the replier's stage values (#188, #189, #190) (#512)
+- First run (#468, part 1): one primary next step, done steps fold, one CLI line, plain protection wording, setup-mode nav, local owner label, worker model list (#487)
+- Chat: conversations and Projects (owners and writers), on the attachment store (#513)
+- no-late-shift: send every pending answer before turning Fetch interception off (#517)
+- Plugins (1/6): inspector, wl-tree-v1 and a pinned fetch (no wiring yet) (#519)
+- Chat: model and effort picker limited to routing, per-conversation budget cap (#514)
+- Intake: Slack and Linear sources beside Discord (preview: tested against fakes only) (#526)
+- GPU devices: NVIDIA nodes root:worklane-gpu-dev 0660, granted test runs through the unit's group (v0.5.1, protected) (#525)
+- First run (#468, part 2): preview the config before its PR, merge from the wizard as the admin's approval, one merged-to-synced path for every config PR (owner merges) (#489)
+- Automations: schedule, GitHub and Discord triggers; Extend -> Automations (#522)
+- Daily budget: enforce on the local day, held until local midnight (#518)
+- Test runs: one instance's wipe never stops another's units or Docker (helper protocol 9) [PROTECTED: owner merges] (#540)
+- Package budget: temporary headroom for the v0.5.1 set (2,000,000 / 6,000,000) (#542)
+- Refuse instance names whose machine users or units are another's (test-, ci-, dashboard-, ...) [PROTECTED: owner merges] (#534)
+- Automations: webhooks through a tailnet-only hooks gateway, each run approved by an owner (#528)
+- Optional cross-family evaluator: a second verdict on protected changes; disagreement holds the PR (#539)
+- Plugins (6/6): update offers, update diffs, and what each run loaded (#533)
+- Test runs: no network by default; root grants it per tier; a fetch phase that runs no repo code; Postgres on its socket only (protected) (#529)
+- ci: new-deps check, new runtime dependencies named in the PR body with licence and why (#553)
+- instance rename: export, add, import, re-key, remove; never two coordinators on one repo (v0.5.1, PROTECTED: owner merges; stacked on #548; supersedes #536) (#549)
+- Package budget: v0.5.1 final, measured actual + 5% (1,850,000 / 5,810,000) (#556)
+
+### Fixes
+
+- Fix #452: an avatar's box is its size whatever its picture does, so a failed picture moves no card (#461)
+- Fix #463 (1/2): a Claude login the API refuses ends runs auth_failed, turns red, holds the login until a tiny real check succeeds; failed runs keep their why (#473)
+- Fix #463 (2/2): the Claude account switch proves the new login with a real call, and rolls back when the API refuses it (#474)
+- Governor holds are seen: a banner with numbers and a fix on the Board and First run, doctor warns, disk floor max(10 GB, 5%) (#483)
+- Fix: claude-failover 'back after the reset' deterministic (flake on main) (#537)
+- Fix: siri-ask cost-leak check uses a value that can't occur by chance (#547)
+- Claims labeled measured/inferred/guess, no handed-over checks, and the structural fix when corrected twice (#541)
+
+### Security and guardrails
+
+- CI: route main's agentshield, push-gate, denylist and scan to the self-hosted runner behind CI_SELF_HOSTED (owner merges) (#441)
+- Claude account profiles (#464, part 1): several accounts per agent user, chosen from the dashboard after a real call (#484)
+- Claude account failover (#464, part 2): on a usage limit, the next account in the order, proven by a real call; optionally back after the reset (#488)
+- Chat attachments: drop, paste or upload files to the dashboard chat (owners and writers; allowlist, caps, 0600, retention, secret warning) (#499)
+- Guardrails: agents never read a dashboard key (#509)
+- Fix: siri token secret parsed by structure (flake on main) (#538)
+- Experiments (4/4): Extend -> Experiments: a study's log, best so far, queue and spend; Review -> Confirm (#535)
+- Test: the MCP broker never enables sandbox-runtime's MITM proxy (node-forge advisory path) (#552)
+
+### Guardrail changes
+
+- Claude account profiles (#464, part 1): several accounts per agent user, chosen from the dashboard after a real call (#484): src/sandbox.ts
+- Claude account failover (#464, part 2): on a usage limit, the next account in the order, proven by a real call; optionally back after the reset (#488): src/sandbox.ts
+- Chat attachments: drop, paste or upload files to the dashboard chat (owners and writers; allowlist, caps, 0600, retention, secret warning) (#499): src/scan/secrets.ts
+- Guardrails: agents never read a dashboard key (#509): src/hook.ts
+- Experiments (4/4): Extend -> Experiments: a study's log, best so far, queue and spend; Review -> Confirm (#535): src/hook.ts
+
 ## v0.5.0 (2026-10-14)
 
 ### Highlights
