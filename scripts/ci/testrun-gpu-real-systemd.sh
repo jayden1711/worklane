@@ -4,8 +4,18 @@
 # Stand-in device nodes with NVIDIA's major (195) and, for nvidia-uvm, the driver's major from /proc/devices or a
 # major nothing here registers: opening one past the cgroup check fails with ENXIO or ENODEV (no driver), never EPERM
 # (the device cgroup refused it) or EACCES (a nodev mount); absent is ENOENT.
+#   devices: the nodes' own group (scripts/setup/gpu-devices.sh): check says FAIL on 0666 stand-ins; apply refuses
+#         the test user, the coordinator user, a user an instance's agents run as and root; apply for the owner (this
+#         runner's user) and udev's step (the installed fixer) make the stand-ins root:worklane-gpu-dev 0660, as the
+#         fixed driver does at boot; check then says PASS. Outside any sandbox, an agent user, the test user and the
+#         coordinator get EACCES on every node (they got through on 0666: the same probe, before); the owner gets
+#         through. check's nvidia-uvm part, on a copy whose module directory and uvm node are stand-ins (no driver
+#         here): PASS with nvidia_uvm "loaded" and a uvm node the member opens; FAIL when the module isn't loaded,
+#         and FAIL when the member can't open the node. At the end, revert takes its files away and leaves the group.
 #   off:  no root file: every node absent in a run that asks for the GPU, and in one that doesn't
-#   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check; nvidia1,
+#   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check and the
+#         0660 nodes' permission (the unit's own worklane-gpu-dev group; never worklane-gpu, and the lock stays out of
+#         reach); nvidia1,
 #         nvidia-uvm-tools, nvidia-modeset, nvidia-caps and the host's other devices absent; mknod refused; the
 #         unit capped at the file's max_minutes. The other instance (not listed) still gets nothing.
 #   lock: two GPU runs at once run one after the other; one that can't get the GPU by its timeout fails saying who
@@ -40,6 +50,8 @@ cleanup() {
   sudo rm -f "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/instance.yaml"
   for u in gpuagent gpuother; do sudo userdel -r "$u" 2>/dev/null || true; done
   sudo groupdel worklane-gpu 2>/dev/null || true
+  sudo bash scripts/setup/gpu-devices.sh revert >/dev/null 2>&1 || true
+  sudo groupdel worklane-gpu-dev 2>/dev/null || true
   rm -rf "$t"
 }
 trap cleanup EXIT
@@ -68,6 +80,98 @@ for d in /dev/sda /dev/vda /dev/nvme0n1 /dev/loop0; do if [ -b "$d" ]; then othe
 [ -n "$other" ] || fail "no block device on the host to look for"
 echo "a host block device to look for in the sandbox: $other"
 
+# The users the device group must never have: an instance's agents run as gpuagent (instance.yaml run_as, where the
+# coordinator keeps it); gpuother is any other local user.
+sudo useradd --create-home --shell /bin/bash gpuagent
+sudo useradd --create-home --shell /bin/bash gpuother
+# An instance whose agents run as gpuagent (instance.yaml run_as, where the coordinator keeps it).
+ch="$(getent passwd wl-ci | cut -d: -f6)"
+for d in .local .local/state .local/state/worklane .local/state/worklane/instances .local/state/worklane/instances/ci; do sudo install -d -o wl-ci -g wl-ci "$ch/$d"; done
+printf 'name: ci\nrun_as:\n  agent_user: gpuagent\n  agent_home: %s\n' "$(getent passwd gpuagent | cut -d: -f6)" | sudo tee "$ch/.local/state/worklane/instances/ci/instance.yaml" > /dev/null
+
+echo "== the nodes' own group (gpu-devices.sh): 0666 FAILs; apply for the owner alone; then 0660 root:worklane-gpu-dev"
+ALL_NODES=(/dev/nvidiactl /dev/nvidia0 /dev/nvidia1 /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps/nvidia-cap1)
+# Each node opened read-write directly, outside any sandbox: "<node> OPENED" or "<node> <errno name>".
+open_py='import errno, os, sys
+for p in sys.argv[1:]:
+    try:
+        os.close(os.open(p, os.O_RDWR)); print(p, "OPENED")
+    except OSError as e:
+        print(p, errno.errorcode.get(e.errno, str(e.errno)))'
+# direct <user> <file>: what that user gets opening every node (sudo sets the user's groups anew).
+direct() { (cd / && sudo -u "$1" python3 -c "$open_py" "${ALL_NODES[@]}") > "$2"; }
+# all_are <file> <errno names...>: every node's result is one of them.
+all_are() {
+  local f="$1" p e; shift
+  [ "$(wc -l < "$f")" = "${#ALL_NODES[@]}" ] || { cat "$f" >&2; fail "$f: not one line per node"; }
+  while read -r p e; do [[ " $* " == *" $e "* ]] || { cat "$f" >&2; fail "$f: $p is $e, not one of: $*"; }; done < "$f"
+}
+DENIED=(gpuagent wl-test-ci wl-ci gpuother)
+# Before: the stand-ins as the driver makes them by default (root:root 0666). Every user gets past the permission check
+# (ENXIO/ENODEV: no driver): what the EACCES proof below would see if the nodes stayed 0666.
+for u in "${DENIED[@]}"; do direct "$u" "$t/before-$u"; all_are "$t/before-$u" ENXIO ENODEV; done
+echo "  0666: ${DENIED[*]} each get past the permission check on every node"
+rc=0; sudo bash scripts/setup/gpu-devices.sh check > "$t/check-before" 2>&1 || rc=$?
+grep -A20 '^FAIL: ' "$t/check-before" | head -n 4
+[ "$rc" = 1 ] && grep -q '^FAIL: ' "$t/check-before" || { cat "$t/check-before" >&2; fail "check on 0666 nodes: exit $rc, no FAIL line"; }
+grep -q 'is root:root, not root:worklane-gpu-dev' "$t/check-before" || { cat "$t/check-before" >&2; fail "check doesn't name the 0666 nodes"; }
+for u in wl-test-ci wl-ci gpuagent root; do
+  if out="$(sudo bash scripts/setup/gpu-devices.sh apply --users "$me,$u" 2>&1)"; then fail "apply added $u: $out"; fi
+  echo "  apply --users $me,$u: $out"
+  grep -q '^refused: ' <<<"$out" || fail "apply --users $me,$u: $out"
+done
+if getent group worklane-gpu-dev > /dev/null; then fail "a refused apply made the group"; fi
+sudo bash scripts/setup/gpu-devices.sh apply --users "$me" > "$t/apply" 2>&1 || { cat "$t/apply" >&2; fail "apply --users $me"; }
+gid="$(getent group worklane-gpu-dev | cut -d: -f3)"
+[ "$(getent group worklane-gpu-dev | cut -d: -f4)" = "$me" ] || fail "the device group isn't just $me: $(getent group worklane-gpu-dev)"
+[ "$gid" != "$(getent group worklane-gpu | cut -d: -f3)" ] || fail "the device group is the locks' group"
+grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_DeviceFileMode=0660" /etc/modprobe.d/worklane-gpu-devices.conf || fail "the modprobe options"
+[ "$(stat -c '%U:%G %a' /etc/modprobe.d/worklane-gpu-devices.conf)" = 'root:root 644' ] || fail "the modprobe file isn't root:root 0644"
+[ "$(stat -c '%U:%G %a' /etc/udev/rules.d/99-worklane-gpu-devices.rules)" = 'root:root 644' ] || fail "the udev rule isn't root:root 0644"
+[ "$(stat -c '%U:%G %a' /usr/local/libexec/worklane-gpu-devices)" = 'root:root 755' ] || fail "the fixer isn't root:root 0755"
+grep -q 'RUN+="/usr/local/libexec/worklane-gpu-devices"' /etc/udev/rules.d/99-worklane-gpu-devices.rules || fail "the udev rule doesn't run the fixer"
+[ "$(stat -c '%U:%G %a' /etc/modules-load.d/worklane-gpu-devices.conf)" = 'root:root 644' ] && grep -qx nvidia-uvm /etc/modules-load.d/worklane-gpu-devices.conf || fail "the modules-load file (nvidia-uvm at boot)"
+if ls -a /etc/modprobe.d /etc/modules-load.d /etc/udev/rules.d /usr/local/libexec | grep -q '\.tmp$'; then fail "a temp file was left"; fi
+# udev's step, as on the driver's "add" (no driver here to send one): the installed fixer, as root.
+sudo /usr/local/libexec/worklane-gpu-devices
+for n in "${ALL_NODES[@]}"; do [ "$(stat -c '%U:%G %a' "$n")" = 'root:worklane-gpu-dev 660' ] || fail "$n is $(stat -c '%U:%G %a' "$n") after the fixer"; done
+# check's nvidia-uvm part needs a loaded driver, which isn't here: a copy of the script whose only two differences are
+# the module directory (nvidia_uvm "loaded" while $t/sysmod/nvidia_uvm exists) and the uvm node it opens as a member
+# (a stand-in with the null device's numbers, so it really opens, root:worklane-gpu-dev 0660 as the fixed driver's).
+cs="$t/wl/scripts"
+mkdir -p "$cs/setup" "$cs/machine" "$t/sysmod/nvidia_uvm"
+cp scripts/setup/lib.sh "$cs/setup/"; cp scripts/machine/worklane-gpu-devices.sh "$cs/machine/"
+sed -e "s|^SYS_MODULE=/sys/module\$|SYS_MODULE=$t/sysmod|" -e "s|^UVM_NODE=/dev/nvidia-uvm\$|UVM_NODE=/dev/worklane-uvm-standin|" scripts/setup/gpu-devices.sh > "$cs/setup/gpu-devices.sh"
+[ "$(diff scripts/setup/gpu-devices.sh "$cs/setup/gpu-devices.sh" | grep -c '^>')" = 2 ] || fail "the stubbed check isn't the script with just its two paths changed"
+sudo mknod -m 0660 /dev/worklane-uvm-standin c 1 3; made+=(/dev/worklane-uvm-standin)
+sudo chown root:worklane-gpu-dev /dev/worklane-uvm-standin
+# stub_check <name>: the stubbed check's output to $t/<name>; its exit code on stdout.
+stub_check() { local rc=0; sudo bash "$cs/setup/gpu-devices.sh" check > "$t/$1" 2>&1 || rc=$?; echo "$rc"; }
+rc="$(stub_check check-after)"
+grep -E 'nvidia_uvm module|opens /dev/worklane-uvm-standin' "$t/check-after"; tail -n 1 "$t/check-after"
+[ "$rc" = 0 ] && tail -n 1 "$t/check-after" | grep -q '^PASS: every NVIDIA device node is root:worklane-gpu-dev' || { cat "$t/check-after" >&2; fail "check on 0660 root:worklane-gpu-dev nodes: exit $rc"; }
+grep -qx '  the nvidia_uvm module: loaded' "$t/check-after" && grep -qx "  $me (a member) opens /dev/worklane-uvm-standin: ok" "$t/check-after" || { cat "$t/check-after" >&2; fail "check didn't report the module loaded and the member opening the uvm node"; }
+echo "== check FAILs when nvidia_uvm isn't loaded"
+rmdir "$t/sysmod/nvidia_uvm"
+rc="$(stub_check check-nouvm)"
+grep -A3 '^FAIL: ' "$t/check-nouvm"
+[ "$rc" = 1 ] && grep -q "^  - the nvidia_uvm module isn't loaded" "$t/check-nouvm" || { cat "$t/check-nouvm" >&2; fail "check with nvidia_uvm not loaded: exit $rc"; }
+mkdir "$t/sysmod/nvidia_uvm"
+echo "== check FAILs when the member can't open the uvm node"
+sudo chgrp root /dev/worklane-uvm-standin
+rc="$(stub_check check-noopen)"
+grep -A3 '^FAIL: ' "$t/check-noopen"
+[ "$rc" = 1 ] && grep -q "^  - $me, a member of worklane-gpu-dev, can't open /dev/worklane-uvm-standin" "$t/check-noopen" || { cat "$t/check-noopen" >&2; fail "check with a uvm node the member can't open: exit $rc"; }
+sudo rm -f /dev/worklane-uvm-standin
+echo "== an agent user, the test user, the coordinator and any other user, directly: EACCES on every node"
+for u in "${DENIED[@]}"; do
+  id -nG "$u" | tr ' ' '\n' | grep -qx worklane-gpu-dev && fail "$u is in the device group"
+  direct "$u" "$t/after-$u"; all_are "$t/after-$u" EACCES
+  echo "  $u: EACCES on ${#ALL_NODES[@]} nodes"
+done
+direct "$me" "$t/after-me"; all_are "$t/after-me" ENXIO ENODEV
+echo "  $me (the group's member): past the permission check on every node"
+
 GRANTED=(/dev/nvidiactl /dev/nvidia-uvm /dev/nvidia0)
 NEVER=(/dev/nvidia1 /dev/nvidia-uvm-tools /dev/nvidia-modeset /dev/nvidia-caps/nvidia-cap1 "$other" /dev/mem)
 
@@ -81,7 +185,18 @@ for p in sys.argv[1:]:
 try:
     os.mknod(os.path.join(os.environ["TMPDIR"], "n"), 0o600 | 0o020000, os.makedev(195, 0)); print("mknod MADE")
 except OSError as e:
-    print("mknod", errno.errorcode.get(e.errno, str(e.errno)))'
+    print("mknod", errno.errorcode.get(e.errno, str(e.errno)))
+import fcntl, grp
+def gname(g):
+    try:
+        return grp.getgrgid(g).gr_name
+    except KeyError:
+        return str(g)
+print("groups", ",".join(sorted(gname(g) for g in set(os.getgroups()) | {os.getgid()})))
+try:
+    fd = os.open("/run/worklane/gpu/0.lock", os.O_RDONLY); fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print("lock LOCKED")
+except OSError as e:
+    print("lock", errno.errorcode.get(e.errno, str(e.errno)))'
 probe="printf %s $(printf %s "$probe_py" | base64 -w0) | base64 -d > \"\$TMPDIR/p.py\" && python3 \"\$TMPDIR/p.py\" ${GRANTED[*]} ${NEVER[*]}"
 
 as_() { local i="$1"; shift; sudo -u "wl-$i" sudo -n "$H" "$i" "$@"; }
@@ -134,12 +249,6 @@ sudo bash scripts/setup/testrun-gpu.sh enable ci --devices 0 --max-minutes 5
 [ "$(sudo stat -c '%U:%G %a' /run/worklane/gpu/0.lock)" = 'root:worklane-gpu 640' ] || fail "GPU 0's lock isn't root:worklane-gpu 0640"
 
 echo "== the locks' group: the owner alone; never an agent, test or coordinator user"
-sudo useradd --create-home --shell /bin/bash gpuagent
-sudo useradd --create-home --shell /bin/bash gpuother
-# An instance whose agents run as gpuagent (instance.yaml run_as, where the coordinator keeps it).
-ch="$(getent passwd wl-ci | cut -d: -f6)"
-for d in .local .local/state .local/state/worklane .local/state/worklane/instances .local/state/worklane/instances/ci; do sudo install -d -o wl-ci -g wl-ci "$ch/$d"; done
-printf 'name: ci\nrun_as:\n  agent_user: gpuagent\n  agent_home: %s\n' "$(getent passwd gpuagent | cut -d: -f6)" | sudo tee "$ch/.local/state/worklane/instances/ci/instance.yaml" > /dev/null
 for u in wl-test-ci wl-ci gpuagent root; do
   if out="$(sudo bash scripts/setup/testrun-gpu.sh holder "$u" 2>&1)"; then fail "the script added $u to the GPU group: $out"; fi
   echo "  holder $u: $out"
@@ -185,6 +294,13 @@ cat "$t/gpu-on-ask.err" | head -n 3
 [ "$(cat "$t/gpu-on-ask.rc")" = 0 ] || { cat "$t/gpu-on-ask.err" >&2; fail "the GPU run exited $(cat "$t/gpu-on-ask.rc")"; }
 head -n 1 "$t/gpu-on-ask.err" | grep -Eqx 'worklane-testrun: gpu 0 \(devices /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia0; max 300 s; waited [0-9]+ s\)' || fail "the grant line (max 300 s: the file's 5 min under the tier's 600 s)"
 for p in "${GRANTED[@]}"; do expect gpu-on-ask "$p" ENXIO ENODEV; done
+# Through the 0660 nodes by the unit's own device group, never the locks' group; and no lock of its own.
+g="$(seen gpu-on-ask groups)"
+echo "  gpu-on-ask's groups: $g"
+[[ ",$g," == *,worklane-gpu-dev,* && ",$g," != *,worklane-gpu,* ]] || fail "gpu-on-ask's groups: $g"
+expect gpu-on-ask lock EACCES ENOENT
+g="$(seen gpu-on-plain groups)"
+[[ ",$g," != *,worklane-gpu-dev,* ]] || fail "a run that didn't ask has the device group: $g"
 for p in "${NEVER[@]}"; do expect gpu-on-ask "$p" ENOENT; done
 expect gpu-on-ask mknod EPERM
 for p in "${GRANTED[@]}" "${NEVER[@]}"; do expect gpu-on-plain "$p" ENOENT; done
@@ -238,8 +354,12 @@ f_end="$(tail -n 1 "$t/gpu-hold-f.out")"
 grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f since " "$t/hold2.err" || { cat "$t/hold2.err" >&2; fail "gpu hold didn't say who held the GPU"; }
 [ "$(cat "$t/hold2.start")" -ge "$f_end" ] || fail "gpu hold's command ran before the GPU run ended"
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
+echo "== revert: its files go, the group stays"
+sudo bash scripts/setup/gpu-devices.sh revert
+for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices; do [ ! -e "$f" ] || fail "revert left $f"; done
+getent group worklane-gpu-dev > /dev/null || fail "revert removed the group"
 # Nothing of this step is left for the steps after it: the sandbox's own check still passes.
 cleanup
 trap - EXIT
 sudo bash scripts/setup/test-user.sh check ci | tail -n 1 | grep -qx 'OK: all checks passed' || { sudo bash scripts/setup/test-user.sh check ci | grep FAIL >&2; fail "test-user.sh check ci fails after this step"; }
-echo "OK: GPU test runs, off and on, one per GPU, and gpu hold, on real systemd"
+echo "OK: GPU test runs, off and on, one per GPU, gpu hold, and the nodes' own group, on real systemd"

@@ -111,7 +111,9 @@ test('server auto-config (audit B4, B5): the setup PR through the App, fitted to
     const r = await autoConfigure(opts(state));
     assert.equal(r.kind, 'proposed', JSON.stringify(r) + said.join('\n'));
     assert.equal(fake.state.pulls.length, 1, 'one PR, opened through the App');
-    assert.deepEqual(state.pr, { number: 1, url: `${fake.url}/${REPO}/pull/1`, branch: SETUP_BRANCH });
+    // #468: the commit pushed for the PR is kept with it (the page merges only its own PR, at that head).
+    assert.deepEqual(state.pr, { number: 1, url: `${fake.url}/${REPO}/pull/1`, branch: SETUP_BRANCH, head: state.pr!.head });
+    assert.match(state.pr!.head!, /^[0-9a-f]{40}$/);
     assert.match(said.join('\n'), /origin has a worklane\/setup from before \([0-9a-f]{8}\) with no open PR: replacing it with this draft/);
     const drafted = p.ref(`refs/heads/${SETUP_BRANCH}`);
     assert.notEqual(drafted, stale, 'the old setup branch was replaced');
