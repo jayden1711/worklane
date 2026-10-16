@@ -60,7 +60,7 @@ async function serve() {
   writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 2, max_test_runs: 3 }));
   writeFileSync(join(slots, 'test-0.lock'), JSON.stringify({ pid: process.pid, owner: 'wl-site test run full-r', acquiredAt: new Date().toISOString() }));
   const cfg = loadConfig(root);
-  cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+  cfg.tests.test_run = { setup: [], fetch: [], setup_network: false, tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, network: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
   const d = await startDashboard({ root, cfg, eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slots, actor: 'wl-site', pollMs: 50, testRunLock: join(dir, 'full-run.lock') });
   const base = d.url.split('/?')[0]!;
   const get = async <T>(path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<T>;
@@ -135,6 +135,14 @@ test('the Machine page\'s test runs: queue, the running slot and its holder, who
   assert.match(board, /data-testid="test-runs-live"/);
   assert.doesNotMatch(board, /test-runs-slots|test-runs-tier-stats/);
   assert.match(r.renderTestRuns({ configured: false, viewer: false, cap: 2, inUse: 0, queue: [], running: [], recent: [] }), /data-configured="no"[^>]*>Test runs: off/);
+});
+
+test('the Machine page\'s test runs: root\'s network grants, read-only with the root command; none of it on the Board', () => {
+  const on = r.renderTestRuns({ ...writerData, network: { state: 'on', tiers: ['e2e', 'setup'], change: 'sudo bash /opt/worklane/current/scripts/setup/testrun-network.sh disable shop', status: 'x' } });
+  assert.match(on, /data-testid="test-runs-network" data-state="on"[^>]*>[\s\S]*Network for test runs: [\s\S]*none, except tiers e2e, setup \(public addresses only\)[\s\S]*Only root changes it: [\s\S]*data-testid="test-runs-network-command"[^>]*>sudo bash \/opt\/worklane\/current\/scripts\/setup\/testrun-network\.sh disable shop</);
+  const off = r.renderTestRuns({ ...writerData, network: { state: 'off', why: 'no root grant file', change: 'sudo bash x enable shop --tiers <tier>', status: 'x' } });
+  assert.match(off, /data-state="off"[\s\S]*none for every tier[\s\S]*sudo bash x enable shop --tiers &lt;tier&gt;/);
+  assert.doesNotMatch(r.renderTestRuns({ ...writerData, network: { state: 'off', why: 'x', change: 'x', status: 'x' } }, true), /test-runs-network"/, 'not on the Board');
 });
 
 test('the Machine page\'s test runs: root\'s GPU opt-in, read-only with the root command; a GPU tier says whether it got the GPU; none of it on the Board', () => {

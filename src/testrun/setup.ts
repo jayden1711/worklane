@@ -66,7 +66,7 @@ export async function setupTestRuns(cfg: Config, s: TestRunSetup, d: { log: Even
     : undefined;
   useTestRuns({
     // Root's GPU file, read for planning and the record only: the helper reads it itself to grant (./gpu.ts).
-    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, ...(sandbox ? { sandbox } : {}), sparseExclude: cfg.tests.checkout.sparse_exclude, gpuOptIn: () => gpuOptIn(s.instance) },
+    run: { config, host, repo: d.root, log: d.log, actor: d.actor, logDir: join(d.stateDir, 'test-runs'), helper, ...(sandbox ? { sandbox } : {}), sparseExclude: cfg.tests.checkout.sparse_exclude, gpuOptIn: () => gpuOptIn(s.instance), instance: s.instance },
     checks: { repo: s.repo, token: s.token, log: d.log, actor: d.actor, ...(s.api ? { api: s.api } : {}) },
   });
   const names = checkNamesFor(config);

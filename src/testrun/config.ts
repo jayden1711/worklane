@@ -8,6 +8,8 @@
 import { z } from 'zod';
 import { projectEnvProblem } from '../project-env.js';
 import { selectMode } from './select.js';
+import { NPM_CACHE_ENV } from './fetch.js';
+import { SETUP_TIER } from './network.js';
 
 const tierName = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/, 'lowercase letters, digits, _ or - (at most 40)');
 const relPath = z
@@ -50,6 +52,12 @@ export const TestRunTier = z
      * tier runs as any other, and its record and check say why.
      */
     gpu: z.boolean().default(false),
+    /**
+     * Asks for the network (docs/test-runs.md "Network"). Only asks: a run's commands have none (their own loopback
+     * only) unless root's own /etc/<cli>/testrun-network.json lists this tier for this instance. Nothing in the repo
+     * grants it. Without the grant the tier runs with no network, and its record and check say why.
+     */
+    network: z.boolean().default(false),
     timeout_s: z.number().int().min(30).max(6 * 3600).default(1800),
   })
   .refine((t) => !t.shardable || t.kind === 'full', { message: 'only a full tier can be sharded', path: ['shardable'] })
@@ -111,8 +119,21 @@ export const TestRunConfig = z
      * in {tests}; `off`, none (the default otherwise). A full run always runs everything.
      */
     select: z.enum(['imports', 'repo', 'off']).optional(),
-    /** Run in the workspace before the tiers (e.g. `npm ci`), with the caches set; a failure fails every tier. */
+    /**
+     * Run in the workspace before the tiers, with the caches set, and with no network (e.g. `npm ci --offline`, after
+     * `fetch`); a failure fails every tier.
+     */
     setup: z.array(z.string().min(1)).default([]),
+    /**
+     * Downloads before the setup steps, with network, running none of the repo's code (./fetch.ts): `npm` fills the
+     * named cache (its env must be npm_config_cache) with what package-lock.json pins, so `npm ci --offline` installs.
+     */
+    fetch: z.array(z.strictObject({ npm: tierName })).max(4).default([]),
+    /**
+     * The setup steps ask for the network, as the tier "setup": granted only when root's own testrun-network.json
+     * lists "setup" for this instance. For an install that can't be split into fetch and an offline step.
+     */
+    setup_network: z.boolean().default(false),
     tiers: z.array(TestRunTier).min(1),
     database: TestRunDatabase.optional(),
     caches: z.array(TestRunCache).default([]),
@@ -136,6 +157,7 @@ export const TestRunConfig = z
   .superRefine((c, ctx) => {
     const names = new Set<string>();
     c.tiers.forEach((t, i) => {
+      if (t.name === SETUP_TIER) ctx.addIssue({ code: 'custom', path: ['tiers', i, 'name'], message: `"${SETUP_TIER}" is the setup steps' name for the network grant; call the tier something else` });
       if (names.has(t.name)) ctx.addIssue({ code: 'custom', path: ['tiers', i, 'name'], message: `duplicate tier ${t.name}` });
       names.add(t.name);
       if (t.database && !c.database) ctx.addIssue({ code: 'custom', path: ['tiers', i, 'database'], message: 'needs test_run.database' });
@@ -156,6 +178,11 @@ export const TestRunConfig = z
       if (k && k !== t.kind) ctx.addIssue({ code: 'custom', path: ['checks'], message: `the check "${n}" has fast and full tiers` });
       checkKind.set(n, t.kind);
     }
+    c.fetch.forEach((f, i) => {
+      const cache = c.caches.find((x) => x.name === f.npm);
+      if (!cache) ctx.addIssue({ code: 'custom', path: ['fetch', i, 'npm'], message: `no cache named ${f.npm} in test_run.caches` });
+      else if (cache.env !== NPM_CACHE_ENV) ctx.addIssue({ code: 'custom', path: ['fetch', i, 'npm'], message: `the cache ${f.npm} is given in ${cache.env}; npm's fetch needs ${NPM_CACHE_ENV}, so the offline install reads it` });
+    });
     const vars = new Set(Object.keys(c.env));
     for (const [list, what] of [[c.caches, 'caches'], [c.shared, 'shared']] as const) {
       const seen = new Set<string>();

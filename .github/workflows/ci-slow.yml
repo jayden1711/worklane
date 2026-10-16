@@ -299,7 +299,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' testrun-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 24
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -538,6 +538,8 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier the public stand-in only, never the host's 127.0.0.1 services (a hub stand-in on 4399, a dashboard's) or the LAN (the PR's earlier host-namespace helper reached the hub); fetch the same; the database container reaches nothing"
+        run: bash scripts/ci/testrun-network-real-systemd.sh "$I2"
       - name: "regression: an instance whose name is a prefix of another's (ci2-sandbox, ci2-sandbox-long-name) never wipes the other's units, Docker or containers"
         run: |
           # Run ids and instance names are both [a-z0-9-]: with units named <cli>-test-<name>-<id>-<pid>, ci2-sandbox's
@@ -596,7 +598,8 @@ jobs:
             [ "$(cut -d' ' -f1 <<<"$out")" = "$(printf %s "$value" | sha256sum | cut -d' ' -f1)" ] || { echo "$which: the run didn't get the value exactly: $out" >&2; exit 1; }
             echo "$which helper: the run got CANARY_VAR exactly (its sha256 matches)"
             sudo truncate -s 0 "$argvlog"
-            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
+            # "<port> <password>" from the old helper, "<socket directory> <password>" from this one.
+            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[^ ]* \([0-9a-f]\{32\}\)$/\1/p')"
             [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
             # db-start's recorded docker calls, copied out with no value on any command line. WHY: a sudo grep for the
             # password put it in sudo's own journal line; every search with the value runs only after the watch and

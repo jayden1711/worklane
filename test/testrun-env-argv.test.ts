@@ -162,7 +162,7 @@ test('the helper refuses variables in argv, an unended one on stdin, and the nam
   try {
     const old = h.run(['exec', h.id, '60', '--env', `X=${CANARY}`, '--', 'true'], '');
     assert.equal(old.status, 2);
-    assert.match(old.stderr, /usage: exec <id> <timeout_s> \[--gpu\] -- <command> \(the run's variables on stdin/);
+    assert.match(old.stderr, /usage: exec <id> <timeout_s> \[--gpu\] \[--network <tier>\] -- <command> \(the run's variables on stdin/);
     assert.equal(h.run(['exec', h.id, '60', '--', 'true'], 'X=no-nul').status, 2);
     for (const bad of ['GITHUB_TOKEN=x', 'PATH=/tmp', 'LD_PRELOAD=/x.so', 'STRIPE_SECRET=x', 'BAD-NAME=x']) {
       const r = h.run(['exec', h.id, '60', '--', 'true'], `${bad}\0`);
@@ -193,7 +193,7 @@ test('regression: db-start gives docker the database password in an --env-file, 
   try {
     const r = h.run(['db-start', h.id, pin, 'test', '5', '250']);
     assert.equal(r.status, 0, r.stderr);
-    const m = /^45678 ([0-9a-f]{32})$/m.exec(r.stdout);
+    const m = /^\/\S+\/pg ([0-9a-f]{32})$/m.exec(r.stdout);
     assert.ok(m, r.stdout);
     const pw = m[1]!;
     assert.ok(!h.dkArgv().includes(pw), 'the password is in no docker argv');
