@@ -1010,7 +1010,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const siriLimits = new RateLimits();
   // Webhook automations (src/automations/webhook.ts): the instance's own hooks gateway token, for the hub's hooks
   // gateway only; never the dashboard's or Siri's token.
-  const hooksToken = opts.instance && opts.automationsFile ? hooksGatewayToken(opts.stateDir, [token, ...(siriToken ? [siriToken] : [])]) : null;
+  // Made for every instance (dashboards.sh waits for it), whether or not it has automations yet.
+  const hooksToken = opts.instance ? hooksGatewayToken(opts.stateDir, [token, ...(siriToken ? [siriToken] : [])]) : null;
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
