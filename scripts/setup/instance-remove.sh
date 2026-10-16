@@ -209,6 +209,8 @@ for em in $(engine_mounts); do
 done
 
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
+# Its users' uids, for what they leave behind in the machine's shared places once they're gone (below).
+my_uids="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [ "$k" = user ] && user_exists "$w" && id -u "$w"; done; true)"
 for line in "${ITEMS[@]}"; do
   IFS=$'\t' read -r k w when <<<"$line"
   case "$k" in
@@ -249,6 +251,12 @@ for line in "${ITEMS[@]}"; do
   esac
 done
 systemctl daemon-reload
+
+# What its users last wrote in the machine's shared places (the incident store, a slot's lock): root's now, its group
+# and mode kept, so nothing is owned by a uid no user has (a later user given the same uid would own it).
+for u in $my_uids; do
+  find /var/lib/worklane /etc/worklane /run/lock -xdev -uid "$u" -exec chown -h root {} + 2>/dev/null || true
+done
 
 # The egress rule names users by uid: when it names one no user has now (this instance's sandbox and test users), it
 # is applied again, rebuilt from the users there are, with the flags it was applied with. No live user's entry changes.

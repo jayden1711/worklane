@@ -14,7 +14,8 @@ t="$(mktemp -d)"; trap 'rm -rf "$t"' EXIT
 v6=/var/lib/worklane-exp/ci/jobs/ci-job-6/vol
 sudo mountpoint -q "$v6" || fail "the cut-off study's volume isn't mounted"
 uids="$(for u in wl-exp-ci wl-score-ci wl-test-ci wl-ci; do id -u "$u" 2>/dev/null || true; done)"
-sudo grep -qxFf <(printf '%s\n' $uids) /etc/worklane/egress.users || fail "the egress rule doesn't name ci's users before"
+printf '%s\n' $uids > "$t/uids" && chmod 0644 "$t/uids" && chmod 0755 "$t"
+sudo grep -qxFf "$t/uids" /etc/worklane/egress.users || fail "the egress rule doesn't name ci's users before"
 other_view() {
   id "wl-$I2"; id "wl-test-$I2"
   sudo sha256sum "/etc/sudoers.d/worklane-$I2" "/etc/sudoers.d/worklane-test-$I2" 2>/dev/null || true
@@ -64,6 +65,8 @@ a="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/ci-*.experiments.tar')"
 [ "$(sudo stat -c '%U %a' "$a")" = "root 600" ] || fail "the experiment records' archive isn't root's 0600"
 sudo tar -tf "$a" | grep -qx 'var/lib/worklane-exp/ci/jobs/ci-job-1/record.json' || fail "job 1's record isn't archived"
 sudo tar -tf "$a" | grep -qx 'etc/worklane/experiments/ci.json' || fail "root's file isn't archived"
+left="$(sudo find /var/lib/worklane /etc/worklane /run/lock -xdev -nouser 2>/dev/null || true)"
+[ -z "$left" ] || fail "owned by no user now: $left"
 other_view > "$t/other-after"
 diff "$t/other-before" "$t/other-after" || fail "the other instance changed"
 
