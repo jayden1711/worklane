@@ -2041,7 +2041,7 @@ test('Add project: the steps show in the script order as they arrive, and its as
 });
 
 test("Add project: the page's name and repo check gives the machine helper's answers", () => {
-  const names = ['shop', 'a', 'site-2', 'a'.repeat(21), 'a'.repeat(22), '', '2shop', 'Shop', 'shop_x', 'shop;id', 'dash', 'shop-agent', 'shop-eval', 'shop-work', 'shop-'];
+  const names = ['shop', 'a', 'site-2', 'a'.repeat(21), 'a'.repeat(22), '', '2shop', 'Shop', 'shop_x', 'shop;id', 'dash', 'shop-agent', 'shop-eval', 'shop-work', 'shop-', 'test-shop', 'ci-shop', 'dashboard-shop', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'agent', 'eval', 'work', 'test', 'ci', 'a-b-c'];
   const repos = ['acme/shop', 'Acme-Co/site.web_2', 'a/b', 'acme', 'a/b/c', '/b', 'a/..', 'a/.', 'a/b c', 'a/b\n', '-a/b', 'a--b/c', `${'a'.repeat(40)}/b`];
   for (const n of names) assert.equal(r.addProjectInvalid(n, 'acme/shop') === null, addProjectNameOk(n), `name ${JSON.stringify(n)}`);
   for (const p of repos) assert.equal(r.addProjectInvalid('shop', p) === null, addProjectRepoOk(p), `repo ${JSON.stringify(p)}`);

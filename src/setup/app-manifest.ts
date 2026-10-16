@@ -30,6 +30,7 @@ import type { Asks } from '../console/asks.js';
 import { CALLBACK_PATH } from '../dashboard-auth.js';
 import { appJwt } from '../github-app.js';
 import { setGithubApp } from '../instance.js';
+import { instanceNameProblem } from '../instance-name.js';
 import { asUser, currentUser, homeOf, installSecretFor } from '../os/index.js';
 
 type Fetch = typeof fetch;
@@ -52,8 +53,13 @@ export const MANIFEST_START_PATH = '/setup/app-manifest/start';
 export const MANIFEST_CALLBACK_PATH = '/setup/app-manifest/callback';
 /** How long a flow's state token lives: from registering to GitHub's redirect back. */
 export const MANIFEST_STATE_MS = 10 * 60_000;
-/** An instance name, as add-project takes it. */
+/** An instance name's shape (an App name prefix takes it too); an instance's own name is checked by instanceNameProblem. */
 export const INSTANCE_NAME = /^[a-z][a-z0-9-]{0,20}$/;
+/** Why an App can't be named for this: an agent App's is its instance's own name; a sign-in App's, the hub's prefix (dash). */
+function appNameProblem(kind: AppKind, name: unknown): string | null {
+  if (kind === 'agent') return instanceNameProblem(name);
+  return typeof name === 'string' && INSTANCE_NAME.test(name) ? null : `must match ${INSTANCE_NAME}`;
+}
 const REPO = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}\/[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
 /** A GitHub user or organization name. */
 export const GITHUB_LOGIN = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/;
@@ -238,7 +244,8 @@ export class ManifestFlows {
   async register(input: { kind?: unknown; instance?: unknown; repo?: unknown; owner?: unknown; publicUrl?: unknown }): Promise<Registered> {
     const kind = input.kind === 'signin' ? 'signin' : input.kind === 'agent' ? 'agent' : null;
     if (!kind) throw new FlowError('kind must be agent or signin');
-    if (typeof input.instance !== 'string' || !INSTANCE_NAME.test(input.instance)) throw new FlowError(`instance must match ${INSTANCE_NAME}`);
+    const why = appNameProblem(kind, input.instance);
+    if (why || typeof input.instance !== 'string') throw new FlowError(`instance: ${why}`);
     // WHY: the sign-in App belongs to the machine, not to a repo: the hub's setup mode (src/hub-setup.ts) names only the
     // account that owns it. The repo's owner is all a sign-in flow ever reads from it.
     let repo = input.repo;
@@ -551,7 +558,8 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
     if (askId) d.onFail?.(askId, error);
     return { ok: false, step, error };
   };
-  if (!INSTANCE_NAME.test(o.instance)) return fail('arguments', `the name must match ${INSTANCE_NAME}`);
+  const why = appNameProblem(o.kind, o.instance);
+  if (why) return fail('arguments', `the name ${o.instance}: ${why}`);
   if (!validRepo(o.repo)) return fail('arguments', 'the repo must be owner/name');
   const user = o.kind === 'agent' ? (d.users?.coordinator ?? coordinatorUser(o.instance)) : (d.users?.viewer ?? VIEWER_USER);
   const userHome = home(user);
