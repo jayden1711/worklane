@@ -2213,11 +2213,24 @@ export const changeAutomation = (body: { action: AutomationAction; id?: string; 
 
 /** Extend -> Experiments (src/experiments/view.ts): the owners' and writers' view. */
 export type ExpAction = 'start' | 'pause' | 'resume' | 'stop_job' | 'approve' | 'decline' | 'archive';
+export interface ExpStage2 {
+  size: number;
+  meanCandidate: number | null;
+  meanBest: number | null;
+  spread: number | null;
+  seeds: number;
+  minutesCandidate: number;
+  minutesBest: number;
+}
 export interface ExpLogRow {
   n: number;
-  kind: 'baseline' | 'exploit' | 'explore' | 'confirm';
+  kind: 'baseline' | 'exploit' | 'explore' | 'combine' | 'seed';
   at: string;
   hypothesis: string;
+  variable: string;
+  stage: 0 | 1 | 2;
+  stage2: ExpStage2[];
+  seeds: number;
   motivation: string;
   change: { commit: string | null; files: string[] };
   config: Record<string, string | number>;
@@ -2232,6 +2245,9 @@ export interface ExpLogRow {
 interface ExpStudyBase {
   id: string;
   goal: string;
+  kind: string;
+  screen: { margin: number; seeds: number };
+  ladder: string[];
   metric: { name: string; direction: 'min' | 'max'; min_delta: number };
   job: { max_minutes: number; gpus: number; output_gb: number };
   budget: { gpu_hours_per_day: number; agent_usd_per_day: number; agent_usd_total: number; max_jobs: number };
@@ -2253,7 +2269,8 @@ export type ExpStudy =
       baseline: { n: number; value: number | null } | null;
       current: { n: number; job: string | null; kind: string; hypothesis: string; approval: string[]; since: string } | null;
       spend: { agentToday: number; agentPerDay: number; agentTotal: number; agentAll: number; gpuHoursToday: number; gpuHoursPerDay: number; jobs: number; maxJobs: number };
-      counts: { jobs: number; kept: number; explore: number; crash: number };
+      counts: { jobs: number; kept: number; explore: number; crash: number; screened: number };
+      held: { n: number; hypothesis: string; variable: string; why: string; commit: string | null; files: string[]; stage2: ExpStage2[]; monitor: { flagged: boolean; findings: string[] } | null } | null;
       points: { n: number; value: number | null; kept: boolean }[];
       log: ExpLogRow[];
     });

@@ -141,7 +141,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
     if (a === 'pause') return !s.paused;
     if (a === 'resume') return s.paused || s.broken;
     if (a === 'stop_job') return s.phase === 'running';
-    if (a === 'approve' || a === 'decline') return s.phase === 'awaiting_approval';
+    if (a === 'approve' || a === 'decline') return s.phase === 'awaiting_approval' || !!s.held;
     if (a === 'archive') return s.phase !== 'running';
     return false;
   });
@@ -157,13 +157,13 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
         <div className="flex w-full flex-wrap gap-1.5 sm:ml-auto sm:w-auto" data-testid="experiment-actions">
           {shown.map((a) => (
             <Button key={a} size="sm" variant={a === 'start' || a === 'approve' || a === 'resume' ? 'default' : 'outline'} className={cx((a === 'stop_job' || a === 'decline') && 'text-red')} disabled={busy} onClick={() => void review(a)} data-testid={`experiment-${a}`}>
-              {ACTION_LABEL[a]}
+              {s.started && s.held && a === 'approve' ? 'Accept result' : s.started && s.held && a === 'decline' ? 'Reject result' : ACTION_LABEL[a]}
             </Button>
           ))}
         </div>
       </div>
       <p className="text-[12.5px] text-ink-2">
-        {s.goal} · <span className="font-mono text-[11.5px]">{s.metric.name}</span> {s.metric.direction === 'min' ? '↓ lower is better' : '↑ higher is better'}
+        {s.goal} · <span className="font-mono text-[11.5px]">{s.metric.name}</span> {s.metric.direction === 'min' ? '↓ lower is better' : '↑ higher is better'} · {s.kind.replace('_', '-')} · screen 1 seed, then {s.screen.seeds}+{s.screen.seeds} seeds{s.ladder.length ? ` · sizes ${s.ladder.join(' → ')}` : ''}
       </p>
       {err && <p className="text-[12.5px] text-red" data-testid="experiment-error">{err}</p>}
       {plan && (
@@ -214,6 +214,21 @@ function Started({ s }: { s: Started }) {
   const delta = s.best && s.baseline?.value ? ((s.best.value - s.baseline.value) / Math.abs(s.baseline.value)) * 100 : null;
   return (
     <>
+      {s.held && (
+        <Card className="space-y-1 p-3 text-[12.5px]" data-testid="experiment-held">
+          <div className="font-medium text-ink">
+            Result #{s.held.n} is held for your review: {s.held.hypothesis}
+          </div>
+          <div className="text-ink-2">{s.held.why}</div>
+          {s.held.stage2.map((x) => (
+            <div key={x.size} className="font-mono text-[11.5px] text-ink-2">
+              size {x.size + 1}: {fmt(x.meanCandidate)} ± {fmt(x.spread)} vs best {fmt(x.meanBest)} · {x.seeds} seeds each · {x.minutesCandidate.toFixed(1)} / {x.minutesBest.toFixed(1)} GPU-min
+            </div>
+          ))}
+          {s.held.monitor && <div className={s.held.monitor.flagged ? 'text-orange' : 'text-ink-3'}>Monitor: {s.held.monitor.flagged ? s.held.monitor.findings.join(' · ') || 'flagged' : 'nothing found'}</div>}
+          <div className="text-ink-3">Accept result shows its change and run record first; nothing counts until you confirm.</div>
+        </Card>
+      )}
       {s.hold && s.phase === 'idle' && (
         <p className="rounded-lg bg-orange-tint p-3 text-[12.5px] text-ink" data-testid="experiment-hold">
           No new round starts: {s.hold}
@@ -235,7 +250,7 @@ function Started({ s }: { s: Started }) {
             <p className="mt-1 text-[12.5px] text-ink-3">No result yet: the first job is the baseline.</p>
           )}
           <div className="mt-1 text-[11.5px] text-ink-2">
-            {s.counts.jobs} jobs · {s.counts.kept} kept · {s.counts.explore} explore · {s.counts.crash} crash
+            {s.counts.jobs} jobs · {s.counts.kept} kept · {s.counts.screened} screened out · {s.counts.explore} explore · {s.counts.crash} crash
           </div>
         </Card>
         <Card className="min-w-0 p-3" data-testid="experiment-queue">
@@ -307,7 +322,7 @@ function BestChart({ points, direction }: { points: { n: number; value: number |
   );
 }
 
-const DECISION_TONE: Record<string, 'ok' | 'neutral' | 'danger' | 'info' | 'warn'> = { keep: 'ok', discard: 'neutral', crash: 'danger', refused: 'danger', stopped: 'warn', running: 'info', pending_confirm: 'info', waiting: 'warn', queued: 'info', session: 'info' };
+const DECISION_TONE: Record<string, 'ok' | 'neutral' | 'danger' | 'info' | 'warn'> = { keep: 'ok', discard: 'neutral', screened_out: 'neutral', crash: 'danger', refused: 'danger', stopped: 'warn', running: 'info', stage2: 'info', ladder: 'info', seed: 'info', winner: 'ok', held: 'warn', waiting: 'warn', queued: 'info', session: 'info' };
 
 function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
   if (!rows.length) return null;
@@ -321,7 +336,7 @@ function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
         <table className="w-full min-w-[720px] text-[12px]">
           <thead>
             <tr className="border-b border-line text-left text-ink-3">
-              {['#', 'Kind', 'Hypothesis', 'Change', 'Config', 'Budget', 'Result', 'Decision'].map((h) => (
+              {['#', 'Kind', 'Hypothesis', 'Change', 'Config', 'Budget a run', 'Result', 'Decision'].map((h) => (
                 <th key={h} className="px-2 py-1.5 font-medium">
                   {h}
                 </th>
@@ -340,8 +355,23 @@ function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
                   {r.change.files.join(', ') || '–'} {r.change.commit?.slice(0, 7)}
                 </td>
                 <td className="px-2 py-1.5 font-mono text-[11.5px]">{Object.entries(r.config).map(([k, v]) => `${k} ${v}`).join(', ') || '–'}</td>
-                <td className="px-2 py-1.5 tabular-nums">{r.minutes === null ? '–' : `${r.minutes.toFixed(0)} min${r.waited_s ? ` · waited ${Math.round(r.waited_s / 60)}` : ''}`}</td>
-                <td className="px-2 py-1.5 font-mono tabular-nums">{fmt(r.result)}</td>
+                <td className="px-2 py-1.5 tabular-nums">
+                  {r.minutes === null ? '–' : `${r.minutes.toFixed(0)} GPU-min${r.waited_s ? ` · waited ${Math.round(r.waited_s / 60)}` : ''}`}
+                  {r.stage2.map((x) => (
+                    <span key={x.size} className="block text-[11px] text-ink-3">
+                      {x.minutesCandidate.toFixed(0)} / {x.minutesBest.toFixed(0)} GPU-min ({x.seeds}+{x.seeds} runs)
+                    </span>
+                  ))}
+                </td>
+                <td className="px-2 py-1.5 font-mono tabular-nums">
+                  {fmt(r.result)}
+                  <span className="block text-[11px] text-ink-3">{r.stage === 1 ? 'stage 1 · 1 seed' : r.stage === 0 ? 'baseline' : ''}</span>
+                  {r.stage2.map((x) => (
+                    <span key={x.size} className="block text-[11px] text-ink-2" data-testid="experiment-stage2">
+                      stage 2{r.stage2.length > 1 || x.size > 0 ? ` · size ${x.size + 1}` : ''}: {fmt(x.meanCandidate)} ± {fmt(x.spread)} vs {fmt(x.meanBest)}
+                    </span>
+                  ))}
+                </td>
                 <td className="px-2 py-1.5">
                   <Badge tone={DECISION_TONE[r.decision] ?? 'neutral'}>{r.decision.replace('_', ' ')}</Badge>
                   {r.why && <span className="mt-0.5 block text-[11px] text-ink-3">{r.why}</span>}
@@ -359,6 +389,7 @@ function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
             </div>
             <div className="text-[12px] text-ink-2">
               {r.hypothesis} → {fmt(r.result)}
+              {r.stage2.map((x) => ` · stage 2: ${fmt(x.meanCandidate)} ± ${fmt(x.spread)} vs ${fmt(x.meanBest)}`).join('')}
             </div>
             {r.why && <div className="text-[11px] text-ink-3">{r.why}</div>}
           </li>

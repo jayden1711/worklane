@@ -26,7 +26,7 @@ const study = {
   editable: ['train.py'],
   budget: { gpu_hours_per_day: 4, agent_usd_per_day: 5, agent_usd_total: 60, max_jobs: 200 },
 };
-const root: RootState = { state: 'on', file: { devices: [0], max_minutes: 60, gpu_hours_per_day: 8, output_gb: 50, env_network: false, sources: { 'train-set': { sha256: 'a'.repeat(64), visibility: 'job' }, 'eval-inputs': { sha256: 'b'.repeat(64), visibility: 'job' }, 'eval-labels': { sha256: 'c'.repeat(64), visibility: 'scorer' } } } };
+const root: RootState = { state: 'on', file: { devices: [0], max_minutes: 20, gpu_hours_per_day: 8, output_gb: 50, env_network: false, tasks_max: 1024, memory_gb: 16, cpu_cores: 4, sources: { 'train-set': { sha256: 'a'.repeat(64), visibility: 'job' }, 'eval-inputs': { sha256: 'b'.repeat(64), visibility: 'job' }, 'eval-labels': { sha256: 'c'.repeat(64), visibility: 'scorer' } } } };
 
 async function serve() {
   const base = mkdtempSync(join(tmpdir(), 'exp-dash-'));
@@ -114,8 +114,8 @@ test('experiments-dashboard: only an owner approves a waiting job, and only that
     const pins = loadPins(s.pinsFile) as { pins: { studies: Record<string, { version: string }> } };
     const version = pins.pins.studies['example-speed']!.version;
     assert.equal((await s.post('example-owner', { action: 'approve', study: 'example-speed' })).status, 400, 'nothing waits yet');
-    s.append('experiment.session', { study: 'example-speed', version, session: 's1', n: 1, kind: 'baseline', parent: null });
-    s.append('experiment.proposed', { study: 'example-speed', version, session: 's1', n: 1, job: 'example-speed-1', hypothesis: 'Baseline', motivation: 'm', expected_effect: 'e', config: {}, commit: 'a'.repeat(40), files: [], lockfile: false, approval: ['the first job of this study version'] });
+    s.append('experiment.session', { study: 'example-speed', version, session: 's1', n: 1, kind: 'baseline', parent: null, size: 0, seed: 1 });
+    s.append('experiment.proposed', { study: 'example-speed', version, session: 's1', n: 1, job: 'example-speed-1', hypothesis: 'Baseline', variable: '', motivation: 'm', expected_effect: 'e', config: {}, commit: 'a'.repeat(40), files: [], lockfile: false, approval: ['the first job of this study version'] });
     const view = (await s.get('example-collaborator')).body.studies![0]!;
     assert.deepEqual([view.started, view.phase, view.log!.length], [true, 'awaiting_approval', 1]);
     assert.equal((await s.post('example-collaborator', { action: 'approve', study: 'example-speed' })).status, 403);
@@ -123,6 +123,34 @@ test('experiments-dashboard: only an owner approves a waiting job, and only that
     assert.ok(a.body.summary!.some((l) => /Why it waited: the first job of this study version/.test(l)));
     assert.equal((await s.post('example-owner', { action: 'approve', study: 'example-speed', confirm: true, digest: a.body.digest })).status, 200);
     assert.deepEqual(s.events('experiment.approval').map((e) => [e.job, e.answer, e.by]), [['example-speed-1', 'approve', 'example-owner']]);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('experiments-dashboard: a held result is the owner\'s to accept or reject, after reading its run record and the monitor', async () => {
+  const s = await serve();
+  try {
+    const r = await s.post('example-owner', { action: 'start', study: 'example-speed' });
+    await s.post('example-owner', { action: 'start', study: 'example-speed', confirm: true, digest: r.body.digest });
+    const pins = loadPins(s.pinsFile) as { pins: { studies: Record<string, { version: string }> } };
+    const version = pins.pins.studies['example-speed']!.version;
+    const job = (n: number, kind: string, score: number, decision: string) => {
+      s.append('experiment.session', { study: 'example-speed', version, session: `s${n}`, n, kind, parent: n === 1 ? null : 1, size: 0, seed: 1 });
+      s.append('experiment.proposed', { study: 'example-speed', version, session: `s${n}`, n, job: `example-speed-${n}`, hypothesis: `h${n}`, variable: 'lr', motivation: 'm', expected_effect: 'e', config: {}, commit: 'a'.repeat(40), files: [], lockfile: false, approval: [] });
+      s.append('experiment.recorded', { study: 'example-speed', version, job: `example-speed-${n}`, n, outcome: 'scored', score, step: null, gpu_minutes: 10, waited_s: 0, tail: '', decision, value: decision === 'keep' ? score : null, why: '' });
+    };
+    job(1, 'baseline', 3, 'keep');
+    job(2, 'exploit', 1, 'stage2');
+    s.append('experiment.judged', { study: 'example-speed', version, n: 2, decision: 'held', why: 'held for an owner\'s review: 1 ± 0.01 vs best 3 ± 0.01', stage2: { size: 0, meanCandidate: 1, meanBest: 3, spread: 0.01, seeds: 3, minutesCandidate: 30, minutesBest: 30 }, value: 1, after: 'keep' });
+    s.append('experiment.monitor', { study: 'example-speed', version, session: 's2', n: 2, flagged: true, findings: ['it searched for the labels'], cost_usd: 0.05 });
+    assert.equal((await s.post('example-collaborator', { action: 'approve', study: 'example-speed' })).status, 403);
+    const a = await s.post('example-owner', { action: 'approve', study: 'example-speed' });
+    assert.ok(a.body.summary!.some((l) => /size 1: 1\.0000 ± 0\.0100 vs best 3\.0000 \(3 seeds each; 30\.0 vs 30\.0 GPU-min\)/.test(l)), a.body.summary!.join('\n'));
+    assert.ok(a.body.summary!.some((l) => /Monitor: flagged: it searched for the labels/.test(l)));
+    assert.equal(a.body.changes![0], 'result #2: held -> accepted');
+    assert.equal((await s.post('example-owner', { action: 'approve', study: 'example-speed', confirm: true, digest: a.body.digest })).status, 200);
+    assert.deepEqual(s.events('experiment.verdict').map((e) => [e.n, e.answer]), [[2, 'accept']]);
   } finally {
     await s.d.close();
   }

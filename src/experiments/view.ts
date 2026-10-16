@@ -43,6 +43,15 @@ const show = (repo: string) => (commit: string, path: string) => {
     return null;
   }
 };
+/** A commit's change as Review shows it: the stat and the patch, cut to 120 lines. */
+const diffOf = (repo: string, commit: string | null): string[] => {
+  if (!commit) return [];
+  try {
+    return execFileSync('git', ['show', '--stat', '--patch', '--format=commit %H', commit], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 }).split('\n').slice(0, 120);
+  } catch {
+    return [`(the commit ${commit.slice(0, 12)} isn't in this checkout)`];
+  }
+};
 const tipOf = (site: ExpSite) => {
   try {
     return execFileSync('git', ['rev-parse', `origin/${site.branch}`], { cwd: site.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -51,11 +60,32 @@ const tipOf = (site: ExpSite) => {
   }
 };
 
-const row = (e: LogEntry) => ({ n: e.n, kind: e.kind, at: e.ts, hypothesis: e.hypothesis, motivation: e.motivation, change: { commit: e.commit, files: e.files }, config: e.config, minutes: e.gpu_minutes, waited_s: e.waited_s, result: e.result, decision: e.decision, why: e.why, step: e.step, parent: e.parent });
+const finiteOr = (x: number | null | undefined) => (x === null || x === undefined || !Number.isFinite(x) ? null : x);
+/** A log row: stage 1's one run, and each stage-2 size's mean ± spread of both arms with the budget each used. */
+const row = (e: LogEntry, entries: LogEntry[]) => ({
+  n: e.n,
+  kind: e.kind,
+  at: e.ts,
+  hypothesis: e.hypothesis,
+  variable: e.variable,
+  motivation: e.motivation,
+  change: { commit: e.commit, files: e.files },
+  config: e.config,
+  minutes: e.gpu_minutes,
+  waited_s: e.waited_s,
+  result: e.result,
+  decision: e.decision,
+  why: e.why,
+  step: e.step,
+  parent: e.parent,
+  stage: e.stage2?.length ? 2 : e.kind === 'baseline' ? 0 : 1,
+  stage2: (e.stage2 ?? []).map((x) => ({ ...x, meanCandidate: finiteOr(x.meanCandidate), meanBest: finiteOr(x.meanBest), spread: finiteOr(x.spread) })),
+  seeds: entries.filter((x) => x.kind === 'seed' && x.of === e.n).length,
+});
 
 /** The study's state now, and why no session would start (null: one would, at the next pass). */
-function stateOf(events: StoredEvent[], s: Study, pin: Pin): StudyState {
-  return foldStudy(events, s.id, pin.version, s.metric.direction);
+function stateOf(events: StoredEvent[], _s: Study, pin: Pin): StudyState {
+  return foldStudy(events, _s.id, pin.version);
 }
 
 /** The page's data: the machine's setup, each study (started or not), and this person's actions. */
@@ -73,7 +103,7 @@ export function experimentsView(o: { site: ExpSite; events: StoredEvent[]; role:
     approve: 'error' in pins ? null : pins.pins.approve,
     studies: studies.map((s) => {
       const pin = pinned[s.id];
-      const base = { id: s.id, goal: s.goal, metric: s.metric, job: s.job, budget: s.budget, exploration: s.exploration, editable: s.editable };
+      const base = { id: s.id, goal: s.goal, kind: s.kind, metric: s.metric, job: s.job, budget: s.budget, exploration: s.exploration, screen: s.screen, ladder: s.ladder.map((z) => z.name), editable: s.editable };
       const canStart = rootRefusal(s, root.state === 'on' ? root.file : null);
       if (!pin) return { ...base, started: false as const, startRefused: canStart };
       const st = stateOf(o.events, s, pin);
@@ -96,12 +126,20 @@ export function experimentsView(o: { site: ExpSite; events: StoredEvent[]; role:
         best: st.best,
         baseline: kept[0] ? { n: kept[0].n, value: kept[0].value ?? kept[0].result } : null,
         current: cur ? { n: cur.n, job: cur.job, kind: cur.kind, hypothesis: cur.hypothesis, approval: cur.approval, since: st.phase === 'running' && started ? started.ts : cur.ts } : null,
+        // A result held for review: what the owner reads before accepting it (the run record, the change, the monitor).
+        held: (() => {
+          const h = st.entries.find((e) => e.decision === 'held');
+          if (!h) return null;
+          const mon = o.events.filter((e) => e.type === 'experiment.monitor' && (e.payload as { study?: string; n?: number }).study === s.id && (e.payload as { n?: number }).n === h.n).map((e) => e.payload as { flagged: boolean; findings: string[] });
+          return { n: h.n, hypothesis: h.hypothesis, variable: h.variable, why: h.why, commit: h.commit, files: h.files, stage2: row(h, st.entries).stage2, monitor: mon.at(-1) ?? null };
+        })(),
         spend: { agentToday: used.agent_usd_today, agentPerDay: s.budget.agent_usd_per_day, agentTotal: used.agent_usd_total, agentAll: s.budget.agent_usd_total, gpuHoursToday: used.gpu_hours_today, gpuHoursPerDay: s.budget.gpu_hours_per_day, jobs: used.jobs, maxJobs: s.budget.max_jobs },
-        counts: { jobs: st.entries.filter((e) => e.job).length, kept: kept.length, explore: st.entries.filter((e) => e.kind === 'explore').length, crash: st.entries.filter((e) => e.decision === 'crash').length },
+        counts: { jobs: st.entries.filter((e) => e.job).length, kept: kept.length, explore: st.entries.filter((e) => e.kind === 'explore').length, crash: st.entries.filter((e) => e.decision === 'crash').length, screened: st.entries.filter((e) => e.decision === 'screened_out').length },
         // The best's steps over the entries (kept points), and every scored result, for the chart.
-        points: st.entries.filter((e) => e.result !== null).map((e) => ({ n: e.n, value: e.value ?? e.result, kept: e.decision === 'keep' })),
-        // The entry in flight says where it is (waiting for approval, queued, running), not just "running".
-        log: [...st.entries].reverse().slice(0, 100).map((e) => ({ ...row(e), ...(e.n === st.current ? { decision: st.phase === 'awaiting_approval' ? 'waiting' : st.phase } : {}) })),
+        points: st.entries.filter((e) => e.kind !== 'seed' && e.result !== null).map((e) => ({ n: e.n, value: e.value ?? e.result, kept: e.decision === 'keep' })),
+        // The entry in flight says where it is (waiting for approval, queued, running), not just "running". Seeds
+        // are folded into their candidate's row (its stage-2 numbers), so the log reads one row per hypothesis.
+        log: [...st.entries].filter((e) => e.kind !== 'seed' || e.n === st.current).reverse().slice(0, 100).map((e) => ({ ...row(e, st.entries), ...(e.n === st.current ? { decision: st.phase === 'awaiting_approval' ? 'waiting' : st.phase } : {}) })),
       };
     }),
   };
@@ -143,8 +181,9 @@ export function planExperiment(o: { site: ExpSite; events: StoredEvent[]; req: E
         `Metric ${s.metric.name}, ${s.metric.direction === 'min' ? 'lower' : 'higher'} is better; kept only when it beats the best by more than ${s.metric.min_delta}.`,
         `Each job: at most ${s.job.max_minutes} min on ${s.job.gpus} GPU(s), ${s.job.output_gb} GB of output, no network.`,
         `Budget: $${s.budget.agent_usd_per_day} a day and $${s.budget.agent_usd_total} in all for its sessions, ${s.budget.gpu_hours_per_day} GPU-hours a day, ${s.budget.max_jobs} jobs.`,
-        `${Math.round(s.exploration.share * 100)}% of its sessions explore; ${s.confirm_runs} confirm run(s) before a new best.`,
-        'The first job (the baseline) waits for your approval.',
+        `${Math.round(s.exploration.share * 100)}% of its sessions explore. A candidate is screened on one seed (it must beat the best by ${s.screen.margin}), then run ${s.screen.seeds} times against ${s.screen.seeds} runs of the best at the same budget${s.ladder.length ? `, at each size (${s.ladder.map((z) => z.name).join(', ')})` : ''}; it counts only past the seeds' spread.`,
+        `Kind: ${s.kind.replace('_', '-')}. The scorer reads only safetensors, npy/npz (numeric), csv, json, jsonl or txt predictions.`,
+        'The first job (the baseline) waits for your approval; so does any job with more than one GPU, an output quota over 20 GB or a lockfile change.',
         ...(pin ? ['The best starts over at the new version; the old log stays.'] : []),
       ],
       changes: [`version: ${pin?.version ?? '(none)'} -> ${now.pin.version}`, `commit: ${now.pin.commit.slice(0, 12)}`, ...Object.entries(now.pin.eval_files).map(([f, h]) => `eval ${f}: sha256 ${h.slice(0, 16)}`), ...Object.entries(now.pin.sources).map(([id, h]) => `data ${id}: sha256 ${h.slice(0, 16)}`)],
@@ -166,11 +205,23 @@ export function planExperiment(o: { site: ExpSite; events: StoredEvent[]; req: E
       if (!st.paused && !st.broken && !st.archived) throw new ExperimentsError(`${s.id} is not paused`);
       return { summary: [`Resumes ${s.id}: the next session starts at the next pass, within its budget.`], changes: ['paused: yes -> no'], digest: d };
     case 'approve':
-    case 'decline':
+    case 'decline': {
+      // A result held for review first: the owner accepts it (it counts) or rejects it (discarded), having read its
+      // run record, its change and the monitor's findings.
+      const held = st.entries.find((e) => e.decision === 'held');
+      if (held) {
+        const mon = events.filter((e) => e.type === 'experiment.monitor' && (e.payload as { study?: string; n?: number }).study === s.id && (e.payload as { n?: number }).n === held.n).map((e) => e.payload as { flagged: boolean; findings: string[] }).at(-1);
+        const diff = diffOf(site.repo, held.commit);
+        const s2 = (held.stage2 ?? []).map((x) => `size ${x.size + 1}: ${x.meanCandidate.toPrecision(5)} ± ${x.spread.toPrecision(3)} vs best ${x.meanBest.toPrecision(5)} (${x.seeds} seeds each; ${x.minutesCandidate.toFixed(1)} vs ${x.minutesBest.toFixed(1)} GPU-min)`);
+        return req.action === 'approve'
+          ? { summary: [`Accepts result #${held.n} (${held.hypothesis}): it becomes ${held.after === 'winner' ? 'a winner to combine onto the best' : 'the best'}.`, `Why it was held: ${held.why}`, ...s2, ...(mon ? [`Monitor: ${mon.flagged ? 'flagged' : 'nothing found'}${mon.findings.length ? `: ${mon.findings.join(' | ')}` : ''}`] : [])], changes: [`result #${held.n}: held -> accepted`, ...diff], digest: d }
+          : { summary: [`Rejects result #${held.n}: it is discarded and never counts.`], changes: [`result #${held.n}: held -> rejected`], digest: d };
+      }
       if (st.phase !== 'awaiting_approval' || !cur?.job) throw new ExperimentsError(`no job of ${s.id} is waiting for approval`);
       return req.action === 'approve'
         ? { summary: [`Approves job #${cur.n}: ${cur.hypothesis}`, `Why it waited: ${cur.approval.join('; ')}.`, `It runs for at most ${s.job.max_minutes} min on ${s.job.gpus} GPU(s); nothing else changes.`], changes: [`job ${cur.job}: waiting -> queued`], digest: d }
         : { summary: [`Declines job #${cur.n}: it never runs; the log records it as declined.`], changes: [`job ${cur.job}: waiting -> declined`], digest: d };
+    }
     case 'archive':
       if (st.phase === 'running') throw new ExperimentsError(`stop job #${cur?.n} first`);
       return { summary: [`Archives ${s.id}: it stops for good; its log stays readable.`], changes: [`${s.id}: started -> archived`], digest: digest(pins.text, 'archive') };
@@ -206,8 +257,9 @@ export function applyExperiment(o: { site: ExpSite; events: StoredEvent[]; req: 
     if ('error' in w) throw new ExperimentsError(w.error);
     emit('experiment.changed', { study: req.study, action: 'archive', by, role, detail });
   } else if (req.action === 'approve' || req.action === 'decline') {
-    const job = /^job (\S+):/.exec(plan.changes[0]!)![1]!;
-    emit('experiment.approval', { study: req.study, job, answer: req.action, by });
+    const held = /^result #(\d+): held/.exec(plan.changes[0]!);
+    if (held) log.append('experiment.verdict', { study: req.study, n: Number(held[1]), answer: req.action === 'approve' ? 'accept' : 'reject', by }, by);
+    else emit('experiment.approval', { study: req.study, job: /^job (\S+):/.exec(plan.changes[0]!)![1]!, answer: req.action, by });
   } else {
     emit('experiment.changed', { study: req.study, action: req.action, by, role, detail });
   }
