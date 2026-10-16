@@ -35,7 +35,7 @@ test('one GPU lock for test runs and experiment jobs: the same lock directory, g
   for (const v of ['GPU_LOCK_DIR', 'GPU_GROUP', 'GPU_MIN_SYSTEMD']) assert.equal(a.match(new RegExp(`^${v}=(\\S+)$`, 'm'))?.[1], b.match(new RegExp(`^${v}=(\\S+)$`, 'm'))?.[1], v);
 });
 
-const file: RootFile = { devices: [0], max_minutes: 60, gpu_hours_per_day: 8, output_gb: 50, env_network: false, sources: { 'train-set': { sha256: 'a'.repeat(64), visibility: 'job' }, 'eval-inputs': { sha256: 'b'.repeat(64), visibility: 'job' }, 'eval-labels': { sha256: 'c'.repeat(64), visibility: 'scorer' } } };
+const file: RootFile = { devices: [0], max_minutes: 60, gpu_hours_per_day: 8, output_gb: 50, env_network: false, tasks_max: 1024, memory_gb: 16, cpu_cores: 4, sources: { 'train-set': { sha256: 'a'.repeat(64), visibility: 'job' }, 'eval-inputs': { sha256: 'b'.repeat(64), visibility: 'job' }, 'eval-labels': { sha256: 'c'.repeat(64), visibility: 'scorer' } } };
 
 test('root\'s file: exactly the script\'s form reads back; anything else is off', () => {
   const t = rootFileText(file);
@@ -47,15 +47,15 @@ test('root\'s file: exactly the script\'s form reads back; anything else is off'
 });
 
 test('the spec: one line a value, NUL-ended; the record: the last line, its form checked', () => {
-  const s: JobSpec = { STUDY: 'example-speed', EVAL: 'e'.repeat(64), MINUTES: 10, GPUS: 1, OUTPUT_GB: 5, WAIT_MAX: 3600, LOCK: 'f'.repeat(64), DATA: ['train-set'], INPUTS: 'eval-inputs', LABELS: 'eval-labels', BUILD: 'true', PREFLIGHT: '', TRAIN: 'python train.py', PREDICT: 'python p.py', SCORE: 'python s.py', CONFIG: { lr: 0.01 }, SEED: 1 };
-  assert.match(specText(s), /^STUDY=example-speed\0EVAL=e+\0MINUTES=10\0/);
+  const s: JobSpec = { STUDY: 'example-speed', EVAL: 'e'.repeat(64), PREDICT_EVAL: 'none', METRIC: 'score', MINUTES: 10, GPUS: 1, OUTPUT_GB: 5, WAIT_MAX: 3600, LOCK: 'f'.repeat(64), DATA: ['train-set'], INPUTS: 'eval-inputs', LABELS: 'eval-labels', BUILD: 'true', PREFLIGHT: '', TRAIN: 'python train.py', PREDICT: 'python p.py', SCORE: 'python s.py', CONFIG: { lr: 0.01 }, SEED: 1 };
+  assert.match(specText(s), /^STUDY=example-speed\0EVAL=e+\0PREDICT_EVAL=none\0METRIC=score\0MINUTES=10\0/);
   assert.match(specText(s), /CONFIG=\{"lr":0\.01\}\0/);
   assert.throws(() => specText({ ...s, TRAIN: 'a\nb' }), /one line/);
-  const rec = (o: object) => `x\nworklane-exp: record ${JSON.stringify({ protocol: 1, job: 'j-1', outcome: 'scored', step: null, score: 2.5, gpu_seconds: 600, waited_s: 0, gpus: [0], output_kb: 1, ...o })}\n`;
+  const rec = (o: object) => `x\nworklane-exp: record ${JSON.stringify({ protocol: 2, timings: { train_ms: 1, predict_ms: 1, score_ms: 1 }, job: 'j-1', outcome: 'scored', step: null, score: 2.5, gpu_seconds: 600, waited_s: 0, gpus: [0], output_kb: 1, ...o })}\n`;
   assert.equal(readRecord(rec({}))?.score, 2.5);
   assert.equal(readRecord(rec({ outcome: 'scored', score: null })), null, 'scored needs a score');
   assert.equal(readRecord(rec({ outcome: 'crashed', score: 1 })), null, 'a crash has none');
-  assert.equal(readRecord(rec({ protocol: 2 })), null);
+  assert.equal(readRecord(rec({ protocol: 1 })), null);
   assert.equal(readRecord('nothing'), null);
 });
 
@@ -80,7 +80,8 @@ printf '%s\\n' "$@" > "${sd}/$n.argv"
 case "$*" in *-score-*) cat '${dir}/score' 2>/dev/null ;; esac
 exit 0`,
   );
-  for (const t of ['systemctl', 'chown', 'chgrp']) stub(t, 'exit 0');
+  for (const t of ['systemctl', 'chown', 'chgrp', 'mount', 'umount', 'mkfs.ext4']) stub(t, 'exit 0');
+  stub('mountpoint', 'exit 1');
   stub('getent', `[ "$1" = group ] && [ "$2" = worklane-gpu ] && { echo "worklane-gpu:x:1234:example-owner"; exit 0; }; [ "$1" = group ] && [ "$2" = worklane-gpu-dev ] && { echo "worklane-gpu-dev:x:1235:"; exit 0; }; [ "$1" = group ] && exit 2; exit 0`);
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
@@ -95,7 +96,7 @@ exit 0`,
 case "$p" in *gpu*) g=worklane-gpu ;; *eval-labels*) g=GRPS ;; *) g=GRP ;; esac
 printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 $g \\2/"`,
   );
-  for (const t of ['git', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'rm', 'find', 'du', 'chmod', 'printf', 'touch', 'mv']) {
+  for (const t of ['git', 'sha256sum', 'cut', 'mkdir', 'sh', 'cat', 'env', 'awk', 'sed', 'grep', 'tr', 'head', 'tail', 'sort', 'date', 'sleep', 'ls', 'dirname', 'rm', 'find', 'du', 'chmod', 'printf', 'touch', 'mv', 'cp', 'truncate', 'rmdir', 'python3']) {
     const p = real(t);
     if (p && !existsSync(join(bin, t))) symlinkSync(p, join(bin, t));
   }
@@ -150,7 +151,7 @@ printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 
     mkdirSync(join(base, 'ex', 'jobs', id, 'out'), { recursive: true });
     mkdirSync(join(base, 'ex', 'jobs', id, 'pred'), { recursive: true });
     mkdirSync(join(base, 'ex', 'jobs', id, 'logs'), { recursive: true });
-    const s: JobSpec = { STUDY: 'example-speed', EVAL: tree, MINUTES: 10, GPUS: 1, OUTPUT_GB: 5, WAIT_MAX: 60, LOCK: 'f'.repeat(64), DATA: ['train-set'], INPUTS: 'eval-inputs', LABELS: 'eval-labels', BUILD: 'build-env', PREFLIGHT: 'preflight-cmd', TRAIN: 'train-cmd', PREDICT: 'predict-cmd', SCORE: 'score-cmd', CONFIG: { lr: 0.01 }, SEED: 7, ...spec };
+    const s: JobSpec = { STUDY: 'example-speed', EVAL: tree, PREDICT_EVAL: 'none', METRIC: 'score', MINUTES: 10, GPUS: 1, OUTPUT_GB: 5, WAIT_MAX: 60, LOCK: 'f'.repeat(64), DATA: ['train-set'], INPUTS: 'eval-inputs', LABELS: 'eval-labels', BUILD: 'build-env', PREFLIGHT: 'preflight-cmd', TRAIN: 'train-cmd', PREDICT: 'predict-cmd', SCORE: 'score-cmd', CONFIG: { lr: 0.01 }, SEED: 7, ...spec };
     return spawnSync('/bin/bash', [helper, 'ex', 'job', id], { encoding: 'utf8', input: specText(s), env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });
   };
   const calls = () =>
@@ -164,7 +165,7 @@ printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 
   return { dir, base, job, calls, clear, writeRoot, score: (s: string) => writeFileSync(join(dir, 'score'), s) };
 }
 
-const unitOf = (argv: string[]) => argv.find((a) => a.startsWith('--unit='))!.replace(/^--unit=worklane-exp-ex-[a-z0-9-]+?-(build|preflight|train|predict|score)-\d+$/, '$1');
+const unitOf = (argv: string[]) => argv.find((a) => a.startsWith('--unit='))!.replace(/^--unit=worklane-exp-ex-[a-z0-9-]+?-(build|preflight|train|predict|gate|score)-\d+$/, '$1');
 const props = (argv: string[]) => argv.filter((a, i) => argv[i - 1] === '-p');
 
 test('a job: every step its own unit with no network; the scorer gets the labels and never the job\'s code; a job step never gets the labels', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {
@@ -175,7 +176,7 @@ test('a job: every step its own unit with no network; the scorer gets the labels
   const rec = readRecord(r.stdout);
   assert.deepEqual([rec?.outcome, rec?.score], ['scored', 2.75]);
   const cs = h.calls();
-  assert.deepEqual(cs.map(unitOf), ['build', 'preflight', 'train', 'predict', 'score']);
+  assert.deepEqual(cs.map(unitOf), ['build', 'preflight', 'train', 'predict', 'gate', 'score']);
   const labels = join(h.base, 'ex', 'data', 'eval-labels');
   const work = join(h.base, 'ex', 'jobs', 'example-speed-1', 'work');
   for (const argv of cs) {
@@ -184,7 +185,14 @@ test('a job: every step its own unit with no network; the scorer gets the labels
     assert.ok(p.includes(`TemporaryFileSystem=${h.base}:ro`), `${unitOf(argv)}: nothing of the state but its binds`);
     assert.ok(p.includes('PrivateDevices=yes') && p.includes('NoNewPrivileges=yes') && p.includes('ProtectSystem=strict'));
     const s = unitOf(argv);
-    if (s === 'score') {
+    if (s !== 'gate' && s !== 'score') assert.ok(argv.includes('--uid=GRP'), `${s}: the job user`);
+    // Root's limits on every step, systemd's, outside the job; nothing that starts or changes a unit is reachable.
+    assert.ok(p.includes('TasksMax=1024') && p.includes('MemoryMax=16G') && p.includes('CPUQuota=400%') && p.some((x) => x.startsWith('RuntimeMaxSec=')), `${s}: root's limits`);
+    const inacc = p.find((x) => x.startsWith('InaccessiblePaths='))!;
+    for (const x of ['/usr/local/libexec', '/usr/bin/sudo', '/usr/bin/systemd-run', '/run/dbus', '/run/systemd/private']) assert.ok(inacc.includes(`-${x}`), `${s}: ${x} unreachable`);
+    if (s === 'gate') {
+      assert.ok(!argv.some((a) => a.includes(labels) || a.includes(work) || a.includes('/cache/')), 'the gate reads the predictions only');
+    } else if (s === 'score') {
       assert.ok(argv.includes('--uid=wl-score-ex') || argv.some((a) => a === '--uid=GRPS'), 'the scorer user');
       assert.ok(p.includes(`BindReadOnlyPaths=${labels}`));
       assert.ok(!argv.some((a) => a.includes(work) || a.includes('/cache/')), 'no workspace, no environment');
@@ -227,4 +235,43 @@ test('the eval tree\'s hash: the engine and the helper agree', { skip: !linuxBas
   const fn = /^tree_hash\(\) \{.*\}$/m.exec(readFileSync(helperSrc, 'utf8'))![0];
   const got = spawnSync('bash', ['-c', `${fn}\ntree_hash "$1"`, '_', dir], { encoding: 'utf8' }).stdout.trim();
   assert.equal(got, evalTreeHash(files));
+});
+
+/** The helper's predictions gate, run here with this machine's python3 on fixture files (as the scorer user runs it). */
+function gate(files: Record<string, Buffer | string>) {
+  const src = /^PRED_GATE='([\s\S]*?)'$/m.exec(readFileSync(helperSrc, 'utf8'))![1]!;
+  const dir = mkdtempSync(join(tmpdir(), 'exp-gate-'));
+  for (const [n, b] of Object.entries(files)) writeFileSync(join(dir, n), b);
+  return spawnSync('python3', ['-I', '-c', src, dir], { encoding: 'utf8' });
+}
+const npyOf = (descr: string, body: Buffer) => {
+  const h = `{'descr': '${descr}', 'fortran_order': False, 'shape': (${body.length / 8},), }`.padEnd(118, ' ') + '\n';
+  return Buffer.concat([Buffer.from([0x93]), Buffer.from('NUMPY'), Buffer.from([1, 0]), Buffer.from([h.length & 255, h.length >> 8]), Buffer.from(h, 'latin1'), body]);
+};
+const hasPython = spawnSync('python3', ['-c', '1']).status === 0;
+
+test('the scorer never gets a pickle: a .pt checkpoint, or pickle bytes under any name, is refused before any load', { skip: !hasPython && 'python3' }, () => {
+  const pickle = Buffer.from([0x80, 0x04, 0x95, 0x05, 0, 0, 0, 0, 0, 0, 0, 0x8c, 0x01, 0x78, 0x94, 0x2e]);
+  for (const [name, body] of [['model.pt', pickle], ['preds.pkl', pickle], ['preds.json', pickle], ['weights.ckpt', 'x']] as const) {
+    const r = gate({ [name]: body });
+    assert.equal(r.status, 1, name);
+    assert.match(r.stdout, new RegExp(`REFUSED ${name.replace('.', '\\.')}:`), name);
+  }
+});
+
+test('an .npy with an object dtype is refused: that is pickle inside', { skip: !hasPython && 'python3' }, () => {
+  assert.match(gate({ 'p.npy': npyOf('|O', Buffer.alloc(8)) }).stdout, /REFUSED p\.npy: not a plain numeric array/);
+  assert.equal(gate({ 'p.npy': npyOf('<f8', Buffer.alloc(16)) }).status, 0, 'a float array is fine');
+});
+
+test('one predictions fixture per study kind passes the gate: supervised CSV, self-supervised .npy, unsupervised JSON, generative JSONL, and safetensors', { skip: !hasPython && 'python3' }, () => {
+  const st = (() => {
+    const h = Buffer.from(JSON.stringify({ w: { dtype: 'F32', shape: [2], data_offsets: [0, 8] } }));
+    const n = Buffer.alloc(8);
+    n.writeBigUInt64LE(BigInt(h.length));
+    return Buffer.concat([n, h, Buffer.alloc(8)]);
+  })();
+  const r = gate({ 'labels.csv': 'id,label\n1,a\n', 'futures.npy': npyOf('<f4', Buffer.alloc(16)), 'clusters.json': '{"1": 0}', 'samples.jsonl': '{"text": "x"}\n', 'emb.safetensors': st });
+  assert.equal(r.status, 0, r.stdout);
+  assert.match(r.stdout, /pred-format: ok/);
 });

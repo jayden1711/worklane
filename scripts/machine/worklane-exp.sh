@@ -23,7 +23,14 @@
 # /home or /root, private /tmp, no devices but the granted GPU's, no new privileges) and, more strictly:
 #   - TemporaryFileSystem=$BASE:ro, then binds of exactly what the step needs. Other instances, other jobs, the labels,
 #     the eval copy and the data a step isn't given don't exist inside it.
-#   - PrivateNetwork=yes for every step (the environment build too, unless root's file says env_network: true).
+#   - PrivateNetwork=yes for every step (the environment build too, unless root's file says env_network: true), and
+#     the host's egress rule for these users (scripts/setup/egress-firewall.sh) as a second layer.
+#   - Root's limits: RuntimeMaxSec (max_minutes), TasksMax, MemoryMax (no swap) and CPUQuota, all systemd's, outside
+#     the job; its outputs on a loop-mounted volume of exactly its output quota (the kernel stops writes at the cap).
+#   - No way to start or change anything outside itself: every root helper, sudo, su, pkexec, systemd-run, systemctl
+#     and the systemd and D-Bus sockets are inaccessible, and NoNewPrivileges holds.
+#   - Timings (train_ms, predict_ms, score_ms) are this helper's own clock around each unit: a timing metric is never
+#     anything the job printed or measured.
 #   - The score step runs the sealed eval copy as the scorer user with the predictions and the labels, and never the
 #     job's workspace, environment or code: a job can't reach the process or the user that scores it.
 # GPU: the same per-GPU locks as the test runs (/run/worklane/gpu/<N>.lock; the lock functions below are the test-run
@@ -38,7 +45,7 @@ set -euo pipefail
 # Set here, never inherited.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=1
+PROTOCOL=2
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-exp
@@ -50,7 +57,72 @@ GPU_GROUP=worklane-gpu
 GPU_DEV_GROUP=worklane-gpu-dev
 DEV=/dev
 GPU_MIN_SYSTEMD=255
+# What a step must never reach to start or change anything outside itself: every root helper, sudo and its kin, and
+# systemd's and D-Bus's sockets (no new unit, no property change, no relaunch). NoNewPrivileges stops setuid anyway.
+NO_EXEC=(/usr/local/libexec /usr/bin/sudo /usr/bin/su /usr/bin/pkexec /usr/bin/systemd-run /usr/bin/systemctl /run/dbus /run/systemd/private /var/run/dbus)
 PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /var/lib/worklane-test /etc/worklane /etc/sudoers.d /root /run/docker.sock /var/run/docker.sock)
+
+# The predictions' format gate, run before the scorer in its own unit as the scorer user (python3 -I, no network,
+# the predictions read-only): every file must be one the scorer may read without running anything. It reads bytes and
+# headers only; it never loads, unpickles or imports a file. Allowed: .safetensors (its JSON header's dtypes plain
+# numbers), .npy and .npz (numeric dtypes only: an object dtype is pickle), .csv, .json, .jsonl, .txt (UTF-8 text).
+# Anything else (pickle, .pt, .pth, .ckpt, a zip of anything but .npy) is refused by name, and the score never runs.
+PRED_GATE='import json, os, re, struct, sys, zipfile
+root = sys.argv[1]
+TEXT = (".csv", ".json", ".jsonl", ".txt")
+NUM = re.compile(r"[<>|=]?[biuf][1-8]$|[<>|=]?c(8|16)$|[<>|=]?b1$")
+ST = {"BOOL", "U8", "I8", "U16", "I16", "U32", "I32", "U64", "I64", "F16", "BF16", "F32", "F64", "F8_E4M3", "F8_E5M2"}
+def npy(head, name):
+    if head[:6] != b"\x93NUMPY":
+        raise ValueError("not an .npy file")
+    major = head[6]
+    n = struct.unpack("<H", head[8:10])[0] if major == 1 else struct.unpack("<I", head[8:12])[0]
+    off = 10 if major == 1 else 12
+    h = head[off:off + n].decode("latin1")
+    m = re.search(r"[\x27\x22]descr[\x27\x22]\s*:\s*[\x27\x22]([^\x27\x22]+)[\x27\x22]", h)
+    if not m or not NUM.match(m.group(1)):
+        raise ValueError("not a plain numeric array (object, structured or unknown dtype)")
+def check(path, name):
+    low = name.lower()
+    with open(path, "rb") as f:
+        head = f.read(65536)
+    if low.endswith(".npy"):
+        npy(head, name)
+    elif low.endswith(".npz"):
+        with zipfile.ZipFile(path) as z:
+            for i in z.infolist():
+                if not i.filename.endswith(".npy"):
+                    raise ValueError("an .npz member that is not .npy: " + i.filename)
+                with z.open(i) as m:
+                    npy(m.read(65536), i.filename)
+    elif low.endswith(".safetensors"):
+        n = struct.unpack("<Q", head[:8])[0]
+        if n > 100000000:
+            raise ValueError("header too large")
+        with open(path, "rb") as f:
+            f.seek(8)
+            h = json.loads(f.read(n))
+        for k, v in h.items():
+            if k != "__metadata__" and v.get("dtype") not in ST:
+                raise ValueError("tensor " + k + " has dtype " + str(v.get("dtype")))
+    elif low.endswith(TEXT):
+        if b"\x00" in head:
+            raise ValueError("binary data in a text file")
+        head.decode("utf-8", "strict") if len(head) < 65536 else None
+    else:
+        raise ValueError("not an allowed format (safetensors, npy, npz, csv, json, jsonl, txt)")
+bad = 0
+for d, _, fs in os.walk(root):
+    for fn in fs:
+        p = os.path.join(d, fn)
+        name = os.path.relpath(p, root)
+        try:
+            check(p, name)
+        except Exception as e:
+            print("REFUSED " + name + ": " + str(e)[:200])
+            bad = 1
+print("pred-format: " + ("refused" if bad else "ok"))
+sys.exit(bad)'
 
 die() { echo "worklane-exp: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
@@ -63,7 +135,7 @@ rfile="$ROOT_DIR/$name.json"
 # The coordinator of instance <name> only (sudo sets SUDO_USER; root running it by hand has none).
 if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "$coord" ]; then die "$SUDO_USER may not use $name's experiments"; fi
 if [ "$cmd" = version ]; then [ "$#" -eq 2 ] || die "usage: version"; echo "$PROTOCOL"; exit 0; fi
-for tool in runuser systemd-run systemctl git getent install id stat sha256sum find chown chmod du; do
+for tool in runuser systemd-run systemctl git getent install id stat sha256sum find chown chmod du cp mount umount mountpoint truncate mkfs.ext4 python3; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool (PATH=$PATH)"
 done
 for u in "$juser" "$suser"; do id -u "$u" >/dev/null 2>&1 || { echo "worklane-exp: no user $u; run scripts/setup/experiments.sh install $name" >&2; exit 1; }; done
@@ -77,7 +149,7 @@ job_dir() { printf '%s/jobs/%s' "$root" "$1"; }
 # Exactly the form scripts/setup/experiments.sh writes (src/experiments/root-file.ts reads the same): anything else
 # is no experiments, never a guess. Sets R_DEVICES (indices), R_MAX_MIN, R_GPU_H, R_OUT_GB, R_ENV_NET (0/1), and
 # R_SRC_SHA[id], R_SRC_VIS[id]; or says why not and exits 1.
-R_DEVICES=() R_MAX_MIN=0 R_GPU_H=0 R_OUT_GB=0 R_ENV_NET=0
+R_DEVICES=() R_MAX_MIN=0 R_GPU_H=0 R_OUT_GB=0 R_ENV_NET=0 R_TASKS=0 R_MEM_GB=0 R_CPUS=0
 declare -A R_SRC_SHA=() R_SRC_VIS=()
 read_root() {
   local got lines=() l n i bad
@@ -87,7 +159,7 @@ read_root() {
   got="$(stat -c '%U %a' -- "$ROOT_DIR")"; [[ "$got" =~ ^$(id -un)\ [0-7][0145][0145]$ ]] || { echo "worklane-exp: $ROOT_DIR is $got: only $(id -un) may write it" >&2; exit 1; }
   while IFS= read -r l || [ -n "$l" ]; do lines+=("$l"); done < "$rfile"
   n="${#lines[@]}"
-  [ "$n" -ge 9 ] && [ "$n" -le 80 ] || { echo "worklane-exp: $bad" >&2; exit 1; }
+  [ "$n" -ge 12 ] && [ "$n" -le 80 ] || { echo "worklane-exp: $bad" >&2; exit 1; }
   [ "${lines[0]}" = '{' ] && [ "${lines[1]}" = '  "version": 1,' ] && [ "${lines[$((n - 1))]}" = '}' ] || { echo "worklane-exp: $bad" >&2; exit 1; }
   [[ "${lines[2]}" =~ ^\ \ \"devices\":\ \[([0-9]{1,2}(,\ [0-9]{1,2}){0,15})?\],$ ]] || { echo "worklane-exp: $bad (devices)" >&2; exit 1; }
   IFS=', ' read -r -a R_DEVICES <<<"${BASH_REMATCH[1]}"
@@ -99,10 +171,17 @@ read_root() {
   R_OUT_GB="${BASH_REMATCH[1]}"
   [[ "${lines[6]}" =~ ^\ \ \"env_network\":\ (true|false),$ ]] || { echo "worklane-exp: $bad (env_network)" >&2; exit 1; }
   [ "${BASH_REMATCH[1]}" = true ] && R_ENV_NET=1 || R_ENV_NET=0
-  if [ "$n" -eq 9 ] && [ "${lines[7]}" = '  "sources": {}' ]; then return 0; fi
-  [ "$n" -ge 11 ] || { echo "worklane-exp: $bad (sources)" >&2; exit 1; }
-  [ "${lines[7]}" = '  "sources": {' ] && [ "${lines[$((n - 2))]}" = '  }' ] || { echo "worklane-exp: $bad (sources)" >&2; exit 1; }
-  for ((i = 8; i < n - 2; i++)); do
+  # The unit's own limits, enforced by systemd outside the job: processes, memory, CPUs.
+  [[ "${lines[7]}" =~ ^\ \ \"tasks_max\":\ ([1-9][0-9]{1,5}),$ ]] && [ "${BASH_REMATCH[1]}" -ge 16 ] && [ "${BASH_REMATCH[1]}" -le 100000 ] || { echo "worklane-exp: $bad (tasks_max: 16 to 100000)" >&2; exit 1; }
+  R_TASKS="${BASH_REMATCH[1]}"
+  [[ "${lines[8]}" =~ ^\ \ \"memory_gb\":\ ([1-9][0-9]{0,3}),$ ]] || { echo "worklane-exp: $bad (memory_gb: 1 to 9999)" >&2; exit 1; }
+  R_MEM_GB="${BASH_REMATCH[1]}"
+  [[ "${lines[9]}" =~ ^\ \ \"cpu_cores\":\ ([1-9][0-9]{0,2}),$ ]] || { echo "worklane-exp: $bad (cpu_cores: 1 to 999)" >&2; exit 1; }
+  R_CPUS="${BASH_REMATCH[1]}"
+  if [ "$n" -eq 12 ] && [ "${lines[10]}" = '  "sources": {}' ]; then return 0; fi
+  [ "$n" -ge 14 ] || { echo "worklane-exp: $bad (sources)" >&2; exit 1; }
+  [ "${lines[10]}" = '  "sources": {' ] && [ "${lines[$((n - 2))]}" = '  }' ] || { echo "worklane-exp: $bad (sources)" >&2; exit 1; }
+  for ((i = 11; i < n - 2; i++)); do
     [[ "${lines[$i]}" =~ ^\ \ \ \ \"([a-z][a-z0-9-]{0,39})\":\ \{\ \"sha256\":\ \"([0-9a-f]{64})\",\ \"visibility\":\ \"(job|scorer)\"\ \}(,?)$ ]] || { echo "worklane-exp: $bad (line $((i + 1)))" >&2; exit 1; }
     if [ "$i" -lt $((n - 3)) ]; then [ "${BASH_REMATCH[4]}" = , ]; else [ -z "${BASH_REMATCH[4]}" ]; fi || { echo "worklane-exp: $bad (line $((i + 1)))" >&2; exit 1; }
     [ -z "${R_SRC_SHA[${BASH_REMATCH[1]}]:-}" ] || { echo "worklane-exp: $bad (${BASH_REMATCH[1]} twice)" >&2; exit 1; }
@@ -249,9 +328,11 @@ protected_paths() {
 }
 
 ENV_FILE=
+VOL_MOUNT=
 cleanup() {
   if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
   gpu_unlock
+  if [ -n "$VOL_MOUNT" ]; then umount "$VOL_MOUNT" 2>/dev/null || umount -l "$VOL_MOUNT" 2>/dev/null || true; fi
 }
 
 # One step as a unit: unit <job> <step> <user> <seconds> <log> <network 0|1> -- <extra -p ...>... -- <command>
@@ -266,16 +347,18 @@ step_unit() {
   shift
   local cmd="$1"
   inaccessible="-$GPU_LOCK_DIR"
-  while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
+  while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths; printf '%s\n' "${NO_EXEC[@]}")
   unit="worklane-exp-$name-$job-$step-$$"
-  local -a netp=()
+  local -a netp=() lim=()
   [ "$net" = 1 ] || netp=(-p PrivateNetwork=yes)
+  # Root's limits for this instance's steps, enforced by systemd outside the job: processes, memory (no swap), CPUs.
+  [ "$R_TASKS" -gt 0 ] && lim=(-p "TasksMax=$R_TASKS" -p "MemoryMax=${R_MEM_GB}G" -p MemorySwapMax=0 -p "CPUQuota=$((R_CPUS * 100))%")
   local -a run=(systemd-run --wait --pipe --collect --expand-environment=no -p "EnvironmentFile=$ENV_FILE"
     --unit="$unit" --slice="$SLICE" --uid="$u" --gid="$u"
     -p RuntimeMaxSec="$secs" -p KillMode=control-group -p UMask=0077
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
-    ${netp[@]+"${netp[@]}"}
+    ${netp[@]+"${netp[@]}"} ${lim[@]+"${lim[@]}"}
     -p "TemporaryFileSystem=$BASE:ro"
     ${extra[@]+"${extra[@]}"}
     -p "InaccessiblePaths=$inaccessible"
@@ -328,7 +411,7 @@ create() {
   d="$(job_dir "$job")"
   [ ! -e "$d" ] || die "job $job exists"
   install -d -o root -g "$coord" -m 0750 "$root/jobs" "$d" "$d/logs"
-  install -d -o "$juser" -g "$juser" -m 0700 "$d/work" "$d/out" "$d/pred"
+  install -d -o "$juser" -g "$juser" -m 0700 "$d/work"
   # The bundle, then the clone as the job user inside a unit (its own binds, no network): the job user can't traverse
   # the job's directory (root's, 0750) on the host, and the workspace is made where every step will see it.
   cat > "$d/work/.wl-bundle"
@@ -349,15 +432,17 @@ read_spec() {
   while IFS= read -r -d '' kv; do
     [[ "$kv" == *=* ]] || die "spec: NAME=value, got ${kv%%=*}"
     k="${kv%%=*}" v="${kv#*=}"
-    [[ "$k" =~ ^(STUDY|EVAL|MINUTES|GPUS|OUTPUT_GB|WAIT_MAX|LOCK|DATA|INPUTS|LABELS|BUILD|PREFLIGHT|TRAIN|PREDICT|SCORE|CONFIG|SEED)$ ]] || die "spec: unknown $k"
+    [[ "$k" =~ ^(STUDY|EVAL|PREDICT_EVAL|METRIC|MINUTES|GPUS|OUTPUT_GB|WAIT_MAX|LOCK|DATA|INPUTS|LABELS|BUILD|PREFLIGHT|TRAIN|PREDICT|SCORE|CONFIG|SEED)$ ]] || die "spec: unknown $k"
     [ -z "${SPEC[$k]+x}" ] || die "spec: $k twice"
     [[ "$v" != *$'\n'* ]] || die "spec: $k: one line"
     [ "${#v}" -le 4000 ] || die "spec: $k: at most 4000 characters"
     SPEC[$k]="$v"
   done
-  for k in STUDY EVAL MINUTES GPUS OUTPUT_GB WAIT_MAX LOCK DATA INPUTS LABELS BUILD PREFLIGHT TRAIN PREDICT SCORE CONFIG SEED; do [ -n "${SPEC[$k]+x}" ] || die "spec: no $k"; done
+  for k in STUDY EVAL PREDICT_EVAL METRIC MINUTES GPUS OUTPUT_GB WAIT_MAX LOCK DATA INPUTS LABELS BUILD PREFLIGHT TRAIN PREDICT SCORE CONFIG SEED; do [ -n "${SPEC[$k]+x}" ] || die "spec: no $k"; done
   [[ "${SPEC[STUDY]}" =~ ^[a-z][a-z0-9-]{0,39}$ ]] || die "spec: STUDY"
   valid_hex "${SPEC[EVAL]}"; valid_hex "${SPEC[LOCK]}"
+  [ "${SPEC[PREDICT_EVAL]}" = none ] || valid_hex "${SPEC[PREDICT_EVAL]}"
+  [[ "${SPEC[METRIC]}" =~ ^(score|train_ms|predict_ms)$ ]] || die "spec: METRIC: score, train_ms or predict_ms"
   [[ "${SPEC[MINUTES]}" =~ ^[1-9][0-9]{0,3}$ ]] && [ "${SPEC[MINUTES]}" -le "$R_MAX_MIN" ] || die "spec: MINUTES ${SPEC[MINUTES]} is above root's $R_MAX_MIN (or not a number)"
   [[ "${SPEC[GPUS]}" =~ ^[0-9]{1,2}$ ]] || die "spec: GPUS"
   [[ "${SPEC[OUTPUT_GB]}" =~ ^[1-9][0-9]{0,4}$ ]] && [ "${SPEC[OUTPUT_GB]}" -le "$R_OUT_GB" ] || die "spec: OUTPUT_GB ${SPEC[OUTPUT_GB]} is above root's $R_OUT_GB (or not a number)"
@@ -379,7 +464,8 @@ write_env() {
 jstr() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"; }
 
 job() {
-  local job="${1:-}" d ev cache r rc res locked waited=0 score="" outcome="" step="" gpu_s=0 t0="" used_kb cap_kb id
+  local job="${1:-}" d ev pev cache r rc res locked waited=0 score="" outcome="" step="" gpu_s=0 t0="" used_kb=0 id vol img
+  local train_ms=0 predict_ms=0 score_ms=0 t
   [ "$#" -eq 1 ] || die "usage: job <job> (the spec on stdin)"
   valid_job "$job"
   read_root
@@ -390,10 +476,14 @@ job() {
   d="$(job_dir "$job")"
   [ -d "$d/work" ] || die "no job $job (create it first)"
   [ ! -e "$d/record.json" ] || die "job $job has a record; it never runs again"
+  # The scorer's copy (score) and the job's (predict) are separate sealed trees: a job never sees the scorer's code.
   ev="$root/evals/${SPEC[EVAL]}"
   [ -e "$ev/.sealed" ] || die "eval ${SPEC[EVAL]} is not sealed"
+  pev=""
+  if [ "${SPEC[PREDICT_EVAL]}" != none ]; then pev="$root/evals/${SPEC[PREDICT_EVAL]}"; [ -e "$pev/.sealed" ] || die "eval ${SPEC[PREDICT_EVAL]} is not sealed"; fi
+  [ "${SPEC[PREDICT_EVAL]}" != "${SPEC[EVAL]}" ] || die "the predict copy can't be the scorer's"
   # Every source resolved and checked before anything runs.
-  local -a jbind=() sbind=()
+  local -a jbind=()
   local data_paths="" ids
   IFS=, read -r -a ids <<<"${SPEC[DATA]}"
   for id in ${ids[@]+"${ids[@]}"}; do r="$(source_dir "$id" job)"; jbind+=(-p "BindReadOnlyPaths=$r"); data_paths="$data_paths${data_paths:+:}$r"; done
@@ -401,8 +491,18 @@ job() {
   inputs="$(source_dir "${SPEC[INPUTS]}" job)"
   labels="$(source_dir "${SPEC[LABELS]}" scorer)"
   trap cleanup EXIT
+  # The output quota: a loop-mounted file system of exactly OUTPUT_GB, so the kernel stops a job's writes at the cap
+  # (ENOSPC), whatever the job does. Its outputs are copied out when it ends; the image goes.
+  vol="$d/vol" img="$d/vol.img"
+  rm -f -- "$img"; truncate -s "${SPEC[OUTPUT_GB]}G" "$img"
+  mkfs.ext4 -q -F -m 0 -O ^has_journal "$img" >/dev/null || die "can't make $job's output volume"
+  install -d -o root -g root -m 0700 "$vol"
+  mount -o loop,nosuid,nodev "$img" "$vol" || die "can't mount $job's output volume"
+  VOL_MOUNT="$vol"
+  rm -rf -- "$vol/lost+found"
+  install -d -o "$juser" -g "$juser" -m 0700 "$vol/out" "$vol/pred"
   cache="$root/cache/${SPEC[LOCK]}"
-  declare -gA VARS=([DATA]="$data_paths" [OUT]="$d/out" [PRED]="$d/pred" [EVAL_INPUTS]="$inputs" [LABELS]="$labels" [EVAL_CODE]="$ev/files" [ENV]="$cache" [CONFIG]="$d/config.json" [SEED]="${SPEC[SEED]}" [WORK]="$d/work")
+  declare -gA VARS=([DATA]="$data_paths" [OUT]="$vol/out" [PRED]="$vol/pred" [EVAL_INPUTS]="$inputs" [LABELS]="$labels" [EVAL_CODE]="${pev:+$pev/files}" [ENV]="$cache" [CONFIG]="$d/config.json" [SEED]="${SPEC[SEED]}" [WORK]="$d/work")
   printf '%s\n' "${SPEC[CONFIG]}" > "$d/config.json"; chmod 0644 "$d/config.json"
   write_env "$job"
   local -a work=(-p "BindReadOnlyPaths=$d/work" -p "BindReadOnlyPaths=$d/config.json" -p "WorkingDirectory=$d/work")
@@ -434,37 +534,62 @@ job() {
       gpu=("${GPU_PROPS[@]}")
     fi
   fi
+  # Each step's time is this helper's own clock around the unit, never anything the job prints or measures.
   if [ -z "$outcome" ]; then
-    t0="$(date +%s)"
-    read -r rc res < <(step_unit "$job" train "$juser" $((mins * 60)) "$d/logs/train.log" 0 -- "${work[@]}" "${envb[@]}" ${jbind[@]+"${jbind[@]}"} -p "BindPaths=$d/out" -p "ReadWritePaths=$d/out" ${gpu[@]+"${gpu[@]}"} -- "${SPEC[TRAIN]}")
+    t0="$(date +%s)"; t="$(date +%s%N)"
+    read -r rc res < <(step_unit "$job" train "$juser" $((mins * 60)) "$d/logs/train.log" 0 -- "${work[@]}" "${envb[@]}" ${jbind[@]+"${jbind[@]}"} -p "BindPaths=$vol/out" -p "ReadWritePaths=$vol/out" ${gpu[@]+"${gpu[@]}"} -- "${SPEC[TRAIN]}")
+    train_ms=$((($(date +%s%N) - t) / 1000000))
     if [ "$rc" -ne 0 ]; then step=train; [ "$res" = timeout ] || [ "$res" = signal ] && outcome=stopped || outcome=crashed; fi
   fi
   if [ -z "$outcome" ]; then
-    read -r rc res < <(step_unit "$job" predict "$juser" $(((mins * 6 > 120) ? mins * 6 : 120)) "$d/logs/predict.log" 0 -- "${work[@]}" "${envb[@]}" -p "BindReadOnlyPaths=$d/out" -p "BindReadOnlyPaths=$inputs" -p "BindReadOnlyPaths=$ev/files" -p "BindPaths=$d/pred" -p "ReadWritePaths=$d/pred" ${gpu[@]+"${gpu[@]}"} -- "${SPEC[PREDICT]}")
+    local -a pevb=()
+    [ -z "$pev" ] || pevb=(-p "BindReadOnlyPaths=$pev/files")
+    t="$(date +%s%N)"
+    read -r rc res < <(step_unit "$job" predict "$juser" $(((mins * 6 > 120) ? mins * 6 : 120)) "$d/logs/predict.log" 0 -- "${work[@]}" "${envb[@]}" -p "BindReadOnlyPaths=$vol/out" -p "BindReadOnlyPaths=$inputs" ${pevb[@]+"${pevb[@]}"} -p "BindPaths=$vol/pred" -p "ReadWritePaths=$vol/pred" ${gpu[@]+"${gpu[@]}"} -- "${SPEC[PREDICT]}")
+    predict_ms=$((($(date +%s%N) - t) / 1000000))
     if [ "$rc" -ne 0 ]; then step=predict; [ "$res" = timeout ] || [ "$res" = signal ] && outcome=stopped || outcome=crashed; fi
   fi
   [ -z "${t0:-}" ] || gpu_s=$(( ${#GPU_IDX[@]} * ($(date +%s) - t0) ))
   gpu_unlock
-  # 4. Seal: nothing but plain files and directories; root's after; within the output cap.
-  find "$d/out" "$d/pred" -mindepth 1 \( ! -type f ! -type d \) -delete
+  # 4. Seal: nothing but plain files and directories, copied off the volume; root's after.
+  find "$vol/out" "$vol/pred" -mindepth 1 \( ! -type f ! -type d \) -delete
+  used_kb="$(du -sk "$vol/out" "$vol/pred" | awk '{ s += $1 } END { print s + 0 }')"
+  install -d -o root -g root -m 0700 "$d/out" "$d/pred"
+  cp -R --no-preserve=ownership,mode -- "$vol/out/." "$d/out/"
+  cp -R --no-preserve=ownership,mode -- "$vol/pred/." "$d/pred/"
+  # Only once the volume is unmounted is $vol a plain directory again (rm never crosses into a mount: --one-file-system).
+  umount "$vol" && VOL_MOUNT= && rm -f -- "$img" && rm -rf --one-file-system -- "$vol"
   chown -R root:"$coord" "$d/out"; chmod -R u=rwX,g=rX,o= "$d/out"
   chown -R root:"$suser" "$d/pred"; chmod -R u=rwX,g=rX,o= "$d/pred"
-  used_kb="$(du -sk "$d/out" "$d/pred" | awk '{ s += $1 } END { print s + 0 }')"
-  cap_kb=$((${SPEC[OUTPUT_GB]} * 1024 * 1024))
-  if [ "$used_kb" -gt "$cap_kb" ]; then rm -rf --one-file-system -- "$d/out" "$d/pred"; outcome=crashed; step=output-cap; fi
-  # 5. Score: the scorer, the sealed eval copy, the predictions and the labels; never the job's workspace or code.
+  # 5. The predictions' format gate (PRED_GATE), then the score: the scorer, its sealed copy, the predictions and
+  # the labels; never the job's workspace, code or copy. A refused file means no score: the scorer never reads it.
   if [ -z "$outcome" ]; then
+    # The step's variables again, with PRED where the sealed predictions are now (the volume is gone).
+    VARS[PRED]="$d/pred"; rm -f -- "$ENV_FILE"; write_env "$job"
+    ( umask 022; printf '%s\n' "$PRED_GATE" > "$root/pred-gate.py" ); chown root:root "$root/pred-gate.py"; chmod 0644 "$root/pred-gate.py"
+    read -r rc res < <(step_unit "$job" gate "$suser" 120 "$d/logs/gate.log" 0 -- -p "BindReadOnlyPaths=$d/pred" -p "BindReadOnlyPaths=$root/pred-gate.py" -- "exec python3 -I $root/pred-gate.py \"\$PRED\"")
+    [ "$rc" -eq 0 ] || { outcome=crashed; step=pred-format; }
+  fi
+  if [ -z "$outcome" ]; then
+    t="$(date +%s%N)"
     read -r rc res < <(step_unit "$job" score "$suser" 300 "$d/logs/score.log" 0 -- -p "BindReadOnlyPaths=$ev/files" -p "BindReadOnlyPaths=$labels" -p "BindReadOnlyPaths=$d/pred" -p "WorkingDirectory=$ev/files" -- "${SPEC[SCORE]}")
+    score_ms=$((($(date +%s%N) - t) / 1000000))
     if [ "$rc" -ne 0 ]; then outcome=crashed; step=score
     else
-      score="$(grep -E '^score=-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,16})?([eE][-+]?[0-9]{1,3})?$' "$d/logs/score.log" | sed 's/^score=//' || true)"
-      if [ "$(printf '%s\n' "$score" | grep -c . || true)" -ne 1 ]; then score=""; outcome=crashed; step=score-unreadable; else outcome=scored; fi
+      case "${SPEC[METRIC]}" in
+        # A timing metric is this helper's measurement; the scorer only had to pass (exit 0) on the predictions.
+        train_ms) score="$train_ms"; outcome=scored ;;
+        predict_ms) score="$predict_ms"; outcome=scored ;;
+        *)
+          score="$(grep -E '^score=-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,16})?([eE][-+]?[0-9]{1,3})?$' "$d/logs/score.log" | sed 's/^score=//' || true)"
+          if [ "$(printf '%s\n' "$score" | grep -c . || true)" -ne 1 ]; then score=""; outcome=crashed; step=score-unreadable; else outcome=scored; fi ;;
+      esac
     fi
   fi
   chown root:"$coord" "$d"/logs/*.log 2>/dev/null || true; chmod 0640 "$d"/logs/*.log 2>/dev/null || true
   rm -rf --one-file-system -- "$d/work"
   local rec
-  rec="{\"protocol\":$PROTOCOL,\"job\":$(jstr "$job"),\"outcome\":$(jstr "$outcome"),\"step\":$([ -n "$step" ] && jstr "$step" || echo null),\"score\":${score:-null},\"gpu_seconds\":$gpu_s,\"waited_s\":$waited,\"gpus\":[$(IFS=,; echo "${GPU_IDX[*]:-}")],\"output_kb\":$used_kb}"
+  rec="{\"protocol\":$PROTOCOL,\"job\":$(jstr "$job"),\"outcome\":$(jstr "$outcome"),\"step\":$([ -n "$step" ] && jstr "$step" || echo null),\"score\":${score:-null},\"gpu_seconds\":$gpu_s,\"waited_s\":$waited,\"gpus\":[$(IFS=,; echo "${GPU_IDX[*]:-}")],\"output_kb\":$used_kb,\"timings\":{\"train_ms\":$train_ms,\"predict_ms\":$predict_ms,\"score_ms\":$score_ms}}"
   printf '%s\n' "$rec" > "$d/record.json"; chown root:"$coord" "$d/record.json"; chmod 0640 "$d/record.json"
   echo "worklane-exp: record $rec"
 }
@@ -485,6 +610,8 @@ wipe() {
   valid_job "$job"
   d="$(job_dir "$job")"
   stop_job "$job" >/dev/null
+  if mountpoint -q "$d/vol" 2>/dev/null; then umount "$d/vol" 2>/dev/null || umount -l "$d/vol" 2>/dev/null || true; fi
+  rm -f -- "$d/vol.img"; rmdir -- "$d/vol" 2>/dev/null || true
   rm -rf --one-file-system -- "$d/work" "$d/config.json"
   rm -f -- "$ENV_DIR/$name.$job."*
   echo "wiped $job"
@@ -518,7 +645,7 @@ check() {
     done < <(echo "$root/jobs"; echo "$GPU_LOCK_DIR"; find "$root/data" -mindepth 1 -maxdepth 1 -type d ! -group "$u" 2>/dev/null; true)
     # Inside the sandbox: the paths come in a variable (the step's environment file), never in the command.
     ENV_FILE="$ENV_DIR/$name.check.$$"
-    ( umask 077; printf 'PROBE="%s"\n' "$( (protected_paths; echo "$root"; echo "$GPU_LOCK_DIR") | tr '\n' ':')" > "$ENV_FILE" )
+    ( umask 077; printf 'PROBE="%s"\n' "$( (protected_paths; printf '%s\n' "${NO_EXEC[@]}"; echo "$root"; echo "$GPU_LOCK_DIR") | tr '\n' ':')" > "$ENV_FILE" )
     log="$(mktemp)"
     read -r rc res < <(step_unit check "probe-$u" "$u" 60 "$log" 0 -- -- 'n=0; IFS=: read -r -a ps <<< "$PROBE"; for p in "${ps[@]}"; do [ -n "$p" ] && [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ]; then echo "open $p"; n=1; fi; done; if (exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null; then echo network; n=1; fi; echo probed; exit $n')
     rm -f "$ENV_FILE"; ENV_FILE=

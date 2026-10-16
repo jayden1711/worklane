@@ -2,7 +2,8 @@
 # As root (review it first): experiment jobs for one instance (docs/experiments.md). Server mode only.
 #
 #   bash scripts/setup/experiments.sh install <name> [--memory-max 8G] [--cpu-weight 10]
-#   bash scripts/setup/experiments.sh set <name> --devices 0 --max-minutes 60 --gpu-hours 8 --output-gb 50 [--env-network no]
+#   bash scripts/setup/experiments.sh set <name> --devices 0 --max-minutes 20 --gpu-hours 8 --output-gb 50 [--env-network no]
+#                                        [--tasks-max 1024] [--memory-gb 16] [--cpu-cores 4]
 #   bash scripts/setup/experiments.sh data hash <path>                 the sha256 to approve (changes nothing; no root)
 #   bash scripts/setup/experiments.sh data add <name> <id> --from <path> --sha256 <hex> --visibility job|scorer
 #   bash scripts/setup/experiments.sh data remove <name> <id>
@@ -32,7 +33,7 @@ here="$(cd "$(dirname "$0")" && pwd)"
 machine_dir="$here/../machine"
 
 usage="usage: experiments.sh [--print] install <name> [options] | set <name> [options] | data hash <path> | data add <name> <id> --from <path> --sha256 <hex> --visibility job|scorer | data remove <name> <id> | check <name> | status <name> | remove <name> | update-helper"
-print="" yes="" devices_set="" memory_max=8G cpu_weight=10 devices="" max_minutes="" gpu_hours="" output_gb="" env_network="" from="" want_sha="" visibility=""
+print="" yes="" devices_set="" memory_max=8G cpu_weight=10 devices="" max_minutes="" gpu_hours="" output_gb="" env_network="" tasks_max="" memory_gb="" cpu_cores="" from="" want_sha="" visibility=""
 pos=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -45,6 +46,9 @@ while [ "$#" -gt 0 ]; do
     --gpu-hours) gpu_hours="${2:?}"; shift 2 ;;
     --output-gb) output_gb="${2:?}"; shift 2 ;;
     --env-network) env_network="${2:?}"; shift 2 ;;
+    --tasks-max) tasks_max="${2:?}"; shift 2 ;;
+    --memory-gb) memory_gb="${2:?}"; shift 2 ;;
+    --cpu-cores) cpu_cores="${2:?}"; shift 2 ;;
     --from) from="${2:?}"; shift 2 ;;
     --sha256) want_sha="${2:?}"; shift 2 ;;
     --visibility) visibility="${2:?}"; shift 2 ;;
@@ -130,7 +134,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # ---- root's file -------------------------------------------------------------------------------------------------
 # The current values (defaults when there is no file): F_DEVICES "0, 1", F_MAX, F_GPU_H, F_OUT, F_NET, F_SRC (lines).
-F_DEVICES="" F_MAX=60 F_GPU_H=8 F_OUT=50 F_NET=false
+# max_minutes starts at 20 (owner, 2026-10-15): raised per instance once its jobs are proven.
+F_DEVICES="" F_MAX=20 F_GPU_H=8 F_OUT=50 F_NET=false F_TASKS=1024 F_MEM=16 F_CPUS=4
 declare -A F_SHA=() F_VIS=()
 read_file() {
   local l
@@ -141,6 +146,9 @@ read_file() {
     elif [[ "$l" =~ ^\ \ \"gpu_hours_per_day\":\ ([0-9]+),$ ]]; then F_GPU_H="${BASH_REMATCH[1]}"
     elif [[ "$l" =~ ^\ \ \"output_gb\":\ ([0-9]+),$ ]]; then F_OUT="${BASH_REMATCH[1]}"
     elif [[ "$l" =~ ^\ \ \"env_network\":\ (true|false),$ ]]; then F_NET="${BASH_REMATCH[1]}"
+    elif [[ "$l" =~ ^\ \ \"tasks_max\":\ ([0-9]+),$ ]]; then F_TASKS="${BASH_REMATCH[1]}"
+    elif [[ "$l" =~ ^\ \ \"memory_gb\":\ ([0-9]+),$ ]]; then F_MEM="${BASH_REMATCH[1]}"
+    elif [[ "$l" =~ ^\ \ \"cpu_cores\":\ ([0-9]+),$ ]]; then F_CPUS="${BASH_REMATCH[1]}"
     elif [[ "$l" =~ ^\ \ \ \ \"([a-z][a-z0-9-]{0,39})\":\ \{\ \"sha256\":\ \"([0-9a-f]{64})\",\ \"visibility\":\ \"(job|scorer)\"\ \},?$ ]]; then
       F_SHA[${BASH_REMATCH[1]}]="${BASH_REMATCH[2]}"; F_VIS[${BASH_REMATCH[1]}]="${BASH_REMATCH[3]}"
     fi
@@ -149,7 +157,7 @@ read_file() {
 # The file's text, exactly as the helper and src/experiments/root-file.ts read it.
 file_text() {
   local ids=() i n
-  printf '{\n  "version": 1,\n  "devices": [%s],\n  "max_minutes": %s,\n  "gpu_hours_per_day": %s,\n  "output_gb": %s,\n  "env_network": %s,\n' "$F_DEVICES" "$F_MAX" "$F_GPU_H" "$F_OUT" "$F_NET"
+  printf '{\n  "version": 1,\n  "devices": [%s],\n  "max_minutes": %s,\n  "gpu_hours_per_day": %s,\n  "output_gb": %s,\n  "env_network": %s,\n  "tasks_max": %s,\n  "memory_gb": %s,\n  "cpu_cores": %s,\n' "$F_DEVICES" "$F_MAX" "$F_GPU_H" "$F_OUT" "$F_NET" "$F_TASKS" "$F_MEM" "$F_CPUS"
   while IFS= read -r i; do [ -n "$i" ] && ids+=("$i"); done < <(printf '%s\n' "${!F_SHA[@]}" | LC_ALL=C sort)
   if [ "${#ids[@]}" -eq 0 ]; then printf '  "sources": {}\n}\n'; return 0; fi
   printf '  "sources": {\n'
@@ -210,11 +218,16 @@ install_cmd() {
   read_file; yes=1; write_file
   say "sudoers: $coord may run $helper $name ..., nothing else"
   install_sudoers "worklane-exp-$name" "$(sudoers_rule)"
+  say "the egress rule: these users send nothing but loopback (the second layer under PrivateNetwork)"
+  local flags=""
+  grep -q '^# --with-test-users' /etc/worklane/egress.users 2>/dev/null && flags=--with-test-users
+  if command -v nft >/dev/null 2>&1; then bash "$here/egress-firewall.sh" apply $flags || { echo "the egress rule didn't load; fix that, then run install again" >&2; exit 1; }
+  else echo "no nft here: apt-get install -y nftables, then: sudo bash $here/egress-firewall.sh apply" >&2; exit 1; fi
   say "check"
   # As root, not as whoever ran sudo: the helper reads SUDO_USER as its caller, and refuses anyone but wl-<name>.
   env -u SUDO_USER "$helper" "$name" check || { echo "fix the FAIL lines, then run install again" >&2; exit 1; }
   echo
-  echo "next: sudo bash $0 set $name --devices 0 --max-minutes 60 --gpu-hours 8 --output-gb 50"
+  echo "next: sudo bash $0 set $name --devices 0 --max-minutes 20 --gpu-hours 8 --output-gb 50"
   echo "      bash $0 data hash <path>; then sudo bash $0 data add $name <id> --from <path> --sha256 <hex> --visibility job|scorer"
 }
 
@@ -229,6 +242,9 @@ set_cmd() {
   if [ -n "$gpu_hours" ]; then [[ "$gpu_hours" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--gpu-hours: 1 to 999" >&2; exit 2; }; F_GPU_H="$gpu_hours"; fi
   if [ -n "$output_gb" ]; then [[ "$output_gb" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "--output-gb: 1 to 99999" >&2; exit 2; }; F_OUT="$output_gb"; fi
   case "$env_network" in "") ;; yes) F_NET=true ;; no) F_NET=false ;; *) echo "--env-network: yes or no" >&2; exit 2 ;; esac
+  if [ -n "$tasks_max" ]; then [[ "$tasks_max" =~ ^[1-9][0-9]{1,5}$ ]] && [ "$tasks_max" -ge 16 ] && [ "$tasks_max" -le 100000 ] || { echo "--tasks-max: 16 to 100000" >&2; exit 2; }; F_TASKS="$tasks_max"; fi
+  if [ -n "$memory_gb" ]; then [[ "$memory_gb" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "--memory-gb: 1 to 9999" >&2; exit 2; }; F_MEM="$memory_gb"; fi
+  if [ -n "$cpu_cores" ]; then [[ "$cpu_cores" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--cpu-cores: 1 to 999" >&2; exit 2; }; F_CPUS="$cpu_cores"; fi
   write_file
 }
 
