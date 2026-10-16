@@ -9,7 +9,7 @@ import { materialize } from './fetch.js';
 import { inspectPlugin, type Inspection, type McpServerSpec } from './inspect.js';
 import { treeFiles, treeHash, treeHashOf, type TreeLimits } from './tree.js';
 import {
-  type Allowlist, allowlistPath, approvalDigest, type ApprovalRecord, canonicalJson, DIGEST, emptyPluginRoot, FETCHES_PER_HOUR, fetchLogPath, HOST, livePending,
+  type Allowlist, allowlistPath, approvalDigest, type ApprovalRecord, canonicalJson, DIGEST, emptyPluginRoot, FETCHES_PER_HOUR, SNAPSHOTS_PER_HOUR, fetchLogPath, HOST, livePending,
   type McpRecord, type McpRuntime, type PendingEntry, pendingPath, PENDING_MAX_PER_INSTANCE, PLUGIN_ID, type PluginRecord, previewDir, readAllowlist, ROLE, SECRET_NAME, storeDir,
 } from './approval.js';
 import { varLibPath } from '../os/system-paths.js';
@@ -147,8 +147,11 @@ export function readPreview(instance: string, id: string): Preview {
   return p;
 }
 
-/** Whether this instance may start another fetch now (Q13: rate-capped), and records it when it may. */
-export function takeFetchSlot(instance: string, now = Date.now()): void {
+/**
+ * Whether this instance may start another fetch, or another snapshot or preview, now (Q13 and the owner's condition on
+ * mcp-preview and mcp-snapshot: each kind rate-capped per instance per hour), recording it when it may.
+ */
+export function takeFetchSlot(instance: string, kind: 'fetch' | 'snapshot' = 'fetch', now = Date.now()): void {
   const log = fetchLogPath();
   const recent = existsSync(log)
     ? readFileSync(log, 'utf8')
@@ -156,16 +159,17 @@ export function takeFetchSlot(instance: string, now = Date.now()): void {
         .filter(Boolean)
         .map((l) => {
           try {
-            return JSON.parse(l) as { instance: string; at: string };
+            return JSON.parse(l) as { instance: string; at: string; kind?: string };
           } catch {
             return null;
           }
         })
-        .filter((e) => e && e.instance === instance && now - Date.parse(e.at) < 3_600_000).length
+        .filter((e) => e && e.instance === instance && (e.kind ?? 'fetch') === kind && now - Date.parse(e.at) < 3_600_000).length
     : 0;
-  check(recent < FETCHES_PER_HOUR, `${instance} has fetched ${recent} plugins in the last hour (at most ${FETCHES_PER_HOUR}); try again later`);
+  const cap = kind === 'fetch' ? FETCHES_PER_HOUR : SNAPSHOTS_PER_HOUR;
+  check(recent < cap, `${instance} has run ${recent} ${kind === 'fetch' ? 'fetches' : 'snapshots or previews'} in the last hour (at most ${cap}); try again later`);
   mkdirSync(dirname(log), { recursive: true });
-  appendFileSync(log, `${JSON.stringify({ at: new Date(now).toISOString(), instance })}\n`, { mode: 0o644 });
+  appendFileSync(log, `${JSON.stringify({ at: new Date(now).toISOString(), instance, kind })}\n`, { mode: 0o644 });
 }
 
 /** Replace an id's preview directory with `next` (a sibling built beside it). */

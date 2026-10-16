@@ -2286,6 +2286,23 @@ jobs:
           p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           jq -e '.snapshot.tools | map(.name) == ["echo"]' "$p"
           jq -e '.snapshotWithSecrets == false and .envNames == ["NOTES_TOKEN"]' "$p"
+          # Named test: a snapshot run that tries to write into the broker's paths (its home and caches, its state, the
+          # plugin store and previews, /etc and /opt) fails at every one, and nothing it tried exists afterwards.
+          sudo -u wl-ci sudo -n "$HELPER" plugin-fetch escape "$url" "$FIXTURE_SHA" test/fixtures/plugins/escape && wait_status escape
+          d="$(digest escape builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage escape "$d" builder && confirm escape "$d"
+          sudo -u wl-ci sudo -n "$HELPER" mcp-preview escape-probe escape probe && wait_status escape-probe
+          tries="$(jq -r '.snapshot.tools[0].description' /var/lib/worklane/plugins/previews/ci/escape-probe/preview.json)"
+          echo "$tries" | tr ' ' '\n'
+          echo "$tries" | grep -q 'wl-ci-mcp/escaped=denied'
+          echo "$tries" | grep -q 'worklane/plugins/store/ci/escaped=denied'
+          if echo "$tries" | grep -q 'WROTE'; then echo "the throwaway snapshot wrote where the broker reads" >&2; exit 1; fi
+          for f in "$(getent passwd wl-ci-mcp | cut -d: -f6)/escaped" "$(getent passwd wl-ci-mcp | cut -d: -f6)/.cache/escaped" /var/lib/worklane/plugins/store/ci/escaped /var/lib/worklane-mcp-ci/escaped /etc/worklane/escaped; do
+            if sudo test -e "$f"; then echo "$f exists" >&2; exit 1; fi
+          done
+          # Owner's condition (3): snapshots and previews are capped per hour (the 11th is refused).
+          for i in $(seq 1 10); do sudo node "$CLI" plugins fetch-slot --instance capcheck --kind snapshot; done
+          if sudo node "$CLI" plugins fetch-slot --instance capcheck --kind snapshot 2> "$F/cap.err"; then echo "an 11th snapshot this hour was allowed" >&2; exit 1; fi
+          grep -q 'snapshots or previews in the last hour' "$F/cap.err"
           d="$(digest kit-notes builder none NOTES_TOKEN)"
           sudo -u wl-ci sudo -n "$HELPER" mcp-stage kit-notes "$d" builder none NOTES_TOKEN
           confirm kit-notes "$d" | grep -q 'confirmed kit-notes for ci'
@@ -2296,6 +2313,9 @@ jobs:
           sf="$(getent passwd wl-ci-mcp | cut -d: -f6)/secrets/kit-notes/NOTES_TOKEN"
           [ "$(sudo stat -c '%U %a' "$sf")" = "wl-ci-mcp 400" ]
           for u in wl-ci wl-ci-agent; do if sudo -u "$u" cat "$sf" > /dev/null 2>&1; then echo "$u read the MCP secret" >&2; exit 1; fi; done
+          # The second snapshot of the APPROVED server: the broker's, with its secret (Q3); root keeps it as a preview.
+          sudo -u wl-ci sudo -n "$HELPER" mcp-snapshot kit-notes && wait_status kit-notes
+          jq -e '.snapshotWithSecrets == true and (.snapshot.tools | map(.name)) == ["echo"]' /var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           # A run's ticket, registered by the coordinator; the agent can't reach the control socket.
           ticket="$(cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {registerRun} from '$E/mcp/client.js'; const r = await registerRun('ci', 'builder', 600000); console.log(r.ticket + ' ' + JSON.stringify(r.servers))")"
           echo "${ticket#* }" | jq -e '. == [{"id":"kit-notes","tools":["echo"]}]'

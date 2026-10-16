@@ -130,7 +130,7 @@ for u in "${users[@]}"; do
   fi
   if sudo_regex_ok; then
     sha="$(printf '0%.0s' $(seq 1 40))" dig="sha256:$(printf 'a%.0s' $(seq 1 64))"
-    for ok in "plugin-fetch kit https://example.com/o/kit.git $sha" "plugin-fetch kit https://example.com/o/mono $sha plugins/kit" "plugin-stage kit $dig builder" "plugin-stage kit $dig builder+reviewer" "plugin-withdraw kit" "plugin-remove kit" "mcp-fetch notes notes-server 1.2.3" "mcp-fetch notes @scope/notes 1.2.3" "mcp-preview kit-notes kit notes" "mcp-snapshot kit-notes" "mcp-stage kit-notes $dig builder api.example.com NOTES_TOKEN" "mcp-stage kit-notes $dig builder none none"; do
+    for ok in "plugin-fetch kit https://example.com/o/kit.git $sha" "plugin-fetch kit https://example.com/o/mono $sha plugins/kit" "plugin-stage kit $dig builder" "plugin-stage kit $dig builder+reviewer" "plugin-withdraw kit" "plugin-remove kit" "mcp-fetch notes notes-server 1.2.3" "mcp-fetch notes @scope/notes 1.2.3" "mcp-fetch notes @scope/notes 1.2.3 registry.npmjs.org" "mcp-preview kit-notes kit notes" "mcp-snapshot kit-notes" "mcp-stage kit-notes $dig builder api.example.com NOTES_TOKEN" "mcp-stage kit-notes $dig builder none none"; do
       # shellcheck disable=SC2086 # each case is its words
       sudo -n -l -U "$u" "$MACHINE_HELPER" $ok >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the $ok pattern, and $u can't run it" >&2; exit 1; }
     done

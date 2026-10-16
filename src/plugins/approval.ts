@@ -30,6 +30,8 @@ export const PENDING_MAX_PER_INSTANCE = 4;
 export const PENDING_TTL_MS = 24 * 60 * 60_000;
 /** At most this many fetches per instance per hour (Q13: an owner may stage, rate-capped). */
 export const FETCHES_PER_HOUR = 10;
+/** At most this many MCP server snapshots or previews per instance per hour (owner's condition on mcp-preview/mcp-snapshot). */
+export const SNAPSHOTS_PER_HOUR = 10;
 
 export const allowlistPath = (instance: string) => etcPath(`plugins/${instance}.json`);
 export const pendingPath = () => varLibPath('plugins/pending.json');

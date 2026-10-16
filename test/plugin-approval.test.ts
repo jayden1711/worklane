@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { type AllowlistEntry, type McpRecord, type PluginRecord, allowlistPath, approvalDigest, canonicalJson, FETCHES_PER_HOUR, parseRoles, pendingPath, previewDir, readAllowlist, storeDir, type ApprovalRecord } from '../src/plugins/approval.js';
+import { type AllowlistEntry, type McpRecord, type PluginRecord, allowlistPath, approvalDigest, canonicalJson, FETCHES_PER_HOUR, SNAPSHOTS_PER_HOUR, parseRoles, pendingPath, previewDir, readAllowlist, storeDir, type ApprovalRecord } from '../src/plugins/approval.js';
 import { confirm, confirmPlan, ingest, previewPluginServer, readPreview, recordOf, remove, stage, takeFetchSlot, withdraw } from '../src/plugins/root-ops.js';
 import { treeHash } from '../src/plugins/tree.js';
 import { repoRoot } from './helpers.js';
@@ -120,10 +120,18 @@ test('the allowlist fails closed: wrong owner, group-writable, another instance,
 
 test('fetches are capped per instance per hour', () => {
   const now = Date.now();
-  for (let i = 0; i < FETCHES_PER_HOUR; i++) takeFetchSlot('lambda', now);
-  assert.throws(() => takeFetchSlot('lambda', now), /at most/);
-  takeFetchSlot('mu', now);
-  takeFetchSlot('lambda', now + 3_600_001);
+  for (let i = 0; i < FETCHES_PER_HOUR; i++) takeFetchSlot('lambda', 'fetch', now);
+  assert.throws(() => takeFetchSlot('lambda', 'fetch', now), /at most/);
+  takeFetchSlot('mu', 'fetch', now);
+  takeFetchSlot('lambda', 'fetch', now + 3_600_001);
+});
+
+test('(3) MCP snapshots and previews are capped per instance per hour, apart from fetches (fail-without: no snapshot cap)', () => {
+  const now = Date.now();
+  for (let i = 0; i < SNAPSHOTS_PER_HOUR; i++) takeFetchSlot('nu2', 'snapshot', now);
+  assert.throws(() => takeFetchSlot('nu2', 'snapshot', now), /snapshots or previews in the last hour/);
+  takeFetchSlot('nu2', 'fetch', now);
+  takeFetchSlot('xi2', 'snapshot', now);
 });
 
 test('canonical JSON and roles are one text per value', () => {
