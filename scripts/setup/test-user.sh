@@ -227,11 +227,16 @@ docker_layout_ok() {
   [ -n "$cg" ] && [ "${pid:-0}" != 0 ] && [ "$(sed -n 's/^0:://p' "/proc/$pid/cgroup" 2>/dev/null)" = "$cg/daemon" ]
 }
 
-# This instance's test runs in progress: their units (worklane-test-<name>-<id>-<pid>.service, not the Docker unit)
-# and their directories (wipe removes both). One per line, empty when there are none.
+# This instance's test runs in progress: their units (worklane-test-<name>_<id>_<pid>.service, or
+# worklane-test-<name>-<id>-<pid>.service from a helper before protocol 9; not the Docker unit) and their directories
+# (wipe removes both). One per line, empty when there are none. A unit counts only when it runs as this instance's test
+# user (User=): instance a-b's runs (worklane-test-a-b-...) match instance a's old pattern, and are never a's.
 active_runs() {
-  systemctl list-units --plain --no-legend --state=active,activating,deactivating "worklane-test-$name-*.service" 2>/dev/null \
-    | awk -v d="$docker_unit_name" '$1 != d {print "unit " $1}'
+  local u
+  while read -r u _; do
+    [ "$u" != "$docker_unit_name" ] || continue
+    [ "$(systemctl show -p User --value "$u" 2>/dev/null)" = "$user" ] && echo "unit $u"
+  done < <(systemctl list-units --plain --no-legend --full --state=active,activating,deactivating "worklane-test-${name}_*.service" "worklane-test-$name-*.service" 2>/dev/null)
   find "$root/runs" -mindepth 1 -maxdepth 1 -type d -printf 'run %f\n' 2>/dev/null || true
 }
 
