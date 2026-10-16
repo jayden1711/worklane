@@ -13,13 +13,15 @@ export type IntakeCheck =
   | { state: 'invalid'; file: string; errors: string[] }
   | { state: 'valid'; file: string; summary: string[]; warnings: string[] };
 
-/** What is on, in three lines. INVARIANT: only these fields of the file are ever printed (no ids of people). */
+/** What is on, a line per source. INVARIANT: only these fields of the file are ever printed (no ids of people). */
 export function intakeSummary(c: IntakeConfig): string[] {
   const n = c.discord.channels.length;
   return [
     `discord: ${c.discord.enabled ? `on, ${n} channel${n === 1 ? '' : 's'}` : 'off'}`,
     `superfan: ${c.superfan.enabled ? `on, channel ${c.superfan.channel}` : 'off'}`,
     `github: ${c.github.enabled ? 'on' : 'off'}`,
+    `slack: ${c.slack.enabled ? `on, ${c.slack.channels.length} channel${c.slack.channels.length === 1 ? '' : 's'}, ${c.slack.allowed_senders.length} may send` : 'off'}`,
+    `linear: ${c.linear.enabled ? `on, ${c.linear.allowed_senders.length} may send` : 'off'}`,
   ];
 }
 

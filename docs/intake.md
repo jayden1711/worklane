@@ -44,7 +44,8 @@ issues, prompts or logs.
 Each source is an adapter with one job: produce `IncomingReport { source, sourceId, sender, text,
 receivedAt, thread? }` items and send short replies. Each is off by default and enabled per instance in the
 instance's `intake.yaml` (instance home, owned by the coordinator user, 0600), which also holds the trusted
-senders. There are two sources: the Discord bot and in-product reports.
+senders. The sources: the Discord bot, a Slack app (2.7), Linear issues (2.8), GitHub issues, in-product reports,
+production alerts and voice.
 
 ### 2.1 Chat bot (Discord)
 
@@ -519,6 +520,78 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
 - Off unless `siri.enabled` in `intake.yaml` (which also takes the voice source on for it). `siri.ask_model` and
   `siri.ask_max_usd_per_day` are for "Hey Siri, ask" (docs/siri.md).
 
+### 2.7 Slack
+
+- A Slack app connects **outbound** over Socket Mode: the coordinator asks Slack's Web API (`apps.connections.open`,
+  with the app-level token) for a WebSocket URL and opens it; nothing listens on the machine and no public address is
+  needed (Slack's HTTP Events API would need one). The URL comes from Slack's answer, so it is opened only when it is
+  `wss://` on a host under `slack.com`; the API base (`https://slack.com/api`) is a constant. Node's built-in
+  `WebSocket` and `fetch`; no dependency. The tokens live only in the coordinator's memory (`src/intake/slack.ts`).
+- **One event, mentions only.** The app subscribes to `app_mention` and nothing else, with the bot scopes
+  `app_mentions:read`, `chat:write`, `users:read` (a sender's display name, only for the redaction; and the people's
+  ids for the owner to copy) and `channels:read` (the channel list for the setup step). No history scope, no
+  direct-message event: Slack never sends the machine a message that doesn't mention the bot.
+- **Dropped before the text is read, in this order:** another workspace's event (on its team id alone, before the
+  event is looked at), a bot's (`bot_id`, `bot_profile`, any subtype, the bot itself), a sender not in
+  `slack.allowed_senders` (on their user id alone), a channel not in `slack.channels` or a direct message, and a
+  mention with nothing after it. Each is only counted. Every envelope is acknowledged so Slack doesn't send it again;
+  a redelivered one (the same event id) is taken once.
+- What is kept is the message's text with Slack's markup made plain (the bot's mention removed, other people's
+  mentions as `[mention]`, a mailto or tel link as its address so the redaction finds it), then the same pipeline as a
+  Discord message (section 3). Attachments, files and link previews are never taken.
+- **Replies** go only in the message's thread (`chat.postMessage` with its `thread_ts`), only in a listed channel, at
+  most 500 characters, with `&`, `<` and `>` escaped (so no `<!channel>`, `<@U...>` or link markup can form), no link
+  previews. The same stages and the same `checkReply` as Discord.
+- **Reports only**, in this version: no decision threads, chat channels, conversations, approvals or posts. Those stay
+  Discord's.
+- **One Slack app per instance.** Slack hands each event to only one of an app's open connections, so two instances on
+  one app would each miss part of the messages. At start-up the bot token's `auth.test` must name `slack.team` (else
+  Slack stays off and says why), and a machine-wide claim (`src/intake/source-claims.ts`: a hash of the workspace and
+  the bot user, never an id) refuses a second instance on the same app, naming the first.
+- Known limit: as for Discord, a message acknowledged but not yet taken by the coordinator is lost if it crashes in
+  between.
+
+```yaml
+slack:
+  enabled: true
+  team: "T0000000001"                 # the one workspace
+  channels: ["C0000000001"]           # public C... or private G...; never a DM (D...)
+  allowed_senders: ["U0000000011"]    # Slack user ids (U... or W... on Enterprise Grid); empty: nobody
+trusted:
+  slack: ["U0000000011"]              # each must be an allowed sender
+```
+
+### 2.8 Linear
+
+- Open issues in one team (`linear.team`) carrying one label (`linear.label`) are reports. Linear's webhooks need a
+  public HTTPS address, so the coordinator polls its GraphQL API (`https://api.linear.app/graphql`, a constant) on the
+  intake timer, at most once every `linear.poll_minutes` (default 5), and not before a rate limit's reset
+  (`src/intake/linear.ts`).
+- **Two steps, so a creator who isn't allowed has nothing of their issue fetched but its id:** the listing asks only for
+  ids, creators' ids and whether a bot or an app made each; the title and description are then fetched only for issues
+  whose creator is in `linear.allowed_senders`. An issue with no creator (an integration, a deleted user), an app's or
+  a bot's is dropped too. Each drop is remembered by the issue's id (`intake/linear-skipped.json`, 0600) and counted
+  once; a taken one is in the seen ledger.
+- A taken issue is a report through the same pipeline (section 3). It maps to an intake report, never to the backlog:
+  a trusted creator's draft is filed on GitHub `ready`, anyone else's is an Inbox decision.
+- **Replies** are one comment on the report's own issue per stage (`commentCreate`), at most 500 characters, with
+  markdown's active characters escaped. Nothing else of the issue is ever changed: no state, label or assignee.
+  Comments on the issue are not read.
+- The key: a Linear personal API key with only **Read** and **Create comments**, limited to the one team. Its comments
+  appear as its user's, so make it on an account kept for this if you can. A machine-wide claim refuses a second
+  instance on the same team and label.
+
+```yaml
+linear:
+  enabled: true
+  team: "00000000-0000-4000-8000-000000000001"    # the one team (uuid)
+  label: "00000000-0000-4000-8000-000000000002"   # only issues with this label
+  allowed_senders: ["00000000-0000-4000-8000-000000000011"]  # Linear user ids; empty: nobody
+  poll_minutes: 5
+trusted:
+  linear: []
+```
+
 ## 3. Pipeline
 
 1. **Receive.** The adapter yields a report. Unaddressed channel messages never get this far.
@@ -619,6 +692,13 @@ test with an injection-style report.
   and `NODE_PATH` are dropped from the child's environment, so nothing else is loaded into it). Tests and CI replace
   the listing only in code, with a stand-in that answers in-process (`discordListingStandIn`); anything else handed to
   the dashboard in its place is refused.
+- Slack's two tokens (`intake.slack_app_token`, `intake.slack_bot_token`) and the Linear key (`intake.linear_api_key`):
+  the same kind of file, the same directory, the same two ways in: `sudo bash scripts/setup/credentials.sh <name>
+  intake-slack` (two hidden prompts, or two lines on stdin) or `... intake-linear`, each shape-checked (`xapp-`,
+  `xoxb-`, `lin_api_`) and written into `credentials.yaml` by `<cli> instance set-intake-credential`; or the First run
+  page's Slack and Linear steps (paste boxes). Never in an agent's environment, an event or a log line: the
+  redaction knows their shapes. What needs them on the dashboard (`<cli> slack view`, `<cli> linear view`) runs as a
+  child process, like the Discord listing.
 - A project's production read credentials stay on the production service, as with `prod-read` today.
 
 ## 7. Caps (instance settings)
@@ -673,6 +753,11 @@ test with an injection-style report.
    `labels` once to create the intake label, and add it to an issue template if outsiders should reach intake.
 10. **Superfans** (2.1.7): a channel per instance and one for the engine, their ids in each instance's
    `intake.yaml` under `superfan`; verify with `intake check --instance <name>` (`superfan: on, channel <id>`).
+11. **Slack** (2.7): create the app from the manifest the First run page shows, install it, make an app-level token;
+   paste both tokens (or `credentials.sh <name> intake-slack`); pick the workspace and channels; list who may send
+   (`slack.allowed_senders`) by hand; invite the bot to each channel (`/invite @bot`); restart the instance.
+12. **Linear** (2.8): make the key (Read, Create comments, one team); paste it (or `credentials.sh <name>
+   intake-linear`); pick the team and label; list who may send (`linear.allowed_senders`) by hand; restart.
 
 ### 10.1 The Discord step: on the dashboard, or by script
 
