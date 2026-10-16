@@ -1,6 +1,6 @@
 // The machine helper's plugin and MCP steps, as the engine builds and checks them before recording a request (the
 // dashboard) and again before running one (the coordinator). The same shapes as the helper's own checks
-// (scripts/machine/worklane-machine.cjs parsePlugin) and its sudoers patterns (scripts/setup/lib.sh): an instance is never
+// (the helper script in scripts/machine/, parsePlugin) and its sudoers patterns (scripts/setup/lib.sh): an instance is never
 // an argument, the helper takes the asking coordinator's from sudo; and no step confirms.
 import { NPM_NAME, NPM_VERSION } from '../mcp/npm.js';
 import { PLUGIN_ID } from './approval.js';

@@ -143,7 +143,7 @@ test('the sudoers rule lists exactly the 34 commands, no patterns but add-projec
   // One profile name each, and no instance: the helper takes the asking coordinator's from SUDO_USER.
   const profiles = ['^claude-account profile-add [a-z][a-z0-9-]*$', '^claude-account remove [a-z][a-z0-9-]*$', '^claude-account use [a-z][a-z0-9-]*$', '^claude-account login [a-z][a-z0-9-]*$', '^claude-account failover [a-z][a-z0-9+-]* back$', '^claude-account failover [a-z][a-z0-9+-]* stay$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
   // The plugin steps: an id, an https URL and a commit, a digest and roles; never an instance, never confirm.
-  const plugins = ['^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$', '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$', '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$', '^plugin-withdraw [a-z0-9][a-z0-9-]*$', '^plugin-remove [a-z0-9][a-z0-9-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9.-]*$', '^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$', '^mcp-snapshot [a-z0-9][a-z0-9-]*$', '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
+  const plugins = ['^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$', '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$', '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$', '^plugin-withdraw [a-z0-9][a-z0-9-]*$', '^plugin-remove [a-z0-9][a-z0-9-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$', '^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$', '^mcp-snapshot [a-z0-9][a-z0-9-]*$', '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
   const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, ...profiles, ...plugins, addProject];
   assert.equal(want.length - 9 - plugins.length, 34);
   for (const p of plugins) assert.doesNotMatch(p, /confirm|--|,|:|=/, p);
@@ -557,4 +557,22 @@ test('a step is recorded only once it has run: as done when it exited 0, as fail
     assert.ok(at > 0 && src.indexOf(ok) > at && src.indexOf(failed) > at, `${ok}: recorded after systemd-run, by outcome`);
     assert.equal(src.split(ok).length, 2, `${ok}: one success record`);
   }
+});
+
+test('the setup self-check\'s plugin cases agree with the sudoers patterns: every "ok" case matches one, no "bad" case matches any', () => {
+  // The self-check runs only under real sudo (CI's add-project job); this catches a case the patterns disagree with before then.
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const block = /PLUGIN_SUDOERS_ARGS=\(\n([\s\S]*?)\n\)/.exec(lib)?.[1] ?? '';
+  const patterns = [...block.matchAll(/^\s*'([^']+)'$/gm)].map((m) => new RegExp(m[1]!));
+  assert.ok(patterns.length >= 5, 'found the plugin patterns');
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'machine-helper.sh'), 'utf8');
+  const sha = '0'.repeat(40), dig = `sha256:${'a'.repeat(64)}`;
+  const cases = (kind: 'ok' | 'bad') => {
+    const m = new RegExp(`for ${kind} in ((?:"[^"]*"\\s*(?:\\\\\\n\\s*)?)+); do`).exec(sh.slice(sh.indexOf('plugin-fetch kit https')- 40));
+    return [...(m?.[1] ?? '').matchAll(/"([^"]*)"/g)].map((c) => c[1]!.replaceAll('$sha', sha).replaceAll('$dig', dig));
+  };
+  const ok = cases('ok'), bad = cases('bad');
+  assert.ok(ok.length > 5 && bad.length > 5, 'found both lists');
+  for (const c of ok) assert.ok(patterns.some((p) => p.test(c)), `no pattern matches ok case: ${c}`);
+  for (const c of bad) assert.ok(!patterns.some((p) => p.test(c)), `a pattern matches bad case: ${c}`);
 });
