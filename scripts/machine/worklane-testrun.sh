@@ -22,8 +22,9 @@
 # namespace outbound NAT to public addresses only: never the host's loopback (--disable-host-loopback, and its unit's
 # IPAddressDeny= has 127.0.0.0/8), the host's own addresses, the LAN, link-local or multicast; the machine's upstream DNS
 # servers allowed to slirp alone (the run's own unit denies them: its DNS is slirp's forwarder, nothing else). slirp4netns
-# must have seccomp (slirp_ok), and runs with --disable-host-loopback --enable-sandbox --enable-seccomp. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
-# can only name a tier root listed for its own instance. On stderr, after any GPU line: "worklane-testrun: network
+# must have seccomp (slirp_ok), and runs with --disable-host-loopback --enable-sandbox --enable-seccomp. The tier's name
+# comes from the coordinator, so the grant is per instance at most: a coordinator can only name a tier root listed for
+# its own instance. On stderr, after any GPU line: "worklane-testrun: network
 # granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
 # a fixed npm download of what the lockfile pins, with no script run, that never reaches this host's loopback or LAN.
 # The run's Postgres has no network either (docker run --network none): it is reached on its Unix socket only.
