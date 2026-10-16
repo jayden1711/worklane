@@ -183,12 +183,19 @@ export const CredentialsFile = z.strictObject({
    */
   provider_keys: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/), path).optional(),
   /**
-   * Work intake's credential: the chat bot's token, a file only the coordinator user can read (0400), installed
-   * with credentials.sh. No agent can read it.
+   * Work intake's credentials: the chat bot's token, the Slack app's two tokens and the Linear API key, each a file
+   * only the coordinator user can read (0400), installed with credentials.sh or the dashboard's paste box. No agent
+   * can read them. Paths only, never a value.
    */
   intake: z
     .strictObject({
       discord_token: path.optional(),
+      /** The Slack app-level token (xapp-, connections:write): opens the Socket Mode connection. */
+      slack_app_token: path.optional(),
+      /** The Slack bot token (xoxb-): who the bot is, senders' names for redaction, and the replies. */
+      slack_bot_token: path.optional(),
+      /** The Linear personal API key (lin_api_): read the team's labelled issues, comment on them. */
+      linear_api_key: path.optional(),
     })
     .optional(),
 });
@@ -296,6 +303,9 @@ export function credentialProblems(c: CredentialsFile): string[] {
   else need(c.github.key_path, 'GitHub: App private key');
   if (c.claude) need(c.claude.config_dir, 'Claude: config dir');
   if (c.intake?.discord_token) need(c.intake.discord_token, 'Intake: chat bot token');
+  if (c.intake?.slack_app_token) need(c.intake.slack_app_token, 'Intake: Slack app-level token');
+  if (c.intake?.slack_bot_token) need(c.intake.slack_bot_token, 'Intake: Slack bot token');
+  if (c.intake?.linear_api_key) need(c.intake.linear_api_key, 'Intake: Linear API key');
   return out;
 }
 
@@ -499,6 +509,22 @@ export function setGithubApp(file: string, app: { appId: number; installationId:
  * or that its group or others can read (the token is the coordinator user's alone).
  */
 export function setDiscordToken(file: string, tokenFile: string): void {
+  setIntakeCredential(file, 'discord_token', tokenFile);
+}
+
+/** The intake credentials credentials.yaml names (under `intake:`), each a path to a 0400 file. */
+export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slack_bot_token', 'linear_api_key'] as const;
+export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];
+
+/**
+ * Point an instance's credentials.yaml at one intake credential's file (intake.<key>), keeping its other settings,
+ * validated before anything is written (0600, renamed into place). The one writer of those entries: credentials.sh
+ * (`instance set-discord-token`, `instance set-intake-credential`) and the dashboard's paste box both come here. Only
+ * the file's path: the secret is never read here. Refused: a path that isn't absolute, isn't a plain file, or that
+ * its group or others can read (the secret is the coordinator user's alone).
+ */
+export function setIntakeCredential(file: string, key: IntakeCredentialKey, tokenFile: string): void {
+  if (!INTAKE_CREDENTIAL_KEYS.includes(key)) throw new Error(`not an intake credential: ${String(key)}`);
   if (!isAbsolute(tokenFile)) throw new Error(`the token file must be an absolute path, not ${tokenFile}`);
   if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
   let st;
@@ -512,7 +538,7 @@ export function setDiscordToken(file: string, tokenFile: string): void {
   if (typeof process.getuid === 'function' && st.mode & 0o077) throw new Error(`${tokenFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the bot token is its owner's alone (chmod 400)`);
   const doc = parseDocument(readFileSync(file, 'utf8'));
   if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
-  doc.setIn(['intake', 'discord_token'], tokenFile);
+  doc.setIn(['intake', key], tokenFile);
   const r = CredentialsFile.safeParse(doc.toJS());
   if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   // WHY: lineWidth 0, so a long path doesn't re-wrap the file's other lines.

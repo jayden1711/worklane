@@ -4,10 +4,13 @@
 // repo, so no agent can read who is trusted or change it. See docs/intake.md.
 import { z } from 'zod';
 
-export const SOURCES = ['discord', 'bug-store', 'alerts', 'github', 'voice'] as const;
+export const SOURCES = ['discord', 'bug-store', 'alerts', 'github', 'voice', 'slack', 'linear'] as const;
 export type Source = (typeof SOURCES)[number];
 
-/** Who sent it, as the source identifies them: a Discord user id, a store row's reporter id, an alert's kind, or (voice) the owner's GitHub login. */
+/**
+ * Who sent it, as the source identifies them: a Discord user id, a Slack user id, a Linear user id, a store row's
+ * reporter id, an alert's kind, or (voice) the owner's GitHub login.
+ */
 export interface Sender {
   source: Source;
   id: string;
@@ -84,6 +87,15 @@ export type TriageKind = (typeof TRIAGE_KINDS)[number];
 /** A GitHub login as GitHub allows them (letters, digits, dashes; at most 39), as the dashboard checks it. */
 const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const snowflake = (what: string) => z.string().regex(/^\d{5,25}$/, `a Discord ${what} id (digits)`);
+/**
+ * A Slack id (a workspace T..., a channel C... or G..., a user U... or W...). Slack calls ids opaque, so only their
+ * shape is checked: capitals and digits. Enough to refuse a name or an @handle, which would silently never match.
+ */
+export const SLACK_ID = /^[A-Z][A-Z0-9]{2,30}$/;
+const slackId = (what: string) => z.string().regex(SLACK_ID, `a Slack ${what} id (capitals and digits, e.g. U0123ABCD; not a name)`);
+/** A Linear id (a user, team or label): a UUID. */
+export const LINEAR_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const linearId = (what: string) => z.string().regex(LINEAR_ID, `a Linear ${what} id (a UUID; not a name)`);
 
 export const IntakeConfig = z.strictObject({
   version: z.literal(1),
@@ -99,6 +111,10 @@ export const IntakeConfig = z.strictObject({
       alerts: z.array(z.string().min(1)).default([]),
       // WHY: GitHub logins compare case-insensitively; the github source lowercases the author too.
       github: z.array(z.string().regex(GITHUB_LOGIN, 'a GitHub login').transform((l) => l.toLowerCase())).default([]),
+      /** Slack user ids whose drafts are filed `ready`; each must be in slack.allowed_senders. */
+      slack: z.array(slackId('user')).default([]),
+      /** Linear user ids whose drafts are filed `ready`; each must be in linear.allowed_senders. */
+      linear: z.array(linearId('user')).default([]),
     })
     .prefault({}),
   /** One server only: messages from any other server, and every direct message, are dropped unstored. */
@@ -212,6 +228,44 @@ export const IntakeConfig = z.strictObject({
         .prefault({}),
     })
     .prefault({}),
+  /**
+   * Slack (src/intake/slack.ts): a Slack app connected OUTBOUND over Socket Mode (no public address), told only about
+   * messages that mention it. One workspace (`team`), the listed channels, the allowed senders: anyone else's mention
+   * is dropped on their user id before its text is read, never stored, never answered. Replies go in the message's
+   * thread. Off by default; it also needs the app's two tokens in credentials.yaml (credentials.sh intake-slack).
+   */
+  slack: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      /** The workspace (team) id; required when enabled. Another workspace's event is dropped on its id. */
+      team: slackId('workspace').optional(),
+      /** Only mentions in these channels count (public C... or private G...); direct messages (D...) never. */
+      channels: z.array(z.string().regex(/^[CG][A-Z0-9]{2,30}$/, 'a Slack channel id (C... or G...; never a direct message D...)')).default([]),
+      /** The only Slack users whose mentions are taken (user ids, U... or W...). Empty: nobody's. */
+      allowed_senders: z.array(slackId('user')).default([]),
+    })
+    .refine((d) => !d.enabled || d.team, { message: 'slack.team (the workspace id) is required when slack is enabled', path: ['team'] })
+    .prefault({}),
+  /**
+   * Linear (src/intake/linear.ts): open issues in one team carrying one label, created by an allowed sender, read by
+   * polling Linear's API (no webhook, no public address). A creator who isn't allowed has nothing of their issue
+   * fetched but its id. Each report gets one comment back on its issue. Off by default; it also needs the API key in
+   * credentials.yaml (credentials.sh intake-linear).
+   */
+  linear: z
+    .strictObject({
+      enabled: z.boolean().default(false),
+      /** The one team (its id); required when enabled. */
+      team: linearId('team').optional(),
+      /** Only issues carrying this label (its id) are reports; required when enabled. */
+      label: linearId('label').optional(),
+      /** The only Linear users whose issues are taken (user ids). Empty: nobody's. */
+      allowed_senders: z.array(linearId('user')).default([]),
+      // INVARIANT: at least a minute between listings, as for GitHub issues.
+      poll_minutes: z.number().int().min(1).max(1440).default(5),
+    })
+    .refine((d) => !d.enabled || (d.team && d.label), { message: 'linear.team and linear.label are required when linear is enabled', path: ['team'] })
+    .prefault({}),
   // WHY: off by default; when on, outsiders' issues reach work only through triage and the trust policy (decide.ts).
   github: z
     .strictObject({
@@ -304,6 +358,11 @@ export const IntakeConfig = z.strictObject({
   for (const id of c.trusted.discord) {
     if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['trusted', 'discord'], message: `${id} is trusted but not in discord.allowed_senders; a trusted sender must be allowed` });
   }
+  for (const src of ['slack', 'linear'] as const) {
+    for (const id of c.trusted[src]) {
+      if (!c[src].allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['trusted', src], message: `${id} is trusted but not in ${src}.allowed_senders; a trusted sender must be allowed` });
+    }
+  }
   for (const id of Object.keys(c.discord.people)) {
     if (!c.discord.allowed_senders.includes(id)) ctx.addIssue({ code: 'custom', path: ['discord', 'people'], message: `${id} is mapped to a GitHub login but not in discord.allowed_senders; a mapped person must be allowed` });
   }
@@ -347,12 +406,23 @@ export function isAllowed(sender: Sender, cfg: IntakeConfig): boolean {
       // WHY allowed: an owner of the instance spoke and confirmed it on the dashboard (or a device token an owner made,
       // for Siri); never trusted, so it always waits for an owner's approval.
       return true;
+    case 'slack':
+      // Only the allowed senders (slack.allowed_senders); empty means nobody. The adapter drops the rest first.
+      return cfg.slack.allowed_senders.includes(sender.id);
+    case 'linear':
+      // Only the allowed senders (linear.allowed_senders); empty means nobody. The adapter never fetches the rest.
+      return cfg.linear.allowed_senders.includes(sender.id);
   }
 }
 
 /** What the config allows that is probably not meant, for the start-up check. */
 export function intakeWarnings(cfg: IntakeConfig): string[] {
-  return cfg.discord.enabled && !cfg.discord.allowed_senders.length ? ['discord is on but discord.allowed_senders is empty: no Discord message will be accepted'] : [];
+  const out: string[] = [];
+  if (cfg.discord.enabled && !cfg.discord.allowed_senders.length) out.push('discord is on but discord.allowed_senders is empty: no Discord message will be accepted');
+  if (cfg.slack.enabled && !cfg.slack.allowed_senders.length) out.push('slack is on but slack.allowed_senders is empty: no Slack message will be accepted');
+  if (cfg.slack.enabled && !cfg.slack.channels.length) out.push('slack is on but slack.channels is empty: no Slack channel is read');
+  if (cfg.linear.enabled && !cfg.linear.allowed_senders.length) out.push('linear is on but linear.allowed_senders is empty: no Linear issue will be taken');
+  return out;
 }
 
 /**
