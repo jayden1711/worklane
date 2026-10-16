@@ -3,7 +3,7 @@
 // triage, the issue it was filed as or joined, the reproduction, and the replies sent. Drafts that need the
 // owner wait in the Inbox. The owner's and the writers' to read.
 import { useEffect, useMemo, useState } from 'react';
-import { api, type IntakeReport, type IntakeView, type State } from '../api';
+import { api, type IntakeReport, type IntakeSourceSummary, type IntakeView, type State } from '../api';
 import { navigate } from '../App';
 import { RecordsTable } from '../components/patterns';
 import { ago, Badge, cx, Empty } from '../components/ui';
@@ -32,12 +32,49 @@ const VIEWS: Record<string, (r: IntakeReport) => boolean> = {
 export const intakeRefusal = (state: Pick<State, 'canReadIntake' | 'owners' | 'user' | 'role'>) =>
   state.canReadIntake === false ? `intake reports are for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}` : null;
 
+const SOURCE_NAME: Record<IntakeSourceSummary['name'], string> = { discord: 'Discord', slack: 'Slack', linear: 'Linear' };
+const SOURCE_STATE: Record<IntakeSourceSummary['state'], { label: string; tone: 'neutral' | 'ok' | 'warn' | 'danger' }> = {
+  on: { label: 'on', tone: 'ok' },
+  off: { label: 'off', tone: 'neutral' },
+  none: { label: 'not set up', tone: 'neutral' },
+  invalid: { label: 'intake.yaml refused', tone: 'danger' },
+};
+const SOURCE_HINT: Record<IntakeSourceSummary['name'], string> = { discord: 'Messages to the bot in channels you pick', slack: 'Mentions of the bot in channels you pick', linear: 'Labelled issues in one team' };
+
+/**
+ * The chat sources, side by side (a server instance's): each one's state and counts, never an id. An owner's card
+ * links to its step on the First run page; a writer's says who sets it up (no link: there is nothing for them there).
+ */
+export function IntakeSources({ sources, canSetUp }: { sources: IntakeSourceSummary[]; canSetUp: boolean }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-3" data-testid="intake-sources">
+      {sources.map((x) => (
+        <div key={x.name} className="rounded-card bg-surface p-3 shadow-hairline" data-testid="intake-source" data-source={x.name} data-state={x.state}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[13px] font-medium text-ink">{SOURCE_NAME[x.name]}</span>
+            <Badge tone={SOURCE_STATE[x.state].tone}>{SOURCE_STATE[x.state].label}</Badge>
+          </div>
+          <div className="mt-0.5 text-[12px] text-ink-3">{x.state === 'none' ? SOURCE_HINT[x.name] : x.detail}</div>
+          {canSetUp ? (
+            <a href={`/first-run?open=${x.name}`} onClick={(e) => (e.preventDefault(), navigate(`/first-run?open=${x.name}`))} className="mt-1 inline-block text-[12px] text-blue-ink hover:underline" data-testid="intake-source-link">
+              {x.state === 'none' ? 'Set up on First run' : 'Change on First run'}
+            </a>
+          ) : (
+            x.state === 'none' && <div className="mt-1 text-[12px] text-ink-3">An owner sets this up.</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The page from its data (also what the render checks render). */
 export function IntakeReports({ data, view = 'All', onView = () => {} }: { data: IntakeView; view?: string; onView?: (v: string) => void }) {
   const rows = data.reports.filter(VIEWS[view] ?? VIEWS.All!);
   const waiting = data.reports.filter(VIEWS['Needs the owner']!).length;
   return (
     <div className="space-y-3 p-6">
+      {data.sources && <IntakeSources sources={data.sources} canSetUp={!!data.canSetUpSources} />}
       <div className="flex flex-wrap items-center gap-1.5">
         {Object.keys(VIEWS).map((v) => (
           <button key={v} onClick={() => onView(v)} className={cx('h-7 rounded-full px-2.5 text-[12px]', view === v ? 'bg-ink font-medium text-surface' : 'text-ink-2 shadow-hairline hover:bg-hover-2')} data-testid="intake-view">
@@ -99,7 +136,7 @@ export function IntakeReports({ data, view = 'All', onView = () => {} }: { data:
       ) : data.reports.length ? (
         <Empty title="No reports in this view" />
       ) : (
-        <Empty title="No reports yet" hint="Each source (chat bot, texts, the product's bug form) is off until the owner turns it on for this instance; see docs/intake.md." />
+        <Empty title="No reports yet" hint="Each source (Discord, Slack, Linear, GitHub issues, the product's bug form, voice) is off until the owner turns it on for this instance; see docs/intake.md." />
       )}
     </div>
   );

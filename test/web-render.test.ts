@@ -60,6 +60,8 @@ interface Render {
   renderClaudeSignin(v: unknown, o?: { confirming?: boolean }): string;
   renderDiscordSetup(v: unknown, o?: { bot?: unknown; botError?: string; tokenConfirming?: boolean; plan?: unknown; values?: Record<string, unknown> }): string;
   renderFirstRunPage(state: unknown): string;
+  renderSourceSetup(v: unknown, o?: { view?: unknown; started?: boolean; confirming?: string; plan?: unknown; values?: Record<string, unknown> }): string;
+  renderIntakeSources(sources: unknown[], canSetUp: boolean): string;
   renderSetupScreens(steps: unknown[]): string;
   renderFirstTask(info: unknown, o?: { canEdit?: boolean; preview?: { title: string; body: string } }): string;
   renderIgnored(data: unknown): string;
@@ -3722,4 +3724,71 @@ test("the coordinator card: current errors once each with a count and since when
   assert.match(r.renderCoordinatorErrors(undefined, [], 3, now), /data-testid="coordinator-errors-count"[^>]*>The coordinator is reporting errors now \(3\)/);
   // Nothing current, nothing earlier: nothing shown.
   assert.equal(r.renderCoordinatorErrors([], [], 0, now), '');
+});
+
+test("the first-run page's Slack and Linear steps: an empty state with one first action for an owner and no button for a writer; then the steps; who may send never a picker", () => {
+  const cred = (credential: string, key: string, title: string, stored = false) => ({ credential, key, title, configured: stored, file: stored ? `/home/example/.config/shop-secrets/${credential}` : null, present: stored, error: null, ask: null });
+  const slack = {
+    available: true,
+    kind: 'slack',
+    instance: 'shop',
+    canAct: true,
+    portal: 'https://api.slack.com/apps',
+    creds: [cred('intake-slack-app', 'slack_app_token', 'Paste the Slack app-level token'), cred('intake-slack-bot', 'slack_bot_token', 'Paste the Slack bot token')],
+    intake: { file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', exists: false, error: null, values: { 'slack.enabled': false, 'slack.team': null, 'slack.channels': [] }, warnings: [], allowed: 0, trusted: 0 },
+    form: [
+      { key: 'slack.enabled', kind: 'boolean', what: 'the app connects' },
+      { key: 'slack.team', kind: 'team', what: 'the one workspace' },
+      { key: 'slack.channels', kind: 'ids', what: 'the channels' },
+    ],
+    slack: { manifest: '{"settings":{"socket_mode_enabled":true}}', scopes: [{ scope: 'app_mentions:read', why: 'mentions only' }] },
+    automation: { token: 'sudo bash /opt/worklane/current/scripts/setup/credentials.sh shop intake-slack', view: 'sudo -H -u wl-shop worklane slack view --instance shop', file: '/home/example/.local/state/worklane/instances/shop/intake.yaml', keys: ['slack.enabled', 'slack.team', 'slack.channels'], restart: 'sudo systemctl restart worklane-shop.service' },
+  };
+  // Nothing set up: the empty state, what it does, and exactly one action (a link to Slack); no button at all.
+  const empty = r.renderSourceSetup(slack);
+  assert.match(empty, /data-testid="source-empty" data-source="slack"[\s\S]*?Slack isn(’|&#x27;)t connected[\s\S]*?Socket Mode[\s\S]*?public address/);
+  assert.equal((empty.match(/data-testid="source-first-action"/g) ?? []).length, 1);
+  assert.match(empty, /href="https:\/\/api\.slack\.com\/apps"[^>]*data-testid="source-first-action"[^>]*>Create the Slack app from the manifest</);
+  assert.doesNotMatch(empty, /<button/, 'no other action, and no dead button');
+  // A writer: the same words, who sets it up, and nothing to click.
+  const writer = r.renderSourceSetup({ ...slack, canAct: false });
+  assert.match(writer, /data-testid="source-writer-note"[^>]*>An owner of this instance sets it up here/);
+  assert.doesNotMatch(writer, /<button|<a /);
+  // Started (or anything stored): the four steps; the paste buttons; no load button before both tokens are stored.
+  const steps = r.renderSourceSetup(slack, { started: true });
+  for (const id of ['source-step-create', 'source-step-token', 'source-step-pick', 'source-step-restart']) assert.match(steps, new RegExp(`data-testid="${id}"`));
+  assert.equal((steps.match(/data-testid="source-token-button"/g) ?? []).length, 2);
+  assert.doesNotMatch(steps, /data-testid="source-load"/);
+  assert.match(steps, /data-testid="source-manifest"/);
+  assert.match(r.renderSourceSetup(slack, { started: true, confirming: 'intake-slack-bot' }), /data-testid="source-token-confirming"[\s\S]*?never the secret[\s\S]*?data-testid="source-token-confirm"/);
+  // Stored, the view loaded: the picks, the people to copy, Review; who may send is only counted, never a picker.
+  const stored = { ...slack, creds: [cred('intake-slack-app', 'slack_app_token', 'Paste the Slack app-level token', true), cred('intake-slack-bot', 'slack_bot_token', 'Paste the Slack bot token', true)], intake: { ...slack.intake, allowed: 2 } };
+  const view = { kind: 'slack', team: { id: 'T0000000001', name: 'Example' }, bot: { user: 'U00000000B0' }, channels: [{ id: 'C0000000001', name: 'ideas', member: true }, { id: 'C0000000002', name: 'random', member: false }], members: [{ id: 'U0000000011', name: 'Ada' }], at: new Date().toISOString() };
+  const loaded = r.renderSourceSetup(stored, { view });
+  assert.deepEqual([...loaded.matchAll(/data-testid="source-field" data-key="([a-z_.]+)"/g)].map((m) => m[1]), ['slack.enabled', 'slack.team', 'slack.channels']);
+  assert.match(loaded, /#random \(invite the bot\)/);
+  assert.match(loaded, /data-testid="source-senders-note"[\s\S]*?slack\.allowed_senders[\s\S]*?2 now/);
+  assert.match(loaded, /data-testid="source-people"[\s\S]*?U0000000011/);
+  assert.match(loaded, /data-testid="source-review"/);
+  assert.doesNotMatch(loaded, /data-key="slack\.allowed_senders"/);
+  // A writer sees where it stands: no paste, load or review button.
+  assert.doesNotMatch(r.renderSourceSetup({ ...stored, canAct: false }, { view }), /source-token-button|source-load"|source-review|source-portal-link/);
+  // Linear's empty state names its one action too.
+  const linear = { ...slack, kind: 'linear', portal: 'https://linear.app/settings/account/security', creds: [cred('intake-linear', 'linear_api_key', 'Paste the Linear API key')], slack: undefined, linear: { permissions: [{ name: 'Read', why: 'read' }] }, form: [], intake: { ...slack.intake, values: {} } };
+  assert.match(r.renderSourceSetup(linear), /Linear isn(’|&#x27;)t connected[\s\S]*?data-testid="source-first-action"[^>]*>Create a Linear API key</);
+});
+
+test("the Intake page's sources strip: each source's state and counts; an owner's card links to its step, a writer's says who sets it up", () => {
+  const sources = [
+    { name: 'discord', state: 'on', detail: '2 channels · 3 may send' },
+    { name: 'slack', state: 'none', detail: '0 channels · 0 may send' },
+    { name: 'linear', state: 'invalid', detail: 'one label · 1 may send' },
+  ];
+  const owner = r.renderIntakeSources(sources, true);
+  assert.deepEqual([...owner.matchAll(/data-source="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['discord:on', 'slack:none', 'linear:invalid']);
+  assert.match(owner, /href="\/first-run\?open=slack"[^>]*>Set up on First run/);
+  assert.match(owner, /intake\.yaml refused/);
+  const writer = r.renderIntakeSources(sources, false);
+  assert.doesNotMatch(writer, /<a /);
+  assert.match(writer, /An owner sets this up/);
 });
