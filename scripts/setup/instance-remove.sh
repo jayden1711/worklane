@@ -223,8 +223,10 @@ for line in "${ITEMS[@]}"; do
     path) exists path "$w" && rm -rf --one-file-system -- "$w" && echo "removed $w" ;;
     user)
       user_exists "$w" || continue
-      loginctl disable-linger "$w" 2>/dev/null || true
       uh="$(home_of "$w")" uid="$(id -u "$w")"
+      # Its systemd user manager (lingering keeps one for the coordinator): stopped, so userdel finds no process of its.
+      loginctl disable-linger "$w" 2>/dev/null || true
+      systemctl stop "user@$uid.service" 2>/dev/null || true
       userdel -r "$w" 2>/dev/null || userdel "$w"
       # Its home goes with it whatever userdel said (a mail spool it couldn't find): it held the state and the keys.
       # Only a home that is that user's own: absolute, not /, owned by its uid, and no other user's home.
