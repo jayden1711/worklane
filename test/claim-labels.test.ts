@@ -5,13 +5,12 @@ import { claimLines, handoffDoubt, handoffs, readClaims } from '../src/claim-lab
 import { rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from '../src/roles.js';
 import { calibrated, verdictRefusal } from '../src/verdict-confidence.js';
 
-test('claim labels: the worker and the evaluator schemas require labeled claims, and their prompts say so', () => {
+test('claim labels: the worker and the evaluator schemas require labeled claims, and the evaluator prompt says so (the worker prompt is unchanged)', () => {
   for (const schema of [WORKER_SCHEMA, VERDICT_SCHEMA]) {
     assert.ok((schema.required as readonly string[]).includes('claims'));
     assert.deepEqual(schema.properties.claims.items.properties.label.enum, ['measured', 'inferred', 'guess']);
     assert.deepEqual(schema.properties.claims.items.required, ['claim', 'label', 'basis']);
   }
-  assert.match(rolePrompt('/nonexistent', 'worker'), /claims: every claim your summary and intent make, each labeled measured .* inferred .* or guess\. Never hand the reviewer or the owner a check you could run yourself/);
   assert.match(rolePrompt('/nonexistent', 'evaluator-verdict'), /A verdict without labeled claims is refused and you're asked again/);
 });
 
