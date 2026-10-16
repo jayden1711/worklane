@@ -70,6 +70,8 @@ export interface RunRecord {
    * like the whole record, and capped). Absent for a success, and in older records.
    */
   detail?: string;
+  /** What the session loaded beyond Claude Code itself: approved plugins and MCP servers, from its init event. */
+  loaded?: { plugins: string[]; mcpServers: string[] };
 }
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
@@ -141,7 +143,12 @@ export class RunRecorder {
   /** One stream-json line from the agent's session. */
   line(j: unknown): void {
     try {
-      const m = j as { type?: string; message?: { content?: unknown } };
+      const m = j as { type?: string; subtype?: string; message?: { content?: unknown }; plugins?: unknown; mcp_servers?: unknown };
+      if (m.type === 'system' && m.subtype === 'init') {
+        const plugins = (Array.isArray(m.plugins) ? m.plugins : []).flatMap((p: { path?: unknown; name?: unknown }) => (p && p.path !== 'builtin' && typeof p.name === 'string' ? [clip(p.name, 80)] : []));
+        const mcpServers = (Array.isArray(m.mcp_servers) ? m.mcp_servers : []).flatMap((s: { name?: unknown }) => (s && typeof s.name === 'string' ? [clip(s.name, 80)] : []));
+        if (plugins.length || mcpServers.length) this.rec.loaded = { plugins: plugins.slice(0, 50), mcpServers: mcpServers.slice(0, 50) };
+      }
       const content = Array.isArray(m.message?.content) ? (m.message!.content as Record<string, unknown>[]) : [];
       if (m.type === 'assistant') {
         for (const c of content) {

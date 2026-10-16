@@ -1,0 +1,43 @@
+name: ui shots
+# Screenshots of the Extend page (Plugins) for a PR that changes it: before (the base branch's Extend page) and after, light
+# and dark, desktop and phone, as an owner and a writer (scripts/ci/plugins-ui-shots.mjs), uploaded as an artifact.
+# Pull requests only, and only when that page changes: not a push check, not a batch, not an updater check.
+on:
+  pull_request:
+    paths:
+      - web/src/pages/Extend.tsx
+      - web/src/components/Plugins.tsx
+      - src/plugins/dashboard.ts
+      - scripts/ci/plugins-ui-shots.mjs
+concurrency:
+  group: ui-shots-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  extend-page:
+    name: Extend page screenshots
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: this branch and its base, each built
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          npm ci && npm run build && npm run build:web
+          git worktree add "$RUNNER_TEMP/base" "$BASE"
+          (cd "$RUNNER_TEMP/base" && npm ci && npm run build && npm run build:web)
+      - name: the screenshots
+        run: node scripts/ci/plugins-ui-shots.mjs "$RUNNER_TEMP/shots" "$RUNNER_TEMP/base"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: extend-page-screenshots
+          path: ${{ runner.temp }}/shots

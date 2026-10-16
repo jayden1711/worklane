@@ -1,0 +1,1 @@
+{ "name": "escape", "version": "1.0.0", "description": "A fixture whose MCP server tries to write where the broker reads; the real-host CI checks every try fails." }

@@ -124,6 +124,8 @@ usage: ${BRAND.cli} <command> [options]
                                    full-run slot is free and tests.yaml idle_probe passes
   jobs                             queued and finished runs, with log paths
   slots                            machine-wide agent slots in use (all harnesses) and the cap
+  plugins show --instance name     the instance's approved plugins (root's allowlist, checked);
+                                   fetch, stage, confirm and remove are root's (scripts/setup/plugins.sh)
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
@@ -679,6 +681,42 @@ async function main(argv: string[]): Promise<number> {
       }
       if (!jobs.length) console.log('no jobs');
       return 0;
+    }
+
+    case 'mcp-broker': {
+      if (!instanceOpt) {
+        console.error('usage: mcp-broker --instance <name>');
+        return 2;
+      }
+      const { runBroker } = await import('./mcp/service.js');
+      return runBroker(instanceOpt);
+    }
+
+    case 'mcp-connect': {
+      // claude starts this for one approved MCP server of a run: mcp-connect <instance> <server>.
+      if (!sub || !rest[0] || rest.length !== 1) {
+        console.error('usage: mcp-connect <instance> <server>');
+        return 2;
+      }
+      const { runConnector } = await import('./mcp/connector.js');
+      return runConnector(sub, rest[0]);
+    }
+
+    case 'mcp-sandboxed': {
+      // The broker's own wrapper for one server: mcp-sandboxed <config.json> -- <argv...>. Read from the raw argv: the
+      // server's own arguments may hold anything, --root and --instance included, which main's option parsing takes.
+      const raw = argv.slice(argv.indexOf('mcp-sandboxed') + 1);
+      if (raw.length < 3 || raw[1] !== '--') {
+        console.error('usage: mcp-sandboxed <config.json> -- <command> [args...]');
+        return 2;
+      }
+      const { runSandboxed } = await import('./mcp/sandboxed.js');
+      return runSandboxed(raw[0]!, raw.slice(2));
+    }
+
+    case 'plugins': {
+      const { pluginsCommand } = await import('./plugins/cli.js');
+      return pluginsCommand(sub, rest, instanceOpt);
     }
 
     case 'slots': {
