@@ -12,6 +12,7 @@ import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
+import { renamedFrom } from './instance-rename.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -1155,6 +1156,28 @@ async function main(argv: string[]): Promise<number> {
         console.log(`wrote ${file} (intake.discord_token: ${tokenFile}; the rest kept)`);
         return 0;
       }
+      if (sub === 'renamed' && target) {
+        // instance-rename.sh's, as the new instance's coordinator, after the old one's history is imported (src/instance-rename.ts).
+        const from = option(rest, '--from');
+        if (!from) {
+          console.error('usage: instance renamed <new name> --from <old name>');
+          return 2;
+        }
+        try {
+          const i = loadInstance(target);
+          const log = new EventLog(join(i.stateDir, 'events.db'));
+          try {
+            const r = renamedFrom({ stateDir: i.stateDir, log, from, to: i.name });
+            console.log(`renamed from ${from}: ${r.revoked.length} Siri device(s) revoked (make new ones on the dashboard), ${r.carried.length} open ask(s) asked again for ${i.name}`);
+            return 0;
+          } finally {
+            log.close();
+          }
+        } catch (e) {
+          console.error(`instance renamed: ${String((e as Error).message ?? e).split('\n')[0]}`);
+          return 1;
+        }
+      }
       if (sub === 'setup-status' && target) {
         // Read-only, from local files: whether the checkout has its config, and auto-config's setup PR and questions.
         try {
@@ -1187,7 +1210,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name>');
       return 2;
     }
 
