@@ -171,7 +171,10 @@ fetch_from() { # <id> <address> <want: none|seen>: a lockfile pinning one tarbal
   # A "none" proves something only if npm was still trying (blocked), not if the fetch had already died.
   if [ "$want" = none ] && ! kill -0 "$pid" 2>/dev/null; then cat "$t/$id.out" >&2; fail "$id: the fetch ended within 20 s, so it never waited on $a"; fi
   echo "  $id (https://$a): the listener saw: $(seen)"
+  # The wipe finds the fetch's own unit (worklane-test-ci_<id>_fetch_<pid>, run_units) and stops it.
+  [ "$want" = seen ] || [ -n "$(systemctl list-units --plain --no-legend "worklane-test-ci_${id}_fetch_*")" ] || fail "$id: no fetch unit while npm waits"
   as_ ci wipe "$id" > /dev/null
+  [ -z "$(systemctl list-units --plain --no-legend "worklane-test-ci_${id}_fetch_*")" ] || fail "$id: the wipe left the fetch's unit"
   wait "$pid" 2>/dev/null || true
 }
 fetch_from net-fetch-loop 127.0.0.1 none

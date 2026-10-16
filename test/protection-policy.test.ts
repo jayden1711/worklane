@@ -158,7 +158,7 @@ test('the Policy form: each key with its bounds; Review shows the change and wri
   const s = await dashboard(dir, { instance: 'shop', policyFile, setupContext: { instanceFacts: () => ({ error: 'not here' }) } });
   try {
     const p = (await s.get()).policy!;
-    assert.deepEqual(p.fields.map((f) => [f.key, f.value]), [['budget.daily_usd', 50], ['agents.max_workers', 4], ['land_mode', 'pr'], ['auto_merge', false], ['main_watch', 'auto']]);
+    assert.deepEqual(p.fields.map((f) => [f.key, f.value]), [['budget.daily_usd', 50], ['agents.max_workers', 4], ['land_mode', 'pr'], ['auto_merge', false], ['main_watch', 'auto'], ['automations.enabled', false]]);
     assert.equal(p.fields[0]!.max, 100, "the machine's limit");
     assert.deepEqual(p.fixed.map((f) => f.key), ['sandbox', 'allow_same_user', 'lanes', 'network_allow', 'pre_approved']);
     const before = readFileSync(policyFile, 'utf8');
