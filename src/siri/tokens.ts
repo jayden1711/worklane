@@ -148,6 +148,13 @@ function change(stateDir: string, id: string, f: (d: DeviceRecord) => DeviceReco
 /** Revoke: refused from the next request on. Kept on the list (as revoked) for the record. */
 export const revokeDevice = (stateDir: string, id: string, by: string, now = new Date()) => change(stateDir, id, (d) => (d.revokedAt ? null : { ...d, revokedAt: now.toISOString(), revokedBy: by }));
 
+/** Revoke every device still active (an instance removed or renamed): none works from the next request on. Returns their ids. */
+export function revokeAllDevices(stateDir: string, by: string, now = new Date()): string[] {
+  const ids = readDevices(stateDir).filter((d) => !d.revokedAt).map((d) => d.id);
+  for (const id of ids) revokeDevice(stateDir, id, by, now);
+  return ids;
+}
+
 /** Unbind: the next use binds it again (to whichever node makes it). */
 export const unbindDevice = (stateDir: string, id: string) => change(stateDir, id, (d) => ({ ...d, boundNode: null, lastForeign: null }));
 

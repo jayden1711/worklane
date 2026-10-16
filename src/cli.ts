@@ -12,6 +12,7 @@ import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
+import { revokeAllDevices } from './siri/tokens.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -1191,6 +1192,23 @@ async function main(argv: string[]): Promise<number> {
         console.log(`wrote ${file} (intake.discord_token: ${tokenFile}; the rest kept)`);
         return 0;
       }
+      if (sub === 'siri-revoke-all' && target) {
+        // instance-remove.sh's, as the instance's coordinator, before it exports: every Siri device token revoked.
+        const why = option(rest, '--why') ?? '';
+        if (!/^[a-z][a-z0-9 -]{0,60}$/.test(why)) {
+          console.error('usage: instance siri-revoke-all <name> --why <a few words>');
+          return 2;
+        }
+        try {
+          const i = loadInstance(target);
+          const ids = revokeAllDevices(i.stateDir, why);
+          console.log(`${target}: ${ids.length} Siri device token(s) revoked (${why})`);
+          return 0;
+        } catch (e) {
+          console.error(`instance siri-revoke-all: ${String((e as Error).message ?? e).split('\n')[0]}`);
+          return 1;
+        }
+      }
       if (sub === 'setup-status' && target) {
         // Read-only, from local files: whether the checkout has its config, and auto-config's setup PR and questions.
         try {
@@ -1223,7 +1241,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance siri-revoke-all <name> --why <a few words>');
       return 2;
     }
 
