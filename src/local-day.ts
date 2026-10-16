@@ -8,3 +8,9 @@ export function localDay(at: number | string | Date = Date.now()): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+
+/** The next local midnight after `at`: when the local day (and the daily budget's day) turns. */
+export function nextLocalMidnight(at: number | Date = Date.now()): Date {
+  const d = at instanceof Date ? at : new Date(at);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+}
