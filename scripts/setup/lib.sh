@@ -123,6 +123,23 @@ PROFILE_SUDOERS_ARGS=(
   '^claude-account failover [a-z][a-z0-9+-]* back$'
   '^claude-account failover [a-z][a-z0-9+-]* stay$'
 )
+# The plugin steps (src/plugins/, plugins.sh): an id, and for a fetch an https URL with a commit (and a subdirectory),
+# for a stage a digest and roles. sudoers needs ':' escaped, so the patterns say '.' where the helper, which checks every
+# argument exactly again, requires 'https:' and 'sha256:'. No instance: the helper takes the asking coordinator's from SUDO_USER.
+PLUGIN_SUDOERS_ARGS=(
+  '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$'
+  '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$'
+  '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$'
+  '^plugin-withdraw [a-z0-9][a-z0-9-]*$'
+  '^plugin-remove [a-z0-9][a-z0-9-]*$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$'
+  '^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$'
+  '^mcp-snapshot [a-z0-9][a-z0-9-]*$'
+  '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'
+)
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
 sudo_regex_ok() {
@@ -150,6 +167,7 @@ machine_sudoers() {
   if sudo_regex_ok; then
     cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
     for n in "${PROFILE_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
+    for n in "${PLUGIN_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
     cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
   else
     signer_rules=0
@@ -157,6 +175,7 @@ machine_sudoers() {
   printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
   [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, login, failover).\n'
+  [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove, mcp-fetch, mcp-preview, mcp-snapshot, mcp-stage): plugins.sh at a root shell instead.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -297,7 +316,8 @@ archive_dirs() {
 
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
-# instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.
+# instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
+# run's directory.
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm
   st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
@@ -310,7 +330,7 @@ instance_in_flight() {
       uid="$(stat -c %u "$pid" 2>/dev/null)" || continue
       [[ " ${uids[*]} " == *" $uid "* ]] || continue
       cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null || true)"
-      case "$cg" in */worklane-dashboard-"$name".service | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
+      case "$cg" in */worklane-dashboard-"$name".service | */worklane-mcp@"$name".service | */worklane-mcp@"$name".service/* | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
       comm="$(cat "$pid/comm" 2>/dev/null || true)"
       echo "process ${pid#/proc/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${cg##*/}"
     done
@@ -373,13 +393,14 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
-  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
   elif [[ "$n" == exp-* ]]; then echo "wl-$n is the experiment job user of instance ${n#exp-}"
   elif [[ "$n" == score-* ]]; then echo "wl-$n is the experiment scorer user of instance ${n#score-}"
   elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
-  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  elif [[ "$n" == plugin-fetch-* ]]; then echo "worklane-$n.service is the plugin fetch of instance ${n#plugin-fetch-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
   fi
 }
 instance_name_ok() { [ -z "$(instance_name_problem "$1")" ]; }
@@ -391,7 +412,7 @@ need_instance_name() { local why; why="$(instance_name_problem "$1")"; [ -z "$wh
 ci_runner_name_problem() {
   local n="$1"
   if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
-  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "wl-ci-$n is instance ci's $n name"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "wl-ci-$n is instance ci's $n name"
   elif [[ "$n" =~ ^(.+)-(docker|reset)$ ]]; then echo "worklane-ci-$n@.service is CI runner ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} unit"
   fi
 }

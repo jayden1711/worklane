@@ -164,6 +164,9 @@ dropped() {
       sudoers) sudoers_installed "$w" || continue ;;
       path) [ -e "$w" ] || continue ;;
       glob) compgen -G "$w*" >/dev/null || continue ;;
+      group) getent group "$w" >/dev/null 2>&1 || continue ;;
+      unit) [ -e "/etc/systemd/system/$w" ] || systemctl is-enabled -q "$w" 2>/dev/null || continue ;;
+      shared) records plan "$old" | cut -f1 | grep -qx "$w" || continue ;;
       via) x=""; for c in $when; do case "${c%%:*}" in user) user_exists "${c#*:}" && x=1 ;; path) [ -e "${c#*:}" ] && x=1 ;; sudoers) sudoers_installed "${c#*:}" && x=1 ;; esac; done; [ -n "$x" ] || continue ;;
       *) continue ;;
     esac

@@ -205,6 +205,29 @@ export function isRoot(): boolean {
 }
 
 /** An OS user's primary group id (POSIX), or null if there is no such user (or on native Windows). */
+/** A user's home directory, from the passwd database (getent); null where there is none or no such user. */
+export function userHomeDir(user: string): string | null {
+  if (process.platform === 'win32' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) return null;
+  try {
+    const home = execFileSync('getent', ['passwd', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim().split(':')[5];
+    return home && home.startsWith('/') ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A group's gid, from the group database (getent); null where there is none or no such group. */
+export function groupGid(group: string): number | null {
+  if (process.platform === 'win32' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(group)) return null;
+  try {
+    const out = execFileSync('getent', ['group', group], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 }).trim();
+    const gid = out.split(':')[2];
+    return gid && /^\d+$/.test(gid) ? Number(gid) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function userGid(user: string): number | null {
   if (process.platform === 'win32') return null;
   try {

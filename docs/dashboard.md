@@ -461,6 +461,38 @@ The actions on a card follow your role there, and each is refused again by the r
 
 A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks, root steps and the terminal stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
 
+## Extend: Plugins
+
+**Extend** (sidebar, under Agents; `g x`; ⌘K "Plugins") is where an instance's agents get more than the repo gives them. It has one tab now, Plugins. Automations takes a second tab when it lands, so there is still one sidebar entry. Plugins use Claude Code's own plugin format; MCP servers come from inside an approved plugin or from a pinned npm package.
+
+**Who sees what**
+- **Owners** see and change everything.
+- **Writers** see a read-only list: each plugin or server, on or off, what it can reach, and its roles. They also see how many approvals are waiting. They get no previews, digests, diffs or audit, and no buttons; a line says the owners add and change plugins.
+- **Viewers** aren't offered the page. `GET /api/plugins` refuses them.
+
+**Adding and updating (owners)**
+1. **Add a plugin** asks the machine to fetch a preview of one of these:
+   - a plugin, by its git URL and exact commit, from a host on root's list (`plugins.sh hosts`; `github.com` by default);
+   - an MCP server, by its npm package and exact version.
+
+   Nothing in a preview runs, and nothing is approved by fetching.
+2. The preview shows what the thing contains:
+   - its refusals: hooks, LSP servers, monitors, `allowed-tools`, inline shell, launchers that fetch code, and anything not reviewed;
+   - its notes;
+   - for an MCP server, its tools and descriptions exactly as the model will read them (invisible characters shown as ⟨U+…⟩, never rendered as HTML).
+3. **Review the approval** shows the record (source, files hash, roles, and an MCP server's hosts and secrets' names), its digest, and for an update what it replaces. **Confirm** stages it.
+4. A staged approval is trusted for nothing. The page shows the one command an admin runs as root on the machine: `sudo bash /opt/worklane/current/scripts/setup/plugins.sh confirm <instance> <id> sha256:<digest>`. It prints the record and asks for the id to be typed back.
+
+**Changing what is approved (owners, each Review then Confirm)**
+- **Disable** and **Enable** take effect from the next run (`plugins-off.yaml` in the instance's home; it can only take away).
+- **Remove** asks the helper to delete the entry.
+- **Allowlist its MCP server** previews a plugin's server.
+- **Take its snapshot with its secrets** is the second approval, for a server that can't list its tools without them.
+
+**Blocked servers.** Servers the broker blocked because their tools changed after approval are listed with what changed.
+
+**Audit.** Every stage, change and refusal on the page is recorded, as is every root confirm.
+
 ## The Machine page
 
 Machine health moved off Overview to its own page (`/machine`, `g m`): the agent slots in use (machine-wide) and who holds each, memory, swap, load, disk, the harness's services, the off-machine backup, check times, usage per day, the merge flow, the instances side by side on a hub, and the machine-wide settings (the slot cap, engine updates) with their history, which moved there from Settings. Overview keeps a one-line summary with a link.
