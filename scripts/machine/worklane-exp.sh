@@ -329,13 +329,16 @@ create() {
   [ ! -e "$d" ] || die "job $job exists"
   install -d -o root -g "$coord" -m 0750 "$root/jobs" "$d" "$d/logs"
   install -d -o "$juser" -g "$juser" -m 0700 "$d/work" "$d/out" "$d/pred"
-  # Relative paths only, from inside the workspace: the job user can't traverse the job's directory (root's, 0750).
-  (cd "$d/work" && runuser -u "$juser" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 bash -c '
-    set -euo pipefail
-    cat > .wl-bundle
-    git init -q . && git config core.hooksPath /dev/null && git config credential.helper ""
-    git fetch -q --no-tags .wl-bundle "+refs/*:refs/bundle/*" && git checkout -q --detach "$1"
-    rm -f .wl-bundle' _ "$sha") >&2
+  # The bundle, then the clone as the job user inside a unit (its own binds, no network): the job user can't traverse
+  # the job's directory (root's, 0750) on the host, and the workspace is made where every step will see it.
+  cat > "$d/work/.wl-bundle"
+  chown "$juser:$juser" "$d/work/.wl-bundle"
+  install -d -o root -g root -m 0700 "$ENV_DIR"
+  ENV_FILE="$ENV_DIR/$name.$job.create.$$"; : > "$ENV_FILE"
+  local rc res
+  read -r rc res < <(step_unit "$job" create "$juser" 300 "$d/logs/create.log" 0 -- -p "BindPaths=$d/work" -p "ReadWritePaths=$d/work" -p "WorkingDirectory=$d/work" -- "set -euo pipefail; export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0; git init -q . && git config core.hooksPath /dev/null && git config credential.helper '' && git fetch -q --no-tags .wl-bundle '+refs/*:refs/bundle/*' && git checkout -q --detach $sha && rm -f .wl-bundle")
+  rm -f "$ENV_FILE"; ENV_FILE=
+  [ "$rc" = 0 ] || { sed 's/^/  /' "$d/logs/create.log" >&2; die "the workspace for $job wasn't made (exit $rc $res)"; }
   echo "$d/work"
 }
 
