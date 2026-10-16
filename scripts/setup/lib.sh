@@ -292,7 +292,8 @@ engine_volume() {
 
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
-# instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.
+# instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
+# run's directory.
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm
   st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
@@ -305,7 +306,7 @@ instance_in_flight() {
       uid="$(stat -c %u "$pid" 2>/dev/null)" || continue
       [[ " ${uids[*]} " == *" $uid "* ]] || continue
       cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null || true)"
-      case "$cg" in */worklane-dashboard-"$name".service | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
+      case "$cg" in */worklane-dashboard-"$name".service | */worklane-mcp@"$name".service | */worklane-mcp@"$name".service/* | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
       comm="$(cat "$pid/comm" 2>/dev/null || true)"
       echo "process ${pid#/proc/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${cg##*/}"
     done

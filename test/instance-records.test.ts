@@ -199,6 +199,7 @@ function machine(): string {
   put(`/var/lib/${cli}/claude-account/paused`, 'alpha-2\nalpha\nbeta\n');
   const inc = (id: string, instance: string | null, key: string) => ({ id, kind: 'unit_down', key, instance, severity: 'red', title: 't', detail: 'd', fix: 'f', tried: [], since: 's', lastSeen: 's', resolvedAt: null, posted: {} });
   put(`/var/lib/${cli}/agent-slots/incidents.json`, { incidents: [inc('1', 'alpha', `${cli}-alpha.service`), inc('2', 'alpha-2', `${cli}-alpha-2.service`), inc('3', null, 'disk'), inc('4', 'alpha', 'alpha#12')], posts: ['p'] });
+  put(`/var/lib/${cli}/plugins/pending.json`, { version: 1, entries: [{ instance: 'alpha', id: 'kit', roles: ['worker'], digest: 'd1', staged_at: 'now' }, { instance: 'alpha-2', id: 'kit', roles: ['worker'], digest: 'd2', staged_at: 'now' }] });
   put(`/var/lib/${cli}/pending-signers.json`, { pending: [{ principal: 'a@example.com', key: 'k1', instance: 'alpha', at: 'now' }, { principal: 'b@example.com', key: 'k2', instance: 'beta', at: 'now' }] });
   return root;
 }
@@ -208,10 +209,11 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const root = machine();
   const archive = join(root, 'archive', 'alpha.records.json');
   const planned = reg.plan(NAME, root);
-  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'pending-signers']);
+  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'pending-signers', 'plugin-pending']);
   const taken = reg.remove(NAME, archive, root);
   // The GPU grant is testrun-gpu.sh's to take out (its strict form): planned, never written here.
-  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'pending-signers']);
+  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'pending-signers', 'plugin-pending']);
+  assert.deepEqual(read(root, `/var/lib/${cli}/plugins/pending.json`), { version: 1, entries: [{ instance: 'alpha-2', id: 'kit', roles: ['worker'], digest: 'd2', staged_at: 'now' }] }, "another instance's staged plugin stays");
   assert.deepEqual(read(root, `/etc/${cli}/testrun-gpu.json`).instances, { alpha: { devices: [0] }, 'alpha-2': { devices: [1] } });
 
   const u = read(root, `/etc/${cli}/updates.json`);

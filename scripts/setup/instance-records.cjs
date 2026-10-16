@@ -36,6 +36,7 @@ const ITEMS = [
   { kind: 'unit', what: 'worklane-dashboard-<name>.service', by: 'dashboards.sh' },
   { kind: 'unit', what: 'worklane-<name>.service', by: 'service.sh' },
   { kind: 'unit', what: 'worklane-test-<name>-docker.service', by: 'test-user.sh install' },
+  { kind: 'unit', what: 'worklane-mcp@<name>.service', by: 'mcp-broker.sh (an instance of the machine-wide template worklane-mcp@.service, which stays)' },
   { kind: 'shared', what: 'gpu', by: 'testrun-gpu.sh enable' },
   { kind: 'shared', what: 'claude-profiles', by: 'claude-account.sh profile-add|use|failover' },
   { kind: 'shared', what: 'claude-status', by: 'claude-account.sh status|switch, add-project.sh' },
@@ -43,7 +44,13 @@ const ITEMS = [
   { kind: 'shared', what: 'canary', by: 'docs/canary.md (an admin, in updates.json)' },
   { kind: 'shared', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
   { kind: 'shared', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
+  { kind: 'shared', what: 'plugin-pending', by: "the machine helper's plugin-stage" },
   { kind: 'path', what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
+  { kind: 'path', what: '/etc/worklane/plugins/<name>.json', by: 'plugins.sh confirm (the allowlist)' },
+  { kind: 'path', what: '/var/lib/worklane/plugins/previews/<name>', by: "the machine helper's plugin-fetch" },
+  { kind: 'path', what: '/var/lib/worklane/plugins/store/<name>', by: 'plugins.sh confirm (approved plugins, and the empty root)' },
+  { kind: 'path', what: '/var/lib/worklane/plugins/fetch-status/<name>.json', by: 'plugins.sh fetch' },
+  { kind: 'path', what: '/var/lib/worklane-mcp-<name>', by: "worklane-mcp@<name>.service's StateDirectory" },
   { kind: 'path', what: '/var/lib/worklane/init/<name>.json', by: 'init --mode server (src/init.ts serverInitFile)' },
   { kind: 'sudoers', what: 'worklane-exp-<name>', by: 'experiments.sh install' },
   { kind: 'path', what: '/etc/worklane/experiments/<name>.json', by: 'experiments.sh install, set, data' },
@@ -56,10 +63,13 @@ const ITEMS = [
   { kind: 'user', what: 'wl-exp-<name>', by: 'experiments.sh install' },
   { kind: 'user', what: 'wl-score-<name>', by: 'experiments.sh install' },
   { kind: 'user', what: 'wl-test-<name>', by: 'test-user.sh install' },
+  { kind: 'user', what: 'wl-<name>-mcp', by: 'mcp-broker.sh (its home: the MCP servers\' secrets)' },
   { kind: 'user', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
   { kind: 'user', what: 'wl-<name>-agent', by: 'instance.sh' },
   { kind: 'user', what: 'wl-<name>', by: 'instance.sh (its home: the instance state, its App key and credentials)' },
   { kind: 'group', what: 'wl-<name>-work', by: 'instance.sh' },
+  { kind: 'group', what: 'wl-<name>-mcpc', by: "mcp-broker.sh (the broker's client socket)" },
+  { kind: 'group', what: 'wl-<name>-mcpctl', by: "mcp-broker.sh (the broker's control socket)" },
 ];
 
 // What names an instance in the scripts and src/ without being a record of its own: each is part of an item above
@@ -77,6 +87,7 @@ const NOT_RECORDS = [
   { what: 'worklane_ci_', why: "ci-runner.sh's nftables names: a runner's name, not an instance" },
   { what: 'wl-ci-<name>', why: "ci-runner.sh's runner user: a runner's name, not an instance" },
   { what: '<name>-worklane', why: "the instance's GitHub App's name (src/setup/app-manifest.ts): GitHub's, never removed here; instance-remove.sh prints what to do there" },
+  { what: '/run/worklane-mcp-<name>', why: "worklane-mcp@<name>.service's RuntimeDirectory (its sockets): systemd removes it with the unit" },
   { what: 'worklane-exp-<name>_', why: "an experiment job's transient unit (worklane-exp-<name>_<job>_<step>_<pid>): gone when the job ends; a job in flight (its users' processes) refuses the removal" },
   { what: '/run/worklane/gpu/<name>.lock', why: "a GPU's lock, by its index, machine-wide: held (flock) only by a live test-run or job helper, which a run in flight refuses the removal for; another instance's hold is never touched" },
 ];
@@ -92,6 +103,11 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/init', item: '/var/lib/worklane/init/<name>.json' },
   { at: '/var/lib/worklane/canary.json', item: "canary (the canary run in progress: taken with updates.json's canary)" },
   { at: '/var/lib/worklane-test', item: '/var/lib/worklane-test/<name>' },
+  { at: '/etc/worklane/plugins', item: '/etc/worklane/plugins/<name>.json' },
+  { at: '/var/lib/worklane/plugins', item: 'plugin-pending (pending.json), previews/<name>, store/<name>, fetch-status/<name>.json (fetches.jsonl: a log, kept)' },
+  { at: '/etc/worklane/plugin-hosts.json', why: 'the hosts any plugin may come from: the machine\'s, no instance in it' },
+  { at: '/etc/worklane/mcp-registries.json', why: 'the npm registries any MCP server may come from: the machine\'s, no instance in it' },
+  { at: '/var/lib/worklane-mcp', item: "/var/lib/worklane-mcp-<name>: each instance's MCP broker's StateDirectory" },
   { at: '/var/lib/worklane-exp', item: '/var/lib/worklane-exp/<name> (experiments.sh remove)' },
   { at: '/etc/worklane/experiments', item: '/etc/worklane/experiments/<name>.json (experiments.sh remove)' },
   { at: '/etc/worklane/egress.nft', item: "egress: the sandbox users' uids, rebuilt by egress-firewall.sh apply once an instance's are gone" },
@@ -121,6 +137,7 @@ const SHARED_FILES = [
 
 const ARCHIVE_DIR = '/var/lib/worklane/removed';
 const P = {
+  pluginPending: '/var/lib/worklane/plugins/pending.json',
   gpu: '/etc/worklane/testrun-gpu.json',
   updates: '/etc/worklane/updates.json',
   canaryState: '/var/lib/worklane/canary.json',
@@ -350,6 +367,23 @@ const SHARED = {
         writeKeeping(f, JSON.stringify(j), 0o660);
         return mine;
       });
+    },
+  },
+  'plugin-pending': {
+    file: P.pluginPending,
+    get: (prefix, name) => {
+      const j = readJson(at(prefix, P.pluginPending));
+      const mine = j && Array.isArray(j.entries) ? j.entries.filter((e) => e && e.instance === name) : [];
+      return mine.length ? mine : null;
+    },
+    drop: (prefix, name) => {
+      const f = at(prefix, P.pluginPending);
+      const j = readJson(f);
+      const mine = j && Array.isArray(j.entries) ? j.entries.filter((e) => e && e.instance === name) : [];
+      if (!mine.length) return null;
+      j.entries = j.entries.filter((e) => !(e && e.instance === name));
+      writeKeeping(f, JSON.stringify(j) + '\n');
+      return mine;
     },
   },
   'pending-signers': {

@@ -2454,6 +2454,15 @@ jobs:
           sudo install -d -m 0755 /var/lib/worklane/init
           printf '{"version":1,"mode":"server","instance":"delta"}\n' | sudo install -m 0640 -g wl-delta /dev/stdin /var/lib/worklane/init/delta.json
           sudo jq -e '[.users[] | select(.instance=="delta")] | length > 0' /var/lib/worklane/claude-account/status.json
+          # delta's MCP broker (mcp-broker.sh: its user, socket groups and unit) and plugin records beside ci's.
+          sudo bash scripts/setup/mcp-broker.sh delta > "$F/rm-mcp.log" 2>&1 || { tail -n 30 "$F/rm-mcp.log"; exit 1; }
+          bu="worklane-mcp@$(echo delta).service"; systemctl is-active "$bu"
+          for n in ci delta; do
+            printf '{"version":1,"plugins":{}}\n' | sudo install -D -m 0644 /dev/stdin "/etc/worklane/plugins/$n.json"
+            sudo install -d -m 0755 "/var/lib/worklane/plugins/store/$n/kit" "/var/lib/worklane/plugins/previews/$n/kit"
+            printf '{"id":"kit","state":"done"}\n' | sudo install -D -m 0644 /dev/stdin "/var/lib/worklane/plugins/fetch-status/$n.json"
+          done
+          printf '{"version":1,"entries":[{"instance":"ci","id":"kit","roles":["worker"],"digest":"sha256:%064d","staged_at":"2026-10-16T00:00:00Z"},{"instance":"delta","id":"kit","roles":["worker"],"digest":"sha256:%064d","staged_at":"2026-10-16T00:00:00Z"}]}\n' 1 2 | sudo install -D -m 0644 /dev/stdin /var/lib/worklane/plugins/pending.json
           # A Siri device token for delta, made the engine's way, as its coordinator.
           dstate="$(getent passwd wl-delta | cut -d: -f6)/.local/state/worklane/instances/delta/state"
           (cd / && sudo -u wl-delta node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/siri/tokens.js"); m.createDevice({ stateDir: process.argv[1], instance: "delta", name: "delta phone", by: "ci-owner" });' "$dstate")
@@ -2469,6 +2478,8 @@ jobs:
             sudo stat -c '%U:%G %a %n' /var/lib/worklane/agent-slots/incidents.json /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
+            sudo cat /etc/worklane/plugins/ci.json /var/lib/worklane/plugins/fetch-status/ci.json; sudo ls -d /var/lib/worklane/plugins/store/ci/kit /var/lib/worklane/plugins/previews/ci/kit
+            sudo jq -c '[.entries[] | select(.instance=="ci")]' /var/lib/worklane/plugins/pending.json
           }
           ci_view > "$F/rm-ci-before.txt"
           # delta's coordinator runs: refused, and nothing changes.
@@ -2482,12 +2493,12 @@ jobs:
           # The slot directory itself is left out like its files: running coordinators take and drop their locks there.
           changed="$(sudo find /etc/worklane /etc/sudoers.d /etc/systemd/system /var/lib/worklane -xdev -newer "$F/rm-mark" ! -name '*.lock' ! -path '/var/lib/worklane/agent-slots' ! -path '/var/lib/worklane/agent-slots/*' ! -name 'machine-changes.jsonl' ! -name 'updates.jsonl' 2>/dev/null || true)"
           [ -z "$changed" ] || { echo "the refused run changed: $changed" >&2; exit 1; }
-          echo "RM_ID=$id" >> "$GITHUB_ENV"; echo "RM_URL=$url" >> "$GITHUB_ENV"
+          echo "RM_ID=$id" >> "$GITHUB_ENV"; echo "RM_URL=$url" >> "$GITHUB_ENV"; echo "RM_D=delta" >> "$GITHUB_ENV"
       - name: "instance-remove: --print lists every item; a process of delta's users refuses it; no terminal and a wrong typed name change nothing"
         run: |
           sudo systemctl stop worklane-delta.service
           sudo bash scripts/setup/instance-remove.sh delta --print | tee "$F/rm-print.txt"
-          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
+          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'record   plugin-pending in ' "unit     worklane-mcp@${RM_D}.service" 'user     wl-delta-mcp ' 'group    wl-delta-mcpc' 'group    wl-delta-mcpctl' 'path     /etc/worklane/plugins/delta.json' 'path     /var/lib/worklane/plugins/store/delta' 'path     /var/lib/worklane-mcp-delta' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
             grep -qF -- "$l" "$F/rm-print.txt" || { echo "--print doesn't list: $l" >&2; exit 1; }
           done
           if grep -qE 'wl-ci|worklane-ci\.service|/srv/worklane/ci|record .*"instance":"ci"' "$F/rm-print.txt"; then echo "--print lists ci's" >&2; exit 1; fi
@@ -2529,6 +2540,13 @@ jobs:
             if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi
           done
           for h in $RM_HOMES; do if sudo test -e "$h"; then echo "the home $h is still there" >&2; exit 1; fi; done
+          # Its MCP broker and plugins: none survives; the broker's template unit, the machine's, stays.
+          if id wl-delta-mcp 2>/dev/null || getent group wl-delta-mcpc wl-delta-mcpctl; then echo "delta's broker user or groups are left" >&2; exit 1; fi
+          bu="worklane-mcp@${RM_D}.service"
+          if systemctl is-active -q "$bu" || systemctl is-enabled -q "$bu" 2>/dev/null; then echo "delta's broker is still running or enabled" >&2; exit 1; fi
+          test -f /etc/systemd/system/worklane-mcp@.service
+          for p in /etc/worklane/plugins/delta.json /var/lib/worklane/plugins/store/delta /var/lib/worklane/plugins/previews/delta /var/lib/worklane/plugins/fetch-status/delta.json /var/lib/worklane-mcp-delta /run/worklane-mcp-delta; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
+          sudo jq -e '[.entries[] | select(.instance=="delta")] | length == 0' /var/lib/worklane/plugins/pending.json
           for u in worklane-delta worklane-dashboard-delta; do if systemctl is-active -q "$u.service"; then echo "$u is running" >&2; exit 1; fi; done
           sudo jq -e '.instances | has("delta") | not' /etc/worklane/testrun-gpu.json
           sudo jq -e '(.active|has("delta")|not) and (.failover.instances|has("delta")|not) and (.profiles|has("ci-delta-only")|not) and (.profiles["ci-shared"].users|has("wl-delta-agent")|not)' /var/lib/worklane/claude-account/profiles.json
@@ -2549,6 +2567,8 @@ jobs:
             sudo stat -c '%U:%G %a %n' /var/lib/worklane/agent-slots/incidents.json /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
+            sudo cat /etc/worklane/plugins/ci.json /var/lib/worklane/plugins/fetch-status/ci.json; sudo ls -d /var/lib/worklane/plugins/store/ci/kit /var/lib/worklane/plugins/previews/ci/kit
+            sudo jq -c '[.entries[] | select(.instance=="ci")]' /var/lib/worklane/plugins/pending.json
           }
           ci_view > "$F/rm-ci-after.txt"
           diff "$F/rm-ci-before.txt" "$F/rm-ci-after.txt"
