@@ -691,6 +691,9 @@ net_props() {
 NET_WAIT='n=0; until grep -qs "^tap0" /proc/net/route; do n=$((n + 1)); if [ "$n" -ge 150 ]; then echo "worklane-testrun: the run'"'"'s network did not come up" >&2; exit 125; fi; sleep 0.1; done; '
 
 # CAP_SYS_PTRACE: opening another user's /proc/<pid>/ns/net (the run's, the test user's) is a ptrace access check.
+# WHY no ProtectSystem=, ProtectHome= or PrivateTmp= on its unit: slirp4netns's own sandbox (--enable-sandbox) mounts an
+# empty tmpfs on /tmp and pivot_roots into it, which those mounts refuse ("cannot pivot_root to /tmp", on real systemd);
+# that sandbox leaves it nothing of the host's file system at all, a stronger boundary than theirs.
 # Give unit <unit>'s network namespace its network: slirp4netns, in a unit of its own (<unit's name>'s run_unit with
 # net_<pid>), bound to the run's unit (it stops with it), as root only to join that namespace and make tap0, then
 # sandboxed by itself (its own mount namespace, every capability dropped, seccomp). Its unit's IPAddressDeny= is where the
@@ -708,8 +711,8 @@ slirp_start() {
   allow="$(resolvers | tr '\n' ' ')"
   ha="$(host_addrs | tr '\n' ' ')"
   systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
-    -p "BindsTo=$unit.service" -p "After=$unit.service" -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes \
-    -p PrivateTmp=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
+    -p "BindsTo=$unit.service" -p "After=$unit.service" -p NoNewPrivileges=yes \
+    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
     -p RestrictSUIDSGID=yes -p LockPersonality=yes -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
     -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
     "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp "$main" tap0
