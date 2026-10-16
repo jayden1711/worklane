@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { allowlistPath, approvalDigest, emptyPluginRoot, storeDir, type AllowlistEntry, type ApprovalRecord } from '../src/plugins/approval.js';
+import { allowlistPath, approvalDigest, emptyPluginRoot, storeDir, type AllowlistEntry, type ApprovalRecord, type PluginRecord } from '../src/plugins/approval.js';
 import { loadedSetProblem, pluginsForRun, PluginRunError, PLUGINS_OFF_FILE } from '../src/plugins/run.js';
 import { treeHash } from '../src/plugins/tree.js';
 import { childEnv } from '../src/os/index.js';
@@ -11,6 +11,7 @@ import { cliArgs, CliRunner, PLUGIN_LOCKS } from '../src/runner.js';
 import { STDIN_LINE } from './helpers.js';
 
 const isWindows = process.platform === 'win32';
+const treeOf = (e: AllowlistEntry) => (e.record as PluginRecord).tree;
 
 /** An approved plugin `id` for `instance`, its copy in the store, and its allowlist entry. */
 function approved(instance: string, id: string, roles: string[]): AllowlistEntry {
@@ -39,7 +40,7 @@ test('a run gets the approved plugins for its role only, from root\'s store, min
   writeFileSync(join(h, PLUGINS_OFF_FILE), 'off: [docs]\n');
   const r = pluginsForRun({ instance: 'one', instanceHome: h, role: 'builder', entries: [a, b] });
   assert.deepEqual(r.ids, ['kit']);
-  assert.deepEqual(r.dirs, [storeDir('one', 'kit', a.record.tree)]);
+  assert.deepEqual(r.dirs, [storeDir('one', 'kit', treeOf(a))]);
 });
 
 test('an unreadable switch-off list switches every plugin off (it can only take away)', () => {
@@ -51,7 +52,7 @@ test('an unreadable switch-off list switches every plugin off (it can only take 
 
 test('a run never starts on an approved copy that changed on disk (fail-without: trusting the store unchecked)', () => {
   const a = approved('three', 'kit', ['builder']);
-  writeFileSync(join(storeDir('three', 'kit', a.record.tree), 'skills', 'a', 'extra.md'), 'added later');
+  writeFileSync(join(storeDir('three', 'kit', treeOf(a)), 'skills', 'a', 'extra.md'), 'added later');
   assert.throws(() => pluginsForRun({ instance: 'three', instanceHome: home(), role: 'builder', entries: [a] }), PluginRunError);
 });
 
@@ -112,7 +113,7 @@ test('acceptance: an instance run gets its plugins, the empty plugin root and th
   let r = await new CliRunner('cli', childEnv(), c.bin, undefined, undefined, undefined, {}, undefined, undefined, undefined, plugins).run(req(cwd));
   assert.equal(r.reason, 'succeeded', r.detail);
   const seen = c.seen()!;
-  assert.deepEqual(seen.args.filter((x, i) => seen.args[i - 1] === '--plugin-dir'), [storeDir('five', 'kit', a.record.tree)]);
+  assert.deepEqual(seen.args.filter((x, i) => seen.args[i - 1] === '--plugin-dir'), [storeDir('five', 'kit', treeOf(a))]);
   assert.equal(seen.pluginRoot, emptyPluginRoot('five'));
   for (const [k, v] of Object.entries(PLUGIN_LOCKS)) assert.deepEqual(seen.settings![k], v, k);
 
@@ -123,10 +124,50 @@ test('acceptance: an instance run gets its plugins, the empty plugin root and th
   assert.match(r.detail, /loaded what the run didn't pass: plugin evil@m/);
 
   // A tampered copy: claude never starts.
-  writeFileSync(join(storeDir('five', 'kit', a.record.tree), 'x.md'), 'later');
+  writeFileSync(join(storeDir('five', 'kit', treeOf(a)), 'x.md'), 'later');
   c = fakeClaude(passed);
   r = await new CliRunner('cli', childEnv(), c.bin, undefined, undefined, undefined, {}, undefined, undefined, undefined, plugins).run(req(cwd));
   assert.equal(r.reason, 'failed');
   assert.match(r.detail, /changed on disk[\s\S]*not starting/);
   assert.equal(c.seen(), null, 'claude never ran');
+});
+
+test('acceptance: a run with approved MCP servers gets the connector config, their exact tool names, the lock admitting only the connector, and its ticket ended', { skip: isWindows && 'POSIX stand-in claude' }, async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'cwd-'));
+  const ended: string[] = [];
+  const mcp = {
+    instance: 'six',
+    register: async (role: string) => (role === 'builder' ? { ticket: 'e'.repeat(64), servers: [{ id: 'notes', tools: ['echo'] }] } : null),
+    end: async (t: string) => void ended.push(t),
+  };
+  // The stand-in lists the MCP servers its --mcp-config names, as claude's init event does.
+  const dir = mkdtempSync(join(tmpdir(), 'fake-claude-'));
+  const log = join(dir, 'seen.json');
+  const bin = join(dir, 'claude');
+  writeFileSync(
+    bin,
+    `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
+${STDIN_LINE};
+const s = args.indexOf('--settings'), m = args.indexOf('--mcp-config'), t = args.indexOf('--allowedTools');
+const config = m >= 0 ? JSON.parse(fs.readFileSync(args[m + 1], 'utf8')) : null;
+fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ settings: JSON.parse(args[s + 1]), config, tools: t >= 0 ? args.slice(t + 1, args.findIndex((a, i) => i > t && a.startsWith('--'))) : [] }));
+console.log(JSON.stringify({ type: 'system', subtype: 'init', plugins: [], mcp_servers: Object.keys(config ? config.mcpServers : {}).map((name) => ({ name, status: 'connected' })) }));
+setTimeout(() => console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 })), 200);
+`,
+  );
+  chmodSync(bin, 0o755);
+  const plugins = () => ({ dirs: [], ids: [], pluginRoot: null });
+  const r = await new CliRunner('cli', childEnv(), bin, undefined, undefined, undefined, {}, undefined, undefined, undefined, plugins, mcp).run({ ...req(cwd), allowedTools: ['Read'] });
+  assert.equal(r.reason, 'succeeded', r.detail);
+  const seen = JSON.parse(readFileSync(log, 'utf8')) as { settings: { allowedMcpServers: { serverCommand: string[] }[] }; config: { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> }; tools: string[] };
+  const notes = seen.config.mcpServers.notes!;
+  assert.deepEqual(notes.args.slice(-3), ['mcp-connect', 'six', 'notes']);
+  assert.deepEqual(seen.settings.allowedMcpServers, [{ serverCommand: [notes.command, ...notes.args] }], 'the lock admits exactly the connector');
+  assert.deepEqual(seen.tools, ['Read', 'mcp__notes__echo']);
+  assert.match(Object.values(notes.env).join(''), /^e{64}$/, 'the ticket, nothing else');
+  await new Promise((res) => setTimeout(res, 50));
+  assert.deepEqual(ended, ['e'.repeat(64)], 'the ticket ended with the run');
 });

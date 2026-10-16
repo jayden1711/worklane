@@ -1,5 +1,5 @@
 {
   "mcpServers": {
-    "notes": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"] }
+    "notes": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"], "env": { "NOTES_TOKEN": "${NOTES_TOKEN}" } }
   }
 }

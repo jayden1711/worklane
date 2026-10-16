@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
-import { allowlistPath, approvalDigest, canonicalJson, FETCHES_PER_HOUR, parseRoles, pendingPath, previewDir, readAllowlist, storeDir, type ApprovalRecord } from '../src/plugins/approval.js';
-import { confirm, confirmPlan, ingest, readPreview, recordOf, remove, stage, takeFetchSlot, withdraw } from '../src/plugins/root-ops.js';
+import { type AllowlistEntry, type McpRecord, type PluginRecord, allowlistPath, approvalDigest, canonicalJson, FETCHES_PER_HOUR, parseRoles, pendingPath, previewDir, readAllowlist, storeDir, type ApprovalRecord } from '../src/plugins/approval.js';
+import { confirm, confirmPlan, ingest, previewPluginServer, readPreview, recordOf, remove, stage, takeFetchSlot, withdraw } from '../src/plugins/root-ops.js';
 import { treeHash } from '../src/plugins/tree.js';
 import { repoRoot } from './helpers.js';
 
 const me = process.getuid!();
+/** An approved plugin entry's tree (these tests approve plugins only). */
+const treeOf = (e: AllowlistEntry) => (e.record as PluginRecord).tree;
 const SOURCE = { type: 'git' as const, url: 'https://example.com/o/kit.git', sha: 'a'.repeat(40) };
 
 /** A fetched plugin directory, ingested as a preview for instance `i`, id `id`. */
@@ -35,7 +37,7 @@ test('preview, stage and confirm: the store holds exactly the approved bytes and
   assert.equal(list.entries.length, 1);
   assert.equal(list.entries[0]!.digest, digest);
   const e = readAllowlist('alpha', { ownerUid: me }).entries[0]!;
-  assert.equal(treeHash(storeDir('alpha', 'kit', e.record.tree)), e.record.tree);
+  assert.equal(treeHash(storeDir('alpha', 'kit', treeOf(e))), treeOf(e));
   assert.deepEqual(e.record.roles, ['builder']);
   assert.equal(existsSync(pendingPath()) && JSON.parse(readFileSync(pendingPath(), 'utf8')).entries.some((x: { id: string; instance: string }) => x.id === 'kit' && x.instance === 'alpha'), false, 'confirmed: no longer pending');
 });
@@ -79,15 +81,15 @@ test('a staged approval lapses after 24 hours', () => {
 
 test('an update is a new approval: the old pin stays until the new one is confirmed, then is replaced', () => {
   previewed('eta', 'kit');
-  const first = stageAndConfirm('eta', 'kit').list.entries[0]!.record.tree;
+  const first = treeOf(stageAndConfirm('eta', 'kit').list.entries[0]!);
   previewed('eta', 'kit', { 'skills/a/SKILL.md': '---\nname: a\ndescription: a\n---\nA, newer.\n' });
   const digest = digestFor('eta', 'kit', ['builder']);
   stage({ instance: 'eta', id: 'kit', roles: ['builder'], digest, by: 'wl-x' });
-  assert.equal(readAllowlist('eta', { ownerUid: me }).entries[0]!.record.tree, first, 'staging changes nothing approved');
+  assert.equal(treeOf(readAllowlist('eta', { ownerUid: me }).entries[0]!), first, 'staging changes nothing approved');
   confirm({ instance: 'eta', id: 'kit', digest, by: 'root', allowlistOwnerUid: me });
   const after = readAllowlist('eta', { ownerUid: me }).entries;
   assert.equal(after.length, 1);
-  assert.notEqual(after[0]!.record.tree, first);
+  assert.notEqual(treeOf(after[0]!), first);
 });
 
 test('remove only deletes the named entry', () => {
@@ -136,4 +138,31 @@ test('only the root operations write the allowlist (fail-without: any other modu
   const files = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(d, e.name)) : e.name.endsWith('.ts') ? [join(d, e.name)] : []));
   const users = files(join(repoRoot, 'src')).filter((f) => /\ballowlistPath\(/.test(readFileSync(f, 'utf8'))).map((f) => relative(repoRoot, f));
   assert.deepEqual(users.sort(), ['src/plugins/approval.ts', 'src/plugins/root-ops.ts']);
+});
+
+test('an MCP server in an approved plugin: previewed from the approved copy, staged with its hosts and secrets\' names, confirmed like any approval', () => {
+  previewed('nu', 'kit', { '.mcp.json': JSON.stringify({ mcpServers: { notes: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/s.js'], env: { NOTES_TOKEN: '${NOTES_TOKEN}' } } } }), 's.js': '' });
+  stageAndConfirm('nu', 'kit');
+  const snapshot = { serverName: 'notes', instructions: null, tools: [{ name: 'echo', description: 'Echo.', inputSchema: { type: 'object' } }] };
+  const p = previewPluginServer({ instance: 'nu', id: 'kit-notes', plugin: 'kit', server: 'notes', snapshot: { snapshot, error: null, withSecrets: false, network: [] }, allowlistOwnerUid: me });
+  assert.deepEqual(p.envNames, ['NOTES_TOKEN']);
+  const mcp = { network: ['api.example.com'], secrets: ['NOTES_TOKEN'] };
+  const digest = approvalDigest(recordOf(readPreview('nu', 'kit-notes'), ['builder'], mcp));
+  // The hosts and secrets are part of what is approved: other ones are another digest.
+  assert.throws(() => stage({ instance: 'nu', id: 'kit-notes', roles: ['builder'], digest, by: 'wl-x', mcp: { ...mcp, network: ['evil.example'] } }), /changed since the review/);
+  stage({ instance: 'nu', id: 'kit-notes', roles: ['builder'], digest, by: 'wl-x', mcp });
+  confirm({ instance: 'nu', id: 'kit-notes', digest, by: 'root', allowlistOwnerUid: me });
+  const e = readAllowlist('nu', { ownerUid: me }).entries.find((x) => x.record.id === 'kit-notes')!.record as McpRecord;
+  assert.deepEqual([e.kind, e.network, e.secrets, e.snapshot?.tools.map((t) => t.name)], ['mcp', ['api.example.com'], ['NOTES_TOKEN'], ['echo']]);
+  // The plugin's MCP config never reaches Claude Code: the approved copy has none.
+  assert.equal(existsSync(join(storeDir('nu', 'kit', treeOf(readAllowlist('nu', { ownerUid: me }).entries.find((x) => x.record.id === 'kit')!)), '.mcp.json')), false);
+});
+
+test('a snapshot taken with secrets is valid only for the network it was taken with', () => {
+  previewed('xi', 'kit', { '.mcp.json': JSON.stringify({ mcpServers: { notes: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/s.js'] } } }), 's.js': '' });
+  stageAndConfirm('xi', 'kit');
+  const snapshot = { serverName: 'notes', instructions: null, tools: [] };
+  previewPluginServer({ instance: 'xi', id: 'kit-notes', plugin: 'kit', server: 'notes', snapshot: { snapshot, error: null, withSecrets: true, network: ['api.example.com'] }, allowlistOwnerUid: me });
+  assert.throws(() => recordOf(readPreview('xi', 'kit-notes'), ['builder'], { network: ['api.example.com', 'other.example'], secrets: [] }), /taken with network api\.example\.com/);
+  assert.ok(recordOf(readPreview('xi', 'kit-notes'), ['builder'], { network: ['api.example.com'], secrets: [] }));
 });

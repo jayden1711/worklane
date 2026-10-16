@@ -108,6 +108,16 @@
 // an admin confirms a staged approval at a root shell (plugins.sh confirm, which refuses a coordinator's sudo).
 // plugin-remove only deletes an entry; plugin-withdraw takes a staged one back out.
 //
+//   worklane-machine mcp-fetch <id> <npm package> <x.y.z>
+//   worklane-machine mcp-preview <id> <plugin id> <server name>
+//   worklane-machine mcp-snapshot <id>
+//   worklane-machine mcp-stage <id> sha256:<64 hex> <role+role...> <host+host...|none> <SECRET+SECRET...|none>
+//
+// MCP servers, the same way (src/mcp/): mcp-fetch, mcp-preview and mcp-snapshot start plugins.sh as the same per-instance
+// unit (a pinned npm package fetched by a throwaway user; a server inside an approved plugin; the second snapshot, with
+// the server's secrets and approved network). Each starts the server in quarantine as the instance's broker user, in its
+// sandbox, with no agent connected. mcp-stage stages its approval with the hosts it may reach and its secrets' names.
+//
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -131,7 +141,7 @@ const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
 const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
 const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id>';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
 
 /** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
 const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
@@ -475,6 +485,12 @@ const PLUGIN_SHA = /^[0-9a-f]{40}$/;
 const PLUGIN_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
 const PLUGIN_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const PLUGIN_ROLES = /^[a-z][a-z0-9-]{0,30}(?:\+[a-z][a-z0-9-]{0,30})*$/;
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const NPM_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const MCP_SERVER_NAME = /^[A-Za-z0-9_-]{1,40}$/;
+const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const MCP_HOSTS = new RegExp(`^(?:none|(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+(?:\\+(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+)*)$`);
+const MCP_SECRETS = /^(?:none|[A-Z][A-Z0-9_]{1,63}(?:\+[A-Z][A-Z0-9_]{1,63})*)$/;
 
 /** The plugin step a list asks for, or null when it is anything else. */
 function parsePlugin(args) {
@@ -488,6 +504,10 @@ function parsePlugin(args) {
   }
   if (cmd === 'plugin-stage' && args.length === 4 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3])) return { action: 'stage', id, digest: args[2], roles: args[3] };
   if (cmd === 'plugin-withdraw' && args.length === 2) return { action: 'withdraw', id };
+  if (cmd === 'mcp-fetch' && args.length === 4 && NPM_NAME.test(args[2]) && NPM_VERSION.test(args[3])) return { action: 'mcp-fetch', id, pkg: args[2], version: args[3] };
+  if (cmd === 'mcp-preview' && args.length === 4 && PLUGIN_ID.test(args[2]) && MCP_SERVER_NAME.test(args[3])) return { action: 'mcp-preview', id, plugin: args[2], server: args[3] };
+  if (cmd === 'mcp-snapshot' && args.length === 2) return { action: 'mcp-snapshot', id };
+  if (cmd === 'mcp-stage' && args.length === 6 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3]) && MCP_HOSTS.test(args[4]) && MCP_SECRETS.test(args[5])) return { action: 'stage', id, digest: args[2], roles: args[3], network: args[4], secrets: args[5] };
   if (cmd === 'plugin-remove' && args.length === 2) return { action: 'remove', id };
   return null;
 }
@@ -498,25 +518,28 @@ function plugin(p) {
     process.stderr.write(`plugin-${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/plugins.sh\n`);
     return 2;
   }
-  if (p.action === 'fetch') {
+  if (p.action === 'fetch' || p.action.startsWith('mcp-')) {
     const real = rootScript(PLUGINS_SH);
     if (!real) return 1;
-    const what = `plugins.${instance}.fetch`;
-    const args = [real, 'fetch', instance, p.id, p.url, p.sha, ...(p.path ? [p.path] : [])];
+    const what = `plugins.${instance}.${p.action}`;
+    const args = p.action === 'fetch' ? [real, 'fetch', instance, p.id, p.url, p.sha, ...(p.path ? [p.path] : [])]
+      : p.action === 'mcp-fetch' ? [real, 'mcp-fetch', instance, p.id, p.pkg, p.version]
+      : p.action === 'mcp-preview' ? [real, 'mcp-preview', instance, p.id, p.plugin, p.server]
+      : [real, 'mcp-snapshot', instance, p.id];
     const r = spawnSync('systemd-run', ['--unit', `${PLUGIN_FETCH_UNIT}-${instance}`, '--collect', '--no-block', '--quiet', '--description', `worklane plugin fetch for ${instance}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
     if (r.error || r.status !== 0) {
       const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
       process.stderr.write(/already (exists|loaded|active)/i.test(text) ? `a plugin fetch for ${instance} is already running\n` : `couldn't start the fetch: ${text.split('\n')[0]}\n`);
-      logLine(what, null, `failed: ${p.id} ${p.url} ${p.sha}: not started`);
+      logLine(what, null, `failed: ${args.slice(2).join(' ')}: not started`);
       return 1;
     }
-    logLine(what, null, `${p.id} ${p.url}${p.path ? ` (${p.path})` : ''} ${p.sha}`);
-    process.stdout.write(`started the fetch of ${p.id} as ${PLUGIN_FETCH_UNIT}-${instance}.service\n`);
+    logLine(what, null, args.slice(3).join(' '));
+    process.stdout.write(`started ${p.action} of ${p.id} as ${PLUGIN_FETCH_UNIT}-${instance}.service\n`);
     return 0;
   }
   const cli = rootScript(ENGINE_CLI);
   if (!cli) return 1;
-  const args = p.action === 'stage' ? ['--id', p.id, '--roles', p.roles, '--digest', p.digest] : ['--id', p.id];
+  const args = p.action === 'stage' ? ['--id', p.id, '--roles', p.roles, '--digest', p.digest, ...(p.network !== undefined ? ['--network', p.network, '--secrets', p.secrets] : [])] : ['--id', p.id];
   // The engine's own root operations: the instance from sudo, `by` from SUDO_USER (kept in the environment).
   const r = spawnSync(process.execPath, [cli, 'plugins', p.action, '--instance', instance, ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8', SUDO_USER: process.env.SUDO_USER }, stdio: 'inherit' });
   return r.status === null ? 1 : r.status;

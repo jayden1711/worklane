@@ -6,7 +6,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { emptyPluginRoot, readAllowlist, storeDir, type AllowlistEntry } from './approval.js';
+import { emptyPluginRoot, readAllowlist, storeDir, type AllowlistEntry, type PluginRecord } from './approval.js';
 import { treeHash } from './tree.js';
 
 /** The instance's own switch-off list (the dashboard's Disable; it can only remove what root approved). */
@@ -51,7 +51,7 @@ export function pluginsForRun(o: { instance: string; instanceHome: string; role:
   const off = pluginsOff(o.instanceHome);
   const root = emptyPluginRoot(o.instance);
   const pluginRoot = existsSync(root) && statSync(root).isDirectory() ? root : null;
-  const mine = off.all ? [] : entries.filter((e) => e.record.roles.includes(o.role) && !off.off.has(e.record.id));
+  const mine = off.all ? [] : entries.filter((e): e is AllowlistEntry & { record: PluginRecord } => e.record.kind === 'plugin' && e.record.roles.includes(o.role) && !off.off.has(e.record.id));
   const dirs: string[] = [];
   for (const e of mine) {
     const dir = storeDir(o.instance, e.record.id, e.record.tree);

@@ -59,6 +59,7 @@
     "vite": "8.3.0"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.78",
     "ws": "8.21.3",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"

@@ -6,6 +6,13 @@
 #   bash scripts/setup/plugins.sh show <instance>                           what the instance's agents may load
 #   bash scripts/setup/plugins.sh fetch <instance> <id> <https url> <sha> [<path>]
 #                                                                           the machine helper's plugin-fetch, as its own unit
+#   bash scripts/setup/plugins.sh mcp-fetch <instance> <id> <npm package> <x.y.z>    an npm MCP server (helper's mcp-fetch)
+#   bash scripts/setup/plugins.sh mcp-preview <instance> <id> <plugin> <server>       an approved plugin's server (mcp-preview)
+#   bash scripts/setup/plugins.sh mcp-snapshot <instance> <id>                        the second snapshot, with secrets (mcp-snapshot)
+#
+# An MCP server is started for its snapshot in quarantine: as the instance's broker user (mcp-broker.sh), in its
+# sandbox, with no agent connected; the first time with no secrets and no network, the second (mcp-snapshot, for a
+# server that needs them to list its tools) with its installed secrets and its approved network only.
 #
 # confirm prints the whole approval record (source, commit, files hash, roles, components, notes) and asks for the
 # plugin id to be typed back; anything else confirms nothing. A coordinator can never confirm: the machine helper has
@@ -26,7 +33,7 @@ FETCH_DIR=/var/lib/private/$FETCH_STATE
 STATUS_DIR=/var/lib/worklane/plugins/fetch-status   # one JSON file per instance: the last fetch's state, for the dashboard
 PATH_ENV=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-usage() { sed -n '4,8p' "$0" | sed 's/^#   //' >&2; exit 2; }
+usage() { sed -n '4,11p' "$0" | sed 's/^#   //' >&2; exit 2; }
 instance_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ ]] && [ "$1" != dash ]; }
 id_ok() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]; }
 
@@ -83,6 +90,38 @@ case "$cmd" in
       status "$instance" "$id" failed "the inspection could not run"
       exit 1
     fi
+    ;;
+  mcp-fetch)
+    [ "$#" -eq 4 ] || usage
+    instance="$1" id="$2" pkg="$3" ver="$4"
+    instance_ok "$instance" && id_ok "$id" || usage
+    [[ "$pkg" =~ ^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$ ]] || { echo "not an npm package name" >&2; exit 2; }
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "the version must be exact" >&2; exit 2; }
+    "$NODE" "$CLI" plugins fetch-slot --instance "$instance" || { status "$instance" "$id" failed "too many fetches this hour"; exit 1; }
+    status "$instance" "$id" running
+    run="$instance-$id-$$"
+    out="$FETCH_DIR/$run"
+    trap 'rm -rf "$out"' EXIT
+    if ! systemd-run --wait --pipe --collect --quiet --unit "worklane-plugin-fetch-job-$run" --description "worklane MCP server fetch (throwaway user)" \
+      -p DynamicUser=yes -p StateDirectory="$FETCH_STATE" -p PrivateTmp=yes -p ProtectHome=yes -p ProtectSystem=strict -p PrivateDevices=yes \
+      -p NoNewPrivileges=yes -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" -p RuntimeMaxSec=600 -p MemoryMax=2G -p UMask=0022 \
+      -p Environment="PATH=$PATH_ENV LANG=C.UTF-8" \
+      "$NODE" "$CLI" plugins npm-job --package "$pkg" --version "$ver" --out "/var/lib/$FETCH_STATE/$run"; then
+      status "$instance" "$id" failed "the fetch failed (journalctl -u worklane-plugin-fetch-job-$run)"
+      exit 1
+    fi
+    chown -R -h root:root "$out"
+    if "$NODE" "$CLI" plugins mcp-ingest-npm --instance "$instance" --id "$id" --from "$out"; then status "$instance" "$id" done; else status "$instance" "$id" failed "the preview could not be made"; exit 1; fi
+    ;;
+  mcp-preview)
+    [ "$#" -eq 4 ] && instance_ok "$1" && id_ok "$2" && id_ok "$3" && [[ "$4" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || usage
+    status "$1" "$2" running
+    if "$NODE" "$CLI" plugins mcp-preview --instance "$1" --id "$2" --plugin "$3" --server "$4"; then status "$1" "$2" done; else status "$1" "$2" failed "the preview could not be made"; exit 1; fi
+    ;;
+  mcp-snapshot)
+    [ "$#" -eq 2 ] && instance_ok "$1" && id_ok "$2" || usage
+    status "$1" "$2" running
+    if "$NODE" "$CLI" plugins mcp-snapshot --instance "$1" --id "$2"; then status "$1" "$2" done; else status "$1" "$2" failed "the snapshot could not be taken"; exit 1; fi
     ;;
   *) usage ;;
 esac

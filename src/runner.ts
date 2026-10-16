@@ -5,6 +5,7 @@
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
@@ -20,6 +21,7 @@ import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from '.
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
 import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run.js';
+import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 
@@ -405,13 +407,15 @@ export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiC
  * on the machine and sudo logs them to the journal, so the prompt goes on
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
-export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = []): string[] {
+export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
   // One flag per approved plugin directory (root's store), never a folder of them: exactly what was checked.
   for (const d of pluginDirs) args.push('--plugin-dir', d);
+  // The broker's connector, once per approved server (--strict-mcp-config stays: nothing else is read).
+  if (mcpConfigFile) args.push('--mcp-config', mcpConfigFile);
   if (req.jsonSchema) args.push('--json-schema', JSON.stringify(req.jsonSchema));
   // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
   if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
@@ -474,6 +478,11 @@ export class CliRunner implements AgentRunner {
      * Set for every instance run: it also pins the plugin root and the MCP and skill-shell locks below.
      */
     private plugins?: (o: { role: string }) => PluginRun,
+    /**
+     * The instance's MCP broker (src/mcp/client.ts): a ticket for each run of a role with approved servers, ended when
+     * the run ends. Null from register: no broker, so no servers. A refusal or failure: the run doesn't start.
+     */
+    private mcp?: { instance: string; register: (role: string, ttlMs: number) => Promise<McpRun | null>; end: (ticket: string) => Promise<void> },
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -568,6 +577,16 @@ export class CliRunner implements AgentRunner {
         return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
       }
     }
+    // Approved MCP servers for this run's role, through the broker: never for an eval lane's user or a provider run.
+    let mcpRun: McpRun | null = null;
+    if (this.mcp && asAgentUser && !req.provider) {
+      try {
+        mcpRun = await this.mcp.register(req.role, req.timeoutMs + 600_000);
+      } catch (e) {
+        return { reason: 'failed', detail: `${(e as Error).message}; not starting`, costUsd: 0, turns: 0, model: req.model };
+      }
+    }
+    const mcpArgs = mcpRun && mcpRun.servers.length ? mcpRunArgs(this.mcp!.instance, mcpRun, process.execPath, fileURLToPath(new URL('./cli.js', import.meta.url))) : null;
     // The plugins root moved to root's empty directory: the agent user's own installs never load, and it can't install.
     const pluginEnv: Record<string, string> = plugins?.pluginRoot ? { CLAUDE_CODE_PLUGIN_CACHE_DIR: plugins.pluginRoot } : {};
     const runEnv = runAs ? { ...runAsEnv(env, runAs), ...endpoint, ...pluginEnv } : { ...env, ...pluginEnv };
@@ -594,6 +613,15 @@ export class CliRunner implements AgentRunner {
     // The role's system prompt, in a file the agent user can read (this process's /tmp, private to the
     // instance's service and its agents), removed when the run ends.
     const promptDir = req.appendSystemPrompt ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-run-`)) : null;
+    // The run's MCP config, in a file the agent user can read (a path on argv, never its content): the connector once
+    // per approved server, each with this run's ticket.
+    const mcpDir = mcpArgs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-mcp-`)) : null;
+    const mcpConfigFile = mcpDir ? join(mcpDir, 'mcp.json') : undefined;
+    if (mcpDir && mcpConfigFile && mcpArgs) {
+      writeFileSync(mcpConfigFile, JSON.stringify(mcpArgs.config));
+      chmodSync(mcpConfigFile, 0o644);
+      chmodSync(mcpDir, 0o755);
+    }
     const systemPromptFile = promptDir ? join(promptDir, 'system-prompt.md') : undefined;
     if (promptDir && systemPromptFile) {
       writeFileSync(systemPromptFile, req.appendSystemPrompt!);
@@ -604,6 +632,8 @@ export class CliRunner implements AgentRunner {
     const cleanup = () => {
       if (promptDir) rmSync(promptDir, { recursive: true, force: true });
       if (providerDir) rmSync(providerDir, { recursive: true, force: true });
+      if (mcpDir) rmSync(mcpDir, { recursive: true, force: true });
+      if (mcpRun) void this.mcp?.end(mcpRun.ticket);
     };
     // What the agent did, for the dashboard: written by this process into the coordinator's state dir (the dashboard can't read the agent user's home).
     const record = req.stateDir ? new RunRecorder(req.stateDir, { role: req.role, model: req.model, cwd: req.cwd, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(req.issue !== undefined ? { issue: req.issue } : {}), ...(req.resume ? { resumed: req.resume } : {}) }) : null;
@@ -625,13 +655,13 @@ export class CliRunner implements AgentRunner {
         : pinned;
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
-    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS } : keyed;
+    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
     const stuck = req.stuck && req.stuck.mode !== 'off' ? { mode: req.stuck.mode, detector: new StuckDetector(), stopped: null as StuckVerdict | null } : null;
     return new Promise((resolve) => {
-      const argv = cliArgs(req, settings, systemPromptFile, plugins?.dirs ?? []);
+      const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
       const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
@@ -721,7 +751,7 @@ export class CliRunner implements AgentRunner {
           }
           req.onLine?.(j);
           if (plugins && j.type === 'system' && j.subtype === 'init' && !loadProblem) {
-            loadProblem = loadedSetProblem(j as InitLoaded, { pluginDirs: plugins.dirs, mcpServers: [] });
+            loadProblem = loadedSetProblem(j as InitLoaded, { pluginDirs: plugins.dirs, mcpServers: mcpArgs?.names ?? [] });
             if (loadProblem) kill('failed');
           }
           if (j.type === 'assistant' || j.type === 'result') started();

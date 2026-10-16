@@ -672,6 +672,37 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
 
+    case 'mcp-broker': {
+      if (!instanceOpt) {
+        console.error('usage: mcp-broker --instance <name>');
+        return 2;
+      }
+      const { runBroker } = await import('./mcp/service.js');
+      return runBroker(instanceOpt);
+    }
+
+    case 'mcp-connect': {
+      // claude starts this for one approved MCP server of a run: mcp-connect <instance> <server>.
+      if (!sub || !rest[0] || rest.length !== 1) {
+        console.error('usage: mcp-connect <instance> <server>');
+        return 2;
+      }
+      const { runConnector } = await import('./mcp/connector.js');
+      return runConnector(sub, rest[0]);
+    }
+
+    case 'mcp-sandboxed': {
+      // The broker's own wrapper for one server: mcp-sandboxed <config.json> -- <argv...>. Read from the raw argv: the
+      // server's own arguments may hold anything, --root and --instance included, which main's option parsing takes.
+      const raw = argv.slice(argv.indexOf('mcp-sandboxed') + 1);
+      if (raw.length < 3 || raw[1] !== '--') {
+        console.error('usage: mcp-sandboxed <config.json> -- <command> [args...]');
+        return 2;
+      }
+      const { runSandboxed } = await import('./mcp/sandboxed.js');
+      return runSandboxed(raw[0]!, raw.slice(2));
+    }
+
     case 'plugins': {
       const { pluginsCommand } = await import('./plugins/cli.js');
       return pluginsCommand(sub, rest, instanceOpt);

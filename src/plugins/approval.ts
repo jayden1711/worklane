@@ -37,12 +37,14 @@ export const fetchLogPath = () => varLibPath('plugins/fetches.jsonl');
 export const previewDir = (instance: string, id: string) => varLibPath(`plugins/previews/${instance}/${id}`);
 export const storeDir = (instance: string, id: string, tree: string) => varLibPath(`plugins/store/${instance}/${id}/${tree.slice(TREE_PREFIX.length)}`);
 export const emptyPluginRoot = (instance: string) => varLibPath(`plugins/store/${instance}/.empty-root`);
+/** Where the broker keeps an instance's MCP secrets: one 0700 directory per server in the broker user's home. */
+export const mcpSecretsDir = (brokerHome: string, id: string) => `${brokerHome.replace(/\/$/, '')}/secrets/${id}`;
 
 const Source = z.strictObject({ type: z.literal('git'), url: z.string().min(1), sha: z.string().regex(/^[0-9a-f]{40}$/), path: z.string().optional() });
 const McpSpec = z.strictObject({ name: z.string(), argv: z.array(z.string()), envNames: z.array(z.string()), from: z.string() });
 
-/** What one approval covers. Every field is part of the digest. */
-export const ApprovalRecord = z.strictObject({
+/** A plugin's approval. Every field is part of the digest. */
+export const PluginRecord = z.strictObject({
   v: z.literal(1),
   kind: z.literal('plugin'),
   instance: z.string().regex(INSTANCE),
@@ -62,6 +64,49 @@ export const ApprovalRecord = z.strictObject({
   /** The agent roles that get the plugin. */
   roles: z.array(z.string().regex(ROLE)).min(1),
 });
+export type PluginRecord = z.infer<typeof PluginRecord>;
+
+/** A host an MCP server may reach (its sandbox's egress allowlist): a DNS name, optionally one *. label first. */
+export const HOST = /^(\*\.)?(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+/** A secret's name: the environment variable the broker sets for that one server. */
+export const SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
+
+const SnapshotTool = z.strictObject({ name: z.string(), title: z.string().optional(), description: z.string().optional(), inputSchema: z.unknown(), outputSchema: z.unknown().optional(), annotations: z.unknown().optional() });
+export const SnapshotSchema = z.strictObject({ serverName: z.string().nullable(), instructions: z.string().nullable(), tools: z.array(SnapshotTool) });
+
+/** How an approved MCP server starts: a server inside an approved plugin, or a pinned npm package. */
+export const McpRuntime = z.discriminatedUnion('type', [
+  z.strictObject({ type: z.literal('plugin'), plugin: z.string().regex(PLUGIN_ID), tree: z.string().regex(TREE), server: z.string(), argv: z.array(z.string()).min(1) }),
+  z.strictObject({ type: z.literal('npm'), package: z.string(), version: z.string(), integrity: z.string().regex(/^sha512-[A-Za-z0-9+/]+={0,2}$/), lockfile: z.string().regex(/^sha256:[0-9a-f]{64}$/), tree: z.string().regex(TREE), argv: z.array(z.string()).min(1) }),
+]);
+export type McpRuntime = z.infer<typeof McpRuntime>;
+
+/**
+ * An MCP server's approval: how it starts, what it may reach, and what it shows the model. The broker runs it (never
+ * Claude Code), with its secrets in its own environment only, and serves the approved snapshot, never the live list.
+ * snapshot null: approved code whose tools couldn't be listed without its secrets (Q3); it serves nothing until a
+ * second approval adds the snapshot taken with them.
+ */
+export const McpRecord = z.strictObject({
+  v: z.literal(1),
+  kind: z.literal('mcp'),
+  instance: z.string().regex(INSTANCE),
+  id: z.string().regex(PLUGIN_ID),
+  runtime: McpRuntime,
+  secrets: z.array(z.string().regex(SECRET_NAME)),
+  network: z.array(z.string().regex(HOST)),
+  snapshot: SnapshotSchema.nullable(),
+  snapshotHash: z.string().regex(/^sha256:[0-9a-f]{64}$/).nullable(),
+  /** Whether the snapshot was taken with the server's secrets and network (the second approval). */
+  snapshotWithSecrets: z.boolean(),
+  flags: z.array(z.string()),
+  /** The agent roles that get every approved tool of this server (Q6: the role grant decides). */
+  roles: z.array(z.string().regex(ROLE)).min(1),
+});
+export type McpRecord = z.infer<typeof McpRecord>;
+
+/** What one approval covers. Every field is part of the digest. */
+export const ApprovalRecord = z.discriminatedUnion('kind', [PluginRecord, McpRecord]);
 export type ApprovalRecord = z.infer<typeof ApprovalRecord>;
 
 export const AllowlistEntry = z.strictObject({ record: ApprovalRecord, digest: z.string().regex(DIGEST), staged_at: z.string(), staged_by: z.string(), confirmed_at: z.string() });
@@ -69,7 +114,17 @@ export type AllowlistEntry = z.infer<typeof AllowlistEntry>;
 export const Allowlist = z.strictObject({ version: z.literal(1), instance: z.string().regex(INSTANCE), entries: z.array(AllowlistEntry) });
 export type Allowlist = z.infer<typeof Allowlist>;
 
-export const PendingEntry = z.strictObject({ instance: z.string().regex(INSTANCE), id: z.string().regex(PLUGIN_ID), roles: z.array(z.string().regex(ROLE)).min(1), digest: z.string().regex(DIGEST), staged_at: z.string(), staged_by: z.string() });
+export const PendingEntry = z.strictObject({
+  instance: z.string().regex(INSTANCE),
+  id: z.string().regex(PLUGIN_ID),
+  roles: z.array(z.string().regex(ROLE)).min(1),
+  /** An MCP server's egress hosts and secret names, as the owner staged them (part of its record, so of the digest). */
+  network: z.array(z.string().regex(HOST)).optional(),
+  secrets: z.array(z.string().regex(SECRET_NAME)).optional(),
+  digest: z.string().regex(DIGEST),
+  staged_at: z.string(),
+  staged_by: z.string(),
+});
 export type PendingEntry = z.infer<typeof PendingEntry>;
 export const Pending = z.strictObject({ version: z.literal(1), entries: z.array(PendingEntry) });
 

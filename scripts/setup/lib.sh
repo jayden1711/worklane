@@ -129,6 +129,11 @@ PLUGIN_SUDOERS_ARGS=(
   '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$'
   '^plugin-withdraw [a-z0-9][a-z0-9-]*$'
   '^plugin-remove [a-z0-9][a-z0-9-]*$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$'
+  '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$'
+  '^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$'
+  '^mcp-snapshot [a-z0-9][a-z0-9-]*$'
+  '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'
 )
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
@@ -165,7 +170,7 @@ machine_sudoers() {
   printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
   [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, login, failover).\n'
-  [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove): plugins.sh at a root shell instead.\n'
+  [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove, mcp-fetch, mcp-preview, mcp-snapshot, mcp-stage): plugins.sh at a root shell instead.\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
