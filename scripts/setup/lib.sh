@@ -377,16 +377,18 @@ stop_uids() {
   [ -z "$left" ]
 }
 
-# Files the removed users <uid>... own in the engine's own places, given to root:root: in each <tree> (find -P, -xdev:
-# a link is never followed, another mount never entered) and, in <lock dir>, only the files named <lock name>, directly
-# in it. Each is chowned with -h (a link itself, never its target); a regular file also loses setuid and setgid (chmod
-# u-s,g-s), its other mode bits kept. Every one is listed in <listing>, "root:root <old mode> -> <new mode> <path>", or
-# "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only once no process of theirs is
-# left (stop_uids): nothing can swap a file for a link between the check and the change.
-#   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <uid>...
+# Files the removed users <uid>... own in the engine's own places, given to root: in each <tree> (find -P, -xdev: a
+# link is never followed, another mount never entered) and, in <lock dir>, only the files named <lock name>, directly
+# in it. Each is chowned with -h (a link itself, never its target): its owner becomes root, and its group root too when
+# it is one of the removed instance's <gids> (comma-separated); another group is kept (the slot directory's files are
+# group agent-slots, which every other instance's coordinator writes them through). A regular file also loses setuid
+# and setgid (chmod u-s,g-s), its other mode bits kept. Every one is listed in <listing>, "<owner>:<group> <old mode>
+# -> <new mode> <path>", or "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only
+# once no process of theirs is left (stop_uids): nothing can swap a file for a link between the check and the change.
+#   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <gids, comma-separated> <uid>...
 rechown_orphans() {
-  local list="$1" trees="$2" lockdir="$3" lockname="$4" u f err old fails=0 t
-  shift 4
+  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids=",$5," u f err old to fails=0 t
+  shift 5
   local -a tv=()
   IFS=: read -r -a tv <<<"$trees"
   local -a there=()
@@ -396,7 +398,9 @@ rechown_orphans() {
     [[ "$u" =~ ^[0-9]+$ ]] || continue
     while IFS= read -r -d '' f; do
       old="$(stat -c %a -- "$f")"
-      if ! err="$(chown -h root:root -- "$f" 2>&1)"; then
+      to=root
+      [[ "$gids" != *",$(stat -c %g -- "$f"),"* ]] || to=root:root
+      if ! err="$(chown -h "$to" -- "$f" 2>&1)"; then
         printf 'FAILED %s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
       fi
       # A regular file (never a link, never a directory: a directory keeps its setgid, the group its files inherit)
@@ -404,7 +408,7 @@ rechown_orphans() {
       if [ -f "$f" ] && [ ! -L "$f" ] && ! err="$(chmod u-s,g-s -- "$f" 2>&1)"; then
         printf 'FAILED %s: chmod u-s,g-s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
       fi
-      printf 'root:root %s -> %s %s\n' "$old" "$(stat -c %a -- "$f")" "$f" >> "$list"
+      printf '%s %s -> %s %s\n' "$(stat -c %U:%G -- "$f")" "$old" "$(stat -c %a -- "$f")" "$f" >> "$list"
     done < <(
       [ "${#there[@]}" -eq 0 ] || find -P "${there[@]}" -xdev -uid "$u" -print0
       [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0

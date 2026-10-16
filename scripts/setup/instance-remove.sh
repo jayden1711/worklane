@@ -251,6 +251,10 @@ uids_file="$ARCHIVE/$name.uids"
 my_uids="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [ "$k" = user ] && user_exists "$w" && id -u "$w"; done; true)"
 if [ -n "$my_uids" ]; then { printf '%s\n' $my_uids; cat "$uids_file" 2>/dev/null || true; } | sort -u > "$uids_file.tmp"; mv -f "$uids_file.tmp" "$uids_file"; chmod 0600 "$uids_file"; fi
 [ ! -f "$uids_file" ] || my_uids="$(cat "$uids_file")"
+# And their groups' gids (each user's own, and the registry's groups), kept the same way.
+gids_file="$ARCHIVE/$name.gids"
+my_gids="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; case "$k" in user) user_exists "$w" && id -g "$w" ;; group) getent group "$w" | cut -d: -f3 ;; esac; done; true)"
+if [ -n "$my_gids" ]; then { printf '%s\n' $my_gids; cat "$gids_file" 2>/dev/null || true; } | grep -E '^[0-9]+$' | sort -u > "$gids_file.tmp"; mv -f "$gids_file.tmp" "$gids_file"; chmod 0600 "$gids_file"; fi
 for line in "${ITEMS[@]}"; do
   IFS=$'\t' read -r k w when _ <<<"$line"
   case "$k" in
@@ -303,16 +307,16 @@ if [ -n "$my_uids" ]; then
   IFS=$'\t' read -r _ lockdir lockname < <(records engine-places x | grep $'^locks\t')
   rechowned="$ARCHIVE/$name-$stamp.rechowned.txt" left="$ARCHIVE/$name-$stamp.left-owned.txt"
   # shellcheck disable=SC2086 # one uid a word
-  rechown_ok=1; rechown_orphans "$rechowned" "$trees" "$lockdir" "$lockname" $my_uids || rechown_ok=""
+  rechown_ok=1; rechown_orphans "$rechowned" "$trees" "$lockdir" "$lockname" "$(paste -sd, "$gids_file" 2>/dev/null || true)" $my_uids || rechown_ok=""
   chmod 0600 "$rechowned"
-  if [ -s "$rechowned" ]; then echo "given to root:root (mode kept), in $rechowned:"; sed 's/^/  /' "$rechowned"; fi
+  if [ -s "$rechowned" ]; then echo "given to root (and to group root when the group was $name's), setuid and setgid off, in $rechowned:"; sed 's/^/  /' "$rechowned"; fi
   # shellcheck disable=SC2086
   left_owned "$left" / "$(printf '%s:' $removed_homes)" $my_uids
   chmod 0600 "$left"
   if [ -s "$left" ]; then echo "still owned by $name's removed users, left as they are (in $left):"; sed 's/^/  /' "$left"; fi
   [ -n "$rechown_ok" ] || refuse "chown refused some of the files above (FAILED): fix them, then run this again"
 fi
-rm -f "$uids_file"
+rm -f "$uids_file" "$gids_file"
 
 # The egress rule names users by uid: when it names one no user has now (this instance's sandbox and test users), it
 # is applied again, rebuilt from the users there are, with the flags it was applied with. No live user's entry changes.

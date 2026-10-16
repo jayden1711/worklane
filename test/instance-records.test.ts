@@ -435,19 +435,22 @@ test("orphaned files are given to root:root only in the engine's own places, a l
   // chown and stat stood in for (a test isn't root): each call recorded, and one path refused.
   const chmods = join(root, 'chmods');
   // stat: 6755 for the planted setuid file until chmod strips it, else 640.
-  const stubs = `chown() { printf '%s\\n' "$*" >> "${calls}"; case "$*" in *keep.json*) echo "Operation not permitted" >&2; return 1 ;; esac; }; chmod() { printf '%s\\n' "$*" >> "${chmods}"; : > "${root}/stripped"; }; stat() { case "$*" in *suid-tool*) if [ -e "${root}/stripped" ]; then echo 755; else echo 6755; fi ;; *) echo 640 ;; esac; }`;
-  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), `${join(root, 'engine')}:${join(root, 'missing')}`, join(root, 'locks')], { encoding: 'utf8' });
+  const stubs = `chown() { printf '%s\\n' "$*" >> "${calls}"; case "$*" in *keep.json*) echo "Operation not permitted" >&2; return 1 ;; esac; }; chmod() { printf '%s\\n' "$*" >> "${chmods}"; case "$*" in *suid-tool*) : > "${root}/stripped" ;; esac; }; stat() { case "$*" in *%g*) case "$*" in *incidents.json*) echo 50 ;; *) echo 4242 ;; esac ;; *%U:%G*) case "$*" in *incidents.json*) echo root:agent-slots ;; *) echo root:root ;; esac ;; *suid-tool*) if [ -e "${root}/stripped" ]; then echo 755; else echo 6755; fi ;; *) echo 640 ;; esac; }`;
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242,4243 ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), `${join(root, 'engine')}:${join(root, 'missing')}`, join(root, 'locks')], { encoding: 'utf8' });
   assert.equal(r.status, 1, 'a refused chown fails the step');
   const made = readFileSync(calls, 'utf8').trim().split('\n');
-  for (const c of made) assert.match(c, /^-h root:root -- /, `every chown is -h root:root: ${c}`);
-  const paths = made.map((c) => c.replace(/^-h root:root -- /, '')).sort();
+  for (const c of made) assert.match(c, /^-h root(:root)? -- /, `every chown is -h, to root: ${c}`);
+  // The group goes to root only when it was the instance's (4242): the slot directory's agent-slots group (50) stays.
+  assert.ok(made.some((c) => c === `-h root -- ${join(root, 'engine/agent-slots/incidents.json')}`), 'a shared file keeps its group');
+  assert.ok(made.some((c) => c === `-h root:root -- ${join(root, 'engine/agent-slots/suid-tool')}`), "the instance's group goes to root");
+  const paths = made.map((c) => c.replace(/^-h root(:root)? -- /, '')).sort();
   assert.ok(paths.includes(join(root, 'engine/agent-slots/link-to-file')), 'the link itself');
   assert.ok(paths.includes(join(root, 'locks/worklane-full-run.lock')), "the engine's lock file");
   assert.ok(!paths.some((p) => p.startsWith(join(root, 'outside'))), `nothing outside, never through a link: ${paths.join(' ')}`);
   assert.ok(!paths.some((p) => p.includes('link-to-dir/')), 'never into a linked directory');
   assert.ok(!paths.includes(join(root, 'locks/other-tool.lock')), "another program's lock in the shared directory is left alone");
   const list = readFileSync(join(root, 'list'), 'utf8');
-  assert.match(list, new RegExp(`^root:root 640 -> 640 ${join(root, 'engine/agent-slots/incidents.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.match(list, new RegExp(`^root:agent-slots 640 -> 640 ${join(root, 'engine/agent-slots/incidents.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   assert.ok(list.includes(`root:root 6755 -> 755 ${join(root, 'engine/agent-slots/suid-tool')}`), 'setuid and setgid stripped, the old mode listed');
   const cm = readFileSync(chmods, 'utf8').trim().split('\n');
   for (const c of cm) assert.match(c, /^u-s,g-s -- /, c);
