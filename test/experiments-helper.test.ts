@@ -162,10 +162,10 @@ printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 
   const clear = () => {
     for (const f of readdirSync(sd)) spawnSync('rm', ['-f', join(sd, f)]);
   };
-  return { dir, base, job, calls, clear, writeRoot, score: (s: string) => writeFileSync(join(dir, 'score'), s) };
+  return { dir, base, helper, job, calls, clear, writeRoot, score: (s: string) => writeFileSync(join(dir, 'score'), s) };
 }
 
-const unitOf = (argv: string[]) => argv.find((a) => a.startsWith('--unit='))!.replace(/^--unit=worklane-exp-ex-[a-z0-9-]+?-(build|preflight|train|predict|gate|score)-\d+$/, '$1');
+const unitOf = (argv: string[]) => argv.find((a) => a.startsWith('--unit='))!.replace(/^--unit=worklane-exp-ex_[a-z0-9-]+_(build|preflight|train|predict|gate|score)_\d+$/, '$1');
 const props = (argv: string[]) => argv.filter((a, i) => argv[i - 1] === '-p');
 
 test('a job: every step its own unit with no network; the scorer gets the labels and never the job\'s code; a job step never gets the labels', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {
@@ -274,4 +274,31 @@ test('one predictions fixture per study kind passes the gate: supervised CSV, se
   const r = gate({ 'labels.csv': 'id,label\n1,a\n', 'futures.npy': npyOf('<f4', Buffer.alloc(16)), 'clusters.json': '{"1": 0}', 'samples.jsonl': '{"text": "x"}\n', 'emb.safetensors': st });
   assert.equal(r.status, 0, r.stdout);
   assert.match(r.stdout, /pred-format: ok/);
+});
+
+test('stopping a job stops only its own units: never another job\'s or another instance\'s with the same prefix, never one run by another user', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {
+  const h = expHelper();
+  // systemctl: these units exist; `show -p User` answers per unit; kill and stop are recorded.
+  const units: Record<string, string> = {
+    'worklane-exp-ex_s-1_train_11.service': 'GRP', // job s-1's own: stopped
+    'worklane-exp-ex_s-1_score_12.service': 'GRPS', // its scorer step: stopped
+    'worklane-exp-ex_s-1-5_train_13.service': 'GRP', // job s-1-5 (a longer id, same leading text): kept
+    'worklane-exp-ex_s-1_train_14.service': 'wl-exp-ex-b', // the right name, another instance's user: kept
+  };
+  writeFileSync(
+    join(h.dir, 'bin', 'systemctl'),
+    `#!/bin/bash
+case "$1" in
+  list-units) for u in ${Object.keys(units).join(' ')}; do case "$u" in $5) echo "$u loaded active running x";; esac; done ;;
+  show) case "${@: -1}" in ${Object.entries(units).map(([u, o]) => `${u}) echo ${o};;`).join(' ')} esac ;;
+  kill|stop) shift; printf '%s\\n' "$@" | grep '\\.service$' >> '${join(h.dir, 'stopped')}' ;;
+esac
+exit 0
+`,
+  );
+  chmodSync(join(h.dir, 'bin', 'systemctl'), 0o755);
+  const r = spawnSync('/bin/bash', [h.helper, 'ex', 'stop', 's-1'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  assert.equal(r.status, 0, r.stderr);
+  const stopped = [...new Set(readFileSync(join(h.dir, 'stopped'), 'utf8').trim().split('\n'))].sort();
+  assert.deepEqual(stopped, ['worklane-exp-ex_s-1_score_12.service', 'worklane-exp-ex_s-1_train_11.service']);
 });

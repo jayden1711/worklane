@@ -348,7 +348,9 @@ step_unit() {
   local cmd="$1"
   inaccessible="-$GPU_LOCK_DIR"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths; printf '%s\n' "${NO_EXEC[@]}")
-  unit="worklane-exp-$name-$job-$step-$$"
+  # `_` between the parts: an instance name, a job id and a step never contain one, so worklane-exp-<name>_<job>_ is
+  # this job's alone (with `-`, instance a's job b-1 and instance a-b's job 1 would share a prefix).
+  unit="worklane-exp-${name}_${job}_${step}_$$"
   local -a netp=() lim=()
   [ "$net" = 1 ] || netp=(-p PrivateNetwork=yes)
   # Root's limits for this instance's steps, enforced by systemd outside the job: processes, memory (no swap), CPUs.
@@ -594,11 +596,23 @@ job() {
   echo "worklane-exp: record $rec"
 }
 
+# A job's units: named exactly worklane-exp-<name>_<job>_<step>_<pid>.service AND running as this instance's job or
+# scorer user (systemd's own User=). Nothing else is ever stopped: not another instance's, not another job's.
+job_units() {
+  local job="$1" u owner
+  systemctl list-units --all --plain --no-legend "worklane-exp-${name}_${job}_*" 2>/dev/null | awk '{print $1}' | while IFS= read -r u; do
+    [[ "$u" =~ ^worklane-exp-${name}_${job}_[a-z0-9-]+_[0-9]+\.service$ ]] || continue
+    owner="$(systemctl show -p User --value "$u" 2>/dev/null || true)"
+    [ "$owner" = "$juser" ] || [ "$owner" = "$suser" ] || continue
+    printf '%s\n' "$u"
+  done
+}
+
 stop_job() {
   local job="${1:-}" units
   [ "$#" -eq 1 ] || die "usage: stop <job>"
   valid_job "$job"
-  units="$(systemctl list-units --all --plain --no-legend "worklane-exp-$name-$job-*" 2>/dev/null | awk '{print $1}')"
+  units="$(job_units "$job")"
   # shellcheck disable=SC2086
   [ -z "$units" ] || { systemctl kill -s KILL $units 2>/dev/null || true; systemctl stop $units 2>/dev/null || true; }
   echo "stopped $job"
