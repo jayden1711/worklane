@@ -5,6 +5,7 @@
 //   <instances dir>/<name>/state/            event log, locks, worktree records
 // The repo's own config folder keeps project behavior (tests, review levels,
 // skills) and is reviewed like code; it may only tighten the instance policy.
+import { AutomationsPolicy } from './automations/schema.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -139,6 +140,8 @@ export const PolicyFile = z.strictObject({
    * protection API answers 403 or 404); off, it doesn't. Read on every pass.
    */
   main_watch: z.enum(['auto', 'off']).default('auto'),
+  /** Automations (docs/automations.md): off until an owner turns them on; the caps over all of them. */
+  automations: AutomationsPolicy,
   /** Instance settings that win over the repo's: worker count, daily budget, CI fix runs, run windows. */
   settings: InstanceSettings.default({}),
   /**
