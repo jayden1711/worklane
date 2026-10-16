@@ -6,6 +6,7 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { shellCommand } from '../os/index.js';
 
 /** What the broker writes for one server's sandbox. Paths absolute. */
 export const SandboxedConfig = z.strictObject({
@@ -31,7 +32,8 @@ export async function runSandboxed(configFile: string, argv: string[]): Promise<
   });
   const wrapped = await SandboxManager.wrapWithSandbox(argv.map(shQuote).join(' '));
   return new Promise((resolve) => {
-    const child = spawn(wrapped, { shell: true, stdio: 'inherit', cwd: cfg.cwd });
+    const [file, args] = shellCommand(wrapped);
+    const child = spawn(file, args, { stdio: 'inherit', cwd: cfg.cwd });
     const stop = () => child.kill('SIGTERM');
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
