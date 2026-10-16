@@ -145,6 +145,8 @@ export abstract class CoordinatorBase {
             return until !== undefined && until > this.nowMs() ? new Date(until).toISOString() : null;
           };
           const routed = await resolveProvider(asked, { cfg: this.d.cfg, settings, stateDir: this.d.stateDir, limited, ...(this.d.providerKeys ? { providerKeys: this.d.providerKeys } : {}) });
+          // A run that must be on its provider or not at all (the cross-family evaluator): not run, saying why.
+          if (routed.fellBack && asked.route?.noFallback) return { reason: 'failed', detail: `not run: ${routed.fellBack.reason}`, costUsd: 0, turns: 0, model: asked.model };
           if (routed.fellBack) this.emit('provider.fallback', { issue: asked.issue ?? runIssue(asked.cwd, asked.taskFile), role: asked.role, provider: routed.fellBack.provider, reason: routed.fellBack.reason.slice(0, 500), model: routed.req.model });
           const req = routed.req.provider ? routed.req : { ...routed.req, model: cappedModel(routed.req.model, settings) };
           // Paused on the Claude usage limit: no run on Anthropic starts until its reset (src/usage-limit.ts).
@@ -216,6 +218,7 @@ export abstract class CoordinatorBase {
             // once on its fallback (the role's normal model). Never a pause, and never retried on the provider.
             if (req.provider) {
               this.providerLimited.set(req.provider.name, Date.parse(hit.resetAt));
+              if (asked.route?.noFallback) return { ...r, reason: 'failed', detail: `not run: ${req.provider.name} hit its usage or rate limit; skipped until ${hit.resetAt}` };
               const fallback = asked.route?.fallback ?? 'sonnet';
               this.emit('provider.fallback', { issue: who.issue, role: req.role, provider: req.provider.name, reason: `${req.provider.name} hit its usage or rate limit; skipped until ${hit.resetAt}`, model: fallback });
               return this.d.runner.run({ ...asked, model: fallback });

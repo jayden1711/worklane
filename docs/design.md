@@ -297,6 +297,7 @@ roles:
 4. Run on the patched code: the repro test, the regression tests that passed on base, the done_when checks, and, at nightly or for money-path changes, Stryker on the changed lines.
 5. The verdict can say the *test* is wrong. Allow at most 2 feedback rounds, then the issue is blocked.
 6. If no repro is possible (docs, UI copy), the evaluator records `repro: not_applicable` with a reason. That sets the review level to at least L1.
+7. Optional cross-family verdict (`routing.eval_cross_family`, off by default): on a protected change the evaluator approved, a hosted provider's model (another model family) gives a second verdict through the usual provider checks, read-only, never on Anthropic in its place, and never for a change touching held-out eval cases or secrets. If the two disagree (one approves, one rejects, or high against low confidence) the change waits for a human with both reasons. It can only add a hold.
 
 ## 9. Review levels
 

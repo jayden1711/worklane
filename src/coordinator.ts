@@ -3,9 +3,9 @@
 // step is decided from events plus GitHub, so a restart picks up where the
 // log says it was. Agents only ever propose: they commit on their own
 // branch in their own worktree; everything outward-facing happens here.
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -22,7 +22,7 @@ import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { evalRouting } from './eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REFLECTION_SCHEMA, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
-import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
+import { compareInstructions, engineRoleCases, instructionTargets, neutralDir, parseCases, runnerAsk } from './skilleval.js';
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
@@ -46,6 +46,8 @@ import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
 import { calibrated, claimDoubt, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
 import { handoffDoubt, handoffs, readClaims } from './claim-labels.js';
 import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
+import { crossDisagreement, crossFamilyModel, crossFamilySkip, type SideVerdict } from './cross-eval.js';
+import { route as routingValue } from './routing.js';
 import type { ReviewConfig } from './config/schema.js';
 import { applySettings, inRunWindow } from './settings.js';
 import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
@@ -65,6 +67,10 @@ import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
+import { EXPERIMENTER_DENIED, EXPERIMENTER_TOOLS, ExperimentLoop, MONITOR_SCHEMA, TRANSCRIPT_MAX, transcriptLine, type ExperimentHost } from './coordinator/experiments.js';
+import { EXP_HELPER, expJobDir } from './experiments/helper.js';
+import { PROPOSAL_SCHEMA } from './experiments/proposal.js';
+import { readRootFile } from './experiments/root-file.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { AutomationRuns } from './coordinator/automations.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
@@ -92,6 +98,9 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
+
+/** git's output as is (a -z listing keeps its NULs). */
+const execGit = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
@@ -158,6 +167,7 @@ export class Coordinator extends AutomationRuns {
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
     await step('automations', () => this.checkAutomations(), undefined);
+    await step('experiments', () => this.experiments()?.tick(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -182,6 +192,7 @@ export class Coordinator extends AutomationRuns {
     await this.optimizeRun;
     await this.superfanRun;
     await this.harnessEvalRun;
+    await this.expLoop?.idle();
     await this.prBatchIdle();
   }
 
@@ -1680,11 +1691,14 @@ export class Coordinator extends AutomationRuns {
     // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     // A confidence other than high always carries its reason; a protected surface's unanswered or unacceptable actor is a doubt.
     const ok = r.reason === 'succeeded';
+    // A protected change the main evaluator approved: a second verdict from another model family, when routing names
+    // one (off by default). A disagreement is a doubt naming both sides, so the change waits for a human.
+    const cross = ok && surface.length && s?.patch_correct === true ? await this.crossFamily(issue, doneWhen, path, extra, files, { patch_correct: true, confidence: s.confidence ?? 'low', reason: s.confidence_reason?.trim() || s.advice?.trim() || '' }) : null;
     const conf = calibrated({
       confidence: (ok && s?.confidence) || 'low',
       reason: ok ? s?.confidence_reason : `evaluator run ${r.reason}`,
       unverified: unverified.length,
-      compromised: ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : [],
+      compromised: [...(ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : []), ...(cross?.doubt ? [cross.doubt] : [])],
       // Claims the evaluator left unlabeled even when asked again, and checks the worker handed over.
       doubts: [...(ok && claimDoubt(s?.claims) ? [`the evaluator's claims are not all labeled measured, inferred or guess, even when asked again: ${claimDoubt(s?.claims)}`] : []), ...handed],
     });
@@ -1698,8 +1712,53 @@ export class Coordinator extends AutomationRuns {
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
     const labeled = ok ? readClaims(s?.claims).claims.slice(0, 50) : [];
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}), ...(labeled.length ? { claims: labeled } : {}) });
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}), ...(labeled.length ? { claims: labeled } : {}), ...(cross ? { cross_family: cross.record } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
+  }
+
+  /**
+   * The cross-family evaluator's verdict on a protected change (src/cross-eval.ts): null when routing has it off.
+   * Its run goes to the named hosted provider through the usual provider checks and never falls back to Anthropic;
+   * not run (a refused provider, a change it must not see, a failed run) is recorded and is no doubt by itself.
+   */
+  private async crossFamily(issue: Issue, doneWhen: DoneWhenList, path: string, brief: string[], files: ChangeFile[], primary: SideVerdict): Promise<{ record: EventPayload<'eval.verdict'>['cross_family'] & {}; doubt: string | null } | null> {
+    const model = crossFamilyModel(routingValue(this.d.cfg.agents, 'eval_cross_family').value);
+    if (!model) return null;
+    const notRun = (why: string) => ({ record: { provider: model, outcome: 'not_run' as const, reason: why.slice(0, 2000) }, doubt: null });
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    let categories: Record<string, string[]> = {};
+    try {
+      categories = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review).categories;
+    } catch {
+      return notRun('the change could not be classified, so it is not sent to another provider');
+    }
+    const skip = crossFamilySkip({ paths: files.map((f) => f.path), categories });
+    if (skip) return notRun(skip);
+    const role = this.d.cfg.agents.roles.evaluator!;
+    const r = await this.d.runner.run({
+      env: this.projectEnv(),
+      role: 'evaluator-verdict',
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, brief),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'evaluator-verdict'),
+      cwd: path,
+      model,
+      route: { kind: 'cross_eval', fallback: role.model, noFallback: true },
+      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
+      disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+      maxTurns: 60,
+      maxBudgetUsd: role.budget_usd ?? 5,
+      jsonSchema: VERDICT_SCHEMA,
+      stallMs: 15 * 60_000,
+      timeoutMs: this.commandTimeoutMs,
+    });
+    this.cost(issue.number, 'evaluator', r);
+    const o = r.structured as { patch_correct?: unknown; confidence?: unknown; confidence_reason?: unknown; advice?: unknown } | undefined;
+    if (r.reason !== 'succeeded' || r.provider !== model || typeof o?.patch_correct !== 'boolean' || !['high', 'medium', 'low'].includes(o.confidence as string))
+      return notRun(r.reason !== 'succeeded' ? r.detail.slice(0, 500) || `the run ended ${r.reason}` : r.provider !== model ? 'the run did not go to the cross-family provider' : 'it gave no verdict');
+    const second: SideVerdict = { patch_correct: o.patch_correct, confidence: o.confidence as SideVerdict['confidence'], reason: (typeof o.confidence_reason === 'string' && o.confidence_reason.trim()) || (typeof o.advice === 'string' ? o.advice.trim() : '') };
+    const doubt = crossDisagreement(primary, { ...second, provider: model });
+    return { record: { provider: model, outcome: doubt ? 'disagrees' : 'agrees', patch_correct: second.patch_correct, confidence: second.confidence, ...(second.reason ? { reason: second.reason.slice(0, 2000) } : {}) }, doubt };
   }
 
   /**
@@ -1781,5 +1840,147 @@ export class Coordinator extends AutomationRuns {
         .finally(() => this.lightRunning.delete(number));
     }
     return 'pending';
+  }
+
+  // ---------------------------------------------------------------- experiments
+
+  private expLoop: ExperimentLoop | null = null;
+  private expFetchedAt = 0;
+
+  /** The experiment loop, when this instance runs experiments (server mode: its deps name the instance). */
+  protected experiments(): ExperimentLoop | null {
+    const x = this.d.experiments;
+    if (!x) return null;
+    this.expLoop ??= new ExperimentLoop(this.experimentHost(x));
+    return this.expLoop;
+  }
+
+  /** What the loop may use of this coordinator: its log, git, runner and the helper, nothing more. */
+  private experimentHost(x: NonNullable<typeof this.d.experiments>): ExperimentHost {
+    const workers = this.d.cfg.agents.roles.workers!;
+    // The monitor reads on the cheaper model routing gives a reflection (the short read-only run before a retry).
+    const monitorModel = routeRun(this.d.cfg, 'reflection');
+    const show = (commit: string, path: string) => {
+      const r = spawnSync('git', ['show', `${commit}:${path}`], { cwd: this.d.repo, maxBuffer: 64 * 1024 * 1024 });
+      return r.status === 0 ? r.stdout : null;
+    };
+    return {
+      instance: x.instance,
+      pinsFile: x.pinsFile,
+      configDir: BRAND.configDir,
+      model: workers.model,
+      monitorModel,
+      events: () => this.d.log.read(),
+      emit: (type, payload) => void this.emit(type, payload),
+      now: () => this.d.now?.() ?? new Date(),
+      held: () => (this.stopped || this.halt.signal.aborted || this.emergencyInForce() ? 'stopping or stopped' : this.usagePause() ? 'usage pause' : this.authHeld() ? 'sign-in held' : this.diskHeld() ? 'disk held' : (this.governorHold()?.reason ?? null)),
+      instanceUsdLeft: () => this.d.cfg.agents.daily_budget_usd - this.spentToday(),
+      mainTip: () => {
+        if (Date.now() - this.expFetchedAt > 5 * 60_000) {
+          this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+          this.expFetchedAt = Date.now();
+        }
+        return this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+      },
+      show,
+      session: async (o, then) => {
+        const branch = `${BRAND.cli}/${o.name}`;
+        const taskFile = join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `${o.name}.json`);
+        const { path, setupErrors } = createWorktree(this.wt, o.name, branch, o.commit);
+        const lines: string[] = [];
+        let size = 0;
+        try {
+          // The eval isn't in the session's copy at all (the hook denies its paths too); it is put back before the
+          // change is read, so the session's diff never shows it gone and anything written there is overwritten.
+          for (const h of o.hide) if (!h.includes('*')) rmSync(join(path, h), { force: true, recursive: true });
+          this.writeTask(taskFile, { id: o.name, done_when: [{ manual: 'the coordinator checks the change and runs it as one job' }], frozen: o.frozen, hidden: o.hide });
+          const r: RunResult = setupErrors.length
+            ? { reason: 'failed', detail: `the worktree's setup failed: ${setupErrors.join('; ')}`, costUsd: 0, turns: 0, model: o.name }
+            : await this.d.runner.run({
+                env: this.projectEnv(),
+                role: 'experimenter',
+                stateDir: this.d.stateDir,
+                prompt: o.prompt,
+                appendSystemPrompt: o.system,
+                cwd: path,
+                model: workers.model,
+                allowedTools: [...EXPERIMENTER_TOOLS],
+                disallowedTools: [...EXPERIMENTER_DENIED],
+                maxTurns: 40,
+                maxBudgetUsd: o.maxBudgetUsd,
+                jsonSchema: PROPOSAL_SCHEMA,
+                taskFile,
+                stallMs: 20 * 60_000,
+                timeoutMs: this.commandTimeoutMs,
+                // The whole transcript, for the tampering monitor on this side only.
+                onStreamLine: (j) => {
+                  const t = transcriptLine(j);
+                  if (!t || size > TRANSCRIPT_MAX * 2) return;
+                  lines.push(t);
+                  size += t.length;
+                },
+              });
+          this.emit('run.cost', { issue: null, role: 'experimenter', model: r.model, usd: r.costUsd, turns: r.turns });
+          const files = o.hide.filter((h) => !h.includes('*'));
+          if (files.length) execFileSync('git', ['checkout', o.commit, '--', ...files], { cwd: path, stdio: 'ignore' });
+          return await then(r, path, lines.join('\n'));
+        } finally {
+          try {
+            removeWorktree(this.wt, o.name);
+          } catch {
+            // already gone
+          }
+        }
+      },
+      monitor: (prompt, maxBudgetUsd) => {
+        const cwd = neutralDir();
+        return this.d.runner
+          .run({ env: {}, role: 'experiment-monitor', stateDir: this.d.stateDir, prompt, cwd, model: monitorModel, allowedTools: [], disallowedTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task'], maxTurns: 2, maxBudgetUsd, jsonSchema: MONITOR_SCHEMA, stallMs: 10 * 60_000, timeoutMs: this.commandTimeoutMs })
+          .then((r) => {
+            this.emit('run.cost', { issue: null, role: 'experiment-monitor', model: r.model, usd: r.costUsd, turns: r.turns });
+            return r;
+          })
+          .finally(() => rmSync(cwd, { recursive: true, force: true }));
+      },
+      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Extend -> Experiments`),
+      commitChange: (path, parent, message) => {
+        removeSandboxPlaceholders(path);
+        this.git(path, 'add', '-A');
+        const tree = this.git(path, 'write-tree');
+        const commit = this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit-tree', tree, '-p', parent, '-m', message);
+        return { commit, raw: execGit(path, ['diff', '--raw', '-z', '--no-renames', parent, commit]) };
+      },
+      bundle: (ref, commit) => {
+        this.git(this.d.repo, 'update-ref', ref, commit);
+        const r = spawnSync('git', ['bundle', 'create', '-q', '-', ref], { cwd: this.d.repo, maxBuffer: 1024 * 1024 * 1024 });
+        if (r.status !== 0) throw new Error(`git bundle ${ref}: ${r.stderr.toString().slice(0, 300)}`);
+        return r.stdout;
+      },
+      helper:
+        x.helper ??
+        ((args, stdin) =>
+          // Async: a job runs for minutes or hours, and the coordinator's passes go on meanwhile.
+          new Promise((res) => {
+            const c = spawn('sudo', ['-n', EXP_HELPER, x.instance, ...args], { env: { PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'] });
+            let out = '';
+            let err = '';
+            c.stdout.on('data', (d: Buffer) => void (out = (out + d.toString()).slice(-1_000_000)));
+            c.stderr.on('data', (d: Buffer) => void (err = (err + d.toString()).slice(-100_000)));
+            c.on('error', (e) => res({ code: null, stdout: out, stderr: `${err}${e.message}` }));
+            c.on('close', (code) => res({ code, stdout: out, stderr: err }));
+            c.stdin.on('error', () => undefined);
+            c.stdin.end(stdin);
+          })),
+      root: x.root ?? (() => readRootFile(x.instance)),
+      logTail:
+        x.logTail ??
+        ((job, step) => {
+          try {
+            return readFileSync(join(expJobDir(x.instance, job), 'logs', `${step}.log`), 'utf8').split('\n').slice(-30).join('\n');
+          } catch {
+            return '';
+          }
+        }),
+    };
   }
 }

@@ -129,6 +129,8 @@ export const unitPath = (unit: string) => systemPath(`${SYSTEM_ROOTS.units}/${un
 export const srvCheckoutPath = (instance: string, repoName: string) => systemPath(`/srv/${BRAND.cli}/${instance}/${repoName}`);
 /** The test-run sandbox's base (scripts/setup/testrun-sandbox.sh): beside /var/lib/<cli>, its own directory. */
 export const testRunBasePath = () => systemPath(`/var/lib/${BRAND.cli}-test`);
+/** /var/lib/<cli>-exp: experiment jobs' state (scripts/setup/experiments.sh), root's. */
+export const expBasePath = () => systemPath(`/var/lib/${BRAND.cli}-exp`);
 /** Single-user and development machines' slot directory (unbranded: every agent harness on the box shares it). */
 export const devSlotsPath = () => systemPath(`${SYSTEM_ROOTS.varTmp}/agent-slots`);
 

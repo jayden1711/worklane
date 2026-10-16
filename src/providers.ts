@@ -47,16 +47,19 @@ export function providerOf(model: string): { kind: ProviderKind; name: string } 
 }
 
 /** What each kind of provider may run (code, not config). Builds here are the L1/L2 build route only. */
-export const PROVIDER_USES: Record<ProviderKind, readonly (RoutedRun | 'build')[]> = {
+export const PROVIDER_USES: Record<ProviderKind, readonly (RoutedRun | 'build' | 'cross_eval')[]> = {
   local: ['intake_replier', 'intake_triage', 'stage_judge'],
-  hosted: ['build', 'research'],
+  // cross_eval: the optional second verdict on a protected change (src/cross-eval.ts); it can only hold, never pass.
+  hosted: ['build', 'research', 'cross_eval'],
   cli: ['build'],
 };
 
 /** Why a provider may not run this, or null. Hosted never gets high-risk work (labels, escalation, L3). */
-export function providerRefusal(kind: ProviderKind, use: { route: RoutedRun | 'build' | 'evaluator' | 'other'; highRisk?: boolean }): string | null {
+export function providerRefusal(kind: ProviderKind, use: { route: RoutedRun | 'build' | 'evaluator' | 'cross_eval' | 'other'; highRisk?: boolean }): string | null {
   if (use.route === 'evaluator') return 'the evaluator never runs on an open model at L1+';
   if (!(PROVIDER_USES[kind] as readonly string[]).includes(use.route)) return `${kind} models run only ${PROVIDER_USES[kind].join(', ')}, not ${use.route}`;
+  // The second verdict is read-only and only ever adds a hold, so a high-risk change is exactly where it runs.
+  if (use.route === 'cross_eval') return null;
   if (kind === 'hosted' && use.highRisk) return 'hosted models never build high-risk, L3, money-path or agent-instructions work';
   if (kind === 'cli' && use.highRisk) return 'another vendor\'s CLI never builds high-risk work: L1 builds only';
   return null;
