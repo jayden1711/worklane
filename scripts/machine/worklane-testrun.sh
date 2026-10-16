@@ -118,6 +118,17 @@ SLIRP=/usr/bin/slirp4netns
 # slirp4netns's own DNS forwarder in a run's namespace (its fixed address, built from its first octet: the denylist
 # refuses a literal private address): the only nameserver a granted run's or a fetch's resolv.conf names.
 SLIRP_DNS="$(printf '%s.0.2.3' 10)"
+# slirp4netns's unit's own sandbox (slirp_start; CI runs a probe under exactly these). Its socket families: AF_INET and
+# AF_INET6 (its outbound connections) and AF_NETLINK, never AF_UNIX: no socket of its can reach a host Unix socket, an
+# abstract one included (those aren't files, so its empty /etc and /run don't hide them). WHY that holds at startup:
+# slirp4netns's one AF_UNIX use is socketpair(AF_LOCAL) in main() (v1.2.1 main.c L1105), the pair its parent and child
+# pass tap0's fd over, and RestrictAddressFamilies= filters socket(2) only, never socketpair(2); a pair connects to
+# nothing else. No --api-socket, no --ready-fd. The rest: see slirp_start.
+SLIRP_SANDBOX=(-p NoNewPrivileges=yes -p TemporaryFileSystem=/etc:ro -p TemporaryFileSystem=/run:ro
+  -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal" -p SystemCallErrorNumber=EPERM
+  -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
+  -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE"
+  -p "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK")
 # Prefixes only: systemd-run's transient IPAddressDeny= refuses the names a unit file takes (link-local, multicast,
 # localhost: "Failed to parse IP address prefix"). Link-local is 169.254.0.0/16 and fe80::/10, multicast 224.0.0.0/4
 # and ff00::/8. WHY the private ranges are built from their first octets: the repo's denylist refuses any literal
@@ -737,11 +748,7 @@ slirp_start() {
   allow="$(resolvers | tr '\n' ' ')"
   ha="$(host_addrs | tr '\n' ' ')"
   systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
-    -p "BindsTo=$unit.service" -p "After=$unit.service" -p NoNewPrivileges=yes \
-    -p TemporaryFileSystem=/etc:ro -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" -p TemporaryFileSystem=/run:ro \
-    -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal" -p SystemCallErrorNumber=EPERM \
-    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
-    -p RestrictSUIDSGID=yes -p LockPersonality=yes -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
+    -p "BindsTo=$unit.service" -p "After=$unit.service" "${SLIRP_SANDBOX[@]}" -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" \
     -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
     "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp "$main" tap0
 }

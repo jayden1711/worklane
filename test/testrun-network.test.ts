@@ -324,6 +324,7 @@ test('DNS: a granted run\'s resolv.conf names only slirp4netns\'s forwarder and 
     assert.match(slirpBind, /:\/etc\/resolv\.conf$/);
     assert.ok(net!.props.includes('TemporaryFileSystem=/etc:ro') && net!.props.includes('TemporaryFileSystem=/run:ro'), 'slirp keeps none of the host\'s /etc or /run');
     assert.ok(net!.props.includes('NoNewPrivileges=yes'));
+    assert.ok(net!.props.includes('RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK'), 'no AF_UNIX socket: no host Unix socket, abstract ones included');
     assert.ok(net!.props.includes('SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal'), 'it may signal no process');
     assert.ok(net!.props.includes('IPAddressAllow=198.51.100.53'));
     const b = h.binds();

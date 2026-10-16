@@ -186,6 +186,40 @@ for x in "$UPSTREAM:53" "$UPSTREAM:80"; do [ "$(got net-granted "$x")" != OK ] |
 # Never the host's loopback (the hub, the dashboard, any service there), its LAN address or slirp's alias for it.
 [ "$(seen)" = "pub:$PUB " ] || fail "the listeners saw $(seen), not the public stand-in alone"
 echo "  the granted run reached: $(seen)(dns: $(got net-granted dns))"
+echo "== slirp4netns's sandbox: no Unix socket at all, so no host abstract socket (owner's RestrictAddressFamilies)"
+# A stand-in for a host service on an abstract Unix socket (not a file: an empty /etc and /run don't hide it).
+cat > "$t/abstract.py" <<'EOF'
+import socket, sys
+s = socket.socket(socket.AF_UNIX); s.bind("\0worklane-ci-abstract-standin"); s.listen(8)
+open(sys.argv[1], "w").write("up")
+while True:
+    c, _ = s.accept()
+    with open(sys.argv[2], "a") as f: f.write("abstract:standin\n")
+    c.close()
+EOF
+python3 "$t/abstract.py" "$t/abstract-up" "$t/seen" > /dev/null 2>&1 &
+echo "$!" >> "$t/pids"
+for _ in $(seq 50); do [ -s "$t/abstract-up" ] && break; sleep 0.1; done
+[ -s "$t/abstract-up" ] || fail "the abstract socket stand-in didn't start"
+# The helper's own slirp sandbox, exactly as slirp_start passes it (SLIRP_SANDBOX), run as root (slirp's uid).
+eval "$(sed -n '/^SLIRP_SANDBOX=(/,/)$/p' scripts/machine/worklane-testrun.sh)"
+[ "${#SLIRP_SANDBOX[@]}" -gt 10 ] || fail "SLIRP_SANDBOX wasn't read from the helper"
+abstract_probe='import errno, socket
+try:
+    s = socket.socket(socket.AF_UNIX); s.connect("\0worklane-ci-abstract-standin"); print("abstract OK")
+except OSError as e:
+    print("abstract", errno.errorcode.get(e.errno, str(e.errno)))'
+: > "$t/seen"
+got_in="$(sudo systemd-run --wait --pipe --quiet --collect "${SLIRP_SANDBOX[@]}" /usr/bin/python3 -c "$abstract_probe" < /dev/null)"
+echo "  in slirp's sandbox: $got_in; the stand-in saw: $(seen)"
+[ "$got_in" = "abstract EAFNOSUPPORT" ] || fail "in slirp's sandbox the probe got: $got_in"
+[ -z "$(seen)" ] || fail "the stand-in saw $(seen)"
+# Fail-without: the same sandbox with AF_UNIX allowed too (RestrictAddressFamilies= lists add up) connects.
+got_out="$(sudo systemd-run --wait --pipe --quiet --collect "${SLIRP_SANDBOX[@]}" -p RestrictAddressFamilies=AF_UNIX /usr/bin/python3 -c "$abstract_probe" < /dev/null)"
+sleep 0.3
+echo "  the same with AF_UNIX allowed: $got_out; the stand-in saw: $(seen)"
+[ "$got_out" = "abstract OK" ] && [ "$(seen)" = "abstract:standin " ] || fail "with AF_UNIX allowed the probe didn't connect ($got_out; $(seen)): this probe can't tell"
+: > "$t/seen"
 echo "== fail-without: this PR's helper before the owner's change ($GRANTED_OLD: the host's namespace) let a granted run reach the hub"
 git fetch -q --depth=1 origin "$GRANTED_OLD"
 git show "$GRANTED_OLD:scripts/machine/worklane-testrun.sh" > "$t/helper-granted-old.sh"
