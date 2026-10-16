@@ -1219,7 +1219,8 @@ export type SetupFix =
   | { kind: 'signin'; label: string }
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
-  | { kind: 'discord'; label: string };
+  | { kind: 'discord'; label: string }
+  | { kind: 'source'; source: SourceKind; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -1383,6 +1384,53 @@ export const openDiscordTokenAsk = () => api<{ ok: boolean; ask: Ask }>('/api/fi
 /** Review (no `expect`: nothing written) or write the intake.yaml change these picks make; a write names the reviewed change's hash. */
 export const changeDiscordIntake = (values: Record<string, DiscordFormValue>, expect?: string) =>
   api<DiscordIntakePlan>('/api/first-run/discord/intake', { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
+/** The first-run page's Slack and Linear steps (src/intake/source-setup.ts), as GET /api/first-run/<slack|linear> serves them. */
+export type SourceKind = 'slack' | 'linear';
+export type SourceFormValue = boolean | string | string[] | null;
+export interface SourceCred {
+  credential: string;
+  key: string;
+  title: string;
+  configured: boolean;
+  file: string | null;
+  present: boolean;
+  error: string | null;
+  ask: (Ask & { kind: 'paste_secret' }) | null;
+}
+export type SourceSetup =
+  | { available: false; why: string }
+  | {
+      available: true;
+      kind: SourceKind;
+      instance: string;
+      canAct: boolean;
+      portal: string;
+      creds: SourceCred[];
+      intake: { file: string; exists: boolean; error: string | null; values: Record<string, SourceFormValue>; warnings: string[]; allowed: number; trusted: number };
+      form: { key: string; kind: 'boolean' | 'team' | 'ids' | 'label'; what: string }[];
+      slack?: { manifest: string; scopes: { scope: string; why: string }[] };
+      linear?: { permissions: { name: string; why: string }[] };
+      automation: { token: string; view: string; file: string; keys: string[]; restart: string };
+    };
+/** What the source's secret can see, from a child process on the instance that reads it itself; this page never sees it. */
+export type SourceView =
+  | { kind: 'slack'; team: { id: string; name: string }; bot: { user: string }; channels: { id: string; name: string; member: boolean }[]; members: { id: string; name: string }[]; at: string }
+  | {
+      kind: 'linear';
+      organization: { name: string };
+      viewer: { id: string; name: string };
+      teams: { id: string; name: string; key: string; labels: { id: string; name: string }[]; members: { id: string; name: string }[] }[];
+      labels: { id: string; name: string }[];
+      at: string;
+    };
+export type SourceIntakePlan = DiscordIntakePlan;
+export const getSourceSetup = (kind: SourceKind) => api<SourceSetup>(`/api/first-run/${kind}`);
+export const getSourceView = (kind: SourceKind, fresh = false) => api<SourceView>(`/api/first-run/${kind}/view${fresh ? '?fresh=1' : ''}`);
+/** Open the paste box for one of the source's secrets (a paste_secret ask); the secret itself goes through pasteSecret. */
+export const openSourceTokenAsk = (kind: SourceKind, credential: string) => api<{ ok: boolean; ask: Ask }>(`/api/first-run/${kind}/token-ask`, { method: 'POST', body: JSON.stringify({ confirm: true, credential }) });
+/** Review (no `expect`: nothing written) or write the intake.yaml change these picks make. */
+export const changeSourceIntake = (kind: SourceKind, values: Record<string, SourceFormValue>, expect?: string) =>
+  api<SourceIntakePlan>(`/api/first-run/${kind}/intake`, { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
@@ -1664,9 +1712,19 @@ export interface IntakeHealth {
   dropped: Record<string, number>;
   reportToMerged: { count: number; medianMinutes: number | null };
 }
+/** One chat source's state for the Intake page's strip (counts only, never an id or a secret). */
+export interface IntakeSourceSummary {
+  name: 'discord' | SourceKind;
+  state: 'on' | 'off' | 'none' | 'invalid';
+  detail: string;
+}
 export interface IntakeView {
   reports: IntakeReport[];
   health: IntakeHealth;
+  /** A server instance's chat sources; null where there are none (local mode). */
+  sources?: IntakeSourceSummary[] | null;
+  /** Whether this person may set the sources up (an owner of a server instance). */
+  canSetUpSources?: boolean;
 }
 
 /** Throughput (GET /api/throughput, src/throughput.ts): merges, cost per merged PR by stage, waits, the top costs. */

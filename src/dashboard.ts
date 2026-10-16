@@ -102,6 +102,7 @@ import type { InitIo } from './init.js';
 import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan } from './setup-actions.js';
 import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
 import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
+import { applySourceIntake, credDef, credStates, intakeSourcesSummary, planSourceIntake, sourceSecretRules, sourceSetupView, sourceTokenAsk, sourceView, type SourceKind, type SourceView } from './intake/source-setup.js';
 import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
@@ -1111,9 +1112,32 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       .finally(() => (botLoading = null));
     return botLoading;
   };
+  // The Slack and Linear steps' views (src/intake/source-setup.ts), through the same runner, kept the same way.
+  const views = new Map<SourceKind, { at: number; view: SourceView & { at: string } }>();
+  const viewLoading = new Map<SourceKind, Promise<SourceView & { at: string }>>();
+  const viewNow = (kind: SourceKind, fresh: boolean): Promise<SourceView & { at: string }> => {
+    const v = views.get(kind);
+    if (v && Date.now() - v.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(v.view);
+    let p = viewLoading.get(kind);
+    if (!p) {
+      p = sourceView(kind, opts.instance!, discordCli)
+        .then((view) => (views.set(kind, { at: Date.now(), view }), view))
+        .finally(() => viewLoading.delete(kind));
+      viewLoading.set(kind, p);
+    }
+    return p;
+  };
   // A pasted bot token (the setup console's paste box): its shape checked, then credentials.yaml pointed at the file.
   const secretRules = instanceHome
     ? {
+        ...sourceSecretRules({
+          instance: opts.instance!,
+          credentialsFile: join(instanceHome, 'credentials.yaml'),
+          onStored: (kind) => {
+            views.delete(kind);
+            setupCache.delete(kind);
+          },
+        }),
         [DISCORD_CREDENTIAL]: discordTokenRule({
           instance: opts.instance!,
           credentialsFile: join(instanceHome, 'credentials.yaml'),
@@ -1607,7 +1631,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/intake' && req.method === 'GET') {
           if (!mayReadIntake(who.role)) return json(res, 403, { error: writersOnly('intake reports are', who) });
           const events = eventCache.all();
-          return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events) });
+          // The chat sources' states for the page's strip: a server instance's only; counts, never an id or a secret.
+          return json(res, 200, { reports: intakeReports(events), health: intakeHealth(events), sources: instanceHome ? intakeSourcesSummary(instanceHome) : null, canSetUpSources: !!instanceHome && isOwnerHere });
         }
         // Throughput: merged PRs, cost per merged PR by stage, where PRs waited for the owner, the top costs with a
         // tuning each. The owner's and the writers' to read, like the runs it is made of.
@@ -2096,6 +2121,75 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               const { text: _text, ...plan } = applyIntake({ ...o, expect: body.expect });
               setupCache.delete('discord');
               audit(who, 'first_run.discord_intake', { file: plan.file, creates: plan.creates, changes: plan.changes });
+              return json(res, 200, { ok: true, confirmed: true, ...plan });
+            } catch (e) {
+              if (e instanceof DiscordSetupError) return refused(e.status, e.message);
+              throw e;
+            }
+          }
+          return json(res, 404, { error: 'not found' });
+        }
+        // The Slack and Linear steps (src/intake/source-setup.ts), as the Discord step: reading a step, loading its view and
+        // reviewing a change write nothing; the owners only act, each write confirmed, and every write and refusal is audited.
+        const sourceRoute = /^\/api\/first-run\/(slack|linear)(?:\/([a-z-]+))?$/.exec(url.pathname);
+        if (sourceRoute) {
+          const kind = sourceRoute[1] as SourceKind;
+          const what = sourceRoute[2] ?? '';
+          if (!what && req.method === 'GET') {
+            if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
+            if (!instanceHome) return json(res, 200, { available: false, why: `${kind === 'slack' ? 'Slack' : 'Linear'} intake is a server instance's: this dashboard serves a checkout, and local mode has no intake wiring` });
+            const all = asksFrom(eventCache.all().filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
+            return json(res, 200, sourceSetupView({ kind, instance: opts.instance!, home: instanceHome, asks: all, role: who.role, engineRoot: engineRoot() }));
+          }
+          const refused = (status: number, error: string) => {
+            audit(who, `first_run.${kind}_refused`, { what: what.slice(0, 20), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!instanceHome) return json(res, 400, { error: `${kind} intake is a server instance's: this dashboard serves a checkout` });
+          const ownersOnly = `only the instance's owners (admin on ${repo}) may set up its ${kind === 'slack' ? 'Slack' : 'Linear'} intake; @${who.login} is a ${who.role}`;
+          // What the source's secret can see. Nothing is written.
+          if (what === 'view' && req.method === 'GET') {
+            if (!isOwnerHere) return json(res, 403, { error: ownersOnly });
+            const missing = credStates(join(instanceHome, 'credentials.yaml'), kind).find((c) => !c.configured || !c.present);
+            if (missing) return json(res, 409, { error: missing.error ?? `${missing.title.replace(/^Paste /, '')} isn't stored for this instance yet: paste it first` });
+            try {
+              return json(res, 200, await viewNow(kind, url.searchParams.get('fresh') === '1'));
+            } catch (e) {
+              if (e instanceof DiscordSetupError) return json(res, e.status, { error: e.message });
+              throw e;
+            }
+          }
+          // Open the paste box for one of the source's secrets: a paste_secret ask, answered through the setup console.
+          if (what === 'token-ask' && req.method === 'POST') {
+            const body = ((await readBody(req)) ?? {}) as { confirm?: unknown; credential?: unknown };
+            if (!isOwnerHere) return refused(403, ownersOnly);
+            const c = typeof body.credential === 'string' ? credDef(body.credential) : null;
+            if (!c || c.kind !== kind) return refused(400, `name the secret to paste (credential: one of ${credStates(join(instanceHome, 'credentials.yaml'), kind).map((x) => x.credential).join(', ')})`);
+            if (body.confirm !== true) return refused(400, 'opening the paste box records an ask in this instance\'s log: confirm it ({"confirm": true})');
+            const log = new EventLog(opts.eventsDb);
+            try {
+              const r = sourceTokenAsk(log, opts.instance!, c.credential, who.login);
+              if (r.created) audit(who, `first_run.${kind}_token_ask`, { ask: r.ask.id, credential: c.credential });
+              return json(res, 200, { ok: true, ask: { ...r.ask, canAnswer: true }, created: r.created });
+            } finally {
+              log.close();
+            }
+          }
+          // intake.yaml: without confirm, the exact change (nothing written); with it and the shown hash, that change.
+          if (what === 'intake' && req.method === 'POST') {
+            const body = ((await readBody(req)) ?? {}) as { values?: unknown; confirm?: unknown; expect?: unknown };
+            if (!isOwnerHere) return refused(403, ownersOnly);
+            const values = body.values && typeof body.values === 'object' && !Array.isArray(body.values) ? (body.values as Record<string, unknown>) : {};
+            try {
+              const o = { kind, path: join(instanceHome, INTAKE_FILE), values, view: await viewNow(kind, false) };
+              if (body.confirm !== true) {
+                const { text: _text, ...plan } = planSourceIntake(o);
+                return json(res, 200, { ok: true, confirmed: false, ...plan });
+              }
+              if (typeof body.expect !== 'string') return refused(400, 'a confirm names the change it confirms (expect: the hash the review returned)');
+              const { text: _text, ...plan } = applySourceIntake({ ...o, expect: body.expect });
+              setupCache.delete(kind);
+              audit(who, `first_run.${kind}_intake`, { file: plan.file, creates: plan.creates, changes: plan.changes });
               return json(res, 200, { ok: true, confirmed: true, ...plan });
             } catch (e) {
               if (e instanceof DiscordSetupError) return refused(e.status, e.message);
