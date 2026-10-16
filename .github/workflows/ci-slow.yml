@@ -2394,7 +2394,8 @@ jobs:
           h="$(mktemp -d /var/tmp/cch-XXXXXX)"
           printf '{"mcpServers":{"kit-notes":{"type":"stdio","command":"/usr/local/bin/node","args":["%s","mcp-connect","ci","kit-notes"],"env":{"WORKLANE_MCP_TICKET":"%s"}}}}' "$CLI" "$ticket" > "$h/mcp.json" && chmod 0644 "$h/mcp.json"
           sudo chown wl-ci-agent "$h"
-          init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$h" CLAUDE_CONFIG_DIR="$h/.claude" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd "$HOME" && exec "$0"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config "$HOME/mcp.json" --settings "$1"' "$cc" "$1" 2>/dev/null | jq -c 'select(.type == "system" and .subtype == "init") | .mcp_servers'; }
+          init() { echo hi | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$h" CLAUDE_CONFIG_DIR="$h/.claude" ANTHROPIC_API_KEY=sk-ant-not-a-key sh -c 'cd "$HOME" && { "$0"/bin/claude -p --output-format stream-json --verbose --max-turns 1 --setting-sources project --strict-mcp-config --mcp-config "$HOME/mcp.json" --settings "$1" || true; }' "$cc" "$1" 2>/dev/null | jq -c 'select(.type == "system" and .subtype == "init") | .mcp_servers'; }
+          # Only the init event is read: the session itself fails (a stand-in API key), so its exit status is not.
           init "{\"allowedMcpServers\":[{\"serverCommand\":[\"/usr/local/bin/node\",\"$CLI\",\"mcp-connect\",\"ci\",\"kit-notes\"]}],\"disableClaudeAiConnectors\":true}" | tee "$F/cc1.json"
           jq -e 'map(select(.name == "kit-notes" and .status == "connected")) | length == 1' "$F/cc1.json"
           init '{"allowedMcpServers":[{"serverCommand":["/usr/local/bin/node","/elsewhere/cli.js","mcp-connect","ci","kit-notes"]}]}' | tee "$F/cc2.json"
