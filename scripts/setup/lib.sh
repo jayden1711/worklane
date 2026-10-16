@@ -248,6 +248,18 @@ ensure_instance_home() {
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
 
+# Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
+# a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
+run_as_users() {
+  local u h f
+  while IFS=: read -r u _ _ _ _ h _; do
+    [[ "$u" == wl-* && -n "$h" && "$h" != / ]] || continue
+    for f in "$h"/.local/state/worklane/instances/*/instance.yaml; do
+      [ -f "$f" ] || continue
+      sed -n -e 's/^  agent_user: *//p' -e 's/^  eval_user: *//p' "$f" | tr -d "\"'" | sed 's/[[:space:]]*$//'
+    done
+  done < <(getent passwd)
+}
 # An instance name add-project takes: instance.sh's shape, never one whose users would collide with another's
 # (wl-dash is the viewer; wl-<x>-agent, -eval and -work belong to instance <x>). The helper checks the same.
 instance_name_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ && "$1" != dash && ! "$1" =~ -(agent|eval|work)$ ]]; }
