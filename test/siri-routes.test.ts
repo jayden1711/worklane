@@ -14,7 +14,7 @@ import { EventLog } from '../src/events/log.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { siriAnswer, writeSiriAnswer } from '../src/siri/ask.js';
 import { SIRI_DEVICE_HEADER, SIRI_GATEWAY_TOKEN_FILE, SIRI_NODE_HEADER, type SiriCaller } from '../src/siri/instance.js';
-import { readDevices } from '../src/siri/tokens.js';
+import { readDevices, TOKEN } from '../src/siri/tokens.js';
 import { voiceInboxDir } from '../src/voice.js';
 import { asDevicePerson, asPerson, exampleProject, exampleRoles } from './helpers.js';
 
@@ -243,7 +243,9 @@ test('a token is made by an owner only, from an allowed device; shown once; kept
     assert.match(((await noDevice.json()) as { error: string }).error, /allowed Tailscale devices/);
     const { token, device } = await s.make();
     assert.match(token, /^worklane_siri_example_[a-z2-7]{10}_[A-Za-z0-9_-]{43}$/);
-    const secret = token.split('_').at(-1)!;
+    // The secret is base64url, so it can hold '_': take it by the token's structure, never by splitting on '_'.
+    const secret = TOKEN.exec(token)![3]!;
+    assert.equal(secret.length, 43);
     const list = await (await s.as(WRITER, '/api/siri-devices')).text();
     assert.ok(list.includes(device.id) && !list.includes(secret) && !list.includes('hash'), 'writers read the list, never the token');
     const f = join(s.stateDir, 'siri', 'devices.json');
