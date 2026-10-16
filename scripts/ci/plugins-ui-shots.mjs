@@ -27,7 +27,7 @@ const writer = { available: true, role: 'writer', entries: entries.map(({ id, ki
 const review = { ok: true, confirmed: false, digest, command: pending.pending[0].command, record: { ...kitRecord, source: { ...kitRecord.source, sha }, version: '1.3.0', tree: update.materialized.tree, transform: update.materialized.transform, flags: update.inspection.flags }, current: { digest, record: kitRecord } };
 
 /** Replace the page's /api/plugins answers in this tab: GET with `view`, POST stage with `review`. */
-const stub = (view) => ({ op: 'eval', expr: `(() => { const f = window.__origFetch ?? window.fetch; window.__origFetch = f; window.fetch = (u, i) => { const s = String(u); if (s.includes('/api/plugins/stage')) return Promise.resolve(new Response(${JSON.stringify(JSON.stringify(review))}, { status: 200, headers: { 'content-type': 'application/json' } })); if (s.includes('/api/plugins')) return Promise.resolve(new Response(${JSON.stringify(JSON.stringify(view))}, { status: 200, headers: { 'content-type': 'application/json' } })); return f(u, i); }; return true; })()` });
+const stub = (view) => ({ op: 'eval', expr: `(() => { const f = window.__origFetch ?? window.fetch; window.__origFetch = f; window.fetch = (u, i) => { const s = String(u); if (s.includes('/plugins/stage')) return Promise.resolve(new Response(${JSON.stringify(JSON.stringify(review))}, { status: 200, headers: { 'content-type': 'application/json' } })); if (s.endsWith('/plugins')) return Promise.resolve(new Response(${JSON.stringify(JSON.stringify(view))}, { status: 200, headers: { 'content-type': 'application/json' } })); return f(u, i); }; return true; })()` });
 
 function run(name, commands, opts) {
   const file = join(out, `${name}.commands`);

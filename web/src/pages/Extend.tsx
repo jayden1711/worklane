@@ -413,7 +413,7 @@ export function ExtendPage({ state, path }: { state: State; path: string }) {
         {view?.offProblem && <div className="rounded-card bg-orange-tint px-3 py-2 text-[12.5px] text-orange">{view.offProblem}</div>}
         {!owner && view?.available && <div className="text-[12.5px] text-ink-3" data-testid="plugins-writer-note">The instance's owners add and change plugins.{view.waiting ? ` ${view.waiting} waiting for an owner.` : ''}</div>}
         {empty && !adding && <EmptyPlugins owner={owner} onAdd={() => setAdding(true)} />}
-        {owner && !empty && !adding && (
+        {owner && view?.available && !empty && !adding && (
           <Button size="sm" onClick={() => setAdding(true)} data-testid="plugins-add">
             Add a plugin
           </Button>
