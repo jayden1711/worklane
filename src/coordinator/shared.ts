@@ -78,6 +78,11 @@ export interface CoordinatorDeps {
    */
   superfan?: { name: string; journal?: () => Promise<JournalRead | null> };
   /**
+   * Experiment studies (src/coordinator/experiments.ts), server mode only: the instance's name (the root helper's
+   * first argument) and its pins file. `helper` and `root` replace the real sudo helper and root's file (tests).
+   */
+  experiments?: { instance: string; pinsFile: string; helper?: import('./experiments.js').ExperimentHost['helper']; root?: () => import('../experiments/root-file.js').RootState; logTail?: (job: string, step: string) => string };
+  /**
    * The config follows the default branch (src/config/live.ts): `tree`, the config tree `cfg` was loaded from
    * (absent: the checkout's HEAD); `check`, checks beyond the schema a new config must pass (an instance's policy).
    */

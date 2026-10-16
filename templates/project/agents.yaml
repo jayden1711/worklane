@@ -37,4 +37,8 @@ instruction_evals: { enabled: true, cap_usd: 10, samples: 3 }
 #            stage_judge: sonnet, eval_answer: sonnet, reflection: haiku, chat: sonnet }
 # routing.chat is the dashboard chat's default model (else roles.chief_of_staff.model); its picker offers only the
 # models routing names. roles.chief_of_staff.conversation_budget_usd caps one chat conversation's spend (default 5).
+# routing.eval_cross_family: off (the default), or hosted:<name>: on a protected change the evaluator approved, a
+# second verdict from that other model family; when the two disagree the PR waits for a human with both reasons. It
+# runs only with the provider configured under providers, this instance opted in (policy.yaml settings.providers),
+# and the evaluator-verdict role passing its evals on that model; never on Anthropic in its place.
 routing: { eval_cheap: sonnet, eval_cheap_levels: [L0], eval_escalate: true }
