@@ -103,7 +103,7 @@ function agents(over: Partial<Record<string, (r: RunRequest) => object>> = {}) {
       commitAll(req.cwd, 'Ignore non-positive quantities in totals');
       return { structured: { summary: 'fixed' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
 }
 
@@ -976,7 +976,7 @@ function parallelAgents(gate: Promise<void>, seen: { now: number; max: number })
       commitAll(req.cwd, `add ${name}`);
       return { structured: { summary: 's' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
 }
 
@@ -1173,7 +1173,7 @@ test('#470: every governor hold records its kind and numbers, the Board shows it
 /** Workers that write a given file; optionally one that also adds a failing test. */
 function fileAgents(redFor?: string) {
   return new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', name), `export const x = '${name}';\n`);
     if (name === redFor) writeFileSync(join(req.cwd, 'test', 'new-red.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('brand new failure', () => { assert.equal(1, 2); });\n");
@@ -1227,7 +1227,7 @@ test('batched landing: changes to the same files go in separate batches', { skip
   const f = fixture();
   // Two workers editing the same file conflict-free in sequence, but must not share a batch.
   const runner = new FakeRunner(async (req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
     const name = req.prompt.match(/Add (\S+\.js)/)![1]!;
     writeFileSync(join(req.cwd, 'src', 'shared.js'), `export const who = '${name}';\n`);
     commitAll(req.cwd, `touch shared for ${name}`);
@@ -1406,7 +1406,7 @@ test('regression: an approving review that did not read every changed file does 
   const f = fixture();
   f.backlog.open({ title: 'Totals count negative quantities', body: BUG, author: 'example-owner', labels: ['ready'] });
   // The evaluator approves but reports reading only the test, not the source change.
-  const runner = agents({ 'evaluator-verdict': () => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: ['test/repro-qty.test.js'] }) });
+  const runner = agents({ 'evaluator-verdict': () => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: ['test/repro-qty.test.js'] }) });
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
   await c.tick();
   await c.idle();
@@ -1455,7 +1455,7 @@ test('emergency stop: one command halts every agent across instances; their task
   // Workers that run until they're aborted, like a real agent mid-task.
   const longRunning = () =>
     new FakeRunner(async (req) => {
-      if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+      if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
       running.now++;
       await new Promise<void>((res) => req.signal?.addEventListener('abort', () => res()));
       running.now--;
@@ -1848,7 +1848,7 @@ const harmless = () => COMPROMISED_ACTORS.map(([actor]) => ({ actor, can_do: 'no
  * A diligent evaluator that approves with high confidence and answers the design question, and the
  * compromised-component question when the brief names a protected surface (#471).
  */
-const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}), ...(/PROTECTED SURFACE/.test(req.prompt) ? { compromised_component: harmless() } : {}) });
+const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}), ...(/PROTECTED SURFACE/.test(req.prompt) ? { compromised_component: harmless() } : {}) });
 
 /** Required check green on the PR's head, then one poll. */
 async function green(t: Awaited<ReturnType<typeof openPr>>) {
@@ -1933,6 +1933,31 @@ test('#471: a medium verdict with no reason is asked once more; its reason is on
   const sure = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
   assert.equal(sure.runner.calls.filter((r) => r.role === 'evaluator-verdict').length, 1);
   assert.equal((lastOf(sure.f.log, 'eval.verdict') as { confidence_reason?: string }).confidence_reason, undefined);
+});
+
+test('claim labels: a check the worker hands the reader holds the PR with that sentence; an unlabeled verdict is asked once more; the PR body lists the labeled claims', { skip }, async () => {
+  const handing = (req: RunRequest) => ({
+    ...workerSaying('Fixed it. The price tests pass. Please run the e2e suite before merging.')(req),
+    claims: [{ claim: 'the price tests pass', label: 'measured', basis: 'node --test' }, { claim: 'other totals are unaffected', label: 'inferred', basis: 'read src/price.js' }],
+  });
+  const t = await openPr({ worker: handing, 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  const v = lastOf(t.f.log, 'eval.verdict') as { confidence: string; confidence_reason?: string };
+  assert.equal(v.confidence, 'medium');
+  assert.match(v.confidence_reason!, /the worker handed the reader a check it could run itself instead of running it: "Please run the e2e suite before merging\."/);
+  assert.match(t.pr().body, /### CLAIMS, LABELED\n\*\*Worker:\*\*\n- measured: the price tests pass \(node --test\)\n- inferred: other totals are unaffected \(read src\/price\.js\)\n- handed to the reader instead of run: "Please run the e2e suite before merging\."\n\*\*Evaluator:\*\*\n- measured: read the diff in full \(git diff\)/);
+  await green(t);
+  assert.equal(reasonsOf(t).auto, false);
+  assert.ok(!t.pr().merged, 'held for a human');
+
+  // An evaluator that labels nothing is refused once; still nothing: a doubt with that reason, never a high pass.
+  const bare = (req: RunRequest) => ({ ...approve()(req), claims: [] });
+  const u = await openPr({ 'evaluator-verdict': bare }, { autoMerge: () => true });
+  const briefs = u.runner.calls.filter((r) => r.role === 'evaluator-verdict').map((r) => r.prompt);
+  assert.equal(briefs.length, 2, 'refused once, asked once more');
+  assert.match(briefs[1]!, /Your verdict was refused: claims must list each claim your verdict rests on/);
+  const w = lastOf(u.f.log, 'eval.verdict') as { confidence: string; confidence_reason?: string };
+  assert.equal(w.confidence, 'medium');
+  assert.match(w.confidence_reason!, /the evaluator's claims are not all labeled measured, inferred or guess, even when asked again/);
 });
 
 test('#471: a change to a protected surface gets the compromised-component question; an unanswered actor is a doubt with that reason, on the decision record too', { skip }, async () => {
@@ -3369,7 +3394,7 @@ test('with test_run on, an agent run never starts the full suite: done_when suit
     const write = (what: string) => `node -e "require('fs').appendFileSync(process.argv[1], '${what}\\n')" ${JSON.stringify(mark)}`;
     f.cfg.tests.runner.full = write('full');
     f.cfg.tests.runner.changed = write('changed');
-    if (on) f.cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+    if (on) f.cfg.tests.test_run = { setup: [], fetch: [], setup_network: false, tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, network: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, full_checkout: false, gpu: false, network: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
     f.backlog.open({ title: 'Totals count negative quantities', body, author: 'example-owner', labels: ['ready'] });
     const runner = agents();
     const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });

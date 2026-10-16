@@ -314,6 +314,118 @@ archive_dirs() {
   sed 's/^/  /' "$list"
 }
 
+# Every process of instance <name>'s users <user>... gone, before they are deleted (userdel refuses a user with
+# processes) and before what they owned is walked. Prints each process still left, "<pid> <uid> <command>" (or why it
+# stopped), and exits 1 when there is any.
+#   1. their accounts locked: no password, expired, no shell: nothing new starts as them (their linger goes in 3);
+#   2. its coordinator and dashboard must be stopped already (instance-remove.sh refuses up front while either runs):
+#      found active here (started since), it stops, naming the command, and touches nothing; never stopped by this;
+#   3. every other engine unit whose User= is one of them (its test runs and Docker, experiment and score steps, MCP
+#      broker, network helpers: worklane-*, User= checked first, so another instance's unit is never touched) and
+#      their user slices (user-<uid>.slice, user@<uid>.service) killed and stopped: the cgroup takes the whole tree;
+#   4. what is left outside those cgroups: pkill -KILL by uid (real and effective, never a name), pass after pass
+#      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart.
+# INSTANCE_REMOVE_TEST_NO_KILL=1 (CI's proof that a process left refuses the removal): steps 3 and 4 are skipped, so
+# the check only ever finds more; it never lets a removal go on.
+#   stop_uids <name> <user>...
+STOP_PASSES=20
+stop_uids() {
+  local name="$1" u uid uids=() names=() unit owner pass left pid
+  shift
+  for u in "$@"; do user_exists "$u" && { names+=("$u"); uids+=("$(id -u "$u")"); }; done
+  [ "${#uids[@]}" -gt 0 ] || return 0
+  for u in "${names[@]}"; do usermod -L -e 1 -s /usr/sbin/nologin "$u" >/dev/null; done
+  for unit in "worklane-$name.service" "worklane-dashboard-$name.service"; do
+    if systemctl is-active -q "$unit"; then echo "$unit is running (it started since the check): stop it first: sudo systemctl stop $unit"; return 1; fi
+  done
+  if [ "${INSTANCE_REMOVE_TEST_NO_KILL:-}" != 1 ]; then
+    for u in "${names[@]}"; do loginctl disable-linger "$u" 2>/dev/null || true; done
+    for unit in $(systemctl list-units --all --plain --no-legend --full 'worklane-*' 2>/dev/null | awk '{print $1}'); do
+      [ "$unit" != "worklane-$name.service" ] && [ "$unit" != "worklane-dashboard-$name.service" ] || continue
+      owner="$(systemctl show -p User --value "$unit" 2>/dev/null || true)"
+      [ -n "$owner" ] && printf '%s\n' "${names[@]}" | grep -qxF -- "$owner" || continue
+      systemctl kill --signal=KILL "$unit" 2>/dev/null || true
+      systemctl stop "$unit" 2>/dev/null || true
+    done
+    for uid in "${uids[@]}"; do
+      systemctl kill --signal=KILL "user@$uid.service" "user-$uid.slice" 2>/dev/null || true
+      systemctl stop "user@$uid.service" "user-$uid.slice" 2>/dev/null || true
+    done
+    # Right before the loop, again: no coordinator or dashboard process is ever killed by uid.
+    for unit in "worklane-$name.service" "worklane-dashboard-$name.service"; do
+      if systemctl is-active -q "$unit"; then echo "$unit is running (it started since the check): stop it first: sudo systemctl stop $unit"; return 1; fi
+    done
+    for ((pass = 0; pass < STOP_PASSES; pass++)); do
+      left=""
+      for uid in "${uids[@]}"; do
+        pkill -KILL -U "$uid" 2>/dev/null || true
+        pkill -KILL -u "$uid" 2>/dev/null || true
+        if pgrep -U "$uid" >/dev/null 2>&1 || pgrep -u "$uid" >/dev/null 2>&1; then left=1; fi
+      done
+      [ -n "$left" ] || break
+      sleep 0.5
+    done
+  fi
+  left=""
+  for uid in "${uids[@]}"; do
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      printf '%s %s %s\n' "$pid" "$uid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-200)"
+      left=1
+    done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
+  done
+  [ -z "$left" ]
+}
+
+# Files the removed users <uid>... own in the engine's own places, given to root:root: in each <tree> (find -P, -xdev:
+# a link is never followed, another mount never entered) and, in <lock dir>, only the files named <lock name>, directly
+# in it. Each is chowned with -h (a link itself, never its target); a regular file also loses setuid and setgid (chmod
+# u-s,g-s), its other mode bits kept. Every one is listed in <listing>, "root:root <old mode> -> <new mode> <path>", or
+# "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only once no process of theirs is
+# left (stop_uids): nothing can swap a file for a link between the check and the change.
+#   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <uid>...
+rechown_orphans() {
+  local list="$1" trees="$2" lockdir="$3" lockname="$4" u f err old fails=0 t
+  shift 4
+  local -a tv=()
+  IFS=: read -r -a tv <<<"$trees"
+  local -a there=()
+  for t in "${tv[@]}"; do [ -d "$t" ] && [ ! -L "$t" ] && there+=("$t"); done
+  : > "$list"
+  for u in "$@"; do
+    [[ "$u" =~ ^[0-9]+$ ]] || continue
+    while IFS= read -r -d '' f; do
+      old="$(stat -c %a -- "$f")"
+      if ! err="$(chown -h root:root -- "$f" 2>&1)"; then
+        printf 'FAILED %s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
+      fi
+      # A regular file (never a link, never a directory: a directory keeps its setgid, the group its files inherit)
+      # loses setuid and setgid, whatever chown already cleared.
+      if [ -f "$f" ] && [ ! -L "$f" ] && ! err="$(chmod u-s,g-s -- "$f" 2>&1)"; then
+        printf 'FAILED %s: chmod u-s,g-s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
+      fi
+      printf 'root:root %s -> %s %s\n' "$old" "$(stat -c %a -- "$f")" "$f" >> "$list"
+    done < <(
+      [ "${#there[@]}" -eq 0 ] || find -P "${there[@]}" -xdev -uid "$u" -print0
+      [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
+    )
+  done
+  return "$fails"
+}
+# Everything else the removed users <uid>... still own on <root>'s filesystem (the removal's: /; read-only: find -P
+# -xdev, /proc, /sys and each <skip> path pruned), one path a line, into <listing>: left as it is, for an admin.
+#   left_owned <listing> <root> <skip paths, colon-separated> <uid>...
+left_owned() {
+  local list="$1" top="$2" skips="$3" u; shift 3
+  local -a sv=() prune=(-path /proc -o -path /sys) match=()
+  IFS=: read -r -a sv <<<"$skips"
+  for u in "${sv[@]}"; do [ -z "$u" ] || prune+=(-o -path "$u"); done
+  for u in "$@"; do [[ "$u" =~ ^[0-9]+$ ]] && match+=(${match[@]:+-o} -uid "$u"); done
+  : > "$list"
+  [ "${#match[@]}" -gt 0 ] || return 0
+  find -P "$top" -xdev \( "${prune[@]}" \) -prune -o \( "${match[@]}" \) -print 2>/dev/null > "$list" || true
+}
+
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
@@ -322,6 +434,8 @@ instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm
   st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
   case "$st" in active | activating | deactivating | reloading) echo "its coordinator, worklane-$name.service, is $st: let its runs finish, then: sudo systemctl stop worklane-$name.service" ;; esac
+  st="$(systemctl show -p ActiveState --value "worklane-dashboard-$name.service" 2>/dev/null || true)"
+  case "$st" in active | activating | deactivating | reloading) echo "its dashboard, worklane-dashboard-$name.service, is $st: sudo systemctl stop worklane-dashboard-$name.service" ;; esac
   while IFS=$'\t' read -r k u _; do
     [ "$k" = user ] && user_exists "$u" && uids+=("$(id -u "$u")")
   done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$name")

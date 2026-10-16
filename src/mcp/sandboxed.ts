@@ -5,6 +5,7 @@
 // that can't start means no server, never an unsandboxed one.
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import type { SandboxManager as SandboxManagerType, SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { z } from 'zod';
 import { shellCommand } from '../os/index.js';
 
@@ -22,14 +23,26 @@ export type SandboxedConfig = z.infer<typeof SandboxedConfig>;
 /** One word for sh: single-quoted, any ' closed, escaped and reopened. */
 export const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
-export async function runSandboxed(configFile: string, argv: string[]): Promise<number> {
-  const cfg = SandboxedConfig.parse(JSON.parse(readFileSync(configFile, 'utf8')));
-  if (!argv.length) throw new Error('no command');
-  const { SandboxManager } = await import('@anthropic-ai/sandbox-runtime');
-  await SandboxManager.initialize({
+/**
+ * The whole configuration handed to sandbox-runtime: an allowlist and filesystem rules, nothing else. In particular no
+ * `network.tlsTerminate` (the only path that builds the library's MITM CA with node-forge) and no `network.mitmProxy`:
+ * the broker never terminates or intercepts a server's TLS. Pinned by test/mcp-sandboxed.test.ts.
+ */
+export function sandboxRuntimeConfig(cfg: SandboxedConfig): SandboxRuntimeConfig {
+  return {
     network: { allowedDomains: cfg.allowedDomains, deniedDomains: [] },
     filesystem: { denyRead: cfg.denyRead, allowWrite: cfg.allowWrite, denyWrite: [] },
-  });
+  };
+}
+
+/** The part of sandbox-runtime's SandboxManager the broker uses; a seam so tests can see what reaches it. */
+export type SandboxManagerLike = Pick<typeof SandboxManagerType, 'initialize' | 'wrapWithSandbox' | 'reset'>;
+
+export async function runSandboxed(configFile: string, argv: string[], manager?: SandboxManagerLike): Promise<number> {
+  const cfg = SandboxedConfig.parse(JSON.parse(readFileSync(configFile, 'utf8')));
+  if (!argv.length) throw new Error('no command');
+  const SandboxManager = manager ?? (await import('@anthropic-ai/sandbox-runtime')).SandboxManager;
+  await SandboxManager.initialize(sandboxRuntimeConfig(cfg));
   const wrapped = await SandboxManager.wrapWithSandbox(argv.map(shQuote).join(' '));
   return new Promise((resolve) => {
     const [file, args] = shellCommand(wrapped);

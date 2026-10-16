@@ -101,7 +101,8 @@ check_cmd() {
   if [ -n "$loaded" ]; then echo "PASS table inet $TABLE is loaded"; else echo "FAIL table inet $TABLE is not loaded"; return 1; fi
   # The users apply covered (its own record), else every one this machine's rule should cover now.
   local uids
-  if [ -f "$MARK" ]; then uids="$(grep -v '^#' "$MARK")"; else uids="$(covered)"; fi
+  # || true: a record with no user (the last instance's sandbox users removed) is no user to check, not a failure.
+  if [ -f "$MARK" ]; then uids="$(grep -v '^#' "$MARK" || true)"; else uids="$(covered)"; fi
   for uid in $uids; do
     u="$(getent passwd "$uid" | cut -d: -f1)"
     if grep -Eq "skuid \\{[^}]*\\b$uid\\b" <<<"$loaded" || grep -Eq "skuid $uid\\b" <<<"$loaded"; then echo "PASS $u ($uid) is covered"; else echo "FAIL $u ($uid) is not covered: run apply again"; fail=1; continue; fi

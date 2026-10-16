@@ -17,6 +17,11 @@ Signed-off-by: Your Name <you@example.com>
 - The project is Apache-2.0.
 - **Never copy code from AGPL, GPL, SSPL, BUSL or Commons Clause projects.** Reading them for design ideas is fine; say so in the PR.
 - MIT, BSD or Apache-2.0 code you reuse must be credited in `THIRD_PARTY_NOTICES.md` with its license text, and the file header should name the source.
+- **A new runtime dependency** (package.json `dependencies`, `optionalDependencies` or `peerDependencies`, or any
+  package-lock.json entry that isn't dev-only, transitive ones and version changes included) is named in the PR body
+  under `## New dependencies`, one line each: `- <name> | <licence> | <why>`, the licence as package-lock.json gives it.
+  The `new-deps` check (scripts/ci/new-deps.mjs) fails without it. A green check is not approval: a new runtime
+  dependency still waits for the owner's OK before it merges.
 
 ## Project-specific code
 

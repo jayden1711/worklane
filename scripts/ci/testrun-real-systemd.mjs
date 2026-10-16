@@ -8,7 +8,7 @@
 //
 // Prints systemd-run's raw stderr for one plain exec (the text test/fixtures/systemd-run-255/ holds), and fails
 // if its summary isn't the shape the fixture has. With a database image it starts the run's database, checks
-// Postgres answers on its port, writes the container's name to "<ids file>.db" and leaves the run in place, so the
+// Postgres answers on its Unix socket from inside the run (and that this user can't reach it), writes the container's name to "<ids file>.db" and leaves the run in place, so the
 // job can look at the container's cgroup as root; --wipe then wipes every run in the ids file.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -48,12 +48,10 @@ const { sandboxHost, newRunId, systemdRunStats, SANDBOX_HELPER } = await load(di
 const { createWorkspace, wipeWorkspace } = await load(dist, 'testrun/workspace.js');
 const { checkHelper, HELPER_PROTOCOL } = await load(dist, 'testrun/helper.js');
 
-// Postgres itself answers on the port: an SSLRequest gets its one-byte reply, 'S' or 'N'.
-const postgresAnswers = (port) => new Promise((resolve, reject) => {
-  const sock = connect({ host: '127.0.0.1', port }, () => sock.write(Buffer.from([0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f])));
-  sock.setTimeout(10_000, () => sock.destroy(new Error('no reply in 10 s')));
-  sock.once('data', (b) => { sock.destroy(); resolve(String.fromCharCode(b[0])); });
-  sock.once('error', reject);
+// This user (the coordinator's) connecting to the database's socket: the error's code, or 'connected'.
+const socketFromHere = (path) => new Promise((resolve) => {
+  const sock = connect({ path }, () => { sock.destroy(); resolve('connected'); });
+  sock.once('error', (e) => resolve(e.code));
 });
 
 // A repo of this user's own: main, and a head commit on top of it.
@@ -180,11 +178,17 @@ if (dbImage !== '-') {
   // Not the default (200) nor the image's (100): the job checks SHOW max_connections is 250 inside the database.
   const db = await host.startDb(id, { image: dbImage, name: 'test', readyS: 90, maxConnections: 250 });
   console.log(db.url.replace(/:[0-9a-f]{32}@/, ':***@'), db.container);
-  assert.ok(db.port > 0 && db.port < 65536);
-  assert.match(db.url, new RegExp(`^postgres://postgres:[0-9a-f]{32}@127\\.0\\.0\\.1:${db.port}/test$`));
-  const reply = await postgresAnswers(db.port);
-  console.log(`Postgres on 127.0.0.1:${db.port} answers an SSLRequest with '${reply}'`);
-  assert.ok(reply === 'S' || reply === 'N', `Postgres's reply: ${JSON.stringify(reply)}`);
+  assert.match(db.socketDir, /^\/var\/lib\/wlt\/[0-9a-f]{8}\/pg$/, 'the socket in the run\'s own TMPDIR');
+  assert.equal(db.url.replace(/:[0-9a-f]{32}@/, ':***@'), `postgres://postgres:***@localhost/test?host=${db.socketDir}`);
+  // Postgres itself answers on its socket, from inside the run (no network there): an SSLRequest gets 'S' or 'N'.
+  const ask = 'import os, socket; s = socket.socket(socket.AF_UNIX); s.connect(os.environ["PGDIR"] + "/.s.PGSQL.5432"); s.sendall(bytes([0, 0, 0, 8, 4, 210, 22, 47])); print("reply", s.recv(1).decode())';
+  const inRun = await host.exec(id, `python3 -c '${ask}'`, { PGDIR: db.socketDir }, 60_000);
+  console.log(`from inside the run: ${inRun.out.trim()}`);
+  assert.equal(inRun.code, 0, inRun.out);
+  assert.match(inRun.out, /^reply [SN]$/m);
+  const here = await socketFromHere(`${db.socketDir}/.s.PGSQL.5432`);
+  console.log(`from the coordinator's user: ${here}`);
+  assert.equal(here, 'EACCES', 'only the run reaches its database');
   writeFileSync(`${idsFile}.db`, `${db.container}\n`);
   console.log(`\nOK: the sandbox host works against real systemd-run; run ${id} and its database are left for the cgroup check`);
 } else {

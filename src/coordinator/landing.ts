@@ -10,6 +10,7 @@ import { computeLevel, loadMoneyPaths } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
 import { waitCategoriesOf } from '../merge-policy.js';
 import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
+import { claimLines } from '../claim-labels.js';
 import { checkedPush } from '../push-check.js';
 import { DIRECT_LAND_REFUSED, directLandRefusal, localRemote } from '../direct-land.js';
 import { receiptLines } from '../receipts.js';
@@ -327,6 +328,12 @@ export abstract class Landing extends Decisions {
       ...evalLines(this.instructionResults(n)),
       '',
       ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
+      '',
+      // Every claim labeled: measured (run and read), inferred (reasoned, not run) or guess (src/claim-labels.ts).
+      '### CLAIMS, LABELED',
+      ...claimLines('Worker', claims?.labeled ?? [], claims?.label_problems ?? []),
+      ...(claims?.handoffs?.length ? claims.handoffs.map((h) => `- handed to the reader instead of run: "${h.replace(/`/g, "'")}"`) : []),
+      ...claimLines('Evaluator', verdict?.claims ?? []),
       ...(browser?.head === q.head ? ['', ...browser.lines] : []),
       // An optimization task (src/optimize.ts): the benchmark's before and after, and every raw run.
       ...((o) => (o.length ? ['', ...o] : []))(optimizePrLines(this.events(n), q.head)),

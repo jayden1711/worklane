@@ -17,6 +17,8 @@ import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
 import { gpuLine, type GpuGrant } from './gpu.js';
+import { networkLine, NETWORK_TIER, type NetworkGrant } from './network.js';
+import { npmFetchScript, type Fetcher } from './fetch.js';
 import { libexecPath } from '../os/system-paths.js';
 
 export const SANDBOX_HELPER = libexecPath('testrun');
@@ -40,12 +42,19 @@ export interface ExecResult {
   unitResult?: string | null;
   /** Only for a command that asked for the GPU: what the helper granted (./gpu.ts), or null when it said nothing. */
   gpu?: GpuGrant | null;
+  /** Only for a command that asked for the network: what the helper granted (./network.ts), or null when it said nothing. */
+  network?: NetworkGrant | null;
 }
 
 /** What a command asks of its host besides its environment. */
 export interface ExecOptions {
   /** Ask for the GPU (a tier's `gpu: true`): granted only as root's file says (./gpu.ts). */
   gpu?: boolean;
+  /**
+   * Ask for the network for this tier (a tier's `network: true`, or "setup" for the setup steps): granted only when
+   * root's file lists that tier for this instance (./network.ts). Absent: the command has no network.
+   */
+  network?: string;
 }
 
 /**
@@ -178,7 +187,10 @@ export interface RunDbSpec {
 
 export interface RunDatabase {
   url: string;
-  port: number;
+  /** The sandbox's: the directory of the database's Unix socket (it has no network, so no port). */
+  socketDir?: string;
+  /** The local host's: its port on 127.0.0.1. */
+  port?: number;
   container: string;
 }
 
@@ -228,8 +240,13 @@ export interface RunHost {
   cache(name: string, key: string): Promise<string>;
   /** A directory every run of the instance shares (e.g. a test-port registry); no wipe removes it. */
   shared(name: string): Promise<string>;
-  /** The run's own Postgres: a unique container and a port the daemon picks, on loopback. */
+  /** The run's own Postgres: a unique container, reached on its Unix socket (the sandbox's has no network). */
   startDb(id: string, db: RunDbSpec): Promise<RunDatabase>;
+  /**
+   * The fetch phase (./fetch.ts): what the run's lockfile pins, downloaded into cache `cache` (key `key`) with network,
+   * running none of the repo's code. Its output and exit as a setup step's.
+   */
+  fetch(id: string, fetcher: Fetcher, cache: string, key: string, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult>;
   /**
    * Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). With `o.gpu`, the
    * sandbox helper may grant the GPU; a wait for it counts against `timeoutMs`.
@@ -354,6 +371,15 @@ function postgresUrl(port: number, password: string, db: string): string {
   return `postgres://postgres:${password}@127.0.0.1:${port}/${db}`;
 }
 
+/**
+ * The URL of a database reached on its Unix socket: libpq, node-postgres and Prisma all take the socket's directory
+ * as the `host` parameter (the socket is <dir>/.s.PGSQL.5432).
+ */
+export function postgresSocketUrl(dir: string, password: string, db: string): string {
+  if (!/^\/[A-Za-z0-9._/-]{1,200}$/.test(dir) || dir.includes('..')) throw new Error(`not a socket directory: ${dir}`);
+  return `postgres://postgres:${password}@localhost/${db}?host=${dir}`;
+}
+
 function checkDb(db: RunDbSpec): void {
   if (!PINNED_IMAGE.test(db.image)) throw new Error(`the database image must be pinned to its digest: ${db.image}`);
   if (!/^[a-z_][a-z0-9_]{0,62}$/.test(db.name)) throw new Error(`not a database name: ${db.name}`);
@@ -402,12 +428,24 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       checkId(id);
       checkDb(db);
       const r = await call(['db-start', id, db.image, db.name, String(db.readyS), String(db.maxConnections)], { timeoutMs: (db.readyS + 300) * 1000 });
-      const m = /^(\d{1,5}) ([0-9a-f]{32})$/.exec(lastLine(r));
+      const m = /^(\/[A-Za-z0-9._/-]{1,200}) ([0-9a-f]{32})$/.exec(lastLine(r));
       if (r.code !== 0 || !m) throw fail('db-start', `starting run ${id}'s database`, r);
-      return { url: postgresUrl(Number(m[1]), m[2]!, db.name), port: Number(m[1]), container: `${BRAND.cli}-test-${instance}-${id}` };
+      return { url: postgresSocketUrl(m[1]!, m[2]!, db.name), socketDir: m[1]!, container: `${BRAND.cli}-test-${instance}-${id}` };
+    },
+    async fetch(id, fetcher, cache, key, timeoutMs, signal) {
+      checkId(id);
+      if (fetcher !== 'npm') throw new Error(`no fetch for ${String(fetcher)}`);
+      if (!/^[a-z][a-z0-9_-]{0,39}$/.test(cache) || !/^[0-9a-f]{16,64}$/.test(key)) throw new Error(`not a cache: ${cache} ${key}`);
+      const r = await call(['fetch', id, fetcher, cache, key, String(Math.max(1, Math.ceil(timeoutMs / 1000)))], { timeoutMs: timeoutMs + 60_000, signal });
+      const line = new RegExp(`^${BRAND.cli}-testrun: fetch npm \\([^\\n]*\\)\\n`).exec(r.stderr);
+      const s = systemdRunStats(r.stderr);
+      const own: Array<[number, number]> = [...(line ? [[0, line[0].length] as [number, number]] : []), ...s.own];
+      const timedOut = s.result === 'timeout' || (r.code === null && !signal?.aborted);
+      return { code: r.code, out: r.without(own), stats: s.stats, err: cut(r.stderr, own), timedOut, unitResult: s.result };
     },
     async exec(id, command, env, timeoutMs, signal, o = {}) {
       checkId(id);
+      if (o.network !== undefined && !NETWORK_TIER.test(o.network)) throw new Error(`not a tier name: ${o.network}`);
       // INVARIANT: no variable's value is ever in an argv. sudo logs its whole command line to the journal and any
       // user can read a process's argv (ps, /proc/<pid>/cmdline); DATABASE_URL carries the run's database password.
       // The run's variables go on stdin, each NAME=value ended by a NUL (no value can hold one).
@@ -415,16 +453,17 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       // The helper's unit ends at its RuntimeMaxSec; this timer is the backstop (a wipe stops whatever is left). A GPU
       // command's wait for its GPU counts against the same timeout (the helper gives the unit only what is left), so
       // the backstop covers the wait too.
-      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), ...(o.gpu ? ['--gpu'] : []), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
+      const r = await call(['exec', id, String(Math.max(1, Math.ceil(timeoutMs / 1000))), ...(o.gpu ? ['--gpu'] : []), ...(o.network !== undefined ? ['--network', o.network] : []), '--', command], { stdin: vars, timeoutMs: timeoutMs + 60_000, signal });
       // systemd-run's lines are in the stderr the run shares with it: taken out, and its summary read from there only.
-      // So is the helper's GPU line, the first of all when the command asked for the GPU.
+      // So are the helper's GPU line, the first of all when the command asked for the GPU, and its network line next.
       const s = systemdRunStats(r.stderr);
       const g = o.gpu ? gpuLine(r.stderr) : { grant: null, own: [] };
-      const own = [...g.own, ...s.own];
+      const n = o.network !== undefined ? networkLine(r.stderr, g.own.length ? g.own[0]![1] : 0) : { grant: null, own: [] };
+      const own = [...g.own, ...n.own, ...s.own];
       // A GPU still held at the run's timeout: no unit ran, and the command's time was spent waiting.
       const held = o.gpu && g.grant !== null && !g.grant.granted && g.grant.why.startsWith('still held');
       const timedOut = s.result === 'timeout' || held || (r.code === null && !signal?.aborted);
-      return { code: r.code, out: r.without(own), stats: s.stats, err: cut(r.stderr, own), timedOut, unitResult: s.result, ...(o.gpu ? { gpu: g.grant } : {}) };
+      return { code: r.code, out: r.without(own), stats: s.stats, err: cut(r.stderr, own), timedOut, unitResult: s.result, ...(o.gpu ? { gpu: g.grant } : {}), ...(o.network !== undefined ? { network: n.grant } : {}) };
     },
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
@@ -537,6 +576,19 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       }
       throw new SetupStepError('db-start', `${container} wasn't ready after ${db.readyS}s`, '');
     },
+    async fetch(id, fetcher, cache, key, timeoutMs, signal) {
+      checkId(id);
+      if (fetcher !== 'npm') throw new Error(`no fetch for ${String(fetcher)}`);
+      const dir = runDir(id);
+      const fd = join(dir, 'fetch');
+      rmSync(fd, { recursive: true, force: true });
+      mkdirSync(join(fd, 'home'), { recursive: true, mode: 0o700 });
+      const [file, args] = shellCommand(npmFetchScript());
+      const full = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', npm_config_cache: await this.cache(cache, key) };
+      const r = await run(file, args, { cwd: fd, env: full, timeoutMs, signal });
+      rmSync(fd, { recursive: true, force: true });
+      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
+    },
     async exec(id, command, env, timeoutMs, signal, eo = {}) {
       checkId(id);
       const dir = runDir(id);
@@ -545,7 +597,8 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
       // The local host has no GPU to grant: a command that asks is told so, as the helper would.
-      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted, ...(eo.gpu ? { gpu: { granted: false as const, why: 'the local host grants no GPU' } } : {}) };
+      // Nor network: it has no sandbox to keep a command off it, and says so to one that asks.
+      return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted, ...(eo.gpu ? { gpu: { granted: false as const, why: 'the local host grants no GPU' } } : {}), ...(eo.network !== undefined ? { network: { granted: false as const, why: 'the local host has no sandbox, so it grants nothing' } } : {}) };
     },
     async check() {
       return { ok: false, detail: 'the local host has no sandbox: for the engine\'s tests and development only' };

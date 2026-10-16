@@ -53,7 +53,7 @@ const runner = () =>
       git(req.cwd, '-c', `user.email=${DEFAULT_COMMIT_IDENTITY.email}`, '-c', `user.name=${DEFAULT_COMMIT_IDENTITY.name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'fix');
       return { structured: { summary: 'fixed' } };
     }
-    return { structured: { patch_correct: false, test_correct: true, confidence: 'high', advice: 'it skips zero quantities wrongly', files_reviewed: ['src/price.js'], design_change: false } };
+    return { structured: { patch_correct: false, test_correct: true, confidence: 'high', advice: 'it skips zero quantities wrongly', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: ['src/price.js'], design_change: false } };
   });
 
 async function run(landMode: 'direct' | 'pr') {

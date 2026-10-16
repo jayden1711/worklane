@@ -299,7 +299,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' testrun-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 24
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -538,6 +538,8 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier the public stand-in only, never the host's 127.0.0.1 services (a hub stand-in on 4399, a dashboard's) or the LAN (the PR's earlier host-namespace helper reached the hub); fetch the same; the database container reaches nothing"
+        run: bash scripts/ci/testrun-network-real-systemd.sh "$I2"
       - name: "regression: an instance whose name is a prefix of another's (ci2-sandbox, ci2-sandbox-long-name) never wipes the other's units, Docker or containers"
         run: |
           # Run ids and instance names are both [a-z0-9-]: with units named <cli>-test-<name>-<id>-<pid>, ci2-sandbox's
@@ -596,7 +598,8 @@ jobs:
             [ "$(cut -d' ' -f1 <<<"$out")" = "$(printf %s "$value" | sha256sum | cut -d' ' -f1)" ] || { echo "$which: the run didn't get the value exactly: $out" >&2; exit 1; }
             echo "$which helper: the run got CANARY_VAR exactly (its sha256 matches)"
             sudo truncate -s 0 "$argvlog"
-            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
+            # "<port> <password>" from the old helper, "<socket directory> <password>" from this one.
+            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[^ ]* \([0-9a-f]\{32\}\)$/\1/p')"
             [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
             # db-start's recorded docker calls, copied out with no value on any command line. WHY: a sudo grep for the
             # password put it in sudo's own journal line; every search with the value runs only after the watch and
@@ -2430,6 +2433,7 @@ jobs:
           echo "RM_HOMES=$(getent passwd wl-delta | cut -d: -f6) $(getent passwd wl-delta-agent | cut -d: -f6)" >> "$GITHUB_ENV"
           # A record for each of delta and ci in every shared root file, in the file's own form.
           printf '{\n  "version": 1,\n  "max_minutes": 20,\n  "instances": {\n    "ci": { "devices": [0] },\n    "delta": { "devices": [1] }\n  }\n}\n' | sudo tee /etc/worklane/testrun-gpu.json >/dev/null
+          printf '{\n  "version": 1,\n  "instances": {\n    "ci": { "tiers": ["e2e"] },\n    "delta": { "tiers": ["e2e", "setup"] }\n  }\n}\n' | sudo tee /etc/worklane/testrun-network.json >/dev/null
           sudo node -e '
             const fs = require("fs");
             const rw = (f, edit, empty) => { let j; try { j = JSON.parse(fs.readFileSync(f, "utf8")); } catch { j = empty; } edit(j); const st = fs.existsSync(f) ? fs.statSync(f) : null; fs.writeFileSync(f + ".ci", JSON.stringify(j, null, 2) + "\n"); if (st) { fs.chownSync(f + ".ci", st.uid, st.gid); fs.chmodSync(f + ".ci", st.mode & 0o7777); } fs.renameSync(f + ".ci", f); };
@@ -2469,6 +2473,7 @@ jobs:
           # What every shared file holds for ci, to compare after.
           ci_view() {
             sudo jq -c '.instances.ci' /etc/worklane/testrun-gpu.json
+            sudo jq -c '.instances.ci' /etc/worklane/testrun-network.json
             sudo jq -c '[.active.ci, .failover.instances.ci, .profiles["ci-shared"].users["wl-ci-agent"]]' /var/lib/worklane/claude-account/profiles.json
             sudo jq -c '[.users[] | select(.instance=="ci")]' /var/lib/worklane/claude-account/status.json
             sudo jq -c '[.incidents[] | select(.id=="ciciok01")]' /var/lib/worklane/agent-slots/incidents.json
@@ -2498,9 +2503,12 @@ jobs:
           echo "RM_ID=$id" >> "$GITHUB_ENV"; echo "RM_URL=$url" >> "$GITHUB_ENV"; echo "RM_D=delta" >> "$GITHUB_ENV"
       - name: "instance-remove: --print lists every item; a process of delta's users refuses it; no terminal and a wrong typed name change nothing"
         run: |
-          sudo systemctl stop worklane-delta.service
+          # Its dashboard running refuses it too: both stopped first, as the refusal says.
+          set +e; sudo systemctl stop worklane-delta.service; sudo bash scripts/setup/instance-remove.sh delta --yes > "$F/rm0b.out" 2> "$F/rm0b.err"; rc=$?; set -e
+          [ "$rc" = 1 ] && grep -q 'worklane-dashboard-delta.service, is active' "$F/rm0b.err"
+          sudo systemctl stop worklane-dashboard-delta.service
           sudo bash scripts/setup/instance-remove.sh delta --print | tee "$F/rm-print.txt"
-          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'record   plugin-pending in ' "unit     worklane-mcp@${RM_D}.service" 'user     wl-delta-mcp ' 'group    wl-delta-mcpc' 'group    wl-delta-mcpctl' 'path     /etc/worklane/plugins/delta.json' 'path     /var/lib/worklane/plugins/store/delta' 'path     /var/lib/worklane-mcp-delta' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
+          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'record   testrun-net in ' 'run      testrun-network.sh disable delta' 'record   plugin-pending in ' "unit     worklane-mcp@${RM_D}.service" 'user     wl-delta-mcp ' 'group    wl-delta-mcpc' 'group    wl-delta-mcpctl' 'path     /etc/worklane/plugins/delta.json' 'path     /var/lib/worklane/plugins/store/delta' 'path     /var/lib/worklane-mcp-delta' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
             grep -qF -- "$l" "$F/rm-print.txt" || { echo "--print doesn't list: $l" >&2; exit 1; }
           done
           if grep -qE 'wl-ci|worklane-ci\.service|/srv/worklane/ci|record .*"instance":"ci"' "$F/rm-print.txt"; then echo "--print lists ci's" >&2; exit 1; fi
@@ -2522,7 +2530,41 @@ jobs:
           if sudo test -e /var/lib/worklane/removed; then echo "a refused run exported something" >&2; exit 1; fi
       - name: "instance-remove: delta exported first (root's 0600), every item gone, ci's records, units, hub and helper rule as they were; a rerun finds nothing left"
         run: |
-          sudo bash scripts/setup/instance-remove.sh delta --yes 2>&1 | tee "$F/rm4.out"
+          # Planted before the removal: a setuid+setgid file of delta's under an engine path; links (in its home, and
+          # under an engine path, the link itself delta's) at a file outside owned by nobody; a file of delta's outside.
+          printf 'canary\n' | sudo install -o nobody -g nogroup -m 0640 /dev/stdin /etc/worklane-ci-canary
+          sudo install -o wl-delta -g wl-delta -m 6755 /bin/true /var/lib/worklane/agent-slots/delta-suid
+          sudo ln -sfn /etc/worklane-ci-canary "$(getent passwd wl-delta | cut -d: -f6)/canary-link"
+          sudo ln -sfn /etc/worklane-ci-canary /var/lib/worklane/agent-slots/delta-link && sudo chown -h wl-delta /var/lib/worklane/agent-slots/delta-link
+          sudo install -o wl-delta -g wl-delta -m 0600 /dev/null /var/tmp/delta-leftover
+          delta_uid="$(id -u wl-delta)"
+          # The removal holds the updater off for its whole run: while it waits for the typed name, the updater's own
+          # quiet check says the machine is busy, and delta's coordinator stays stopped.
+          (sleep 12; echo delta) | script -qec "sudo bash $GITHUB_WORKSPACE/scripts/setup/instance-remove.sh delta" /dev/null > "$F/rm4.out" 2>&1 &
+          rmpid=$!
+          for _ in $(seq 1 20); do sudo sh -c 'grep -lq "\"owner\":\"instance-remove delta\"" /var/lib/worklane/agent-slots/agent-9*.lock' 2>/dev/null && break; sleep 0.5; done
+          q="$(sudo node -e 'process.stdout.write(JSON.stringify(require(process.argv[1]).updaterQuiet()))' "$GITHUB_WORKSPACE/scripts/setup/instance-records.cjs")"
+          echo "the updater's quiet check during the removal: $q"
+          jq -e '.quiet == false and .why == "an agent is running"' <<<"$q"
+          if systemctl is-active -q worklane-delta.service; then echo "delta's coordinator started during the removal" >&2; exit 1; fi
+          wait "$rmpid"
+          cat "$F/rm4.out"
+          grep -q 'removed delta\.' "$F/rm4.out"
+          if sudo sh -c 'grep -lq "\"owner\":\"instance-remove delta\"" /var/lib/worklane/agent-slots/agent-9*.lock' 2>/dev/null; then echo "the updater hold is still there" >&2; exit 1; fi
+          [ "$(sudo node -e 'process.stdout.write(String(require(process.argv[1]).updaterQuiet().quiet))' "$GITHUB_WORKSPACE/scripts/setup/instance-records.cjs")" = true ] || echo "note: the machine is busy for another reason now"
+          # No process of delta's users was left before any was deleted, and what they owned in the engine's places is
+          # root:root, setuid and setgid gone, links themselves never followed; the file outside is listed, untouched.
+          grep -qF 'no process of wl-' "$F/rm4.out"
+          [ "$(grep -n 'no process of wl-' "$F/rm4.out" | head -1 | cut -d: -f1)" -lt "$(grep -n 'removed user wl-delta' "$F/rm4.out" | head -1 | cut -d: -f1)" ]
+          [ "$(sudo stat -c '%U:%G %a' /var/lib/worklane/agent-slots/delta-suid)" = "root:root 755" ]
+          [ "$(sudo stat -c '%U:%G %a' /etc/worklane-ci-canary)" = "nobody:nogroup 640" ]
+          [ "$(sudo stat -c '%U:%G' /var/lib/worklane/agent-slots/delta-link)" = "root:root" ]
+          [ "$(sudo stat -c '%u' /var/tmp/delta-leftover)" = "$delta_uid" ]
+          rc_="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.rechowned.txt')" && lo="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.left-owned.txt')"
+          for f in "$rc_" "$lo"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ]; done
+          sudo grep -qx 'root:root 6755 -> 755 /var/lib/worklane/agent-slots/delta-suid' "$rc_"
+          sudo grep -qx '/var/tmp/delta-leftover' "$lo"
+          sudo rm -f /var/lib/worklane/agent-slots/delta-suid /var/lib/worklane/agent-slots/delta-link /var/tmp/delta-leftover /etc/worklane-ci-canary
           # Exported first: the bundle and the records, root's 0600, in root's 0700 archive.
           [ "$(sudo stat -c '%U:%G %a' /var/lib/worklane/removed)" = "root:root 700" ]
           b="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.bundle')" && r="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/delta-*.records.json')"
@@ -2554,6 +2596,7 @@ jobs:
           [ -z "$left" ] || { echo "owned by no user now: $left" >&2; exit 1; }
           for u in worklane-delta worklane-dashboard-delta; do if systemctl is-active -q "$u.service"; then echo "$u is running" >&2; exit 1; fi; done
           sudo jq -e '.instances | has("delta") | not' /etc/worklane/testrun-gpu.json
+          sudo jq -e '.instances | has("delta") | not' /etc/worklane/testrun-network.json
           sudo jq -e '(.active|has("delta")|not) and (.failover.instances|has("delta")|not) and (.profiles|has("ci-delta-only")|not) and (.profiles["ci-shared"].users|has("wl-delta-agent")|not)' /var/lib/worklane/claude-account/profiles.json
           sudo jq -e '[.users[] | select(.instance=="delta")] | length == 0' /var/lib/worklane/claude-account/status.json
           sudo jq -e 'has("canary") | not' /etc/worklane/updates.json
@@ -2563,6 +2606,7 @@ jobs:
           # ci's as they were: every record, its units, the hub (ci alone, its Siri gateway kept), the helper rule (ci and beta).
           ci_view() {
             sudo jq -c '.instances.ci' /etc/worklane/testrun-gpu.json
+            sudo jq -c '.instances.ci' /etc/worklane/testrun-network.json
             sudo jq -c '[.active.ci, .failover.instances.ci, .profiles["ci-shared"].users["wl-ci-agent"]]' /var/lib/worklane/claude-account/profiles.json
             sudo jq -c '[.users[] | select(.instance=="ci")]' /var/lib/worklane/claude-account/status.json
             sudo jq -c '[.incidents[] | select(.id=="ciciok01")]' /var/lib/worklane/agent-slots/incidents.json
@@ -2667,7 +2711,7 @@ jobs:
           printf 'kept across the rename\n' | sudo install -o wl-ci -g wl-ci -m 0600 /dev/stdin "$ci_inst/notes/keep-me.txt"
           sudo bash scripts/setup/instance-rename.sh ci kilo --print | tee "$F/rn4-print.txt"
           grep -q 'it would refuse now, while:' "$F/rn4-print.txt" && grep -q 'worklane-ci.service, is active' "$F/rn4-print.txt"
-          sudo systemctl stop worklane-ci.service
+          sudo systemctl stop worklane-ci.service worklane-dashboard-ci.service
           # ci's state is on its own filesystem (the full-disk step's tmpfs): refused, nothing changed, naming it.
           findmnt -rn -o TARGET | grep -qx "$state"
           set +e; sudo bash scripts/setup/instance-rename.sh ci kilo --yes > "$F/rn4.out" 2> "$F/rn4.err"; rc=$?; set -e
@@ -2675,9 +2719,7 @@ jobs:
           [ "$rc" = 1 ] && grep -qF "a filesystem is mounted at $state, inside what the removal of ci takes: unmount it first" "$F/rn4.err"
           if id wl-kilo 2>/dev/null || sudo test -e /var/lib/worklane/renames/ci-to-kilo; then echo "the refused rename changed something" >&2; exit 1; fi
           # Its state back on the home's filesystem, as it was.
-          sudo systemctl stop worklane-dashboard-ci.service
           t="$(mktemp -d)"; sudo cp -a "$state/." "$t/"; sudo umount "$state"; sudo cp -a "$t/." "$state/"; sudo rm -rf "$t"
-          sudo systemctl start worklane-dashboard-ci.service
           sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/instance-rename.sh ci kilo --yes > "$F/rn5.out" 2> "$F/rn5.err" || { tail -n 60 "$F/rn5.out"; cat "$F/rn5.err"; exit 1; }
           tail -n 25 "$F/rn5.out"
           # Never two coordinators on the repo: ci's is gone, kilo's runs.
@@ -2711,6 +2753,8 @@ jobs:
           # Every root record re-keyed; none of ci's left.
           sudo jq -e '(.instances|has("ci")|not) and (.instances|has("kilo")|not)' /etc/worklane/testrun-gpu.json
           grep -q "note: ci's GPU grant (GPU 0) is not moved: ci has no test user" "$F/rn5.out"
+          grep -q "note: ci's test-run network grant (tiers e2e) is not moved: ci has no test user" "$F/rn5.out"
+          sudo jq -e '(.instances|has("ci")|not) and (.instances|has("kilo")|not)' /etc/worklane/testrun-network.json
           grep -qF "dropped  experiments.sh remove ci (experiments aren't moved" "$F/rn5.out"
           # The old home's notes/ survived into the archive, root's 0600, listed by path and size.
           kt="$(sudo sh -c 'ls -1 /var/lib/worklane/removed/ci-to-kilo-*.home-dirs.tar')"; kl="${kt%.tar}.txt"

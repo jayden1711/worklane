@@ -350,7 +350,17 @@ export const EventSchemas = {
    * worker's intent paragraph and risk class for the top of the PR body (src/pr-rules.ts; the class can only raise
    * the one computed from the paths). Both absent in older events.
    */
-  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()), intent: z.string().max(4000).optional(), risk_class: z.enum(['docs-only', 'logic', 'protected']).optional() }),
+  'worker.claims': z.strictObject({
+    issue,
+    claims: z.array(z.string()),
+    intent: z.string().max(4000).optional(),
+    risk_class: z.enum(['docs-only', 'logic', 'protected']).optional(),
+    /** The worker's claims as it labeled them (src/claim-labels.ts), and what was wrong with its labels. */
+    labeled: z.array(z.strictObject({ claim: z.string().max(500), label: z.enum(['measured', 'inferred', 'guess']), basis: z.string().max(500) })).max(50).optional(),
+    label_problems: z.array(z.string().max(600)).max(10).optional(),
+    /** Sentences that hand the reader a check the worker could run itself: each a doubt on the change. */
+    handoffs: z.array(z.string().max(300)).max(5).optional(),
+  }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -371,6 +381,8 @@ export const EventSchemas = {
     /** The model whose verdict this is (tiered evaluation), and the cheap model it was escalated from, if it was. */
     model: z.string().optional(),
     escalated_from: z.string().optional(),
+    /** The claims the verdict rests on, as the evaluator labeled them (src/claim-labels.ts). */
+    claims: z.array(z.strictObject({ claim: z.string().max(500), label: z.enum(['measured', 'inferred', 'guess']), basis: z.string().max(500) })).max(50).optional(),
     /** The cross-family evaluator's second verdict on a protected change (src/cross-eval.ts), when routing turns it on. */
     cross_family: z
       .strictObject({
@@ -811,7 +823,8 @@ export const EventSchemas = {
   'testrun.started': z.strictObject({ id: z.string(), slot: z.string(), lock_wait_ms: z.number().int().nonnegative(), gpu: z.literal('planned').optional() }),
   /** One tier's outcome. `summary`: the end of its output; `log_ref`: its full log in the instance's state (never a viewer's). */
   // `gpu`: only for a tier that asked for the GPU: whether the sandbox helper granted it, the nodes, and its line.
-  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable(), gpu: z.strictObject({ granted: z.boolean(), devices: z.array(z.string()), detail: z.string().max(300) }).optional() }),
+  // `network`: whether its command had the network (none unless it asked and root's file granted it; absent before 0.5.1).
+  'testrun.tier': z.strictObject({ id: z.string(), tier: z.string(), ok: z.boolean(), duration_ms: z.number().int().nonnegative(), summary: z.string().max(2000), log_ref: z.string(), cpu_s: z.number().nonnegative().nullable(), mem_peak_mb: z.number().nonnegative().nullable(), gpu: z.strictObject({ granted: z.boolean(), devices: z.array(z.string()), detail: z.string().max(300) }).optional(), network: z.enum(['none', 'granted']).optional() }),
   /** `results`: each tier's pass or fail, all a viewer sees of a run. */
   'testrun.finished': z.strictObject({
     id: z.string(),

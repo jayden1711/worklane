@@ -57,7 +57,7 @@ function recordingHost(): RunHost & { calls: string[] } {
     calls.push(m);
     throw new Error(`${m} called`);
   };
-  return { kind: 'sandbox', calls, create: no('create'), storeTips: no('storeTips'), changedFiles: no('changedFiles'), cache: no('cache'), shared: no('shared'), startDb: no('startDb'), exec: no('exec'), check: no('check'), wipe: no('wipe'), helperVersion: no('helperVersion') } as RunHost & { calls: string[] };
+  return { kind: 'sandbox', calls, create: no('create'), storeTips: no('storeTips'), changedFiles: no('changedFiles'), cache: no('cache'), shared: no('shared'), startDb: no('startDb'), fetch: no('fetch'), exec: no('exec'), check: no('check'), wipe: no('wipe'), helperVersion: no('helperVersion') } as RunHost & { calls: string[] };
 }
 
 const refusedSets: Array<[string[], RegExp]> = [

@@ -1,0 +1,33 @@
+name: new-deps
+# Every pull request: a new or changed runtime dependency (package.json dependencies / optionalDependencies /
+# peerDependencies, or a runtime package in package-lock.json, transitive ones included) is named in the PR body's
+# "## New dependencies" section with its licence and why (scripts/ci/new-deps.mjs). Its own workflow, not ci.yml,
+# because it also runs when the body is edited: ci.yml on an edit would restart every test. Green here is not
+# approval: a new runtime dependency still waits for the owner's OK before it merges.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+concurrency:
+  group: new-deps-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  new-deps:
+    runs-on: ubuntu-latest
+    steps:
+      # The PR's merge commit and its base (HEAD^1). The PR is only data here: its files are read with git show.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      # The base's copy of the check when it has one, so a PR can't loosen the check it is judged by; the body comes
+      # from the event payload ($GITHUB_EVENT_PATH), no API call and no token.
+      - name: new runtime dependencies are named, with licence and why
+        run: |
+          check="$RUNNER_TEMP/new-deps.mjs"
+          git show HEAD^1:scripts/ci/new-deps.mjs > "$check" 2>/dev/null || cp scripts/ci/new-deps.mjs "$check"
+          node "$check" HEAD^1 HEAD

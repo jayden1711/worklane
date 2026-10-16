@@ -12,8 +12,8 @@
 # with the same GitHub App (its key and installation carried, never made again) and the same agents' Claude logins.
 #
 # Refused, changing nothing: <new> isn't a name add-project takes, or is in use (any user, unit, file or record of it);
-# <old> has work in flight (its coordinator active: stop it once its runs are done; a process of its users; a test
-# run); another rename of <old> is under way. Old and new never run at once: <old>'s coordinator unit is parked (moved
+# <old> has work in flight (its coordinator or dashboard active: stop them, the coordinator once its runs are done;
+# a process of its users; a test run); another rename of <old> is under way. Old and new never run at once: <old>'s coordinator unit is parked (moved
 # out of systemd's reach, so nothing, the engine updater included, can start it) before anything of <new> exists, and
 # <new> starts only once <old>'s history is in it.
 #
@@ -114,7 +114,7 @@ show_plan() {
       home) printf "  home     %s's instance home, with %s's files (paths and users moved), its ~/.config/%s-* and the agents' Claude logins\n" "$new" "$old" "$old" ;;
       checkout) printf '  checkout %s/%s/%s, a fresh clone through the same App\n' "$SRV_ROOT" "$new" "${repo#*/}" ;;
       import) printf "  import   %s's history into %s; Siri device tokens revoked; open asks asked again for %s\n" "$old" "$new" "$new" ;;
-      records) printf "  records  %s\n" "$(records plan "$old" | cut -f1 | grep -vx gpu | tr '\n' ' ')" ;;
+      records) printf "  records  %s\n" "$(records plan "$old" | cut -f1 | grep -vxE 'gpu|testrun-net' | tr '\n' ' ')" ;;
       services) printf '  services %s%s, worklane-%s.service, the machine helper rule and the hub with %s\n' "$(user_exists "wl-test-$old" && echo "test user wl-test-$new, ")" "$(records plan "$old" | cut -f1 | grep -qx gpu && echo "the GPU grant, ")" "$new" "$new" ;;
       keep) printf "  keep     %s's instance home directories but state/ -> %s/%s-to-%s-<time>.home-dirs.tar (root's 0600), listed by path and size\n" "$old" "$ARCHIVE" "$old" "$new" ;;
       remove) printf '  remove   instance-remove.sh %s --yes\n' "$old" ;;
@@ -313,9 +313,15 @@ step_records() {
 # One limit from the old coordinator's unit, as service.sh wrote it.
 old_limit() { sed -n "s/^$1=//p" "$parked" 2>/dev/null | head -1; }
 step_services() {
-  local devices args=() v names
+  local devices tiers args=() v names
   if user_exists "wl-test-$old" && ! user_exists "wl-test-$new"; then bash "$here/test-user.sh" install "$new"; fi
   devices="$(records plan "$old" | awk -F'\t' '$1 == "gpu" { print $3 }' | sed -n 's/.*"devices":\[\([0-9,]*\)\].*/\1/p')"
+  # The test-run network grant, the same way: its script's enable for the new name (with a test user), then disable.
+  tiers="$(records plan "$old" | awk -F'\t' '$1 == "testrun-net" { print $3 }' | sed -n 's/.*"tiers":\[\([^]]*\)\].*/\1/p' | tr -d '"')"
+  if [ -n "$tiers" ]; then
+    if user_exists "wl-test-$new"; then bash "$here/testrun-network.sh" enable "$new" --tiers "$tiers"; else echo "note: $old's test-run network grant (tiers $tiers) is not moved: $old has no test user, so its runs never had the network; enable it for $new once it has one (testrun-network.sh enable $new --tiers $tiers)"; fi
+    bash "$here/testrun-network.sh" disable "$old"
+  fi
   if [ -n "$devices" ]; then
     # A grant is only ever made for an instance with a test user (testrun-gpu.sh enable); one whose test user has gone
     # since can't be moved, and goes.
@@ -332,7 +338,8 @@ step_services() {
   bash "$here/machine-helper.sh" $names
   if [ -f "$HUB_UNIT" ]; then
     mapfile -t args < <(hub_keep_args)
-    names="$({ hub_instances; echo "$new"; } | sort -u | while read -r n; do if [ -d "$(inst_dir "$n" 2>/dev/null)/state" ]; then echo "$n"; fi; done | tr '\n' ' ')"
+    # Never the old name: its dashboard stays stopped (instance-remove.sh refuses while it runs), and it goes next.
+    names="$({ hub_instances; echo "$new"; } | grep -vx "$old" | sort -u | while read -r n; do if [ -d "$(inst_dir "$n" 2>/dev/null)/state" ]; then echo "$n"; fi; done | tr '\n' ' ')"
     # shellcheck disable=SC2086 # one word per instance name
     bash "$here/dashboards.sh" "${args[@]}" $names
   fi

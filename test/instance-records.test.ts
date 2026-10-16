@@ -198,6 +198,7 @@ function machine(): string {
     writeFileSync(f, typeof v === 'string' ? v : JSON.stringify(v));
   };
   put(`/etc/${cli}/testrun-gpu.json`, { version: 1, max_minutes: 20, instances: { alpha: { devices: [0] }, 'alpha-2': { devices: [1] } } });
+  put(`/etc/${cli}/testrun-network.json`, { version: 1, instances: { alpha: { tiers: ['e2e'] }, 'alpha-2': { tiers: ['e2e'] } } });
   put(`/etc/${cli}/updates.json`, { enabled: true, channel: 'release', canary: { instance: 'alpha', repo: 'o/scratch', time_limit_minutes: 60 }, required_checks: ['a'] });
   put(`/var/lib/${cli}/canary.json`, { running: { issue: 7 }, lastFiledAt: '2026-10-15T00:00:00Z' });
   const rec = (instance: string, user: string) => ({ instance, kind: 'agent', user, api_ok: true });
@@ -226,7 +227,7 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const root = machine();
   const archive = join(root, 'archive', 'alpha.records.json');
   const planned = reg.plan(NAME, root);
-  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'pending-signers', 'plugin-pending']);
+  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'pending-signers', 'plugin-pending', 'testrun-net']);
   const taken = reg.remove(NAME, archive, root);
   // The GPU grant is testrun-gpu.sh's to take out (its strict form): planned, never written here.
   assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'pending-signers', 'plugin-pending']);
@@ -262,7 +263,7 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const before = readFileSync(join(root, `/var/lib/${cli}/claude-account/profiles.json`), 'utf8');
   assert.deepEqual(reg.remove(NAME, join(root, 'archive', 'again.json'), root), {});
   assert.equal(readFileSync(join(root, `/var/lib/${cli}/claude-account/profiles.json`), 'utf8'), before);
-  assert.deepEqual(Object.keys(reg.plan(NAME, root)), ['gpu']);
+  assert.deepEqual(Object.keys(reg.plan(NAME, root)).sort(), ['gpu', 'testrun-net'], "the GPU and network grants are their scripts' to take out");
 });
 
 test('a shared file keeps its mode through a removal', { skip: !posix && 'POSIX modes' }, () => {
@@ -411,4 +412,126 @@ test("a rename keeps the old instance home's directories but state/: archived wh
   assert.deepEqual(readFileSync(list, 'utf8').trim().split('\n'), ['.hidden/x\t1', 'git-hooks/pre-push\t10', 'notes/keep-me.txt\t12']);
   assert.match(r.stdout, /notes\/keep-me\.txt\t12/);
   for (const f of [tarf, list]) assert.equal(statSync(f).mode & 0o777, 0o600, f);
+});
+
+test("orphaned files are given to root:root only in the engine's own places, a link itself and never its target, nothing outside followed into; a refused chown is listed", { skip: !posix && 'bash, find' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-'));
+  const mk = (p: string, data = 'x') => {
+    mkdirSync(dirname(join(root, p)), { recursive: true });
+    writeFileSync(join(root, p), data);
+  };
+  mk('engine/agent-slots/incidents.json');
+  mk('engine/agent-slots/sub/keep.json');
+  mk('outside/target.conf');
+  mk('outside/dir/inner.txt');
+  mk('locks/worklane-full-run.lock');
+  mk('locks/other-tool.lock');
+  mk('engine/agent-slots/suid-tool');
+  // Planted links under an engine path: one at a file outside, one at a directory outside.
+  spawnSync('ln', ['-s', join(root, 'outside/target.conf'), join(root, 'engine/agent-slots/link-to-file')]);
+  spawnSync('ln', ['-s', join(root, 'outside/dir'), join(root, 'engine/agent-slots/link-to-dir')]);
+  const calls = join(root, 'calls');
+  const uid = String(process.getuid!());
+  // chown and stat stood in for (a test isn't root): each call recorded, and one path refused.
+  const chmods = join(root, 'chmods');
+  // stat: 6755 for the planted setuid file until chmod strips it, else 640.
+  const stubs = `chown() { printf '%s\\n' "$*" >> "${calls}"; case "$*" in *keep.json*) echo "Operation not permitted" >&2; return 1 ;; esac; }; chmod() { printf '%s\\n' "$*" >> "${chmods}"; : > "${root}/stripped"; }; stat() { case "$*" in *suid-tool*) if [ -e "${root}/stripped" ]; then echo 755; else echo 6755; fi ;; *) echo 640 ;; esac; }`;
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), `${join(root, 'engine')}:${join(root, 'missing')}`, join(root, 'locks')], { encoding: 'utf8' });
+  assert.equal(r.status, 1, 'a refused chown fails the step');
+  const made = readFileSync(calls, 'utf8').trim().split('\n');
+  for (const c of made) assert.match(c, /^-h root:root -- /, `every chown is -h root:root: ${c}`);
+  const paths = made.map((c) => c.replace(/^-h root:root -- /, '')).sort();
+  assert.ok(paths.includes(join(root, 'engine/agent-slots/link-to-file')), 'the link itself');
+  assert.ok(paths.includes(join(root, 'locks/worklane-full-run.lock')), "the engine's lock file");
+  assert.ok(!paths.some((p) => p.startsWith(join(root, 'outside'))), `nothing outside, never through a link: ${paths.join(' ')}`);
+  assert.ok(!paths.some((p) => p.includes('link-to-dir/')), 'never into a linked directory');
+  assert.ok(!paths.includes(join(root, 'locks/other-tool.lock')), "another program's lock in the shared directory is left alone");
+  const list = readFileSync(join(root, 'list'), 'utf8');
+  assert.match(list, new RegExp(`^root:root 640 -> 640 ${join(root, 'engine/agent-slots/incidents.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
+  assert.ok(list.includes(`root:root 6755 -> 755 ${join(root, 'engine/agent-slots/suid-tool')}`), 'setuid and setgid stripped, the old mode listed');
+  const cm = readFileSync(chmods, 'utf8').trim().split('\n');
+  for (const c of cm) assert.match(c, /^u-s,g-s -- /, c);
+  assert.ok(!cm.some((c) => c.includes('link-to')), 'never chmod through a link');
+  assert.match(list, /^FAILED .*keep\.json: Operation not permitted$/m, 'a refused chown is listed, not hidden');
+
+  // What they own outside the engine's places is listed (read-only), the removed home pruned.
+  mk('home/wl-x/secret');
+  const l = spawnSync('bash', ['-c', 'source "$1"; left_owned "$2" "$3" "$4" "$5"', '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'left'), join(root, 'outside'), join(root, 'outside/dir'), uid], { encoding: 'utf8' });
+  assert.equal(l.status, 0, l.stderr);
+  const listed = readFileSync(join(root, 'left'), 'utf8').trim().split('\n');
+  assert.ok(listed.includes(join(root, 'outside/target.conf')), listed.join(' '));
+  assert.ok(!listed.some((p) => p.startsWith(join(root, 'outside/dir'))), 'a skipped path is pruned');
+});
+
+// --- no process of the removed users left before userdel and the walk; the updater held off meanwhile
+
+/** stop_uids with every system tool stood in for, as a log of what it ran; pgrep finds a process for <busy> passes. */
+function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: boolean }) {
+  const root = mkdtempSync(join(tmpdir(), 'stop-'));
+  const log = join(root, 'log');
+  const n = join(root, 'n');
+  writeFileSync(n, '0');
+  const stubs = [
+    `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
+    `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
+    `usermod() { echo "usermod $*" >> "${log}"; }; loginctl() { echo "loginctl $*" >> "${log}"; }; sleep() { :; }`,
+    `systemctl() { echo "systemctl $*" >> "${log}"; case "$1 \${3:-}" in "is-active ${o.active ?? '-'}") return 0 ;; "is-active "*) return 1 ;; esac; case "$1" in list-units) echo "worklane-test-alpha_r1_9.service loaded active running x"; echo "worklane-test-beta_r1_9.service loaded active running x" ;; show) case "$*" in *alpha_r1*) echo wl-alpha-agent ;; *beta*) echo wl-beta-agent ;; esac ;; esac; }`,
+    // One pass is the first pkill of uid 1001; while fewer passes than <busy> have run, pgrep finds pid 4242 of 1001.
+    `pkill() { echo "pkill $*" >> "${log}"; [ "$*" != "-KILL -U 1001" ] || echo $(($(cat "${n}") + 1)) > "${n}"; }`,
+    `pgrep() { if [ "\${2:-}" = 1001 ] && [ "$(cat "${n}")" -lt ${o.busy} ]; then echo 4242; return 0; fi; return 1; }`,
+  ].join('\n');
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; ${o.passes ? `STOP_PASSES=${o.passes};` : ''} stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], { encoding: 'utf8', env: { ...process.env, ...(o.noKill ? { INSTANCE_REMOVE_TEST_NO_KILL: '1' } : {}) } });
+  return { r, ran: existsSync(log) ? readFileSync(log, 'utf8') : '' };
+}
+
+test("before userdel: the accounts are locked, the users' engine units (User= checked) and slices stopped, then pkill by uid pass after pass until none is left", { skip: !posix && 'bash' }, () => {
+  const { r, ran } = stopRun({ busy: 3 });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(ran, /usermod -L -e 1 -s \/usr\/sbin\/nologin wl-alpha\n/);
+  assert.ok(ran.indexOf('usermod -L') < ran.indexOf('pkill'), 'locked before anything is killed');
+  assert.match(ran, /systemctl kill --signal=KILL worklane-test-alpha_r1_9\.service/);
+  assert.doesNotMatch(ran, /systemctl (kill|stop)[^\n]*worklane-test-beta/, "another instance's unit is never killed or stopped (only its User= read)");
+  assert.match(ran, /systemctl stop user@1001\.service user-1001\.slice/);
+  assert.ok((ran.match(/^pkill -KILL -u /gm) ?? []).length >= 3, 'as many passes as it takes');
+  assert.doesNotMatch(ran, /pkill .*-f|pkill [a-z]/, 'by uid, never a name');
+});
+
+test('a process that outlives every pass refuses the removal, named; one pass alone is not enough for one that forks', { skip: !posix && 'bash' }, () => {
+  const { r } = stopRun({ busy: 1000 });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /^4242 1001 /m, 'pid, uid, command');
+  // The fail-without for the loop: a single pass leaves the forking process.
+  assert.equal(stopRun({ busy: 3, passes: 1 }).r.status, 1);
+  assert.equal(stopRun({ busy: 3 }).r.status, 0);
+  // The test seam only ever finds more: no kill at all, and the process left refuses it.
+  const seam = stopRun({ busy: 1, noKill: true });
+  assert.equal(seam.r.status, 1);
+  assert.doesNotMatch(seam.ran, /pkill|systemctl kill/);
+});
+
+test('with its coordinator running at the kill step, the removal refuses and the coordinator is left running: nothing is killed', { skip: !posix && 'bash' }, () => {
+  const { r, ran } = stopRun({ busy: 1, active: 'worklane-alpha.service' });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /worklane-alpha\.service is running .*sudo systemctl stop worklane-alpha\.service/);
+  assert.doesNotMatch(ran, /pkill|systemctl (kill|stop)/, 'no kill and no stop');
+  const d = stopRun({ busy: 1, active: 'worklane-dashboard-alpha.service' });
+  assert.equal(d.r.status, 1);
+  assert.doesNotMatch(d.ran, /pkill|systemctl (kill|stop)/);
+});
+
+test("the removal holds the updater off: an agent slot with its pid, busy to the updater's own quiet check, gone when it lets go", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'slots-'));
+  const r2 = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as { holdSlot: (pid: number, owner: string, dir: string) => string; releaseSlot: (f: string, pid: number) => void; updaterQuiet: (dir: string) => { quiet: boolean; why?: string } };
+  assert.equal(r2.updaterQuiet(dir).quiet, true);
+  const f = r2.holdSlot(process.pid, 'instance-remove alpha', dir);
+  assert.match(f, /agent-9\d\d\.lock$/);
+  assert.deepEqual(r2.updaterQuiet(dir), { quiet: false, why: 'an agent is running' });
+  r2.releaseSlot(f, process.pid + 1);
+  assert.equal(r2.updaterQuiet(dir).quiet, false, "another pid can't let it go");
+  r2.releaseSlot(f, process.pid);
+  assert.equal(r2.updaterQuiet(dir).quiet, true);
+  // A run that died: its hold is stale to the updater, and the next run takes it over.
+  writeFileSync(f, JSON.stringify({ pid: 999999, owner: 'instance-remove alpha', acquiredAt: 'x' }));
+  assert.equal(r2.updaterQuiet(dir).quiet, true);
+  assert.equal(r2.holdSlot(process.pid, 'instance-remove alpha', dir), f);
 });

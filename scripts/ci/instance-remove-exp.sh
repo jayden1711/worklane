@@ -38,6 +38,23 @@ if grep -qF "$v6, inside" "$t/r0.err"; then fail "the study's own volume was cou
 id wl-ci >/dev/null && id wl-exp-ci >/dev/null && sudo mountpoint -q "$v6" || fail "the refused removal changed something"
 sudo umount "$x" "$fake"; sudo rmdir "$x" "$fake"
 
+echo "== a fork loop of ci's, in its own user manager (outside every engine unit), and a setuid file under an engine path"
+ci_uid="$(id -u wl-ci)"
+sudo loginctl enable-linger wl-ci
+for _ in $(seq 1 30); do systemctl is-active -q "user@$ci_uid.service" && break; sleep 1; done
+sudo systemd-run --quiet --user -M wl-ci@ --unit=ci-forkloop bash -c 'while :; do (sleep 0.05 &); sleep 0.01; done'
+for _ in $(seq 1 20); do pgrep -u "$ci_uid" -f 'sleep 0.05' >/dev/null && break; sleep 0.5; done
+pgrep -u "$ci_uid" -f 'while :' >/dev/null || fail "the fork loop didn't start"
+sudo install -o wl-ci -g wl-ci -m 6755 /bin/true /var/lib/worklane/agent-slots/ci-suid
+echo "== nothing killed (the test seam): the fork loop is left, and the removal refuses, naming it, before any userdel or walk"
+set +e; sudo env INSTANCE_REMOVE_TEST_NO_KILL=1 bash scripts/setup/instance-remove.sh ci --yes > "$t/rk.out" 2> "$t/rk.err"; rc=$?; set -e
+cat "$t/rk.err"
+[ "$rc" = 1 ] && grep -q "refused: processes of ci's users are still running" "$t/rk.err" || fail "a lingering process didn't refuse the removal"
+grep -Eq "^  [0-9]+ $ci_uid " "$t/rk.err" || fail "the survivor isn't named by pid and uid"
+id wl-ci >/dev/null && id wl-exp-ci >/dev/null || fail "a user went though a process was left"
+[ "$(sudo stat -c '%U %a' /var/lib/worklane/agent-slots/ci-suid)" = "wl-ci 6755" ] || fail "the walk ran though a process was left"
+sudo mountpoint -q "$v6" || fail "the refused removal unmounted the study's volume"
+
 echo "== --print names the study's volume to unmount"
 sudo bash scripts/setup/instance-remove.sh ci --print | tee "$t/print"
 grep -qF "unmount  $v6 (an experiment job's output volume" "$t/print" || fail "--print doesn't name the volume"
@@ -46,6 +63,12 @@ grep -q 'run      experiments.sh remove ci' "$t/print" || fail "--print doesn't 
 echo "== the removal"
 sudo bash scripts/setup/instance-remove.sh ci --yes 2>&1 | tee "$t/r1.out"
 grep -qF "unmounted $v6" "$t/r1.out" || fail "the volume wasn't unmounted by the removal"
+# The fork loop was gone before any user was deleted: the user slice stopped, then pkill by uid until none was left.
+nl="$(grep -n 'no process of wl-' "$t/r1.out" | head -1 | cut -d: -f1)"; ul="$(grep -n 'removed user wl-' "$t/r1.out" | head -1 | cut -d: -f1)"
+[ -n "$nl" ] && [ -n "$ul" ] && [ "$nl" -lt "$ul" ] || fail "no 'no process left' line before the first userdel"
+if pgrep -u "$ci_uid" >/dev/null; then fail "a process of ci's uid is still running"; fi
+[ "$(sudo stat -c '%U:%G %a' /var/lib/worklane/agent-slots/ci-suid)" = "root:root 755" ] || fail "the setuid file isn't root:root 755: $(sudo stat -c '%U:%G %a' /var/lib/worklane/agent-slots/ci-suid)"
+sudo rm -f /var/lib/worklane/agent-slots/ci-suid
 if findmnt -rn -o TARGET | grep -q '^/var/lib/worklane-exp/ci'; then fail "a mount of ci's is left"; fi
 if sudo losetup -a | grep -q '/var/lib/worklane-exp/ci/'; then fail "a loop device on ci's image is left"; fi
 for u in wl-ci wl-ci-agent wl-exp-ci wl-score-ci wl-test-ci; do if id "$u" 2>/dev/null; then fail "user $u is left"; fi; done

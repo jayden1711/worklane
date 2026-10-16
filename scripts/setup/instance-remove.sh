@@ -6,8 +6,9 @@
 #   sudo bash scripts/setup/instance-remove.sh <name>             asks for the name to be typed back first
 #   sudo bash scripts/setup/instance-remove.sh <name> --yes       no question (a script's, or a rerun's)
 #
-# It refuses, changing nothing, while the instance has anything in flight: its coordinator service active (stop it
-# first, once its runs are done: sudo systemctl stop worklane-<name>.service), any process of its users (an agent, a
+# It refuses, changing nothing, while the instance has anything in flight: its coordinator service or its dashboard
+# active (stop them first, the coordinator once its runs are done: sudo systemctl stop worklane-<name>.service
+# worklane-dashboard-<name>.service), any process of its users (an agent, a
 # test run, an experiment job) outside its dashboard and its test Docker daemon, or a test run's directory. And it
 # refuses a name whose users would be another instance's (wl-test-<x> is instance test-<x>'s coordinator, too), and while
 # a filesystem is mounted inside what it removes.
@@ -158,6 +159,16 @@ if [ -n "$busy" ]; then
   exit 1
 fi
 
+# The updater waits for the whole run (an agent slot held with this run's pid: busy to its quiet check), so no update
+# restarts the services mid-removal; let go on every exit, a failure's too. Refused when the updater would still call
+# the machine quiet.
+on_exit=()
+cleanup() { local c; for c in "${on_exit[@]}"; do eval "$c"; done; }
+trap cleanup EXIT
+held_slot="$(records hold-slot x "$$" "$name")" || refuse "couldn't hold the updater off (above): nothing changed"
+on_exit+=("records release-slot x '$held_slot' $$")
+echo "the engine updater waits while this runs ($held_slot, this run's pid $$)"
+
 show_plan
 if [ -z "$yes" ]; then
   [ -t 0 ] || refuse "this asks for the instance's name to be typed back: run it in a terminal, or pass --yes"
@@ -180,8 +191,8 @@ elif [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
   # Its Siri device tokens revoked first, as its coordinator: none works again, and the export records it.
   run_as "$coord" '"$1" instance siri-revoke-all "$2" --why "$3"' "$ENGINE_CLI" "$name" "instance removed" || refuse "revoking $name's Siri device tokens failed (above): nothing removed"
   work="$(mktemp -d)"
-  trap 'rm -rf "$work"' EXIT
-  chown "$coord" "$work" && chmod 0700 "$work"
+  on_exit+=("rm -rf '$work'")
+  chown -h "$coord" "$work" && chmod 0700 "$work"
   run_as "$coord" '"$1" export --instance "$2" --out "$3"' "$ENGINE_CLI" "$name" "$work/export.bundle" || refuse "the export failed (above): nothing removed"
   bundle="$ARCHIVE/$name-$stamp.bundle"
   install -o root -g root -m 0600 "$work/export.bundle" "$bundle"
@@ -189,6 +200,22 @@ elif [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
   echo "exported $name's history: $bundle (root's, 0600; worklane import reads it)"
 else
   echo "no state of $name left to export$(ls -1 "$ARCHIVE" 2>/dev/null | grep -q "^$name-.*\.bundle$" && echo " (exported earlier: $(ls -1t "$ARCHIVE"/"$name"-*.bundle | head -1))")"
+fi
+
+# No process of its users left, before anything else goes: their accounts locked, their user slice and every engine
+# unit running as them stopped (cgroup and all), then whatever is left killed by uid until none is. Any survivor
+# refuses the removal, named, before any user is deleted or any file walked.
+say "stop every process of $name's users"
+my_users="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [ "$k" = user ] && user_exists "$w" && echo "$w"; done; true)"
+if [ -n "$my_users" ]; then
+  # shellcheck disable=SC2086 # one user a word
+  if ! survivors="$(stop_uids "$name" $my_users)"; then
+    echo "refused: processes of $name's users are still running (pid, uid, command); nothing more is removed:" >&2
+    printf '%s\n' "$survivors" | sed 's/^/  /' >&2
+    echo "their accounts are locked (usermod -L, expired, nologin); end those processes, then run this again" >&2
+    exit 1
+  fi
+  echo "no process of $(echo $my_users | tr ' ' ',') is left: $(for u in $my_users; do printf '%s=%s ' "$u" "$(pgrep -u "$(id -u "$u")" | wc -l | tr -d ' ')"; done)"
 fi
 
 # Its experiments' history (root's): each job's record and root's file for it, kept beside the export.
@@ -218,7 +245,12 @@ done
 
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
 # Its users' uids, for what they leave behind in the machine's shared places once they're gone (below).
+removed_homes=""
+# Kept in the archive until the removal ends, so a rerun after its users are gone still knows their uids.
+uids_file="$ARCHIVE/$name.uids"
 my_uids="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [ "$k" = user ] && user_exists "$w" && id -u "$w"; done; true)"
+if [ -n "$my_uids" ]; then { printf '%s\n' $my_uids; cat "$uids_file" 2>/dev/null || true; } | sort -u > "$uids_file.tmp"; mv -f "$uids_file.tmp" "$uids_file"; chmod 0600 "$uids_file"; fi
+[ ! -f "$uids_file" ] || my_uids="$(cat "$uids_file")"
 for line in "${ITEMS[@]}"; do
   IFS=$'\t' read -r k w when _ <<<"$line"
   case "$k" in
@@ -253,6 +285,7 @@ for line in "${ITEMS[@]}"; do
       if [[ "$uh" == /?* && "$uh" != / && -d "$uh" && "$(stat -c %u "$uh")" = "$uid" ]] && ! getent passwd | cut -d: -f6 | grep -qx "$uh"; then
         rm -rf --one-file-system -- "$uh"
       fi
+      removed_homes="$removed_homes $uh"
       echo "removed user $w${uh:+ and its home $uh}"
       ;;
     group) exists group "$w" && groupdel "$w" && echo "removed group $w" ;;
@@ -260,11 +293,26 @@ for line in "${ITEMS[@]}"; do
 done
 systemctl daemon-reload
 
-# What its users last wrote in the machine's shared places (the incident store, a slot's lock): root's now, its group
-# and mode kept, so nothing is owned by a uid no user has (a later user given the same uid would own it).
-for u in $my_uids; do
-  find /var/lib/worklane /etc/worklane /run/lock -xdev -uid "$u" -exec chown -h root {} + 2>/dev/null || true
-done
+# What its users last wrote in the engine's own places (the incident store, a slot's lock, the engine's lock files):
+# root:root now, mode kept, links never followed, so nothing there is owned by a uid no user has (a later user given
+# the same uid would own it). Each listed, and kept in the archive. What they own anywhere else is left as it is, and
+# listed for an admin.
+if [ -n "$my_uids" ]; then
+  say "what $name's users left in the engine's own places, and anywhere else"
+  trees="$(records engine-places x | awk -F'\t' '$1 == "tree" { print $2 }' | paste -sd: -)"
+  IFS=$'\t' read -r _ lockdir lockname < <(records engine-places x | grep $'^locks\t')
+  rechowned="$ARCHIVE/$name-$stamp.rechowned.txt" left="$ARCHIVE/$name-$stamp.left-owned.txt"
+  # shellcheck disable=SC2086 # one uid a word
+  rechown_ok=1; rechown_orphans "$rechowned" "$trees" "$lockdir" "$lockname" $my_uids || rechown_ok=""
+  chmod 0600 "$rechowned"
+  if [ -s "$rechowned" ]; then echo "given to root:root (mode kept), in $rechowned:"; sed 's/^/  /' "$rechowned"; fi
+  # shellcheck disable=SC2086
+  left_owned "$left" / "$(printf '%s:' $removed_homes)" $my_uids
+  chmod 0600 "$left"
+  if [ -s "$left" ]; then echo "still owned by $name's removed users, left as they are (in $left):"; sed 's/^/  /' "$left"; fi
+  [ -n "$rechown_ok" ] || refuse "chown refused some of the files above (FAILED): fix them, then run this again"
+fi
+rm -f "$uids_file"
 
 # The egress rule names users by uid: when it names one no user has now (this instance's sandbox and test users), it
 # is applied again, rebuilt from the users there are, with the flags it was applied with. No live user's entry changes.
