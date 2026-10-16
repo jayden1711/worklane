@@ -148,7 +148,7 @@ exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $
     chmodSync(file, mode);
   };
   /** The systemd-run call of run <id>. */
-  const call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop-${id}-`)))!;
+  const call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop_${id}_`)))!;
   const setGroup = (line: string | null) => (line === null ? rmSync(join(dir, 'group'), { force: true }) : writeFileSync(join(dir, 'group'), `${line.replace('<g>', myGroup)}\n`));
   return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), done: () => rmSync(dir, { recursive: true, force: true }) };
 }
