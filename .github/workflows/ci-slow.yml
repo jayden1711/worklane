@@ -2475,7 +2475,9 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            sudo stat -c '%U:%G %a %n' /var/lib/worklane/agent-slots/incidents.json /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json
+            sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
             sudo cat /etc/worklane/plugins/ci.json /var/lib/worklane/plugins/fetch-status/ci.json; sudo ls -d /var/lib/worklane/plugins/store/ci/kit /var/lib/worklane/plugins/previews/ci/kit
@@ -2547,6 +2549,9 @@ jobs:
           test -f /etc/systemd/system/worklane-mcp@.service
           for p in /etc/worklane/plugins/delta.json /var/lib/worklane/plugins/store/delta /var/lib/worklane/plugins/previews/delta /var/lib/worklane/plugins/fetch-status/delta.json /var/lib/worklane-mcp-delta /run/worklane-mcp-delta; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
           sudo jq -e '[.entries[] | select(.instance=="delta")] | length == 0' /var/lib/worklane/plugins/pending.json
+          # Nothing in the machine's shared places is owned by a uid no user has now.
+          left="$(sudo find /var/lib/worklane /etc/worklane /run/lock -xdev -nouser 2>/dev/null || true)"
+          [ -z "$left" ] || { echo "owned by no user now: $left" >&2; exit 1; }
           for u in worklane-delta worklane-dashboard-delta; do if systemctl is-active -q "$u.service"; then echo "$u is running" >&2; exit 1; fi; done
           sudo jq -e '.instances | has("delta") | not' /etc/worklane/testrun-gpu.json
           sudo jq -e '(.active|has("delta")|not) and (.failover.instances|has("delta")|not) and (.profiles|has("ci-delta-only")|not) and (.profiles["ci-shared"].users|has("wl-delta-agent")|not)' /var/lib/worklane/claude-account/profiles.json
@@ -2564,7 +2569,9 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            sudo stat -c '%U:%G %a %n' /var/lib/worklane/agent-slots/incidents.json /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json
+            sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
             sudo cat /etc/worklane/plugins/ci.json /var/lib/worklane/plugins/fetch-status/ci.json; sudo ls -d /var/lib/worklane/plugins/store/ci/kit /var/lib/worklane/plugins/previews/ci/kit
