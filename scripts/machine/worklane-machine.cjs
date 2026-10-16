@@ -529,6 +529,25 @@ function pluginUrlProblem(url, hosts) {
   return null;
 }
 
+// Root's allowlist of npm registries MCP servers may come from (plugins.sh registries): root:root, not writable by
+// others. Absent: registry.npmjs.org alone. Present but not root's, writable by others or malformed: none.
+const MCP_REGISTRIES_FILE = '/etc/worklane/mcp-registries.json';
+function mcpRegistries(file = MCP_REGISTRIES_FILE, ownerUid = 0) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return ['registry.npmjs.org'];
+  }
+  if (!st.isFile() || st.uid !== ownerUid || (st.mode & 0o022) !== 0) return [];
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(v.registries) && v.registries.every((h) => typeof h === 'string' && HOST_NAME.test(h) && require('node:net').isIP(h) === 0) ? v.registries : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Why a subdirectory may not be fetched (null when it may): plain relative segments, never absolute or "..". */
 function pluginPathProblem(p) {
   if (typeof p !== 'string' || !p) return 'no subdirectory';
@@ -538,7 +557,7 @@ function pluginPathProblem(p) {
 }
 
 /** The plugin step a list asks for, or null when it is anything else. */
-function parsePlugin(args, hosts = pluginHosts()) {
+function parsePlugin(args, hosts = pluginHosts(), registries = mcpRegistries()) {
   const [cmd, id] = args;
   if (typeof id !== 'string' || !PLUGIN_ID.test(id)) return null;
   if (cmd === 'plugin-fetch' && (args.length === 4 || args.length === 5)) {
@@ -549,7 +568,12 @@ function parsePlugin(args, hosts = pluginHosts()) {
   }
   if (cmd === 'plugin-stage' && args.length === 4 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3])) return { action: 'stage', id, digest: args[2], roles: args[3] };
   if (cmd === 'plugin-withdraw' && args.length === 2) return { action: 'withdraw', id };
-  if (cmd === 'mcp-fetch' && args.length === 4 && NPM_NAME.test(args[2]) && NPM_VERSION.test(args[3])) return { action: 'mcp-fetch', id, pkg: args[2], version: args[3] };
+  if (cmd === 'mcp-fetch' && (args.length === 4 || args.length === 5) && NPM_NAME.test(args[2]) && NPM_VERSION.test(args[3])) {
+    // Only a registry on root's list; none named: the first on it.
+    const registry = args.length === 5 ? args[4] : registries[0];
+    if (typeof registry !== 'string' || !registries.includes(registry)) return null;
+    return { action: 'mcp-fetch', id, pkg: args[2], version: args[3], registry };
+  }
   if (cmd === 'mcp-preview' && args.length === 4 && PLUGIN_ID.test(args[2]) && MCP_SERVER_NAME.test(args[3])) return { action: 'mcp-preview', id, plugin: args[2], server: args[3] };
   if (cmd === 'mcp-snapshot' && args.length === 2) return { action: 'mcp-snapshot', id };
   if (cmd === 'mcp-stage' && args.length === 6 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3]) && MCP_HOSTS.test(args[4]) && MCP_SECRETS.test(args[5])) return { action: 'stage', id, digest: args[2], roles: args[3], network: args[4], secrets: args[5] };
@@ -568,7 +592,7 @@ function plugin(p) {
     if (!real) return 1;
     const what = `plugins.${instance}.${p.action}`;
     const args = p.action === 'fetch' ? [real, 'fetch', instance, p.id, p.url, p.sha, ...(p.path ? [p.path] : [])]
-      : p.action === 'mcp-fetch' ? [real, 'mcp-fetch', instance, p.id, p.pkg, p.version]
+      : p.action === 'mcp-fetch' ? [real, 'mcp-fetch', instance, p.id, p.pkg, p.version, p.registry]
       : p.action === 'mcp-preview' ? [real, 'mcp-preview', instance, p.id, p.plugin, p.server]
       : [real, 'mcp-snapshot', instance, p.id];
     const r = spawnSync('systemd-run', ['--unit', `${PLUGIN_FETCH_UNIT}-${instance}`, '--collect', '--no-block', '--quiet', '--description', `worklane plugin fetch for ${instance}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
@@ -688,4 +712,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePlugin, pluginHosts, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

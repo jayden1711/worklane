@@ -24,9 +24,10 @@ import { fetchGitPlugin, sourceProblem } from './fetch.js';
 import { confirm, confirmPlan, describeRecord, ingest, mcpCodeDir, NPM_TREE_LIMITS, previewCodeDir, previewNpmServer, previewPluginServer, readPreview, remove, setPreviewSnapshot, stage, takeFetchSlot, withdraw } from './root-ops.js';
 import { treeHash } from './tree.js';
 import { fetchNpmServer, type NpmResult } from '../mcp/npm.js';
-import { takeSnapshot, type SnapshotResult } from '../mcp/quarantine.js';
-import { brokerUser, readSecretFile } from '../mcp/service.js';
-import { curlResolve, pinnedAddress, pluginUrlProblem, readPluginHosts } from './hosts.js';
+import { type SnapshotResult } from '../mcp/quarantine.js';
+import { runThrowawaySnapshot, snapshotJob } from '../mcp/throwaway.js';
+import { brokerSnapshot } from '../mcp/client.js';
+import { curlResolve, pinnedAddress, pluginUrlProblem, readMcpRegistries, readPluginHosts } from './hosts.js';
 
 const USAGE = 'usage: plugins fetch-job|fetch-slot|ingest|stage|withdraw|remove|confirm|show|npm-job|mcp-ingest-npm|mcp-preview|mcp-snapshot [options] (see src/plugins/cli.ts)';
 
@@ -38,33 +39,16 @@ function plusList(s: string | undefined, re: RegExp, what: string): string[] {
   return l;
 }
 
+/** The engine's own cli.js and node, for the throwaway snapshot unit and the broker. */
+const engine = () => ({ node: process.execPath, engineCli: fileURLToPath(new URL('../cli.js', import.meta.url)) });
+
 /**
- * Start a server in quarantine, as the instance's broker user in its sandbox, with no agent connected: with no secrets
- * and no network (the first snapshot), or with its installed secrets and its approved network (the second, Q3).
+ * A snapshot of unapproved server code (owner's condition): as a throwaway user, no network, no secrets, the code
+ * read-only, nothing writable that the broker reads or runs; root reads one line of its output as data.
  */
-async function quarantine(instance: string, id: string, runtime: McpRuntime, codeDir: string, withSecrets: { secrets: string[]; network: string[] } | null): Promise<SnapshotResult> {
-  const user = brokerUser(instance);
-  const uid = userUid(user);
-  const gid = groupGid(user);
-  const home = userHomeDir(user);
-  if (uid === null || gid === null || !home) return { snapshot: null, error: `no broker user ${user}: run mcp-broker.sh ${instance} first`, withSecrets: false, network: [] };
-  const secrets: Record<string, string> = {};
-  for (const n of withSecrets?.secrets ?? []) {
-    const v = readSecretFile(home, id, n);
-    if (v === null) return { snapshot: null, error: `secret ${n} is not installed (mcp-broker.sh ${instance} secret ${id} ${n})`, withSecrets: true, network: withSecrets!.network };
-    secrets[n] = v;
-  }
-  return takeSnapshot({
-    engineCli: fileURLToPath(new URL('../cli.js', import.meta.url)),
-    node: process.execPath,
-    runtime,
-    codeDir,
-    secrets,
-    network: withSecrets?.network ?? [],
-    scratchDir: join('/tmp', `mcp-quarantine-${instance}-${id}-${process.pid}`),
-    denyRead: [join(home, 'secrets'), mcpStatePath(instance, '')],
-    as: { uid, gid },
-  });
+function quarantine(instance: string, id: string, runtime: McpRuntime, codeDir: string): SnapshotResult {
+  const r = runThrowawaySnapshot({ ...engine(), runtime, codeDir, unit: `worklane-mcp-snapshot-${instance}-${id}-${process.pid}` });
+  return { snapshot: r.snapshot, error: r.error, withSecrets: false, network: [] };
 }
 
 function opts(args: string[]): Record<string, string> {
@@ -118,11 +102,24 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       console.log(`fetched ${s.url}${s.path ? ` (${s.path})` : ''} at ${s.sha}`);
       return 0;
     }
+    if (sub === 'snapshot-job') {
+      need('code', 'argv');
+      const argv = JSON.parse(o.argv!) as unknown;
+      if (!Array.isArray(argv) || !argv.length || !argv.every((x) => typeof x === 'string')) throw new Error('--argv must be a JSON list of strings');
+      console.log(await snapshotJob(o.code!, argv as string[]));
+      return 0;
+    }
     if (sub === 'npm-job') {
       need('package', 'version', 'out');
       // The tree in <out>/tree, the result beside it, for root to read once it owns them.
       mkdirSync(o.out!, { recursive: true });
-      const r = fetchNpmServer(o.package!, o.version!, join(o.out!, 'tree'));
+      // Root's registries only (owner's condition): the one asked for, or the first; its name public-only in DNS.
+      const regs = readMcpRegistries();
+      if (regs.problem) throw new Error(`MCP registries: ${regs.problem}`);
+      const registry = o.registry ?? regs.registries[0];
+      if (!registry || !regs.registries.includes(registry)) throw new Error(`${registry ?? 'no registry'} is not a registry MCP servers may come from (${regs.registries.join(', ') || 'none'})`);
+      await pinnedAddress(registry);
+      const r = fetchNpmServer(o.package!, o.version!, join(o.out!, 'tree'), registry);
       writeFileSync(join(o.out!, '.npm-result.json'), JSON.stringify(r) + '\n');
       console.log(`fetched ${r.package}@${r.version} (${r.integrity})${r.refusals.length ? `; refused: ${r.refusals.join('; ')}` : ''}`);
       return 0;
@@ -145,7 +142,7 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
     if (!isRoot()) throw new Error(`plugins ${sub} runs as root only`);
     if (sub === 'fetch-slot') {
       need('instance');
-      takeFetchSlot(instance!);
+      takeFetchSlot(instance!, o.kind === 'snapshot' ? 'snapshot' : 'fetch');
       return 0;
     }
     need('instance', 'id');
@@ -163,7 +160,7 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       const r = JSON.parse(readFileSync(join(o.from!, '.npm-result.json'), 'utf8')) as NpmResult;
       // Copied into the preview first (root's, readable by the broker's user), then started from there in quarantine.
       let p = previewNpmServer({ instance: instance!, id: o.id!, from: join(o.from!, 'tree'), runtime: { type: 'npm', package: r.package, version: r.version, integrity: r.integrity, lockfile: r.lockfile, argv: r.argv }, refusals: r.refusals, snapshot: { snapshot: null, error: 'not started yet', withSecrets: false, network: [] } });
-      if (!p.refusals.length) p = setPreviewSnapshot(instance!, o.id!, await quarantine(instance!, o.id!, p.runtime, previewCodeDir(p), null));
+      if (!p.refusals.length) p = setPreviewSnapshot(instance!, o.id!, quarantine(instance!, o.id!, p.runtime, previewCodeDir(p)));
       console.log(p.refusals.length ? `refused: ${p.refusals.join('; ')}` : p.snapshot ? `previewed ${o.id}: ${p.snapshot.tools.length} tools` : `previewed ${o.id} without a snapshot: ${p.snapshotError}`);
       return 0;
     }
@@ -176,7 +173,7 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       const runtime: McpRuntime = { type: 'plugin', plugin: a.record.id, tree: a.record.tree, server: spec.name, argv: spec.argv };
       const codeDir = mcpCodeDir(instance!, o.id!, runtime);
       if (treeHash(codeDir) !== a.record.tree) throw new Error(`plugin ${o.plugin}'s approved copy changed on disk`);
-      const snap = await quarantine(instance!, o.id!, runtime, codeDir, null);
+      const snap = quarantine(instance!, o.id!, runtime, codeDir);
       const p = previewPluginServer({ instance: instance!, id: o.id!, plugin: o.plugin!, server: o.server!, snapshot: snap });
       console.log(p.snapshot ? `previewed ${o.id}: ${p.snapshot.tools.length} tools` : `previewed ${o.id} without a snapshot: ${p.snapshotError}`);
       return 0;
@@ -189,7 +186,10 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       const r = e.record as McpRecord;
       const codeDir = mcpCodeDir(instance!, r.id, r.runtime);
       if (treeHash(codeDir, r.runtime.type === 'npm' ? NPM_TREE_LIMITS : undefined) !== r.runtime.tree) throw new Error(`${o.id}'s approved code changed on disk`);
-      const snap = await quarantine(instance!, r.id, r.runtime, codeDir, { secrets: r.secrets, network: r.network });
+      // Approved code (its first confirm): the broker starts it as it would for a session, with its secrets and its
+      // approved network, lists its tools and stops it. Root reads the reply as data.
+      const got = await brokerSnapshot(instance!, r.id);
+      const snap: SnapshotResult = { ...got, withSecrets: true, network: r.network };
       if (r.runtime.type === 'plugin') previewPluginServer({ instance: instance!, id: r.id, plugin: r.runtime.plugin, server: r.runtime.server, snapshot: snap });
       else {
         previewNpmServer({ instance: instance!, id: r.id, from: codeDir, runtime: { type: 'npm', package: r.runtime.package, version: r.runtime.version, integrity: r.runtime.integrity, lockfile: r.runtime.lockfile, argv: r.runtime.argv }, refusals: [], snapshot: snap });

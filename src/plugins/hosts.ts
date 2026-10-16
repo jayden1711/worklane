@@ -95,3 +95,53 @@ export async function pinnedAddress(host: string, resolve: (h: string) => Promis
 
 /** git's pin for one host on https: http.curloptResolve's "host:443:address" (an IPv6 address in brackets). */
 export const curlResolve = (host: string, ip: string) => `${host}:443:${isIP(ip) === 6 ? `[${ip}]` : ip}`;
+
+// ---------- MCP servers from npm: root's registry allowlist ----------
+
+export const MCP_REGISTRIES_FILE = () => etcPath('mcp-registries.json');
+export const DEFAULT_MCP_REGISTRIES = ['registry.npmjs.org'] as const;
+
+/**
+ * The npm registries pinned MCP servers may come from (owner's condition on mcp-fetch): root's file
+ * (/etc/<cli>/mcp-registries.json, root:root 0644, set by plugins.sh registries); absent, registry.npmjs.org alone.
+ * A file that isn't root's alone or doesn't hold {"registries": [<host name>, ...]}: none at all.
+ */
+export function readMcpRegistries(file = MCP_REGISTRIES_FILE(), ownerUid = 0): { registries: string[]; problem: string | null } {
+  const f = readRegularFile(file, 64 * 1024);
+  if (f.kind === 'missing') return { registries: [...DEFAULT_MCP_REGISTRIES], problem: null };
+  if (f.kind !== 'file') return { registries: [], problem: `${file}: ${f.kind}` };
+  if (f.uid !== ownerUid || Number.parseInt(f.mode, 8) & 0o022) return { registries: [], problem: `${file} isn't root's alone` };
+  try {
+    const v = JSON.parse(f.text) as { registries?: unknown };
+    if (!Array.isArray(v.registries) || !v.registries.every((h) => typeof h === 'string' && HOST_NAME.test(h) && isIP(h) === 0)) return { registries: [], problem: `${file}: expected {"registries": [<host name>, ...]}` };
+    return { registries: v.registries as string[], problem: null };
+  } catch {
+    return { registries: [], problem: `${file}: not JSON` };
+  }
+}
+
+/** Why a lockfile's packages may not be installed: any `resolved` URL not on https://<registry>/. Null when all are. */
+export function lockResolvedProblem(lockText: string, registry: string): string | null {
+  let lock: { packages?: Record<string, { resolved?: unknown; link?: unknown }> };
+  try {
+    lock = JSON.parse(lockText) as typeof lock;
+  } catch {
+    return 'the lockfile is not JSON';
+  }
+  const bad: string[] = [];
+  for (const [p, e] of Object.entries(lock.packages ?? {})) {
+    if (!p) continue; // the root project
+    if (e.link) bad.push(`${p} is a link`);
+    else if (typeof e.resolved !== 'string') bad.push(`${p} has no resolved URL`);
+    else {
+      let u: URL | null = null;
+      try {
+        u = new URL(e.resolved);
+      } catch {
+        // below
+      }
+      if (!u || u.protocol !== 'https:' || u.hostname !== registry || u.port || u.username || u.password) bad.push(`${p} comes from ${String(e.resolved).slice(0, 120)}`);
+    }
+  }
+  return bad.length ? `packages not from https://${registry}/: ${bad.slice(0, 5).join('; ')}${bad.length > 5 ? ` (and ${bad.length - 5} more)` : ''}` : null;
+}
