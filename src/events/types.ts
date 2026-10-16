@@ -350,7 +350,17 @@ export const EventSchemas = {
    * worker's intent paragraph and risk class for the top of the PR body (src/pr-rules.ts; the class can only raise
    * the one computed from the paths). Both absent in older events.
    */
-  'worker.claims': z.strictObject({ issue, claims: z.array(z.string()), intent: z.string().max(4000).optional(), risk_class: z.enum(['docs-only', 'logic', 'protected']).optional() }),
+  'worker.claims': z.strictObject({
+    issue,
+    claims: z.array(z.string()),
+    intent: z.string().max(4000).optional(),
+    risk_class: z.enum(['docs-only', 'logic', 'protected']).optional(),
+    /** The worker's claims as it labeled them (src/claim-labels.ts), and what was wrong with its labels. */
+    labeled: z.array(z.strictObject({ claim: z.string().max(500), label: z.enum(['measured', 'inferred', 'guess']), basis: z.string().max(500) })).max(50).optional(),
+    label_problems: z.array(z.string().max(600)).max(10).optional(),
+    /** Sentences that hand the reader a check the worker could run itself: each a doubt on the change. */
+    handoffs: z.array(z.string().max(300)).max(5).optional(),
+  }),
   'eval.verdict': z.strictObject({
     issue,
     head: sha,
@@ -371,6 +381,8 @@ export const EventSchemas = {
     /** The model whose verdict this is (tiered evaluation), and the cheap model it was escalated from, if it was. */
     model: z.string().optional(),
     escalated_from: z.string().optional(),
+    /** The claims the verdict rests on, as the evaluator labeled them (src/claim-labels.ts). */
+    claims: z.array(z.strictObject({ claim: z.string().max(500), label: z.enum(['measured', 'inferred', 'guess']), basis: z.string().max(500) })).max(50).optional(),
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions

@@ -43,7 +43,8 @@ import { changedFiles } from './merge-base.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
-import { calibrated, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
+import { calibrated, claimDoubt, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
+import { handoffDoubt, handoffs, readClaims } from './claim-labels.js';
 import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
 import type { ReviewConfig } from './config/schema.js';
 import { applySettings, inRunWindow } from './settings.js';
@@ -1335,7 +1336,7 @@ export class Coordinator extends HarnessEvals {
     this.cost(n, 'worker', r.durationMs === undefined ? { ...r, durationMs: Date.now() - started } : r);
     // Its session is kept: a fix run on this issue's PR resumes it (src/coordinator/fix-runs.ts).
     this.emit('run.finished', { issue: n, role: 'worker', reason: r.reason, detail: r.detail.slice(0, 1000), ...(r.sessionId && SESSION_ID.test(r.sessionId) ? { session: r.sessionId } : {}) });
-    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass };
+    const s = (r.structured ?? {}) as { summary?: string; blocked?: string; no_change_needed?: string; ask?: { question: string; options: string[]; recommendation: string; detail?: string }; raise_review?: Level; research_request?: unknown; intent?: string; risk_class?: RiskClass; claims?: unknown };
     const owner = this.ownerOf(n);
     // The runner already waited out auth and transient errors for half an hour: not the change, so say so.
     if (r.transient) {
@@ -1378,7 +1379,18 @@ export class Coordinator extends HarnessEvals {
     // And its intent (the summary's first paragraph when it gave none) and risk class: the top of the PR body.
     const intent = oneParagraph(s.intent || (s.summary ?? '').split(/\n\s*\n/)[0]).slice(0, 4000);
     const riskClass = s.risk_class && RISK_CLASSES.includes(s.risk_class) ? s.risk_class : undefined;
-    this.emit('worker.claims', { issue: n, claims: claimsOf(s.summary ?? ''), ...(intent ? { intent } : {}), ...(riskClass ? { risk_class: riskClass } : {}) });
+    // Its claims as it labeled them (measured, inferred, guess), and any check it handed the reader instead of running.
+    const labeled = readClaims(s.claims);
+    const handed = handoffs(s.summary, s.intent, ...labeled.claims.map((c) => c.claim));
+    this.emit('worker.claims', {
+      issue: n,
+      claims: claimsOf(s.summary ?? ''),
+      ...(intent ? { intent } : {}),
+      ...(riskClass ? { risk_class: riskClass } : {}),
+      ...(labeled.claims.length ? { labeled: labeled.claims.slice(0, 50) } : {}),
+      ...(labeled.problems.length ? { label_problems: labeled.problems.slice(0, 10).map((p) => p.slice(0, 600)) } : {}),
+      ...(handed.length ? { handoffs: handed } : {}),
+    });
     return { stop: false as const, ...(s.raise_review ? { raise: s.raise_review } : {}), ...(s.no_change_needed ? { noChange: s.no_change_needed } : {}), ...(r.provider ? { provider: r.provider } : {}) };
   }
 
@@ -1593,18 +1605,22 @@ export class Coordinator extends HarnessEvals {
     const role = this.d.cfg.agents.roles.evaluator!;
     const changed = files.map((f) => f.path);
     const unverified = this.unverifiedClaims(n, checks);
+    const worker = this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined;
+    // A check the worker handed the reader instead of running it: a doubt, so the change waits for a human.
+    const handed = worker?.handoffs?.length ? [handoffDoubt('the worker', worker.handoffs)] : [];
     // A change to a protected surface: the evaluator answers the compromised-component question for each actor.
     const surface = this.protectedSurface(issue, files);
     const extra = [
       `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
+      ...(worker?.labeled?.length ? [`The worker's claims as it labeled them (inferred and guess are not evidence): ${worker.labeled.map((c) => `[${c.label}] ${c.claim}${c.basis ? ` (${c.basis})` : ''}`).join('; ')}`] : []),
       ...(unverified.length ? [`NOT VERIFIED (the worker claimed these; no recorded command or check backs them, so they are not evidence): ${unverified.map((c) => `"${c}"`).join('; ')}`] : []),
       ...(tampered.length ? [`Tamper guard flags: ${tampered.join('; ')}`] : []),
       ...(surface.length ? [protectedBrief(surface)] : []),
       ...(opts.extra ?? []),
     ];
-    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; confidence_reason?: string; compromised_component?: unknown; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
+    type Out = { patch_correct?: boolean; test_correct?: boolean; confidence?: 'high' | 'medium' | 'low'; confidence_reason?: string; claims?: unknown; compromised_component?: unknown; advice?: string; design_change?: boolean; design_reason?: string; both_sides_kept?: boolean } | undefined;
     // The model is chosen in code from the change's level; a cheap verdict that isn't a confident pass is judged
     // once more by the evaluator role's model. What the run read comes from its record, not from its own list.
     const judged = await judge({
@@ -1665,6 +1681,8 @@ export class Coordinator extends HarnessEvals {
       reason: ok ? s?.confidence_reason : `evaluator run ${r.reason}`,
       unverified: unverified.length,
       compromised: ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : [],
+      // Claims the evaluator left unlabeled even when asked again, and checks the worker handed over.
+      doubts: [...(ok && claimDoubt(s?.claims) ? [`the evaluator's claims are not all labeled measured, inferred or guess, even when asked again: ${claimDoubt(s?.claims)}`] : []), ...handed],
     });
     const v = {
       patch_correct: ok && s?.patch_correct === true,
@@ -1675,7 +1693,8 @@ export class Coordinator extends HarnessEvals {
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}) });
+    const labeled = ok ? readClaims(s?.claims).claims.slice(0, 50) : [];
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}), ...(labeled.length ? { claims: labeled } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
   }
 
@@ -1698,7 +1717,9 @@ export class Coordinator extends HarnessEvals {
    * worker's last run recorded as succeeding.
    */
   private unverifiedClaims(n: number, checks: { check: string; status: string }[]): string[] {
-    const claims = (this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined)?.claims ?? [];
+    const said = this.events(n).filter((e) => e.type === 'worker.claims').at(-1)?.payload as EventPayload<'worker.claims'> | undefined;
+    // A claim labeled measured is checked against the record like any claim of verification: its basis names what ran.
+    const claims = [...(said?.claims ?? []), ...(said?.labeled ?? []).filter((c) => c.label === 'measured').map((c) => `${c.claim} (measured: ${c.basis})`)].filter((c, i, all) => all.indexOf(c) === i);
     if (!claims.length) return [];
     const run = this.d.stateDir ? runsForIssue(this.d.stateDir, n).filter((r) => r.role === 'worker').at(-1) : undefined;
     const steps = run ? (readRun(this.d.stateDir!, run.id)?.steps ?? []) : [];

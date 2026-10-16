@@ -164,7 +164,7 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
       if (refused) return { reason: 'auth_failed', detail: "claude's login was refused (HTTP 401): Invalid API key · Please run /login", turns: 0, costUsd: 0, login: { key: 'claude', account: 'agents@example.com' } };
       return r.role === 'worker' ? { structured: realFix(r) } : { costUsd: 0.02 };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(r) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(r) } };
   });
   const chat = fakeChat();
   const config = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: ['100000000001'], people: { '100000000001': 'example-owner' }, asks_channel: ASKS, dashboard_url: DASH } });

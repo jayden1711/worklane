@@ -25,14 +25,16 @@ test('the schema requires confidence_reason and gives confidence its rubric; the
   assert.deepEqual(VERDICT_SCHEMA.properties.compromised_component.items.properties.actor.enum, [...COMPROMISED_ACTORS.map(([k]) => k), 'other']);
 });
 
+const claims = [{ claim: 'read the diff', label: 'measured', basis: 'git diff' }];
+
 test('a confidence other than high without a reason is refused; with one, or high, it is accepted', () => {
   for (const confidence of ['medium', 'low']) {
-    assert.match(verdictRefusal({ confidence })!, new RegExp(`confidence ${confidence} needs confidence_reason`));
-    assert.ok(verdictRefusal({ confidence, confidence_reason: '   ' }), 'blank is no reason');
-    assert.equal(verdictRefusal({ confidence, confidence_reason: 'the zero-quantity case has no test' }), null);
+    assert.match(verdictRefusal({ confidence, claims })!, new RegExp(`confidence ${confidence} needs confidence_reason`));
+    assert.ok(verdictRefusal({ confidence, confidence_reason: '   ', claims }), 'blank is no reason');
+    assert.equal(verdictRefusal({ confidence, confidence_reason: 'the zero-quantity case has no test', claims }), null);
   }
-  assert.equal(verdictRefusal({ confidence: 'high' }), null);
-  assert.equal(verdictRefusal({ confidence: 'high', confidence_reason: '' }), null);
+  assert.equal(verdictRefusal({ confidence: 'high', claims }), null);
+  assert.equal(verdictRefusal({ confidence: 'high', confidence_reason: '', claims }), null);
 });
 
 test('the recorded confidence always has its reason when it is not high', () => {

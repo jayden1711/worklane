@@ -4,6 +4,29 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DoneWhenList, Issue } from './backlog/types.js';
 
+/** How sure a claim is (src/claim-labels.ts): measured (run and read), inferred (reasoned, not run) or guess. */
+export const CLAIM_LABELS = ['measured', 'inferred', 'guess'] as const;
+export type ClaimLabel = (typeof CLAIM_LABELS)[number];
+
+/** The output-schema field the worker and the evaluator fill. */
+export const LABELED_CLAIMS_FIELD = {
+  claims: {
+    type: 'array',
+    description:
+      'Every claim you make, each labeled: measured (you ran the command or check and read its output: basis names it and what it showed), inferred (reasoned from code or evidence you read, not run: basis says from what) or guess (basis says why you could not check it).',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['claim', 'label', 'basis'],
+      properties: {
+        claim: { type: 'string', maxLength: 500 },
+        label: { type: 'string', enum: [...CLAIM_LABELS] },
+        basis: { type: 'string', maxLength: 500 },
+      },
+    },
+  },
+} as const;
+
 /** A worker's or evaluator's research request: one precise question instead of a guess (src/research-request.ts). */
 export const RESEARCH_REQUEST_FIELD = {
   research_request: {
@@ -21,9 +44,10 @@ export const RESEARCH_REQUEST_FIELD = {
 export const WORKER_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['summary'],
+  required: ['summary', 'claims'],
   properties: {
     summary: { type: 'string', description: 'What you changed and how you verified it, in 2-5 sentences.' },
+    ...LABELED_CLAIMS_FIELD,
     blocked: { type: 'string', description: 'Set only if you could not finish: what blocks you.' },
     no_change_needed: { type: 'string', description: 'Set only if the issue needs no change: its done_when already passes on the unchanged code. Say what you checked and why nothing should change. Commit nothing.' },
     ask: {
@@ -86,8 +110,9 @@ export const OTHER_ACTOR = 'other';
 export const VERDICT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['patch_correct', 'test_correct', 'confidence', 'confidence_reason', 'advice', 'files_reviewed', 'design_change'],
+  required: ['patch_correct', 'test_correct', 'confidence', 'confidence_reason', 'advice', 'files_reviewed', 'design_change', 'claims'],
   properties: {
+    ...LABELED_CLAIMS_FIELD,
     files_reviewed: { type: 'array', items: { type: 'string' }, description: 'Every changed file whose diff you read in full (repo-relative paths).' },
     patch_correct: { type: 'boolean', description: 'The change does what the issue and done_when ask, without breaking anything else you can see.' },
     test_correct: { type: 'boolean', description: 'The reproduction test checks the right behavior (false if the test itself is wrong).' },
@@ -237,6 +262,7 @@ Own: the smallest change that fully solves the issue below, committed on the cur
 - Add no validation, defense or complexity for a hypothetical concern. Add it only for something real: a failing test, a failure you observed (cite its evidence: the error, log or input), or a protected path (money path, auth, secrets, rulesets, CI, scripts/setup). For each guard you add, your summary names which. A concern with none of these goes in your summary, not the code.
 Sources: the issue and its done_when contract below, the code in this worktree, and the repository's CLAUDE.md and conventions. If docs disagree with the code, trust the code; treat docs as unverified.
 Output: commits on the current branch with clear messages (git add, git commit), and your summary: what you changed and how you verified it.
+- claims: every claim your summary and intent make, each labeled measured (you ran the command or check and read its output; basis names it and what it showed), inferred (reasoned from code you read, not run) or guess. Never hand the reviewer or the owner a check you could run yourself ("please run", "you can verify by running"): run it and report it as measured. A handoff holds the change for a human.
 - If the issue already holds on the unchanged code (its done_when passes and nothing should change), commit nothing and set "no_change_needed" with what you checked; the coordinator re-runs the checks itself. Never make a change just to have one.
 Approval: a real decision only the owner can make: set "ask" and stop. Its recommendation is one of its options, copied exactly; your reasoning goes in its detail. Pushing, pull requests and labels are the coordinator's, after independent review.
 Failure: If a source is missing, stale or contradictory, report it; never guess or fill from memory. If you're blocked, set "blocked". Otherwise finish the work.
@@ -271,6 +297,7 @@ Output: the verdict fields.
 - confidence_reason: whenever confidence isn't high, one sentence naming that specific unverified thing or problem. A verdict without it is refused and you're asked again. Empty when high.
 - compromised_component, when the brief says the change touches a PROTECTED SURFACE: for each actor it lists, what that actor can do through this change if it's compromised or hostile, whether that's acceptable, and why (or what stops it). A missing or unconvincing answer is a doubt: confidence not high, with that reason. Never a high pass.
 - advice: specific.
+- claims: each claim your verdict rests on, labeled measured (a command you ran, such as git diff or a check's output, and what it showed), inferred (from reading the code, not run) or guess. A verdict without labeled claims is refused and you're asked again.
 - Added validation, defense or complexity (a guard, check, fallback, retry, wrapper) with none of these behind it: a failing test, an observed failure with its evidence, or a protected path (money path, auth, secrets, rulesets, CI, scripts/setup). Request the change: patch_correct false, and advice names what to remove and cites the rule (no defenses for hypothetical concerns). Don't ask for such defenses yourself either.
 Approval: a design change always waits for a human, however correct it is. When unsure, say design_change true.
 Failure: If a source is missing, stale or contradictory, report it; never guess or fill from memory. A changed file you couldn't read stays out of files_reviewed.

@@ -127,7 +127,7 @@ function agents(o: { fix?: boolean } = {}) {
     if (req.role === 'evaluator-verdict') {
       const b = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
       const files_reviewed = b ? git(req.cwd, 'diff', '--name-only', `${b}..HEAD`).split('\n').filter(Boolean) : [];
-      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed }, costUsd: 0.18 };
+      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed }, costUsd: 0.18 };
     }
     if (o.fix !== false) {
       const p = join(req.cwd, 'src', 'price.js');

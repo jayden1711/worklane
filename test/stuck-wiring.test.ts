@@ -112,7 +112,7 @@ test('the coordinator runs the worker under the guard in dry-run by default and 
       r.stuck?.onVerdict?.({ kind: 'flag', tool: 'Bash', input: 'npm test', repeats: 5, failures: 5 }, 'log');
       return { structured: realFix(r) };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(r) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(r) } };
   });
   const c = coordinator(f, runnerFake);
   await c.tick();
@@ -135,7 +135,7 @@ test('a stuck stop is a failed attempt: even with a passing change committed, th
       if (workers.length === 1) return { reason: 'stuck', detail: 'stopped as stuck: the same Bash call failed 8 times in a row: npm test', structured: realFix(r) };
       return { structured: { summary: 'the fix is already committed' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(r) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(r) } };
   });
   const c = coordinator(f, runnerFake, { settings: () => ({ settings: { stuck_guard: 'on' }, error: null }) });
   await c.tick();

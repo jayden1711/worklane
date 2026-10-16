@@ -13,7 +13,7 @@ import { coordinator, easyIssue, fixture, readAll, skip } from './repro-state-gr
 /** Every worker run ends blocked on the owner (an auth mismatch never retries on its own). */
 const blocksOnOwner = () =>
   new FakeRunner((req: RunRequest) =>
-    req.role === 'worker' ? { reason: 'auth_mismatch' as never, detail: 'wrong login' } : { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } },
+    req.role === 'worker' ? { reason: 'auth_mismatch' as never, detail: 'wrong login' } : { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } },
   );
 
 test('regression: a blocked issue the owner then closes on GitHub is no longer waiting on them', { skip }, async () => {

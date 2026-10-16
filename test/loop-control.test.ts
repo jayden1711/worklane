@@ -55,7 +55,7 @@ function stuckAgents(detail: (k: number) => string, o: { worker?: Script; reflec
       return { reason: 'stuck', detail: `stopped as stuck: ${detail(k)}`, ...o.workerResult };
     }
     if (req.role === 'reflection') return { structured: o.reflection?.(req) ?? { what_failed: 'It repeated a failing call.', what_to_change: 'Read the code first.' } };
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
 }
 

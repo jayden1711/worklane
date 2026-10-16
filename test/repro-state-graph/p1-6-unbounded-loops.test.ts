@@ -17,7 +17,7 @@ test('deferred landing: a land deferred on every pass (the full-run slot is held
   f.cfg.tests.runner.full = 'node --test --test-reporter=spec';
   const n = f.backlog.open(easyIssue('Add a.js', 'a.js'));
   const runner = new FakeRunner((req) => {
-    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    if (req.role !== 'worker') return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
     writeFileSync(join(req.cwd, 'src', 'a.js'), "export const x = 'a';\n");
     commitAll(req.cwd, 'add a.js');
     return { structured: { summary: 's' } };
