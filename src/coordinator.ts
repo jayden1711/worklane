@@ -3,9 +3,9 @@
 // step is decided from events plus GitHub, so a restart picks up where the
 // log says it was. Agents only ever propose: they commit on their own
 // branch in their own worktree; everything outward-facing happens here.
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { cpSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
@@ -22,7 +22,7 @@ import { evalLevel, judge } from './coordinator/eval-routing.js';
 import { evalRouting } from './eval-routing.js';
 import { MAX_REQUESTS_PER_TASK } from './research-request.js';
 import { defaultRolePrompt, INVESTIGATION_OPTIONS, INVESTIGATION_SCHEMA, issueBrief, REFLECTION_SCHEMA, REPRO_SCHEMA, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from './roles.js';
-import { compareInstructions, engineRoleCases, instructionTargets, parseCases, runnerAsk } from './skilleval.js';
+import { compareInstructions, engineRoleCases, instructionTargets, neutralDir, parseCases, runnerAsk } from './skilleval.js';
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
@@ -66,6 +66,10 @@ import { seen } from './intake/store.js';
 import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './coordinator/browser.js';
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
+import { EXPERIMENTER_DENIED, EXPERIMENTER_TOOLS, ExperimentLoop, MONITOR_SCHEMA, TRANSCRIPT_MAX, transcriptLine, type ExperimentHost } from './coordinator/experiments.js';
+import { EXP_HELPER, expJobDir } from './experiments/helper.js';
+import { PROPOSAL_SCHEMA } from './experiments/proposal.js';
+import { readRootFile } from './experiments/root-file.js';
 import { maybePostDigest } from './coordinator/digest.js';
 import { AutomationRuns } from './coordinator/automations.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
@@ -93,6 +97,9 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
+
+/** git's output as is (a -z listing keeps its NULs). */
+const execGit = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
@@ -159,6 +166,7 @@ export class Coordinator extends AutomationRuns {
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
     await step('automations', () => this.checkAutomations(), undefined);
+    await step('experiments', () => this.experiments()?.tick(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -183,6 +191,7 @@ export class Coordinator extends AutomationRuns {
     await this.optimizeRun;
     await this.superfanRun;
     await this.harnessEvalRun;
+    await this.expLoop?.idle();
     await this.prBatchIdle();
   }
 
@@ -1810,5 +1819,147 @@ export class Coordinator extends AutomationRuns {
         .finally(() => this.lightRunning.delete(number));
     }
     return 'pending';
+  }
+
+  // ---------------------------------------------------------------- experiments
+
+  private expLoop: ExperimentLoop | null = null;
+  private expFetchedAt = 0;
+
+  /** The experiment loop, when this instance runs experiments (server mode: its deps name the instance). */
+  protected experiments(): ExperimentLoop | null {
+    const x = this.d.experiments;
+    if (!x) return null;
+    this.expLoop ??= new ExperimentLoop(this.experimentHost(x));
+    return this.expLoop;
+  }
+
+  /** What the loop may use of this coordinator: its log, git, runner and the helper, nothing more. */
+  private experimentHost(x: NonNullable<typeof this.d.experiments>): ExperimentHost {
+    const workers = this.d.cfg.agents.roles.workers!;
+    // The monitor reads on the cheaper model routing gives a reflection (the short read-only run before a retry).
+    const monitorModel = routeRun(this.d.cfg, 'reflection');
+    const show = (commit: string, path: string) => {
+      const r = spawnSync('git', ['show', `${commit}:${path}`], { cwd: this.d.repo, maxBuffer: 64 * 1024 * 1024 });
+      return r.status === 0 ? r.stdout : null;
+    };
+    return {
+      instance: x.instance,
+      pinsFile: x.pinsFile,
+      configDir: BRAND.configDir,
+      model: workers.model,
+      monitorModel,
+      events: () => this.d.log.read(),
+      emit: (type, payload) => void this.emit(type, payload),
+      now: () => this.d.now?.() ?? new Date(),
+      held: () => (this.stopped || this.halt.signal.aborted || this.emergencyInForce() ? 'stopping or stopped' : this.usagePause() ? 'usage pause' : this.authHeld() ? 'sign-in held' : this.diskHeld() ? 'disk held' : (this.governorHold()?.reason ?? null)),
+      instanceUsdLeft: () => this.d.cfg.agents.daily_budget_usd - this.spentToday(),
+      mainTip: () => {
+        if (Date.now() - this.expFetchedAt > 5 * 60_000) {
+          this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+          this.expFetchedAt = Date.now();
+        }
+        return this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+      },
+      show,
+      session: async (o, then) => {
+        const branch = `${BRAND.cli}/${o.name}`;
+        const taskFile = join(this.d.agentTasks?.dir ?? join(this.d.stateDir, 'tasks'), `${o.name}.json`);
+        const { path, setupErrors } = createWorktree(this.wt, o.name, branch, o.commit);
+        const lines: string[] = [];
+        let size = 0;
+        try {
+          // The eval isn't in the session's copy at all (the hook denies its paths too); it is put back before the
+          // change is read, so the session's diff never shows it gone and anything written there is overwritten.
+          for (const h of o.hide) if (!h.includes('*')) rmSync(join(path, h), { force: true, recursive: true });
+          this.writeTask(taskFile, { id: o.name, done_when: [{ manual: 'the coordinator checks the change and runs it as one job' }], frozen: o.frozen, hidden: o.hide });
+          const r: RunResult = setupErrors.length
+            ? { reason: 'failed', detail: `the worktree's setup failed: ${setupErrors.join('; ')}`, costUsd: 0, turns: 0, model: o.name }
+            : await this.d.runner.run({
+                env: this.projectEnv(),
+                role: 'experimenter',
+                stateDir: this.d.stateDir,
+                prompt: o.prompt,
+                appendSystemPrompt: o.system,
+                cwd: path,
+                model: workers.model,
+                allowedTools: [...EXPERIMENTER_TOOLS],
+                disallowedTools: [...EXPERIMENTER_DENIED],
+                maxTurns: 40,
+                maxBudgetUsd: o.maxBudgetUsd,
+                jsonSchema: PROPOSAL_SCHEMA,
+                taskFile,
+                stallMs: 20 * 60_000,
+                timeoutMs: this.commandTimeoutMs,
+                // The whole transcript, for the tampering monitor on this side only.
+                onStreamLine: (j) => {
+                  const t = transcriptLine(j);
+                  if (!t || size > TRANSCRIPT_MAX * 2) return;
+                  lines.push(t);
+                  size += t.length;
+                },
+              });
+          this.emit('run.cost', { issue: null, role: 'experimenter', model: r.model, usd: r.costUsd, turns: r.turns });
+          const files = o.hide.filter((h) => !h.includes('*'));
+          if (files.length) execFileSync('git', ['checkout', o.commit, '--', ...files], { cwd: path, stdio: 'ignore' });
+          return await then(r, path, lines.join('\n'));
+        } finally {
+          try {
+            removeWorktree(this.wt, o.name);
+          } catch {
+            // already gone
+          }
+        }
+      },
+      monitor: (prompt, maxBudgetUsd) => {
+        const cwd = neutralDir();
+        return this.d.runner
+          .run({ env: {}, role: 'experiment-monitor', stateDir: this.d.stateDir, prompt, cwd, model: monitorModel, allowedTools: [], disallowedTools: ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'Task'], maxTurns: 2, maxBudgetUsd, jsonSchema: MONITOR_SCHEMA, stallMs: 10 * 60_000, timeoutMs: this.commandTimeoutMs })
+          .then((r) => {
+            this.emit('run.cost', { issue: null, role: 'experiment-monitor', model: r.model, usd: r.costUsd, turns: r.turns });
+            return r;
+          })
+          .finally(() => rmSync(cwd, { recursive: true, force: true }));
+      },
+      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Extend -> Experiments`),
+      commitChange: (path, parent, message) => {
+        removeSandboxPlaceholders(path);
+        this.git(path, 'add', '-A');
+        const tree = this.git(path, 'write-tree');
+        const commit = this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit-tree', tree, '-p', parent, '-m', message);
+        return { commit, raw: execGit(path, ['diff', '--raw', '-z', '--no-renames', parent, commit]) };
+      },
+      bundle: (ref, commit) => {
+        this.git(this.d.repo, 'update-ref', ref, commit);
+        const r = spawnSync('git', ['bundle', 'create', '-q', '-', ref], { cwd: this.d.repo, maxBuffer: 1024 * 1024 * 1024 });
+        if (r.status !== 0) throw new Error(`git bundle ${ref}: ${r.stderr.toString().slice(0, 300)}`);
+        return r.stdout;
+      },
+      helper:
+        x.helper ??
+        ((args, stdin) =>
+          // Async: a job runs for minutes or hours, and the coordinator's passes go on meanwhile.
+          new Promise((res) => {
+            const c = spawn('sudo', ['-n', EXP_HELPER, x.instance, ...args], { env: { PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'] });
+            let out = '';
+            let err = '';
+            c.stdout.on('data', (d: Buffer) => void (out = (out + d.toString()).slice(-1_000_000)));
+            c.stderr.on('data', (d: Buffer) => void (err = (err + d.toString()).slice(-100_000)));
+            c.on('error', (e) => res({ code: null, stdout: out, stderr: `${err}${e.message}` }));
+            c.on('close', (code) => res({ code, stdout: out, stderr: err }));
+            c.stdin.on('error', () => undefined);
+            c.stdin.end(stdin);
+          })),
+      root: x.root ?? (() => readRootFile(x.instance)),
+      logTail:
+        x.logTail ??
+        ((job, step) => {
+          try {
+            return readFileSync(join(expJobDir(x.instance, job), 'logs', `${step}.log`), 'utf8').split('\n').slice(-30).join('\n');
+          } catch {
+            return '';
+          }
+        }),
+    };
   }
 }

@@ -9,6 +9,8 @@
 // See dashboard-auth.ts.
 import { applyChange, ACTIONS as AUTOMATION_ACTIONS, AutomationsError, loadAutomations, mayDo, planChange, type AutomationAction, type ChangeRequest } from './automations/store.js';
 import { automationsView } from './automations/view.js';
+import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsView, mayDoExp, planExperiment, type ExpAction, type ExpSite } from './experiments/view.js';
+import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
 import { spawnSync } from 'node:child_process';
@@ -236,6 +238,8 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The instance's automations.yaml (in its home): Extend -> Automations reads and, through Review -> Confirm, writes it. None: a checkout (no automations). */
   automationsFile?: string;
+  /** Extend -> Experiments: the instance's checkout, default branch, name and pins file (server mode only). None: no experiments here. */
+  experiments?: ExpSite;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
   /** What running agents' process groups use now, for the board; the OS adapter's processGroupUsage when unset. */
@@ -423,7 +427,7 @@ export function siteOptions(site: ReturnType<typeof dashboardSite>) {
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string; automationsFile?: string } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string; automationsFile?: string; experiments?: ExpSite } {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
@@ -432,7 +436,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
   const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE), automationsFile: join(i.home, AUTOMATIONS_FILE) } : {}) };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE), automationsFile: join(i.home, AUTOMATIONS_FILE) } : {}), ...(i?.runAs ? { experiments: { repo: s.root, branch: s.cfg.project.project.default_branch, instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}) };
 }
 
 /**
@@ -1774,6 +1778,41 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, confirmed: true, action: plan.action, id: plan.id, changes: plan.changes, summary: plan.summary, ...(plan.secret ? { secret: plan.secret, path: `/hook/${opts.instance}/${plan.id}` } : {}) });
           } catch (e) {
             if (e instanceof AutomationsError) return refused(400, e.message);
+            throw e;
+          }
+        }
+        // Experiment studies (src/experiments/, Extend -> Experiments): the owners' and writers' to read; a viewer gets
+        // nothing. A change is planned without confirm (nothing written) and carried out with it, against what the review
+        // saw (its digest). Owners start, resume, approve, decline and archive; writers pause and stop a running job.
+        if (url.pathname === '/api/experiments' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('experiments are', who) });
+          if (!opts.experiments) return json(res, 200, { unavailable: "experiments are a server instance's (separate users): this dashboard serves a checkout or a local instance" });
+          return json(res, 200, experimentsView({ site: opts.experiments, events: eventCache.all(), role: who.role, now: new Date() }));
+        }
+        if (url.pathname === '/api/experiments' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown; study?: unknown; digest?: unknown; confirm?: unknown };
+          const action = String(body.action ?? '') as ExpAction;
+          const study = String(body.study ?? '').slice(0, 40);
+          const refused = (status: number, error: string) => {
+            audit(who, 'experiment.refused_change', { action: action.slice(0, 20), study, why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!opts.experiments) return refused(400, "experiments are a server instance's: this dashboard serves a checkout");
+          if (!(EXP_ACTIONS as readonly string[]).includes(action)) return refused(400, `no action ${action.slice(0, 20)}`);
+          if (!mayDoExp(action, who.role)) return refused(403, `only the instance's owners (admin on ${repo}) may ${action.replace('_', ' ')} a study${action === 'pause' || action === 'stop_job' ? '' : '; writers may pause one or stop its running job'}; @${who.login} is a ${who.role}`);
+          try {
+            if (body.confirm !== true) return json(res, 200, { ok: true, confirmed: false, action, study, ...planExperiment({ site: opts.experiments, events: eventCache.all(), req: { action, study }, by: who.login, now: new Date() }) });
+            const log = new EventLog(opts.eventsDb);
+            let done;
+            try {
+              done = applyExperiment({ site: opts.experiments, events: log.read(), req: { action, study }, digest: String(body.digest ?? ''), by: who.login, role: who.role, now: new Date(), log });
+            } finally {
+              log.close();
+            }
+            audit(who, `experiment.${action}`, { study, changes: done.changes });
+            return json(res, 200, { ok: true, confirmed: true, action, study, ...done });
+          } catch (e) {
+            if (e instanceof ExperimentsError) return refused(400, e.message);
             throw e;
           }
         }

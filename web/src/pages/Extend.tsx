@@ -4,11 +4,15 @@
 import { type State } from '../api';
 import { navigate } from '../App';
 import { AutomationsTab } from '../components/Automations';
+import { ExperimentsTab } from '../components/Experiments';
 import { Header } from '../components/Header';
 import { cx } from '../components/ui';
 
 /** The tabs, in order: each its own address. */
-export const EXTEND_TABS = [{ id: 'automations', label: 'Automations', to: '/extend/automations' }] as const;
+export const EXTEND_TABS = [
+  { id: 'automations', label: 'Automations', to: '/extend/automations' },
+  { id: 'experiments', label: 'Experiments', to: '/extend/experiments' },
+] as const;
 
 export function ExtendPage({ state, path }: { state: State; path: string }) {
   const m = path.match(/^\/extend(?:\/([a-z]+))?(?:\/([a-z][a-z0-9-]{0,39}))?\/?$/);
@@ -37,7 +41,10 @@ export function ExtendPage({ state, path }: { state: State; path: string }) {
             Extend is for the instance's owners and writers (write on its repo).
           </p>
         ) : (
-          tab.id === 'automations' && <AutomationsTab state={state} id={m?.[1] === 'automations' ? (m[2] ?? null) : null} />
+          <>
+            {tab.id === 'automations' && <AutomationsTab state={state} id={m?.[1] === 'automations' ? (m[2] ?? null) : null} />}
+            {tab.id === 'experiments' && <ExperimentsTab state={state} id={m?.[1] === 'experiments' ? (m[2] ?? null) : null} />}
+          </>
         )}
       </div>
     </div>

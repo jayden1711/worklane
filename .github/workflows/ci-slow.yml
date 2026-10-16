@@ -299,7 +299,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' testrun-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 22
+    timeout-minutes: 24
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -745,6 +745,8 @@ jobs:
             if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
           done < "$T/measure-ids"
           echo "both measure runs wiped"
+      - name: "Experiment jobs on real systemd: install and check, approved data by sha256 only, a job's steps with no network and only their own binds, the scorer apart from the job's code, sealed outputs, a job stopped at its cap, another instance refused"
+        run: bash scripts/ci/exp-real-systemd.sh "$I2"
       - name: the sandbox's units and Docker, on failure
         if: failure()
         run: |
