@@ -538,7 +538,7 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
-      - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier public addresses only; fetch never reaches the host's loopback or LAN; the database container reaches nothing"
+      - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier public addresses and its loopback, never the LAN; fetch never reaches the host's loopback or LAN; the database container reaches nothing"
         run: bash scripts/ci/testrun-network-real-systemd.sh "$I2"
       - name: "regression: no value of a run's variables, nor its database password, in any argv, the journal or the unit (a canary, watched as nobody)"
         run: |

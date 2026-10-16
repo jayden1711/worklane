@@ -7,7 +7,7 @@
 #   none:    a run that asks for nothing, and one whose tier asks (tests.yaml network: true) with no root grant:
 #            reaches none of the three, nor DNS; its own loopback works. The helper before this change (main at $OLD)
 #            reaches the public one from the same probe (fail-without).
-#   granted: root's script grants ci's e2e: that tier reaches the public address only (not the LAN); another tier of
+#   granted: root's script grants ci's e2e: that tier reaches the public address and the host's loopback, never the LAN; another tier of
 #            ci, and the other instance's e2e, get none.
 #   fetch:   npm fetches from the public address only, never the host's loopback or LAN, with no grant.
 #   db:      the run's Postgres container reaches nothing (--network none); the helper before reached the public one.
@@ -136,7 +136,8 @@ grep -qx "worklane-testrun: network granted (e2e; public addresses and the machi
 [ "$(got net-granted "$PUB")" = OK ] || fail "the granted tier didn't reach $PUB"
 [ "$(got net-granted "$lan")" != OK ] || fail "the granted tier reached the LAN address $lan"
 [ "$(got net-granted own-loopback)" = OK ] || fail "the granted tier's own loopback"
-[ "$(seen)" = "$PUB " ] || fail "the listener saw $(seen), not $PUB alone"
+# A granted run keeps the host's loopback (its own test servers share it: docs/test-runs.md "Network"), never the LAN.
+[ "$(seen)" = "127.0.0.1 $PUB " ] || fail "the listener saw $(seen), not exactly 127.0.0.1 and $PUB"
 ex ci net-othertier --network unit
 none_reached net-othertier
 grep -q '^worklane-testrun: network none (tier unit of ci is not granted the network in ' "$t/net-othertier.err" || fail "another tier's line"
