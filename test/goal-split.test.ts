@@ -60,7 +60,7 @@ function goalAgents(split: object) {
       commitAll(req.cwd, 'work');
       return { structured: { summary: 's' } };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
 }
 

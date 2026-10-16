@@ -23,6 +23,8 @@ import type { Plan } from './affected.js';
 import { importsPlan, selectMode, testsArg } from './select.js';
 import { runLockPath } from '../os/system-paths.js';
 import { gpuPlanned, gpuRecord, gpuStopped, gpuSummaryLine, type GpuOptIn } from './gpu.js';
+import { networkRecord, networkSummaryLine, SETUP_TIER } from './network.js';
+import { cacheKey } from './cache.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -46,6 +48,8 @@ export interface TierResult {
   predates?: Predates;
   /** Only for a tier that asked for the GPU: whether it got it, the nodes, and the helper's line (./gpu.ts). */
   gpu?: { granted: boolean; devices: string[]; detail: string };
+  /** Whether its command had the network (./network.ts): none unless it asked and root's file granted it. */
+  network?: 'none' | 'granted';
 }
 export interface TestRunResult {
   id: string;
@@ -73,7 +77,7 @@ export interface TestRunResult {
 }
 
 export interface SetupFailure {
-  /** helper, sandbox, create, changed-files, caches, shared, db-start, or "setup step <n> (<command>)". */
+  /** helper, sandbox, create, changed-files, caches, shared, fetch, db-start, or "setup step <n> (<command>)". */
   step: string;
   detail: string;
   /** The last lines of its stderr, redacted; '' when it said nothing there. */
@@ -117,6 +121,8 @@ export interface TestRunDeps {
    * the record only, never as the permission (the helper reads root's file itself). Absent: never planned.
    */
   gpuOptIn?: () => GpuOptIn;
+  /** The instance, for the root command a tier denied the network is shown (absent: "<name>"). */
+  instance?: string;
 }
 
 /** What a run's workspace leaves out: the project's sparse_exclude, or nothing when one of its tiers needs a full checkout. */
@@ -190,7 +196,7 @@ export function validateRequest(req: TestRunRequest): void {
  */
 export function runLimitMs(config: TestRunConfig, tiers: TestRunTier[]): number {
   const db = config.database && tiers.some((t) => t.database) ? config.database.ready_timeout_s : 0;
-  return (config.setup.length * SETUP_TIMEOUT_S + db + tiers.reduce((n, t) => n + t.timeout_s, 0)) * 1000;
+  return ((config.setup.length + (config.fetch?.length ?? 0)) * SETUP_TIMEOUT_S + db + tiers.reduce((n, t) => n + t.timeout_s, 0)) * 1000;
 }
 
 /**
@@ -254,23 +260,44 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     const caches = await cacheDirs(d.config.caches, d.repo, req.sha, (n, k) => d.host.cache(n, k));
     stage = 'shared';
     for (const s of d.config.shared) caches[s.env] = await d.host.shared(s.name);
+    // The fetch phase (./fetch.ts): with network, none of the repo's code, before the database and any setup step.
+    stage = 'fetch';
+    let fetchFailed = false;
+    for (const [i, f] of (d.config.fetch ?? []).entries()) {
+      if (o.signal?.aborted) break;
+      const cache = d.config.caches.find((c) => c.name === f.npm)!;
+      const r = await d.host.fetch(id, 'npm', cache.name, cacheKey(d.repo, req.sha, cache.key), SETUP_TIMEOUT_S * 1000, o.signal);
+      mkdirSync(join(d.logDir, id), { recursive: true, mode: 0o700 });
+      writeFileSync(join(d.logDir, id, `fetch-${i + 1}.log`), r.out, { mode: 0o600 });
+      if (r.code !== 0) {
+        fetchFailed = true;
+        const step = `fetch ${i + 1} (npm, into the ${cache.name} cache)`;
+        const why = r.timedOut ? timedOutLine(step, SETUP_TIMEOUT_S, 'the setup steps\' cap') : `${step} failed (exit ${r.code ?? 'killed'})`;
+        setup = { step, detail: r.timedOut ? `timed out after ${SETUP_TIMEOUT_S / 60} min` : `exit ${r.code ?? 'killed'}`, stderr: tail(r.err ?? '') };
+        failAll(`${why}:\n${tail(r.out)}`);
+        break;
+      }
+    }
     let db: RunDatabase | null = null;
     stage = 'db-start';
-    if (d.config.database && tiers.some((t) => t.database)) db = await d.host.startDb(id, { image: d.config.database.image, name: d.config.database.name, readyS: d.config.database.ready_timeout_s, maxConnections: d.config.database.max_connections });
+    if (!fetchFailed && d.config.database && tiers.some((t) => t.database)) db = await d.host.startDb(id, { image: d.config.database.image, name: d.config.database.name, readyS: d.config.database.ready_timeout_s, maxConnections: d.config.database.max_connections });
     const baseEnv = runEnv(d.config.env, caches, null);
     const dbEnv = runEnv(d.config.env, caches, db);
     mkdirSync(join(d.logDir, id), { recursive: true, mode: 0o700 });
-    let setupFailed = false;
+    let setupFailed = fetchFailed;
     stage = 'setup';
     for (const [i, step] of d.config.setup.entries()) {
-      if (o.signal?.aborted) break;
-      const r = await d.host.exec(id, step, baseEnv, SETUP_TIMEOUT_S * 1000, o.signal);
+      if (setupFailed || o.signal?.aborted) break;
+      const r = await d.host.exec(id, step, baseEnv, SETUP_TIMEOUT_S * 1000, o.signal, d.config.setup_network ? { network: SETUP_TIER } : {});
       writeFileSync(join(d.logDir, id, `setup-${i + 1}.log`), r.out, { mode: 0o600 });
       if (r.code !== 0) {
         setupFailed = true;
         const why = r.timedOut ? timedOutLine(`setup step ${i + 1} (${step})`, SETUP_TIMEOUT_S, 'the setup steps\' cap') : `setup step ${i + 1} (${step}) failed (exit ${r.code ?? 'killed'})`;
+        // A setup step that asked for the network and wasn't granted it: the check says so, and how root grants it.
+        const net = d.config.setup_network ? networkRecord(true, r.network ?? null) : null;
+        const netLine = net && net.network === 'none' ? `${networkSummaryLine(net, d.instance ?? '<name>', SETUP_TIER)}\n` : '';
         setup = { step: `setup step ${i + 1} (${step})`, detail: r.timedOut ? `timed out after ${SETUP_TIMEOUT_S / 60} min` : `exit ${r.code ?? 'killed'}`, stderr: tail(r.err ?? '') };
-        failAll(`${why}:\n${tail(r.out)}`);
+        failAll(`${netLine}${why}:\n${tail(r.out)}`);
         break;
       }
     }
@@ -309,7 +336,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
         continue;
       }
       const start = now();
-      const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal, t.gpu ? { gpu: true } : {});
+      const r = await d.host.exec(id, command, t.database ? dbEnv : baseEnv, t.timeout_s * 1000, o.signal, { ...(t.gpu ? { gpu: true } : {}), ...(t.network ? { network: t.name } : {}) });
       const logRef = `${id}/${t.name}.log`;
       writeFileSync(join(d.logDir, logRef), r.out, { mode: 0o600 });
       const gpu = gpuRecord(t.gpu, r.gpu ?? null);
@@ -319,12 +346,13 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const g = r.gpu?.granted ? r.gpu : null;
       const cap = g && g.maxS + g.waitedS < t.timeout_s ? timedOutLine(`tier ${t.name}`, g.maxS, `the GPU runs' max_minutes in root's testrun-gpu.json, after ${g.waitedS} s waiting for the GPU`) : timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run');
       const out = r.timedOut ? `${cap}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
-      const said = [...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : [])];
-      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: said.length ? `${said.join('\n')}\n${out}` : out, logRef, ...(gpu ? { gpu } : {}) };
+      const net = networkRecord(t.network, r.network ?? null);
+      const said = [...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : []), ...(t.network ? [networkSummaryLine(net, d.instance ?? '<name>', t.name)] : [])];
+      const tr: TierResult = { tier: t.name, ok: r.code === 0, durationMs: Math.max(0, now() - start), summary: said.length ? `${said.join('\n')}\n${out}` : out, logRef, ...(gpu ? { gpu } : {}), network: net.network };
       const old = behind && !tr.ok ? oldHeadFailure(command, r.code, r.out) : null;
       if (behind && old) tr.predates = { configCommit: behind, what: old, notRun: false };
       results.push(tr);
-      emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null, ...(gpu ? { gpu } : {}) });
+      emit('testrun.tier', { id, tier: t.name, ok: tr.ok, duration_ms: tr.durationMs, summary: tr.summary.slice(0, 2000), log_ref: logRef, cpu_s: r.stats?.cpuS ?? null, mem_peak_mb: r.stats?.memPeakMb ?? null, ...(gpu ? { gpu } : {}), network: net.network });
       // Its per-test durations, for the metrics' slow tests (src/test-durations.ts): names and times only, never output.
       const durations = recordable(r.out);
       emit('testrun.durations', { id, tier: t.name, tests: durations.tests, parsed: durations.parsed });
@@ -368,6 +396,7 @@ export function mergeShards(results: readonly TestRunResult[]): TestRunResult {
     logRef: ts.map((t) => t.logRef).filter(Boolean).join(' '),
     ...(ts.find((t) => t.predates) ? { predates: ts.find((t) => t.predates)!.predates! } : {}),
     ...(ts.find((t) => t.gpu) ? { gpu: ts.find((t) => t.gpu)!.gpu! } : {}),
+    ...(ts.find((t) => t.network) ? { network: ts.some((t) => t.network === 'granted') ? ('granted' as const) : ('none' as const) } : {}),
   }));
   // Any shard without a verdict leaves the whole run without one.
   const outcome = results.find((r) => r.outcome !== 'done')?.outcome ?? 'done';

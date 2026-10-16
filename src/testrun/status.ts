@@ -3,6 +3,7 @@
 // For health and the dashboard; viewers get viewerTestRuns, tier pass or fail only.
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { gpuCommands, type GpuOptIn } from './gpu.js';
+import { networkCommands, type NetworkPolicy } from './network.js';
 
 /**
  * Whether this instance's test runs came up, as its coordinator last said at a start (./setup.ts): the newest of its
@@ -169,6 +170,8 @@ export interface TestRunsViewInput {
   lock: { path: string; holders: { pid: number; mode: 'shared' | 'exclusive' }[] | null };
   /** Root's GPU opt-in for this instance (./gpu.ts gpuOptIn), read-only here; absent: not shown. */
   gpu?: GpuOptIn;
+  /** Root's network grants for this instance (./network.ts networkPolicy), read-only here; absent: not shown. */
+  network?: NetworkPolicy;
   /** The instance, for the root commands shown with the opt-in. */
   instance?: string;
 }
@@ -177,6 +180,12 @@ export interface TestRunsViewInput {
 export function gpuView(o: GpuOptIn, instance: string) {
   const c = gpuCommands(instance);
   return o.state === 'on' ? { state: 'on' as const, devices: o.devices, maxMinutes: o.maxMinutes, change: c.disable, status: c.status } : { state: o.state, why: o.why, change: c.enable, status: c.status };
+}
+
+/** Root's network grants as the Machine page shows them: read-only, with the root commands that change them. */
+export function networkView(p: NetworkPolicy, instance: string) {
+  const c = networkCommands(instance);
+  return p.state === 'on' ? { state: 'on' as const, tiers: p.tiers, change: c.disable, status: c.status } : { state: p.state, why: p.why, change: c.enable, status: c.status };
 }
 
 /**
@@ -201,5 +210,6 @@ export function testRunsView(i: TestRunsViewInput) {
     checksPermission: s.checksPermission,
     problems: s.problems,
     ...(i.gpu ? { gpu: gpuView(i.gpu, i.instance ?? '<name>') } : {}),
+    ...(i.network ? { network: networkView(i.network, i.instance ?? '<name>') } : {}),
   };
 }

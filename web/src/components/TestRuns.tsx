@@ -31,6 +31,8 @@ export interface TestRunRowData {
 }
 /** Root's GPU opt-in for this instance (src/testrun/status.ts gpuView): read-only; `change` is the root command. */
 export type TestRunsGpu = { state: 'on'; devices: number[]; maxMinutes: number; change: string; status: string } | { state: 'off' | 'unknown'; why: string; change: string; status: string };
+/** Root's network grants for this instance (src/testrun/status.ts networkView): read-only; `change` is the root command. */
+export type TestRunsNetwork = { state: 'on'; tiers: string[]; change: string; status: string } | { state: 'off' | 'unknown'; why: string; change: string; status: string };
 export interface TestRunsData {
   configured: boolean;
   viewer: boolean;
@@ -44,6 +46,7 @@ export interface TestRunsData {
   tierStats?: { tier: string; runs: number; medianMs: number; peakMemMb: number | null; maxCpuS: number | null }[];
   problems?: string[];
   gpu?: TestRunsGpu;
+  network?: TestRunsNetwork;
 }
 
 const STATE_TONE: Record<TestRunRowData['state'], 'green' | 'red' | 'orange' | 'ink'> = { queued: 'ink', running: 'orange', passed: 'green', failed: 'red', cancelled: 'ink', interrupted: 'red' };
@@ -78,6 +81,20 @@ function GpuOptIn({ gpu }: { gpu: TestRunsGpu }) {
       <span>. Only root changes it: </span>
       <code className="font-mono text-[11.5px] text-ink-2" data-testid="test-runs-gpu-command">
         {gpu.change}
+      </code>
+    </div>
+  );
+}
+
+/** Root's network grants, read-only: a run has none unless root lists its tier (docs/test-runs.md "Network"). */
+function NetworkGrants({ network }: { network: TestRunsNetwork }) {
+  return (
+    <div className="text-[12px] text-ink-3" data-testid="test-runs-network" data-state={network.state}>
+      <span className="text-ink-2">Network for test runs: </span>
+      {network.state === 'on' ? `none, except tiers ${network.tiers.join(', ')} (public addresses only)` : `none for every tier${network.state === 'unknown' ? ` (root's grants can't be read: ${network.why})` : ''}`}
+      <span>. Only root changes it: </span>
+      <code className="font-mono text-[11.5px] text-ink-2" data-testid="test-runs-network-command">
+        {network.change}
       </code>
     </div>
   );
@@ -136,6 +153,7 @@ export function TestRunsView({ data, compact = false }: { data: TestRunsData; co
         </span>
       </div>
       {!compact && data.gpu ? <GpuOptIn gpu={data.gpu} /> : null}
+      {!compact && data.network ? <NetworkGrants network={data.network} /> : null}
       {data.problems?.map((p) => (
         <div key={p} className="rounded-control bg-[var(--red-tint)] px-2.5 py-2 text-[12.5px] text-ink" data-testid="test-runs-problem">
           {p}

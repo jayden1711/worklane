@@ -78,15 +78,21 @@ test('regression: instance aa\'s wipe of run b or b-1 never stops instance aa-b\
     [`${c}-test-aa-b-1-101.service`]: 'wl-test-aa',
     [`${c}-test-aa_b_300.service`]: 'wl-test-aa',
     [`${c}-test-aa_b-2_301.service`]: 'wl-test-aa',
+    // Run b's fetch (docs/test-runs.md "Network"), and one of aa-b's run 1 named the same way.
+    [`${c}-test-aa_b_fetch_302.service`]: 'wl-test-aa',
+    [`${c}-test-aa-b_1_fetch_102.service`]: 'wl-test-aa-b',
+    // Run b's network (slirp4netns, root's: no User=), and aa-b's run 1's.
+    [`${c}-test-aa_b_net_303.service`]: '',
+    [`${c}-test-aa-b_1_net_103.service`]: '',
   };
   const h = helperAs('aa', units);
   try {
     const b = h.run('wipe', 'b');
     assert.equal(b.status, 0, b.stderr);
-    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`], 'wipe b: run b\'s own unit only');
+    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`, `${c}-test-aa_b_net_303.service`], 'wipe b: run b\'s own units only (its command\'s, its fetch\'s and its network\'s)');
     const b1 = h.run('wipe', 'b-1');
     assert.equal(b1.status, 0, b1.stderr);
-    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa-b-1-101.service`], 'wipe b-1: the old-named unit that is aa\'s, never aa-b\'s of the same shape');
+    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_fetch_302.service`, `${c}-test-aa_b_net_303.service`, `${c}-test-aa-b-1-101.service`], 'wipe b-1: the old-named unit that is aa\'s, never aa-b\'s of the same shape');
   } finally {
     h.done();
   }
@@ -96,6 +102,7 @@ test('exec names its unit <cli>-test-<name>_<id>_<pid>, the name wipe looks for;
   const src = readFileSync(helperSrc, 'utf8');
   assert.match(src, /^run_unit\(\) \{ printf '[a-z]+-test-%s_%s_%s' "\$name" "\$1" "\$2"; \}$/m);
   assert.match(src, /^ {2}unit="\$\(run_unit "\$id" "\$\$"\)"$/m);
+  assert.match(src, /^ {2}unit="\$\(run_unit "\$id" "fetch_\$\$"\)"$/m, 'the fetch\'s unit too');
   for (const unit of [`${BRAND.cli}-test-aa-b_fast-abc-1_4243.service`, `${BRAND.cli}-test-aa-b-fast-abc-1-4243.service`]) {
     const line = `Running as unit: ${unit}\n`;
     const s = systemdRunStats(`${line}the run's own\n`);

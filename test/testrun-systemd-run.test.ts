@@ -144,13 +144,13 @@ test('the sandbox host reads what the helper prints for it from stdout, whatever
   const dir = mkdtempSync(join(tmpdir(), 'tr-sdrun-'));
   try {
     // git's and the helper's messages are on stderr, and may arrive after the answer on stdout.
-    const sudo = fakeSudo(dir, `cat >/dev/null; case "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; *) echo /runs/x/work ;; esac; sleep 0.3; echo "warning: a message on stderr" >&2\n`);
+    const sudo = fakeSudo(dir, `cat >/dev/null; case "$2" in db-start) echo "/var/lib/wlt/0123abcd/pg ${'b'.repeat(32)}" ;; *) echo /runs/x/work ;; esac; sleep 0.3; echo "warning: a message on stderr" >&2\n`);
     const host = sandboxHost('shop', join(dir, 'helper'), sudo);
     assert.equal(await host.cache('npm', 'a'.repeat(16)), '/runs/x/work');
     assert.equal(await host.shared('ports'), '/runs/x/work');
     assert.equal(await host.changedFiles('fast-abc-1', ['a.ts']), '/runs/x/work');
     const db = await host.startDb('fast-abc-1', { image: `postgres:16@sha256:${'a'.repeat(64)}`, name: 'test', readyS: 5, maxConnections: 200 });
-    assert.equal(db.port, 45678);
+    assert.equal(db.socketDir, '/var/lib/wlt/0123abcd/pg');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

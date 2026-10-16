@@ -372,11 +372,12 @@ test('isolation: two runs at once get their own database, by a unique name and a
   assert.deepEqual(seen.map((s) => new URL(s.out).port), dbs.map((d) => String(d.port)), 'each run sees its own database in DATABASE_URL');
   assert.notEqual(new URL(seen[0]!.out).password, new URL(seen[1]!.out).password, 'and its own password');
   for (const id of ids) await wipeWorkspace(host, id);
-  // The sandbox helper starts it the same way: loopback, no fixed host port, a name with the run's id.
+  // The sandbox helper starts it with a name with the run's id, and no network at all: its socket alone, in the run's
+  // own TMPDIR, never a port (docs/test-runs.md "Network").
   const helper = readFileSync(helperSrc, 'utf8');
   assert.match(helper, /c="worklane-test-\$name-\$id"/);
-  assert.match(helper, /-p 127\.0\.0\.1::5432 /);
-  assert.doesNotMatch(helper, /-p [0-9.]*:\d+:5432/);
+  assert.match(helper, / --network none -v "\$pgdir:\/var\/run\/postgresql" /);
+  assert.doesNotMatch(helper, / -p [0-9.]*:\d*:5432/);
   rmSync(base, { recursive: true, force: true });
 });
 
@@ -411,7 +412,7 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   const dir = mkdtempSync(join(tmpdir(), 'tr-helper-'));
   const log = join(dir, 'calls');
   const helper = join(dir, 'helper');
-  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "45678 ${'b'.repeat(32)}" ;; wipe) echo wiped ;; store-tips) printf '%s\\nnot-a-sha\\n%s\\n' ${'c'.repeat(40)} ${'d'.repeat(64)} ;; create) cat > /dev/null; echo /runs/x/work ;; exec) cat > "${log}.exec-stdin"; echo /runs/x/work ;; *) echo /runs/x/work ;; esac\n`);
+  writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\ncase "$2" in db-start) echo "/var/lib/wlt/0123abcd/pg ${'b'.repeat(32)}" ;; wipe) echo wiped ;; store-tips) printf '%s\\nnot-a-sha\\n%s\\n' ${'c'.repeat(40)} ${'d'.repeat(64)} ;; create) cat > /dev/null; echo /runs/x/work ;; exec) cat > "${log}.exec-stdin"; echo /runs/x/work ;; *) echo /runs/x/work ;; esac\n`);
   chmodSync(helper, 0o755);
   const sudo = join(dir, 'sudo');
   writeFileSync(sudo, '#!/bin/sh\n[ "$1" = -n ] || exit 9\nshift\nexec "$@"\n');
@@ -419,7 +420,7 @@ test('the sandbox host calls the helper with sudo -n for its own instance, and p
   const host = sandboxHost('shop', helper, sudo);
   assert.throws(() => sandboxHost('Shop;x'), /not an instance name/);
   const db = await host.startDb('fast-abc-1', { image: pin, name: 'test', readyS: 5, maxConnections: 250 });
-  assert.deepEqual(db, { url: `postgres://postgres:${'b'.repeat(32)}@127.0.0.1:45678/test`, port: 45678, container: 'worklane-test-shop-fast-abc-1' });
+  assert.deepEqual(db, { url: `postgres://postgres:${'b'.repeat(32)}@localhost/test?host=/var/lib/wlt/0123abcd/pg`, socketDir: '/var/lib/wlt/0123abcd/pg', container: 'worklane-test-shop-fast-abc-1' });
   await host.exec('fast-abc-1', 'npm test', { DATABASE_URL: db.url }, 60_000);
   assert.deepEqual(await host.wipe('fast-abc-1'), { ok: true, left: [] });
   await assert.rejects(host.startDb('fast-abc-1', { image: 'postgres:16', name: 'test', readyS: 5, maxConnections: 200 }), /pinned to its digest/);
@@ -868,9 +869,11 @@ test('regression: the helper starts the run\'s Postgres with -c max_connections=
   try {
     const r = h.dbStart('250');
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^45678 [0-9a-f]{32}$/m);
+    assert.match(r.stdout, /^\/\S*\/pg [0-9a-f]{32}$/m);
     const run = h.calls().find((c) => c.startsWith('run '));
     assert.ok(run, h.calls().join('\n'));
+    assert.match(run, / --network none -v \S+\/pg:\/var\/run\/postgresql /, 'no network: its socket alone');
+    assert.doesNotMatch(run, / -p /);
     assert.ok(run.endsWith(` ${pin} -c max_connections=250`), run);
   } finally {
     h.done();
