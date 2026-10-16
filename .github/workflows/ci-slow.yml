@@ -2476,7 +2476,8 @@ jobs:
             sudo jq -c '.instances.ci' /etc/worklane/testrun-network.json
             sudo jq -c '[.active.ci, .failover.instances.ci, .profiles["ci-shared"].users["wl-ci-agent"]]' /var/lib/worklane/claude-account/profiles.json
             sudo jq -c '[.users[] | select(.instance=="ci")]' /var/lib/worklane/claude-account/status.json
-            sudo jq -c '[.incidents[] | select(.id=="ciciok01")]' /var/lib/worklane/agent-slots/incidents.json
+            # ci's own watchdog may resolve it meanwhile: the record itself, never touched by delta's removal.
+            sudo jq -c '[.incidents[] | select(.id=="ciciok01") | {id, kind, key, instance}]' /var/lib/worklane/agent-slots/incidents.json
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
@@ -2610,7 +2611,8 @@ jobs:
             sudo jq -c '.instances.ci' /etc/worklane/testrun-network.json
             sudo jq -c '[.active.ci, .failover.instances.ci, .profiles["ci-shared"].users["wl-ci-agent"]]' /var/lib/worklane/claude-account/profiles.json
             sudo jq -c '[.users[] | select(.instance=="ci")]' /var/lib/worklane/claude-account/status.json
-            sudo jq -c '[.incidents[] | select(.id=="ciciok01")]' /var/lib/worklane/agent-slots/incidents.json
+            # ci's own watchdog may resolve it meanwhile: the record itself, never touched by delta's removal.
+            sudo jq -c '[.incidents[] | select(.id=="ciciok01") | {id, kind, key, instance}]' /var/lib/worklane/agent-slots/incidents.json
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
