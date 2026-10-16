@@ -1,4 +1,6 @@
 // What the coordinator's parts share: its dependencies, constants and module-level helpers.
+import type { AutomationsPolicy } from '../automations/schema.js';
+import type { Get } from '../automations/github.js';
 import type { IncidentSink } from '../usage-limit.js';
 import { spawn } from 'node:child_process';
 import type { Config, ConfigError } from '../config/load.js';
@@ -157,6 +159,11 @@ export interface CoordinatorDeps {
   deployGate?: DeployGate;
   /** docs/previews.md: PR previews; absent, off. */
   previews?: Previews;
+  /**
+   * Automations (src/coordinator/automations.ts): the instance's automations.yaml, its policy's automations part (read
+   * every pass), and a GET for GitHub's listings (absent: no GitHub triggers). Absent: no automations (a checkout).
+   */
+  automations?: { file: string; policy: () => AutomationsPolicy; github?: Get };
 }
 
 /** The default for tests.yaml command_timeout_s (2 hours), for a command run without the config. */
