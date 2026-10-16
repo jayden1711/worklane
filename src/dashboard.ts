@@ -9,6 +9,7 @@
 // See dashboard-auth.ts.
 import { applyChange, ACTIONS as AUTOMATION_ACTIONS, AutomationsError, loadAutomations, mayDo, planChange, type AutomationAction, type ChangeRequest } from './automations/store.js';
 import { automationsView } from './automations/view.js';
+import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
@@ -998,6 +999,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
   const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
   const siriLimits = new RateLimits();
+  // Webhook automations (src/automations/webhook.ts): the instance's own hooks gateway token, for the hub's hooks
+  // gateway only; never the dashboard's or Siri's token.
+  const hooksToken = opts.instance && opts.automationsFile ? hooksGatewayToken(opts.stateDir, [token, ...(siriToken ? [siriToken] : [])]) : null;
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -1232,10 +1236,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, siriToken ? [token, siriToken] : [token])) return;
+    if (refuseKeyInUrl(url, res, [token, ...(siriToken ? [siriToken] : []), ...(hooksToken ? [hooksToken] : [])])) return;
     try {
       // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
       // gateway token works there, and nothing under /api/siri falls through to any other route.
+      // A webhook delivery (src/automations/webhook.ts), before and instead of the dashboard's own auth: only the hooks
+      // gateway token works there, and nothing under /api/hooks falls through to any other route.
+      if (url.pathname === '/api/hooks' || url.pathname.startsWith('/api/hooks/')) {
+        if (!hooksToken || !opts.automationsFile) return json(res, 404, { error: 'not found' });
+        return void (await handleHook(req, res, url, { stateDir: opts.stateDir, home: dirname(opts.automationsFile), automationsFile: opts.automationsFile, eventsDb: opts.eventsDb, gatewayToken: hooksToken, instance: opts.instance ?? '' }));
+      }
       if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
         if (!siriToken) return json(res, 404, { error: 'not found' });
         return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
@@ -1615,7 +1625,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/automations' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('automations are', who) });
           if (!opts.automationsFile) return json(res, 200, { unavailable: "automations are a server instance's: this dashboard serves a checkout" });
-          return json(res, 200, automationsView({ loaded: loadAutomations(opts.automationsFile), limits: automationLimitsHere(), events: eventCache.all(), role: who.role, now: new Date() }));
+          return json(res, 200, automationsView({ loaded: loadAutomations(opts.automationsFile), limits: automationLimitsHere(), events: eventCache.all(), role: who.role, now: new Date(), ...(opts.instance ? { hooks: { stateDir: opts.stateDir, home: dirname(opts.automationsFile), instance: opts.instance } } : {}) }));
         }
         if (url.pathname === '/api/automations' && req.method === 'POST') {
           const body = ((await readBody(req)) ?? {}) as { action?: unknown; id?: unknown; automation?: unknown; digest?: unknown; confirm?: unknown };
@@ -1626,7 +1636,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!opts.automationsFile) return refused(400, "automations are a server instance's: this dashboard serves a checkout");
           if (!(AUTOMATION_ACTIONS as readonly string[]).includes(action)) return refused(400, `no action ${action.slice(0, 20)}`);
-          if (!mayDo(action, who.role)) return refused(403, `only the instance's owners (admin on ${repo}) may ${action} an automation${action === 'pause' || action === 'run' ? '' : '; writers may pause one or run it now'}; @${who.login} is a ${who.role}`);
+          if (!mayDo(action, who.role)) return refused(403, `only the instance's owners (admin on ${repo}) may ${action === 'rotate' ? 'rotate the secret of' : action === 'unbind' ? 'unbind' : action} an automation; writers may pause one or run it now; @${who.login} is a ${who.role}`);
           const req2: ChangeRequest = { action, ...(typeof body.id === 'string' ? { id: body.id } : {}), ...(body.automation !== undefined ? { automation: body.automation } : {}) };
           try {
             if (body.confirm !== true) {
@@ -1636,12 +1646,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const log = new EventLog(opts.eventsDb);
             let plan;
             try {
-              plan = applyChange({ path: opts.automationsFile, req: req2, digest: String(body.digest ?? ''), by: who.login, role: who.role, log });
+              plan = applyChange({ path: opts.automationsFile, req: req2, digest: String(body.digest ?? ''), by: who.login, role: who.role, log, stateDir: opts.stateDir });
             } finally {
               log.close();
             }
             audit(who, `automation.${plan.action}`, { id: plan.id, changes: plan.changes });
-            return json(res, 200, { ok: true, confirmed: true, action: plan.action, id: plan.id, changes: plan.changes, summary: plan.summary });
+            // INVARIANT: a webhook's secret is in this answer only, once; never audited or logged.
+            return json(res, 200, { ok: true, confirmed: true, action: plan.action, id: plan.id, changes: plan.changes, summary: plan.summary, ...(plan.secret ? { secret: plan.secret, path: `/hook/${opts.instance}/${plan.id}` } : {}) });
           } catch (e) {
             if (e instanceof AutomationsError) return refused(400, e.message);
             throw e;

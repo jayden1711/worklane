@@ -582,7 +582,7 @@ export abstract class CoordinatorBase {
     return (c?.payload as { owner?: string } | undefined)?.owner ?? this.d.cfg.project.owners.default;
   }
 
-  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[], context?: DecisionContext): Promise<string> {
+  protected async ask(kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'automation', issue: number | null, owner: string, question: string, options: string[], recommended: string, detail: string[], context?: DecisionContext): Promise<string> {
     const id = `d-${issue ?? kind}-${randomBytes(3).toString('hex')}`;
     // The recommendation is one of the options or nothing: prose (an agent's reasoning) moves into the detail.
     const { recommendation, receipts } = settleRecommendation(options, recommended, detail);
