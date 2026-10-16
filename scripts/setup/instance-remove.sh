@@ -30,17 +30,21 @@
 # Not here: its GitHub App and its repo. They are GitHub's: it prints what to do there, and changes nothing on GitHub.
 source "$(dirname "$0")/lib.sh"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: instance-remove.sh <name> [--print | --yes]"
-name="" print="" yes=""
-for a in "$@"; do
-  case "$a" in
-    --print) print=1 ;;
-    --yes) yes=1 ;;
+usage="usage: instance-remove.sh <name> [--print | --yes [--exported <bundle>]]"
+name="" print="" yes="" exported=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print) print=1; shift ;;
+    --yes) yes=1; shift ;;
+    # instance-rename.sh --abort's: the history is in this bundle already (the old name's export, which the new name
+    # only copied). One of the archive's own: root's 0600, a regular file there.
+    --exported) exported="${2:-}"; shift 2 || { echo "$usage" >&2; exit 2; } ;;
     -*) echo "$usage" >&2; exit 2 ;;
-    *) [ -z "$name" ] || { echo "$usage" >&2; exit 2; }; name="$a" ;;
+    *) [ -z "$name" ] || { echo "$usage" >&2; exit 2; }; name="$1"; shift ;;
   esac
 done
-[ -n "$name" ] && { [ -z "$print" ] || [ -z "$yes" ]; } || { echo "$usage" >&2; exit 2; }
+[ -n "$name" ] && { [ -z "$print" ] || [ -z "$yes" ]; } && { [ -z "$exported" ] || [ -n "$yes" ]; } || { echo "$usage" >&2; exit 2; }
+[ -z "$exported" ] || [[ "$exported" =~ ^/var/lib/worklane/removed/[a-z][a-z0-9-]{0,20}-[0-9]{8}T[0-9]{6}Z\.bundle$ ]] || { echo "--exported: a bundle in /var/lib/worklane/removed" >&2; exit 2; }
 # The instance-name rules (lib.sh instance_name_problem). One exception: an instance made before those rules, under
 # a name they now refuse, is still there to remove; then only the shape every name has had is needed, and its users
 # must be its own (the overlap check below).
@@ -99,7 +103,7 @@ show_plan() {
   echo "instance $name: what $([ -n "$print" ] && echo would go || echo goes)"
   if [ -n "$state_dir" ] && [ -d "$state_dir" ]; then echo "  export   $state_dir (its history) -> $ARCHIVE/$name-<time>.bundle, root's 0600"; fi
   for line in "${ITEMS[@]}"; do
-    IFS=$'\t' read -r k w when <<<"$line"
+    IFS=$'\t' read -r k w when _ <<<"$line"
     exists "$k" "$w" "$when" || continue
     n=$((n + 1))
     case "$k" in
@@ -166,7 +170,11 @@ fi
 install -d -o root -g root -m 0700 "$ARCHIVE"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 bundle="" exp_kept="" kept="$ARCHIVE/$name-$stamp.records.json"
-if [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
+if [ -n "$exported" ]; then
+  [ -f "$exported" ] && [ ! -L "$exported" ] && [ "$(stat -c '%u %a' "$exported")" = "0 600" ] || refuse "--exported $exported: not a root-owned 0600 bundle; nothing removed"
+  bundle="$exported"
+  echo "$name's history is in $bundle already: not exported again"
+elif [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
   say "export $name's history"
   [ -x "$ENGINE_CLI" ] || refuse "no $ENGINE_CLI to export with: install the engine (engine.sh), then run this again"
   # Its Siri device tokens revoked first, as its coordinator: none works again, and the export records it.
@@ -210,7 +218,7 @@ done
 
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
 for line in "${ITEMS[@]}"; do
-  IFS=$'\t' read -r k w when <<<"$line"
+  IFS=$'\t' read -r k w when _ <<<"$line"
   case "$k" in
     via)
       exists via "$w" "$when" || continue
