@@ -2719,7 +2719,7 @@ jobs:
           findmnt -rn -o TARGET | grep -qx "$state"
           set +e; sudo bash scripts/setup/instance-rename.sh ci kilo --yes > "$F/rn4.out" 2> "$F/rn4.err"; rc=$?; set -e
           cat "$F/rn4.err"
-          [ "$rc" = 1 ] && grep -qF "a filesystem is mounted at $state, inside what the removal of ci takes: unmount it first" "$F/rn4.err"
+          [ "$rc" = 1 ] && grep -qF "a filesystem is mounted at $state, inside what the removal of ci takes, and it is not one the engine made: unmount it first" "$F/rn4.err"
           if id wl-kilo 2>/dev/null || sudo test -e /var/lib/worklane/renames/ci-to-kilo; then echo "the refused rename changed something" >&2; exit 1; fi
           # Its state back on the home's filesystem, as it was.
           t="$(mktemp -d)"; sudo cp -a "$state/." "$t/"; sudo umount "$state"; sudo cp -a "$t/." "$state/"; sudo rm -rf "$t"
