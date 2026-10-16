@@ -66,10 +66,10 @@ UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
 NoNewPrivileges=yes
+# Not ProtectKernelTunables or ProtectControlGroups: their read-only mounts over /proc/sys and /sys/fs/cgroup stop
+# bubblewrap (the servers' sandbox) mounting a fresh /proc inside its own namespace.
 Restart=on-failure
 RestartSec=5
 

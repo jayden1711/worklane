@@ -201,11 +201,17 @@ export class Broker {
       secrets[n] = v;
     }
     const child = this.d.launch(r, secrets, sessionId);
+    // The server's stderr, for the broker's own log (the journal) only, with its secrets taken out: never the agent's.
+    let stderr = '';
+    child.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
     let up: Upstream;
     try {
       up = await connectUpstream(child, { clientName: 'broker', timeoutMs: 30_000 });
     } catch (e) {
       child.kill('SIGKILL');
+      let tail = stderr.trim().split('\n').slice(-8).join(' | ');
+      for (const v of Object.values(secrets)) if (v.length >= 4) tail = tail.split(v).join('[redacted]');
+      this.log(`${r.id} (session ${sessionId}) didn't start: ${(e as Error).message}${tail ? `; its stderr: ${tail}` : ''}`);
       throw new Error(`${r.id} didn't start as an MCP server: ${(e as Error).message}`);
     }
     if (snapshotHash(up.snapshot) !== r.snapshotHash) {
