@@ -1626,13 +1626,23 @@ export interface ChatAnswer {
   refusedActions: string[];
   readOnly: boolean;
   costUsd: number;
+  /** What it ran on, and its conversation's spend after it against the cap (src/chat-pick.ts). */
+  model?: string;
+  effort?: ChatEffort;
+  conversation?: { id: string; spentUsd: number; capUsd: number };
 }
+export type ChatEffort = 'low' | 'medium' | 'high';
+/** The chat's model and effort choice: unset fields run on routing's default and the CLI's default effort. */
+export interface ChatPick { model?: string; effort?: ChatEffort }
+/** What this person may pick on an instance (src/chat-pick.ts chatPickerView): a viewer gets canPick false and no models. */
+export interface ChatPickerOptions { canPick: boolean; models: string[]; efforts: ChatEffort[]; defaultModel: string; capUsd: number }
 export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean; filed: { number: number } | null } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
 
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
+export const chatPickerOptions = (instance: string | null) => chatCall<ChatPickerOptions>(instance, '/api/chat/options');
 
 /** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
 export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
@@ -1684,7 +1694,7 @@ export const getConversation = (instance: string | null, id: string) => chatCall
 export const renameConversation = (instance: string | null, id: string, title: string) => chatCall<{ conversation: Conversation }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) });
 export const deleteConversation = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'DELETE' });
 /** The message goes in the body, never the URL; `key` makes a retried send the same turn. */
-export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}) }) });
+export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
 export const fileConversationDraft = (instance: string | null, id: string, turn: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/conversations/${enc(id)}/turns/${enc(turn)}/file-issue`, { method: 'POST', body: '{}' });
 export const listProjects = (instance: string | null, cursor?: string | null) => chatCall<Paged<ProjectItem>>(instance, `/api/chat/projects${cursor ? `?cursor=${enc(cursor)}` : ''}`);
 export const getProject = (instance: string | null, id: string) => chatCall<{ project: ChatProject }>(instance, `/api/chat/projects/${enc(id)}`);
