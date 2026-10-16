@@ -5,6 +5,9 @@
 // A feature that adds a per-instance root record adds it here, with how it goes, and instance-remove.sh removes it.
 //
 //   node instance-records.cjs items <name>              every item, one a line: <kind> <what> (exists or not)
+//   node instance-records.cjs engine-places x           the engine's own places a removal re-owns orphaned files in
+//   node instance-records.cjs hold-slot x <pid> <name>   an agent slot held for <pid>: the updater waits (prints its path)
+//   node instance-records.cjs release-slot x <path> <pid>
 //   node instance-records.cjs plan <name>               the shared files' records <name> has, one a line (changes nothing)
 //   node instance-records.cjs remove <name> <archive>   take <name>'s records out of the shared files, keeping what was
 //                                                       taken in <archive> (root's, 0600) first
@@ -32,12 +35,14 @@ const NAME = /^[a-z][a-z0-9-]{0,20}$/;
 const ITEMS = [
   { kind: 'via', what: 'test-user.sh remove <name>', when: ['user:wl-test-<name>', 'path:/var/lib/worklane-test/<name>', 'unit:worklane-test-<name>-docker.service', 'sudoers:worklane-test-<name>'], by: 'test-user.sh install' },
   { kind: 'via', what: 'experiments.sh remove <name>', when: ['user:wl-exp-<name>', 'user:wl-score-<name>', 'path:/var/lib/worklane-exp/<name>', 'path:/etc/worklane/experiments/<name>.json', 'sudoers:worklane-exp-<name>'], by: 'experiments.sh install' },
+  { kind: 'via', what: 'testrun-network.sh disable <name>', when: ['shared:testrun-net'], by: 'testrun-network.sh enable' },
   { kind: 'via', what: 'testrun-gpu.sh disable <name>', when: ['shared:gpu'], by: 'testrun-gpu.sh enable' },
   { kind: 'unit', what: 'worklane-dashboard-<name>.service', by: 'dashboards.sh' },
   { kind: 'unit', what: 'worklane-<name>.service', by: 'service.sh' },
   { kind: 'unit', what: 'worklane-test-<name>-docker.service', by: 'test-user.sh install' },
   { kind: 'unit', what: 'worklane-mcp@<name>.service', by: 'mcp-broker.sh (an instance of the machine-wide template worklane-mcp@.service, which stays)' },
   { kind: 'shared', what: 'gpu', by: 'testrun-gpu.sh enable' },
+  { kind: 'shared', what: 'testrun-net', by: 'testrun-network.sh enable' },
   { kind: 'shared', what: 'claude-profiles', by: 'claude-account.sh profile-add|use|failover' },
   { kind: 'shared', what: 'claude-status', by: 'claude-account.sh status|switch, add-project.sh' },
   { kind: 'shared', what: 'claude-paused', by: 'claude-account.sh switch' },
@@ -77,7 +82,7 @@ const ITEMS = [
 // name found in the code when it is part of an item's `what`, or listed here.
 const NOT_RECORDS = [
   { what: '/run/worklane-test-<name>-docker', why: "the test Docker unit's RuntimeDirectory: systemd removes it with the unit" },
-  { what: 'worklane-test-<name>_', why: "a test run's transient unit since the helper's protocol 9 (worklane-test-<name>_<id>_<pid>): gone when the run ends; a run in flight refuses the removal" },
+  { what: 'worklane-test-<name>_', why: "a test run's transient units since the helper's protocol 9 (worklane-test-<name>_<id>_<pid>, its _fetch_ and _net_ units): gone when the run ends; a run in flight refuses the removal, and the kill step stops any left whose User= is the instance's" },
   { what: 'worklane-test-<name>-', why: "a test run's transient unit (worklane-test-<name>-<id>-<pid>): gone when the run ends; a run in flight refuses the removal" },
   { what: '/.local/state/worklane/instances/<name>', why: "the instance's state, in wl-<name>'s home: exported, then removed with the user" },
   { what: 'worklane-ci-<name>', why: "ci-runner.sh's self-hosted CI runner: a runner's name, not an instance" },
@@ -96,6 +101,7 @@ const NOT_RECORDS = [
 // either it names instances inside (the item that takes an instance's out), or it is the machine's (why).
 const SHARED_FILES = [
   { at: '/etc/worklane/testrun-gpu.json', item: 'gpu' },
+  { at: '/etc/worklane/testrun-network.json', item: 'testrun-net' },
   { at: '/etc/worklane/updates.json', item: 'canary' },
   { at: '/var/lib/worklane/claude-account', item: 'claude-profiles, claude-status, claude-paused (switch.jsonl, profile-ops.jsonl: logs, kept)' },
   { at: '/var/lib/worklane/agent-slots', item: 'incidents, discord-claim-<name>.json (the slot locks name no instance)' },
@@ -135,8 +141,85 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane-build', why: "the updater's build directory: no instance" },
 ];
 
+// The engine's own places, where a removed instance's users may have left a file another instance still uses (the
+// incident store, a slot's lock): instance-remove.sh gives what they own there to root:root, never following a link
+// and never crossing into another mount. Only these: the engine's state and config trees, and in /run/lock (the
+// system's directory) only the engine's own lock files, by name. Anything else they own is listed, never changed.
+const ENGINE_OWNED = { trees: ['/var/lib/worklane', '/etc/worklane'], locks: { dir: '/run/lock', name: 'worklane-*.lock' } };
+
 const ARCHIVE_DIR = '/var/lib/worklane/removed';
+
+// The engine updater waits while the machine isn't quiet: a live agent slot (agent-<n>.lock in the slot directory,
+// its pid alive) is busy to it (scripts/machine/worklane-update.cjs quiet()). instance-remove.sh holds one for its
+// whole run, with its own pid, so no update restarts the services mid-removal; a crashed run's is stale by that same
+// rule (its pid dead). Indexes from 900: never one a coordinator takes (src/slots.ts takes 0-63).
+const SLOTS_DIR = '/var/lib/worklane/agent-slots';
+const HOLD_FROM = 900;
+const HOLD_COUNT = 64;
+
+/** Take an agent slot for <pid>, the src/locks.ts way (a file linked into place; a dead holder's taken over). Returns its path. */
+function holdSlot(pid, owner, dir = SLOTS_DIR) {
+  if (!Number.isInteger(pid) || pid < 2) throw new Error('hold: a pid');
+  fs.mkdirSync(dir, { recursive: true });
+  const info = JSON.stringify({ pid, owner, acquiredAt: new Date().toISOString() });
+  for (let i = HOLD_FROM; i < HOLD_FROM + HOLD_COUNT; i++) {
+    const f = path.join(dir, `agent-${i}.lock`);
+    const tmp = `${f}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, info, { mode: 0o644 });
+    try {
+      fs.linkSync(tmp, f);
+      return f;
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let held = null;
+      try {
+        held = JSON.parse(fs.readFileSync(f, 'utf8'));
+      } catch {
+        // unreadable: another index
+      }
+      if (held && Number.isInteger(held.pid) && !pidAlive(held.pid) && typeof held.owner === 'string' && held.owner.startsWith('instance-remove ')) {
+        // One of ours from a run that died: taken over in place.
+        fs.renameSync(tmp, f);
+        return f;
+      }
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  }
+  throw new Error(`no free agent slot to hold in ${dir}`);
+}
+
+/** Let go of a slot holdSlot took: only while it still holds <pid>. */
+function releaseSlot(f, pid) {
+  try {
+    if (JSON.parse(fs.readFileSync(f, 'utf8')).pid === pid) fs.unlinkSync(f);
+  } catch {
+    // gone already
+  }
+}
+
+/** The updater's own answer: is this machine quiet (it would update) with the slots there are now? */
+function updaterQuiet(dir = SLOTS_DIR) {
+  const upd = require('../machine/worklane-update.cjs');
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // no slots: quiet
+  }
+  const entries = names.map((name) => {
+    let j = {};
+    try {
+      j = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) || {};
+    } catch {
+      // not a slot
+    }
+    return { name, pid: upd.slotPid(j.pid) };
+  });
+  return upd.quiet(entries, (p) => upd.slotPid(p) !== null && pidAlive(p));
+}
 const P = {
+  net: '/etc/worklane/testrun-network.json',
   pluginPending: '/var/lib/worklane/plugins/pending.json',
   gpu: '/etc/worklane/testrun-gpu.json',
   updates: '/etc/worklane/updates.json',
@@ -278,6 +361,15 @@ const SHARED = {
       const j = readJson(at(prefix, P.gpu));
       const v = j && j.instances && Object.prototype.hasOwnProperty.call(j.instances, name) ? j.instances[name] : null;
       return v ? { devices: v.devices } : null;
+    },
+  },
+  'testrun-net': {
+    file: P.net,
+    // Written and changed only by testrun-network.sh (its strict form); instance-remove.sh runs its disable.
+    get: (prefix, name) => {
+      const j = readJson(at(prefix, P.net));
+      const v = j && j.instances && Object.prototype.hasOwnProperty.call(j.instances, name) ? j.instances[name] : null;
+      return v ? { tiers: v.tiers } : null;
     },
   },
   'claude-profiles': {
@@ -476,6 +568,25 @@ function main(argv) {
     process.stderr.write(`${usage}\n`);
     return 2;
   }
+  if (cmd === 'hold-slot') {
+    const f = holdSlot(Number(argv[2]), `instance-remove ${argv[3] || '?'}`);
+    const q = updaterQuiet();
+    if (q.quiet) {
+      releaseSlot(f, Number(argv[2]));
+      throw new Error(`held ${f}, but the updater would still call this machine quiet: nothing removed`);
+    }
+    process.stdout.write(`${f}\n`);
+    return 0;
+  }
+  if (cmd === 'release-slot') {
+    releaseSlot(argv[2], Number(argv[3]));
+    return 0;
+  }
+  if (cmd === 'engine-places') {
+    for (const t of ENGINE_OWNED.trees) process.stdout.write(`tree\t${t}\n`);
+    process.stdout.write(`locks\t${ENGINE_OWNED.locks.dir}\t${ENGINE_OWNED.locks.name}\n`);
+    return 0;
+  }
   if (cmd === 'items') {
     for (const i of items(name)) process.stdout.write(`${i.kind}\t${i.what}${i.when ? `\t${i.when.join(' ')}` : ''}\n`);
     return 0;
@@ -498,7 +609,7 @@ function main(argv) {
   return 2;
 }
 
-module.exports = { ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, ARCHIVE_DIR, items, plan, remove, withLock, writeKeeping };
+module.exports = { holdSlot, releaseSlot, updaterQuiet, ENGINE_OWNED, ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, ARCHIVE_DIR, items, plan, remove, withLock, writeKeeping };
 
 if (require.main === module) {
   try {
