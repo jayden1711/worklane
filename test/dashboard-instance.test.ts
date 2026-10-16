@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { dashboardSite, instancePort, startDashboard } from '../src/dashboard.js';
+import { dashboardSite, siteOptions, instancePort, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { initInstance } from '../src/instance.js';
 import { childEnv } from '../src/os/index.js';
@@ -30,6 +30,9 @@ test('with --instance the dashboard reads and writes that instance\'s log and st
   assert.equal(site.cfg.project.project.repo, 'example-org/example-shop');
   assert.equal(site.port, instancePort('shop'));
   assert.equal(dashboardSite(repo).port, 4317, 'a checkout keeps the usual port');
+  // instance-dashboard-files: the dashboard an instance's service starts gets its automations file (and its intake file).
+  assert.equal(siteOptions(site).automationsFile, join(home, 'automations.yaml'));
+  assert.equal(siteOptions(dashboardSite(repo)).automationsFile, undefined, 'a checkout has none');
 
   const log = new EventLog(site.eventsDb);
   log.append('issue.seen', { issue: 3, title: 'In the instance', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }, 'c');

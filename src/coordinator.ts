@@ -65,7 +65,7 @@ import { browserChecks, changeAt, worktreeBaseline, type BaselineRun } from './c
 import { buildRoute, routeRun, runRoute } from './coordinator/model-routing.js';
 import { builtChangeRefusal } from './coordinator/providers.js';
 import { maybePostDigest } from './coordinator/digest.js';
-import { HarnessEvals } from './coordinator/harness-evals.js';
+import { AutomationRuns } from './coordinator/automations.js';
 import { CASE_WRITER_COST_ROLE, heldOutFor } from './coordinator/held-out.js';
 import { POOL_CHECK_MS, retryAfter, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, pushRefusal } from './coordinator/shared.js';
 import { AUTH_FAILED_CHAT_TEXT } from './claude-auth-failure.js';
@@ -92,7 +92,7 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
 
-export class Coordinator extends HarnessEvals {
+export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
 
   /** One deterministic pass: reconcile, handle approvals, land, dispatch. */
@@ -156,6 +156,7 @@ export class Coordinator extends HarnessEvals {
     await step('checks from feedback', () => this.checkFeedbackChecks(), undefined);
     await step('optimize', () => this.checkOptimize(), undefined);
     await step('harness evals', () => this.checkHarnessEvals(), undefined);
+    await step('automations', () => this.checkAutomations(), undefined);
     await step('learnings', () => this.promoteLearnings(), undefined);
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
@@ -650,7 +651,7 @@ export class Coordinator extends HarnessEvals {
       // The machine's canary (src/canary.ts): its own App's canary issue, on the canary instance only.
       // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
       const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
-      const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
+      const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? this.automationTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
       const contract = parseContract(issue.body);
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
@@ -978,6 +979,9 @@ export class Coordinator extends HarnessEvals {
           this.emit('optimize.result', { issue: n, target: optimizing.target ?? '', head: null, outcome: 'discarded', why, before: optimizing.baseline, after: null, gain: null, pct: null, noise: null });
           return await this.optimizeDiscard(n, why, optimizing.baseline);
         }
+        // An automation's task (src/coordinator/automations.ts): what its budgets have left is a hard stop before every attempt.
+        const auto = this.automationLeft(n);
+        if (auto && auto.usd < 0.1) return await this.block(n, owner, `stopped: ${auto.why}.`);
         // The issue's budget: an incident at 85%, stopped at 100%.
         const budget = this.taskBudget(n);
         if (budget.raised) budgetRaised = true;
@@ -1318,8 +1322,8 @@ export class Coordinator extends HarnessEvals {
       route,
       allowedTools: ['Read', 'Edit', 'Write', 'Glob', 'Grep', 'Bash', ...this.d.cfg.guardrails.pre_approved],
       maxTurns: 200,
-      // An optimization task's run is also capped at what its week's budget has left (a hard stop).
-      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : [])),
+      // An optimization task's run is also capped at what its week's budget has left (a hard stop); an automation's task at what its budgets have left.
+      maxBudgetUsd: Math.min(role.budget_usd ?? 10, remaining, ...(this.optimizePassOf(n) ? [Math.max(0.01, this.optimizeLeft())] : []), ...(this.automationLeft(n) ? [Math.max(0.01, this.automationLeft(n)!.usd)] : [])),
       jsonSchema: WORKER_SCHEMA,
       taskFile,
       stallMs: 20 * 60_000,
