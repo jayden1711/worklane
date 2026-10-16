@@ -46,7 +46,7 @@ function ReviewPanel({ lines, command, digest, onConfirm, onCancel, busy, confir
           </li>
         ))}
       </ul>
-      {digest && <div className="font-mono text-[11.5px] text-ink-2">Approval digest {digest}</div>}
+      {digest && <div className="break-all font-mono text-[11.5px] text-ink-2">Approval digest {digest}</div>}
       {command && <div className="text-[12px] text-ink-2">Confirm stages it. It is trusted for nothing until a root admin runs the command it then shows.</div>}
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={busy} onClick={onConfirm} data-testid="plugin-confirm">
