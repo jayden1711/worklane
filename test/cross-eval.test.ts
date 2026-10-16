@@ -60,7 +60,7 @@ test('cross-family evaluator: one approves and the other rejects, or high agains
 // ---- wired, with fake providers
 
 const harmless = () => COMPROMISED_ACTORS.map(([actor]) => ({ actor, can_do: 'nothing it could not do before', acceptable: true, why: 'the change gives it no new reach' }));
-const approve = (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: false, compromised_component: harmless() });
+const approve = (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req), design_change: false, compromised_component: harmless() });
 
 async function protectedChange(o: { cross?: string; optIn?: boolean; second?: (req: RunRequest) => object }) {
   const f = fixture();

@@ -49,7 +49,7 @@ function agents(cost: number | null, o: { usd?: number; fail?: boolean } = {}) {
       return { structured: { summary: 'made it faster' }, costUsd: o.usd ?? 0.5 };
     }
     if (req.role === 'evaluator-repro') return { structured: { test_path: '', explanation: '', not_reproducible: 'a speed change' } };
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req), design_change: false } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req), design_change: false } };
   });
 }
 

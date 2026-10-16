@@ -126,7 +126,7 @@ async function run(settings: object = {}) {
     }
     if (req.role === 'evaluator-repro') return { structured: { test_path: '', explanation: '', not_reproducible: 'covered by the existing test' } };
     const b = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)![1]!;
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: git(req.cwd, 'diff', '--name-only', `${b}..HEAD`).split('\n').filter(Boolean), design_change: false } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: git(req.cwd, 'diff', '--name-only', `${b}..HEAD`).split('\n').filter(Boolean), design_change: false } };
   });
   const c = new Coordinator({ cfg, log, backlog, runner, repo, instance: 'alice', stateDir: join(base, 'state'), slotsDir, maxAttempts: 3, settings: () => ({ settings, error: null }), machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
   await c.tick();

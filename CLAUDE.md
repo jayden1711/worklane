@@ -9,3 +9,5 @@ Engine for a multi-agent dev harness. Design: docs/design.md. Prior art: docs/pr
 - Commits: atomic, signed off (`git commit -s`).
 - Verify with `npm test` and `npm run typecheck` before calling anything done. Every bug fix gets a test that fails without it.
 - Fix ranking: make the wrong thing impossible > a test or lint > a written rule.
+- Label every claim in PR bodies, verdicts and replies to the owner: measured (from a command or CI output you cite), inferred (reasoned, not run) or guess. Never hand the owner a check you could run yourself: run it and report the result.
+- When the owner corrects the same thing twice, propose the structural fix as an issue (architecture > lint/test > skill/rule) instead of just complying.

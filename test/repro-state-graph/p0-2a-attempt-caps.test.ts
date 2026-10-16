@@ -28,7 +28,7 @@ test('attempt cap: a coordinator restart mid-task does not reset the attempt cou
         if (crashAt !== null && k === crashAt) throw new Error('simulated crash'); // the process dies mid-attempt
         return { structured: uselessWorker(req, k) };
       }
-      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
     });
   const c1 = coordinator(f, script(2), { maxAttempts: 3 });
   await c1.tick();
@@ -57,7 +57,7 @@ test('attempt cap: an emergency stop and resume requeue does not reset the attem
       }
       return { structured: uselessWorker(req, k) };
     }
-    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: readAll(req) } };
+    return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req) } };
   });
   const c = coordinator(f, runner, { maxAttempts: 3 });
   await c.tick();

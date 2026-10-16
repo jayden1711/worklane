@@ -54,7 +54,7 @@ function agents(edit: Edit, verdicts: ((req: RunRequest, files: string[]) => Fak
   });
 }
 
-const pass = (confidence = 'high') => (_: RunRequest, files: string[]): FakeResult => ({ structured: { patch_correct: true, test_correct: true, confidence, confidence_reason: confidence === 'high' ? '' : 'the totals test was not run on a zero quantity', advice: '', files_reviewed: files, design_change: false } });
+const pass = (confidence = 'high') => (_: RunRequest, files: string[]): FakeResult => ({ structured: { patch_correct: true, test_correct: true, confidence, confidence_reason: confidence === 'high' ? '' : 'the totals test was not run on a zero quantity', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: files, design_change: false } });
 
 async function run(runner: FakeRunner, settings: InstanceSettings = {}) {
   const base = mkdtempSync(join(tmpdir(), 'eval-wire-'));
@@ -98,7 +98,7 @@ test('#106: an evaluator that says it reviewed a file its run never read leaves 
 });
 
 test('#106: a file the run did read is not unread, whatever the evaluator lists', { skip }, async () => {
-  const t = await run(agents('code', [() => ({ structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: [], design_change: false }, reads: ['src/price.js'] })]));
+  const t = await run(agents('code', [() => ({ structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: [], design_change: false }, reads: ['src/price.js'] })]));
   assert.equal(t.verdict?.unread, undefined);
   assert.notEqual(t.level?.level, 'L3');
 });
@@ -119,7 +119,7 @@ test('tiered: a cheap verdict that is not a confident pass goes once to the stro
   assert.deepEqual(unsure.verdictRuns.map((r) => r.model), ['sonnet', 'opus']);
   assert.deepEqual([unsure.verdict?.model, unsure.verdict?.escalated_from], ['opus', 'sonnet']);
   assert.deepEqual(unsure.costs.map((c) => [c.role, c.model]), [['evaluator-verdict', 'sonnet'], ['evaluator-escalated', 'opus']]);
-  const rejected = await run(agents('docs', [() => ({ structured: { patch_correct: false, test_correct: true, confidence: 'high', advice: 'typo', files_reviewed: ['docs/pricing.md'], design_change: false } }), pass('low')]));
+  const rejected = await run(agents('docs', [() => ({ structured: { patch_correct: false, test_correct: true, confidence: 'high', advice: 'typo', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: ['docs/pricing.md'], design_change: false } }), pass('low')]));
   assert.deepEqual(rejected.verdictRuns.map((r) => r.model), ['sonnet', 'opus'], 'a rejection escalates');
   assert.equal(rejected.verdict?.model, 'opus');
   const unread = await run(agents('docs', [(_, files) => ({ ...pass()(_, files), reads: [] }), pass()]));

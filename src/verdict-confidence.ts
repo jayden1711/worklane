@@ -3,6 +3,7 @@
 // once more. For a change to a protected surface the evaluator also answers the "compromised component" question for
 // every actor that can reach it; a missing or unacceptable answer is a doubt with that reason, never a high pass.
 // Pure: the coordinator runs the evaluator around these (src/coordinator.ts evaluate).
+import { readClaims } from './claim-labels.js';
 import { lowerConfidence } from './receipts.js';
 import { COMPROMISED_ACTORS, OTHER_ACTOR } from './roles.js';
 
@@ -29,13 +30,23 @@ const text = (x: unknown) => (typeof x === 'string' ? x.replace(/\s+/g, ' ').tri
 export const REASON_MAX = 2000;
 
 /**
- * Why a verdict is refused as given: a confidence other than high without a reason. Null: accepted. The text is what
- * the evaluator is told when it's asked once more.
+ * Why a verdict is refused as given: a confidence other than high without a reason, or claims not each labeled
+ * measured, inferred or guess. Null: accepted. The text is what the evaluator is told when it's asked once more.
  */
-export function verdictRefusal(s: { confidence?: unknown; confidence_reason?: unknown } | undefined): string | null {
-  if (!s || s.confidence === 'high' || (s.confidence !== 'medium' && s.confidence !== 'low')) return null;
-  if (text(s.confidence_reason)) return null;
-  return `Your verdict was refused: confidence ${s.confidence} needs confidence_reason, one sentence naming the specific thing you could not verify or the likely problem you found. Give the whole verdict again.`;
+export function verdictRefusal(s: { confidence?: unknown; confidence_reason?: unknown; claims?: unknown } | undefined): string | null {
+  if (!s) return null;
+  const why: string[] = [];
+  if ((s.confidence === 'medium' || s.confidence === 'low') && !text(s.confidence_reason))
+    why.push(`confidence ${s.confidence} needs confidence_reason, one sentence naming the specific thing you could not verify or the likely problem you found`);
+  const labels = claimDoubt(s.claims);
+  if (labels) why.push(`claims must list each claim your verdict rests on, labeled measured (with the command and what it showed), inferred or guess (${labels})`);
+  return why.length ? `Your verdict was refused: ${why.join('; and ')}. Give the whole verdict again.` : null;
+}
+
+/** What is wrong with a verdict's labeled claims, as one doubt; null when every claim is labeled. */
+export function claimDoubt(claims: unknown): string | null {
+  const { problems } = readClaims(claims);
+  return problems.length ? clip(problems.join('; '), 600) : null;
 }
 
 /**
@@ -63,18 +74,20 @@ export function compromisedDoubts(answers: unknown, protectedSurface: boolean): 
 
 /**
  * The confidence recorded and its reason. The evaluator's own, lowered for claims no record backs (never evidence)
- * and, for a protected surface, to at most medium by any compromised-component doubt. A confidence other than high
+ * and, for a protected surface, to at most medium by any compromised-component doubt, and by any other doubt given
+ * (claims left unlabeled, a check handed to the reader instead of run). A confidence other than high
  * always has a reason: the evaluator's, what lowered it, or, when it gave none even when asked again, that it gave none.
  */
-export function calibrated(o: { confidence: Confidence; reason?: unknown; unverified: number; compromised: string[] }): { confidence: Confidence; confidence_reason?: string } {
+export function calibrated(o: { confidence: Confidence; reason?: unknown; unverified: number; compromised: string[]; doubts?: string[] }): { confidence: Confidence; confidence_reason?: string } {
   let confidence = lowerConfidence(o.confidence, o.unverified);
-  if (o.compromised.length && confidence === 'high') confidence = 'medium';
+  const doubts = [...o.compromised, ...(o.doubts ?? [])];
+  if (doubts.length && confidence === 'high') confidence = 'medium';
   if (confidence === 'high') return { confidence };
   const own = o.confidence !== 'high' ? text(o.reason) : '';
   const parts = [
     ...(own ? [own] : []),
     ...(o.unverified ? [`lowered: ${o.unverified} unverified claim(s)`] : []),
-    ...o.compromised,
+    ...doubts,
   ];
   if (!parts.length) parts.push(`the evaluator gave no reason for confidence ${o.confidence}, even when asked again`);
   return { confidence, confidence_reason: clip(parts.join('; '), REASON_MAX) };

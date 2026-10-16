@@ -35,7 +35,7 @@ const fix = (cwd: string) => {
 const answered = (req: RunRequest) => req.prompt.includes('## Research you asked for');
 const pass = (req: RunRequest): FakeResult => {
   const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)![1]!;
-  return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed: git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean), design_change: false } };
+  return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean), design_change: false } };
 };
 
 /** Scripted agents: `worker` and `verdict` decide per call; the researcher always reports with a source. */

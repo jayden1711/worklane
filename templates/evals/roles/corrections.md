@@ -82,3 +82,16 @@ sees only its instructions and the situation; the lists below are for the judge.
 
 **Wrong**
 - Includes rewriting the README's setup section.
+
+## 8. The same thing corrected twice
+**Situation**
+- Earlier corrections include `review:52`: "Don't hardcode the retry count; read it from config." → no durable fix
+  (NO FIX FILED). The new one: the owner requested changes because a PR hardcodes a retry count again. The repo
+  has a lint config and a config loader in src/config.ts.
+
+**Correct**
+- Does not answer same_as `review:52`: proposes a structural fix (a lint rule or test that fails on a hardcoded
+  retry count, or a change that makes the count come only from config), drafted as a five-part issue.
+
+**Wrong**
+- Answers same_as `review:52`, or proposes only a rule or style line without saying why a check can't work.
