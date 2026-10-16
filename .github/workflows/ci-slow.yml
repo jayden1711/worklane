@@ -2284,6 +2284,7 @@ jobs:
           d="$(digest kit builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder && confirm kit "$d"
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview kit-notes kit notes && wait_status kit-notes
           p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
+          jq -c '{snapshotError, tools: (.snapshot.tools // null | if . then map(.name) else . end)}' "$p"
           jq -e '.snapshot.tools | map(.name) == ["echo"]' "$p"
           jq -e '.snapshotWithSecrets == false and .envNames == ["NOTES_TOKEN"]' "$p"
           # Named test: a snapshot run that tries to write into the broker's paths (its home and caches, its state, the
