@@ -76,8 +76,11 @@ export const ECHO_WORDS = 8;
 
 /** A link, as the reply checks find one. */
 export const URL = /\bhttps?:\/\/\S+|\bwww\.\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|gg|ly|me|xyz|info|biz|link|site|online|ru|cn|tk|to)\b(?:\/\S*)?/gi;
-/** A mention: a user, role or channel ping, @everyone or @here, or an @handle. */
-export const MENTION = /<@[!&]?\d+>|<#\d+>|@everyone|@here|(?:^|\s)@[A-Za-z0-9_.]{2,}/;
+/**
+ * A mention: a Discord user, role or channel ping; a Slack user, channel or group ping (<@U...>, <#C...>,
+ * <!here>, <!channel>, <!everyone>, <!subteam^...>); @everyone, @here or @channel; or an @handle.
+ */
+export const MENTION = /<@[!&]?\d+>|<#\d+>|<@[UWB][A-Z0-9]+(?:\|[^>]*)?>|<#[CG][A-Z0-9]+(?:\|[^>]*)?>|<!(?:here|channel|everyone|subteam\^[A-Z0-9]+)(?:\|[^>]*)?>|@everyone|@here|@channel|(?:^|\s)@[A-Za-z0-9_.]{2,}/;
 const PROMISE = [
   /\b(?:by|before|until|on) (?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|tonight|today|the weekend|end of (?:the )?(?:day|week|month))\b/i,
   /\b(?:tomorrow|tonight|next (?:week|month|release|update)|this (?:week|weekend|month)|in (?:a|one|two|three|\d+) (?:minutes?|hours?|days?|weeks?)|within (?:a|one|two|three|\d+) (?:minutes?|hours?|days?|weeks?))\b/i,
