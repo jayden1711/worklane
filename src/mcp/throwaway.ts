@@ -74,7 +74,9 @@ export async function snapshotJob(codeDir: string, argv: string[]): Promise<stri
     return JSON.stringify({ snapshot });
   } catch (e) {
     child.kill('SIGKILL');
-    const tail = [spawnError, stderr.trim().split('\n').slice(-3).join(' | ')].filter(Boolean).join('; ');
+    // Its error lines, not the stack: a thrown error's name, message and code survive the 500-character cap.
+    const lines = stderr.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('at ') && l !== '}' && l !== '^' && !/^Node\.js v/.test(l));
+    const tail = [spawnError, lines.slice(-6).join(' | ')].filter(Boolean).join('; ');
     return JSON.stringify({ error: `${(e as Error).message}${tail ? ` (${tail})` : ''}`.slice(0, 500) });
   } finally {
     clearTimeout(kill);
