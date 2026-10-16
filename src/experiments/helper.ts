@@ -1,12 +1,15 @@
-// The engine's side of the experiment jobs' root helper (scripts/machine/worklane-exp.sh): its protocol, the spec it
+// The engine's side of the experiment jobs' root helper (scripts/machine/<cli>-exp.sh): its protocol, the spec it
 // reads on stdin, the eval tree's hash it checks, and the run record it prints. The helper decides everything that
 // matters itself (root's file); this only says what is asked and reads what happened.
 import { createHash } from 'node:crypto';
 import { BRAND } from '../brand.js';
+import { expBasePath, libexecPath } from '../os/system-paths.js';
 
 /** The helper's PROTOCOL (a test keeps them alike). Bump both when a command's arguments or output change. */
 export const EXP_PROTOCOL = 1;
-export const EXP_HELPER = `/usr/local/libexec/${BRAND.cli}-exp`;
+export const EXP_HELPER = libexecPath('exp');
+/** A job's directory (its record, logs and outputs; the coordinator's group may read them). */
+export const expJobDir = (instance: string, job: string) => `${expBasePath()}/${instance}/jobs/${job}`;
 
 /** What one job asks for. Commands are the study's own; ids are root's approved sources; nothing else is a path. */
 export interface JobSpec {
