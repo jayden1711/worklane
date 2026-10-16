@@ -71,7 +71,8 @@ case "$cmd" in
     esac ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "the instance name: lowercase letters, digits and dashes, at most 21" >&2; exit 2; }
+# The same names lib.sh allows (never one whose users or units are another's), except for the helper-only commands.
+[ "$name" = helper ] || need_instance_name "$name" "the instance name"
 [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] || { echo "--memory-max: a size such as 8G" >&2; exit 2; }
 [[ "$cpu_weight" =~ ^[0-9]+$ ]] && [ "$cpu_weight" -ge 1 ] && [ "$cpu_weight" -le 10000 ] || { echo "--cpu-weight: 1 to 10000" >&2; exit 2; }
 

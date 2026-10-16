@@ -23,9 +23,9 @@ const lib = join(setupDir, 'lib.sh');
 const helper = createRequire(import.meta.url)(join(machineDir, `${BRAND.cli}-machine.cjs`)) as { instanceNameProblem: (s: unknown) => string | null };
 
 /** Names that are another's: each prefix, suffix and exact name the rules refuse. */
-const REFUSED = ['test-foo', 'test-a-b', 'ci-x', 'ci-shop', 'dashboard-shop', 'dash', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'agent', 'eval', 'work', 'shop-agent', 'shop-eval', 'shop-work'];
+const REFUSED = ['exp-shop', 'score-shop', 'egress', 'test-foo', 'test-a-b', 'ci-x', 'ci-shop', 'dashboard-shop', 'dash', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'agent', 'eval', 'work', 'shop-agent', 'shop-eval', 'shop-work'];
 /** Names that stay fine, hyphens and all (test and ci themselves: CI runs an instance named ci). */
-const ALLOWED = ['shop', 'a', 'a-b-c', 'test', 'ci', 'tests', 'testx', 'cix', 'my-test-app', 'shop-ci', 'agents', 'dashboards', 'hubby', 'abcdefghijklmnopqrstu'];
+const ALLOWED = ['shop', 'a', 'a-b-c', 'test', 'ci', 'exp', 'score', 'expert', 'egresses', 'tests', 'testx', 'cix', 'my-test-app', 'shop-ci', 'agents', 'dashboards', 'hubby', 'abcdefghijklmnopqrstu'];
 const BAD_SHAPE = ['', 'Shop', '1a', '-a', 'a_b', 'a b', 'abcdefghijklmnopqrstuv'];
 
 /** lib.sh's answer for each name: its message, or '' when the name may be an instance's. */
@@ -57,9 +57,11 @@ test('test-foo, ci-x and every other name that is already another\'s are refused
   const libText = fnText(readFileSync(lib, 'utf8'));
   assert.ok(libText);
   assert.equal(fnText(readFileSync(join(machineDir, `${BRAND.cli}-testrun.sh`), 'utf8')), libText, 'the testrun helper checks names as lib.sh does');
+  assert.equal(fnText(readFileSync(join(machineDir, `${BRAND.cli}-exp.sh`), 'utf8')), libText, 'the experiments helper checks names as lib.sh does');
+  assert.equal(instanceNameProblem('exp-shop'), 'wl-exp-shop is the experiment job user of instance shop');
 
   // Every setup script that takes an instance name checks it with lib.sh's rules, not a regex of its own.
-  for (const s of ['instance.sh', 'test-user.sh', 'machine-helper.sh', 'dashboards.sh', 'add-project.sh']) assert.match(readFileSync(join(setupDir, s), 'utf8'), /need_instance_name "\$name"/, s);
+  for (const s of ['instance.sh', 'test-user.sh', 'machine-helper.sh', 'dashboards.sh', 'add-project.sh', 'experiments.sh']) assert.match(readFileSync(join(setupDir, s), 'utf8'), /need_instance_name "\$name"/, s);
   // And the two that check before root say so, with the collision named.
   const t = spawnSync('bash', [join(setupDir, 'test-user.sh'), 'check', 'test-foo'], { encoding: 'utf8' });
   assert.equal(t.status, 2);
@@ -149,4 +151,8 @@ test('ENGINE_NAMES lists every user, group and unit the scripts make, and no two
   const short = [...names].filter((n) => n.split('-').length <= 2);
   for (const n of short.filter((x) => instanceNameOk(x))) for (const id of short) claim(fill(run, n, id, '1'), `instance ${n}'s run ${id}`);
   assert.notEqual(fill(run, 'a', 'b-a', '1'), fill(run, 'a-b', 'a', '1'));
+  // An experiment job's step unit: each (instance, job, step) its own, and none any other kind's.
+  const step = ENGINE_NAMES.find((e) => e.of === 'exp-step')!.pattern;
+  for (const n of short.filter((x) => instanceNameOk(x))) for (const job of short) for (const st of ['train', 'score']) claim(fill(step, n, job, st, '1'), `instance ${n}'s job ${job} ${st}`);
+  assert.notEqual(fill(step, 'a', 'b-a', 'train', '1'), fill(step, 'a-b', 'a', 'train', '1'));
 });

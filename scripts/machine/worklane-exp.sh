@@ -126,7 +126,26 @@ sys.exit(bad)'
 
 die() { echo "worklane-exp: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
+# An instance's name, as scripts/setup/lib.sh takes one (installed alone, this helper holds a copy; a test keeps the two
+# equal): never a name whose users or units are another's (an instance exp-<x>'s coordinator would be x's job user).
+instance_name_problem() {
+  local n="$1"
+  if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
+  elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
+  elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
+  elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
+  elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
+  elif [[ "$n" == exp-* ]]; then echo "wl-$n is the experiment job user of instance ${n#exp-}"
+  elif [[ "$n" == score-* ]]; then echo "wl-$n is the experiment scorer user of instance ${n#score-}"
+  elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  fi
+}
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-exp <name> version|eval-put|eval-seal|create|job|stop|wipe|prune|check ..."
+why="$(instance_name_problem "$name")"
+[ -z "$why" ] || die "instance name $name: $why"
 juser="wl-exp-$name"
 suser="wl-score-$name"
 coord="wl-$name"

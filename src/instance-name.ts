@@ -1,5 +1,6 @@
 // Instance names, and every machine name the setup scripts derive from one. An instance <n> gets the users wl-<n>,
-// wl-<n>-agent and wl-<n>-eval, the group wl-<n>-work, the test user wl-test-<n> and the units <cli>-<n>.service,
+// wl-<n>-agent and wl-<n>-eval, the group wl-<n>-work, the test user wl-test-<n>, the experiment users wl-exp-<n> and
+// wl-score-<n>, and the units <cli>-<n>.service,
 // <cli>-dashboard-<n>.service and <cli>-test-<n>-docker.service; a CI runner <r> gets wl-ci-<r> and its units; the
 // hub has wl-dash and its own units. A name is refused when any of its names could be another's: an instance named
 // test-shop would be wl-test-shop, the test user of instance shop, with that user's sandbox and none of a coordinator's.
@@ -17,7 +18,7 @@ export const INSTANCE_NAME_MAX = 21;
 export const INSTANCE_FILE_NAME_MAX = 41;
 
 /** What each name the scripts make is derived from: an instance name, a CI runner name, or nothing (a fixed name). */
-export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy';
+export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy' | 'exp-step';
 /** Every user, group and systemd unit the setup scripts make, with <n> the instance or runner name. */
 export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: NameOf }[] = [
   { pattern: 'wl-<n>', of: 'instance' },
@@ -35,6 +36,13 @@ export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: Nam
   // The same, as a helper before protocol 9 named it (<instance>-<run id>-<pid>), which an update can leave behind: never
   // another kind's (the last part is digits), but two instances' can be equal, so the helper tells them apart by User=.
   { pattern: `${BRAND.cli}-test-<n>-<n>-<n>.service`, of: 'test-run-legacy' },
+  // Experiment jobs (scripts/setup/experiments.sh): the job and scorer users, the slice, the host egress rule's unit,
+  // and a job step's transient unit, <instance>_<job>_<step>_<pid> (no part holds an underscore: one step's alone).
+  { pattern: 'wl-exp-<n>', of: 'instance' },
+  { pattern: 'wl-score-<n>', of: 'instance' },
+  { pattern: `${BRAND.cli}-exp.slice`, of: 'fixed' },
+  { pattern: `${BRAND.cli}-egress.service`, of: 'fixed' },
+  { pattern: `${BRAND.cli}-exp-<n>_<n>_<n>_<n>.service`, of: 'exp-step' },
   { pattern: `${BRAND.cli}-ci-<n>@.service`, of: 'runner' },
   { pattern: `${BRAND.cli}-ci-<n>-docker@.service`, of: 'runner' },
   { pattern: `${BRAND.cli}-ci-<n>-reset@.service`, of: 'runner' },
@@ -57,10 +65,12 @@ export function instanceNameProblem(s: unknown, max = INSTANCE_NAME_MAX): string
   if (typeof s !== 'string' || !new RegExp(`^[a-z][a-z0-9-]{0,${max - 1}}$`).test(s)) return `lowercase letters, digits and dashes, starting with a letter, at most ${max}`;
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `${BRAND.cli}-dashboard-${s}.service is the dashboard hub's`;
-  if (s === 'update' || s === 'tailscale' || s === 'claude-account') return `${BRAND.cli}-${s}.service is the machine's own`;
+  if (s === 'update' || s === 'tailscale' || s === 'claude-account' || s === 'egress') return `${BRAND.cli}-${s}.service is the machine's own`;
   if (s === 'agent' || s === 'eval' || s === 'work') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
+  if (s.startsWith('exp-')) return `wl-${s} is the experiment job user of instance ${s.slice(4)}`;
+  if (s.startsWith('score-')) return `wl-${s} is the experiment scorer user of instance ${s.slice(6)}`;
   if (s.startsWith('dashboard-')) return `${BRAND.cli}-${s}.service is the dashboard of instance ${s.slice(10)}`;
   const m = /^(.+)-(agent|eval|work)$/.exec(s);
   if (m) return `wl-${s} is instance ${m[1]}'s ${m[2]} name`;
