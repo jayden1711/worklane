@@ -60,6 +60,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.78",
+    "get-nonce": "1.0.1",
     "ws": "8.21.3",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
