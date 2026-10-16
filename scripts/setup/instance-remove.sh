@@ -202,7 +202,9 @@ for line in "${ITEMS[@]}"; do
       # Its systemd user manager (lingering keeps one for the coordinator): stopped, so userdel finds no process of its.
       loginctl disable-linger "$w" 2>/dev/null || true
       systemctl stop "user@$uid.service" 2>/dev/null || true
-      userdel -r "$w" 2>/dev/null || userdel "$w"
+      # userdel -r can delete the user and still fail on its home (exit 12): the home is seen to below. Only a user it
+      # left in place is deleted again, without -r.
+      userdel -r "$w" 2>/dev/null || ! user_exists "$w" || userdel "$w"
       # Its home goes with it whatever userdel said (a mail spool it couldn't find): it held the state and the keys.
       # Only a home that is that user's own: absolute, not /, owned by its uid, and no other user's home.
       if [[ "$uh" == /?* && "$uh" != / && -d "$uh" && "$(stat -c %u "$uh")" = "$uid" ]] && ! getent passwd | cut -d: -f6 | grep -qx "$uh"; then
