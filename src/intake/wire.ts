@@ -19,6 +19,9 @@ import { GitHubIssuesIntake } from './github.js';
 import { VoiceIntake } from './voice.js';
 import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
+import { LinearIntake } from './linear.js';
+import { SlackIntake, type SlackOptions } from './slack.js';
+import { claimKey, claimSource } from './source-claims.js';
 import type { IntakeConfig, IntakeSource } from './report.js';
 
 export interface IntakeWiring {
@@ -29,11 +32,13 @@ export interface IntakeWiring {
   name: string;
   /**
    * Connect Discord, after the start-up checks: no other instance on the machine claims one of its server+channel
-   * pairs, and every discord.owners entry maps to an admin of the repo. A refusal leaves Discord off (the source is
-   * removed) and says why; null when connected or when there is nothing to connect.
+   * pairs, and every discord.owners entry maps to an admin of the repo. Then Slack (its bot token names the configured
+   * workspace, and no other instance runs the same Slack app) and Linear (no other instance takes the same team and
+   * label). A refusal leaves that source off (it is removed) and says why; null when every source started or there is
+   * nothing to start.
    */
   start: () => Promise<string | null>;
-  /** Closes the Discord connection. */
+  /** Closes the Discord and Slack connections and releases the claims. */
   stop: () => void;
 }
 
@@ -70,6 +75,13 @@ export function discordSource(bot: DiscordIntake): IntakeSource {
 
 /** The instance's bot token, from the file credentials.yaml intake.discord_token names (the bot and `discord channels` both read it here). */
 export const readDiscordToken = (tokenFile: string): string => readFileSync(tokenFile, 'utf8').trim();
+/** An intake credential (a Slack token, the Linear key) from the file credentials.yaml names: the coordinator's own, 0400. */
+export const readIntakeSecret = (file: string): string => readFileSync(file, 'utf8').trim();
+
+/** The Slack app as the coordinator's source: a plain report source (no threads of its own, no chat). */
+export function slackSource(bot: SlackIntake): IntakeSource {
+  return { name: 'slack', take: () => bot.take(), reply: (t, text) => bot.reply(t.id, text) };
+}
 
 /**
  * The intake deps for one instance, or null when it has no intake.yaml (intake off). A config that is refused
@@ -83,6 +95,13 @@ export function intakeForInstance(o: {
   instance?: string;
   /** credentials.yaml intake.discord_token: the token file's path. */
   tokenFile?: string | undefined;
+  /** credentials.yaml intake.slack_app_token, slack_bot_token and linear_api_key: the files' paths. */
+  slackAppTokenFile?: string | undefined;
+  slackBotTokenFile?: string | undefined;
+  linearKeyFile?: string | undefined;
+  /** Tests: the Slack adapter's socket, fetch and timer, and Linear's fetch. */
+  slack?: Pick<SlackOptions, 'connect' | 'fetch' | 'setTimeout'>;
+  linearFetch?: typeof fetch;
   /** The instance's own GitHub token (for repo permissions). */
   githubToken: () => Promise<string>;
   githubApi?: string;
@@ -122,13 +141,14 @@ export function intakeForInstance(o: {
   const sources: IntakeSource[] = [];
   let stop = () => {};
   let start = async (): Promise<string | null> => null;
+  const machineDir = () => o.machineDir ?? slotsDir();
   const d = first.config.discord;
   const roleOf = o.roleOf ?? (Object.keys(d.people).length ? cachedRoles(repoPermission({ repo: o.repo, token: o.githubToken, ...(o.githubApi ? { api: o.githubApi } : {}) })) : undefined);
   if (d.enabled && d.guild) {
     if (!o.tokenFile) say('intake: discord is on but credentials.yaml has no intake.discord_token; the bot is not connected');
     else {
       const token = readDiscordToken(o.tokenFile);
-      const machine = o.machineDir ?? slotsDir();
+      const machine = machineDir();
       const f = o.discord?.fetch;
       const { now: _now, sleep: _sleep, alive: _alive, ...adapter } = o.discord ?? {};
       const gate = identifyGate({ dir: machine, token, owner: `discord identify ${name}`, ...(o.discord?.now ? { now: o.discord.now } : {}), ...(o.discord?.sleep ? { sleep: o.discord.sleep } : {}), limit: () => sessionStartLimit(token, f ?? fetch) });
@@ -156,6 +176,77 @@ export function intakeForInstance(o: {
       };
     }
   }
+  // Slack and Linear start after Discord, each through its own start-up checks; a refusal leaves only that one off.
+  const starts: (() => Promise<string | null>)[] = [];
+  const stops: (() => void)[] = [];
+  const sl = first.config.slack;
+  if (sl.enabled && sl.team) {
+    if (!o.slackAppTokenFile || !o.slackBotTokenFile) say('intake: slack is on but credentials.yaml lacks intake.slack_app_token or intake.slack_bot_token; Slack is not connected');
+    else {
+      const bot = new SlackIntake({ appToken: readIntakeSecret(o.slackAppTokenFile), botToken: readIntakeSecret(o.slackBotTokenFile), team: sl.team, channels: sl.channels, allowedSenders: sl.allowed_senders, log: say, ...(o.slack ?? {}) });
+      const source = slackSource(bot);
+      sources.push(source);
+      let release = () => {};
+      starts.push(async () => {
+        const refuse = (why: string) => {
+          sources.splice(sources.indexOf(source), 1);
+          say(`slack not started: ${why}`);
+          return `slack: ${why}`;
+        };
+        const me = await bot.identify();
+        if ('error' in me) return refuse(me.error);
+        const claim = await claimSource({ kind: 'slack', instance: name, key: claimKey('slack', me.team, me.user), claimsDir: machineDir(), ...(o.discord?.alive ? { alive: o.discord.alive } : {}), ...(o.discord?.sleep ? { sleep: o.discord.sleep } : {}) });
+        if ('error' in claim) return refuse(claim.error);
+        release = claim.release;
+        bot.start();
+        return null;
+      });
+      stops.push(() => {
+        bot.stop();
+        release();
+      });
+    }
+  }
+  const li = first.config.linear;
+  if (li.enabled && li.team && li.label) {
+    if (!o.linearKeyFile) say('intake: linear is on but credentials.yaml has no intake.linear_api_key; Linear is not read');
+    else if (!o.stateDir) say('intake: linear is on but the instance has no state directory; Linear is not read');
+    else {
+      const linear = new LinearIntake({ apiKey: readIntakeSecret(o.linearKeyFile), stateDir: o.stateDir, config: () => config()?.linear ?? li, ...(o.linearFetch ? { fetch: o.linearFetch } : {}) });
+      // INVARIANT: nothing is pulled until this instance holds the claim (start(), below).
+      let claimed = false;
+      const source: IntakeSource = { ...linear.source(), take: () => (claimed ? linear.take() : Promise.resolve([])) };
+      sources.push(source);
+      let release = () => {};
+      starts.push(async () => {
+        const claim = await claimSource({ kind: 'linear', instance: name, key: claimKey('linear', li.team!, li.label!), claimsDir: machineDir(), ...(o.discord?.alive ? { alive: o.discord.alive } : {}), ...(o.discord?.sleep ? { sleep: o.discord.sleep } : {}) });
+        if ('error' in claim) {
+          sources.splice(sources.indexOf(source), 1);
+          say(`linear not started: ${claim.error}`);
+          return `linear: ${claim.error}`;
+        }
+        release = claim.release;
+        claimed = true;
+        return null;
+      });
+      stops.push(() => {
+        claimed = false;
+        release();
+      });
+    }
+  }
+  const startDiscord = start;
+  const stopDiscord = stop;
+  start = async () => {
+    const why = [await startDiscord()];
+    for (const s of starts) why.push(await s());
+    const refused = why.filter((w): w is string => !!w);
+    return refused.length ? refused.join('; ') : null;
+  };
+  stop = () => {
+    stopDiscord();
+    for (const s of stops) s();
+  };
   // Production alerts: only when intake.yaml turns them on and the project has the owner's production read path.
   if (first.config.alerts.enabled) {
     if (!o.prodRead || !o.stateDir) say('intake: alerts are on but the project has no production read path (deploy.yaml prod_read); alerts are not pulled');

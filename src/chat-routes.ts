@@ -14,6 +14,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ChatError, type ChatAnswer, type ChatAnswerFile } from './chat.js';
 import { AttachmentError, type AttachmentCaps } from './chat-attachments.js';
+import type { ChatPick } from './chat-pick.js';
 import { askInConversation, attachmentViews, ConversationError, createConversation, createProject, deleteConversation, deleteProject, listConversations, listProjects, openConversation, projectFor, projectView, sharers, turnFor, updateConversation, updateProject, type ConversationTurn } from './chat-conversations.js';
 import { isOwner, isWriter, type Role, type RoleOf } from './dashboard-auth.js';
 
@@ -33,6 +34,8 @@ export interface ConversationRouteContext {
   filed: (id: string) => { number: number } | null;
   /** The single-shot chat's own filing of a draft (owner only, checked again, once): the same confirm flow. */
   fileDraft: (id: string, answer: ChatAnswer | null) => Promise<{ status: number; body: unknown }>;
+  /** The model and effort picker (src/chat-pick.ts): a message's pick checked for this person, or why not; null: no pick. */
+  pick?: (raw: unknown) => { pick: ChatPick; picker: 'owner' | 'writer' } | { error: string } | null;
 }
 
 const turnView = (t: ConversationTurn, c: ConversationRouteContext) => {
@@ -70,7 +73,9 @@ export async function handleConversationRoute(req: IncomingMessage, res: ServerR
       const id = conv[1]!;
       if (conv[2] && req.method === 'POST') {
         const b = await body();
-        const asked = askInConversation({ stateDir: c.stateDir, id, by, text: b.text, attachments: b.attachments, ...(b.key !== undefined ? { key: b.key } : {}), caps: c.caps });
+        const picked = c.pick?.(b.pick) ?? null;
+        if (picked && 'error' in picked) return send(400, { error: picked.error });
+        const asked = askInConversation({ stateDir: c.stateDir, id, by, text: b.text, attachments: b.attachments, ...(b.key !== undefined ? { key: b.key } : {}), ...(picked ?? {}), caps: c.caps });
         c.audit('chat.asked', { id: asked.id, conversation: id });
         return send(200, asked);
       }

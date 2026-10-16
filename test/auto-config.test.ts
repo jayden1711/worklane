@@ -253,7 +253,9 @@ test('the PR: answered on the terminal, the scaffold is drafted on the setup bra
   const r = await autoConfigure({ root: p.root, repo: 'example-org/example-shop', io, state, save: () => undefined });
   assert.equal(r.kind, 'proposed', JSON.stringify(r) + io.said.join('\n'));
   assert.match(r.kind === 'proposed' ? r.detail : '', /proposed in PR #7 \(https:\/\/github\.com\/example-org\/example-shop\/pull\/7\), from worklane\/setup: review and merge it/);
-  assert.deepEqual(state.pr, { number: 7, url: 'https://github.com/example-org/example-shop/pull/7', branch: SETUP_BRANCH });
+  // #468: the commit pushed for it is kept: the page merges only its own PR, at that head.
+  assert.deepEqual(state.pr, { number: 7, url: 'https://github.com/example-org/example-shop/pull/7', branch: SETUP_BRANCH, head: state.pr!.head });
+  assert.match(state.pr!.head!, /^[0-9a-f]{40}$/);
   assert.deepEqual(state.verified.map((x) => [x.command, x.passed]), [[FAILS, false], [PASSES, true]]);
   assert.equal(p.mainSha(), before, 'main on the remote is untouched');
   const create = g.calls.find((c) => c[0] === 'pr' && c[1] === 'create')!;
