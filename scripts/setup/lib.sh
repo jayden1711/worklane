@@ -239,22 +239,36 @@ hub_keep_args() {
 }
 
 # The mount points at or under what an instance's removal deletes (its users' homes, its paths in the registry), one
-# a line: instance-remove.sh and instance-rename.sh refuse while there is any, as rm --one-file-system would stop at
-# each part way.
+# a line, "<mount point>\t<engine|other>". engine: an experiment job's output volume the helper made and a cut-off job
+# left mounted, known by both its place, exactly /var/lib/worklane-exp/<name>/jobs/<job>/vol, and its source, a loop
+# device whose backing file is that job's vol.img; instance-remove.sh unmounts those. Anything else is other, and
+# instance-remove.sh and instance-rename.sh refuse while there is any (rm --one-file-system would stop at each).
 instance_mounts() {
-  local k w p m roots=()
+  local name="$1" k w p m roots=()
   while IFS=$'\t' read -r k w _; do
     case "$k" in
       user) if user_exists "$w"; then roots+=("$(home_of "$w")"); fi ;;
       path) roots+=("$w") ;;
     esac
-  done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$1")
+  done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$name")
   findmnt -rn -o TARGET 2>/dev/null | while read -r m; do
     for p in "${roots[@]}"; do
-      if [[ -n "$p" && "$p" != / && ( "$m" == "$p" || "$m" == "$p"/* ) ]]; then echo "$m"; fi
+      if [[ -n "$p" && "$p" != / && ( "$m" == "$p" || "$m" == "$p"/* ) ]]; then
+        if engine_volume "$name" "$m"; then printf '%s\tengine\n' "$m"; else printf '%s\tother\n' "$m"; fi
+      fi
     done
   done | sort -u
   return 0
+}
+# Whether <mount point> is <name>'s experiment job output volume, positively: its exact place and a loop device backed
+# by exactly that job's vol.img (worklane-exp.sh makes both: mount -o loop <job dir>/vol.img <job dir>/vol).
+engine_volume() {
+  local name="$1" m="$2" src back
+  [[ "$m" =~ ^/var/lib/worklane-exp/${name}/jobs/[a-z][a-z0-9-]{0,47}/vol$ ]] || return 1
+  src="$(findmnt -rn -o SOURCE --mountpoint "$m" 2>/dev/null | head -1)"
+  [[ "$src" =~ ^/dev/loop[0-9]+$ ]] || return 1
+  back="$(losetup -n -O BACK-FILE "$src" 2>/dev/null | sed 's/[[:space:]]*$//')"
+  [ "$back" = "${m%/vol}/vol.img" ]
 }
 
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh

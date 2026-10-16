@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
+import { createDevice, readDevices, revokeAllDevices, verifyToken } from '../src/siri/tokens.js';
 
 interface Item { kind: string; what: string; when?: string[]; by: string }
 const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as {
@@ -118,12 +119,13 @@ test('every file under /etc/<cli> and /var/lib/<cli> the scripts and the engine 
 });
 
 test('the registry check sees a new feature\'s per-instance root records, in a script and in src/', () => {
-  // As a plugin or experiments feature would write them (#520, #524): each must be registered before it can merge.
-  assert.ok(!instanceNames('install -d "/var/lib/worklane-exp/$name"').every(known));
-  assert.ok(!instanceNames('remove_sudoers "worklane-exp-$name"').every(known));
-  assert.ok(!instanceNames('export const allowlistPath = (instance: string) => etcPath(`plugins/${instance}.json`);').every(known));
-  assert.ok(rootFiles('etc_dir=/etc/worklane/experiments').includes(`/etc/${cli}/experiments`));
-  assert.ok(rootFiles("export const PENDING = varLibPath('plugins/pending.json');").includes(`/var/lib/${cli}/plugins`));
+  // As a feature not written yet would write them: each must be registered before it can merge.
+  assert.ok(!instanceNames('install -d "/var/lib/worklane-future/$name"').every(known));
+  assert.ok(!instanceNames('remove_sudoers "worklane-future-$name"').every(known));
+  assert.ok(!instanceNames('export const allowlistPath = (instance: string) => etcPath(`future/${instance}.json`);').every(known));
+  assert.ok(rootFiles('etc_dir=/etc/worklane/future').includes(`/etc/${cli}/future`));
+  assert.ok(rootFiles("export const PENDING = varLibPath('future/pending.json');").includes(`/var/lib/${cli}/future`));
+  assert.ok(!rootFiles('x=/etc/worklane/future').every((p) => reg.SHARED_FILES.some((f) => f.at === p)));
   // And the ones it has already.
   assert.ok(instanceNames('install_sudoers "worklane-test-$name" "$(sudoers_rule)"').every(known));
   assert.ok(instanceNames('root="/var/lib/worklane-test/$name"').every(known));
@@ -266,4 +268,35 @@ test("the incident store is changed under its lock: a coordinator's write in pro
   assert.ok(Date.now() - t0 >= 300, 'it waited for the holder');
   assert.deepEqual(read(root, `/var/lib/${cli}/agent-slots/incidents.json`).incidents.map((x: { id: string }) => x.id), ['2', '3']);
   assert.ok(!existsSync(lock), 'and let go of the lock');
+});
+
+// --- what instance-remove.sh unmounts, and what refuses it
+
+test("only an experiment job's own output volume is the engine's mount to unmount: its exact place, and a loop device backed by that job's vol.img", { skip: !posix && 'bash' }, () => {
+  // findmnt and losetup stood in for: what a machine with these mounts would answer.
+  const stubs = `
+    findmnt() { case "$*" in *"--mountpoint /var/lib/${cli}-exp/alpha/jobs/j-1/vol"*) echo /dev/loop3 ;; *"--mountpoint /var/lib/${cli}-exp/alpha/jobs/j-2/vol"*) echo /dev/loop4 ;; *"--mountpoint /var/lib/${cli}-exp/alpha/jobs/j-3/vol"*) echo tmpfs ;; *"--mountpoint /var/lib/${cli}-exp/alpha-2/jobs/j-1/vol"*) echo /dev/loop5 ;; *) echo /dev/loop3 ;; esac; }
+    losetup() { case "$*" in *loop3*) echo "/var/lib/${cli}-exp/alpha/jobs/j-1/vol.img  " ;; *loop4*) echo /var/lib/${cli}-exp/alpha/jobs/j-1/vol.img ;; *loop5*) echo /var/lib/${cli}-exp/alpha-2/jobs/j-1/vol.img ;; esac; }`;
+  const is = (name: string, m: string) => spawnSync('bash', ['-c', `source "$1"; ${stubs}; engine_volume "$2" "$3"`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), name, m], { encoding: 'utf8' }).status === 0;
+  assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha/jobs/j-1/vol`), true, "the job's own loop-mounted image");
+  assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha/jobs/j-2/vol`), false, "a loop device backed by another job's image");
+  assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha/jobs/j-3/vol`), false, 'a tmpfs at the place');
+  assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), false, "another instance's volume, named for alpha");
+  assert.equal(is('alpha-2', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), true);
+  for (const m of [`/var/lib/${cli}-exp/alpha/jobs/j-1/vol/x`, `/var/lib/${cli}-exp/alpha/jobs/j-1`, `/var/lib/${cli}-exp/alpha/jobs/J-1/vol`, `/home/wl-alpha/vol`]) assert.equal(is('alpha', m), false, m);
+});
+
+test("instance-remove.sh revokes the instance's Siri device tokens, as its coordinator, before it exports; none works after", () => {
+  const script = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
+  const revoke = script.indexOf('instance siri-revoke-all');
+  assert.ok(revoke > 0 && revoke < script.indexOf('export --instance'), 'revoked before the export, so the history records it');
+  const stateDir = mkdtempSync(join(tmpdir(), 'siri-'));
+  const node = { id: 'n1', name: 'phone-node' };
+  const a = createDevice({ stateDir, instance: 'alpha', name: 'phone', by: 'owner' });
+  const b = createDevice({ stateDir, instance: 'alpha', name: 'tablet', by: 'owner' });
+  assert.equal(verifyToken({ stateDir, instance: 'alpha', token: a.token, node }).ok, true);
+  assert.deepEqual(revokeAllDevices(stateDir, 'instance removed').sort(), [a.device.id, b.device.id].sort());
+  for (const t of [a.token, b.token]) assert.equal(verifyToken({ stateDir, instance: 'alpha', token: t, node }).ok, false);
+  assert.ok(readDevices(stateDir).every((d) => d.revokedBy === 'instance removed'));
+  assert.deepEqual(revokeAllDevices(stateDir, 'instance removed'), [], 'again: nothing left to revoke');
 });

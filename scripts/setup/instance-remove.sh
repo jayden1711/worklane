@@ -70,6 +70,7 @@ exists() { # <kind> <what>: whether that item is on this machine
     unit) [ -e "/etc/systemd/system/$2" ] || [ -e "/etc/systemd/system/$2.d" ] || systemctl is-enabled -q "$2" 2>/dev/null ;;
     sudoers) sudoers_installed "$2" ;;
     path) [ -e "$2" ] ;;
+    glob) compgen -G "$2*" >/dev/null ;;
     shared) printf '%s\n' "$shared_plan" | cut -f1 | grep -qx "$2" ;;
     via) local w; for w in $3; do exists "${w%%:*}" "${w#*:}" && return 0; done; return 1 ;;
     *) return 1 ;;
@@ -109,6 +110,7 @@ show_plan() {
     esac
   done
   planned="$n"
+  local em; for em in $(engine_mounts); do echo "  unmount  $em (an experiment job's output volume, its job cut off)"; n=$((n + 1)); done
   [ "$n" -gt 0 ] || echo "  nothing: no user, unit, file or record of $name is left"
   local h; h="$(remaining_helper | tr '\n' ' ')"
   if helper_instances | grep -qx "$name"; then
@@ -132,7 +134,9 @@ github_steps() {
   echo "  - its repo, issues, PRs and labels are as they were"
 }
 
-mounted() { local m; m="$(instance_mounts "$name")"; [ -z "$m" ] || printf 'a filesystem is mounted at %s, inside what goes: unmount it first\n' $m; }
+# A mount the engine made and can name (an experiment job's output volume) is unmounted; any other refuses it.
+mounted() { local m; m="$(instance_mounts "$name" | awk -F'\t' '$2 == "other" { print $1 }')"; [ -z "$m" ] || printf 'a filesystem is mounted at %s, inside what goes, and it is not one the engine made: unmount it first\n' $m; }
+engine_mounts() { instance_mounts "$name" | awk -F'\t' '$2 == "engine" { print $1 }'; }
 if [ -n "$print" ]; then
   show_plan
   busy="$(instance_in_flight "$name"; mounted)"
@@ -161,10 +165,12 @@ fi
 
 install -d -o root -g root -m 0700 "$ARCHIVE"
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-bundle="" kept="$ARCHIVE/$name-$stamp.records.json"
+bundle="" exp_kept="" kept="$ARCHIVE/$name-$stamp.records.json"
 if [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
   say "export $name's history"
   [ -x "$ENGINE_CLI" ] || refuse "no $ENGINE_CLI to export with: install the engine (engine.sh), then run this again"
+  # Its Siri device tokens revoked first, as its coordinator: none works again, and the export records it.
+  run_as "$coord" '"$1" instance siri-revoke-all "$2" --why "$3"' "$ENGINE_CLI" "$name" "instance removed" || refuse "revoking $name's Siri device tokens failed (above): nothing removed"
   work="$(mktemp -d)"
   trap 'rm -rf "$work"' EXIT
   chown "$coord" "$work" && chmod 0700 "$work"
@@ -177,6 +183,15 @@ else
   echo "no state of $name left to export$(ls -1 "$ARCHIVE" 2>/dev/null | grep -q "^$name-.*\.bundle$" && echo " (exported earlier: $(ls -1t "$ARCHIVE"/"$name"-*.bundle | head -1))")"
 fi
 
+# Its experiments' history (root's): each job's record and root's file for it, kept beside the export.
+if [ -d "/var/lib/worklane-exp/$name" ] || [ -f "/etc/worklane/experiments/$name.json" ]; then
+  exp_kept="$ARCHIVE/$name-$stamp.experiments.tar"
+  { find "/var/lib/worklane-exp/$name/jobs" -mindepth 2 -maxdepth 2 -name record.json -type f 2>/dev/null; [ ! -f "/etc/worklane/experiments/$name.json" ] || echo "/etc/worklane/experiments/$name.json"; } \
+    | sed 's#^/##' | (cd / && tar --no-recursion -cf "$exp_kept" -T -)
+  chmod 0600 "$exp_kept"
+  echo "kept $name's experiment records: $exp_kept"
+fi
+
 # --- the registry's items, in its order
 
 say "remove $name"
@@ -185,6 +200,14 @@ say "remove $name"
 records remove "$name" "$kept"
 chmod 0600 "$kept"
 echo "kept what the shared files held for $name: $kept"
+# The engine's own mounts inside what goes (a cut-off job's output volume): unmounted, its loop device freed.
+for em in $(engine_mounts); do
+  src="$(findmnt -rn -o SOURCE --mountpoint "$em" | head -1)"
+  umount "$em"
+  if losetup "$src" >/dev/null 2>&1 && [ "$(losetup -n -O BACK-FILE "$src" | sed 's/[[:space:]]*$//')" = "${em%/vol}/vol.img" ]; then losetup -d "$src"; fi
+  echo "unmounted $em (an experiment job's output volume)"
+done
+
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
 for line in "${ITEMS[@]}"; do
   IFS=$'\t' read -r k w when <<<"$line"
@@ -205,6 +228,7 @@ for line in "${ITEMS[@]}"; do
     shared) ;; # taken out above, all at once
     sudoers) exists sudoers "$w" && remove_sudoers "$w" && echo "removed the sudoers file $w" ;;
     path) exists path "$w" && rm -rf --one-file-system -- "$w" && echo "removed $w" ;;
+    glob) exists glob "$w" && rm -f -- "$w"* && echo "removed $w*" ;;
     user)
       user_exists "$w" || continue
       uh="$(home_of "$w")" uid="$(id -u "$w")"
@@ -225,6 +249,16 @@ for line in "${ITEMS[@]}"; do
   esac
 done
 systemctl daemon-reload
+
+# The egress rule names users by uid: when it names one no user has now (this instance's sandbox and test users), it
+# is applied again, rebuilt from the users there are, with the flags it was applied with. No live user's entry changes.
+EGRESS_USERS=/etc/worklane/egress.users
+# A uid it names that is no one's now (a rerun finds the same): its users went, and nothing else changed.
+stale_uids="$( [ -f "$EGRESS_USERS" ] && grep -vx '#.*' "$EGRESS_USERS" | while read -r u; do getent passwd "$u" >/dev/null || echo "$u"; done; true)"
+if [ -n "$stale_uids" ]; then
+  say "the egress rule, without $name's users"
+  if grep -qx '# --with-test-users' "$EGRESS_USERS"; then bash "$here/egress-firewall.sh" apply --with-test-users; else bash "$here/egress-firewall.sh" apply; fi
+fi
 
 say "the machine's helper rule and hub, without $name"
 helper_now="$(remaining_helper | tr '\n' ' ')"
@@ -249,5 +283,5 @@ if hub_instances | grep -qx "$name"; then
 fi
 if [ "${planned:-0}" -gt 0 ] || [ -n "$bundle" ]; then mlog "$name"; fi
 echo
-echo "removed $name. Its history: ${bundle:-exported by an earlier run (in $ARCHIVE)}; what the shared files held: $kept"
+echo "removed $name. Its history: ${bundle:-exported by an earlier run (in $ARCHIVE)}; what the shared files held: $kept${exp_kept:+; its experiment records: $exp_kept}"
 github_steps

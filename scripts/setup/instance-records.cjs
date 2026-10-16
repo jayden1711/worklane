@@ -23,10 +23,15 @@ const NAME = /^[a-z][a-z0-9-]{0,20}$/;
 //   path     rm -rf --one-file-system
 //   user     userdel -r, after loginctl disable-linger
 //   group    groupdel
+//   glob     rm -f of each file named <what> followed by anything (the name then a dot: never another instance's)
 //   shared   a record inside a shared root file, taken out by `remove` here
+// And, last, the egress rule (egress-firewall.sh) applied again when it names a uid of a user that went: it is
+// rebuilt from the users there are, so no other instance's entry changes. An experiment job's output volume left
+// mounted (its job cut off) is unmounted first, when it is positively the engine's (lib.sh instance_mounts).
 // <name> stands for the instance's name. Order is the order of removal: users and the state go last, after the export.
 const ITEMS = [
   { kind: 'via', what: 'test-user.sh remove <name>', when: ['user:wl-test-<name>', 'path:/var/lib/worklane-test/<name>', 'unit:worklane-test-<name>-docker.service', 'sudoers:worklane-test-<name>'], by: 'test-user.sh install' },
+  { kind: 'via', what: 'experiments.sh remove <name>', when: ['user:wl-exp-<name>', 'user:wl-score-<name>', 'path:/var/lib/worklane-exp/<name>', 'path:/etc/worklane/experiments/<name>.json', 'sudoers:worklane-exp-<name>'], by: 'experiments.sh install' },
   { kind: 'via', what: 'testrun-gpu.sh disable <name>', when: ['shared:gpu'], by: 'testrun-gpu.sh enable' },
   { kind: 'unit', what: 'worklane-dashboard-<name>.service', by: 'dashboards.sh' },
   { kind: 'unit', what: 'worklane-<name>.service', by: 'service.sh' },
@@ -40,10 +45,16 @@ const ITEMS = [
   { kind: 'shared', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
   { kind: 'path', what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
   { kind: 'path', what: '/var/lib/worklane/init/<name>.json', by: 'init --mode server (src/init.ts serverInitFile)' },
+  { kind: 'sudoers', what: 'worklane-exp-<name>', by: 'experiments.sh install' },
+  { kind: 'path', what: '/etc/worklane/experiments/<name>.json', by: 'experiments.sh install, set, data' },
+  { kind: 'path', what: '/var/lib/worklane-exp/<name>', by: 'experiments.sh install; the experiment helper' },
+  { kind: 'glob', what: '/run/worklane-exp-env/<name>.', by: 'the experiment helper (a job runtime environment file)' },
   { kind: 'sudoers', what: 'worklane-test-<name>', by: 'test-user.sh install' },
   { kind: 'sudoers', what: 'worklane-<name>', by: 'instance.sh' },
   { kind: 'path', what: '/var/lib/worklane-test/<name>', by: 'test-user.sh install' },
   { kind: 'path', what: '/srv/worklane/<name>', by: 'instance.sh, checkout.sh' },
+  { kind: 'user', what: 'wl-exp-<name>', by: 'experiments.sh install' },
+  { kind: 'user', what: 'wl-score-<name>', by: 'experiments.sh install' },
   { kind: 'user', what: 'wl-test-<name>', by: 'test-user.sh install' },
   { kind: 'user', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
   { kind: 'user', what: 'wl-<name>-agent', by: 'instance.sh' },
@@ -66,7 +77,8 @@ const NOT_RECORDS = [
   { what: 'worklane_ci_', why: "ci-runner.sh's nftables names: a runner's name, not an instance" },
   { what: 'wl-ci-<name>', why: "ci-runner.sh's runner user: a runner's name, not an instance" },
   { what: '<name>-worklane', why: "the instance's GitHub App's name (src/setup/app-manifest.ts): GitHub's, never removed here; instance-remove.sh prints what to do there" },
-  { what: '/run/worklane/gpu/<name>.lock', why: "a GPU's lock, by its index: not an instance" },
+  { what: 'worklane-exp-<name>_', why: "an experiment job's transient unit (worklane-exp-<name>_<job>_<step>_<pid>): gone when the job ends; a job in flight (its users' processes) refuses the removal" },
+  { what: '/run/worklane/gpu/<name>.lock', why: "a GPU's lock, by its index, machine-wide: held (flock) only by a live test-run or job helper, which a run in flight refuses the removal for; another instance's hold is never touched" },
 ];
 
 // Every file and directory directly under /etc/worklane and /var/lib/worklane (and the /var/lib/worklane-* roots):
@@ -80,6 +92,10 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/init', item: '/var/lib/worklane/init/<name>.json' },
   { at: '/var/lib/worklane/canary.json', item: "canary (the canary run in progress: taken with updates.json's canary)" },
   { at: '/var/lib/worklane-test', item: '/var/lib/worklane-test/<name>' },
+  { at: '/var/lib/worklane-exp', item: '/var/lib/worklane-exp/<name> (experiments.sh remove)' },
+  { at: '/etc/worklane/experiments', item: '/etc/worklane/experiments/<name>.json (experiments.sh remove)' },
+  { at: '/etc/worklane/egress.nft', item: "egress: the sandbox users' uids, rebuilt by egress-firewall.sh apply once an instance's are gone" },
+  { at: '/etc/worklane/egress.users', item: 'egress: the uids the rule covers, as egress-firewall.sh apply last wrote them' },
   { at: '/etc/worklane/allowed_signers', why: 'release signers: the machine updater' },
   { at: '/etc/worklane/slots.json', why: 'the machine slot cap' },
   { at: '/etc/worklane/machine-owners.json', why: 'the machine owners: GitHub logins' },
