@@ -45,7 +45,7 @@ import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp } from './instance.js';
+import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { sandboxVerdict } from './testrun/status.js';
@@ -60,6 +60,7 @@ import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
 import { INTAKE_LABEL } from './intake/github.js';
 import { discordChannelsCommand } from './intake/discord-channels.js';
+import { sourceViewCommand } from './intake/source-view.js';
 import { intakeCheckCommand } from './intake/check.js';
 import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
@@ -187,6 +188,12 @@ usage: ${BRAND.cli} <command> [options]
                                    read-only: the text and announcement channels the instance's bot can see,
                                    one "<server> / #<channel> <id>" line each (run as the instance's user);
                                    --json: one JSON line, with each server's id and the bot's application
+  slack view [--instance name] [--json]
+                                   read-only: the workspace, public channels and people the instance's Slack
+                                   app can see, with their ids (run as the instance's user); --json: one line
+  linear view [--instance name] [--json]
+                                   read-only: the teams, labels and people the instance's Linear key can see,
+                                   with their ids (run as the instance's user); --json: one line
   intake check [--instance name]   read-only: validate the instance's intake.yaml as the coordinator reads it:
                                    what is on, or each error with its path (exit 1); no file: intake is off
   instance init <name> --repo <path> --github <owner/repo>
@@ -197,6 +204,9 @@ usage: ${BRAND.cli} <command> [options]
   instance set-discord-token <name> --file <path>
                                    point credentials.yaml at the chat bot's token file (credentials.sh
                                    intake-discord runs it); the token is never an argument
+  instance set-intake-credential <name> <slack_app_token|slack_bot_token|linear_api_key> --file <path>
+                                   point credentials.yaml at a Slack token's or the Linear key's file
+                                   (credentials.sh intake-slack / intake-linear run it); never the secret itself
   instance auto-config <name> [--answer <id>=<choice>]...
                                    server mode's repo config: detect, check as the agent user, propose the setup PR
                                    through the App; one JSON line says where it stands (checkout.sh runs it)
@@ -1133,6 +1143,29 @@ async function main(argv: string[]): Promise<number> {
         console.log(`wrote ${file} (github: App ${appId}, installation ${installationId}; the rest kept)`);
         return 0;
       }
+      if (sub === 'set-intake-credential' && target) {
+        // credentials.sh intake-slack / intake-linear, after it installed the file: the entry in credentials.yaml,
+        // validated, the rest kept. Only the file's path is passed: the secret is never an argument.
+        const tokenFile = option(rest, '--file');
+        const key = rest[1];
+        if (!tokenFile?.startsWith('/') || rest.length !== 2 || (key !== 'slack_app_token' && key !== 'slack_bot_token' && key !== 'linear_api_key')) {
+          console.error('usage: instance set-intake-credential <name> <slack_app_token|slack_bot_token|linear_api_key> --file <absolute path>');
+          return 2;
+        }
+        const file = join(instancesDir(), target, 'credentials.yaml');
+        if (!existsSync(join(instancesDir(), target, 'instance.yaml'))) {
+          console.error(`no instance "${target}" for this user (${join(instancesDir(), target)}): \`${BRAND.cli} instance init\` first`);
+          return 1;
+        }
+        try {
+          setIntakeCredential(file, key, tokenFile);
+        } catch (e) {
+          console.error((e as Error).message);
+          return 1;
+        }
+        console.log(`wrote ${file} (intake.${key}: ${tokenFile}; the rest kept)`);
+        return 0;
+      }
       if (sub === 'set-discord-token' && target) {
         // credentials.sh intake-discord, after it installed the token file: the entry in credentials.yaml, validated,
         // the rest kept. Only the file's path is passed: the token is never an argument.
@@ -1187,7 +1220,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]...');
       return 2;
     }
 
@@ -1235,6 +1268,16 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       return discordChannelsCommand({ instance: instanceOpt, json });
+    }
+
+    case 'slack':
+    case 'linear': {
+      const json = flag(rest, '--json');
+      if (sub !== 'view' || rest.length) {
+        console.error(commandUsage(cmd));
+        return 2;
+      }
+      return sourceViewCommand({ kind: cmd, instance: instanceOpt, json });
     }
 
     case 'intake': {
