@@ -183,7 +183,7 @@ test('setup: the slot cap becomes root:root 0644, changed only through the helpe
   assert.doesNotMatch(machine, /0664/);
   const helper = readFileSync(join(setup, 'machine-helper.sh'), 'utf8');
   assert.match(helper, /install_sudoers worklane-machine "\$\(machine_sudoers "\$\{users\[@\]\}"\)"/);
-  assert.match(helper, /\[ "\$name" != dash \]/);
+  assert.match(helper, /need_instance_name "\$name"/, 'lib.sh refuses dash (test/instance-name.test.ts)');
   assert.match(helper, /^chmod 0644 \/etc\/worklane\/slots\.json$/m);
   assert.match(helper, /install -o root -g root -m 0755 "\$src" "\$tmp"/);
 });

@@ -37,8 +37,7 @@ as_root "$@"
 [ "$#" -ge 1 ] || { echo "usage: machine-helper.sh <name> [<name>...]" >&2; exit 2; }
 users=()
 for name in "$@"; do
-  [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
-  [ "$name" != dash ] || { echo "wl-dash is the dashboard viewer, not a coordinator; it gets no access" >&2; exit 2; }
+  need_instance_name "$name"
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   users+=("wl-$name")
 done

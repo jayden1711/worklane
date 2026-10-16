@@ -143,8 +143,26 @@ const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
 const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
 
-/** An instance name: instance.sh's shape, never the viewer's (dash) or one whose users are another instance's. */
-const instanceName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
+/**
+ * Why a name can't be an instance's, or null: instance.sh's shape, never a name whose users, group or units are already
+ * another's. Word for word src/instance-name.ts instanceNameProblem and scripts/setup/lib.sh instance_name_problem
+ * (test/instance-name.test.ts holds the three equal).
+ */
+function instanceNameProblem(s) {
+  if (typeof s !== 'string' || !/^[a-z][a-z0-9-]{0,20}$/.test(s)) return 'lowercase letters, digits and dashes, starting with a letter, at most 21';
+  if (s === 'dash') return 'wl-dash is the dashboard viewer';
+  if (s === 'hub' || s === 'hub-setup') return `worklane-dashboard-${s}.service is the dashboard hub's`;
+  if (s === 'update' || s === 'tailscale' || s === 'claude-account') return `worklane-${s}.service is the machine's own`;
+  if (s === 'agent' || s === 'eval' || s === 'work') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
+  if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
+  if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
+  if (s.startsWith('dashboard-')) return `worklane-${s}.service is the dashboard of instance ${s.slice(10)}`;
+  const m = /^(.+)-(agent|eval|work)$/.exec(s);
+  if (m) return `wl-${s} is instance ${m[1]}'s ${m[2]} name`;
+  return null;
+}
+/** An instance name the helper acts for. */
+const instanceName = (s) => instanceNameProblem(s) === null;
 /** A GitHub repo, owner/name: the owner a GitHub login (letters, digits, single inner dashes, at most 39), the name letters, digits, ., _ and -. */
 const githubRepo = (s) => {
   if (typeof s !== 'string') return false;
@@ -712,4 +730,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

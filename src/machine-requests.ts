@@ -18,6 +18,7 @@ import type { EventPayload, StoredEvent } from './events/types.js';
 import { checkRootStep } from './console/root-steps.js';
 import { MACHINE_OWNERS_FILE, machineChangeRefusal, type MachineRequester } from './machine-owners.js';
 import { addProjectNameOk, addProjectRepoOk } from './machine.js';
+import { instanceNameProblem } from './instance-name.js';
 
 export const MACHINE_EVENTS = ['machine.requested', 'machine.started', 'machine.finished'] as const;
 
@@ -121,7 +122,7 @@ export function requestMachineChange(log: EventLog, r: { args: string[]; request
 export function requestAddProject(log: EventLog, r: { name: unknown; repo: unknown; requester: MachineRequester; ownersFile?: string }): MachineRequest {
   const who = machineChangeRefusal(r.requester, { file: r.ownersFile ?? MACHINE_OWNERS_FILE });
   if (who) throw new MachineRequestError(who, 403);
-  if (!addProjectNameOk(r.name)) throw new MachineRequestError("the project's name: lowercase letters, digits and dashes, starting with a letter, at most 21 (not dash, and not ending in -agent, -eval or -work)");
+  if (!addProjectNameOk(r.name)) throw new MachineRequestError(`the project's name: ${instanceNameProblem(r.name)}`);
   if (!addProjectRepoOk(r.repo)) throw new MachineRequestError('the repo: a GitHub owner/name');
   const open = machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.args[0] === 'add-project' && (x.status === 'pending' || x.status === 'running'));
   if (open) throw new MachineRequestError(`an add-project (${open.args[1]}) is already ${open.status}; wait for it to finish`, 409);
