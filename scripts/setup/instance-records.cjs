@@ -575,7 +575,13 @@ function carry(h, fromDir, toDir) {
       out.push({ skipped: src });
       continue;
     }
-    const text = fs.readFileSync(src, 'utf8');
+    const raw = fs.readFileSync(src);
+    // A binary file is carried as it is: only text names paths and users.
+    if (raw.includes(0)) {
+      plan.push([path.join(toDir, e.name), raw, fs.statSync(src).mode & 0o777]);
+      continue;
+    }
+    const text = raw.toString('utf8');
     let moved;
     try {
       moved = moveText(text, h);
