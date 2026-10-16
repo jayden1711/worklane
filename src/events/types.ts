@@ -999,6 +999,8 @@ export const EventSchemas = {
     value: z.number().nullable(),
     why: z.string().max(500),
   }),
+  /** What one experimenter session cost (real money): the study's spend counts these, on the local day. */
+  'experiment.cost': z.strictObject({ study: z.string(), session: z.string(), usd: z.number().nonnegative() }),
   /** A person's change to a study through the dashboard's Review -> Confirm. */
   'experiment.changed': z.strictObject({ study: z.string(), action: z.enum(['start', 'pause', 'resume', 'stop_job', 'caps', 'archive', 'promote', 'prune']), by: z.string(), role: z.string(), detail: z.string().max(1000) }),
   'harness_eval.run': z.strictObject({

@@ -16,6 +16,7 @@ import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
+import { expSecretGlobs } from './experiments/paths.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
 
@@ -125,7 +126,8 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     // one this instance names. (They live in the coordinator's state, which agent users can't enter either.)
     const held = env[HELD_OUT_ENV];
     // A dashboard key, likewise: in local mode the agents are the person's own OS user, so only this keeps them out (#508).
-    guardrails = { ...guardrails, secret_paths: [...guardrails.secret_paths, HELD_OUT_GLOB, DASHBOARD_KEY_GLOB, ...(held ? [`${held.replace(/[\\/]+$/, '')}/**`] : [])] };
+    // Experiment jobs' state and root's experiment files too: the eval copies, the data and every job's outputs.
+    guardrails = { ...guardrails, secret_paths: [...guardrails.secret_paths, HELD_OUT_GLOB, DASHBOARD_KEY_GLOB, ...expSecretGlobs(), ...(held ? [`${held.replace(/[\\/]+$/, '')}/**`] : [])] };
     // Hosts the owner allowed for this one run ("allow once"), set by the runner for this session only.
     const once = (env[`${BRAND.envPrefix}_ALLOW_HOSTS`] ?? '').split(',').map((h) => h.trim()).filter(Boolean);
     if (once.length) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, ...once] } };
