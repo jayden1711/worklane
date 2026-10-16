@@ -16,6 +16,7 @@ import { localDay } from './local-day.js';
 import { MODEL_TIERS, tierOf } from './model-routing.js';
 import { providerOf } from './providers.js';
 import { effectiveRouting, route } from './routing.js';
+import { CROSS_FAMILY_OFF } from './cross-eval.js';
 
 /** What --effort may be set to from the chat (claude 2.1.296 also has xhigh and max; not offered: not every model has xhigh, and they cost the most). */
 export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const;
@@ -56,7 +57,7 @@ export function chatDefaultModel(agents: Agents): string {
 /** Every Anthropic model routing names (in effect, the chat's default first), and chief_of_staff's: the only ones the chat runs on. */
 export function chatModels(agents: Agents): string[] {
   const named = [chatDefaultModel(agents), ...effectiveRouting(agents).map((r) => r.value), agents.roles.chief_of_staff?.model];
-  return [...new Set(named.filter((m): m is string => typeof m === 'string' && m.length > 0 && !providerOf(m)))];
+  return [...new Set(named.filter((m): m is string => typeof m === 'string' && m.length > 0 && m !== CROSS_FAMILY_OFF && !providerOf(m)))];
 }
 
 /** The models this person may pick: all of chatModels for the owner; for a writer, those at or below the default's tier; none for a viewer. */

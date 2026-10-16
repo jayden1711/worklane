@@ -45,6 +45,8 @@ import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
 import { calibrated, compromisedDoubts, protectedBrief, verdictRefusal } from './verdict-confidence.js';
 import { waitCategoriesOf, whyHighRisk } from './merge-policy.js';
+import { crossDisagreement, crossFamilyModel, crossFamilySkip, type SideVerdict } from './cross-eval.js';
+import { route as routingValue } from './routing.js';
 import type { ReviewConfig } from './config/schema.js';
 import { applySettings, inRunWindow } from './settings.js';
 import { CONFIG_INCIDENT, LiveConfig } from './config/live.js';
@@ -1660,11 +1662,14 @@ export class Coordinator extends HarnessEvals {
     // An unbacked claim lowers the confidence whatever the evaluator said: it is never evidence.
     // A confidence other than high always carries its reason; a protected surface's unanswered or unacceptable actor is a doubt.
     const ok = r.reason === 'succeeded';
+    // A protected change the main evaluator approved: a second verdict from another model family, when routing names
+    // one (off by default). A disagreement is a doubt naming both sides, so the change waits for a human.
+    const cross = ok && surface.length && s?.patch_correct === true ? await this.crossFamily(issue, doneWhen, path, extra, files, { patch_correct: true, confidence: s.confidence ?? 'low', reason: s.confidence_reason?.trim() || s.advice?.trim() || '' }) : null;
     const conf = calibrated({
       confidence: (ok && s?.confidence) || 'low',
       reason: ok ? s?.confidence_reason : `evaluator run ${r.reason}`,
       unverified: unverified.length,
-      compromised: ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : [],
+      compromised: [...(ok ? compromisedDoubts(s?.compromised_component, surface.length > 0) : []), ...(cross?.doubt ? [cross.doubt] : [])],
     });
     const v = {
       patch_correct: ok && s?.patch_correct === true,
@@ -1675,8 +1680,53 @@ export class Coordinator extends HarnessEvals {
     } as const;
     if (this.git(path, 'rev-parse', 'HEAD') !== head) throw new Error('the worktree moved during evaluation; the verdict would not match the patch');
     const design = r.reason === 'succeeded' && typeof s?.design_change === 'boolean' ? { design_change: s.design_change, ...(s.design_reason ? { design_reason: s.design_reason.slice(0, 500) } : {}) } : {};
-    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}) });
+    this.emit('eval.verdict', { issue: n, head, patch_hash: patchHash, ...v, ...(unread.length ? { unread } : {}), ...design, model: judged.model, ...(judged.escalatedFrom ? { escalated_from: judged.escalatedFrom } : {}), ...(cross ? { cross_family: cross.record } : {}) });
     return { ...v, unread, bothSidesKept: r.reason === 'succeeded' && typeof s?.both_sides_kept === 'boolean' ? s.both_sides_kept : null };
+  }
+
+  /**
+   * The cross-family evaluator's verdict on a protected change (src/cross-eval.ts): null when routing has it off.
+   * Its run goes to the named hosted provider through the usual provider checks and never falls back to Anthropic;
+   * not run (a refused provider, a change it must not see, a failed run) is recorded and is no doubt by itself.
+   */
+  private async crossFamily(issue: Issue, doneWhen: DoneWhenList, path: string, brief: string[], files: ChangeFile[], primary: SideVerdict): Promise<{ record: EventPayload<'eval.verdict'>['cross_family'] & {}; doubt: string | null } | null> {
+    const model = crossFamilyModel(routingValue(this.d.cfg.agents, 'eval_cross_family').value);
+    if (!model) return null;
+    const notRun = (why: string) => ({ record: { provider: model, outcome: 'not_run' as const, reason: why.slice(0, 2000) }, doubt: null });
+    const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    let categories: Record<string, string[]> = {};
+    try {
+      categories = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review).categories;
+    } catch {
+      return notRun('the change could not be classified, so it is not sent to another provider');
+    }
+    const skip = crossFamilySkip({ paths: files.map((f) => f.path), categories });
+    if (skip) return notRun(skip);
+    const role = this.d.cfg.agents.roles.evaluator!;
+    const r = await this.d.runner.run({
+      env: this.projectEnv(),
+      role: 'evaluator-verdict',
+      stateDir: this.d.stateDir,
+      prompt: issueBrief(issue, doneWhen, brief),
+      appendSystemPrompt: rolePrompt(this.d.cfg, 'evaluator-verdict'),
+      cwd: path,
+      model,
+      route: { kind: 'cross_eval', fallback: role.model, noFallback: true },
+      allowedTools: ['Read', 'Glob', 'Grep', 'Bash(git diff:*)', 'Bash(git log:*)', 'Bash(git show:*)'],
+      disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'],
+      maxTurns: 60,
+      maxBudgetUsd: role.budget_usd ?? 5,
+      jsonSchema: VERDICT_SCHEMA,
+      stallMs: 15 * 60_000,
+      timeoutMs: this.commandTimeoutMs,
+    });
+    this.cost(issue.number, 'evaluator', r);
+    const o = r.structured as { patch_correct?: unknown; confidence?: unknown; confidence_reason?: unknown; advice?: unknown } | undefined;
+    if (r.reason !== 'succeeded' || r.provider !== model || typeof o?.patch_correct !== 'boolean' || !['high', 'medium', 'low'].includes(o.confidence as string))
+      return notRun(r.reason !== 'succeeded' ? r.detail.slice(0, 500) || `the run ended ${r.reason}` : r.provider !== model ? 'the run did not go to the cross-family provider' : 'it gave no verdict');
+    const second: SideVerdict = { patch_correct: o.patch_correct, confidence: o.confidence as SideVerdict['confidence'], reason: (typeof o.confidence_reason === 'string' && o.confidence_reason.trim()) || (typeof o.advice === 'string' ? o.advice.trim() : '') };
+    const doubt = crossDisagreement(primary, { ...second, provider: model });
+    return { record: { provider: model, outcome: doubt ? 'disagrees' : 'agrees', patch_correct: second.patch_correct, confidence: second.confidence, ...(second.reason ? { reason: second.reason.slice(0, 2000) } : {}) }, doubt };
   }
 
   /**

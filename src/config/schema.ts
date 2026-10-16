@@ -3,6 +3,7 @@
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
+import { CROSS_FAMILY_OFF, crossFamilyRefusal } from '../cross-eval.js';
 import type { RoutedRun } from '../model-routing.js';
 import { ROUTING_ALIASES, type Routing, type RoutingKey } from '../routing.js';
 import { projectEnvProblem } from '../project-env.js';
@@ -329,7 +330,7 @@ const modelRoutingShape = {
   /** The dashboard chat's default model; never an open model (checked below). */
   chat: model.optional(),
 };
-const routingShape = { ...modelRoutingShape, eval_cheap: model.optional(), eval_cheap_levels: levels.optional(), eval_escalate: z.boolean().optional() } satisfies Record<RoutingKey, z.ZodType>;
+const routingShape = { ...modelRoutingShape, eval_cheap: model.optional(), eval_cheap_levels: levels.optional(), eval_escalate: z.boolean().optional(), eval_cross_family: model.optional() } satisfies Record<RoutingKey, z.ZodType>;
 // INVARIANT: the routing keys that name a model for a routed run (an open model may be allowed there).
 const ROUTED_MODEL_KEYS = ['build', 'build_high_risk', 'planner', 'research', 'intake_triage', 'intake_replier', 'intake_summary', 'intake_thread', 'stage_judge', 'eval_answer', 'reflection'] as const satisfies readonly RoutingKey[];
 
@@ -434,6 +435,13 @@ export const AgentsConfig = z
     }
     if (c.routing.eval_cheap !== undefined) plain(at('eval_cheap'), c.routing.eval_cheap);
     if (c.routing.chat !== undefined) plain(at('chat'), c.routing.chat);
+    // The cross-family evaluator: off, or a hosted provider that is configured (src/cross-eval.ts).
+    const cross = c.routing.eval_cross_family;
+    if (cross !== undefined) {
+      const why = crossFamilyRefusal(cross);
+      if (why) ctx.addIssue({ code: 'custom', path: at('eval_cross_family'), message: why });
+      else if (cross !== CROSS_FAMILY_OFF && !c.providers?.hosted?.[providerOf(cross)!.name]) ctx.addIssue({ code: 'custom', path: at('eval_cross_family'), message: `${cross} is not configured under providers` });
+    }
     for (const [r, cfg] of Object.entries(c.roles)) if (r !== 'chief_of_staff' && cfg?.conversation_budget_usd !== undefined) ctx.addIssue({ code: 'custom', path: ['roles', r, 'conversation_budget_usd'], message: 'only chief_of_staff (the chat) has conversations' });
     plain(['instruction_evals', 'model'], c.instruction_evals.model);
     plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
