@@ -2388,12 +2388,12 @@ jobs:
           sudo sh -c "cd '$gh_' && sha256sum *.yaml" | diff "$F/gamma-before.txt" -
           [ "$(systemctl show -p LoadState --value worklane-gamma.service)" = loaded ]
           sudo systemctl start worklane-gamma.service && sleep 10 && systemctl is-active worklane-gamma.service
-      - name: "instance-rename: ci becomes ci-renamed: the same App key and agent login, its history imported, every root record re-keyed, the old Siri token refused, its open ask asked again; nothing of ci left"
+      - name: "instance-rename: ci becomes kilo: the same App key and agent login, its history imported, every root record re-keyed, the old Siri token refused, its open ask asked again; nothing of ci left"
         run: |
           home="$(getent passwd wl-ci | cut -d: -f6)"; state="$home/.local/state/worklane/instances/ci/state"
           # As another user, from a directory every user may enter.
           asu() { (cd / && sudo -u "$@"); }
-          for u in worklane-ci-renamed worklane-dashboard-ci-renamed; do
+          for u in worklane-kilo worklane-dashboard-kilo; do
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8999\n' "$LOOPBACK?port=8999" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
@@ -2408,59 +2408,59 @@ jobs:
           sudo jq -e '.active.ci and .failover.instances.ci' /var/lib/worklane/claude-account/profiles.json
           sudo grep -qx ci /var/lib/worklane/claude-account/paused
           sudo jq -e '.instances.ci.devices == [0]' /etc/worklane/testrun-gpu.json
-          sudo bash scripts/setup/instance-rename.sh ci ci-renamed --print | tee "$F/rn4-print.txt"
+          sudo bash scripts/setup/instance-rename.sh ci kilo --print | tee "$F/rn4-print.txt"
           grep -q 'it would refuse now, while:' "$F/rn4-print.txt" && grep -q 'worklane-ci.service, is active' "$F/rn4-print.txt"
           sudo systemctl stop worklane-ci.service
-          sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/instance-rename.sh ci ci-renamed --yes > "$F/rn5.out" 2> "$F/rn5.err" || { tail -n 60 "$F/rn5.out"; cat "$F/rn5.err"; exit 1; }
+          sudo env NODE_OPTIONS="$LOOPBACK?port=8999" CI_LOOPBACK_GITHUB_PORT=8999 bash scripts/setup/instance-rename.sh ci kilo --yes > "$F/rn5.out" 2> "$F/rn5.err" || { tail -n 60 "$F/rn5.out"; cat "$F/rn5.err"; exit 1; }
           tail -n 25 "$F/rn5.out"
-          # Never two coordinators on the repo: ci's is gone, ci-renamed's runs.
+          # Never two coordinators on the repo: ci's is gone, kilo's runs.
           [ "$(systemctl show -p LoadState --value worklane-ci.service)" = not-found ]
-          sleep 10; systemctl is-active worklane-ci-renamed.service worklane-dashboard-ci-renamed.service worklane-dashboard-hub.service
+          sleep 10; systemctl is-active worklane-kilo.service worklane-dashboard-kilo.service worklane-dashboard-hub.service
           for u in wl-ci wl-ci-agent; do if id "$u" 2>/dev/null; then echo "$u is still there" >&2; exit 1; fi; done
-          for p in /srv/worklane/ci /etc/sudoers.d/worklane-ci /etc/systemd/system/worklane-dashboard-ci.service "$home" /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/renames/ci-to-ci-renamed.unit; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
-          nh="$(getent passwd wl-ci-renamed | cut -d: -f6)"; ni="$nh/.local/state/worklane/instances/ci-renamed"
+          for p in /srv/worklane/ci /etc/sudoers.d/worklane-ci /etc/systemd/system/worklane-dashboard-ci.service "$home" /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/renames/ci-to-kilo.unit; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
+          nh="$(getent passwd wl-kilo | cut -d: -f6)"; ni="$nh/.local/state/worklane/instances/kilo"
           # The same App key and agent login, the new users' own.
-          [ "$(sudo sha256sum "$nh/.config/ci-renamed-app/private-key.pem" | cut -d' ' -f1)" = "$key_sum" ] && [ "$(sudo stat -c '%U %a' "$nh/.config/ci-renamed-app/private-key.pem")" = "wl-ci-renamed 400" ]
-          nc="$(getent passwd wl-ci-renamed-agent | cut -d: -f6)/.claude/.credentials.json"
-          [ "$(sudo sha256sum "$nc" | cut -d' ' -f1)" = "$login_sum" ] && [ "$(sudo stat -c '%U %a' "$nc")" = "wl-ci-renamed-agent 600" ]
-          sudo grep -qx 'name: ci-renamed' "$ni/instance.yaml"
-          if sudo grep -rqE "/srv/worklane/ci/|$home/|wl-ci-agent|ci-app/" "$ni"/*.yaml; then echo "a file of ci-renamed still names ci's" >&2; sudo grep -rnE "/srv/worklane/ci/|$home/|wl-ci-agent|ci-app/" "$ni"/*.yaml >&2; exit 1; fi
-          sudo grep -q "$nh/.config/ci-renamed-app/private-key.pem" "$ni/credentials.yaml"
-          sudo git -C /srv/worklane/ci-renamed/alpha config --get-all credential.helper | grep -qx '!/usr/local/bin/worklane git-credential --instance ci-renamed'
+          [ "$(sudo sha256sum "$nh/.config/kilo-app/private-key.pem" | cut -d' ' -f1)" = "$key_sum" ] && [ "$(sudo stat -c '%U %a' "$nh/.config/kilo-app/private-key.pem")" = "wl-kilo 400" ]
+          nc="$(getent passwd wl-kilo-agent | cut -d: -f6)/.claude/.credentials.json"
+          [ "$(sudo sha256sum "$nc" | cut -d' ' -f1)" = "$login_sum" ] && [ "$(sudo stat -c '%U %a' "$nc")" = "wl-kilo-agent 600" ]
+          sudo grep -qx 'name: kilo' "$ni/instance.yaml"
+          if sudo grep -rqE "/srv/worklane/ci/|$home/|wl-ci-agent|ci-app/" "$ni"/*.yaml; then echo "a file of kilo still names ci's" >&2; sudo grep -rnE "/srv/worklane/ci/|$home/|wl-ci-agent|ci-app/" "$ni"/*.yaml >&2; exit 1; fi
+          sudo grep -q "$nh/.config/kilo-app/private-key.pem" "$ni/credentials.yaml"
+          sudo git -C /srv/worklane/kilo/alpha config --get-all credential.helper | grep -qx '!/usr/local/bin/worklane git-credential --instance kilo'
           # Its history imported: every event ci had, and more (the rename's own).
-          after_events="$(asu wl-ci-renamed node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const l = new EventLog(process.argv[1]); console.log(l.read(0).length); l.close();' "$ni/state/events.db")"
+          after_events="$(asu wl-kilo node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const l = new EventLog(process.argv[1]); console.log(l.read(0).length); l.close();' "$ni/state/events.db")"
           [ "$after_events" -gt "$before_events" ] || { echo "events: $before_events before, $after_events after" >&2; exit 1; }
-          # The open ask, asked again for ci-renamed; ci's withdrawn.
-          asu wl-ci-renamed node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const { asks } = await import("/opt/worklane/current/dist/src/console/asks.js"); const l = new EventLog(process.argv[1]); const a = asks(l); const n = a.list({ instance: "ci-renamed", status: "open" }).filter((x) => x.title === "ci rename: carried?").length; const o = a.list({ instance: "ci", status: "open" }).length; l.close(); if (n !== 1 || o !== 0) { console.error(n, o); process.exit(1); }' "$ni/state/events.db"
+          # The open ask, asked again for kilo; ci's withdrawn.
+          asu wl-kilo node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const { asks } = await import("/opt/worklane/current/dist/src/console/asks.js"); const l = new EventLog(process.argv[1]); const a = asks(l); const n = a.list({ instance: "kilo", status: "open" }).filter((x) => x.title === "ci rename: carried?").length; const o = a.list({ instance: "ci", status: "open" }).length; l.close(); if (n !== 1 || o !== 0) { console.error(n, o); process.exit(1); }' "$ni/state/events.db"
           # The old Siri token is refused on the new instance, as made and with its name rewritten; it was revoked by the rename.
-          sudo cp "$F/siri-ci-token" /tmp/siri-ci-token && sudo chown wl-ci-renamed /tmp/siri-ci-token && sudo chmod 0400 /tmp/siri-ci-token
-          asu wl-ci-renamed node --input-type=module -e '
+          sudo cp "$F/siri-ci-token" /tmp/siri-ci-token && sudo chown wl-kilo /tmp/siri-ci-token && sudo chmod 0400 /tmp/siri-ci-token
+          asu wl-kilo node --input-type=module -e '
             const fs = await import("node:fs"); const m = await import("/opt/worklane/current/dist/src/siri/tokens.js");
             const t = fs.readFileSync("/tmp/siri-ci-token", "utf8").trim(); const node = { id: "n1", name: "phone-node" };
-            const tries = [[t, "ci-renamed"], [t.replace("_siri_ci_", "_siri_ci-renamed_"), "ci-renamed"]];
+            const tries = [[t, "kilo"], [t.replace("_siri_ci_", "_siri_kilo_"), "kilo"]];
             for (const [tok, inst] of tries) { const v = m.verifyToken({ stateDir: process.argv[1], instance: inst, token: tok, node }); if (v.ok) { console.error("accepted"); process.exit(1); } console.log(v.why); }
             if (!m.readDevices(process.argv[1]).every((d) => d.revokedAt)) process.exit(2);' "$ni/state"
           sudo rm -f /tmp/siri-ci-token
           # Every root record re-keyed; none of ci's left.
-          sudo jq -e '(.instances|has("ci")|not) and (.instances|has("ci-renamed")|not)' /etc/worklane/testrun-gpu.json
+          sudo jq -e '(.instances|has("ci")|not) and (.instances|has("kilo")|not)' /etc/worklane/testrun-gpu.json
           grep -q "note: ci's GPU grant (GPU 0) is not moved: ci has no test user" "$F/rn5.out"
-          sudo jq -e '(.active|has("ci")|not) and .active["ci-renamed"].profile=="ci-shared" and (.failover.instances|has("ci-renamed")) and (.profiles["ci-shared"].users["wl-ci-renamed-agent"].instance=="ci-renamed") and (.profiles["ci-shared"].users|has("wl-ci-agent")|not)' /var/lib/worklane/claude-account/profiles.json
-          sudo jq -e '([.users[] | select(.instance=="ci")] | length == 0) and ([.users[] | select(.instance=="ci-renamed" and .user=="wl-ci-renamed-agent")] | length > 0)' /var/lib/worklane/claude-account/status.json
-          sudo grep -qx ci-renamed /var/lib/worklane/claude-account/paused && ! sudo grep -qx ci /var/lib/worklane/claude-account/paused
-          sudo jq -e '.canary.instance=="ci-renamed"' /etc/worklane/updates.json
-          sudo jq -e '[.incidents[] | select(.id=="ciciok01")][0] | .instance=="ci-renamed" and .key=="worklane-ci-renamed.service"' /var/lib/worklane/agent-slots/incidents.json
+          sudo jq -e '(.active|has("ci")|not) and .active["kilo"].profile=="ci-shared" and (.failover.instances|has("kilo")) and (.profiles["ci-shared"].users["wl-kilo-agent"].instance=="kilo") and (.profiles["ci-shared"].users|has("wl-ci-agent")|not)' /var/lib/worklane/claude-account/profiles.json
+          sudo jq -e '([.users[] | select(.instance=="ci")] | length == 0) and ([.users[] | select(.instance=="kilo" and .user=="wl-kilo-agent")] | length > 0)' /var/lib/worklane/claude-account/status.json
+          sudo grep -qx kilo /var/lib/worklane/claude-account/paused && ! sudo grep -qx ci /var/lib/worklane/claude-account/paused
+          sudo jq -e '.canary.instance=="kilo"' /etc/worklane/updates.json
+          sudo jq -e '[.incidents[] | select(.id=="ciciok01")][0] | .instance=="kilo" and .key=="worklane-kilo.service"' /var/lib/worklane/agent-slots/incidents.json
           sudo jq -e '[.incidents[] | select(.instance=="ci")] | length == 0' /var/lib/worklane/agent-slots/incidents.json
           sudo jq -e '[.pending[] | select(.instance=="ci")] | length == 0' /var/lib/worklane/pending-signers.json
-          # The helper's rule and the hub with ci-renamed, never ci; the hub's Siri gateway kept.
-          grep -qxF "wl-beta, wl-ci-renamed ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
+          # The helper's rule and the hub with kilo, never ci; the hub's Siri gateway kept.
+          grep -qxF "wl-beta, wl-kilo ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
           hub=/etc/systemd/system/worklane-dashboard-hub.service
-          grep -q -- '--hub ci-renamed=' "$hub" && grep -q -- ' --siri-port 4397' "$hub"
+          grep -q -- '--hub kilo=' "$hub" && grep -q -- ' --siri-port 4397' "$hub"
           if grep -qE -- '--hub (.*,)?ci=' "$hub"; then echo "the hub still serves ci" >&2; exit 1; fi
-          sudo -n -l -U wl-ci-renamed "$HELPER" set-slots 1 >/dev/null
-          sudo tail -n 1 /var/lib/worklane/machine-changes.jsonl | jq -e '.what=="instance.renamed" and .from=="ci" and .to=="ci-renamed"'
+          sudo -n -l -U wl-kilo "$HELPER" set-slots 1 >/dev/null
+          sudo tail -n 1 /var/lib/worklane/machine-changes.jsonl | jq -e '.what=="instance.renamed" and .from=="ci" and .to=="kilo"'
           [ "$(sudo sh -c 'ls -1 /var/lib/worklane/removed/ci-*.bundle' | wc -l)" = 2 ]
           # A rerun: done already.
-          sudo bash scripts/setup/instance-rename.sh ci ci-renamed --yes | grep -q 'ci was renamed to ci-renamed already'
+          sudo bash scripts/setup/instance-rename.sh ci kilo --yes | grep -q 'ci was renamed to kilo already'
       - name: the units and the fake's log, on failure
         if: failure()
         run: |
@@ -2472,7 +2472,7 @@ jobs:
           sudo journalctl --no-pager -n 80 -u worklane-ci.service -u worklane-dashboard-ci.service -u worklane-dashboard-hub.service -u worklane-dashboard-hub-setup.service -u worklane-beta.service -u worklane-claude-account.service || true
           sudo cat /var/lib/worklane/claude-account/switch.jsonl || true
           cat "$F"/rm*.out "$F"/rm*.err "$F/rm-print.txt" "$F"/rn*.out "$F"/rn*.err 2>/dev/null || true
-          sudo journalctl --no-pager -n 60 -u worklane-ci-renamed.service -u worklane-dashboard-ci-renamed.service -u worklane-gamma.service || true
+          sudo journalctl --no-pager -n 60 -u worklane-kilo.service -u worklane-dashboard-kilo.service -u worklane-gamma.service || true
           tail -n 80 "$F/requests.log" "$F/server.log" || true
           tail -n 80 "$F"/run*.err || true
 
