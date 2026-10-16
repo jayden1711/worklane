@@ -57,6 +57,12 @@ test('(2) an unapproved server\'s snapshot runs as a throwaway user: no network,
   assert.ok(!props.some((p) => /^(User|Group|SupplementaryGroups)=/.test(p)), 'never a named user (the broker\'s, or anyone\'s)');
   assert.ok(!props.some((p) => /^Environment=.*(SECRET|TOKEN|KEY)/i.test(p)), 'no secret in its environment');
   assert.deepEqual([...THROWAWAY_PROPERTIES].filter((p) => p.startsWith('RestrictAddressFamilies')), ['RestrictAddressFamilies=AF_UNIX']);
+  // systemd expands $ in a unit's command line: no argument after the program may hold one (or a % specifier), and
+  // the server's argv, ${CLAUDE_PLUGIN_ROOT} and all, arrives intact.
+  const command = cmd.slice(cmd.indexOf('/usr/local/bin/node'));
+  for (const a of command) assert.doesNotMatch(a, /[$%]/, a);
+  const b64 = command[command.indexOf('--argv-b64') + 1]!;
+  assert.deepEqual(JSON.parse(Buffer.from(b64, 'base64').toString('utf8')), ['node', '${CLAUDE_PLUGIN_ROOT}/server.js']);
 });
 
 test('(2) root reads the throwaway run\'s output as data: a snapshot that fits the schema, or an error; nothing else', () => {

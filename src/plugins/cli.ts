@@ -104,9 +104,9 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
       return 0;
     }
     if (sub === 'snapshot-job') {
-      need('code', 'argv');
-      const argv = JSON.parse(o.argv!) as unknown;
-      if (!Array.isArray(argv) || !argv.length || !argv.every((x) => typeof x === 'string')) throw new Error('--argv must be a JSON list of strings');
+      need('code', 'argv-b64');
+      const argv = JSON.parse(Buffer.from(o['argv-b64']!, 'base64').toString('utf8')) as unknown;
+      if (!Array.isArray(argv) || !argv.length || !argv.every((x) => typeof x === 'string')) throw new Error('--argv-b64 must be a JSON list of strings, base64');
       console.log(await snapshotJob(o.code!, argv as string[]));
       return 0;
     }

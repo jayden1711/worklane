@@ -31,7 +31,9 @@ export function throwawayCommand(o: { node: string; engineCli: string; runtime: 
     ...THROWAWAY_PROPERTIES.flatMap((p) => ['--property', p]),
     '--property', `ReadOnlyPaths=${o.codeDir}`,
     '--property', 'Environment=PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 HOME=/tmp',
-    o.node, o.engineCli, 'plugins', 'snapshot-job', '--code', o.codeDir, '--argv', JSON.stringify(o.runtime.argv),
+    // The argv as base64: systemd expands $VAR and ${VAR} in a unit's command line, which would empty the server's
+    // ${CLAUDE_PLUGIN_ROOT} (or any $ in its arguments) before the job sees it. base64 has neither $ nor %.
+    o.node, o.engineCli, 'plugins', 'snapshot-job', '--code', o.codeDir, '--argv-b64', Buffer.from(JSON.stringify(o.runtime.argv)).toString('base64'),
   ];
 }
 
