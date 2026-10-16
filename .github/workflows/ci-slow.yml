@@ -299,7 +299,7 @@ jobs:
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' testrun-real-systemd ') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 18
     defaults:
       run:
         shell: bash # -eo pipefail: a failed install isn't hidden by its tee
@@ -538,6 +538,8 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier public addresses only; fetch never reaches the host's loopback or LAN; the database container reaches nothing"
+        run: bash scripts/ci/testrun-network-real-systemd.sh "$I2"
       - name: "regression: no value of a run's variables, nor its database password, in any argv, the journal or the unit (a canary, watched as nobody)"
         run: |
           # sudo logs its whole command line to the journal; any user reads a process's argv (ps, /proc/<pid>/cmdline)
@@ -585,7 +587,8 @@ jobs:
             [ "$(cut -d' ' -f1 <<<"$out")" = "$(printf %s "$value" | sha256sum | cut -d' ' -f1)" ] || { echo "$which: the run didn't get the value exactly: $out" >&2; exit 1; }
             echo "$which helper: the run got CANARY_VAR exactly (its sha256 matches)"
             sudo truncate -s 0 "$argvlog"
-            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[0-9]* \([0-9a-f]\{32\}\)$/\1/p')"
+            # "<port> <password>" from the old helper, "<socket directory> <password>" from this one.
+            pw="$(sudo -u wl-ci sudo -n "$H" ci db-start "$id" "$DB_IMAGE" test 90 250 | sed -n 's/^[^ ]* \([0-9a-f]\{32\}\)$/\1/p')"
             [ -n "$pw" ] || { echo "$which: db-start printed no password" >&2; exit 1; }
             # db-start's recorded docker calls, copied out with no value on any command line. WHY: a sudo grep for the
             # password put it in sudo's own journal line; every search with the value runs only after the watch and
