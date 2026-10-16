@@ -36,7 +36,8 @@ import { deployGateView } from './deploy-gate/gate.js';
 import { checkResults, inbox, prsView, project } from './projection.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
 import { backlogFor, instanceEnv, instanceId, instanceTokens, instanceUnit, localServiceSpec, siteForInstance, siteForRoot } from './service.js';
-import { askChat, ChatError, chatAnswer, validateDraft, type ChatAnswer, type ChatAnswerFile } from './chat.js';
+import { askChat, ChatError, chatAnswer, cleanPick, validateDraft, type ChatAnswer, type ChatAnswerFile } from './chat.js';
+import { CHAT_EFFORTS, chatPickerView, pickRefusal, type ChatPick, type Picker } from './chat-pick.js';
 import { handleConversationRoute } from './chat-routes.js';
 import { mayDownload, mayRemove, sharers } from './chat-conversations.js';
 import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
@@ -1527,13 +1528,22 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
           return json(res, 405, { error: 'not a method here' });
         }
+        // The chat's model and effort picker (src/chat-pick.ts): what this person may pick, from routing in effect.
+        const picker: Picker = isOwnerHere ? 'owner' : isWriter(who.role) ? 'writer' : 'viewer';
+        if (url.pathname === '/api/chat/options' && req.method === 'GET') return json(res, 200, chatPickerView(liveCfg().agents, picker));
         if (url.pathname === '/api/chat' && req.method === 'POST') {
-          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown };
+          const body = (await readBody(req)) as { question?: string; key?: unknown; attachments?: unknown; pick?: unknown };
           try {
+            // A viewer never gets here (no POST for a viewer: 403 above). A pick is checked here to refuse early, and again by
+            // the coordinator before the answer runs. No conversation id is taken from the client: a single-shot question
+            // counts against the instance's one legacy stream (MAIN_CONVERSATION), so a new id can't reset its cap.
+            const pick = body.pick === undefined || body.pick === null ? undefined : (body.pick as ChatPick);
+            const pickWhy = pick && typeof pick === 'object' ? pickRefusal(liveCfg().agents, picker, pick) : null;
+            if (pickWhy) return json(res, 400, { error: pickWhy });
             const attached = attachmentsFor(opts.stateDir, body.attachments, chatAttachmentCaps(opts), who.login).map((m) => m.id);
             // `key`: the client's request key, so a retried POST is the same question, not a second turn.
-            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}) });
-            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}) });
+            const asked = askChat({ stateDir: opts.stateDir, question: String(body.question ?? ''), by: who.login, ...(body.key !== undefined ? { key: String(body.key) } : {}), ...(attached.length ? { attachments: attached } : {}), ...(pick && picker !== 'viewer' ? { pick, picker } : {}) });
+            audit(who, 'chat.asked', { id: asked.id, ...(attached.length ? { attachments: attached } : {}), ...(pick ? { pick } : {}) });
             return json(res, 200, asked);
           } catch (e) {
             if (e instanceof ChatError) return json(res, 400, { error: e.message });
@@ -1574,7 +1584,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return typeof rec?.number === 'number' ? { number: rec.number } : null;
         };
         // Conversations and Projects (src/chat-routes.ts): owners' and writers' only, each conversation its creator's.
-        if (await handleConversationRoute(req, res, url, { stateDir: opts.stateDir, who, roleOf: opts.roleOf, caps: chatAttachmentCaps(opts), readBody, json, audit: (action, detail) => audit(who, action, detail), answerFor: chatAnswerFor, filed: filedOf, fileDraft })) return;
+        if (await handleConversationRoute(req, res, url, { stateDir: opts.stateDir, who, roleOf: opts.roleOf, caps: chatAttachmentCaps(opts), readBody, json, audit: (action, detail) => audit(who, action, detail), answerFor: chatAnswerFor, filed: filedOf, fileDraft, pick: (raw) => {
+          if (raw === undefined || raw === null) return null;
+          const pick = cleanPick(raw);
+          if (!pick || picker === 'viewer') return { error: `a pick is a routing model and an effort (${CHAT_EFFORTS.join(', ')})` };
+          const why = pickRefusal(liveCfg().agents, picker, pick);
+          return why ? { error: why } : { pick, picker };
+        } })) return;
         const chat = url.pathname.match(/^\/api\/chat\/([0-9]+-[a-f0-9]+)(\/file-issue)?$/);
         if (chat) {
           const f = chatAnswer(opts.stateDir, chat[1]!);
