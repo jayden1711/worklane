@@ -2218,3 +2218,86 @@ export interface AutomationPlan {
 }
 /** Review (no digest, no confirm: nothing written) or Confirm (with the review's digest) one change to the automations. */
 export const changeAutomation = (body: { action: AutomationAction; id?: string; automation?: AutomationDef; digest?: string; confirm?: boolean }) => api<AutomationPlan>('/api/automations', { method: 'POST', body: JSON.stringify(body) });
+
+/** Extend -> Experiments (src/experiments/view.ts): the owners' and writers' view. */
+export type ExpAction = 'start' | 'pause' | 'resume' | 'stop_job' | 'approve' | 'decline' | 'archive';
+export interface ExpStage2 {
+  size: number;
+  meanCandidate: number | null;
+  meanBest: number | null;
+  spread: number | null;
+  seeds: number;
+  minutesCandidate: number;
+  minutesBest: number;
+}
+export interface ExpLogRow {
+  n: number;
+  kind: 'baseline' | 'exploit' | 'explore' | 'combine' | 'seed';
+  at: string;
+  hypothesis: string;
+  variable: string;
+  stage: 0 | 1 | 2;
+  stage2: ExpStage2[];
+  seeds: number;
+  motivation: string;
+  change: { commit: string | null; files: string[] };
+  config: Record<string, string | number>;
+  minutes: number | null;
+  waited_s: number | null;
+  result: number | null;
+  decision: string;
+  why: string;
+  step: string | null;
+  parent: number | null;
+}
+interface ExpStudyBase {
+  id: string;
+  goal: string;
+  kind: string;
+  screen: { margin: number; seeds: number };
+  ladder: string[];
+  metric: { name: string; direction: 'min' | 'max'; min_delta: number };
+  job: { max_minutes: number; gpus: number; output_gb: number };
+  budget: { gpu_hours_per_day: number; agent_usd_per_day: number; agent_usd_total: number; max_jobs: number };
+  exploration: { share: number; near_miss: number };
+  editable: string[];
+}
+export type ExpStudy =
+  | (ExpStudyBase & { started: false; startRefused: string | null })
+  | (ExpStudyBase & {
+      started: true;
+      version: string;
+      startedBy: string;
+      phase: 'idle' | 'session' | 'awaiting_approval' | 'queued' | 'running';
+      paused: boolean;
+      archived: boolean;
+      broken: boolean;
+      hold: string | null;
+      best: { n: number; value: number } | null;
+      baseline: { n: number; value: number | null } | null;
+      current: { n: number; job: string | null; kind: string; hypothesis: string; approval: string[]; since: string } | null;
+      spend: { agentToday: number; agentPerDay: number; agentTotal: number; agentAll: number; gpuHoursToday: number; gpuHoursPerDay: number; jobs: number; maxJobs: number };
+      counts: { jobs: number; kept: number; explore: number; crash: number; screened: number };
+      held: { n: number; hypothesis: string; variable: string; why: string; commit: string | null; files: string[]; stage2: ExpStage2[]; monitor: { flagged: boolean; findings: string[] } | null } | null;
+      points: { n: number; value: number | null; kept: boolean }[];
+      log: ExpLogRow[];
+    });
+export interface ExperimentsView {
+  unavailable?: string;
+  setup: { state: 'on' | 'off' | 'unknown'; why: string | null; commands: { install: string; set: string; hash: string; add: string }; devices: number[] };
+  error: string | null;
+  actions: ExpAction[];
+  approve: { above_minutes: number; above_gb: number } | null;
+  studies: ExpStudy[];
+}
+export interface ExpPlan {
+  ok: boolean;
+  confirmed: boolean;
+  action: ExpAction;
+  study: string;
+  summary: string[];
+  changes: string[];
+  digest?: string;
+}
+/** Review (nothing written) or Confirm (with the review's digest) one change to a study. */
+export const changeExperiment = (body: { action: ExpAction; study: string; digest?: string; confirm?: boolean }) => api<ExpPlan>('/api/experiments', { method: 'POST', body: JSON.stringify(body) });
