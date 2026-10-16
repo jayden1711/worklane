@@ -454,8 +454,8 @@ job() {
     read -r rc res < <(step_unit "$job" score "$suser" 300 "$d/logs/score.log" 0 -- -p "BindReadOnlyPaths=$ev/files" -p "BindReadOnlyPaths=$labels" -p "BindReadOnlyPaths=$d/pred" -p "WorkingDirectory=$ev/files" -- "${SPEC[SCORE]}")
     if [ "$rc" -ne 0 ]; then outcome=crashed; step=score
     else
-      score="$(grep -E '^score=-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,16})?([eE][-+]?[0-9]{1,3})?$' "$d/logs/score.log" | sed 's/^score=//')"
-      if [ "$(printf '%s\n' "$score" | grep -c .)" -ne 1 ]; then score=""; outcome=crashed; step=score-unreadable; else outcome=scored; fi
+      score="$(grep -E '^score=-?(0|[1-9][0-9]{0,15})(\.[0-9]{1,16})?([eE][-+]?[0-9]{1,3})?$' "$d/logs/score.log" | sed 's/^score=//' || true)"
+      if [ "$(printf '%s\n' "$score" | grep -c . || true)" -ne 1 ]; then score=""; outcome=crashed; step=score-unreadable; else outcome=scored; fi
     fi
   fi
   chown root:"$coord" "$d"/logs/*.log 2>/dev/null || true; chmod 0640 "$d"/logs/*.log 2>/dev/null || true
