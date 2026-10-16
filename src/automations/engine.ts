@@ -45,7 +45,7 @@ export function lastFiredAt(events: StoredEvent[], id: string): number | null {
 
 /** Whether a schedule's slot already fired (its key is the fire's ref). */
 export function slotFired(events: StoredEvent[], id: string, key: string): boolean {
-  return fired(events).some((e) => {
+  return events.filter((e) => e.type === 'automation.fired' || e.type === 'automation.pending').some((e) => {
     const p = e.payload as Fired;
     return p.id === id && p.trigger.kind === 'schedule' && p.trigger.ref === key;
   }) || events.some((e) => e.type === 'automation.refused' && (e.payload as EventPayload<'automation.refused'>).id === id && (e.payload as EventPayload<'automation.refused'>).ref === key);

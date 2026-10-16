@@ -11,12 +11,13 @@ import type { Role } from '../dashboard-auth.js';
 import type { EventLog } from '../events/log.js';
 import { replaceFileAtomically } from '../os/index.js';
 import { describeCron } from './cron.js';
+import { makeSecret, removeSecret, unbind } from './secrets.js';
 import { Automation, AutomationsFile, type Trigger } from './schema.js';
 
-export const ACTIONS = ['create', 'edit', 'delete', 'pause', 'resume', 'run'] as const;
+export const ACTIONS = ['create', 'edit', 'delete', 'pause', 'resume', 'run', 'rotate', 'unbind'] as const;
 export type AutomationAction = (typeof ACTIONS)[number];
 
-/** INVARIANT: the one rule for who may do what. Pause and run now are the writers' too; the rest the owners' only. */
+/** INVARIANT: the one rule for who may do what. Pause and run now are the writers' too; the rest (rotating a webhook's secret and unbinding its node included) the owners' only. */
 export function mayDo(action: AutomationAction, role: Role | null | undefined): boolean {
   if (role === 'owner') return true;
   if (role === 'writer') return action === 'pause' || action === 'run';
@@ -98,6 +99,7 @@ export function fieldDiff(before: Automation | null, after: Automation | null): 
 export function describeTrigger(t: Trigger): string {
   if (t.kind === 'schedule') return `${describeCron(t.cron)}, this machine's time (${t.cron})`;
   if (t.kind === 'discord') return `"run ${t.command}" to the Discord bot, from a writer or owner`;
+  if (t.kind === 'webhook') return 'a signed POST to the hooks gateway, from its bound tailnet device; each run waits for an owner\'s approval';
   const what = { 'issue.opened': 'an issue is opened', 'issue.labeled': `an issue gets the label ${t.label}`, 'issue_comment.created': `a comment starts with /${t.command}`, 'pull_request.opened': 'a pull request is opened', 'pull_request.merged': 'a pull request is merged' }[t.on];
   return `when ${what} on GitHub, by a writer or owner`;
 }
@@ -135,7 +137,7 @@ export function planChange(loaded: Loaded, req: ChangeRequest, by: string): Plan
     const next = AutomationsFile.safeParse({ version: 1, automations: after ? (before ? list.map((x) => (x.id === id ? after : x)) : [...list, after]) : list.filter((x) => x.id !== id) });
     if (!next.success) throw new AutomationsError(`refused: ${next.error.issues.map((i) => i.message).join('; ')}`);
     const changes = fieldDiff(before, after);
-    if (action !== 'run' && !changes.length) throw new AutomationsError('nothing to change');
+    if (!['run', 'rotate', 'unbind'].includes(action) && !changes.length) throw new AutomationsError('nothing to change');
     return { action, id, changes, summary, digest, next: next.data };
   };
   switch (req.action) {
@@ -163,6 +165,16 @@ export function planChange(loaded: Loaded, req: ChangeRequest, by: string): Plan
       if (a.enabled) throw new AutomationsError(`${a.id} is on already`);
       return finish('resume', a.id, a, { ...a, enabled: true }, [`Resumes "${a.name}": it fires on its next trigger (nothing missed while paused catches up).`, ...describe(a)]);
     }
+    case 'rotate': {
+      const a = find(req.id);
+      if (a.trigger.kind !== 'webhook') throw new AutomationsError(`${a.id} takes no webhook, so it has no secret`);
+      return finish('rotate', a.id, a, a, [`Makes a new secret for "${a.name}" and shows it to you once. The old one stops working at once: update the caller.`]);
+    }
+    case 'unbind': {
+      const a = find(req.id);
+      if (a.trigger.kind !== 'webhook') throw new AutomationsError(`${a.id} takes no webhook, so it is bound to no device`);
+      return finish('unbind', a.id, a, a, [`Forgets which tailnet device "${a.name}" is bound to. The next valid delivery, from any device, binds it again.`]);
+    }
     case 'run': {
       const a = find(req.id);
       if (!a.enabled) throw new AutomationsError(`${a.id} is paused; an owner resumes it first`);
@@ -176,7 +188,7 @@ export function planChange(loaded: Loaded, req: ChangeRequest, by: string): Plan
  * changed since the review). A run now writes nothing to the file: it is recorded (automation.run_requested) for the
  * coordinator. Every change is recorded as automation.changed with who did it.
  */
-export function applyChange(o: { path: string; req: ChangeRequest; digest: string; by: string; role: Role; log: EventLog }): Plan {
+export function applyChange(o: { path: string; req: ChangeRequest; digest: string; by: string; role: Role; log: EventLog; stateDir?: string }): Plan & { secret?: string } {
   if (!mayDo(o.req.action, o.role) || o.role === 'viewer') throw new AutomationsError(`a ${o.role} may not ${o.req.action} an automation`);
   const role = o.role;
   const loaded = loadAutomations(o.path);
@@ -186,9 +198,20 @@ export function applyChange(o: { path: string; req: ChangeRequest; digest: strin
     o.log.append('automation.run_requested', { id: plan.id, by: o.by, role: o.role }, o.by, 'human');
     return plan;
   }
-  replaceFileAtomically(o.path, stringify(plan.next), 0o600, existsSync(o.path) ? o.path : dirname(o.path));
+  // A webhook's secret: made when one starts taking webhooks (shown once, in this answer only), made anew on a rotate,
+  // removed with the automation or when it stops taking webhooks; its binding forgotten on an unbind or a delete.
+  const home = dirname(o.path);
+  const before = loaded.file.automations.find((x) => x.id === plan.id);
+  const after = plan.next.automations.find((x) => x.id === plan.id);
+  const hooksBefore = before?.trigger.kind === 'webhook';
+  const hooksAfter = after?.trigger.kind === 'webhook';
+  if (plan.action !== 'rotate' && plan.action !== 'unbind') replaceFileAtomically(o.path, stringify(plan.next), 0o600, existsSync(o.path) ? o.path : home);
+  let secret: string | undefined;
+  if (plan.action === 'rotate' || (hooksAfter && !hooksBefore)) secret = makeSecret(home, plan.id);
+  if (hooksBefore && !hooksAfter) removeSecret(home, plan.id);
+  if (o.stateDir && (plan.action === 'unbind' || plan.action === 'delete' || (hooksBefore && !hooksAfter))) unbind(o.stateDir, plan.id);
   o.log.append('automation.changed', { id: plan.id, action: plan.action, by: o.by, role, changes: plan.changes.slice(0, 200) }, o.by, 'human');
-  return plan;
+  return secret ? { ...plan, secret } : plan;
 }
 
 /**

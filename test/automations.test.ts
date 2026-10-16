@@ -146,9 +146,9 @@ test('payload-is-data: trigger text is redacted, cut and fenced; it can never cl
 });
 
 test('roles: owners do everything; writers only pause and run now; viewers nothing', () => {
-  for (const a of ['create', 'edit', 'delete', 'pause', 'resume', 'run'] as const) assert.equal(mayDo(a, 'owner'), true);
-  assert.deepEqual((['create', 'edit', 'delete', 'pause', 'resume', 'run'] as const).filter((a) => mayDo(a, 'writer')), ['pause', 'run']);
-  assert.deepEqual((['create', 'edit', 'delete', 'pause', 'resume', 'run'] as const).filter((a) => mayDo(a, 'viewer') || mayDo(a, null)), []);
+  for (const a of ['create', 'edit', 'delete', 'pause', 'resume', 'run', 'rotate', 'unbind'] as const) assert.equal(mayDo(a, 'owner'), true);
+  assert.deepEqual((['create', 'edit', 'delete', 'pause', 'resume', 'run', 'rotate', 'unbind'] as const).filter((a) => mayDo(a, 'writer')), ['pause', 'run']);
+  assert.deepEqual((['create', 'edit', 'delete', 'pause', 'resume', 'run', 'rotate', 'unbind'] as const).filter((a) => mayDo(a, 'viewer') || mayDo(a, null)), []);
 });
 
 test('review-then-confirm: a plan writes nothing; Confirm writes exactly it, refused if the file changed since; a writer can never create', () => {
