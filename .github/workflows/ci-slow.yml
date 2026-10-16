@@ -538,6 +538,17 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "regression: an instance whose name is a prefix of another's (ci2-sandbox, ci2-sandbox-long-name) never wipes the other's units, Docker or containers"
+        run: |
+          # Run ids and instance names are both [a-z0-9-]: with units named <cli>-test-<name>-<id>-<pid>, ci2-sandbox's
+          # wipe of long-name stopped ci2-sandbox-long-name's Docker and runs, as root.
+          A="${I2%-long-name}"
+          sudo useradd --create-home --shell /bin/bash "wl-$A"
+          sudo chmod 0750 "$(getent passwd "wl-$A" | cut -d: -f6)"
+          n="$(nproc)"
+          sudo bash scripts/setup/test-user.sh install "$A" --cpus "$((n - 2))-$((n - 1))" --memory-max 2G > "$RUNNER_TEMP/install3.log" || { cat "$RUNNER_TEMP/install3.log"; exit 1; }
+          tail -n 5 "$RUNNER_TEMP/install3.log" | grep -qx 'OK: all checks passed'
+          bash scripts/ci/testrun-cross-instance-real-systemd.sh "$I2" "$A" "$DB_IMAGE"
       - name: "regression: no value of a run's variables, nor its database password, in any argv, the journal or the unit (a canary, watched as nobody)"
         run: |
           # sudo logs its whole command line to the journal; any user reads a process's argv (ps, /proc/<pid>/cmdline)
@@ -679,7 +690,7 @@ jobs:
           while IFS= read -r id; do
             [ -n "$id" ] || continue
             if sudo test -e "/var/lib/worklane-test/ci/runs/$id"; then echo "run $id's directory is still there" >&2; exit 1; fi
-            if [ -n "$(systemctl list-units --all --plain --no-legend "worklane-test-ci-$id-*")" ]; then echo "run $id has units left" >&2; exit 1; fi
+            if [ -n "$(systemctl list-units --all --plain --no-legend "worklane-test-ci_${id}_*" "worklane-test-ci-$id-*")" ]; then echo "run $id has units left" >&2; exit 1; fi
           done < "$T/ids"
           sudo -u wl-test-ci env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock \
             /opt/worklane-test/docker/docker ps -aq --filter label=worklane.test-run > "$RUNNER_TEMP/left"
