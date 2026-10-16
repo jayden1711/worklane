@@ -73,7 +73,13 @@ export interface RunRequest {
    * resolves it to the provider, or to `fallback` (the role's normal model) when the provider may not or can't run
    * it. A provider model without a route is never sent anywhere but the fallback.
    */
-  route?: { kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'other'; highRisk?: boolean; fallback: string };
+  route?: {
+    kind: 'build' | 'planner' | 'research' | 'intake_triage' | 'intake_replier' | 'intake_summary' | 'intake_thread' | 'stage_judge' | 'eval_answer' | 'evaluator' | 'cross_eval' | 'other';
+    highRisk?: boolean;
+    fallback: string;
+    /** Never run on the fallback: when the provider may not or can't run it (or hits its limit), the run is not run (reason failed, no turns). */
+    noFallback?: boolean;
+  };
   /**
    * A person is waiting on this run (a chat-channel reply, a question in a decision's thread): it takes its Claude
    * login's start lock only (the auth check and claude's start, when a token refresh happens), never the login's
