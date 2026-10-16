@@ -127,6 +127,36 @@ test('repeats are grouped, never proposed twice: the same words without a run, a
   assert.equal((await u.backlog.list('correction')).length, 1, 'one fix for both');
 });
 
+test('the same thing corrected twice: a repeat of a correction that got no fix filed is not grouped away; it gets the structural fix', async () => {
+  // First time: the agent finds no durable fix. Second time, the same words: a run, told it repeats one with NO FIX FILED.
+  let n = 0;
+  const t = fixture(() => (n++ === 0 ? { ...FILE, fix_kind: 'none', why: 'unclear yet', title: '', body: '' } : FILE));
+  t.chat('example-owner', 'Correction: read the retry count from config, never hardcode it');
+  await t.check();
+  const first = String(t.of('correction.recorded')[0]!.key);
+  assert.equal(t.of('correction.no_fix').length, 1);
+  t.chat('example-owner', 'correction: Read the retry count from config -- never hardcode it!');
+  await t.check();
+  assert.equal(t.of('correction.grouped').length, 0, 'not grouped with a correction that got no fix');
+  assert.equal(t.runs().length, 2, 'the repeat goes to the agent');
+  assert.match(t.runs()[1]!.prompt, new RegExp(`- ${first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} \\(chat\\): .* → no durable fix \\(unclear yet\\) \\(NO FIX FILED\\)`));
+  assert.match(t.runs()[1]!.prompt, /If it repeats one marked NO FIX FILED, the owner has now corrected the same thing twice: don't answer same_as; propose the structural fix/);
+  assert.equal(t.of('correction.proposed').length, 1, 'the structural fix is filed');
+
+  // The agent may not group a repeat with a correction that got no fix filed either.
+  let m = 0;
+  const u = fixture((req) => {
+    if (m++ === 0) return { ...FILE, fix_kind: 'none', why: 'unclear yet', title: '', body: '' };
+    return { ...FILE, same_as: /^- (chat:\S+) \(chat\)/m.exec(req.prompt)![1]! };
+  });
+  u.chat('example-owner', 'correction: never log request bodies');
+  await u.check();
+  u.chat('example-owner', 'correction: request payloads must not reach the logs');
+  await u.check();
+  assert.equal(u.of('correction.grouped').length, 0);
+  assert.match(String(u.of('correction.no_fix').at(-1)!.why), /not an earlier correction with a fix filed/);
+});
+
 test('a weaker fix without why, an invalid draft, or no durable fix files nothing; a failed run is not retried', async () => {
   const answers = [{ ...FILE, fix_kind: 'rule', why_not_stronger: '' }, { ...FILE, body: 'Just fix it.' }, { ...FILE, fix_kind: 'none', why: 'it asks to loosen a guardrail' }];
   let i = 0;

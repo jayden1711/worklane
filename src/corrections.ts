@@ -183,7 +183,7 @@ export type Proposal =
 export function readProposal(s: unknown, earlier: string[]): Proposal {
   const p = (s ?? {}) as Partial<Record<keyof (typeof CORRECTIONS_SCHEMA)['properties'], string>>;
   const sameAs = (p.same_as ?? '').trim();
-  if (sameAs) return earlier.includes(sameAs) ? { act: 'group', sameAs } : { act: 'invalid', why: `same_as names ${sameAs}, which is not an earlier correction` };
+  if (sameAs) return earlier.includes(sameAs) ? { act: 'group', sameAs } : { act: 'invalid', why: `same_as names ${sameAs}, which is not an earlier correction with a fix filed (a repeat of one with none needs the structural fix)` };
   const kind = p.fix_kind as FixKind | undefined;
   if (!kind || !FIX_KINDS.includes(kind)) return { act: 'invalid', why: 'no fix_kind' };
   if (kind === 'none') return { act: 'none', why: (p.why ?? '').trim() || 'no reason given' };
@@ -195,8 +195,23 @@ export function readProposal(s: unknown, earlier: string[]): Proposal {
   return { act: 'file', fixKind: kind, title, body, why: (p.why ?? '').trim() };
 }
 
+/**
+ * Whether a correction's fix was filed: its own proposal, or the one it was grouped with (followed to the root). A
+ * repeat of a correction with no filed fix is the owner correcting the same thing twice: it gets a proposal of its own,
+ * never a silent grouping.
+ */
+export function fixFiled(key: string, o: { grouped: Map<string, string>; filed: Set<string> }): boolean {
+  let k = key;
+  for (let i = 0; i < 20 && !o.filed.has(k); i++) {
+    const up = o.grouped.get(k);
+    if (up === undefined) break;
+    k = up;
+  }
+  return o.filed.has(k);
+}
+
 /** The corrections agent's brief: the correction, the ranking, and the earlier corrections it may repeat. */
-export function correctionBrief(c: Correction, earlier: { key: string; kind: string; text: string; outcome: string }[]): string {
+export function correctionBrief(c: Correction, earlier: { key: string; kind: string; text: string; outcome: string; fixed?: boolean }[]): string {
   return [
     `The correction (key ${c.key}, ${c.kind.replace('_', ' ')}, by @${c.by}, ${c.at}):`,
     '<correction>',
@@ -208,8 +223,10 @@ export function correctionBrief(c: Correction, earlier: { key: string; kind: str
     'Propose the strongest durable fix, strongest first:',
     ...Object.entries(FIX_RANK).map(([k, v], i) => `${i + 1}. ${k}: ${v}`),
     '',
-    earlier.length ? 'Earlier corrections (key, kind, what they produced). If this one repeats one of them, answer same_as with its key:' : 'There are no earlier corrections.',
-    ...earlier.slice(-30).map((e) => `- ${e.key} (${e.kind}): ${clip(e.text.replace(/\s+/g, ' '), 300)} → ${e.outcome}`),
+    earlier.length
+      ? "Earlier corrections (key, kind, what they produced). If this one repeats one whose fix was filed, answer same_as with its key. If it repeats one marked NO FIX FILED, the owner has now corrected the same thing twice: don't answer same_as; propose the structural fix (strongest first), or fix_kind none only if no durable fix can exist, saying why:"
+      : 'There are no earlier corrections.',
+    ...earlier.slice(-30).map((e) => `- ${e.key} (${e.kind}): ${clip(e.text.replace(/\s+/g, ' '), 300)} → ${e.outcome}${e.fixed === false ? ' (NO FIX FILED)' : ''}`),
     '',
     `Draft the fix as an issue a worker builds: ${DRAFT_FORMAT}`,
   ].join('\n');

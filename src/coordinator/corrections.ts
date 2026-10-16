@@ -3,7 +3,7 @@
 // durable fix, filed as an issue the pipeline builds into a reviewed PR. See src/corrections.ts.
 import { BRAND } from '../brand.js';
 import { chatHistory } from '../chat.js';
-import { chatCorrections, CORRECTION_LABEL, correctionBrief, correctionMarker, correctionsFromEvents, CORRECTIONS_SCHEMA, fingerprint, prRejection, readProposal, reviewCorrections, type Correction } from '../corrections.js';
+import { chatCorrections, CORRECTION_LABEL, correctionBrief, correctionMarker, correctionsFromEvents, CORRECTIONS_SCHEMA, fingerprint, fixFiled, prRejection, readProposal, reviewCorrections, type Correction } from '../corrections.js';
 import type { EventPayload } from '../events/types.js';
 import { rolePrompt } from '../roles.js';
 import { MergeFlow } from './merge-flow.js';
@@ -93,9 +93,15 @@ export abstract class Corrections extends MergeFlow {
     const c = this.pendingCorrections()[0];
     if (!c) return;
     const all = this.d.log.read(0, ['correction.recorded']).map((e) => ({ ...(e.payload as EventPayload<'correction.recorded'>), at: e.ts }));
-    // The same words as an earlier correction: the same correction, grouped without a run.
+    // Which earlier corrections got a fix filed (their own, or the one they were grouped with).
+    const filing = {
+      grouped: new Map(this.d.log.read(0, ['correction.grouped']).map((e) => [(e.payload as EventPayload<'correction.grouped'>).key, (e.payload as EventPayload<'correction.grouped'>).same_as])),
+      filed: new Set(this.d.log.read(0, ['correction.proposed']).map((e) => (e.payload as EventPayload<'correction.proposed'>).key)),
+    };
+    // The same words as an earlier correction whose fix was filed: the same correction, grouped without a run. One
+    // with no fix filed is the owner correcting the same thing twice: it goes to the agent for the structural fix.
     const twin = all.find((x) => x.key !== c.key && fingerprint(x) === fingerprint(c) && all.indexOf(x) < all.findIndex((y) => y.key === c.key));
-    if (twin) {
+    if (twin && fixFiled(twin.key, filing)) {
       this.emit('correction.grouped', { key: c.key, same_as: twin.key, how: 'same words' });
       return this.noteRepeat(twin.key, c);
     }
@@ -107,7 +113,7 @@ export abstract class Corrections extends MergeFlow {
       const p = e.payload as { key: string; issue?: number; same_as?: string; why?: string };
       outcomes.set(p.key, e.type === 'correction.proposed' ? `fix filed as #${p.issue}` : e.type === 'correction.grouped' ? `grouped with ${p.same_as}` : `no durable fix (${p.why ?? ''})`);
     }
-    const earlier = all.filter((x) => x.key !== c.key && outcomes.has(x.key)).map((x) => ({ key: x.key, kind: x.kind, text: x.text, outcome: outcomes.get(x.key)! }));
+    const earlier = all.filter((x) => x.key !== c.key && outcomes.has(x.key)).map((x) => ({ key: x.key, kind: x.kind, text: x.text, outcome: outcomes.get(x.key)!, fixed: fixFiled(x.key, filing) }));
     const role = this.d.cfg.agents.roles.corrections ?? this.d.cfg.agents.roles.workers!;
     const r = await this.d.runner.run({
       env: this.projectEnv(),
@@ -128,7 +134,8 @@ export abstract class Corrections extends MergeFlow {
     });
     this.emit('run.cost', { issue: c.issue, role: 'corrections', model: r.model, usd: r.costUsd, turns: r.turns });
     if (r.reason !== 'succeeded') return void this.emit('correction.no_fix', { key: c.key, why: `the corrections run ended: ${r.reason} (${r.detail.slice(0, 300)})`, failed: true });
-    const p = readProposal(r.structured, earlier.map((e) => e.key));
+    // A repeat may only be grouped with a correction whose fix was filed.
+    const p = readProposal(r.structured, earlier.filter((e) => e.fixed).map((e) => e.key));
     if (p.act === 'invalid') return void this.emit('correction.no_fix', { key: c.key, why: p.why.slice(0, 1000), failed: true });
     if (p.act === 'none') return void this.emit('correction.no_fix', { key: c.key, why: p.why.slice(0, 1000), failed: false });
     if (p.act === 'group') {
