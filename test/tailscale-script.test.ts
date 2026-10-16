@@ -100,10 +100,10 @@ test('a machine without tailscale: status says so and changes nothing; up, serve
   writeFileSync(join(m.T, 'hub.service'), hubUnit('https://hub.example.test'));
   const st = m.run(['status', '--json']);
   assert.equal(st.status, 0, st.stderr);
-  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, funnel: false, siri: false, hub_url: 'https://hub.example.test' });
+  assert.deepEqual(JSON.parse(st.stdout), { installed: false, version: '', pinned_version: VERSION, state: '', name: '', https: false, serve: false, other_443: false, break_glass_forwarded: false, funnel: false, siri: false, hooks: false, hub_url: 'https://hub.example.test' });
   assert.match(m.run(['status']).stdout, /^tailscale: not installed \(optional/);
   assert.ok(!existsSync(join(m.T, 'var')), 'status writes nothing');
-  for (const step of ['up', 'serve', 'serve-siri', 'public-url']) {
+  for (const step of ['up', 'serve', 'serve-siri', 'serve-hooks', 'public-url']) {
     const r = m.run([step]);
     assert.equal(r.status, 1, step);
     assert.match(m.steps().at(-1)!.detail, /tailscale isn't installed on this machine/);
@@ -181,13 +181,15 @@ test('the script fetches no install script and pipes nothing to a shell', () => 
   assert.doesNotMatch(code, /install\.sh|tailscale\.com\/install/);
   assert.deepEqual([...code.matchAll(/curl [^\n]*/g)].length, 1, 'one download: the key');
   assert.doesNotMatch(code, /--auth-?key/i, 'no auth key option anywhere');
-  // tailscale itself is run in exactly these ways: two reads, `up` with a timeout, and the two fixed serves (the hub on
-  // 443, the Siri gateway on 8443). No funnel command, no flag that turns Funnel on, no other serve target, no other
+  // tailscale itself is run in exactly these ways: two reads, `up` with a timeout, and the three fixed serves (the hub on
+  // 443, the Siri gateway on 8443, the hooks gateway on 8444). No funnel command, no flag that turns Funnel on, no other serve target, no other
   // `up` flag.
   const runs = [...code.matchAll(/(?:\bts|"\$TAILSCALE_BIN") ([a-z][^|)\n]*)/g)].map((m) => m[1]!.replace(/ 2>.*$/, '').trim());
-  assert.deepEqual([...new Set(runs)].sort(), ['serve --bg "--https=$SIRI_TAILNET_PORT" "http://127.0.0.1:$SIRI_GATEWAY_PORT"', 'serve --bg --https=443 "http://127.0.0.1:$HUB_PORT"', 'serve status --json', 'status --json', 'up --timeout="${TAILSCALE_UP_SECONDS}s"', 'version']);
+  assert.deepEqual([...new Set(runs)].sort(), ['serve --bg "--https=$HOOKS_TAILNET_PORT" "http://127.0.0.1:$HOOKS_GATEWAY_PORT"', 'serve --bg "--https=$SIRI_TAILNET_PORT" "http://127.0.0.1:$SIRI_GATEWAY_PORT"', 'serve --bg --https=443 "http://127.0.0.1:$HUB_PORT"', 'serve status --json', 'status --json', 'up --timeout="${TAILSCALE_UP_SECONDS}s"', 'version']);
   assert.match(libText, /^SIRI_GATEWAY_PORT=4397$/m);
   assert.match(libText, /^SIRI_TAILNET_PORT=8443$/m);
+  assert.match(libText, /^HOOKS_GATEWAY_PORT=4396$/m);
+  assert.match(libText, /^HOOKS_TAILNET_PORT=8444$/m);
   assert.ok(!/(\bts|TAILSCALE_BIN"?) +funnel|--funnel/.test(code), 'tailscale is never given a funnel command or flag');
   assert.deepEqual([...new Set([...code.matchAll(/tailscale funnel [a-z]+/g)].map((m) => m[0]))], ['tailscale funnel reset'], 'the only funnel command named is the one an admin is told to run to turn it off');
   assert.doesNotMatch(code, /--(advertise|ssh|accept-routes|exit-node|login-server|operator|set-path|tcp|tls-terminated|http=)/);
@@ -314,6 +316,9 @@ test('every other argument list is refused before anything runs: no auth key, fl
     ['serve-siri', 'http://127.0.0.1:4399'],
     ['serve-siri', '--funnel'],
     ['serve-siri', '--for', 'alpha'],
+    ['serve-hooks', '4396'],
+    ['serve-hooks', '--https=8444', 'http://127.0.0.1:4398'],
+    ['serve-hooks', '--funnel'],
     ['public-url', '--name', 'other'],
     ['public-url', 'box.example.test'],
   ];
@@ -423,7 +428,7 @@ test('Funnel is read and never changed: with it on, status says so, and serve an
     const st = JSON.parse(m.run(['status', '--json']).stdout) as { funnel: boolean };
     assert.equal(st.funnel, true, JSON.stringify(cfg));
     assert.match(m.run(['status']).stdout, /Tailscale Funnel \(the public internet\): ON; nothing here changes it/);
-    for (const step of ['serve', 'serve-siri', 'public-url']) {
+    for (const step of ['serve', 'serve-siri', 'serve-hooks', 'public-url']) {
       assert.equal(m.run([step]).status, 1, `${step}: ${JSON.stringify(cfg)}`);
       assert.match(m.steps().at(-1)!.detail, /Tailscale Funnel is on for this machine, which publishes to the public internet\. This step never turns Funnel on or off, and does nothing while it is on/);
     }
@@ -478,4 +483,32 @@ test('serve-siri: https 8443 to the Siri gateway (4397) and nothing else, beside
   p.set('serve.json', serving(HUB));
   assert.equal(p.run(['public-url']).status, 0);
   assert.deepEqual(p.lines('dashboards-calls'), [`--client-id Iv1.signin0001 --public-url https://${NAME} --siri alpha beta`]);
+});
+
+test('serve-hooks: https 8444 to the hooks gateway (4396) and nothing else, beside 443; refused off a tailnet, over another 8444 and with the break-glass forwarded; public-url keeps --hooks', { skip: !posix }, () => {
+  const m = machine();
+  const HOOKS = 'http://127.0.0.1:4396';
+  assert.equal(m.run(['serve-hooks']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /isn't on a tailnet yet/);
+  m.set('state.json', RUNNING);
+  m.set('serve.json', serving(HUB));
+  const r = m.run(['serve-hooks']);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.deepEqual(m.tsCalls().filter((c) => c.args[0] === 'serve' && c.args[1] === '--bg').map((c) => c.args), [['serve', '--bg', '--https=8444', HOOKS]]);
+  assert.match(m.steps().at(-1)!.detail, /forwards to the hooks gateway \(4396\), and to nothing else/);
+  const st = JSON.parse(m.run(['status', '--json']).stdout) as { serve: boolean; hooks: boolean; siri: boolean };
+  assert.deepEqual([st.serve, st.hooks, st.siri], [true, true, false], '443 still goes to the hub; 8443 untouched');
+  m.set('serve.json', { ...serving(HUB), TCP: { 443: { HTTPS: true }, 8444: { HTTPS: true } }, Web: { ...serving(HUB).Web, [`${NAME}:8444`]: { Handlers: { '/': { Proxy: 'http://127.0.0.1:3000' } } } } });
+  assert.equal(m.run(['serve-hooks']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /already forwards https 8444 somewhere else; left as it is/);
+  m.set('serve.json', serving('http://127.0.0.1:4398'));
+  assert.equal(m.run(['serve-hooks']).status, 1);
+  assert.match(m.steps().at(-1)!.detail, /break-glass port 4398/);
+  assert.equal(m.tsCalls().filter((c) => c.args[0] === 'serve' && c.args[1] === '--bg').length, 1, 'never run again');
+  const p = machine();
+  writeFileSync(join(p.T, 'hub.service'), hubUnit('https://hub.example.test', ' --hooks-port 4396'));
+  p.set('state.json', RUNNING);
+  p.set('serve.json', serving(HUB));
+  assert.equal(p.run(['public-url']).status, 0);
+  assert.deepEqual(p.lines('dashboards-calls'), [`--client-id Iv1.signin0001 --public-url https://${NAME} --hooks alpha beta`]);
 });
