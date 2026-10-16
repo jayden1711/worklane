@@ -376,7 +376,7 @@ write_env() {
 jstr() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$(printf '%s' "$s" | tr -d '\000-\037')"; }
 
 job() {
-  local job="${1:-}" d ev cache r rc res started locked waited=0 score="" outcome step="" gpu_s=0 t0 used_kb cap_kb id
+  local job="${1:-}" d ev cache r rc res locked waited=0 score="" outcome="" step="" gpu_s=0 t0="" used_kb cap_kb id
   [ "$#" -eq 1 ] || die "usage: job <job> (the spec on stdin)"
   valid_job "$job"
   read_root
