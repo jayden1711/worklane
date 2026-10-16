@@ -36,10 +36,11 @@ export async function personOf(cfg: IntakeConfig, discordId: string, roleOf: Rol
 }
 
 /**
- * Decision kinds no ordinary chat reply ever answers: high-risk (L3) merges. Only an owner listed in discord.owners
+ * Decision kinds no ordinary chat reply ever answers: high-risk (L3) merges, and an automation's run (approved
+ * only by a click on the dashboard). Only an owner listed in discord.owners
  * approves one from a thread, naming its number (mayApproveHighRisk; src/coordinator/channel.ts).
  */
-export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['land']);
+export const NEVER_FROM_CHAT: ReadonlySet<string> = new Set(['land', 'automation']);
 
 /**
  * THE rule for answering a decision from a chat thread: the dashboard's own (mayAnswerKind: an admin answers owner

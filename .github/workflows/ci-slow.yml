@@ -2142,6 +2142,45 @@ jobs:
           if grep -q -- '--siri-port' "$hub"; then echo "the gateway stayed on" >&2; exit 1; fi
           if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash still reads the Siri gateway token" >&2; exit 1; fi
           sudo install -o root -g root -m 0644 "$F/siri-steps-before.jsonl" "$d/steps.jsonl"
+      # The hooks gateway for webhook automations on a real machine (docs/automations.md): dashboards.sh --hooks gives
+      # wl-dash the instance's hooks gateway token (and takes it away again without --hooks), the hub listens on
+      # 127.0.0.1:4396, a program on this machine is refused by the kernel's word whatever headers it sends, the
+      # dashboard key never works on /api/hooks and the gateway token works nowhere else; serve-hooks adds 8444 only.
+      - name: "hooks gateway: wl-dash reads the gateway token only with --hooks; a local program is refused by the kernel's word; the dashboard key never works on /api/hooks; serve-hooks adds 8444 only"
+        run: |
+          d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
+          state="$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state"
+          port="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/dashboard.js"); console.log(m.instancePort("ci"));')"
+          id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
+          [ -n "$id" ] && [ -n "$url" ]
+          sudo cp "$d/steps.jsonl" "$F/hooks-steps-before.jsonl"
+          sudo test -s "$state/hooks-gateway-token"
+          if sudo -u wl-dash test -r "$state/hooks-gateway-token"; then echo "wl-dash reads the hooks gateway token without --hooks" >&2; exit 1; fi
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --hooks ci | tee "$F/hooks-dashboards.log"
+          grep -q -- ' --hooks-port 4396' "$hub"
+          sudo -u wl-dash test -r "$state/hooks-gateway-token"
+          if sudo -u wl-dash test -w "$state/hooks-gateway-token"; then echo "wl-dash can write the hooks gateway token" >&2; exit 1; fi
+          if sudo cmp -s "$state/hooks-gateway-token" "$state/dashboard-token"; then echo "the hooks gateway token is the dashboard token" >&2; exit 1; fi
+          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4396/hook/ci/x)" != 000 ] && break; sleep 1; done
+          # One try from this runner's user, which is not tailscaled, naming a tailnet address: refused before anything is read.
+          peer="$(printf '100.%s.%s.%s' 101 102 103)"
+          code="$(curl -sS -o "$F/hooks-local.json" -w '%{http_code}' -X POST http://127.0.0.1:4396/hook/ci/deploy-notes -H "x-forwarded-for: $peer" -d '{}')"
+          cat "$F/hooks-local.json"; echo
+          [ "$code" = 403 ]
+          tok="$(sudo cat "$state/dashboard-token")"; echo "::add-mask::$tok"
+          gw="$(sudo cat "$state/hooks-gateway-token")"; echo "::add-mask::$gw"
+          # The dashboard key on the instance's hooks route: refused; the gateway token on the dashboard's routes: refused.
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" -H 'x-hook-node: {"id":"n1","name":"ci-peer"}' -d '{}' "http://127.0.0.1:$port/api/hooks/deploy-notes")" = 401 ]
+          [ "$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $gw" "http://127.0.0.1:$port/api/automations")" = 401 ]
+          # serve-hooks, by hand as root: 8444 to the gateway, 443 still to the hub, never Funnel.
+          sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-hooks
+          sudo jq -e --arg n "$TS_NAME" '.Web["\($n):8444"].Handlers["/"].Proxy=="http://127.0.0.1:4396" and .Web["\($n):443"].Handlers["/"].Proxy=="http://127.0.0.1:4399" and (has("AllowFunnel")|not)' /var/lib/ci-tailscale/serve.json
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.hooks and .serve and (.funnel|not)'
+          # Back as it was for the steps after: no gateway, and wl-dash's read of the gateway token removed.
+          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" ci > "$F/hooks-dashboards-off.log"
+          if grep -q -- '--hooks-port' "$hub"; then echo "the gateway stayed on" >&2; exit 1; fi
+          if sudo -u wl-dash test -r "$state/hooks-gateway-token"; then echo "wl-dash still reads the hooks gateway token" >&2; exit 1; fi
+          sudo install -o root -g root -m 0644 "$F/hooks-steps-before.jsonl" "$d/steps.jsonl"
       # The first-run wizard's Tailscale screen, end to end on this machine: the instance's own dashboard (the owner's
       # break-glass token, on loopback), the request in its event log, the real coordinator (worklane-ci.service) running
       # the helper through sudo, the step's own unit, and the screen's view of it. The stand-in is logged out first.

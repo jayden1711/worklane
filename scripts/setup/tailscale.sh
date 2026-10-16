@@ -8,6 +8,7 @@
 #   sudo bash scripts/setup/tailscale.sh up
 #   sudo bash scripts/setup/tailscale.sh serve
 #   sudo bash scripts/setup/tailscale.sh serve-siri
+#   sudo bash scripts/setup/tailscale.sh serve-hooks
 #   sudo bash scripts/setup/tailscale.sh public-url
 #
 # status      whether tailscale is installed, its state, this machine's tailnet name, whether the tailnet issues an
@@ -33,6 +34,10 @@
 #             hub's Siri gateway (dashboards.sh --siri; docs/siri.md), and to nothing else. Its own port, so the tailnet
 #             policy can let only your phone reach it. Refused under the same conditions as serve, and when 8443
 #             already forwards somewhere else. Never Funnel.
+# serve-hooks `tailscale serve --bg --https=8444 http://127.0.0.1:4396`: https 8444 on this machine's tailnet name to the
+#             hub's hooks gateway for webhook automations (dashboards.sh --hooks; docs/automations.md), and to nothing
+#             else. Its own port, so the tailnet policy can let only the callers reach it. Refused under the same
+#             conditions as serve-siri (and when 8444 already goes elsewhere). Never Funnel.
 # public-url  the hub's URL becomes https://<this machine's tailnet name>, through dashboards.sh with the hub's other
 #             settings as its unit has them (the sign-in App's client id, the instances, the owner terminal). Only once
 #             serve forwards to the hub, and never while Funnel is on. The name is read here, from tailscale status,
@@ -45,11 +50,11 @@
 # Each root step writes its progress to $TAILSCALE_DIR/steps.jsonl (root's, 0644: one JSON line per change, for the
 # dashboard) and to its output. One step at a time on a machine. Exit 0 when the step is done or was already.
 source "$(dirname "$0")/lib.sh"
-usage="usage: tailscale.sh status [--json] | install | up [--for <instance>] | serve | serve-siri | public-url"
+usage="usage: tailscale.sh status [--json] | install | up [--for <instance>] | serve | serve-siri | serve-hooks | public-url"
 cmd="${1:-}"
 case "$cmd" in
   status) ;;
-  install | up | serve | serve-siri | public-url) as_root "$@" ;;
+  install | up | serve | serve-siri | serve-hooks | public-url) as_root "$@" ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
 shift
@@ -88,7 +93,7 @@ read_facts() {
     serve="$(ts serve status --json 2>/dev/null || true)"
   fi
   out="$(node -e '
-const [statusText, serveText, hubPort, breakGlassPort, siriPort, siriTailnetPort] = process.argv.slice(1);
+const [statusText, serveText, hubPort, breakGlassPort, siriPort, siriTailnetPort, hooksPort, hooksTailnetPort] = process.argv.slice(1);
 const parse = (t) => {
   try {
     const v = JSON.parse(t);
@@ -112,15 +117,17 @@ const root = (hostPort) => {
 const serves = !!name && root(`${name}:443`) === hub;
 const siri = !!name && root(`${name}:${siriTailnetPort}`) === `http://127.0.0.1:${siriPort}`;
 const onSiriPort = Object.keys(web).some((k) => k.endsWith(`:${siriTailnetPort}`)) || !!(sv.TCP && sv.TCP[siriTailnetPort]);
+const hooks = !!name && root(`${name}:${hooksTailnetPort}`) === `http://127.0.0.1:${hooksPort}`;
+const onHooksPort = Object.keys(web).some((k) => k.endsWith(`:${hooksTailnetPort}`)) || !!(sv.TCP && sv.TCP[hooksTailnetPort]);
 const on443 = Object.keys(web).some((k) => k.endsWith(":443")) || !!(sv.TCP && sv.TCP["443"]);
 const yn = (b) => (b ? "yes" : "no");
 const all = JSON.stringify(sv);
 const breakGlass = new RegExp(`(127\\.0\\.0\\.1|localhost|\\[::1\\]):${breakGlassPort}(?![0-9])`).test(all);
 // Funnel: any AllowFunnel entry that is on, anywhere in the serve config (a background one, or a foreground session).
 const funnelOn = (v) => !!v && typeof v === "object" && Object.entries(v).some(([k, x]) => (k === "AllowFunnel" && !!x && typeof x === "object" ? Object.values(x).some((on) => on === true) : funnelOn(x)));
-process.stdout.write([state, name || "-", yn(!!name && certs.includes(name)), yn(serves), yn(on443 && !serves), yn(breakGlass), yn(funnelOn(sv)), yn(siri), yn(onSiriPort && !siri)].join("\n") + "\n");
-' "$status" "$serve" "$HUB_PORT" "$BREAK_GLASS_PORT" "$SIRI_GATEWAY_PORT" "$SIRI_TAILNET_PORT")"
-  { read -r f_state; read -r f_name; read -r f_https; read -r f_serve; read -r f_other443; read -r f_break_glass; read -r f_funnel; read -r f_siri; read -r f_other_siri; } <<< "$out"
+process.stdout.write([state, name || "-", yn(!!name && certs.includes(name)), yn(serves), yn(on443 && !serves), yn(breakGlass), yn(funnelOn(sv)), yn(siri), yn(onSiriPort && !siri), yn(hooks), yn(onHooksPort && !hooks)].join("\n") + "\n");
+' "$status" "$serve" "$HUB_PORT" "$BREAK_GLASS_PORT" "$SIRI_GATEWAY_PORT" "$SIRI_TAILNET_PORT" "$HOOKS_GATEWAY_PORT" "$HOOKS_TAILNET_PORT")"
+  { read -r f_state; read -r f_name; read -r f_https; read -r f_serve; read -r f_other443; read -r f_break_glass; read -r f_funnel; read -r f_siri; read -r f_other_siri; read -r f_hooks; read -r f_other_hooks; } <<< "$out"
 }
 
 # --- progress
@@ -150,9 +157,9 @@ do_status() {
   hub_url="$(hub_option --public-url)"
   local name="${f_name#-}" state="${f_state#-}"
   if [ -n "$json" ]; then
-    printf '{"installed":%s,"version":%s,"pinned_version":%s,"state":%s,"name":%s,"https":%s,"serve":%s,"other_443":%s,"break_glass_forwarded":%s,"funnel":%s,"siri":%s,"hub_url":%s}\n' \
+    printf '{"installed":%s,"version":%s,"pinned_version":%s,"state":%s,"name":%s,"https":%s,"serve":%s,"other_443":%s,"break_glass_forwarded":%s,"funnel":%s,"siri":%s,"hooks":%s,"hub_url":%s}\n' \
       "$(if installed; then echo true; else echo false; fi)" "$(json_str "$version")" "$(json_str "$TAILSCALE_VERSION")" "$(json_str "$state")" "$(json_str "$name")" \
-      "$([ "$f_https" = yes ] && echo true || echo false)" "$([ "$f_serve" = yes ] && echo true || echo false)" "$([ "$f_other443" = yes ] && echo true || echo false)" "$([ "$f_break_glass" = yes ] && echo true || echo false)" "$([ "$f_funnel" = yes ] && echo true || echo false)" "$([ "$f_siri" = yes ] && echo true || echo false)" "$(json_str "$hub_url")"
+      "$([ "$f_https" = yes ] && echo true || echo false)" "$([ "$f_serve" = yes ] && echo true || echo false)" "$([ "$f_other443" = yes ] && echo true || echo false)" "$([ "$f_break_glass" = yes ] && echo true || echo false)" "$([ "$f_funnel" = yes ] && echo true || echo false)" "$([ "$f_siri" = yes ] && echo true || echo false)" "$([ "$f_hooks" = yes ] && echo true || echo false)" "$(json_str "$hub_url")"
     return 0
   fi
   if ! installed; then
@@ -161,6 +168,7 @@ do_status() {
     echo "tailscale: ${version:-installed}, ${state:-no state}${name:+, this machine is $name}"
     echo "https certificate for this name: $f_https; tailscale serve forwards 443 to the hub ($HUB_PORT): $f_serve"
     echo "tailscale serve forwards $SIRI_TAILNET_PORT to the Siri gateway ($SIRI_GATEWAY_PORT): $f_siri"
+    echo "tailscale serve forwards $HOOKS_TAILNET_PORT to the hooks gateway ($HOOKS_GATEWAY_PORT): $f_hooks"
     [ "$f_break_glass" = no ] || echo "WARNING: tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: tailscale serve reset"
     echo "Tailscale Funnel (the public internet): $([ "$f_funnel" = yes ] && echo "ON; nothing here changes it, and serve and public-url do nothing while it is on (tailscale funnel reset)" || echo off)"
   fi
@@ -317,10 +325,38 @@ do_serve_siri() {
   emit done "https $SIRI_TAILNET_PORT on $f_name forwards to the Siri gateway ($SIRI_GATEWAY_PORT), and to nothing else. In the tailnet policy, let only your phone reach $f_name:$SIRI_TAILNET_PORT (docs/siri.md)"
 }
 
+# --- serve-hooks: https 8444 to the hub's hooks gateway, nothing else; tailnet only, never Funnel
+
+do_serve_hooks() {
+  local out rc
+  need_installed
+  read_facts
+  [ "$f_state" = Running ] || fail "this machine isn't on a tailnet yet: run the up step first"
+  [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: remove it (tailscale serve reset), then run this again"
+  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
+  if [ "$f_hooks" = yes ]; then
+    emit done "https $HOOKS_TAILNET_PORT on $f_name already forwards to the hooks gateway ($HOOKS_GATEWAY_PORT)"
+    return 0
+  fi
+  [ "$f_other_hooks" = no ] || fail "tailscale serve already forwards https $HOOKS_TAILNET_PORT somewhere else; left as it is (see: tailscale serve status)"
+  [ "$f_https" = yes ] || fail "the tailnet doesn't issue an HTTPS certificate for ${f_name#-} yet: turn on MagicDNS and HTTPS certificates in Tailscale's admin console (DNS), then run this again"
+  emit running "tailscale serve --bg --https=$HOOKS_TAILNET_PORT to 127.0.0.1:$HOOKS_GATEWAY_PORT"
+  set +e
+  out="$(timeout "$TAILSCALE_SERVE_SECONDS" env -u TS_AUTHKEY -u TS_AUTH_KEY "$TAILSCALE_BIN" serve --bg "--https=$HOOKS_TAILNET_PORT" "http://127.0.0.1:$HOOKS_GATEWAY_PORT" 2>&1)"
+  rc=$?
+  set -e
+  [ -z "$out" ] || printf '%s\n' "$out" | tailscale_redact | sed 's/^/tailscale: /'
+  read_facts
+  [ "$rc" = 0 ] && [ "$f_hooks" = yes ] || fail "tailscale serve didn't start forwarding $HOOKS_TAILNET_PORT within $TAILSCALE_SERVE_SECONDS s (see: tailscale serve status)"
+  [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT: tailscale serve reset"
+  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
+  emit done "https $HOOKS_TAILNET_PORT on $f_name forwards to the hooks gateway ($HOOKS_GATEWAY_PORT), and to nothing else. In the tailnet policy, let only your webhook callers reach $f_name:$HOOKS_TAILNET_PORT (docs/automations.md)"
+}
+
 # --- public-url: the hub's URL, through dashboards.sh
 
 do_public_url() {
-  local id old user devices siri_port names new args
+  local id old user devices siri_port hooks_port names new args
   need_installed
   read_facts
   [ "$f_state" = Running ] && [ "$f_name" != - ] || fail "this machine isn't on a tailnet yet: run the up step first; the hub keeps its URL"
@@ -328,7 +364,7 @@ do_public_url() {
   [ "$f_serve" = yes ] || fail "tailscale serve doesn't forward to the hub yet, so the new URL would reach nothing: run the serve step first; the hub keeps its URL"
   new="https://$f_name"
   [ -f "$HUB_UNIT" ] || fail "no dashboard hub on this machine yet: set it up first (credentials.sh dashboard-signin, then dashboards.sh --client-id <id> --public-url $new <instance>...)"
-  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"; siri_port="$(hub_option --siri-port)"
+  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"; siri_port="$(hub_option --siri-port)"; hooks_port="$(hub_option --hooks-port)"
   names="$(hub_instances | tr '\n' ' ' | sed 's/ $//')"
   [ -n "$id" ] && [ -n "$names" ] || fail "the hub's unit ($HUB_UNIT) doesn't name its sign-in App or its instances: run dashboards.sh yourself with --public-url $new"
   if [ "$old" = "$new" ]; then
@@ -339,6 +375,7 @@ do_public_url() {
   [ -z "$user" ] || args+=(--console-user "$user")
   [ -z "$devices" ] || args+=(--console-devices "$devices")
   [ -z "$siri_port" ] || args+=(--siri)
+  [ -z "$hooks_port" ] || args+=(--hooks)
   emit running "dashboards.sh ${args[*]} $names"
   # shellcheck disable=SC2086 # one word per instance name, none with spaces (hub_instances checks each)
   bash "$here/dashboards.sh" "${args[@]}" $names || fail "dashboards.sh failed (its output is above); check the hub: systemctl status worklane-dashboard-hub.service"
@@ -364,5 +401,6 @@ case "$cmd" in
   up) do_up ;;
   serve) do_serve ;;
   serve-siri) do_serve_siri ;;
+  serve-hooks) do_serve_hooks ;;
   public-url) do_public_url ;;
 esac
