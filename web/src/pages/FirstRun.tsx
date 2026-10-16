@@ -8,6 +8,7 @@ import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, skipStep, st
 import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
 import { DiscordSetupPanel } from '../components/DiscordSetup';
+import { SourceSetupPanel } from '../components/SourceSetup';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { Header } from '../components/Header';
 import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
@@ -15,6 +16,7 @@ import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { StarterCi } from '../components/StarterCi';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
+import { ConfigPrList } from '../components/ConfigPr';
 import { FirstTaskForm } from '../components/FirstTask';
 
 /** How often the page checks again while it is open. The server keeps GitHub's answers for 2 minutes, the rest for 10 s. */
@@ -30,7 +32,9 @@ const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2
 const SLOT_LABEL: Record<FirstRunVerification['slot'], string> = { setup: 'worktree setup', full: 'runner.full', changed: 'runner.changed', one: 'runner.one' };
 
 /** Auto-config's part of the Repo config step: the questions it can't settle alone, with their choices, and each command's run on the default branch. */
-function AutoConfigView({ a }: { a: FirstRunAutoConfig }) {
+function AutoConfigView({ a: given, settled = false }: { a: FirstRunAutoConfig; settled?: boolean }) {
+  // WHY (#468): once the setup PR has merged and the config is here, its "merge it, then run init again" is stale.
+  const a = settled ? { ...given, pr: null } : given;
   if (!a.questions.length && !a.verified.length && !a.pr) return null;
   return (
     <section aria-label="Repo config" className="space-y-3" data-testid="first-run-auto-config">
@@ -369,9 +373,10 @@ function keepOpenSteps(ids: string[]) {
   }
 }
 
-function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSkip }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; primary?: boolean; onSkip?: (skip: boolean) => void }) {
-  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord';
-  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' ? s.fix.label : 'Fix';
+function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSkip, canAct = true }: { s: SetupStepView; open: boolean; onFix: () => void; action?: ReactNode; rerun?: boolean; primary?: boolean; onSkip?: (skip: boolean) => void; canAct?: boolean }) {
+  const panel = s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' || s.fix.kind === 'source';
+  // WHY: a writer may read an intake source's step but do nothing there: its button says so (Show, not Set up).
+  const label = s.fix.kind === 'screen' ? 'Open' : s.fix.kind === 'start' ? 'Start' : s.fix.kind === 'source' && !canAct ? 'Show' : s.fix.kind === 'action' || s.fix.kind === 'form' || s.fix.kind === 'signin' || s.fix.kind === 'gh-login' || s.fix.kind === 'discord' || s.fix.kind === 'source' ? s.fix.label : 'Fix';
   // WHY: a done step with a screen on this page can be opened again (#468: any step expands and collapses): a form's
   // values changed, a sign-in or Discord redone, an action run again. Setup mode's origin and draft are the exception
   // (once done, there is nothing left for them to change). A skipped step stays closed until the skip is undone.
@@ -402,7 +407,7 @@ function StepRow({ s, open, onFix, action, rerun = false, primary = false, onSki
           )}
           {offered && (
             <Button size="sm" variant={primary && !open ? 'default' : open || s.done ? 'ghost' : 'outline'} onClick={onFix} aria-expanded={s.fix.kind === 'screen' ? undefined : open} data-testid="first-run-fix" data-fix={s.fix.kind} {...(primary ? { 'data-primary': 'true' } : {})}>
-              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' ? 'Change' : 'Run again') : label}
+              {s.done ? (s.fix.kind === 'form' ? label : s.fix.kind === 'signin' ? 'Again' : s.fix.kind === 'discord' || (s.fix.kind === 'source' && canAct) ? 'Change' : s.fix.kind === 'source' ? 'Show' : 'Run again') : label}
             </Button>
           )}
         </div>
@@ -494,7 +499,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; initialGhLogin?: GhLoginView | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, sources, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; sources?: Partial<Record<'slack' | 'linear', ReactNode>>; initialGhLogin?: GhLoginView | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -585,6 +590,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                   rerun={rerun === s.id}
                   primary={next?.id === s.id && !(s.fix.kind === 'start' && startPressable)}
                   {...(f.canAct ? { onSkip: (on: boolean) => skip(s.id, on) } : {})}
+                  canAct={!!f.canAct}
                   action={
                     s.fix.kind === 'action' ? (
                       <ActionPanel plan={f.actions?.[s.fix.action]} canAct={!!f.canAct} initialConfirming={initialActionConfirming} onDone={() => onRecheck?.()} />
@@ -594,6 +600,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                       <GhLoginPanel canAct={!!f.canAct} command={s.fix.command} initial={initialGhLogin} onDone={recheck} />
                     ) : s.fix.kind === 'discord' ? (
                       (discord ?? <DiscordSetupPanel onChanged={() => onRecheck?.()} />)
+                    ) : s.fix.kind === 'source' ? (
+                      (sources?.[s.fix.source] ?? <SourceSetupPanel kind={s.fix.source} onChanged={() => onRecheck?.()} />)
                     ) : s.fix.kind === 'form' && s.fix.form === 'policy' && f.policy ? (
                       <PolicyForm p={f.policy} canEdit={!!f.canAct} initialChanges={initialPolicyChanges} onDone={() => onRecheck?.()} />
                     ) : s.fix.kind === 'form' && s.fix.form === 'repo-config' && f.repoConfig ? (
@@ -602,7 +610,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                           Not from here yet: {f.repoConfig.error}
                         </p>
                       ) : (
-                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onMerged={() => onRecheck?.()} />
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onChanged={() => onRecheck?.()} />
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
@@ -626,6 +634,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           </Card>
         </section>
       ))}
+      {/* #468: every config PR, followed to its end the same way (merged here or anywhere: this checkout brought to it). */}
+      {f.configPrs && <ConfigPrList prs={f.configPrs} canAct={!!f.canAct} onDone={() => onRecheck?.()} />}
       {/* #468: the first-task form is a checkout's only for now (the owner, 2026-10-15); on a server, why, in one line. */}
       {f.mode === 'server' && (
         <p className="text-[12.5px] text-ink-2" data-testid="first-run-first-task-server">
@@ -633,7 +643,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
         </p>
       )}
       <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
-      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} />}
+      {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} settled={!!f.setup?.groups.flatMap((g) => g.steps).find((s) => s.id === 'config-on-main')?.done || !!f.configPrs?.some((p) => p.number === f.autoConfig?.pr?.number && p.state === 'merged')} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
           <div className="text-[13px] font-medium text-ink">init hasn't been run here</div>
@@ -695,9 +705,10 @@ export function FirstRunPage({ state }: { state: State }) {
   useEffect(() => load(false), [load, state.lastId]);
   const setupMode = !!(f && 'setupMode' in f && f.setupMode);
   const drafting = !!(f && 'draft' in f && f.draft?.running);
-  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app.
+  // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app, on First run.
   useEffect(() => {
-    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.reload();
+    // WHY (#468): onto First run itself, never the empty Board: it stays here until the person moves on.
+    if (state.setupMode && f && !('error' in f) && f.setupMode === false) window.location.replace('/first-run');
   }, [f, state.setupMode]);
   // Live while open: a provider login done in another tab shows here without a click; faster while setting up.
   useEffect(() => {
