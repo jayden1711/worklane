@@ -2659,7 +2659,7 @@ jobs:
           cat "$F/rn1.err"
           [ "$rc" = 1 ] && grep -q 'refused: gamma has work in flight; nothing changed' "$F/rn1.err"
           if id wl-gamma2 2>/dev/null || sudo test -e /var/lib/worklane/renames/gamma-to-gamma2; then echo "a refused rename changed something" >&2; exit 1; fi
-          sudo systemctl stop worklane-gamma.service
+          sudo systemctl stop worklane-gamma.service worklane-dashboard-gamma.service
           # The fresh clone can't reach the repo (a closed port in its place): the checkout step fails.
           sudo git config --system --unset-all url."$GH_FAKE2/example/gamma".insteadOf
           sudo git config --system url."http://127.0.0.1:9/example/gamma".insteadOf https://github.com/example/gamma
@@ -2681,7 +2681,7 @@ jobs:
           for p in /srv/worklane/gamma2 /etc/sudoers.d/worklane-gamma2 /var/lib/worklane/renames/gamma-to-gamma2 /var/lib/worklane/renames/gamma-to-gamma2.unit; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
           sudo sh -c "cd '$gh_' && sha256sum *.yaml" | diff "$F/gamma-before.txt" -
           [ "$(systemctl show -p LoadState --value worklane-gamma.service)" = loaded ]
-          sudo systemctl start worklane-gamma.service && sleep 10 && systemctl is-active worklane-gamma.service
+          sudo systemctl start worklane-gamma.service worklane-dashboard-gamma.service && sleep 10 && systemctl is-active worklane-gamma.service
       - name: "instance-rename: ci becomes kilo: the same App key and agent login, its history imported, every root record re-keyed, the old Siri token refused, its open ask asked again; nothing of ci left"
         run: |
           home="$(getent passwd wl-ci | cut -d: -f6)"; state="$home/.local/state/worklane/instances/ci/state"
