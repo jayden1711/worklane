@@ -399,7 +399,7 @@ job() {
   labels="$(source_dir "${SPEC[LABELS]}" scorer)"
   trap cleanup EXIT
   cache="$root/cache/${SPEC[LOCK]}"
-  declare -gA VARS=([DATA]="$data_paths" [OUT]="$d/out" [PRED]="$d/pred" [EVAL_INPUTS]="$inputs" [EVAL_CODE]="$ev/files" [ENV]="$cache" [CONFIG]="$d/config.json" [SEED]="${SPEC[SEED]}" [WORK]="$d/work")
+  declare -gA VARS=([DATA]="$data_paths" [OUT]="$d/out" [PRED]="$d/pred" [EVAL_INPUTS]="$inputs" [LABELS]="$labels" [EVAL_CODE]="$ev/files" [ENV]="$cache" [CONFIG]="$d/config.json" [SEED]="${SPEC[SEED]}" [WORK]="$d/work")
   printf '%s\n' "${SPEC[CONFIG]}" > "$d/config.json"; chmod 0644 "$d/config.json"
   write_env "$job"
   local -a work=(-p "BindReadOnlyPaths=$d/work" -p "BindReadOnlyPaths=$d/config.json" -p "WorkingDirectory=$d/work")
@@ -497,20 +497,30 @@ prune() {
   echo "pruned $job"
 }
 
-# PASS when each user can't reach what isn't its own, as itself: the labels and the eval copy from the job user, the
-# workspace and the GPU locks from both, and every protected path. A probe that can't run is a FAIL.
+# PASS when each user is alone in its group with no sudo, can't reach on the host what isn't its own (the jobs, the
+# sources not its own, the GPU locks), and, inside the sandbox a step gets, reaches none of the protected paths,
+# nothing of the state and no network. A probe that can't run is a FAIL.
 check() {
-  local fail=0 u p out g
+  local fail=0 u p out g rc res log
   [ "$#" -eq 0 ] || die "usage: check"
+  install -d -o root -g root -m 0700 "$ENV_DIR"
   for u in "$juser" "$suser"; do
     g="$(id -nG "$u")"
     if [ "$g" = "$u" ]; then echo "PASS $u is in its own group only"; else echo "FAIL $u's groups: $g"; fail=1; fi
     if sudo -n -l -U "$u" 2>&1 | grep -q 'is not allowed to run sudo'; then echo "PASS $u may not run sudo"; else echo "FAIL $u has sudo rules"; fail=1; fi
     while IFS= read -r p; do
       [ -e "$p" ] || continue
-      out="$(cd / && runuser -u "$u" -- sh -c 'if [ -r "$1" ] || [ -w "$1" ] || { [ -d "$1" ] && [ -x "$1" ]; }; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
-      if [ "$out" = denied ]; then echo "PASS $u can't reach $p"; else echo "FAIL $u can reach $p (${out:-the probe did not run})"; fail=1; fi
-    done < <(protected_paths; echo "$GPU_LOCK_DIR"; [ "$u" = "$juser" ] && find "$root/data" -mindepth 1 -maxdepth 1 -type d -group "$suser" 2>/dev/null; [ "$u" = "$suser" ] && find "$root/data" -mindepth 1 -maxdepth 1 -type d -group "$juser" 2>/dev/null; true)
+      out="$(cd / && runuser -u "$u" -- sh -c 'if [ -r "$1" ] || [ -w "$1" ]; then echo open; else echo denied; fi' _ "$p" 2>/dev/null || true)"
+      if [ "$out" = denied ]; then echo "PASS $u can't read or write $p"; else echo "FAIL $u can reach $p (${out:-the probe did not run})"; fail=1; fi
+    done < <(echo "$root/jobs"; echo "$GPU_LOCK_DIR"; find "$root/data" -mindepth 1 -maxdepth 1 -type d ! -group "$u" 2>/dev/null; true)
+    # Inside the sandbox: the paths come in a variable (the step's environment file), never in the command.
+    ENV_FILE="$ENV_DIR/$name.check.$$"
+    ( umask 077; printf 'PROBE="%s"\n' "$( (protected_paths; echo "$root"; echo "$GPU_LOCK_DIR") | tr '\n' ':')" > "$ENV_FILE" )
+    log="$(mktemp)"
+    read -r rc res < <(step_unit check "probe-$u" "$u" 60 "$log" 0 -- -- 'n=0; IFS=: read -r -a ps <<< "$PROBE"; for p in "${ps[@]}"; do [ -n "$p" ] && [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ]; then echo "open $p"; n=1; fi; done; if (exec 3<>/dev/tcp/1.1.1.1/443) 2>/dev/null; then echo network; n=1; fi; echo probed; exit $n')
+    rm -f "$ENV_FILE"; ENV_FILE=
+    if [ "$rc" -eq 0 ] && grep -qx probed "$log"; then echo "PASS a step as $u reaches none of them and no network"; else echo "FAIL in the sandbox as $u (exit $rc $res):"; sed 's/^/  /' "$log"; fail=1; fi
+    rm -f "$log"
   done
   [ "$fail" -eq 0 ] && echo "OK" || echo "FAILED"
   return "$fail"

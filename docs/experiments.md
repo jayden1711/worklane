@@ -73,3 +73,29 @@ one GPU, writes more than 20 GB, or changes the dependency lockfile. Root's file
 a job, GPU-hours a day, output size, the approved data sources): a job above them is refused and can't be approved.
 
 Spend is real money only: the sessions' agent cost, counted on the local day. GPU time is shown in hours.
+
+## Setting a machine up (root, server mode only)
+
+```sh
+sudo bash scripts/setup/experiments.sh install <name>        # users, helper, sudoers rule, slice, root's file
+sudo bash scripts/setup/experiments.sh set <name> --devices 0 --max-minutes 60 --gpu-hours 8 --output-gb 50
+bash scripts/setup/experiments.sh data hash <path>            # prints the sha256 to approve
+sudo bash scripts/setup/experiments.sh data add <name> <id> --from <path> --sha256 <hex> --visibility job|scorer
+sudo bash scripts/setup/experiments.sh check <name>
+```
+
+- `wl-exp-<name>` runs a job's build, preflight, train and predict steps; `wl-score-<name>` runs its score step. Both
+  are system users with no login, no home and no sudo, each in its own group only. Neither is ever in a GPU group: a
+  granted step's unit gets the device group for that unit only (`SupplementaryGroups=`).
+- The helper (`/usr/local/libexec/worklane-exp`) runs each step as a transient unit in `worklane-exp.slice`. Every
+  step has no network (the environment build too, unless root's file says `env_network: true`) and sees nothing of
+  `/var/lib/worklane-exp` but what is bound for it. The score step runs the sealed eval copy as the scorer with the
+  predictions and the labels; it never gets the job's workspace, environment or code.
+- Root's file, `/etc/worklane/experiments/<name>.json`, is the only place the GPUs, the caps and the approved data
+  sources come from. A source is copied by root, checked against the sha256 you give (a mismatch installs nothing),
+  and readable only by the user its visibility names. Jobs never fetch anything.
+- The GPU: the same per-GPU locks as the test runs, held from before training until prediction ends. The wait has its
+  own limit and doesn't count against the job's minutes. A GPU job that timed out or was killed is never run again by
+  itself.
+- After a job, its outputs are root's (the coordinator reads them); the predictions are the scorer's. Nobody's job can
+  write them again. The record (`record.json`) is root's.
