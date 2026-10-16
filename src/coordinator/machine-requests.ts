@@ -5,6 +5,7 @@
 // claimed but never finished (it stopped mid-run) is marked interrupted, never run again.
 import type { EventLog } from '../events/log.js';
 import { checkRootStep } from '../console/root-steps.js';
+import { PLUGIN_STEPS } from '../plugins/steps.js';
 import { recordAnswer } from '../console/asks.js';
 import type { Exec } from '../machine.js';
 import { MACHINE_EVENTS, machineRefusal, machineRequests, type MachineRequest } from '../machine-requests.js';
@@ -84,7 +85,10 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     if (r.args[0] === 'add-project' && runningAddProjects.size) continue;
     if (!claim(d.log, r.id, d.instance)) continue;
     // Checked again here, whatever the dashboard checked: a request written any other way can't widen what runs.
-    const why = requesterRefusal(r, d.ownersFile) ?? machineRefusal(r.args);
+    // Q13: a plugin step (via the Plugins page) is the instance owner's to ask for, and the dashboard checked that role;
+    // it is for this instance alone and approves nothing. Every other machine change still needs a machine owner.
+    const instanceStep = r.via === 'plugins' && (PLUGIN_STEPS as readonly string[]).includes(r.args[0] ?? '');
+    const why = (instanceStep ? null : requesterRefusal(r, d.ownersFile)) ?? machineRefusal(r.args);
     if (why) {
       d.log.append('machine.finished', { id: r.id, outcome: 'refused', detail: why.slice(0, 1000) }, d.instance, 'coordinator');
       continue;

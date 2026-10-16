@@ -92,6 +92,32 @@
 // set-test-slots, set-updates, set-update-channel, install-updater, add-project, stage/discard-update-signer,
 // claude-account status) runs in a transient unit of its own, started with systemd-run once its arguments have
 // passed, because the coordinator's own sandbox (ProtectSystem=full) would make those paths read-only. See main().
+// Plugins for an instance's agents (scripts/setup/plugins.sh, src/plugins/), for the asking coordinator's instance
+// alone (from SUDO_USER, never an argument):
+//
+//   worklane-machine plugin-fetch <id> <https git URL> <40-hex commit> [<subdirectory>]
+//   worklane-machine plugin-stage <id> sha256:<64 hex> <role+role...>
+//   worklane-machine plugin-withdraw <id>
+//   worklane-machine plugin-remove <id>
+//
+// plugin-fetch starts plugins.sh fetch as its own unit (worklane-plugin-fetch-<instance>.service: one at a time per
+// instance, and at most 10 an hour): a throwaway user (DynamicUser) fetches that exact commit; root inspects it without
+// running any of it and leaves a preview. plugin-stage records an approval in /var/lib/worklane/plugins/pending.json,
+// only when the digest is what that preview and those roles make now; a staged approval is trusted for nothing.
+// Nothing in this helper adds or changes an entry in an instance's allowlist (/etc/worklane/plugins/<instance>.json):
+// an admin confirms a staged approval at a root shell (plugins.sh confirm, which refuses a coordinator's sudo).
+// plugin-remove only deletes an entry; plugin-withdraw takes a staged one back out.
+//
+//   worklane-machine mcp-fetch <id> <npm package> <x.y.z>
+//   worklane-machine mcp-preview <id> <plugin id> <server name>
+//   worklane-machine mcp-snapshot <id>
+//   worklane-machine mcp-stage <id> sha256:<64 hex> <role+role...> <host+host...|none> <SECRET+SECRET...|none>
+//
+// MCP servers, the same way (src/mcp/): mcp-fetch, mcp-preview and mcp-snapshot start plugins.sh as the same per-instance
+// unit (a pinned npm package fetched by a throwaway user; a server inside an approved plugin; the second snapshot, with
+// the server's secrets and approved network). Each starts the server in quarantine as the instance's broker user, in its
+// sandbox, with no agent connected. mcp-stage stages its approval with the hosts it may reach and its secrets' names.
+//
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
@@ -111,8 +137,11 @@ const TAILSCALE = '/opt/worklane/current/scripts/setup/tailscale.sh';
 const TAILSCALE_UNIT = 'worklane-tailscale';
 const TAILSCALE_ACTIONS = ['install', 'up', 'serve', 'public-url'];
 const PATH_ENV = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
+const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
+const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
 
 /**
  * Why a name can't be an instance's, or null: instance.sh's shape, never a name whose users, group or units are already
@@ -124,13 +153,14 @@ function instanceNameProblem(s) {
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `worklane-dashboard-${s}.service is the dashboard hub's`;
   if (s === 'update' || s === 'tailscale' || s === 'claude-account' || s === 'egress') return `worklane-${s}.service is the machine's own`;
-  if (s === 'agent' || s === 'eval' || s === 'work') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
+  if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
   if (s.startsWith('exp-')) return `wl-${s} is the experiment job user of instance ${s.slice(4)}`;
   if (s.startsWith('score-')) return `wl-${s} is the experiment scorer user of instance ${s.slice(6)}`;
   if (s.startsWith('dashboard-')) return `worklane-${s}.service is the dashboard of instance ${s.slice(10)}`;
-  const m = /^(.+)-(agent|eval|work)$/.exec(s);
+  if (s.startsWith('plugin-fetch-')) return `worklane-${s}.service is the plugin fetch of instance ${s.slice(13)}`;
+  const m = /^(.+)-(agent|eval|work|mcp|mcpc|mcpctl)$/.exec(s);
   if (m) return `wl-${s} is instance ${m[1]}'s ${m[2]} name`;
   return null;
 }
@@ -467,6 +497,144 @@ function readJson(file) {
   }
 }
 
+// ---------- plugins ----------
+
+const PLUGIN_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+// An https git URL with no credentials, port, query or fragment (sudo's pattern allows the same, src/plugins/fetch.ts more).
+const PLUGIN_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~/-]+$/;
+const PLUGIN_SHA = /^[0-9a-f]{40}$/;
+const PLUGIN_PATH = /^(?:[A-Za-z0-9._-]+\/)*[A-Za-z0-9._-]+$/;
+const PLUGIN_DIGEST = /^sha256:[0-9a-f]{64}$/;
+const PLUGIN_ROLES = /^[a-z][a-z0-9-]{0,30}(?:\+[a-z][a-z0-9-]{0,30})*$/;
+const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
+const NPM_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const MCP_SERVER_NAME = /^[A-Za-z0-9_-]{1,40}$/;
+const HOST_LABEL = '[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?';
+const MCP_HOSTS = new RegExp(`^(?:none|(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+(?:\\+(?:\\*\\.)?${HOST_LABEL}(?:\\.${HOST_LABEL})+)*)$`);
+const MCP_SECRETS = /^(?:none|[A-Z][A-Z0-9_]{1,63}(?:\+[A-Z][A-Z0-9_]{1,63})*)$/;
+// Root's allowlist of hosts plugins may come from (scripts/setup/plugins.sh hosts): root:root, not writable by others.
+// Absent: github.com alone. Present but not root's, writable by others or malformed: no host at all.
+const PLUGIN_HOSTS_FILE = '/etc/worklane/plugin-hosts.json';
+const HOST_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
+function pluginHosts(file = PLUGIN_HOSTS_FILE, ownerUid = 0) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return ['github.com'];
+  }
+  if (!st.isFile() || st.uid !== ownerUid || (st.mode & 0o022) !== 0) return [];
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(v.hosts) && v.hosts.every((h) => typeof h === 'string' && HOST_NAME.test(h) && require('node:net').isIP(h) === 0) ? v.hosts : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Why a plugin's URL may not be fetched (null when it may): exactly https://, one allowed host by name, no address. */
+function pluginUrlProblem(url, hosts) {
+  if (typeof url !== 'string' || !url.startsWith('https://')) return 'the source must start with https://';
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return 'the source is not a URL';
+  }
+  if (u.protocol !== 'https:' || u.username || u.password || u.port || u.search || u.hash) return 'the source must be https://<host>/<path>, with no user, port, query or fragment';
+  const host = u.hostname;
+  // WHATWG URL already turned decimal, octal and hex IPv4 spellings into dotted form; IPv6 comes bracketed.
+  if (host.startsWith('[') || require('node:net').isIP(host) !== 0) return `the source names an address (${host}), not a host`;
+  if (!hosts.includes(host)) return `${host} is not a host plugins may come from`;
+  return null;
+}
+
+// Root's allowlist of npm registries MCP servers may come from (plugins.sh registries): root:root, not writable by
+// others. Absent: registry.npmjs.org alone. Present but not root's, writable by others or malformed: none.
+const MCP_REGISTRIES_FILE = '/etc/worklane/mcp-registries.json';
+function mcpRegistries(file = MCP_REGISTRIES_FILE, ownerUid = 0) {
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch {
+    return ['registry.npmjs.org'];
+  }
+  if (!st.isFile() || st.uid !== ownerUid || (st.mode & 0o022) !== 0) return [];
+  try {
+    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return Array.isArray(v.registries) && v.registries.every((h) => typeof h === 'string' && HOST_NAME.test(h) && require('node:net').isIP(h) === 0) ? v.registries : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Why a subdirectory may not be fetched (null when it may): plain relative segments, never absolute or "..". */
+function pluginPathProblem(p) {
+  if (typeof p !== 'string' || !p) return 'no subdirectory';
+  if (p.startsWith('/') || p.includes('\\')) return 'the subdirectory must be relative';
+  if (p.split('/').some((x) => x === '..' || x === '.' || x === '')) return 'the subdirectory may not hold "..", "." or empty segments';
+  return PLUGIN_PATH.test(p) ? null : 'the subdirectory holds characters outside A-Z a-z 0-9 . _ -';
+}
+
+/** The plugin step a list asks for, or null when it is anything else. */
+function parsePlugin(args, hosts = pluginHosts(), registries = mcpRegistries()) {
+  const [cmd, id] = args;
+  if (typeof id !== 'string' || !PLUGIN_ID.test(id)) return null;
+  if (cmd === 'plugin-fetch' && (args.length === 4 || args.length === 5)) {
+    const [, , url, sha, sub] = args;
+    if (!PLUGIN_URL.test(url) || pluginUrlProblem(url, hosts) || !PLUGIN_SHA.test(sha)) return null;
+    if (sub !== undefined && pluginPathProblem(sub)) return null;
+    return { action: 'fetch', id, url, sha, ...(sub !== undefined ? { path: sub } : {}) };
+  }
+  if (cmd === 'plugin-stage' && args.length === 4 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3])) return { action: 'stage', id, digest: args[2], roles: args[3] };
+  if (cmd === 'plugin-withdraw' && args.length === 2) return { action: 'withdraw', id };
+  if (cmd === 'mcp-fetch' && (args.length === 4 || args.length === 5) && NPM_NAME.test(args[2]) && NPM_VERSION.test(args[3])) {
+    // Only a registry on root's list; none named: the first on it.
+    const registry = args.length === 5 ? args[4] : registries[0];
+    if (typeof registry !== 'string' || !registries.includes(registry)) return null;
+    return { action: 'mcp-fetch', id, pkg: args[2], version: args[3], registry };
+  }
+  if (cmd === 'mcp-preview' && args.length === 4 && PLUGIN_ID.test(args[2]) && MCP_SERVER_NAME.test(args[3])) return { action: 'mcp-preview', id, plugin: args[2], server: args[3] };
+  if (cmd === 'mcp-snapshot' && args.length === 2) return { action: 'mcp-snapshot', id };
+  if (cmd === 'mcp-stage' && args.length === 6 && PLUGIN_DIGEST.test(args[2]) && PLUGIN_ROLES.test(args[3]) && MCP_HOSTS.test(args[4]) && MCP_SECRETS.test(args[5])) return { action: 'stage', id, digest: args[2], roles: args[3], network: args[4], secrets: args[5] };
+  if (cmd === 'plugin-remove' && args.length === 2) return { action: 'remove', id };
+  return null;
+}
+
+function plugin(p) {
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write(`plugin-${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/plugins.sh\n`);
+    return 2;
+  }
+  if (p.action === 'fetch' || p.action.startsWith('mcp-')) {
+    const real = rootScript(PLUGINS_SH);
+    if (!real) return 1;
+    const what = `plugins.${instance}.${p.action}`;
+    const args = p.action === 'fetch' ? [real, 'fetch', instance, p.id, p.url, p.sha, ...(p.path ? [p.path] : [])]
+      : p.action === 'mcp-fetch' ? [real, 'mcp-fetch', instance, p.id, p.pkg, p.version, p.registry]
+      : p.action === 'mcp-preview' ? [real, 'mcp-preview', instance, p.id, p.plugin, p.server]
+      : [real, 'mcp-snapshot', instance, p.id];
+    const r = spawnSync('systemd-run', ['--unit', `${PLUGIN_FETCH_UNIT}-${instance}`, '--collect', '--no-block', '--quiet', '--description', `worklane plugin fetch for ${instance}`, '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8 HOME=/root`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
+    if (r.error || r.status !== 0) {
+      const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
+      process.stderr.write(/already (exists|loaded|active)/i.test(text) ? `a plugin fetch for ${instance} is already running\n` : `couldn't start the fetch: ${text.split('\n')[0]}\n`);
+      logLine(what, null, `failed: ${args.slice(2).join(' ')}: not started`);
+      return 1;
+    }
+    logLine(what, null, args.slice(3).join(' '));
+    process.stdout.write(`started ${p.action} of ${p.id} as ${PLUGIN_FETCH_UNIT}-${instance}.service\n`);
+    return 0;
+  }
+  const cli = rootScript(ENGINE_CLI);
+  if (!cli) return 1;
+  const args = p.action === 'stage' ? ['--id', p.id, '--roles', p.roles, '--digest', p.digest, ...(p.network !== undefined ? ['--network', p.network, '--secrets', p.secrets] : [])] : ['--id', p.id];
+  // The engine's own root operations: the instance from sudo, `by` from SUDO_USER (kept in the environment).
+  const r = spawnSync(process.execPath, [cli, 'plugins', p.action, '--instance', instance, ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8', SUDO_USER: process.env.SUDO_USER }, stdio: 'inherit' });
+  return r.status === null ? 1 : r.status;
+}
+
 // ---------- where a step runs ----------
 //
 // The coordinator calls this helper through sudo from inside its own unit, whose sandbox (ProtectSystem=full) makes
@@ -486,6 +654,8 @@ function needsUnit(args) {
   if (parseSigner('stage-update-signer', args) || parseSigner('discard-update-signer', args)) return true; // its pending list, kept with the rest
   if (parseClaudeAccount(args) === 'status') return true; // claude-account.sh as root
   if (parseClaudeFailover(args)) return true; // claude-account.sh as root
+  const pl = parsePlugin(args);
+  if (pl && pl.action === 'remove') return true; // /etc/worklane/plugins
   return false;
 }
 
@@ -530,6 +700,8 @@ function main(argv) {
   if (discard) return discardSigner(discard);
   const ts = parseTailscale(args);
   if (ts) return tailscale(ts);
+  const pl = parsePlugin(args);
+  if (pl) return plugin(pl);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
@@ -561,4 +733,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

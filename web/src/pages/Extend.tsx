@@ -1,4 +1,4 @@
-// WHY: one place for what an instance does beyond its issues (Automations now; Plugins plugs in here as its own tab),
+// WHY: one place for what an instance does beyond its issues (Automations, and Plugins as its own tab),
 // so neither adds a page of its own. The sidebar lists Extend for owners and writers only (App.tsx NAV roles); a tab
 // is drawn only where its feature exists, so there is never a dead tab.
 import { type State } from '../api';
@@ -6,11 +6,13 @@ import { navigate } from '../App';
 import { AutomationsTab } from '../components/Automations';
 import { ExperimentsTab } from '../components/Experiments';
 import { Header } from '../components/Header';
+import { PluginsTab } from '../components/Plugins';
 import { cx } from '../components/ui';
 
 /** The tabs, in order: each its own address. */
 export const EXTEND_TABS = [
   { id: 'automations', label: 'Automations', to: '/extend/automations' },
+  { id: 'plugins', label: 'Plugins', to: '/extend/plugins' },
   { id: 'experiments', label: 'Experiments', to: '/extend/experiments' },
 ] as const;
 
@@ -43,6 +45,7 @@ export function ExtendPage({ state, path }: { state: State; path: string }) {
         ) : (
           <>
             {tab.id === 'automations' && <AutomationsTab state={state} id={m?.[1] === 'automations' ? (m[2] ?? null) : null} />}
+            {tab.id === 'plugins' && <PluginsTab state={state} />}
             {tab.id === 'experiments' && <ExperimentsTab state={state} id={m?.[1] === 'experiments' ? (m[2] ?? null) : null} />}
           </>
         )}

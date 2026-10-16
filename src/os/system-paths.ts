@@ -123,6 +123,10 @@ export const optPath = (name: string) => systemPath(`${SYSTEM_ROOTS.opt}/${name}
 export const runLockPath = (name: string) => systemPath(`${SYSTEM_ROOTS.runLock}/${BRAND.cli}-${name}`);
 /** /run/<cli>/<name>: root's runtime files every user may read (the GPU test runs' locks). */
 export const runPath = (name: string) => systemPath(`${SYSTEM_ROOTS.run}/${name}`);
+/** /run/<cli>-mcp-<instance>: the instance's MCP broker's sockets (its unit's RuntimeDirectory). */
+export const mcpRunPath = (instance: string, name: string) => systemPath(`/run/${BRAND.cli}-mcp-${instance}/${name}`);
+/** /var/lib/<cli>-mcp-<instance>: the broker's own state (blocked servers, the call log): its unit's StateDirectory. */
+export const mcpStatePath = (instance: string, name: string) => systemPath(`/var/lib/${BRAND.cli}-mcp-${instance}/${name}`);
 /** /etc/systemd/system/<unit> */
 export const unitPath = (unit: string) => systemPath(`${SYSTEM_ROOTS.units}/${unit}`);
 /** /srv/<cli>/<instance>/<repo name>: a server instance's checkout (scripts/setup/lib.sh SRV_ROOT, add-project.sh). */
