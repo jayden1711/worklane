@@ -135,6 +135,10 @@ export function optionEffect(kind: DetailKind, option: string, o: { investigatio
     if (option === 'reject') return { does: 'Drops the report, and the sender is told it was declined.', cannot: 'No issue is filed.' };
     if (option === 'answered') return { does: 'Marks the question answered.', cannot: "It doesn't send your answer: reply to the sender yourself." };
   }
+  if (kind === 'automation') {
+    if (option === 'approve') return { does: "Runs the automation once for this trigger, if its caps and budgets still allow it now (they are checked again).", cannot: "It doesn't approve later triggers: each run asks again." };
+    if (option === 'reject') return { does: "Doesn't run it for this trigger.", cannot: "It doesn't pause the automation: pause it on Extend." };
+  }
   if (kind === 'delegation') {
     if (option === 'loosen' || option === 'tighten') return { does: `Files the review.yaml change as an issue: the harness then ${option === 'loosen' ? 'stops waiting for you on' : 'waits for you again on'} that category, once its PR is merged.`, cannot: 'Nothing changes before that PR is reviewed and merged.' };
     if (option === 'keep') return { does: 'Nothing changes.', cannot: "It won't be suggested again until the record changes." };
@@ -144,6 +148,7 @@ export function optionEffect(kind: DetailKind, option: string, o: { investigatio
 
 /** What happens if nobody picks anything: nothing times out. */
 export function ifNothing(kind: DetailKind, issue: number | null): string {
+  if (kind === 'automation') return "It expires: unanswered for a day, the automation doesn't run for this trigger. Only an owner answers it, here on the dashboard (never from chat or voice).";
   const where = issue !== null && kind !== 'intake' && kind !== 'delegation' && kind !== 'pr' ? `, here, or in a comment on #${issue} (\`/${BRAND.cli} <option>\`)` : kind === 'pr' ? ' on GitHub' : ', here';
   const what: Record<DetailKind, string> = {
     land: "the change doesn't land",
@@ -152,6 +157,7 @@ export function ifNothing(kind: DetailKind, issue: number | null): string {
     plan: 'nothing is built',
     intake: 'the report is neither filed nor dropped',
     delegation: 'the review settings stay as they are',
+    automation: 'the automation does not run for this trigger',
     pr: 'the PR stays open, unmerged',
   };
   return `No timeout: it waits. Until someone with the right role answers${where}, ${what[kind]}. It stays in Waiting on you and in the daily digest.`;
@@ -239,6 +245,8 @@ function happened(kind: DetailKind, issue: number | null, ctx: DecisionContext |
       return `The plan${on} is held for your approval: nothing is built before it.`;
     case 'intake':
       return 'A report came in from outside, from a sender who is not trusted: it needs your OK before it becomes an issue.';
+    case 'automation':
+      return "An automation was triggered and is set to wait for its owner's approval before each run (a webhook's always is).";
     case 'delegation':
       return "The review history of a category of changes suggests changing whether it waits for you.";
     case 'pr':

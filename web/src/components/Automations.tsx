@@ -10,7 +10,7 @@ const field = 'h-8 w-full rounded-control bg-field px-2.5 text-[13px] text-ink s
 const fieldAuto = field.replace('w-full', 'w-auto max-w-full');
 const label = 'block space-y-1 text-[12px] text-ink-3';
 
-const ACTION_LABEL: Record<AutomationAction, string> = { create: 'Create', edit: 'Edit', delete: 'Delete', pause: 'Pause', resume: 'Resume', run: 'Run now' };
+const ACTION_LABEL: Record<AutomationAction, string> = { create: 'Create', edit: 'Edit', delete: 'Delete', pause: 'Pause', resume: 'Resume', run: 'Run now', rotate: 'Rotate secret', unbind: 'Unbind device' };
 
 /** Three starting points inside the form (never in the empty state, which offers one action). */
 const PRESETS: { name: string; def: AutomationDef }[] = [
@@ -59,7 +59,7 @@ export function AutomationsTab({ state, id }: { state: State; id: string | null 
         {data.error && <p className="text-[12.5px] text-red" data-testid="automations-file-error">{data.error}</p>}
         <div className="rounded-card bg-inset p-8 text-center shadow-hairline" data-testid="automations-empty">
           <div className="text-[14px] font-medium text-ink">No automations yet</div>
-          <p className="mx-auto mt-1.5 max-w-md text-[12.5px] text-ink-2">An automation runs an agent task for you on a schedule or when something happens: a GitHub issue or pull request, or a Discord message.</p>
+          <p className="mx-auto mt-1.5 max-w-md text-[12.5px] text-ink-2">An automation runs an agent task for you on a schedule or when something happens: a GitHub issue or pull request, a Discord message, or a webhook from your tailnet.</p>
           <ul className="mx-auto mt-3 max-w-sm space-y-0.5 text-left text-[12px] text-ink-2">
             <li>· Each one has its own budget and a daily run limit.</li>
             <li>· Its work goes through the same sandbox, review and merge rules as any other run.</li>
@@ -126,7 +126,7 @@ export function AutomationsTab({ state, id }: { state: State; id: string | null 
 function AutomationDetail({ a, actions, digest, timezone }: { a: AutomationItem; actions: AutomationAction[]; digest: string; timezone: string }) {
   const [editing, setEditing] = useState(false);
   if (editing) return <AutomationForm digest={digest} initial={a} onDone={() => setEditing(false)} />;
-  const shown = actions.filter((x) => x !== 'create' && (x !== 'pause' || a.enabled) && (x !== 'resume' || !a.enabled) && (x !== 'run' || a.enabled));
+  const shown = actions.filter((x) => x !== 'create' && (x !== 'pause' || a.enabled) && (x !== 'resume' || !a.enabled) && (x !== 'run' || a.enabled) && ((x !== 'rotate' && x !== 'unbind') || !!a.webhook) && (x !== 'unbind' || !!a.webhook?.bound));
   return (
     <Card className="min-w-0 space-y-3 p-4" data-testid="automation-detail" data-id={a.id}>
       <div className="flex flex-wrap items-center gap-2">
@@ -152,6 +152,24 @@ function AutomationDetail({ a, actions, digest, timezone }: { a: AutomationItem;
           </li>
         )}
       </ul>
+      {a.webhook && (
+        <div className="space-y-1 rounded-lg bg-inset p-3 text-[12.5px] text-ink shadow-hairline" data-testid="automation-webhook">
+          <div>
+            Address: <code className="break-all font-mono text-[12px]">https://&lt;this machine's tailnet name&gt;:8444{a.webhook.path}</code> (tailnet only)
+          </div>
+          <div className="text-ink-2">{a.webhook.bound ? `Bound to ${a.webhook.bound.name} since ${ago(a.webhook.bound.at)}: deliveries from any other device are refused.` : 'Not bound yet: the first valid delivery binds it to its device.'}</div>
+          {!a.webhook.hasSecret && <div className="text-red">It has no secret, so every delivery is refused: Rotate secret makes one.</div>}
+        </div>
+      )}
+      {a.waiting.length > 0 && (
+        <p className="rounded-lg bg-blue-tint p-2 text-[12.5px] text-ink" data-testid="automation-waiting">
+          {a.waiting.length} run{a.waiting.length === 1 ? '' : 's'} waiting for {a.owner ? `@${a.owner}` : 'its owner'}'s approval in the{' '}
+          <a href="/inbox" onClick={(e) => (e.preventDefault(), navigate('/inbox'))} className="underline">
+            Inbox
+          </a>
+          .
+        </p>
+      )}
       <div>
         <div className="text-[12px] font-medium text-ink-3">Last runs</div>
         {a.runs.length ? (
@@ -198,6 +216,7 @@ function ActionBar({ a, actions, digest, onEdit }: { a: AutomationItem; actions:
   const [plan, setPlan] = useState<AutomationPlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [secret, setSecret] = useState<{ secret: string; path: string } | null>(null);
   if (!actions.length) return null;
   const review = async (action: AutomationAction) => {
     if (action === 'edit') return onEdit();
@@ -217,6 +236,7 @@ function ActionBar({ a, actions, digest, onEdit }: { a: AutomationItem; actions:
     try {
       const r = await changeAutomation({ action: plan.action, id: a.id, ...(plan.digest ? { digest: plan.digest } : { digest }), confirm: true });
       setMsg({ ok: true, text: r.action === 'run' ? 'Asked: it starts on the next pass, if its caps allow.' : `Done: ${ACTION_LABEL[r.action].toLowerCase()}.` });
+      if (r.secret && r.path) setSecret({ secret: r.secret, path: r.path });
       setPlan(null);
       if (r.action === 'delete') navigate('/extend/automations');
     } catch (e) {
@@ -235,7 +255,27 @@ function ActionBar({ a, actions, digest, onEdit }: { a: AutomationItem; actions:
         ))}
       </div>
       {plan && <Review plan={plan} busy={busy} onConfirm={() => void confirm()} onCancel={() => setPlan(null)} />}
+      {secret && <SecretOnce secret={secret.secret} path={secret.path} onDone={() => setSecret(null)} />}
       {msg && <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="automation-result">{msg.text}</p>}
+    </div>
+  );
+}
+
+/** A webhook's secret, shown once (it is never shown again: Rotate secret makes a new one), with how to sign a delivery. */
+function SecretOnce({ secret, path, onDone }: { secret: string; path: string; onDone: () => void }) {
+  const example = [
+    `SECRET='${secret}'`,
+    "ts=$(date +%s); id=$(uuidgen); body='{\"text\":\"hello\"}'",
+    `sig=$(printf '%s.%s.%s' "$ts" "$id" "$body" | openssl dgst -sha256 -hmac "$SECRET" -hex | sed 's/^.* //')`,
+    `curl -sS -X POST "https://<this machine's tailnet name>:8444${path}" -H "x-hook-timestamp: $ts" -H "x-hook-delivery: $id" -H "x-hook-signature: v1=$sig" --data "$body"`,
+  ].join('\n');
+  return (
+    <div className="space-y-2 rounded-lg bg-orange-tint p-3" data-testid="automation-secret">
+      <div className="text-[12.5px] font-medium text-ink">Its secret, shown this once: copy it now. It is never shown again (Rotate secret makes a new one).</div>
+      <pre className="overflow-x-auto whitespace-pre rounded-md bg-surface p-2 font-mono text-[11.5px] text-ink shadow-hairline" data-testid="automation-secret-example">{example}</pre>
+      <Button size="sm" variant="outline" onClick={onDone} data-testid="automation-secret-done">
+        I've copied it
+      </Button>
     </div>
   );
 }
@@ -277,10 +317,11 @@ function Review({ plan, busy, onConfirm, onCancel }: { plan: AutomationPlan; bus
 
 /** New or Edit: one form (When, What, Limits), then Review -> Confirm. An id never changes once made. */
 function AutomationForm({ initial, digest, onDone }: { initial?: AutomationItem; digest: string; onDone: (id?: string) => void }) {
-  const [d, setD] = useState<AutomationDef>(() => (initial ? { id: initial.id, name: initial.name, trigger: initial.trigger, mode: initial.mode, template: initial.template, budget: initial.budget, limits: initial.limits, ...(initial.chain ? { chain: initial.chain } : {}) } : BLANK));
+  const [d, setD] = useState<AutomationDef>(() => (initial ? { id: initial.id, name: initial.name, trigger: initial.trigger, mode: initial.mode, template: initial.template, budget: initial.budget, limits: initial.limits, ...(initial.gates ? { gates: initial.gates } : {}), ...(initial.chain ? { chain: initial.chain } : {}) } : BLANK));
   const [plan, setPlan] = useState<AutomationPlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [secret, setSecret] = useState<{ secret: string; path: string } | null>(null);
   const set = (p: Partial<AutomationDef>) => (setD({ ...d, ...p }), setPlan(null), setMsg(null));
   const action = initial ? 'edit' : 'create';
   const send = async (confirm: boolean) => {
@@ -290,8 +331,9 @@ function AutomationForm({ initial, digest, onDone }: { initial?: AutomationItem;
       const body = { action, ...(initial ? { id: initial.id } : {}), automation: d } as const;
       if (!confirm) setPlan(await changeAutomation(body));
       else {
-        await changeAutomation({ ...body, digest: plan?.digest ?? digest, confirm: true });
-        onDone(d.id);
+        const r = await changeAutomation({ ...body, digest: plan?.digest ?? digest, confirm: true });
+        if (r.secret && r.path) setSecret({ secret: r.secret, path: r.path });
+        else onDone(d.id);
       }
     } catch (e) {
       setMsg((e as Error).message);
@@ -299,6 +341,7 @@ function AutomationForm({ initial, digest, onDone }: { initial?: AutomationItem;
       setBusy(false);
     }
   };
+  if (secret) return <SecretOnce secret={secret.secret} path={secret.path} onDone={() => onDone(d.id)} />;
   const t = d.trigger;
   const commands = d.template.done_when.map((c) => ('command' in c ? c.command : c.test)).join('\n');
   return (
@@ -328,10 +371,11 @@ function AutomationForm({ initial, digest, onDone }: { initial?: AutomationItem;
       </div>
       <fieldset className="space-y-2">
         <legend className="text-[12px] font-medium text-ink">When</legend>
-        <select className={fieldAuto} value={t.kind} onChange={(e) => set({ trigger: e.target.value === 'schedule' ? { kind: 'schedule', cron: '0 9 * * 1' } : e.target.value === 'github' ? { kind: 'github', on: 'issue.labeled', label: '' } : { kind: 'discord', command: '' } })} aria-label="Trigger" data-testid="automation-trigger">
+        <select className={fieldAuto} value={t.kind} onChange={(e) => set({ trigger: e.target.value === 'schedule' ? { kind: 'schedule', cron: '0 9 * * 1' } : e.target.value === 'github' ? { kind: 'github', on: 'issue.labeled', label: '' } : e.target.value === 'webhook' ? { kind: 'webhook' } : { kind: 'discord', command: '' }, ...(e.target.value === 'webhook' ? { gates: { start: 'approve' as const } } : {}) })} aria-label="Trigger" data-testid="automation-trigger">
           <option value="schedule">On a schedule (this machine's time)</option>
           <option value="github">On a GitHub event (by a writer or owner)</option>
           <option value="discord">On "run &lt;command&gt;" to the Discord bot</option>
+          <option value="webhook">On a signed webhook from your tailnet (each run waits for your approval)</option>
         </select>
         {t.kind === 'schedule' && (
           <label className={label}>
@@ -352,6 +396,11 @@ function AutomationForm({ initial, digest, onDone }: { initial?: AutomationItem;
             {t.on === 'issue_comment.created' && <input className={cx(field, 'font-mono')} placeholder="command" value={t.command ?? ''} onChange={(e) => set({ trigger: { ...t, command: e.target.value } })} aria-label="Command" data-testid="automation-github-command" />}
           </div>
         )}
+        {t.kind === 'webhook' && <p className="text-[12px] text-ink-3">After Confirm you get its secret once, and how to sign a delivery. Only devices on your tailnet reach it, and it binds to the first device that sends a valid delivery.</p>}
+        <label className="flex items-center gap-2 text-[12.5px] text-ink">
+          <input type="checkbox" checked={t.kind === 'webhook' || d.gates?.start === 'approve'} disabled={t.kind === 'webhook'} onChange={(e) => set({ gates: { start: e.target.checked ? 'approve' : 'auto' } })} data-testid="automation-approve" />
+          Ask me before each run (always, for a webhook)
+        </label>
         {t.kind === 'discord' && (
           <label className={label}>
             Command word

@@ -384,7 +384,7 @@ export const EventSchemas = {
   }),
   'review.level_set': z.strictObject({ issue, head: sha, level: z.enum(['L0', 'L1', 'L2', 'L3']), reasons: z.array(z.string()) }),
   // decisions
-  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake', 'delegation']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()), context: DecisionContextSchema.optional() }),
+  'decision.asked': z.strictObject({ id: z.string(), kind: z.enum(['land', 'question', 'domain', 'plan', 'intake', 'delegation', 'automation']), issue: issue.nullable(), owner: z.string(), question: z.string(), options: z.array(z.string()), recommendation: z.string(), receipts: z.array(z.string()), context: DecisionContextSchema.optional() }),
   /** An agent's request to a host outside its allowlist was refused: once per issue and host, with the decision it raised. */
   'network.domain_requested': z.strictObject({ issue, host: z.string(), role: z.string(), run: z.string().nullable(), tool: z.string(), what: z.string(), decision: z.string() }),
   /** The owner's answer on a refused host: allow-repo (pr: the config change proposed), allow-once (the task's next run), or deny. */
@@ -469,7 +469,7 @@ export const EventSchemas = {
   /** One gardener run (started_at: by the coordinator's clock): what it found and filed, what it cost, its log issue; outcome: done, or why it stopped. */
   'gardener.run': z.strictObject({ started_at: z.string(), findings: z.number().int().nonnegative(), filed: z.array(issue), cost_usd: z.number().nonnegative(), log_issue: issue.nullable(), outcome: z.string() }),
   /** An automation's definition changed (src/automations/store.ts): who, how, and each changed field (never a secret). system: the engine paused it. */
-  'automation.changed': z.strictObject({ id: z.string(), action: z.enum(['create', 'edit', 'delete', 'pause', 'resume']), by: z.string(), role: z.enum(['owner', 'writer', 'system']), changes: z.array(z.string()), why: z.string().optional() }),
+  'automation.changed': z.strictObject({ id: z.string(), action: z.enum(['create', 'edit', 'delete', 'pause', 'resume', 'rotate', 'unbind']), by: z.string(), role: z.enum(['owner', 'writer', 'system']), changes: z.array(z.string()), why: z.string().optional() }),
   /** A person asked the dashboard to run an automation now; the coordinator takes it on its next pass. */
   'automation.run_requested': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer', 'viewer']) }),
   /**
@@ -477,13 +477,26 @@ export const EventSchemas = {
    * message's id; who), and its place in a chain (depth 0: a person, a schedule or a chat command; ancestors: the
    * automations whose output led here, oldest first).
    */
-  'automation.fired': z.strictObject({ id: z.string(), run: z.string(), mode: z.enum(['task', 'report']), trigger: z.strictObject({ kind: z.enum(['schedule', 'github', 'discord', 'manual']), ref: z.string().nullable(), by: z.string().nullable() }), depth: z.number().int().nonnegative(), ancestors: z.array(z.string()) }),
+  'automation.fired': z.strictObject({ id: z.string(), run: z.string(), mode: z.enum(['task', 'report']), trigger: z.strictObject({ kind: z.enum(['schedule', 'github', 'discord', 'manual', 'webhook']), ref: z.string().nullable(), by: z.string().nullable() }), depth: z.number().int().nonnegative(), ancestors: z.array(z.string()) }),
   /** A trigger that didn't fire its automation, and why (a cap, the chain rules, a role, paused, off). */
-  'automation.refused': z.strictObject({ id: z.string(), trigger: z.enum(['schedule', 'github', 'discord', 'manual']), ref: z.string().nullable(), why: z.string() }),
+  'automation.refused': z.strictObject({ id: z.string(), trigger: z.enum(['schedule', 'github', 'discord', 'manual', 'webhook']), ref: z.string().nullable(), why: z.string() }),
   /** What a run made: the issue it filed (task), or the issue or PR it commented on (report). Chains are traced through these, never through text on GitHub. */
   'automation.output': z.strictObject({ id: z.string(), run: z.string(), kind: z.enum(['issue', 'comment']), number: issue }),
   /** A run finished (a report's run; a task's filing): its outcome and what it cost (a task's builds are booked to its issue). */
   'automation.done': z.strictObject({ id: z.string(), run: z.string(), outcome: z.string(), cost_usd: z.number().nonnegative() }),
+  /**
+   * A webhook delivery the instance accepted (src/automations/webhook.ts): signed with the automation's secret, fresh,
+   * never seen, from its bound node. `text`: the body, redacted and cut (untrusted data). The coordinator turns it
+   * into an approval decision; nothing runs before an owner approves.
+   */
+  'automation.webhook': z.strictObject({ id: z.string(), delivery: z.string(), node: z.strictObject({ id: z.string(), name: z.string() }), text: z.string() }),
+  /**
+   * A fire waiting for its owner's approval (gates.start: approve): the decision asked, and what fires on approve (the
+   * trigger, its chain place, its text and target as they were). Resolved once by automation.resolved.
+   */
+  'automation.pending': z.strictObject({ id: z.string(), decision: z.string(), trigger: z.strictObject({ kind: z.enum(['schedule', 'github', 'discord', 'manual', 'webhook']), ref: z.string().nullable(), by: z.string().nullable() }), depth: z.number().int().nonnegative(), ancestors: z.array(z.string()), source: z.string().nullable(), text: z.string().nullable(), target: issue.nullable() }),
+  /** How a pending fire ended: approved (and then fired or refused by the caps then), rejected, or expired unanswered. */
+  'automation.resolved': z.strictObject({ id: z.string(), decision: z.string(), outcome: z.enum(['approved', 'rejected', 'expired']), by: z.string().nullable() }),
   /** The GitHub poller is holding off (the rate limit is under its floor, or GitHub said to wait), once per hold. */
   'automation.poll_held': z.strictObject({ why: z.string(), until: z.string() }),
   /** One superfan pass (src/superfan/): the instance's or the machine's; what it read, what it did, what it cost, today's spend. Notes: what it couldn't read. */

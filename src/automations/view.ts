@@ -7,9 +7,12 @@ import { localDay } from '../local-day.js';
 import { nextSlots, parseCron } from './cron.js';
 import { runsOn, spentOn } from './engine.js';
 import { type AutomationLimits } from './schema.js';
+import { readHooksState, readSecret } from './secrets.js';
 import { ACTIONS, describe, describeTrigger, digestOf, mayDo, type Loaded } from './store.js';
 
-export function automationsView(o: { loaded: Loaded; limits: AutomationLimits; events: StoredEvent[]; role: Role; now: Date }) {
+export function automationsView(o: { loaded: Loaded; limits: AutomationLimits; events: StoredEvent[]; role: Role; now: Date; hooks?: { stateDir: string; home: string; instance: string } }) {
+  const hookState = o.hooks ? readHooksState(o.hooks.stateDir) : null;
+  const resolved = new Set(o.events.filter((e) => e.type === 'automation.resolved').map((e) => (e.payload as EventPayload<'automation.resolved'>).decision));
   const day = localDay(o.now);
   const of = <T extends 'automation.fired' | 'automation.done' | 'automation.output' | 'automation.refused' | 'automation.changed'>(type: T) =>
     o.events.filter((e) => e.type === type).map((e) => ({ ts: e.ts, ...(e.payload as EventPayload<T>) }));
@@ -47,6 +50,13 @@ export function automationsView(o: { loaded: Loaded; limits: AutomationLimits; e
         today: { runs: runsOn(o.events, day, a.id), spentUsd: Math.round(spentOn(o.events, day, a.id) * 100) / 100 },
         runs,
         refused: refused.filter((r) => r.id === a.id).slice(-3).reverse().map((r) => ({ at: r.ts, trigger: r.trigger, why: r.why })),
+        /** A webhook's address (on this machine's tailnet name, port 8444), its bound device, and whether it has a secret. */
+        webhook:
+          a.trigger.kind === 'webhook' && o.hooks
+            ? { path: `/hook/${o.hooks.instance}/${a.id}`, bound: hookState?.bound[a.id] ? { name: hookState.bound[a.id]!.name, at: hookState.bound[a.id]!.at } : null, hasSecret: readSecret(o.hooks.home, a.id) !== null }
+            : null,
+        /** Fires waiting for its owner's approval now. */
+        waiting: o.events.filter((e) => e.type === 'automation.pending' && (e.payload as EventPayload<'automation.pending'>).id === a.id && !resolved.has((e.payload as EventPayload<'automation.pending'>).decision)).map((e) => (e.payload as EventPayload<'automation.pending'>).decision),
         pausedBy: pausedBySystem ? { by: pausedBySystem.by, role: pausedBySystem.role, why: pausedBySystem.why ?? null, at: pausedBySystem.ts } : null,
       };
     }),

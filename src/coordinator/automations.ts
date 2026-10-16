@@ -22,8 +22,8 @@ import { localDay } from '../local-day.js';
 import { latestSlot, parseCron } from '../automations/cron.js';
 import { capRefusal, chainRefusal, originOf, runBudget, slotFired, triggerText, type Origin } from '../automations/engine.js';
 import { GitHubEventsPoller, type RepoEvent } from '../automations/github.js';
-import { CATCH_UP_MINUTES, limitsInForce, type Automation, type AutomationLimits } from '../automations/schema.js';
-import { loadAutomations, pauseBySystem } from '../automations/store.js';
+import { APPROVAL_EXPIRY_MS, CATCH_UP_MINUTES, limitsInForce, type Automation, type AutomationLimits } from '../automations/schema.js';
+import { describe, loadAutomations, pauseBySystem } from '../automations/store.js';
 import { HarnessEvals } from './harness-evals.js';
 
 /** The label on every issue an automation files or posts its reports on. */
@@ -39,6 +39,8 @@ export function parseRunCommand(text: string): { command: string; rest: string }
 }
 
 type TriggerRef = EventPayload<'automation.fired'>['trigger'];
+/** Who or what started a fire, in plain words (the task's footer, the report's prompt, the approval's question). */
+const sourceOf = (t: TriggerRef) => (t.kind === 'github' ? `GitHub ${t.ref} by @${t.by}` : t.kind === 'discord' ? `Discord, by @${t.by}` : t.kind === 'manual' ? `the dashboard, by @${t.by}` : t.kind === 'webhook' ? `a webhook delivery (${t.ref}) from ${t.by}` : `the schedule (${t.ref})`);
 const REPORT_SCHEMA = { type: 'object', properties: { answer: { type: 'string', maxLength: 6000 } }, required: ['answer'], additionalProperties: false };
 /** The report run's instructions: fixed here, before any trigger text is read. */
 export const REPORT_PROMPT = [
@@ -100,6 +102,9 @@ export abstract class AutomationRuns extends HarnessEvals {
   /** Automation runs going now: reports running, and filed tasks not finished. Of `id` only, when given. */
   private automationActive(id?: string): number {
     let n = [...this.autoReports.keys()].filter((k) => !id || k === id).length;
+    // A fire waiting for approval counts as going: another trigger meanwhile is folded into it.
+    const resolved = new Set(this.d.log.read(0, ['automation.resolved']).map((e) => (e.payload as EventPayload<'automation.resolved'>).decision));
+    n += this.d.log.read(0, ['automation.pending']).filter((e) => !resolved.has((e.payload as EventPayload<'automation.pending'>).decision) && (!id || (e.payload as EventPayload<'automation.pending'>).id === id)).length;
     const now = this.autoNow().getTime();
     for (const e of this.d.log.read(0, ['automation.output'])) {
       const p = e.payload as EventPayload<'automation.output'>;
@@ -120,8 +125,8 @@ export abstract class AutomationRuns extends HarnessEvals {
     // A run now asked for on the dashboard: each once (its fire or refusal names the request).
     const handled = new Set(
       this.d.log
-        .read(0, ['automation.fired', 'automation.refused'])
-        .map((e) => (e.type === 'automation.fired' ? (e.payload as EventPayload<'automation.fired'>).trigger.ref : (e.payload as EventPayload<'automation.refused'>).ref))
+        .read(0, ['automation.fired', 'automation.pending', 'automation.refused'])
+        .map((e) => (e.type === 'automation.refused' ? (e.payload as EventPayload<'automation.refused'>).ref : (e.payload as EventPayload<'automation.fired'>).trigger.ref))
         .filter((r): r is string => !!r && r.startsWith('request:')),
     );
     for (const e of this.d.log.read(0, ['automation.run_requested'])) {
@@ -134,14 +139,32 @@ export abstract class AutomationRuns extends HarnessEvals {
       else if (!(role === 'owner' || role === 'writer')) this.emit('automation.refused', { id: a.id, trigger: 'manual', ref, why: `@${p.by} is no longer a writer or owner of the repo` });
       else await this.fireAutomation(a, { kind: 'manual', ref, by: p.by }, { kind: 'person' }, null, null, limits);
     }
+    await this.resolveApprovals(list, limits, now);
     if (!limits.enabled) return;
+    // Webhook deliveries the instance accepted: each once (its approval, fire or refusal names the delivery).
+    const done = new Set(
+      this.d.log
+        .read(0, ['automation.pending', 'automation.fired', 'automation.refused'])
+        .map((e) => (e.payload as { trigger: TriggerRef | string; ref?: string | null }))
+        .map((p) => (typeof p.trigger === 'object' ? p.trigger.ref : (p.ref ?? null)))
+        .filter((r): r is string => !!r && r.startsWith('webhook:')),
+    );
+    for (const e of this.d.log.read(0, ['automation.webhook'])) {
+      const p = e.payload as EventPayload<'automation.webhook'>;
+      const ref = `webhook:${p.delivery}`;
+      if (done.has(ref)) continue;
+      done.add(ref);
+      const a = list.find((x) => x.id === p.id && x.trigger.kind === 'webhook');
+      if (!a) this.emit('automation.refused', { id: p.id, trigger: 'webhook', ref, why: 'no such webhook automation now' });
+      else await this.fireAutomation(a, { kind: 'webhook', ref, by: p.node.name }, { kind: 'person' }, p.text, null, limits);
+    }
     // Schedules: the most recent slot within the catch-up window, once.
     for (const a of list) {
       if (a.trigger.kind !== 'schedule') continue;
       const c = parseCron(a.trigger.cron);
       if (!c.ok) continue;
       const slot = latestSlot(c.cron, now, CATCH_UP_MINUTES);
-      if (!slot || slotFired(this.d.log.read(0, ['automation.fired', 'automation.refused']), a.id, slot.key)) continue;
+      if (!slot || slotFired(this.d.log.read(0, ['automation.fired', 'automation.pending', 'automation.refused']), a.id, slot.key)) continue;
       await this.fireAutomation(a, { kind: 'schedule', ref: slot.key, by: null }, { kind: 'person' }, null, null, limits);
     }
     // GitHub: polled only while an enabled automation listens to it.
@@ -157,6 +180,37 @@ export abstract class AutomationRuns extends HarnessEvals {
       return;
     }
     for (const ev of got) for (const a of listening) if (this.githubMatches(a, ev)) await this.githubFire(a, ev, limits);
+  }
+
+  /**
+   * Fires waiting for approval: an owner's approve fires it (every cap and the owner checked again now), a reject or a
+   * day without an answer ends it. Each is resolved once.
+   */
+  private async resolveApprovals(list: Automation[], limits: AutomationLimits, now: Date): Promise<void> {
+    const resolved = new Set(this.d.log.read(0, ['automation.resolved']).map((e) => (e.payload as EventPayload<'automation.resolved'>).decision));
+    const answers = new Map(this.d.log.read(0, ['decision.answered']).map((e) => [(e.payload as EventPayload<'decision.answered'>).id, e.payload as EventPayload<'decision.answered'>]));
+    for (const e of this.d.log.read(0, ['automation.pending'])) {
+      const p = e.payload as EventPayload<'automation.pending'>;
+      if (resolved.has(p.decision)) continue;
+      const answer = answers.get(p.decision);
+      if (!answer) {
+        if (now.getTime() - Date.parse(e.ts) > APPROVAL_EXPIRY_MS) this.emit('automation.resolved', { id: p.id, decision: p.decision, outcome: 'expired', by: null });
+        continue;
+      }
+      // Owner decisions (OWNER_DECISIONS): the answer path already refused anyone else; a role it recorded must say owner.
+      if (answer.answer !== 'approve' || (answer.role !== undefined && answer.role !== 'owner')) {
+        this.emit('automation.resolved', { id: p.id, decision: p.decision, outcome: 'rejected', by: answer.by });
+        continue;
+      }
+      this.emit('automation.resolved', { id: p.id, decision: p.decision, outcome: 'approved', by: answer.by });
+      const a = list.find((x) => x.id === p.id);
+      if (!a) {
+        this.emit('automation.refused', { id: p.id, trigger: p.trigger.kind, ref: p.trigger.ref, why: 'approved, but it no longer exists' });
+        continue;
+      }
+      const origin: Origin = p.source ? { kind: 'chained', source: p.source, depth: p.depth, ancestors: p.ancestors } : { kind: 'person' };
+      await this.fireAutomation(a, p.trigger, origin, p.text, p.target, limits, { approved: true });
+    }
   }
 
   private githubMatches(a: Automation, ev: RepoEvent): boolean {
@@ -192,10 +246,10 @@ export abstract class AutomationRuns extends HarnessEvals {
    * Fire `a`, or record why not. `text`: the trigger's text (untrusted), `target`: the issue or PR it was about (a
    * report's answer goes there). Returns whether it fired.
    */
-  protected async fireAutomation(a: Automation, trigger: TriggerRef, origin: Origin, text: string | null, target: number | null, limits = this.automationLimits()): Promise<boolean> {
-    const refuse = (why: string) => {
+  protected async fireAutomation(a: Automation, trigger: TriggerRef, origin: Origin, text: string | null, target: number | null, limits = this.automationLimits(), o: { approved?: boolean } = {}): Promise<'fired' | 'pending' | 'refused'> {
+    const refuse = (why: string): 'refused' => {
       this.emit('automation.refused', { id: a.id, trigger: trigger.kind, ref: trigger.ref, why: why.slice(0, 500) });
-      return false;
+      return 'refused';
     };
     const chain = chainRefusal(a, origin);
     if (chain) return refuse(chain);
@@ -207,11 +261,18 @@ export abstract class AutomationRuns extends HarnessEvals {
     if ((await this.autoRole(a.owner)) !== 'owner') return refuse(`its owner @${a.owner} is not an owner (admin) of the repo now`);
     const budget = runBudget({ a, limits, events, now, instanceLeftUsd });
     if (budget < 0.1) return refuse('less than $0.10 is left in its budgets');
-    const run = `${a.id}-${now.getTime().toString(36)}`;
     const depth = origin.kind === 'chained' ? origin.depth : 0;
     const ancestors = origin.kind === 'chained' ? origin.ancestors : [];
+    const source = sourceOf(trigger);
+    // INVARIANT: an automation that waits for approval (a webhook's always does) never runs on its trigger: its owner
+    // is asked, on the dashboard only (never from chat or voice), and the caps are checked again on approval.
+    if (a.gates.start === 'approve' && !o.approved) {
+      const decision = await this.ask('automation', null, a.owner, `Run the automation "${a.name}" (${a.id}) for ${source}?`, ['approve', 'reject'], '', [`Started by ${source}.`, ...describe(a)]);
+      this.emit('automation.pending', { id: a.id, decision, trigger, depth, ancestors, source: origin.kind === 'chained' ? origin.source : null, text, target });
+      return 'pending';
+    }
+    const run = `${a.id}-${now.getTime().toString(36)}`;
     this.emit('automation.fired', { id: a.id, run, mode: a.mode, trigger, depth, ancestors });
-    const source = trigger.kind === 'github' ? `GitHub ${trigger.ref} by @${trigger.by}` : trigger.kind === 'discord' ? `Discord, by @${trigger.by}` : trigger.kind === 'manual' ? `the dashboard, by @${trigger.by}` : `the schedule (${trigger.ref})`;
     const data = a.template.trigger_text === 'quoted' && text ? triggerText(source, text) : null;
     if (a.mode === 'task') {
       try {
@@ -221,11 +282,11 @@ export abstract class AutomationRuns extends HarnessEvals {
       } catch (e) {
         this.automationFailed(a, run, `filing failed: ${(e as Error).message}`, 0);
       }
-      return true;
+      return 'fired';
     }
     const p = this.reportRun(a, run, source, data, target, budget).finally(() => this.autoReports.delete(a.id));
     this.autoReports.set(a.id, p);
-    return true;
+    return 'fired';
   }
 
   private placeholders(s: string, trigger: TriggerRef): string {
@@ -329,9 +390,9 @@ export abstract class AutomationRuns extends HarnessEvals {
         await say(`Not started: no automation answers to "run ${cmd.command}".`);
         continue;
       }
-      const fired = await this.fireAutomation(a, { kind: 'discord', ref: id, by: person.login }, { kind: 'person' }, cmd.rest || null, null);
-      const why = fired ? null : (this.d.log.read(0, ['automation.refused']).at(-1)?.payload as EventPayload<'automation.refused'> | undefined)?.why;
-      await say(fired ? `Started **${a.name}**: ${a.mode === 'task' ? 'it files a task, built like any other' : 'a read-only report, posted on its log issue'}.` : `Not started: ${why ?? 'refused'}.`);
+      const got = await this.fireAutomation(a, { kind: 'discord', ref: id, by: person.login }, { kind: 'person' }, cmd.rest || null, null);
+      const why = got === 'refused' ? (this.d.log.read(0, ['automation.refused']).at(-1)?.payload as EventPayload<'automation.refused'> | undefined)?.why : null;
+      await say(got === 'fired' ? `Started **${a.name}**: ${a.mode === 'task' ? 'it files a task, built like any other' : 'a read-only report, posted on its log issue'}.` : got === 'pending' ? `Asked: **${a.name}** waits for its owner's approval on the dashboard.` : `Not started: ${why ?? 'refused'}.`);
     }
     return out;
   }

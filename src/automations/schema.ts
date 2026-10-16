@@ -18,6 +18,8 @@ const COMMAND = /^[a-z][a-z0-9-]{0,30}$/;
 export const MAX_CHAIN_DEPTH = 2;
 /** At most this many automations per instance. */
 export const MAX_AUTOMATIONS = 50;
+/** How long a run waiting for its owner's approval waits: unanswered after this, it never runs. */
+export const APPROVAL_EXPIRY_MS = 24 * 3600_000;
 /** A trigger's text is cut to this many characters (after redaction) before any run sees it. */
 export const TRIGGER_TEXT_MAX = 4000;
 /** A scheduled time missed (the machine off, a hold) still fires within this long after it; never later. */
@@ -47,6 +49,12 @@ export const Trigger = z.discriminatedUnion('kind', [
     .refine((t) => t.on !== 'issue_comment.created' || !!t.command, { message: 'issue_comment.created needs a command', path: ['command'] }),
   /** `run <command>` addressed to the instance's Discord bot, by an allowed, mapped writer or owner. */
   z.strictObject({ kind: z.literal('discord'), command: z.string().regex(COMMAND) }),
+  /**
+   * A signed POST to the hub's hooks gateway, from the tailnet only (src/automations/webhook-gateway.ts), checked by
+   * the instance (src/automations/webhook.ts): its own secret (never in this file), a fresh timestamp, a delivery id
+   * never seen, the node it is bound to. Every run it asks for waits for an owner's approval (gates.start: approve).
+   */
+  z.strictObject({ kind: z.literal('webhook') }),
 ]);
 export type Trigger = z.infer<typeof Trigger>;
 
@@ -72,14 +80,18 @@ export const Automation = z
     }),
     budget: z.strictObject({ per_run_usd: z.number().positive().max(50), per_day_usd: z.number().positive().max(500) }),
     limits: z.strictObject({ runs_per_day: z.number().int().min(1).max(24).default(4), cooldown_minutes: z.number().int().min(0).max(1440).default(60) }).prefault({}),
-    /** auto: it starts on its trigger (the owner's Confirm of this definition is the approval). */
-    gates: z.strictObject({ start: z.literal('auto').default('auto') }).prefault({}),
+    /**
+     * auto: it starts on its trigger (the owner's Confirm of this definition is the approval). approve: each run waits
+     * for its owner's approval on the dashboard (an Inbox decision, never from chat), and expires unanswered after a day.
+     */
+    gates: z.strictObject({ start: z.enum(['auto', 'approve']).default('auto') }).prefault({}),
     /** The automations whose output may start this one (default none). Never itself. */
     chain: z.strictObject({ accept_from: z.array(z.string().regex(AUTOMATION_ID)).max(10).default([]) }).prefault({}),
   })
   .refine((a) => a.mode !== 'task' || a.template.done_when.length > 0, { message: 'a task needs at least one done_when check', path: ['template', 'done_when'] })
   .refine((a) => !a.chain.accept_from.includes(a.id), { message: 'an automation can never start itself', path: ['chain', 'accept_from'] })
-  .refine((a) => a.budget.per_run_usd <= a.budget.per_day_usd, { message: 'per_run_usd is over per_day_usd', path: ['budget', 'per_run_usd'] });
+  .refine((a) => a.budget.per_run_usd <= a.budget.per_day_usd, { message: 'per_run_usd is over per_day_usd', path: ['budget', 'per_run_usd'] })
+  .refine((a) => a.trigger.kind !== 'webhook' || a.gates.start === 'approve', { message: "a webhook's runs always wait for an owner's approval (gates.start: approve)", path: ['gates', 'start'] });
 export type Automation = z.infer<typeof Automation>;
 
 export const AutomationsFile = z
