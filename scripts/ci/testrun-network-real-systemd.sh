@@ -90,7 +90,13 @@ seen() { sort -u "$t/seen" | tr '\n' ' '; }
 # slirp4netns's alias for the host's loopback (its gateway), built from its first octet: the denylist refuses a literal
 # private address, and this is slirp's fixed one, not a LAN's.
 SLIRP_GW="$(printf '%s.0.2.2' 10)"
-TARGETS="127.0.0.1:$P 127.0.0.1:$HUB 127.0.0.1:$DASH $SLIRP_GW:$P $SLIRP_GW:$HUB $lan:$P $PUB:$PP"
+SLIRP_DNS="$(printf '%s.0.2.3' 10)"
+# The machine's upstream DNS server (resolved's list): a granted run reaches it only through slirp's forwarder.
+UPSTREAM="$(sed -n 's/^nameserver \([0-9.]*\)$/\1/p' /run/systemd/resolve/resolv.conf | grep -v '^127\.' | head -n 1)"
+[ -n "$UPSTREAM" ] || fail "no upstream DNS server in /run/systemd/resolve/resolv.conf"
+/usr/bin/slirp4netns --version
+echo "upstream DNS server: $UPSTREAM"
+TARGETS="127.0.0.1:$P 127.0.0.1:$HUB 127.0.0.1:$DASH $SLIRP_GW:$P $SLIRP_GW:$HUB $lan:$P $UPSTREAM:53 $UPSTREAM:80 $PUB:$PP"
 
 as_() { local i="$1"; shift; sudo -u "wl-$i" sudo -n "$H" "$i" "$@"; }
 # A run of instance $1 with id $2, its commit holding the files in directory $3 (optional).
@@ -122,7 +128,11 @@ except OSError as e:
 try:
     socket.getaddrinfo("example.com", 443); print("dns OK")
 except OSError as e:
-    print("dns", type(e).__name__)'
+    print("dns", type(e).__name__)
+try:
+    print("resolv", ",".join(l.split()[1] for l in open("/etc/resolv.conf") if l.startswith("nameserver")))
+except OSError as e:
+    print("resolv", type(e).__name__)'
 probe="printf %s $(printf %s "$probe_py" | base64 -w0) | base64 -d > \"\$TMPDIR/p.py\" && python3 \"\$TMPDIR/p.py\" $TARGETS"
 # exec of run <id> of instance <i> with the probe; its stdout in $t/<id>.out, stderr in $t/<id>.err.
 ex() {
@@ -168,6 +178,11 @@ ex ci net-granted --network e2e
 grep -qx "worklane-testrun: network granted (e2e; public addresses and the machine's DNS only)" "$t/net-granted.err" || { cat "$t/net-granted.err" >&2; fail "the granted line"; }
 [ "$(got net-granted "$PUB:$PP")" = OK ] || { cat "$t/net-granted.err" >&2; fail "the granted tier didn't reach $PUB"; }
 [ "$(got net-granted own-loopback)" = OK ] || fail "the granted tier's own loopback"
+# DNS only through slirp's forwarder: the run's resolv.conf names it alone, resolution works, and the upstream server
+# itself is refused on 53 and on 80.
+[ "$(got net-granted resolv)" = "$SLIRP_DNS" ] || fail "the granted run's resolv.conf names $(got net-granted resolv), not slirp's forwarder alone"
+[ "$(got net-granted dns)" = OK ] || fail "the granted run can't resolve a name through slirp's forwarder"
+for x in "$UPSTREAM:53" "$UPSTREAM:80"; do [ "$(got net-granted "$x")" != OK ] || fail "the granted run reached the upstream DNS server at $x itself"; done
 # Never the host's loopback (the hub, the dashboard, any service there), its LAN address or slirp's alias for it.
 [ "$(seen)" = "pub:$PUB " ] || fail "the listeners saw $(seen), not the public stand-in alone"
 echo "  the granted run reached: $(seen)(dns: $(got net-granted dns))"

@@ -120,8 +120,11 @@ function netHelper() {
   const me = userInfo().username;
   const sd = join(dir, 'sd');
   mkdirSync(sd);
+  // systemd-run: its argv per call, and each BindReadOnlyPaths= source's content as it was then (the helper removes them after).
   stub('systemd-run', `[ "$1" = --version ] && { echo "systemd 255 (test)"; exit 0; }
-printf '%s\\n' "$@" > "${sd}/$(date +%s%N)-$$.argv"
+n="$(date +%s%N)-$$"
+printf '%s\\n' "$@" > "${sd}/$n.argv"
+for a in "$@"; do case "$a" in BindReadOnlyPaths=*) f="\${a#BindReadOnlyPaths=}"; f="\${f%%:*}"; { echo "== $f"; cat "$f"; } >> "${sd}/$n.binds" ;; esac; done
 echo ran`);
   stub('chown', 'exit 0');
   // systemctl: a run unit's main process, for slirp_start; nothing else.
@@ -150,7 +153,8 @@ echo ran`);
   const upstream = join(dir, 'upstream.conf');
   writeFileSync(upstream, 'nameserver 127.0.0.53\nnameserver 203.0.113.9 ; not an address alone\nnameserver 198.51.100.53\n');
   const slirp = join(dir, 'slirp4netns');
-  writeFileSync(slirp, '#!/bin/sh\n');
+  // --version names libseccomp unless the file noseccomp is there (a build without it).
+  writeFileSync(slirp, `#!/bin/sh\n[ "$1" = --version ] && { echo "slirp4netns version 1.2.1"; [ -e '${join(dir, 'noseccomp')}' ] || echo "libseccomp: 2.5.5"; }\nexit 0\n`);
   chmodSync(slirp, 0o755);
   const base = join(dir, 'base');
   const tmpBase = join(dir, 't');
@@ -196,12 +200,20 @@ echo ran`);
       .filter((x) => x.endsWith('.argv'))
       .sort()
       .map((f) => readFileSync(join(sd, f), 'utf8').trim().split('\n'));
+  /** Every bound file's content, as the newest calls saw it: "== <path>" then its lines. */
+  const binds = () =>
+    spawnSync('ls', [sd], { encoding: 'utf8' })
+      .stdout.split('\n')
+      .filter((x) => x.endsWith('.binds'))
+      .sort()
+      .map((f) => readFileSync(join(sd, f), 'utf8'))
+      .join('');
   const withProps = (argv: string[]) => ({ argv, props: argv.filter((_, i) => argv[i - 1] === '-p') });
   /** The newest run unit's systemd-run call (never a network unit's), and its -p properties. */
   const lastProps = () => withProps(calls().filter((a) => !a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(x))).pop() ?? []);
   /** The network units' systemd-run calls (slirp_start), oldest first. */
   const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
-  return { dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, done: () => rmSync(dir, { recursive: true, force: true }) };
+  return { dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''), done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 // The LAN ranges a granted run or a fetch never reaches (RFC 1918, RFC 6598, ULA), with link-local, multicast and
@@ -249,13 +261,13 @@ test('granted by root\'s file: its own namespace and loopback still (never the h
     assert.match(r.stderr, /^worklane-testrun: network granted \(e2e; public addresses and the machine's DNS only\)\n/);
     const { argv, props } = h.lastProps();
     for (const p of NO_NET) assert.ok(props.includes(p), `${p}: a granted run keeps its own network namespace and an empty /run`);
-    assert.ok(!props.some((p) => p.startsWith('IPAddress')), 'its own namespace: no address rules needed on it');
+    assert.deepEqual(props.filter((p) => p.startsWith('IPAddress')), ['IPAddressDeny=198.51.100.53'], 'its own namespace; only the upstream DNS server denied (below)');
     const resolvBind = props.find((p) => p.startsWith('BindReadOnlyPaths='));
     assert.ok(resolvBind && /\.resolv:/.test(resolvBind), props.join(' | '));
     assert.match(argv.at(-1)!, /^n=0; until grep -qs "\^tap0" \/proc\/net\/route; do .*; done; echo hi$/, 'the command waits for its network first');
     // Every other property the same as a run without the network (the unit's name and paths aside).
     const norm = (ps: string[]) => ps.map((p) => p.replace(/fast-b-\d/g, 'ID').replace(/\/t\/[0-9a-f]{8}/g, '/t/HASH'));
-    assert.deepEqual(norm(props.filter((p) => !p.startsWith('BindReadOnlyPaths='))), norm(before));
+    assert.deepEqual(norm(props.filter((p) => !p.startsWith('BindReadOnlyPaths=') && !p.startsWith('IPAddressDeny='))), norm(before));
     // Its network: one slirp4netns unit, bound to the run's, joining its main process's namespace.
     const [net] = h.netCalls();
     assert.ok(net, 'a network unit');
@@ -291,6 +303,52 @@ test('fetch: its own namespace with slirp4netns as a granted run\'s; no run\'s T
     assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-c-1', 'fetch')}`, `ReadWritePaths=${join(h.base, 'shop', 'cache', `npm-${key}`)}`]);
     assert.ok(argv.includes(`--setenv=npm_config_cache=${join(h.base, 'shop', 'cache', `npm-${key}`)}`));
     for (const bad of [['pip', 'npm', key, '60'], ['npm', 'npm', 'xyz', '60'], ['npm', '../x', key, '60'], ['npm', 'npm', key, '0']]) assert.equal(h.run('fetch', 'fast-c-1', ...bad).status, 2, bad.join(' '));
+  } finally {
+    h.done();
+  }
+});
+
+const SLIRP_DNS = `${10}.0.2.3`;
+
+test('DNS: a granted run\'s resolv.conf names only slirp4netns\'s forwarder and its unit denies the upstream servers; slirp\'s own resolv.conf names them, in an empty /etc', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.grant({ shop: ['e2e'] });
+    const r = h.exec('fast-e-1', ['--network', 'e2e']);
+    assert.equal(r.status, 0, r.stderr);
+    const { props } = h.lastProps();
+    assert.ok(props.includes('IPAddressDeny=198.51.100.53'), `the run never reaches the upstream server itself: ${props.join(' | ')}`);
+    const runBind = props.find((p) => p.startsWith('BindReadOnlyPaths='))!.slice('BindReadOnlyPaths='.length).split(':')[0]!;
+    const [net] = h.netCalls();
+    const slirpBind = net!.props.find((p) => p.startsWith('BindReadOnlyPaths='))!;
+    assert.match(slirpBind, /:\/etc\/resolv\.conf$/);
+    assert.ok(net!.props.includes('TemporaryFileSystem=/etc:ro') && net!.props.includes('TemporaryFileSystem=/run:ro'), 'slirp keeps none of the host\'s /etc or /run');
+    assert.ok(net!.props.includes('NoNewPrivileges=yes'));
+    assert.ok(net!.props.includes('SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal'), 'it may signal no process');
+    assert.ok(net!.props.includes('IPAddressAllow=198.51.100.53'));
+    const b = h.binds();
+    assert.ok(b.includes(`== ${runBind}\nnameserver ${SLIRP_DNS}\n`), `the run's resolv.conf: slirp's forwarder alone\n${b}`);
+    assert.ok(b.includes(`== ${slirpBind.slice('BindReadOnlyPaths='.length).split(':')[0]}\nnameserver 198.51.100.53\n`), `slirp's: the upstream server alone\n${b}`);
+  } finally {
+    h.done();
+  }
+});
+
+test('a slirp4netns without seccomp support: no run gets the network and the fetch refuses, each naming the fix', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.noSeccomp();
+    h.grant({ shop: ['e2e'] });
+    const r = h.exec('fast-f-1', ['--network', 'e2e']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^worklane-testrun: network none \(\S+ has no seccomp support \(its --version names no libseccomp\): install the distribution's build \(apt-get install slirp4netns\), then try again\)\n/);
+    for (const p of NO_NET) assert.ok(h.lastProps().props.includes(p), p);
+    assert.deepEqual(h.netCalls(), [], 'no slirp4netns started');
+    h.mkRun('fast-f-2');
+    mkdirSync(join(h.base, 'shop', 'cache', `npm-${'c'.repeat(32)}`), { recursive: true });
+    const f = h.run('fetch', 'fast-f-2', 'npm', 'npm', 'c'.repeat(32), '600');
+    assert.equal(f.status, 2);
+    assert.match(f.stderr, /fetch: \S+ has no seccomp support/);
   } finally {
     h.done();
   }

@@ -21,7 +21,8 @@
 # then it keeps its own network namespace and loopback, and slirp4netns (a unit of its own, started here) gives that
 # namespace outbound NAT to public addresses only: never the host's loopback (--disable-host-loopback, and its unit's
 # IPAddressDeny= has 127.0.0.0/8), the host's own addresses, the LAN, link-local or multicast; the machine's upstream DNS
-# servers allowed. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
+# servers allowed to slirp alone (the run's own unit denies them: its DNS is slirp's forwarder, nothing else). slirp4netns
+# must have seccomp (slirp_ok), and runs with --disable-host-loopback --enable-sandbox --enable-seccomp. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
 # can only name a tier root listed for its own instance. On stderr, after any GPU line: "worklane-testrun: network
 # granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
 # a fixed npm download of what the lockfile pins, with no script run, that never reaches this host's loopback or LAN.
@@ -114,6 +115,9 @@ NET_FILE=/etc/worklane/testrun-network.json
 RESOLV_UPSTREAM=/run/systemd/resolve/resolv.conf
 RESOLV_CONF=/etc/resolv.conf
 SLIRP=/usr/bin/slirp4netns
+# slirp4netns's own DNS forwarder in a run's namespace (its fixed address, built from its first octet: the denylist
+# refuses a literal private address): the only nameserver a granted run's or a fetch's resolv.conf names.
+SLIRP_DNS="$(printf '%s.0.2.3' 10)"
 # Prefixes only: systemd-run's transient IPAddressDeny= refuses the names a unit file takes (link-local, multicast,
 # localhost: "Failed to parse IP address prefix"). Link-local is 169.254.0.0/16 and fe80::/10, multicast 224.0.0.0/4
 # and ff00::/8. WHY the private ranges are built from their first octets: the repo's denylist refuses any literal
@@ -670,20 +674,36 @@ host_addrs() {
 
 # The unit properties of a run with no network (NET_PROPS), or of one granted it (or a fetch): both its own network
 # namespace (PrivateNetwork=yes: its own loopback only) and an empty /run (a daemon's socket there would reach the
-# network for it: resolved, D-Bus, avahi); a granted one also gets a resolv.conf naming the upstream servers ($1 the
-# file), bound where the host's resolv.conf points, and its network from slirp_start (below).
+# network for it: resolved, D-Bus, avahi); a granted one also gets a resolv.conf naming slirp4netns's forwarder alone,
+# bound where the host's resolv.conf points, an IPAddressDeny= of the upstream servers, and its network from
+# slirp_start (below), whose own resolv.conf names the upstream servers.
 NET_PROPS=()
 RESOLV_FILE=
+SLIRP_RESOLV=
 net_props() {
-  local granted="$1" target
+  local granted="$1" target up
   NET_PROPS=(-p "RestrictAddressFamilies=$FAMILIES" -p PrivateNetwork=yes -p TemporaryFileSystem=/run:ro)
   [ "$granted" -eq 1 ] || return 0
   if [ -L "$ENV_DIR" ]; then die "$ENV_DIR is a symlink"; fi
   [ -d "$ENV_DIR" ] || mkdir -m 0700 -- "$ENV_DIR" 2>/dev/null || [ -d "$ENV_DIR" ] || die "can't make $ENV_DIR"
+  # The run's resolv.conf names slirp4netns's forwarder alone; slirp's names the upstream servers (slirp_start).
   RESOLV_FILE="$ENV_DIR/$name.$NET_ID.$$.resolv"
-  ( umask 022; set -C; resolvers | sed 's/^/nameserver /' > "$RESOLV_FILE" ) || die "can't write $RESOLV_FILE"
+  SLIRP_RESOLV="$ENV_DIR/$name.$NET_ID.$$.slirp-resolv"
+  ( umask 022; set -C; printf 'nameserver %s\n' "$SLIRP_DNS" > "$RESOLV_FILE" ) || die "can't write $RESOLV_FILE"
+  ( umask 022; set -C; resolvers | sed 's/^/nameserver /' > "$SLIRP_RESOLV" ) || die "can't write $SLIRP_RESOLV"
   target="$(readlink -f "$RESOLV_CONF" 2>/dev/null || echo "$RESOLV_CONF")"
   NET_PROPS+=(-p "BindReadOnlyPaths=$RESOLV_FILE:$target")
+  # WHY: the run never reaches the upstream servers itself (slirp would carry it there, on any port): only through
+  # slirp's forwarder, for DNS.
+  up="$(resolvers | tr '\n' ' ')"
+  [ -z "${up// /}" ] || NET_PROPS+=(-p "IPAddressDeny=${up% }")
+}
+
+# Whether the installed slirp4netns was built with seccomp: its --version names libseccomp only then. Without it,
+# --enable-seccomp can't hold, and no run gets the network.
+slirp_ok() {
+  [ -x "$SLIRP" ] || { NET_WHY="no $SLIRP on this machine (scripts/setup/test-user.sh install puts it there)"; return 1; }
+  "$SLIRP" --version 2>/dev/null | grep -q '^libseccomp: [0-9]' || { NET_WHY="$SLIRP has no seccomp support (its --version names no libseccomp): install the distribution's build (apt-get install slirp4netns), then try again"; return 1; }
 }
 
 # The command a granted run's unit runs: it waits for its network (slirp4netns's tap0 and its route) first, at most 15 s.
@@ -692,8 +712,12 @@ NET_WAIT='n=0; until grep -qs "^tap0" /proc/net/route; do n=$((n + 1)); if [ "$n
 
 # CAP_SYS_PTRACE: opening another user's /proc/<pid>/ns/net (the run's, the test user's) is a ptrace access check.
 # WHY no ProtectSystem=, ProtectHome= or PrivateTmp= on its unit: slirp4netns's own sandbox (--enable-sandbox) mounts an
-# empty tmpfs on /tmp and pivot_roots into it, which those mounts refuse ("cannot pivot_root to /tmp", on real systemd);
-# that sandbox leaves it nothing of the host's file system at all, a stronger boundary than theirs.
+# empty tmpfs on /tmp and pivot_roots into it, which PrivateTmp='s mount refuses ("cannot pivot_root to /tmp", on real
+# systemd). What it keeps after that pivot is the host's /etc and /run, bound read-only: so its unit gives it an empty
+# /etc holding only a resolv.conf of the upstream servers (libslirp's forwarder reads it), and an empty /run. As uid 0
+# with no capability it could otherwise read root's files there (/etc/shadow) or connect to root's sockets in /run
+# (systemd's, D-Bus's), which trust uid 0. Nor may it send a signal: as uid 0 it could kill any root process, and its own
+# seccomp filter (a deny list) allows kill; slirp4netns sends none.
 # Give unit <unit>'s network namespace its network: slirp4netns, in a unit of its own (<unit's name>'s run_unit with
 # net_<pid>), bound to the run's unit (it stops with it), as root only to join that namespace and make tap0, then
 # sandboxed by itself (its own mount namespace, every capability dropped, seccomp). Its unit's IPAddressDeny= is where the
@@ -712,6 +736,8 @@ slirp_start() {
   ha="$(host_addrs | tr '\n' ' ')"
   systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
     -p "BindsTo=$unit.service" -p "After=$unit.service" -p NoNewPrivileges=yes \
+    -p TemporaryFileSystem=/etc:ro -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" -p TemporaryFileSystem=/run:ro \
+    -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal" -p SystemCallErrorNumber=EPERM \
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes \
     -p RestrictSUIDSGID=yes -p LockPersonality=yes -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
     -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
@@ -722,6 +748,7 @@ slirp_start() {
 exec_cleanup() {
   if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
   if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE"; fi
+  if [ -n "$SLIRP_RESOLV" ]; then rm -f -- "$SLIRP_RESOLV"; fi
   gpu_unlock
 }
 
@@ -780,7 +807,7 @@ exec_run() {
   fi
   # Network (above): none, unless asked for a tier that root's file grants it to. Only asking prints a line.
   NET_ID="$id"
-  if [ -n "$net" ] && net_granted "$net" && [ -x "$SLIRP" ]; then
+  if [ -n "$net" ] && net_granted "$net" && slirp_ok; then
     granted=1
     net_props 1
     # The command waits for its network first (NET_WAIT), the same command otherwise.
@@ -788,7 +815,6 @@ exec_run() {
     cmd="${cmd#*$'\n'}"
     echo "worklane-testrun: network granted ($net; public addresses and the machine's DNS only)" >&2
   else
-    if [ -n "$net" ] && [ -z "$NET_WHY" ]; then NET_WHY="no $SLIRP on this machine (scripts/setup/test-user.sh install puts it there)"; fi
     net_props 0
     [ -z "$net" ] || echo "worklane-testrun: network none ($NET_WHY)" >&2
   fi
@@ -834,7 +860,7 @@ exec_run() {
     trap - TERM INT HUP
   fi
   exec_cleanup
-  ENV_FILE= RESOLV_FILE=
+  ENV_FILE= RESOLV_FILE= SLIRP_RESOLV=
   return "$rc"
 }
 
@@ -857,14 +883,14 @@ fetch_cmd() {
   fd="$d/fetch"
   as_user rm -rf -- "$fd"
   as_user mkdir -m 0700 -- "$fd" "$fd/home" || die "can't make $fd"
-  [ -x "$SLIRP" ] || die "fetch: no $SLIRP on this machine (scripts/setup/test-user.sh install puts it there)"
+  slirp_ok || die "fetch: $NET_WHY"
   cmd="$(systemd_command "$(systemd_version)" "$NET_WAIT$FETCH_NPM")"
   flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
   [ -z "$flag" ] || noexpand=("$flag")
   inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
   NET_ID="$id"
-  trap 'if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE"; fi' EXIT
+  trap 'if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE" "$SLIRP_RESOLV"; fi' EXIT
   net_props 1
   unit="$(run_unit "$id" "fetch_$$")"
   echo "worklane-testrun: fetch npm (no script run; public addresses and the machine's DNS only)" >&2
