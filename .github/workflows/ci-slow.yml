@@ -743,7 +743,11 @@ jobs:
           done < "$T/measure-ids"
           echo "both measure runs wiped"
       - name: "Experiment jobs on real systemd: install and check, approved data by sha256 only, a job's steps with no network and only their own binds, the scorer apart from the job's code, sealed outputs, a job stopped at its cap, another instance refused"
+        env:
+          KEEP_FOR_REMOVE: 1
         run: bash scripts/ci/exp-real-systemd.sh "$I2"
+      - name: "instance-remove (v0.5.1): ci, which ran a study cut off with its output volume mounted: a mount the engine didn't make refuses it; then the volume unmounted and every experiments user, rule, file and egress entry of ci's gone, the other instance as it was"
+        run: bash scripts/ci/instance-remove-exp.sh "$I2"
       - name: the sandbox's units and Docker, on failure
         if: failure()
         run: |
@@ -2294,6 +2298,9 @@ jobs:
           sudo install -d -m 0755 /var/lib/worklane/init
           printf '{"version":1,"mode":"server","instance":"delta"}\n' | sudo install -m 0640 -g wl-delta /dev/stdin /var/lib/worklane/init/delta.json
           sudo jq -e '[.users[] | select(.instance=="delta")] | length > 0' /var/lib/worklane/claude-account/status.json
+          # A Siri device token for delta, made the engine's way, as its coordinator.
+          dstate="$(getent passwd wl-delta | cut -d: -f6)/.local/state/worklane/instances/delta/state"
+          (cd / && sudo -u wl-delta node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/siri/tokens.js"); m.createDevice({ stateDir: process.argv[1], instance: "delta", name: "delta phone", by: "ci-owner" });' "$dstate")
           # What every shared file holds for ci, to compare after.
           ci_view() {
             sudo jq -c '.instances.ci' /etc/worklane/testrun-gpu.json
@@ -2353,6 +2360,8 @@ jobs:
           [ "$(echo "$b" | wc -l)" = 1 ] && [ "$(echo "$r" | wc -l)" = 1 ]
           for f in "$b" "$r"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ] || { sudo stat -c '%n %U:%G %a' "$f"; exit 1; }; done
           grep -qF "exported delta's history: $b" "$F/rm4.out"
+          # Its Siri device tokens were revoked before the export: the bundle's store has every one revoked.
+          sudo node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/instance-move.js"); const f = m.readBundle(process.argv[1]).files.find((x) => x.path === "state/siri/devices.json"); if (!f) process.exit(1); const d = JSON.parse(Buffer.from(f.data, "base64").toString("utf8")).devices; if (!d.length || !d.every((x) => x.revokedAt && x.revokedBy === "instance removed")) process.exit(2); console.log(d.length, "Siri device(s), all revoked");' "$b"
           sudo node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/instance-move.js"); const b = m.readBundle(process.argv[1]); if (!b.files.some((f) => f.path === "state/events.db")) process.exit(1); if (b.files.some((f) => /dashboard-token|credential|\.pem$/.test(f.path))) process.exit(2); console.log(b.files.length, "files, from", b.from.repo);' "$b"
           sudo jq -c '{instance, incidents: [.taken.incidents[]? | {id, instance}], canary: .taken.canary.canary, gpu: .records.gpu}' "$r"
           # Every incident taken is delta's (its own coordinator raised some too), the seeded one among them.
