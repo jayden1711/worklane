@@ -2306,6 +2306,7 @@ jobs:
             | (sleep 0; cat; sleep 6) | sudo -u wl-ci-agent env -i PATH=/usr/local/bin:/usr/bin:/bin WORKLANE_MCP_TICKET="$1" timeout 20 /usr/local/bin/node "$CLI" mcp-connect ci kit-notes; }
           talk "$ticket" > "$F/mcp-talk.out" || true
           cat "$F/mcp-talk.out"
+          sudo journalctl -u "worklane-mcp@ci" --no-pager | tail -n 20
           jq -s -e 'map(select(.id == 2))[0].result.tools | map(.name) == ["echo"]' "$F/mcp-talk.out"
           jq -s -e 'map(select(.id == 3))[0].result.content[0].text == "echo hi (token present)"' "$F/mcp-talk.out"
           jq -s -e 'map(select(.id == 4))[0].result.isError == true' "$F/mcp-talk.out"
