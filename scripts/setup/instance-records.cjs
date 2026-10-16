@@ -68,6 +68,7 @@ const ITEMS = [
 // name found in the code when it is part of an item's `what`, or listed here.
 const NOT_RECORDS = [
   { what: '/run/worklane-test-<name>-docker', why: "the test Docker unit's RuntimeDirectory: systemd removes it with the unit" },
+  { what: 'worklane-test-<name>_', why: "a test run's transient unit since the helper's protocol 9 (worklane-test-<name>_<id>_<pid>): gone when the run ends; a run in flight refuses the removal" },
   { what: 'worklane-test-<name>-', why: "a test run's transient unit (worklane-test-<name>-<id>-<pid>): gone when the run ends; a run in flight refuses the removal" },
   { what: '/.local/state/worklane/instances/<name>', why: "the instance's state, in wl-<name>'s home: exported, then removed with the user" },
   { what: 'worklane-ci-<name>', why: "ci-runner.sh's self-hosted CI runner: a runner's name, not an instance" },

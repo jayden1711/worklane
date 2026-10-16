@@ -232,6 +232,25 @@ hub_keep_args() {
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
 }
 
+# The mount points at or under what an instance's removal deletes (its users' homes, its paths in the registry), one
+# a line: instance-remove.sh and instance-rename.sh refuse while there is any, as rm --one-file-system would stop at
+# each part way.
+instance_mounts() {
+  local k w p m roots=()
+  while IFS=$'\t' read -r k w _; do
+    case "$k" in
+      user) if user_exists "$w"; then roots+=("$(home_of "$w")"); fi ;;
+      path) roots+=("$w") ;;
+    esac
+  done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$1")
+  findmnt -rn -o TARGET 2>/dev/null | while read -r m; do
+    for p in "${roots[@]}"; do
+      if [[ -n "$p" && "$p" != / && ( "$m" == "$p" || "$m" == "$p"/* ) ]]; then echo "$m"; fi
+    done
+  done | sort -u
+  return 0
+}
+
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its test Docker daemon and its own user manager, or a test run's directory.
@@ -287,9 +306,49 @@ ensure_instance_home() {
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
 
-# An instance name add-project takes: instance.sh's shape, never one whose users would collide with another's
-# (wl-dash is the viewer; wl-<x>-agent, -eval and -work belong to instance <x>). The helper checks the same.
-instance_name_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ && "$1" != dash && ! "$1" =~ -(agent|eval|work)$ ]]; }
+# Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
+# a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
+run_as_users() {
+  local u h f
+  while IFS=: read -r u _ _ _ _ h _; do
+    [[ "$u" == wl-* && -n "$h" && "$h" != / ]] || continue
+    for f in "$h"/.local/state/worklane/instances/*/instance.yaml; do
+      [ -f "$f" ] || continue
+      sed -n -e 's/^  agent_user: *//p' -e 's/^  eval_user: *//p' "$f" | tr -d "\"'" | sed 's/[[:space:]]*$//'
+    done
+  done < <(getent passwd)
+}
+# Why a name can't be an instance's (printed; nothing when it can): lowercase letters, digits and dashes, at most 21,
+# and never a name whose users, group or units are already another's (wl-test-<x> is instance x's test user, wl-ci-<x>
+# a CI runner's, wl-<x>-agent instance x's agent, wl-dash the viewer; worklane-dashboard-<x>.service x's dashboard).
+# The same rules, word for word: src/instance-name.ts, the machine helper's instanceName and the testrun helper's copy
+# of this function (test/instance-name.test.ts holds them equal).
+instance_name_problem() {
+  local n="$1"
+  if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
+  elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
+  elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
+  elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
+  elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
+  elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  fi
+}
+instance_name_ok() { [ -z "$(instance_name_problem "$1")" ]; }
+# Refuse a name that can't be an instance's, saying why: `need_instance_name <name> [<what it is>]`.
+need_instance_name() { local why; why="$(instance_name_problem "$1")"; [ -z "$why" ] || { echo "${2:-instance name} ${1:-(none)}: $why" >&2; exit 2; }; }
+# Why a name can't be a CI runner's (ci-runner.sh --name; nothing when it can): an instance's shape, never agent, eval
+# or work (wl-ci-<x> is then instance ci's), nor ending in -docker or -reset (another runner's units). As
+# src/instance-name.ts ciRunnerNameProblem.
+ci_runner_name_problem() {
+  local n="$1"
+  if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "wl-ci-$n is instance ci's $n name"
+  elif [[ "$n" =~ ^(.+)-(docker|reset)$ ]]; then echo "worklane-ci-$n@.service is CI runner ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} unit"
+  fi
+}
 # A GitHub repo, owner/name, strictly: the owner a GitHub login, the name letters, digits, '.', '_' and '-'.
 repo_ok() {
   local owner="${1%%/*}" rest="${1#*/}"

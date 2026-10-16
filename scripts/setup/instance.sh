@@ -6,7 +6,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 name="${1:?usage: instance.sh <name> [--eval]}"
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name: lowercase letters, digits and dashes" >&2; exit 1; }
+need_instance_name "$name"
 eval_user=""
 [ "${2:-}" = --eval ] && eval_user="wl-$name-eval"
 coord="wl-$name" agent="wl-$name-agent" work="wl-$name-work"

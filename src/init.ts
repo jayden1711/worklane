@@ -28,6 +28,7 @@ import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
+import { instanceNameProblem } from './instance-name.js';
 import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, protectionAnswer, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
@@ -181,6 +182,8 @@ export interface InitContext {
   timeout?: number;
   /** Server mode: add-project's run in this init, once it has run (it runs at most once). */
   handedOff?: { code: number; last: string };
+  /** WHY (#468): the first-run page's draft: hold the drafted config for its preview instead of proposing it at once. */
+  hold?: boolean;
 }
 
 export interface StepResult {
@@ -333,7 +336,9 @@ export const autoConfig: AutoConfig = async (c) => {
     ...(c.answers ? { given: c.answers } : {}),
     io: { git: (args, cwd) => c.io.run('git', args, { cwd }), gh: (args, cwd) => c.io.run('gh', args, { cwd }), ask: (q) => (c.interactive ? c.io.ask(q) : Promise.resolve(null)), say: c.io.say },
     save: () => c.save?.(),
+    ...(c.hold ? { hold: true } : {}),
   });
+  if (r.kind === 'drafted') return { status: 'done', detail: r.detail };
   if (r.kind !== 'merged') return { status: 'failed', detail: r.detail };
   // Merged: bring this checkout up to it when it's on the default branch (a fast-forward only), else say so.
   const on = c.io.run('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: c.root! }).stdout.trim();
@@ -658,8 +663,9 @@ export async function initCommand(a: InitArgs, io: InitIo = systemIo({ interacti
     return 2;
   }
   const instance = a.instance ?? repo.split('/')[1]!.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^[^a-z]+/, '').slice(0, 21);
-  if (!/^[a-z][a-z0-9-]{0,20}$/.test(instance)) {
-    io.say(`init: instance name "${instance}": lowercase letters, digits and dashes, starting with a letter (give --instance <name>)`);
+  const why = instanceNameProblem(instance);
+  if (why) {
+    io.say(`init: instance name "${instance}": ${why} (give --instance <name>)`);
     return 2;
   }
   if (!root()) {

@@ -1,5 +1,6 @@
 // Schemas for a project's config folder. Unknown keys are errors (strict), so
 // a typo fails loudly instead of silently falling back to a default.
+import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
@@ -178,6 +179,11 @@ export const ProjectConfig = z.strictObject({
    * run (at most `max_usd`) looks for tech debt and anti-patterns. Findings go to one log issue; a fix is filed only
    * for a pattern seen 3+ times, at most `max_prs` per run, never in a high-risk or safety-floor path.
    */
+  /**
+   * Automations (docs/automations.md): the repo can only tighten the instance's policy: turn them off, or lower the
+   * runs a day or the dollars a day all of them may use. Definitions are never in the repo.
+   */
+  automations: AutomationsRepo,
   gardener: z
     .strictObject({
       enabled: z.boolean().default(false),
@@ -291,6 +297,8 @@ const role = z.strictObject({
   max_fixes_per_pr: z.number().int().min(0).optional(),
   applies_to: z.array(z.string()).optional(),
   budget_usd: z.number().positive().optional(),
+  /** chief_of_staff only: one chat conversation's spend cap, all its answers together (src/chat-pick.ts). */
+  conversation_budget_usd: z.number().positive().max(1000).optional(),
 });
 
 export const RoleNames = [
@@ -324,6 +332,8 @@ const modelRoutingShape = {
   stage_judge: model.optional(),
   eval_answer: model.optional(),
   reflection: model.optional(),
+  /** The dashboard chat's default model; never an open model (checked below). */
+  chat: model.optional(),
 };
 const routingShape = { ...modelRoutingShape, eval_cheap: model.optional(), eval_cheap_levels: levels.optional(), eval_escalate: z.boolean().optional() } satisfies Record<RoutingKey, z.ZodType>;
 // INVARIANT: the routing keys that name a model for a routed run (an open model may be allowed there).
@@ -429,6 +439,8 @@ export const AgentsConfig = z
       plain(['roles', r, 'hard_issues_model'], cfg?.hard_issues_model);
     }
     if (c.routing.eval_cheap !== undefined) plain(at('eval_cheap'), c.routing.eval_cheap);
+    if (c.routing.chat !== undefined) plain(at('chat'), c.routing.chat);
+    for (const [r, cfg] of Object.entries(c.roles)) if (r !== 'chief_of_staff' && cfg?.conversation_budget_usd !== undefined) ctx.addIssue({ code: 'custom', path: ['roles', r, 'conversation_budget_usd'], message: 'only chief_of_staff (the chat) has conversations' });
     plain(['instruction_evals', 'model'], c.instruction_evals.model);
     plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
   });

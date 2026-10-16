@@ -39,9 +39,10 @@ const block = (text: string, indent: string) => `|\n${text.split('\n').map((l) =
 /**
  * The issue body for these answers: the Outcome, the done_when block (each test as `- test:`, each command as a YAML
  * block scalar; an expected output becomes `<command> | grep -qF -- '<text>'`), and any context. Checked with
- * parseContract, the coordinator's own parser: a body it would refuse is never returned.
+ * parseContract, the coordinator's own parser: a body it would refuse is never returned. `footer`: its last line (an
+ * automation's issue names the automation there).
  */
-export function firstTaskBody(given: Partial<Record<keyof FirstTaskInput, unknown>>): { title: string; body: string } {
+export function firstTaskBody(given: Partial<Record<keyof FirstTaskInput, unknown>>, footer = `_Filed from the ${BRAND.name} first-run page._`): { title: string; body: string } {
   const title = oneLine(given.title, 'title', 200);
   const outcome = oneLine(given.outcome, 'outcome', 500);
   const picks = Array.isArray(given.done_when) ? (given.done_when as unknown[]) : [];
@@ -60,7 +61,7 @@ export function firstTaskBody(given: Partial<Record<keyof FirstTaskInput, unknow
     throw new FirstTaskError(`check ${i + 1}: a test or a command`);
   });
   const context = String(given.context ?? '').trim().slice(0, 5000);
-  const body = [`**Outcome:** ${outcome}`, '', '```done_when', ...items, '```', ...(context ? ['', '**Context:**', context] : []), '', `_Filed from the ${BRAND.name} first-run page._`].join('\n');
+  const body = [`**Outcome:** ${outcome}`, '', '```done_when', ...items, '```', ...(context ? ['', '**Context:**', context] : []), '', footer].join('\n');
   const c = parseContract(body);
   if (!c.ok) throw new FirstTaskError(`the done_when block wouldn't be taken: ${c.why}`);
   return { title, body };

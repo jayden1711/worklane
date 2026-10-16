@@ -5,11 +5,13 @@
 //   <instances dir>/<name>/state/            event log, locks, worktree records
 // The repo's own config folder keeps project behavior (tests, review levels,
 // skills) and is reviewed like code; it may only tighten the instance policy.
+import { AutomationsPolicy } from './automations/schema.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
+import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
 import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
@@ -22,7 +24,12 @@ import { fileURLToPath } from 'node:url';
 /** The engine's CLI, for hooks a lane adds itself (dist/src/cli.js beside this file). */
 const ENGINE_CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
 
-const name = z.string().regex(/^[a-z][a-z0-9-]{0,40}$/, 'lowercase letters, digits and dashes');
+// An instance's own users and units are never another's (src/instance-name.ts); an instance that runs as its owner's
+// user may keep a longer name than a machine's (INSTANCE_FILE_NAME_MAX).
+const name = z.string().superRefine((s, ctx) => {
+  const why = instanceNameProblem(s, INSTANCE_FILE_NAME_MAX);
+  if (why) ctx.addIssue({ code: 'custom', message: why });
+});
 
 export const InstanceFile = z.strictObject({
   version: z.literal(1),
@@ -111,6 +118,11 @@ export const InstanceSettings = z.strictObject({
       retention_days: z.number().int().min(1).max(365).optional(),
     })
     .optional(),
+  /**
+   * The dashboard chat (src/chat-pick.ts): what one person who isn't an owner may spend on chat answers in a local
+   * day, across all their conversations. Here, in the owner's policy.yaml, so no writer can raise it. Absent: $10.
+   */
+  chat: z.strictObject({ person_daily_usd: z.number().positive().max(1000).optional() }).optional(),
 });
 export type InstanceSettings = z.infer<typeof InstanceSettings>;
 
@@ -134,6 +146,8 @@ export const PolicyFile = z.strictObject({
    * protection API answers 403 or 404); off, it doesn't. Read on every pass.
    */
   main_watch: z.enum(['auto', 'off']).default('auto'),
+  /** Automations (docs/automations.md): off until an owner turns them on; the caps over all of them. */
+  automations: AutomationsPolicy,
   /** Instance settings that win over the repo's: worker count, daily budget, CI fix runs, run windows. */
   settings: InstanceSettings.default({}),
   /**
@@ -183,12 +197,19 @@ export const CredentialsFile = z.strictObject({
    */
   provider_keys: z.record(z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/), path).optional(),
   /**
-   * Work intake's credential: the chat bot's token, a file only the coordinator user can read (0400), installed
-   * with credentials.sh. No agent can read it.
+   * Work intake's credentials: the chat bot's token, the Slack app's two tokens and the Linear API key, each a file
+   * only the coordinator user can read (0400), installed with credentials.sh or the dashboard's paste box. No agent
+   * can read them. Paths only, never a value.
    */
   intake: z
     .strictObject({
       discord_token: path.optional(),
+      /** The Slack app-level token (xapp-, connections:write): opens the Socket Mode connection. */
+      slack_app_token: path.optional(),
+      /** The Slack bot token (xoxb-): who the bot is, senders' names for redaction, and the replies. */
+      slack_bot_token: path.optional(),
+      /** The Linear personal API key (lin_api_): read the team's labelled issues, comment on them. */
+      linear_api_key: path.optional(),
     })
     .optional(),
 });
@@ -296,6 +317,9 @@ export function credentialProblems(c: CredentialsFile): string[] {
   else need(c.github.key_path, 'GitHub: App private key');
   if (c.claude) need(c.claude.config_dir, 'Claude: config dir');
   if (c.intake?.discord_token) need(c.intake.discord_token, 'Intake: chat bot token');
+  if (c.intake?.slack_app_token) need(c.intake.slack_app_token, 'Intake: Slack app-level token');
+  if (c.intake?.slack_bot_token) need(c.intake.slack_bot_token, 'Intake: Slack bot token');
+  if (c.intake?.linear_api_key) need(c.intake.linear_api_key, 'Intake: Linear API key');
   return out;
 }
 
@@ -352,7 +376,8 @@ export function setResolveHome(f: (user: string) => string | null): void {
 }
 
 export function initInstance(instanceName: string, repoPath: string, repo: string, dir = instancesDir(), agentUser = `${instanceName}-agent`, agentHome = resolveHome(agentUser) ?? `${homesRoot()}/${agentUser}`): string {
-  if (!name.safeParse(instanceName).success) throw new Error(`instance name "${instanceName}": lowercase letters, digits and dashes`);
+  const why = instanceNameProblem(instanceName, INSTANCE_FILE_NAME_MAX);
+  if (why) throw new Error(`instance name "${instanceName}": ${why}`);
   const home = join(dir, instanceName);
   if (existsSync(home)) throw new Error(`instance "${instanceName}" already exists at ${home}`);
   mkdirSync(join(home, 'state'), { recursive: true, mode: 0o700 });
@@ -499,6 +524,22 @@ export function setGithubApp(file: string, app: { appId: number; installationId:
  * or that its group or others can read (the token is the coordinator user's alone).
  */
 export function setDiscordToken(file: string, tokenFile: string): void {
+  setIntakeCredential(file, 'discord_token', tokenFile);
+}
+
+/** The intake credentials credentials.yaml names (under `intake:`), each a path to a 0400 file. */
+export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slack_bot_token', 'linear_api_key'] as const;
+export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];
+
+/**
+ * Point an instance's credentials.yaml at one intake credential's file (intake.<key>), keeping its other settings,
+ * validated before anything is written (0600, renamed into place). The one writer of those entries: credentials.sh
+ * (`instance set-discord-token`, `instance set-intake-credential`) and the dashboard's paste box both come here. Only
+ * the file's path: the secret is never read here. Refused: a path that isn't absolute, isn't a plain file, or that
+ * its group or others can read (the secret is the coordinator user's alone).
+ */
+export function setIntakeCredential(file: string, key: IntakeCredentialKey, tokenFile: string): void {
+  if (!INTAKE_CREDENTIAL_KEYS.includes(key)) throw new Error(`not an intake credential: ${String(key)}`);
   if (!isAbsolute(tokenFile)) throw new Error(`the token file must be an absolute path, not ${tokenFile}`);
   if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
   let st;
@@ -512,7 +553,7 @@ export function setDiscordToken(file: string, tokenFile: string): void {
   if (typeof process.getuid === 'function' && st.mode & 0o077) throw new Error(`${tokenFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the bot token is its owner's alone (chmod 400)`);
   const doc = parseDocument(readFileSync(file, 'utf8'));
   if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
-  doc.setIn(['intake', 'discord_token'], tokenFile);
+  doc.setIn(['intake', key], tokenFile);
   const r = CredentialsFile.safeParse(doc.toJS());
   if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   // WHY: lineWidth 0, so a long path doesn't re-wrap the file's other lines.

@@ -3,7 +3,7 @@
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { TailscaleAction, TailscaleData } from './api';
-import type { GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, CoordinatorError, DotStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
+import type { ConfigPr, HeldDraftView, GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, CoordinatorError, DotStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
 import { ChatAnswerView } from './components/ChatPanel';
@@ -39,9 +39,11 @@ import { Agents } from './pages/Agents';
 import { Decisions } from './pages/Decisions';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
-import { IntakeHealthSection, IntakePage, IntakeReports } from './pages/Intake';
+import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
+import { ConfigPrList, ConfigPrRow } from './components/ConfigPr';
+import { DraftPreview } from './components/SetupConfig';
 import { FirstTaskForm, IgnoredIssues } from './components/FirstTask';
 import { RepoConfigForm } from './components/RepoConfigForm';
 import type { StarterCi as StarterCiView } from './api';
@@ -50,6 +52,8 @@ import { CiNote } from './components/CiNote';
 import { ClaudeSigninView } from './components/ClaudeSignin';
 import { SetupScreensView, withScreen } from './components/SetupScreens';
 import { DiscordSetupView } from './components/DiscordSetup';
+import { SourceSetupView } from './components/SourceSetup';
+import type { IntakeSourceSummary, SourceIntakePlan, SourceSetup, SourceView, SourceFormValue } from './api';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { Checks, IssueDetail } from './pages/IssueDetail';
 import { GoalGraphView } from './components/GoalGraph';
@@ -179,6 +183,9 @@ export const renderFirstRun = (f: FirstRun, o: { open?: string; confirming?: boo
 export const renderClaudeSignin = (v: ClaudeSigninData, o: { confirming?: boolean } = {}) => renderToStaticMarkup(<ClaudeSigninView v={v} initialConfirming={!!o.confirming} onChanged={() => {}} />);
 export const renderDiscordSetup = (v: DiscordSetup, o: { bot?: DiscordBot; botError?: string; tokenConfirming?: boolean; plan?: DiscordIntakePlan; values?: Record<string, DiscordFormValue> } = {}) =>
   renderToStaticMarkup(<DiscordSetupView v={v} bot={o.bot ?? null} botError={o.botError ?? null} initialTokenConfirming={!!o.tokenConfirming} initialPlan={o.plan ?? null} {...(o.values ? { initialValues: o.values } : {})} />);
+export const renderSourceSetup = (v: SourceSetup, o: { view?: SourceView; started?: boolean; confirming?: string; plan?: SourceIntakePlan; values?: Record<string, SourceFormValue> } = {}) =>
+  renderToStaticMarkup(<SourceSetupView v={v} view={o.view ?? null} initialStarted={!!o.started} initialConfirming={o.confirming ?? null} initialPlan={o.plan ?? null} {...(o.values ? { initialValues: o.values } : {})} />);
+export const renderIntakeSources = (sources: IntakeSourceSummary[], canSetUp: boolean) => renderToStaticMarkup(<IntakeSources sources={sources} canSetUp={canSetUp} />);
 export const renderFirstRunPage = (state: State) => renderToStaticMarkup(<FirstRunPage state={state} />);
 export const renderSetupScreens = (steps: SetupStepView[]) => renderToStaticMarkup(<SetupScreensView steps={withScreen(steps)} />);
 export const renderSignIn = (local = false) => renderToStaticMarkup(<SignInPage local={local} />);
@@ -232,8 +239,13 @@ export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIss
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 
-export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; mergePlan?: { command: string; then: string }; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
-  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialMergePlan={o.mergePlan ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
+export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
+  renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
+/** #468: the config PRs as the page follows them; one row with its merge plan shown. */
+export const renderConfigPrs = (prs: ConfigPr[], o: { canAct?: boolean; plan?: { command: string; then: string } } = {}) =>
+  renderToStaticMarkup(o.plan ? <ul><ConfigPrRow pr={prs[0]!} canAct={o.canAct ?? true} initialPlan={o.plan} onDone={() => {}} /></ul> : <ConfigPrList prs={prs} canAct={o.canAct ?? true} onDone={() => {}} />);
+/** #468: the held draft's preview, or its Change form. */
+export const renderDraftPreview = (held: HeldDraftView, o: { canEdit?: boolean; changing?: boolean } = {}) => renderToStaticMarkup(<DraftPreview held={held} repo="example-org/example-shop" canEdit={o.canEdit ?? true} running={false} onDone={() => {}} initialChanging={!!o.changing} />);
 
 // What a live panel keeps when a look fails (web/src/refresh.tsx), for the tests to call.
 export { afterLoad, NOTHING_YET } from './refresh';

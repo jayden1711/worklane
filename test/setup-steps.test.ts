@@ -36,7 +36,7 @@ test('the registry covers every row of the first-run audit (1-33), each step onc
     if (s.fix.kind === 'outside') assert.ok(s.fix.url === null || /^https:\/\//.test(s.fix.url), `${s.id}: a direct https link`);
   }
   assert.deepEqual(STEPS.map((s) => s.id), GROUPS.filter((g) => g.walked).map((g) => g.id));
-  assert.deepEqual(STEPS.map((s) => s.title), ['Tools present', 'Claude login', 'GitHub', 'Repo config', 'Coordinator running', 'Protection', 'Discord', 'Tailscale']);
+  assert.deepEqual(STEPS.map((s) => s.title), ['Tools present', 'Claude login', 'GitHub', 'Repo config', 'Coordinator running', 'Protection', 'Intake sources', 'Tailscale']);
 });
 
 /** A machine of stand-ins: which tools are on PATH, what commands answer, the service manager; git runs for real. */
@@ -156,6 +156,8 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
   protection: { mode: 'local', on: () => {}, off: (_f, w) => void (w.protectedMain = false), not: /^main isn't protected on GitHub yet: Protect requires your checks/ },
   policy: { mode: 'server', on: (f) => writeFileSync(join(f.home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 2 }\nland_mode: pr\n'), off: (f) => writeFileSync(join(f.home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: -1 }\n'), done: /\$20\/day, 2 workers/ },
   discord: { mode: 'server', on: (f) => { f.facts.credentials.intake = { discord_token: join(f.home, 'bot') }; writeFileSync(join(f.home, 'intake.yaml'), 'x'); }, off: (f) => { f.facts.credentials.intake = { discord_token: join(f.home, 'bot') }; }, not: /no intake\.yaml/ },
+  slack: { mode: 'server', on: (f) => { f.facts.credentials.intake = { slack_app_token: join(f.home, 'a'), slack_bot_token: join(f.home, 'b') }; writeFileSync(join(f.home, 'intake.yaml'), 'version: 1\nslack: { enabled: true, team: T0000000001 }\n', { mode: 0o600 }); }, off: (f) => { f.facts.credentials.intake = { slack_app_token: join(f.home, 'a'), slack_bot_token: join(f.home, 'b') }; }, done: /slack on/, not: /slack is not on/ },
+  linear: { mode: 'server', on: (f) => { f.facts.credentials.intake = { linear_api_key: join(f.home, 'k') }; writeFileSync(join(f.home, 'intake.yaml'), 'version: 1\nlinear: { enabled: true, team: "00000000-0000-4000-8000-000000000001", label: "00000000-0000-4000-8000-000000000002" }\n', { mode: 0o600 }); }, off: () => {}, done: /linear on/, not: /no Linear API key/ },
   tailscale: { mode: 'server', on: (_f, w) => { w.tools.add('tailscale'); w.tailscale = '{"BackendState":"Running","Self":{"DNSName":"box.example.com."}}'; }, off: (_f, w) => { w.tools.add('tailscale'); w.tailscale = '{"BackendState":"NeedsLogin"}'; }, done: /box\.example\.com/ },
   'console-devices': { mode: 'server', on: (f) => writeFileSync(f.machine.hubUnitFile, 'ExecStart=x --console-devices tag:owner\n'), off: (f) => writeFileSync(f.machine.hubUnitFile, 'ExecStart=x\n'), done: /tag:owner/ },
   updater: { mode: 'server', on: (f) => { writeFileSync(f.machine.updatesConfig, '{}'); writeFileSync(f.machine.allowedSigners, 'k'); }, off: (f) => writeFileSync(f.machine.updatesConfig, '{}'), not: /installs nothing until/ },

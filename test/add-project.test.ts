@@ -295,8 +295,8 @@ test("an instance by that name for another repo is never reused", { skip: !posix
   assert.deepEqual(m.calls(), []);
 });
 
-const NAMES_OK = ['alpha', 'a', 'ab-c', 'a1', 'abcdefghijklmnopqrstu'];
-const NAMES_BAD = ['', 'Alpha', '1a', '-a', 'a_b', 'dash', 'x-agent', 'x-eval', 'x-work', 'abcdefghijklmnopqrstuv', 'a b', 'a;id', 'a\n'];
+const NAMES_OK = ['alpha', 'a', 'ab-c', 'a1', 'abcdefghijklmnopqrstu', 'test', 'ci', 'a-b-c'];
+const NAMES_BAD = ['', 'Alpha', '1a', '-a', 'a_b', 'dash', 'x-agent', 'x-eval', 'x-work', 'test-x', 'ci-x', 'dashboard-x', 'hub', 'agent', 'abcdefghijklmnopqrstuv', 'a b', 'a;id', 'a\n'];
 const REPOS_OK = ['example/alpha', 'a/b', 'a-b/c.d_e-f', 'A1/.github', `${'a'.repeat(39)}/r`];
 const REPOS_BAD = ['', 'a', 'a/', '/b', 'a/b/c', 'a/.', 'a/..', '-a/b', 'a-/b', 'a--b/c', 'a b/c', 'a/b c', `${'a'.repeat(40)}/r`, `a/${'r'.repeat(101)}`, 'a/b;id', 'a/$(id)', '../b'];
 

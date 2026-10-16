@@ -1133,14 +1133,16 @@ test('#470: every governor hold records its kind and numbers, the Board shows it
   assert.equal(h.wait, new Date(2026, 9, 11, 8, 0).toISOString());
   assert.equal(h.fix, 'or change the run windows in Settings.');
 
-  // The daily budget: it waits for the next day (UTC).
+  // The daily budget: it waits for the next local day (this machine's midnight, as the dashboard's "today").
   f.log.append('run.cost', { issue: null, role: 'x', model: 'm', usd: 1, turns: 1 }, 'alice');
   current = { settings: { daily_budget_usd: 0.5 }, error: null };
   await c.tick();
   assert.equal(last().kind, 'budget');
   h = banner()!;
-  assert.equal(h.numbers, '$1.00 spent today (UTC) of the $0.5 daily budget');
-  assert.ok(h.wait && Date.parse(h.wait) > Date.now() && Date.parse(h.wait) - Date.now() <= 86_400_000, 'until the next UTC day');
+  assert.equal(h.numbers, '$1.00 spent today of the $0.5 daily budget');
+  const midnight = new Date();
+  midnight.setHours(24, 0, 0, 0);
+  assert.equal(h.wait, midnight.toISOString(), 'until the next local midnight');
 
   // The machine-wide agent cap: both slots held by other harnesses.
   current = { settings: {}, error: null };
@@ -2890,6 +2892,47 @@ test('chat: a conversation turn is answered into its conversation with the earli
   assert.deepEqual(lastOf(f.log, 'chat.turn'), { id: second.id, by: 'example-owner', read_only: false, citations: 0, draft: 'none', actions: 0, cost_usd: 0.1, refused: null });
   assert.doesNotMatch(JSON.stringify(f.log.read()), /first one|and then\?|first answer/, 'no message text in the event log');
 });
+/** A coordinator whose chat answers cost $0.4 each, with a $1 per-person daily chat cap (policy.yaml settings.chat). */
+function personCapped() {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [] }, costUsd: 0.4 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, settings: () => ({ settings: { chat: { person_daily_usd: 1 } }, error: null }) });
+  /** One turn in a brand-new conversation of `by`'s: its state and why. */
+  const fresh = async (by: string) => {
+    const conv = createConversation({ stateDir: f.stateDir, by, sharer: () => true });
+    const t = askInConversation({ stateDir: f.stateDir, id: conv.id, by, caps: ATTACHMENT_DEFAULT_CAPS, text: 'q' });
+    await c.checkChat();
+    const turn = conversationTurns(f.stateDir, conv.id).find((x) => x.id === t.id)!;
+    return [turn.state, turn.why ?? null] as const;
+  };
+  return { f, runner, fresh };
+}
+
+test('chat per-person cap: a writer spreading turns over several new conversations is stopped at the cap for the day', { skip }, async () => {
+  const s = personCapped();
+  const got = [];
+  for (let i = 0; i < 4; i++) got.push(await s.fresh('example-collaborator'));
+  assert.deepEqual(got.map((g) => g[0]), ['answered', 'answered', 'answered', 'refused']);
+  assert.match(got[3]![1]!, /per-person cap \(\$1; \$1\.20 spent\); it resets at local midnight/);
+  assert.equal(s.runner.calls.length, 3);
+});
+
+test('chat per-person cap: an owner is not stopped by it', { skip }, async () => {
+  const s = personCapped();
+  const got = [];
+  for (let i = 0; i < 4; i++) got.push(await s.fresh('example-owner'));
+  assert.deepEqual(got.map((g) => g[0]), ['answered', 'answered', 'answered', 'answered']);
+});
+
+test('chat per-person cap: checked before the model call: a writer at the cap gets a refusal and no run starts', { skip }, async () => {
+  const s = personCapped();
+  s.f.log.append('run.cost', { issue: null, role: 'chat', model: 'm', usd: 1, turns: 1, conversation: 'default', by: 'example-collaborator' }, 'alice');
+  const [state, why] = await s.fresh('example-collaborator');
+  assert.equal(state, 'refused');
+  assert.match(why!, /per-person cap \(\$1/);
+  assert.equal(s.runner.calls.length, 0);
+});
+
 test("chat: someone who isn't the owner gets a read-only answer; a spent budget or a disabled chat is refused", { skip }, async () => {
   const f = fixture();
   const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [], actions: [{ kind: 'pause' }] } } : {}));
@@ -2903,6 +2946,40 @@ test("chat: someone who isn't the owner gets a read-only answer; a spent budget 
   await c.checkChat();
   assert.deepEqual([chatAnswer(f.stateDir, spent.id)!.state, (chatAnswer(f.stateDir, spent.id) as { why: string }).why], ['refused', `the daily budget ($${f.cfg.agents.daily_budget_usd}) is spent`]);
   assert.equal(runner.calls.length, 1, 'no run for a refused question');
+});
+
+test("chat: the picker and the conversation's cap are checked before the answer runs: the pick's model and effort, the cap passed on, refused once spent", { skip }, async () => {
+  const f = fixture();
+  const runner = new FakeRunner((req) => (req.role === 'chat' ? { structured: { answer: 'here', citations: [] }, costUsd: 0.5 } : {}));
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  // A writer's pick within the default's tier runs; one without the role the dashboard read runs on the default.
+  const picked = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-collaborator', pick: { model: 'haiku', effort: 'low' }, picker: 'writer' });
+  await c.checkChat();
+  assert.deepEqual([runner.calls[0]!.model, runner.calls[0]!.effort, runner.calls[0]!.maxBudgetUsd], ['haiku', 'low', 1]);
+  const a = chatAnswer(f.stateDir, picked.id) as { answer: { conversation: object } };
+  assert.deepEqual(a.answer.conversation, { id: 'default', spentUsd: 0.5, capUsd: 5 });
+  assert.equal((lastOf(f.log, 'run.cost') as { conversation: string }).conversation, 'default');
+  // A writer's pick above the default's tier, written past the dashboard: refused, no run.
+  const above = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-collaborator', pick: { model: 'opus' }, picker: 'writer' });
+  await c.checkChat();
+  assert.equal(chatAnswer(f.stateDir, above.id)!.state, 'refused');
+  // The conversation's cap ($5 by default) spent: refused before any run.
+  f.log.append('run.cost', { issue: null, role: 'chat', model: 'm', usd: 4.5, turns: 1, conversation: 'default' }, 'alice');
+  const spent = askChat({ stateDir: f.stateDir, question: 'q', by: 'example-owner' });
+  await c.checkChat();
+  assert.match((chatAnswer(f.stateDir, spent.id) as { why: string }).why, /this conversation's budget \(\$5\) is spent/);
+  assert.equal(runner.calls.length, 1, 'no run for a refused question');
+  // A conversation's turn counts under the conversation's own id: its spend is recorded there, and its cap is its own.
+  const conv = createConversation({ stateDir: f.stateDir, by: 'example-owner', sharer: () => true });
+  askInConversation({ stateDir: f.stateDir, id: conv.id, by: 'example-owner', caps: ATTACHMENT_DEFAULT_CAPS, text: 'first' });
+  await c.checkChat();
+  assert.equal((lastOf(f.log, 'run.cost') as { conversation: string }).conversation, conv.id);
+  f.log.append('run.cost', { issue: null, role: 'chat', model: 'm', usd: 4.5, turns: 1, conversation: conv.id }, 'alice');
+  const over = askInConversation({ stateDir: f.stateDir, id: conv.id, by: 'example-owner', caps: ATTACHMENT_DEFAULT_CAPS, text: 'again' });
+  await c.checkChat();
+  const t = conversationTurns(f.stateDir, conv.id).find((x) => x.id === over.id)!;
+  assert.deepEqual([t.state, /this conversation's budget \(\$5\) is spent/.test(t.why ?? '')], ['refused', true]);
+  assert.equal(runner.calls.length, 2);
 });
 
 test('chat: a chat turn and a worker run on the same Claude login never overlap (the chat holds the login lock too)', { skip: (skip || process.platform === 'win32') && 'POSIX stand-in for claude' }, async () => {

@@ -36,9 +36,11 @@ interface Step {
   reset_at: string | null;
   detail: string;
   ts: string;
+  /** The event's id: its place in the log. */
+  id: number;
 }
 
-const stepsOf = (events: readonly StoredEvent[]): Step[] => events.filter((e) => e.type === 'account.failover').map((e) => ({ ...(e.payload as Omit<Step, 'ts'>), ts: e.ts }));
+const stepsOf = (events: readonly StoredEvent[]): Step[] => events.filter((e) => e.type === 'account.failover').map((e) => ({ ...(e.payload as Omit<Step, 'ts' | 'id'>), ts: e.ts, id: e.id }));
 
 export interface FailoverDeps {
   log: EventLog;
@@ -57,7 +59,7 @@ export function failoverStep(d: FailoverDeps): FailoverStage | null {
   const profiles = readProfiles(d.dir ?? CLAUDE_ACCOUNT_DIR);
   const events = d.log.read(0, ['usage.paused', 'usage.resumed', 'account.failover', 'account.switched']);
   const steps = stepsOf(events);
-  const emit = (s: Omit<Step, 'ts'>) => {
+  const emit = (s: Omit<Step, 'ts' | 'id'>) => {
     d.log.append('account.failover', { stage: s.stage, from: s.from, to: s.to, reset_at: s.reset_at, detail: s.detail.slice(0, 1000) }, d.instance, 'coordinator');
     return s.stage;
   };
@@ -70,9 +72,12 @@ export function failoverStep(d: FailoverDeps): FailoverStage | null {
   };
 
   // 1. A move asked for: wait for its answer (account.switched, recorded from the step's own lines).
+  // INVARIANT: the answer is one written after the ask, by log order (id), never by time: an earlier answer for the
+  // same account (a move back refused, then asked again) can share the ask's millisecond, or a clock set back can
+  // make it look later, and it would be read as this ask's answer.
   const last = steps.at(-1);
   if (last && (last.stage === 'asked' || last.stage === 'back-asked')) {
-    const answer = events.find((e) => e.type === 'account.switched' && Date.parse(e.ts) >= Date.parse(last.ts) && (e.payload as { to: string }).to === last.to);
+    const answer = events.find((e) => e.type === 'account.switched' && e.id > last.id && (e.payload as { to: string }).to === last.to);
     const back = last.stage === 'back-asked';
     if (!answer) {
       if (now - Date.parse(last.ts) < FAILOVER_ANSWER_MS) return null;

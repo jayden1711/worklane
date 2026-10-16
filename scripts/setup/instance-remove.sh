@@ -9,7 +9,8 @@
 # It refuses, changing nothing, while the instance has anything in flight: its coordinator service active (stop it
 # first, once its runs are done: sudo systemctl stop worklane-<name>.service), any process of its users (an agent, a
 # test run, an experiment job) outside its dashboard and its test Docker daemon, or a test run's directory. And it
-# refuses a name whose users would be another instance's (wl-test-<x> is instance test-<x>'s coordinator, too).
+# refuses a name whose users would be another instance's (wl-test-<x> is instance test-<x>'s coordinator, too), and while
+# a filesystem is mounted inside what it removes.
 #
 # Then, in order, each step skipped when already done, so a rerun finishes a removal that stopped part way:
 #   export    the instance's history (`worklane export`, as its coordinator: the event log and its state, never a
@@ -128,9 +129,10 @@ github_steps() {
   echo "  - its repo, issues, PRs and labels are as they were"
 }
 
+mounted() { local m; m="$(instance_mounts "$name")"; [ -z "$m" ] || printf 'a filesystem is mounted at %s, inside what goes: unmount it first\n' $m; }
 if [ -n "$print" ]; then
   show_plan
-  busy="$(instance_in_flight "$name")"
+  busy="$(instance_in_flight "$name"; mounted)"
   [ -z "$busy" ] || { echo; echo "it would refuse now, while:"; printf '%s\n' "$busy" | sed 's/^/  /'; }
   exit 0
 fi
@@ -138,7 +140,7 @@ fi
 # One at a time with add-project and instance-rename: they rewrite the same machine-wide rules.
 exec 9> "$ADD_PROJECT_LOCK"
 flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
-busy="$(instance_in_flight "$name")"
+busy="$(instance_in_flight "$name"; mounted)"
 if [ -n "$busy" ]; then
   echo "refused: $name has work in flight; nothing changed:" >&2
   printf '%s\n' "$busy" | sed 's/^/  /' >&2

@@ -148,9 +148,11 @@ if [ -z "$started" ]; then
   [ -z "$inuse" ] || { echo "refused: $new is in use on this machine; nothing changed:" >&2; printf '%s\n' "$inuse" | sed 's/^/  /' >&2; exit 1; }
 fi
 
+# A filesystem mounted inside what the last step removes would stop it part way, once <new> runs: refused up front.
+mounted() { local m; m="$(instance_mounts "$old")"; [ -z "$m" ] || printf 'a filesystem is mounted at %s, inside what the removal of %s takes: unmount it first\n' $m "$old"; }
 if [ -n "$print" ]; then
   show_plan
-  busy="$(instance_in_flight "$old")"
+  busy="$(instance_in_flight "$old"; mounted)"
   [ -z "$busy" ] || { echo; echo "it would refuse now, while:"; printf '%s\n' "$busy" | sed 's/^/  /'; }
   exit 0
 fi
@@ -158,7 +160,7 @@ fi
 exec 9> "$ADD_PROJECT_LOCK"
 flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
 if ! done_step remove; then
-  busy="$(instance_in_flight "$old")"
+  busy="$(instance_in_flight "$old"; mounted)"
   [ -z "$busy" ] || { echo "refused: $old has work in flight; nothing changed:" >&2; printf '%s\n' "$busy" | sed 's/^/  /' >&2; exit 1; }
 fi
 show_plan
