@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
+import { lockResolvedProblem } from '../plugins/hosts.js';
 
 export const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 export const NPM_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -20,14 +21,16 @@ export interface NpmResult {
   refusals: string[];
 }
 
-function npm(cwd: string, home: string, args: string[]): string {
-  return execFileSync('npm', args, {
+function npm(cwd: string, home: string, args: string[], registry: string): string {
+  // Only root's registry: on the command line and in the environment, with no user, global or project config that
+  // could name another (or a scoped registry for one of the package's scopes).
+  return execFileSync('npm', [...args, '--registry', `https://${registry}/`], {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 240_000,
     maxBuffer: 64 * 1024 * 1024,
-    env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, LANG: 'C', NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', NPM_CONFIG_CACHE: join(home, 'cache'), NPM_CONFIG_IGNORE_SCRIPTS: 'true', NPM_CONFIG_BIN_LINKS: 'false', NPM_CONFIG_FUND: 'false', NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_UPDATE_NOTIFIER: 'false' },
+    env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, LANG: 'C', NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', NPM_CONFIG_CACHE: join(home, 'cache'), NPM_CONFIG_IGNORE_SCRIPTS: 'true', NPM_CONFIG_BIN_LINKS: 'false', NPM_CONFIG_FUND: 'false', NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_UPDATE_NOTIFIER: 'false', NPM_CONFIG_REGISTRY: `https://${registry}/` },
   });
 }
 
@@ -40,14 +43,14 @@ export function binOf(pkg: string, bin: unknown): string | null {
   return n.startsWith('..') || posix.isAbsolute(n) ? null : n;
 }
 
-export function fetchNpmServer(pkg: string, version: string, dest: string): NpmResult {
+export function fetchNpmServer(pkg: string, version: string, dest: string, registry = 'registry.npmjs.org'): NpmResult {
   if (!NPM_NAME.test(pkg)) throw new Error(`${JSON.stringify(pkg)} is not an npm package name`);
   if (!NPM_VERSION.test(version)) throw new Error('the version must be exact (1.2.3), never a range or a tag');
   if (existsSync(dest)) throw new Error(`${dest} already exists`);
   const home = mkdtempSync(join(tmpdir(), 'npm-fetch-'));
   const refusals: string[] = [];
   try {
-    const view = JSON.parse(npm(home, home, ['view', `${pkg}@${version}`, 'dist.integrity', 'bin', 'version', '--json'])) as { 'dist.integrity'?: string; bin?: unknown; version?: string };
+    const view = JSON.parse(npm(home, home, ['view', `${pkg}@${version}`, 'dist.integrity', 'bin', 'version', '--json'], registry)) as { 'dist.integrity'?: string; bin?: unknown; version?: string };
     if (view.version !== version) throw new Error(`the registry has no ${pkg}@${version}`);
     const integrity = view['dist.integrity'];
     if (typeof integrity !== 'string' || !integrity.startsWith('sha512-')) throw new Error(`${pkg}@${version} has no sha512 integrity in the registry`);
@@ -55,8 +58,11 @@ export function fetchNpmServer(pkg: string, version: string, dest: string): NpmR
     if (!bin) refusals.push(`${pkg}@${version} names no single command to start (its package.json "bin")`);
     mkdirSync(dest, { recursive: true });
     writeFileSync(join(dest, 'package.json'), JSON.stringify({ name: 'pinned-mcp-server', private: true, dependencies: { [pkg]: version } }, null, 2) + '\n');
-    npm(dest, home, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund']);
-    npm(dest, home, ['ci', '--ignore-scripts', '--no-bin-links', '--no-audit', '--no-fund']);
+    npm(dest, home, ['install', '--package-lock-only', '--ignore-scripts', '--no-audit', '--no-fund'], registry);
+    // Every package the lock names must come from that registry: no tarball URL, git dependency or link elsewhere.
+    const resolvedBad = lockResolvedProblem(readFileSync(join(dest, 'package-lock.json'), 'utf8'), registry);
+    if (resolvedBad) throw new Error(resolvedBad);
+    npm(dest, home, ['ci', '--ignore-scripts', '--no-bin-links', '--no-audit', '--no-fund'], registry);
     const lockText = readFileSync(join(dest, 'package-lock.json'), 'utf8');
     const lock = JSON.parse(lockText) as { packages?: Record<string, { version?: string; integrity?: string; hasInstallScript?: boolean }> };
     const me = lock.packages?.[`node_modules/${pkg}`];

@@ -7,13 +7,16 @@
 #   bash scripts/setup/plugins.sh hosts <host> [<host>...]                  the hosts plugins may be fetched from (default github.com)
 #   bash scripts/setup/plugins.sh fetch <instance> <id> <https url> <sha> [<path>]
 #                                                                           the machine helper's plugin-fetch, as its own unit
-#   bash scripts/setup/plugins.sh mcp-fetch <instance> <id> <npm package> <x.y.z>    an npm MCP server (helper's mcp-fetch)
+#   bash scripts/setup/plugins.sh registries <host> [<host>...]             the npm registries MCP servers may come from (default registry.npmjs.org)
+#   bash scripts/setup/plugins.sh mcp-fetch <instance> <id> <npm package> <x.y.z> <registry>    an npm MCP server (helper's mcp-fetch)
 #   bash scripts/setup/plugins.sh mcp-preview <instance> <id> <plugin> <server>       an approved plugin's server (mcp-preview)
 #   bash scripts/setup/plugins.sh mcp-snapshot <instance> <id>                        the second snapshot, with secrets (mcp-snapshot)
 #
-# An MCP server is started for its snapshot in quarantine: as the instance's broker user (mcp-broker.sh), in its
-# sandbox, with no agent connected; the first time with no secrets and no network, the second (mcp-snapshot, for a
-# server that needs them to list its tools) with its installed secrets and its approved network only.
+# An unapproved MCP server's snapshot (mcp-fetch, mcp-preview) is taken by a throwaway user (systemd DynamicUser): no
+# network, no secrets, its code read-only, homes hidden and /var/lib read-only, so it can write nothing the broker
+# reads or runs; root reads its one line of output as data. Never as the broker's user. The second snapshot of an
+# APPROVED server (mcp-snapshot) is the broker's: started as for a session, with its secrets and approved network.
+# Snapshots and previews are capped per instance per hour, apart from fetches.
 #
 # confirm prints the whole approval record (source, commit, files hash, roles, components, notes) and asks for the
 # plugin id to be typed back; anything else confirms nothing. A coordinator can never confirm: the machine helper has
@@ -34,7 +37,7 @@ FETCH_DIR=/var/lib/private/$FETCH_STATE
 STATUS_DIR=/var/lib/worklane/plugins/fetch-status   # one JSON file per instance: the last fetch's state, for the dashboard
 PATH_ENV=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-usage() { sed -n '4,12p' "$0" | sed 's/^#   //' >&2; exit 2; }
+usage() { sed -n '4,13p' "$0" | sed 's/^#   //' >&2; exit 2; }
 instance_ok() { [[ "$1" =~ ^[a-z][a-z0-9-]{0,20}$ ]] && [ "$1" != dash ]; }
 id_ok() { [[ "$1" =~ ^[a-z0-9][a-z0-9-]{0,39}$ ]]; }
 
@@ -71,6 +74,18 @@ case "$cmd" in
     chown root:root "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" /etc/worklane/plugin-hosts.json
     echo "plugins may be fetched from: $*"
     ;;
+  registries)
+    # Root's allowlist of npm registries for MCP servers: names only, root:root 0644. Written whole.
+    [ "$#" -ge 1 ] || usage
+    for h in "$@"; do
+      [[ "$h" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ && ! "$h" =~ ^[0-9.]+$ ]] || { echo "$h: a host name (lowercase, with a dot), never an address" >&2; exit 2; }
+    done
+    list="$(printf '"%s",' "$@")"
+    tmp="/etc/worklane/.mcp-registries.json.$$"
+    printf '{"registries":[%s]}\n' "${list%,}" > "$tmp"
+    chown root:root "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" /etc/worklane/mcp-registries.json
+    echo "MCP servers may be fetched from: $*"
+    ;;
   show)
     [ "$#" -eq 1 ] && instance_ok "$1" || usage
     exec "$NODE" "$CLI" plugins show --instance "$1"
@@ -106,8 +121,8 @@ case "$cmd" in
     fi
     ;;
   mcp-fetch)
-    [ "$#" -eq 4 ] || usage
-    instance="$1" id="$2" pkg="$3" ver="$4"
+    [ "$#" -eq 5 ] || usage
+    instance="$1" id="$2" pkg="$3" ver="$4" registry="$5"
     instance_ok "$instance" && id_ok "$id" || usage
     [[ "$pkg" =~ ^(@[a-z0-9][a-z0-9._~-]*/)?[a-z0-9][a-z0-9._~-]*$ ]] || { echo "not an npm package name" >&2; exit 2; }
     [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "the version must be exact" >&2; exit 2; }
@@ -120,7 +135,7 @@ case "$cmd" in
       -p DynamicUser=yes -p StateDirectory="$FETCH_STATE" -p PrivateTmp=yes -p ProtectHome=yes -p ProtectSystem=strict -p PrivateDevices=yes \
       -p NoNewPrivileges=yes -p RestrictAddressFamilies="AF_INET AF_INET6 AF_UNIX" -p RuntimeMaxSec=600 -p MemoryMax=2G -p UMask=0022 \
       -p Environment="PATH=$PATH_ENV LANG=C.UTF-8" \
-      "$NODE" "$CLI" plugins npm-job --package "$pkg" --version "$ver" --out "/var/lib/$FETCH_STATE/$run"; then
+      "$NODE" "$CLI" plugins npm-job --package "$pkg" --version "$ver" --registry "$registry" --out "/var/lib/$FETCH_STATE/$run"; then
       status "$instance" "$id" failed "the fetch failed (journalctl -u worklane-plugin-fetch-job-$run)"
       exit 1
     fi
@@ -129,11 +144,13 @@ case "$cmd" in
     ;;
   mcp-preview)
     [ "$#" -eq 4 ] && instance_ok "$1" && id_ok "$2" && id_ok "$3" && [[ "$4" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || usage
+    "$NODE" "$CLI" plugins fetch-slot --instance "$1" --kind snapshot || { status "$1" "$2" failed "too many snapshots this hour"; exit 1; }
     status "$1" "$2" running
     if "$NODE" "$CLI" plugins mcp-preview --instance "$1" --id "$2" --plugin "$3" --server "$4"; then status "$1" "$2" done; else status "$1" "$2" failed "the preview could not be made"; exit 1; fi
     ;;
   mcp-snapshot)
     [ "$#" -eq 2 ] && instance_ok "$1" && id_ok "$2" || usage
+    "$NODE" "$CLI" plugins fetch-slot --instance "$1" --kind snapshot || { status "$1" "$2" failed "too many snapshots this hour"; exit 1; }
     status "$1" "$2" running
     if "$NODE" "$CLI" plugins mcp-snapshot --instance "$1" --id "$2"; then status "$1" "$2" done; else status "$1" "$2" failed "the snapshot could not be taken"; exit 1; fi
     ;;

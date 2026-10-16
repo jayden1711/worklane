@@ -7,6 +7,8 @@ import { existsSync } from 'node:fs';
 import { connect } from 'node:net';
 import { mcpRunPath } from '../os/system-paths.js';
 import { connectorArgv, CONTROL_SOCKET, TICKET_VAR } from './connector.js';
+import { SnapshotSchema } from '../plugins/approval.js';
+import type { Snapshot } from './snapshot.js';
 
 export interface McpRun {
   ticket: string;
@@ -14,6 +16,7 @@ export interface McpRun {
 }
 
 function ask(path: string, line: object, timeoutMs = 5_000): Promise<Record<string, unknown>> {
+  // A reply may be a whole snapshot: read until its newline, however long.
   return new Promise((resolve, reject) => {
     const sock = connect(path);
     let buf = '';
@@ -73,4 +76,21 @@ export function mcpRunArgs(instance: string, run: McpRun, node: string, engineCl
     allowedMcpServers: run.servers.map((s) => ({ serverCommand: connectorArgv(node, engineCli, instance, s.id) })),
     names: run.servers.map((s) => s.id),
   };
+}
+
+/**
+ * Root (plugins.sh mcp-snapshot): the second snapshot of an approved server, taken by the broker as it would start it
+ * for a session (its secrets, its approved network, its sandbox). The reply is checked against the snapshot's schema:
+ * data, never a command.
+ */
+export async function brokerSnapshot(instance: string, id: string, path = mcpRunPath(instance, CONTROL_SOCKET)): Promise<{ snapshot: Snapshot | null; error: string | null }> {
+  if (!existsSync(path)) return { snapshot: null, error: `no MCP broker for ${instance}: run mcp-broker.sh ${instance}` };
+  try {
+    const r = await ask(path, { op: 'snapshot', id }, 90_000);
+    if (r.ok !== true) return { snapshot: null, error: String(r.error ?? 'the broker refused') };
+    const s = SnapshotSchema.safeParse(r.snapshot);
+    return s.success ? { snapshot: s.data as Snapshot, error: null } : { snapshot: null, error: 'the broker answered something that is not a snapshot' };
+  } catch (e) {
+    return { snapshot: null, error: (e as Error).message };
+  }
 }

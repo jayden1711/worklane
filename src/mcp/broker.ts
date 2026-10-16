@@ -124,10 +124,39 @@ export class Broker {
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
+        let op: unknown;
+        try {
+          op = (JSON.parse(line) as { op?: unknown }).op;
+        } catch {
+          op = null;
+        }
+        if (op === 'snapshot') {
+          void this.snapshotFor(line).then((r) => sock.write(`${r}\n`));
+          continue;
+        }
         sock.write(`${this.control(line)}\n`);
       }
     });
     sock.on('error', () => {});
+  }
+
+  /**
+   * The second snapshot of an APPROVED server (Q3), for root: started as for a session (its secrets, its network, its
+   * sandbox), listed, stopped; never compared or blocked here (the owner reviews it as an update). Unapproved code
+   * never reaches this: its snapshot is a throwaway user's (src/mcp/throwaway.ts).
+   */
+  async snapshotFor(line: string): Promise<string> {
+    const id = (JSON.parse(line) as { id?: unknown }).id;
+    const r = this.d.servers().find((x) => x.id === id);
+    if (!r) return JSON.stringify({ ok: false, error: `no approved MCP server ${String(id)}` });
+    try {
+      const up = await this.start(r, `snapshot-${this.now()}`, false);
+      const snapshot = up.snapshot;
+      up.stop();
+      return JSON.stringify({ ok: true, snapshot });
+    } catch (e) {
+      return JSON.stringify({ ok: false, error: (e as Error).message });
+    }
   }
 
   // ---------- an agent's session (through the connector) ----------
@@ -191,7 +220,7 @@ export class Broker {
   }
 
   /** Start the server for one session and check it against its approved snapshot. */
-  private async start(r: McpRecord, sessionId: string): Promise<Upstream> {
+  private async start(r: McpRecord, sessionId: string, compare = true): Promise<Upstream> {
     const secrets: Record<string, string> = {};
     for (const n of r.secrets) {
       const v = this.d.secret(r.id, n);
@@ -212,7 +241,7 @@ export class Broker {
       this.log(`${r.id} (session ${sessionId}) didn't start: ${(e as Error).message}${tail ? `; its stderr: ${tail}` : ''}`);
       throw new Error(`${r.id} didn't start as an MCP server: ${(e as Error).message}`);
     }
-    if (snapshotHash(up.snapshot) !== r.snapshotHash) {
+    if (compare && snapshotHash(up.snapshot) !== r.snapshotHash) {
       this.block(r, up.snapshot);
       up.stop();
       throw new Error(`${r.id} is blocked: its tools changed after approval`);
