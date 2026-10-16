@@ -118,8 +118,11 @@ test('a step whose unit never answers is given up after 30 minutes, then the nex
   m.log.close();
 });
 
-test('back after the reset: once it has passed and the instance is still on the account it moved to, back to where it began, proven the same way', () => {
-  // A limit that resets in a minute (the log's times are the real clock's, so the step's clock moves only a little).
+test('back after the reset: once it has passed and the instance is still on the account it moved to, back to where it began, proven the same way', (t) => {
+  // The log's clock is held at T0, so every event shares one millisecond: the refused answer to the first move back
+  // has the second ask's time too, and only log order tells them apart (it once matched by time: flaky on CI).
+  t.mock.timers.enable({ apis: ['Date'], now: T0 });
+  // A limit that resets in a minute; only the step's clock moves.
   const m = setup({ reset: new Date(T0 + 60_000).toISOString() });
   m.limit();
   m.step();

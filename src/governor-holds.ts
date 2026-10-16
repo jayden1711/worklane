@@ -22,7 +22,7 @@ export interface HoldFacts {
   max_load?: number;
   spent_usd?: number;
   budget_usd?: number;
-  /** When it ends on its own (ISO): the usage limit's reset, the next run window, the budget's next day (UTC). */
+  /** When it ends on its own (ISO): the usage limit's reset, the next run window, the budget's next day (local midnight). */
   until?: string;
   cap?: number;
   running?: number;
@@ -111,12 +111,6 @@ export function nextRunWindowStart(windows: { from: string; to: string }[], now:
   return best;
 }
 
-/** Midnight UTC after `nowMs`: when the daily budget's day (spentToday's, UTC) turns. */
-export function nextUtcDay(nowMs: number): Date {
-  const d = new Date(nowMs);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1));
-}
-
 /** What the Board and First run show while a hold is in force. */
 export interface HoldBanner {
   kind: HoldKind | 'other';
@@ -162,7 +156,7 @@ export function holdBanner(h: { kind?: string | undefined; reason: string; facts
     }
     case 'budget': {
       const spent = num(f.spent_usd), budget = num(f.budget_usd);
-      return { ...base, title: "Today's agent budget is spent", numbers: spent !== null && budget !== null ? `$${spent.toFixed(2)} spent today (UTC) of the $${budget} daily budget` : h.reason, wait: f.until ?? null, fix: 'or raise the daily budget in Settings.', link: SETTINGS };
+      return { ...base, title: "Today's agent budget is spent", numbers: spent !== null && budget !== null ? `$${spent.toFixed(2)} spent today of the $${budget} daily budget` : h.reason, wait: f.until ?? null, fix: 'or raise the daily budget in Settings.', link: SETTINGS };
     }
     case 'slots': {
       const cap = num(f.cap), running = num(f.running);

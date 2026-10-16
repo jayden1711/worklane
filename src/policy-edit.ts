@@ -10,7 +10,7 @@ import { policyViolations, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
 
-export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch'] as const;
+export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
 
 export interface PolicyField {
@@ -33,7 +33,7 @@ export interface PolicyFormView {
 
 export class PolicyEditError extends Error {}
 
-const get = (p: PolicyFile, k: PolicyKey): number | boolean | string => (k === 'budget.daily_usd' ? p.budget.daily_usd : k === 'agents.max_workers' ? p.agents.max_workers : p[k]);
+const get = (p: PolicyFile, k: PolicyKey): number | boolean | string => (k === 'budget.daily_usd' ? p.budget.daily_usd : k === 'agents.max_workers' ? p.agents.max_workers : k === 'automations.enabled' ? p.automations.enabled : p[k]);
 
 function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: PolicyFile } {
   const doc = parseDocument(readFileSync(path, 'utf8'));
@@ -58,6 +58,7 @@ export function policyForm(path: string, limitsPath?: string): PolicyFormView {
       { key: 'land_mode', value: policy.land_mode, kind: 'choice', choices: ['pr', 'direct'], why: 'pr: every change lands through a PR; direct: the harness may push the default branch (needs branch protection)' },
       { key: 'auto_merge', value: policy.auto_merge, kind: 'boolean', why: "on: the harness merges its own PRs that review.yaml's merge rules allow; off: every PR waits for a person" },
       { key: 'main_watch', value: policy.main_watch, kind: 'choice', choices: ['auto', 'off'], why: "auto: the main watch guards the default branch whenever GitHub doesn't protect it" },
+      { key: 'automations.enabled', value: policy.automations.enabled, kind: 'boolean', why: `on: the automations on Extend may run, within ${policy.automations.max_runs_per_day} runs a day, ${policy.automations.max_concurrent} at once and ${Math.round(policy.automations.budget_share * 100)}% of the daily budget; off: none runs` },
     ],
     fixed: [
       { key: 'sandbox', value: policy.sandbox },

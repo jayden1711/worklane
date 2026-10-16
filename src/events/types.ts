@@ -470,6 +470,24 @@ export const EventSchemas = {
   'gardener.filed': z.strictObject({ pattern: z.string(), issue }),
   /** One gardener run (started_at: by the coordinator's clock): what it found and filed, what it cost, its log issue; outcome: done, or why it stopped. */
   'gardener.run': z.strictObject({ started_at: z.string(), findings: z.number().int().nonnegative(), filed: z.array(issue), cost_usd: z.number().nonnegative(), log_issue: issue.nullable(), outcome: z.string() }),
+  /** An automation's definition changed (src/automations/store.ts): who, how, and each changed field (never a secret). system: the engine paused it. */
+  'automation.changed': z.strictObject({ id: z.string(), action: z.enum(['create', 'edit', 'delete', 'pause', 'resume']), by: z.string(), role: z.enum(['owner', 'writer', 'system']), changes: z.array(z.string()), why: z.string().optional() }),
+  /** A person asked the dashboard to run an automation now; the coordinator takes it on its next pass. */
+  'automation.run_requested': z.strictObject({ id: z.string(), by: z.string(), role: z.enum(['owner', 'writer', 'viewer']) }),
+  /**
+   * An automation fired: its run id, what started it (kind, its reference: an issue or PR number, a slot, a chat
+   * message's id; who), and its place in a chain (depth 0: a person, a schedule or a chat command; ancestors: the
+   * automations whose output led here, oldest first).
+   */
+  'automation.fired': z.strictObject({ id: z.string(), run: z.string(), mode: z.enum(['task', 'report']), trigger: z.strictObject({ kind: z.enum(['schedule', 'github', 'discord', 'manual']), ref: z.string().nullable(), by: z.string().nullable() }), depth: z.number().int().nonnegative(), ancestors: z.array(z.string()) }),
+  /** A trigger that didn't fire its automation, and why (a cap, the chain rules, a role, paused, off). */
+  'automation.refused': z.strictObject({ id: z.string(), trigger: z.enum(['schedule', 'github', 'discord', 'manual']), ref: z.string().nullable(), why: z.string() }),
+  /** What a run made: the issue it filed (task), or the issue or PR it commented on (report). Chains are traced through these, never through text on GitHub. */
+  'automation.output': z.strictObject({ id: z.string(), run: z.string(), kind: z.enum(['issue', 'comment']), number: issue }),
+  /** A run finished (a report's run; a task's filing): its outcome and what it cost (a task's builds are booked to its issue). */
+  'automation.done': z.strictObject({ id: z.string(), run: z.string(), outcome: z.string(), cost_usd: z.number().nonnegative() }),
+  /** The GitHub poller is holding off (the rate limit is under its floor, or GitHub said to wait), once per hold. */
+  'automation.poll_held': z.strictObject({ why: z.string(), until: z.string() }),
   /** One superfan pass (src/superfan/): the instance's or the machine's; what it read, what it did, what it cost, today's spend. Notes: what it couldn't read. */
   'superfan.pass': z.strictObject({ scope: z.enum(['instance', 'machine']), outcome: z.enum(['quiet', 'nothing', 'posted', 'duplicate', 'budget', 'instance_budget', 'failed']), items: z.number().int().nonnegative(), cost_usd: z.number().nonnegative(), spent_usd: z.number().nonnegative(), filed: issue.nullable(), notes: z.array(z.string()) }),
   /** `role`: answered on the dashboard by someone it read as an owner or writer of the instance's repo. */

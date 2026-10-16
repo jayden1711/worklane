@@ -59,7 +59,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=8
+PROTOCOL=9
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -88,7 +88,24 @@ GPU_MIN_SYSTEMD=255
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
+# An instance's name, as scripts/setup/lib.sh takes one (installed alone, this helper holds a copy; a test keeps the two
+# equal): never a name whose users or units are another's (an instance test-<x>'s coordinator would be x's test user).
+instance_name_problem() {
+  local n="$1"
+  if [[ ! "$n" =~ ^[a-z][a-z0-9-]{0,20}$ ]]; then echo "lowercase letters, digits and dashes, starting with a letter, at most 21"
+  elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
+  elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
+  elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
+  elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
+  elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
+  elif [[ "$n" == dashboard-* ]]; then echo "worklane-$n.service is the dashboard of instance ${n#dashboard-}"
+  elif [[ "$n" =~ ^(.+)-(agent|eval|work)$ ]]; then echo "wl-$n is instance ${BASH_REMATCH[1]}'s ${BASH_REMATCH[2]} name"
+  fi
+}
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|exec|wipe|check|version ..."
+why="$(instance_name_problem "$name")"
+[ -z "$why" ] || die "instance name $name: $why"
 user="wl-test-$name"
 root="$BASE/$name"
 store="$root/store"
@@ -136,6 +153,26 @@ own_tmp() {
   [ "$o" = "$user" ] || [ "$o" = "$(id -un)" ]
 }
 as_user() { runuser -u "$user" -- "$@"; }
+
+# A run's transient units: worklane-test-<name>_<id>_<pid>.service. WHY the underscores: a name and an id are both
+# [a-z0-9-], so with dashes instance a's run b-1 and instance a-b's run 1 made the same name, and a wipe's
+# "worklane-test-a-b-*" matched instance a-b's runs and its Docker unit (worklane-test-a-b-docker.service). Neither
+# part can hold an underscore, so "<name>_<id>_" is this run's alone. systemd unit names take [A-Za-z0-9:_.\-].
+run_unit() { printf 'worklane-test-%s_%s_%s' "$name" "$1" "$2"; }
+# Run <id>'s units, one per line: those named as run_unit names them, and those a helper before it named
+# worklane-test-<name>-<id>-<pid> (an update can leave one behind), each only when the unit itself says it runs as
+# this instance's test user (User=). WHY both: the old name is ambiguous across instances (above), so only User= tells
+# whose it is; the new one is unambiguous by name, and User= is checked for it too. Nothing else is ever stopped.
+run_units() {
+  local id="$1" u owner
+  local new="^worklane-test-${name}_${id}_[0-9]+[.]service\$" old="^worklane-test-${name}-${id}-[0-9]+[.]service\$"
+  while read -r u _; do
+    [[ "$u" =~ $new || "$u" =~ $old ]] || continue
+    owner="$(systemctl show -p User --value "$u" 2>/dev/null)" || continue
+    [ "$owner" = "$user" ] && printf '%s\n' "$u"
+  done < <(systemctl list-units --all --plain --no-legend --full "worklane-test-${name}_${id}_*" "worklane-test-${name}-${id}-*" 2>/dev/null)
+  return 0
+}
 docker_as_user() { runuser -u "$user" -- env HOME="$root/docker-home" XDG_RUNTIME_DIR="$sock_dir" DOCKER_HOST="unix://$sock_dir/docker.sock" "$DOCKER" "$@"; }
 
 # Every path the test user must not reach: worklane's own, every other wl-* user's home, root's, the Docker socket.
@@ -515,7 +552,7 @@ exec_run() {
   # The GPU locks too: a run (GPU or not) can't flock one and keep a GPU run waiting.
   inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
   while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
-  unit="worklane-test-$name-$id-$$"
+  unit="$(run_unit "$id" "$$")"
   trap exec_cleanup EXIT
   runtime="$timeout"
   # GPU (above): only when asked, and only as root's file says. The lock's wait counts against the run's timeout; the
@@ -546,7 +583,7 @@ exec_run() {
     ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
     envfile=(-p "EnvironmentFile=$ENV_FILE")
   fi
-  # The unit's own name carries the run id, so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
+  # The unit's own name carries the run id (run_unit), so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
   # the run's stdout as its own and reads systemd-run's summary only as the final block of stderr.
@@ -588,7 +625,7 @@ exec_cmd() {
 # What is left of a run: its units, containers, volumes and directory, one per line ("" when nothing).
 leftovers() {
   local id="$1"
-  systemctl list-units --all --plain --no-legend "worklane-test-$name-$id-*" 2>/dev/null | awk '{print "unit " $1}'
+  run_units "$id" | sed 's/^/unit /'
   if [ -S "$sock_dir/docker.sock" ]; then
     docker_as_user ps -aq --filter "label=$LABEL=$name-$id" | sed 's/^/container /'
     docker_as_user volume ls -q --filter "label=$LABEL=$name-$id" | sed 's/^/volume /'
@@ -604,9 +641,12 @@ wipe() {
   [ "$#" -eq 1 ] || die "usage: wipe <id>"
   valid_id "$id"
   # Processes first, so nothing still running writes into what is removed next.
-  units="$(systemctl list-units --all --plain --no-legend "worklane-test-$name-$id-*" 2>/dev/null | awk '{print $1}')"
+  # Only this instance's units of this run (run_units): never another instance's whose name shares a prefix.
+  units="$(run_units "$id")"
   # shellcheck disable=SC2086 # one unit per word
   [ -z "$units" ] || { systemctl kill -s KILL $units 2>/dev/null || true; systemctl stop $units 2>/dev/null || true; systemctl reset-failed $units 2>/dev/null || true; }
+  # Containers and volumes: asked of this instance's own Docker (its test user's, at $sock_dir), which holds no other
+  # instance's, and matched by the whole label (label=K=V is equality, never a prefix).
   if [ -S "$sock_dir/docker.sock" ]; then
     ids="$(docker_as_user ps -aq --filter "label=$LABEL=$name-$id")"
     # shellcheck disable=SC2086
