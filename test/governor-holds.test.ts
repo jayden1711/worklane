@@ -78,7 +78,7 @@ const HOLDS: Record<HoldKind, { payload: EventPayload<'governor.hold'>; numbers:
   load: { payload: { kind: 'load', reason: 'machine load 41 > 40', load: 41, free_disk_pct: 50, facts: { load: 41, max_load: 40 } }, numbers: /^load 41\.0; the limit is 40$/, fix: /resumes on its own once the load drops/, link: '/settings' },
   budget: {
     payload: { kind: 'budget', reason: 'daily budget $5 reached', load: 1, free_disk_pct: 50, facts: { spent_usd: 5.2, budget_usd: 5, until: '2026-10-16T00:00:00.000Z' } },
-    numbers: /^\$5\.20 spent today \(UTC\) of the \$5 daily budget$/,
+    numbers: /^\$5\.20 spent today of the \$5 daily budget$/,
     fix: /^or raise the daily budget in Settings\.$/,
     wait: '2026-10-16T00:00:00.000Z',
     link: '/settings',
