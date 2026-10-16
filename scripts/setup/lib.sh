@@ -195,6 +195,10 @@ BREAK_GLASS_PORT=4398
 # The hub's Siri gateway (dashboards.sh --siri), and the tailnet HTTPS port tailscale.sh serve-siri publishes it on.
 SIRI_GATEWAY_PORT=4397
 SIRI_TAILNET_PORT=8443
+# The hub's hooks gateway for webhook automations (dashboards.sh --hooks), and the tailnet HTTPS port tailscale.sh
+# serve-hooks publishes it on.
+HOOKS_GATEWAY_PORT=4396
+HOOKS_TAILNET_PORT=8444
 # How long `tailscale up` waits for the owner to log in, and `tailscale serve` for tailscaled, in seconds.
 TAILSCALE_UP_SECONDS=600 TAILSCALE_SERVE_SECONDS=30
 # The login link `tailscale up` prints, strictly: Tailscale's own login host and a short id. Anything else is not
@@ -223,13 +227,15 @@ hub_option() {
 hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
 
 # The hub's own settings, to run dashboards.sh again with another list of instances and nothing else changed: one word
-# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, and --siri when it has the gateway).
+# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, --siri and --hooks when it has
+# those gateways).
 hub_keep_args() {
   local v
   printf '%s\n' --client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)"
   v="$(hub_option --console-user)"; [ -z "$v" ] || printf '%s\n' --console-user "$v"
   v="$(hub_option --console-devices)"; [ -z "$v" ] || printf '%s\n' --console-devices "$v"
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
+  [ -z "$(hub_option --hooks-port)" ] || printf '%s\n' --hooks
 }
 
 # The mount points at or under what an instance's removal deletes (its users' homes, its paths in the registry), one

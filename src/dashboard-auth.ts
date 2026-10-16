@@ -115,8 +115,8 @@ export const isOwner = (r: Role | null | undefined) => r === 'owner';
 /** The owner or a writer: who may read runs, throughput, reports, intake and the digest, and use the chat. */
 export const isWriter = (r: Role | null | undefined) => r === 'owner' || r === 'writer';
 
-/** Decisions only the owner may answer: held plans, and high-risk (L3) merges. The rest are the writers' too. */
-export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land']);
+/** Decisions only the owner may answer: held plans, high-risk (L3) merges, and an automation's run. The rest are the writers' too. */
+export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land', 'automation']);
 export const mayAnswerKind = (kind: string, r: Role | null | undefined) => (OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r));
 
 /** `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows). */
