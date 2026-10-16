@@ -2301,6 +2301,7 @@ jobs:
           for f in "$b" "$r"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ] || { sudo stat -c '%n %U:%G %a' "$f"; exit 1; }; done
           grep -qF "exported delta's history: $b" "$F/rm4.out"
           sudo node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/instance-move.js"); const b = m.readBundle(process.argv[1]); if (!b.files.some((f) => f.path === "state/events.db")) process.exit(1); if (b.files.some((f) => /dashboard-token|credential|\.pem$/.test(f.path))) process.exit(2); console.log(b.files.length, "files, from", b.from.repo);' "$b"
+          sudo jq -c '{instance, incidents: [.taken.incidents[]? | {id, instance}], canary: .taken.canary.canary, gpu: .records.gpu}' "$r"
           # Every incident taken is delta's (its own coordinator raised some too), the seeded one among them.
           sudo jq -e '.instance=="delta" and (.taken.incidents|all(.instance=="delta")) and (.taken.incidents|map(.id)|index("cidelta1") != null) and .taken.canary.canary.instance=="delta" and (.records.gpu.devices==[1])' "$r"
           # Every item of delta's gone.
