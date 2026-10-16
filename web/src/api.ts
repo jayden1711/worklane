@@ -55,7 +55,7 @@ export interface Decision {
 /** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
 export interface DecisionDetail {
   id: string;
-  kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'pr';
+  kind: 'land' | 'question' | 'domain' | 'plan' | 'intake' | 'delegation' | 'automation' | 'pr';
   issue: number | null;
   owner: string;
   question: string;
@@ -2166,13 +2166,14 @@ export async function healthPass(refresh: () => Promise<HubInfo | null> = refres
 }
 
 /** Extend -> Automations (src/automations/view.ts): the owners' and writers' view. */
-export type AutomationAction = 'create' | 'edit' | 'delete' | 'pause' | 'resume' | 'run';
+export type AutomationAction = 'create' | 'edit' | 'delete' | 'pause' | 'resume' | 'run' | 'rotate' | 'unbind';
 export interface AutomationDef {
   id: string;
   name: string;
   owner?: string;
   enabled?: boolean;
-  trigger: { kind: 'schedule'; cron: string } | { kind: 'github'; on: string; label?: string; command?: string } | { kind: 'discord'; command: string };
+  trigger: { kind: 'schedule'; cron: string } | { kind: 'github'; on: string; label?: string; command?: string } | { kind: 'discord'; command: string } | { kind: 'webhook' };
+  gates?: { start: 'auto' | 'approve' };
   mode: 'task' | 'report';
   template: { title: string; outcome: string; done_when: ({ test: string } | { command: string; expect?: string })[]; trigger_text?: 'quoted' | 'none' };
   budget: { per_run_usd: number; per_day_usd: number };
@@ -2190,6 +2191,8 @@ export interface AutomationItem extends AutomationDef {
   runs: { run: string; at: string; trigger: { kind: string; ref: string | null; by: string | null }; depth: number; outcome: string; costUsd: number | null; outputs: { kind: string; number: number }[] }[];
   refused: { at: string; trigger: string; why: string }[];
   pausedBy: { by: string; role: string; why: string | null; at: string } | null;
+  webhook: { path: string; bound: { name: string; at: string } | null; hasSecret: boolean } | null;
+  waiting: string[];
 }
 export interface AutomationsView {
   unavailable?: string;
@@ -2209,6 +2212,9 @@ export interface AutomationPlan {
   changes: string[];
   summary: string[];
   digest?: string;
+  /** A webhook's new secret and its address path: in a Confirm's answer only, once. */
+  secret?: string;
+  path?: string;
 }
 /** Review (no digest, no confirm: nothing written) or Confirm (with the review's digest) one change to the automations. */
 export const changeAutomation = (body: { action: AutomationAction; id?: string; automation?: AutomationDef; digest?: string; confirm?: boolean }) => api<AutomationPlan>('/api/automations', { method: 'POST', body: JSON.stringify(body) });

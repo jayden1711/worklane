@@ -16,7 +16,7 @@ type SectionId = (typeof DETAIL_SECTIONS)[number];
 /** How a section stands: shown, not recorded in the log, not one this kind of decision has, or not this person's. */
 type SectionState = 'shown' | 'not-recorded' | 'not-applicable' | 'withheld';
 
-const KIND_LABEL: Record<DecisionDetail['kind'], string> = { land: 'Approve landing', question: 'Question', domain: 'Network access', plan: 'Plan', intake: 'Intake report', delegation: 'Review settings', pr: 'PR held for you' };
+const KIND_LABEL: Record<DecisionDetail['kind'], string> = { land: 'Approve landing', question: 'Question', domain: 'Network access', plan: 'Plan', intake: 'Intake report', delegation: 'Review settings', automation: 'Automation run', pr: 'PR held for you' };
 const FLAG_LABEL = { 'money-path': 'Money path', auth: 'Auth', secrets: 'Secrets' } as const;
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink', unavailable: 'orange' };
 const CONF_TONE: Record<string, 'ok' | 'warn' | 'danger'> = { high: 'ok', medium: 'warn', low: 'danger' };
