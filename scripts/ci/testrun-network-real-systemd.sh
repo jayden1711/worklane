@@ -148,8 +148,11 @@ sudo bash scripts/setup/testrun-network.sh disable ci > /dev/null
 
 echo "== fetch: public addresses only, never the host's loopback or LAN, with no grant"
 command -v npm > /dev/null && [ -x /usr/local/bin/npm ] || fail "no npm in /usr/local/bin for the test user (PATH=/usr/local/bin:/usr/bin:/bin)"
-fetch_from() { # <id> <address>: a lockfile pinning one tarball at https://<address>:$P/; the fetch fails (no TLS there)
-  local id="$1" a="$2" d="$t/files-$1" rc=0
+fetch_from() { # <id> <address> <want: none|seen>: a lockfile pinning one tarball at https://<address>:$P/
+  # WHY not waiting for the fetch to end: a blocked address drops the SYN (IPAddressDeny=), so npm waits its own
+  # timeouts and retries (minutes). Only whether a connection arrives matters: 20 s for none, until seen for one;
+  # then the wipe stops the fetch's unit.
+  local id="$1" a="$2" want="$3" d="$t/files-$1" pid i
   mkdir -p "$d"
   printf '{"name":"p","version":"1.0.0","dependencies":{"x":"1.0.0"}}\n' > "$d/package.json"
   printf '{"name":"p","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"p","version":"1.0.0","dependencies":{"x":"1.0.0"}},"node_modules/x":{"version":"1.0.0","resolved":"https://%s:%s/x-1.0.0.tgz","integrity":"sha512-AAAA"}}}\n' "$a" "$P" > "$d/package-lock.json"
@@ -157,17 +160,25 @@ fetch_from() { # <id> <address>: a lockfile pinning one tarball at https://<addr
   key="$(printf '%s' "$id" | sha256sum | cut -c1-32)"
   as_ ci cache npm "$key" > /dev/null
   : > "$t/seen"
-  as_ ci fetch "$id" npm npm "$key" 300 < /dev/null > "$t/$id.out" 2>&1 || rc=$?
-  [ "$rc" -ne 0 ] || fail "$id: the fetch passed with no tarball there"
+  as_ ci fetch "$id" npm npm "$key" 300 < /dev/null > "$t/$id.out" 2>&1 &
+  pid=$!
+  for i in $(seq 40); do
+    { [ "$want" = seen ] && grep -qx "$a" "$t/seen"; } && break
+    if ! kill -0 "$pid" 2>/dev/null; then break; fi
+    sleep 0.5
+  done
   head -n 1 "$t/$id.out" | grep -qx "worklane-testrun: fetch npm (no script run; public addresses and the machine's DNS only)" || { cat "$t/$id.out" >&2; fail "$id: the fetch line"; }
+  # A "none" proves something only if npm was still trying (blocked), not if the fetch had already died.
+  if [ "$want" = none ] && ! kill -0 "$pid" 2>/dev/null; then cat "$t/$id.out" >&2; fail "$id: the fetch ended within 20 s, so it never waited on $a"; fi
+  echo "  $id (https://$a): the listener saw: $(seen)"
   as_ ci wipe "$id" > /dev/null
-  echo "  $id (https://$a): exit $rc; the listener saw: $(seen)"
+  wait "$pid" 2>/dev/null || true
 }
-fetch_from net-fetch-loop 127.0.0.1
+fetch_from net-fetch-loop 127.0.0.1 none
 [ -z "$(seen)" ] || fail "the fetch reached the host's loopback"
-fetch_from net-fetch-lan "$lan"
+fetch_from net-fetch-lan "$lan" none
 [ -z "$(seen)" ] || fail "the fetch reached the host's LAN address"
-fetch_from net-fetch-pub "$PUB"
+fetch_from net-fetch-pub "$PUB" seen
 [ "$(seen)" = "$PUB " ] || { cat "$t/net-fetch-pub.out" >&2; fail "the fetch didn't reach the public stand-in"; }
 
 echo "== db: the run's Postgres container reaches nothing; the helper before let it out"
