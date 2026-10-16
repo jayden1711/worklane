@@ -30,7 +30,8 @@ function seeded() {
   const log = new EventLog(join(dir, 'events.db'));
   log.append('issue.seen', { issue: 4, title: 'Show tax on the totals page', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: 'opened by writer' }, 'c');
   log.append('decision.asked', { id: 'd-1', kind: 'question', issue: 4, owner: 'example-owner', question: 'Ship the totals change?', options: ['approve', 'reject'], recommendation: 'approve', receipts: ['holds because PRIVATE-RECEIPT'] }, 'c');
-  log.append('run.cost', { issue: 4, role: 'worker', model: 'opus', usd: 3.21, turns: 9 }, 'c');
+  // WHY: a cost no timestamp or id can hold by chance (#546: '3.21' matched an event time like 12:00:13.215Z).
+  log.append('run.cost', { issue: 4, role: 'worker', model: 'opus', usd: 987654.32, turns: 9 }, 'c');
   log.append('run.started', { issue: 4, role: 'worker', model: 'opus', worktree: '/srv/example/PRIVATE-WORKTREE', pid: 1, pgid: 1, attempt: 1 }, 'c');
   log.append('intake.received', { id: 'r1', source: 'discord', sender: 'abc', excerpt: 'PRIVATE-INTAKE-WORDS from a customer' }, 'c');
   return { dir, log };
@@ -62,7 +63,7 @@ test("the answer's run: no tools at all, the research lane (no repository), an e
   // What it knows: a viewer's view. Never costs, runs, worktrees, intake words or decision receipts.
   assert.match(req.prompt, /Show tax on the totals page/);
   assert.match(req.prompt, /Ship the totals change\?/);
-  for (const secret of ['3.21', 'PRIVATE-WORKTREE', 'PRIVATE-INTAKE-WORDS', 'PRIVATE-RECEIPT', 'opus']) assert.ok(!req.prompt.includes(secret), secret);
+  for (const secret of ['987654', 'PRIVATE-WORKTREE', 'PRIVATE-INTAKE-WORDS', 'PRIVATE-RECEIPT', 'opus']) assert.ok(!req.prompt.includes(secret), secret);
   assert.deepEqual(siriAnswer(stateDir, q.id), { v: 1, id: q.id, at: siriAnswer(stateDir, q.id)!.at, device: 'abcdefghij', state: 'answered', speech: 'One decision waits: ship the totals change.' });
   assert.equal(log.read(0, ['run.cost']).filter((e) => (e.payload as { role: string }).role === 'siri').length, 1, 'its cost is recorded as siri');
 });
@@ -74,7 +75,7 @@ test('the spec itself: siriAskRun never allows a tool, and viewerState is built 
   assert.equal(spec.lane, RESEARCH_LANE);
   const { log } = seeded();
   const s = viewerState(log.read(), 'example');
-  assert.doesNotMatch(s, /PRIVATE|3\.21|opus/);
+  assert.doesNotMatch(s, /PRIVATE|987654|opus/);
   assert.match(s, /#4 .*Show tax on the totals page/);
 });
 
