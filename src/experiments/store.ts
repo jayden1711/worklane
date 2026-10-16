@@ -38,7 +38,7 @@ export function loadPins(file: string): { pins: PinsFile; text: string } | { err
   if (!existsSync(file)) return { pins: EMPTY_PINS, text: '' };
   const st = lstatSync(file);
   if (!st.isFile()) return { error: `${file} is not a regular file` };
-  if (process.platform !== 'win32' && (st.mode & 0o077) !== 0) return { error: `${file} is open to other users (mode ${(st.mode & 0o777).toString(8)}); make it 0600` };
+  if (typeof process.getuid === 'function' && (st.mode & 0o077) !== 0) return { error: `${file} is open to other users (mode ${(st.mode & 0o777).toString(8)}); make it 0600` };
   const text = readFileSync(file, 'utf8');
   try {
     return { pins: PinsFile.parse(parse(text) ?? {}), text };
