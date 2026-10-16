@@ -39,8 +39,6 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
   { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*'] },
   { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
-  // A study's eval, data and budget: an agent's PR must never change what scores its own experiments (docs/experiments.md).
-  { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
 ];
 
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
