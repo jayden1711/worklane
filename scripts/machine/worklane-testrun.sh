@@ -105,10 +105,13 @@ GPU_MIN_SYSTEMD=255
 # needs none). Every unit's address families: no raw sockets, no packet sockets, no Bluetooth, nothing but these.
 NET_FILE=/etc/worklane/testrun-network.json
 RESOLV_CONF=/etc/resolv.conf
-# WHY built from the first octets: the repo's denylist refuses any literal private address in its files (a real LAN's
-# would be a project detail); these are only the ranges' names. The value is exactly
-# "link-local multicast 0.0.0.0/8 <10>.0.0.0/8 <100>.64.0.0/10 <172>.16.0.0/12 <192>.168.0.0/16 fc00::/7".
-NET_DENY="link-local multicast 0.0.0.0/8 $(printf '%s.0.0.0/8 %s.64.0.0/10 %s.16.0.0/12 %s.168.0.0/16' 10 100 172 192) fc00::/7"
+# Prefixes only: systemd-run's transient IPAddressDeny= refuses the names a unit file takes (link-local, multicast,
+# localhost: "Failed to parse IP address prefix"). Link-local is 169.254.0.0/16 and fe80::/10, multicast 224.0.0.0/4
+# and ff00::/8. WHY the private ranges are built from their first octets: the repo's denylist refuses any literal
+# private address in its files (a real LAN's would be a project detail); these are only the ranges' names:
+# <10>.0.0.0/8 <100>.64.0.0/10 <172>.16.0.0/12 <192>.168.0.0/16.
+NET_DENY="0.0.0.0/8 169.254.0.0/16 224.0.0.0/4 fe80::/10 ff00::/8 $(printf '%s.0.0.0/8 %s.64.0.0/10 %s.16.0.0/12 %s.168.0.0/16' 10 100 172 192) fc00::/7"
+NET_LOOPBACK='127.0.0.0/8 ::1/128'
 FAMILIES='AF_UNIX AF_INET AF_INET6 AF_NETLINK'
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
@@ -615,7 +618,7 @@ net_props() {
     return 0
   fi
   allow="$(resolvers | tr '\n' ' ')"
-  if [ "$fetch" -eq 1 ]; then NET_PROPS+=(-p "IPAddressDeny=localhost $NET_DENY"); else NET_PROPS+=(-p "IPAddressDeny=$NET_DENY"); fi
+  if [ "$fetch" -eq 1 ]; then NET_PROPS+=(-p "IPAddressDeny=$NET_LOOPBACK $NET_DENY"); else NET_PROPS+=(-p "IPAddressDeny=$NET_DENY"); fi
   [ -z "${allow// /}" ] || NET_PROPS+=(-p "IPAddressAllow=${allow% }")
 }
 

@@ -189,7 +189,7 @@ echo ran`);
 
 // The LAN ranges a granted run or a fetch never reaches (RFC 1918, RFC 6598, ULA), with link-local, multicast and
 // 0.0.0.0/8. Built from their first octets: the repo's denylist refuses a literal private address.
-const LAN_DENY = `link-local multicast 0.0.0.0/8 ${([[10, '0.0.0/8'], [100, '64.0.0/10'], [172, '16.0.0/12'], [192, '168.0.0/16']] as const).map(([x, y]) => `${x}.${y}`).join(' ')} fc00::/7`;
+const LAN_DENY = `0.0.0.0/8 169.254.0.0/16 224.0.0.0/4 fe80::/10 ff00::/8 ${([[10, '0.0.0/8'], [100, '64.0.0/10'], [172, '16.0.0/12'], [192, '168.0.0/16']] as const).map(([x, y]) => `${x}.${y}`).join(' ')} fc00::/7`;
 const NO_NET = ['RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK', 'PrivateNetwork=yes', 'TemporaryFileSystem=/run:ro'];
 
 test('the key claim: a run has no network by default (PrivateNetwork=yes, an empty /run), and a repo\'s ask alone grants none', { skip: !posix && 'bash' }, () => {
@@ -258,7 +258,7 @@ test('fetch: the host\'s network minus its loopback and the LAN; no run\'s TMPDI
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /^worklane-testrun: fetch npm \(no script run; public addresses and the machine's DNS only\)\n/);
     const { argv, props } = h.lastProps();
-    assert.ok(props.includes(`IPAddressDeny=localhost ${LAN_DENY}`), props.join(' | '));
+    assert.ok(props.includes(`IPAddressDeny=127.0.0.0/8 ::1/128 ${LAN_DENY}`), props.join(' | '));
     assert.ok(props.includes('IPAddressAllow=127.0.0.53'));
     assert.ok(props.includes(`TemporaryFileSystem=${join(h.dir, 't')}:ro`), 'no run\'s TMPDIR, so no database socket');
     assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-c-1', 'fetch')}`, `ReadWritePaths=${join(h.base, 'shop', 'cache', `npm-${key}`)}`]);

@@ -196,7 +196,7 @@ export function validateRequest(req: TestRunRequest): void {
  */
 export function runLimitMs(config: TestRunConfig, tiers: TestRunTier[]): number {
   const db = config.database && tiers.some((t) => t.database) ? config.database.ready_timeout_s : 0;
-  return ((config.setup.length + config.fetch.length) * SETUP_TIMEOUT_S + db + tiers.reduce((n, t) => n + t.timeout_s, 0)) * 1000;
+  return ((config.setup.length + (config.fetch?.length ?? 0)) * SETUP_TIMEOUT_S + db + tiers.reduce((n, t) => n + t.timeout_s, 0)) * 1000;
 }
 
 /**
@@ -263,7 +263,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     // The fetch phase (./fetch.ts): with network, none of the repo's code, before the database and any setup step.
     stage = 'fetch';
     let fetchFailed = false;
-    for (const [i, f] of d.config.fetch.entries()) {
+    for (const [i, f] of (d.config.fetch ?? []).entries()) {
       if (o.signal?.aborted) break;
       const cache = d.config.caches.find((c) => c.name === f.npm)!;
       const r = await d.host.fetch(id, 'npm', cache.name, cacheKey(d.repo, req.sha, cache.key), SETUP_TIMEOUT_S * 1000, o.signal);
