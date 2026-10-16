@@ -140,7 +140,7 @@ usage: ${BRAND.cli} <command> [options]
                                    the page asks for the key, kept in a file only you can read);
                                    --port 0: any free port, the same one again on a rerun
   dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
-            [--console-user admin --console-devices tag:x,node] [--siri-port n]
+            [--console-user admin --console-devices tag:x,node] [--siri-port n] [--hooks-port n]
             [--client-id id --public-url https://<host> --signin-dir dir]
                                    one view over several instances' own dashboards; it forwards
                                    to each, so writes stay with that instance's server and user.
@@ -150,6 +150,7 @@ usage: ${BRAND.cli} <command> [options]
                                    --console-user: the admin user the owner terminal runs as
                                    from the Tailscale devices --console-devices lists (none: refused);
                                    --siri-port: the Siri gateway's loopback port (4397; docs/siri.md)
+                                   --hooks-port: the webhook automations' gateway port (4396; docs/automations.md)
   dashboard --hub-setup (--public-url https://<host> | --loopback) --signin-dir dir [--port n] [--service]
                                    the hub in setup mode, before sign-in exists (dashboards.sh --setup
                                    runs it): one page, unlocked by a one-time setup token from a 0600
@@ -782,10 +783,12 @@ async function main(argv: string[]): Promise<number> {
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
         const siriOpt = option(opts, '--siri-port');
         if (siriOpt !== undefined && !/^[0-9]{1,5}$/.test(siriOpt)) throw new Error('--siri-port: a port number');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) }, ...(siriOpt !== undefined ? { siri: { port: Number(siriOpt) } } : {}) });
+        const hooksOpt = option(opts, '--hooks-port');
+        if (hooksOpt !== undefined && !/^[0-9]{1,5}$/.test(hooksOpt)) throw new Error('--hooks-port: a port number');
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) }, ...(siriOpt !== undefined ? { siri: { port: Number(siriOpt) } } : {}), ...(hooksOpt !== undefined ? { hooks: { port: Number(hooksOpt) } } : {}) });
         // INVARIANT: the printed and opened URLs carry no key; the key's file is named, never the key (keyFileNote).
         const bg = `${h.breakGlassUrl} ${keyFileNote(h.keyFile)}`;
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.siriUrl ? `\n  Siri gateway: ${h.siriUrl} (tailscale serve publishes it on 8443)` : ''}\n(loopback only)`);
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.siriUrl ? `\n  Siri gateway: ${h.siriUrl} (tailscale serve publishes it on 8443)` : ''}${h.hooksUrl ? `\n  hooks gateway: ${h.hooksUrl} (tailscale serve publishes it on 8444)` : ''}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;

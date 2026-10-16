@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';
+import { instanceNameOk } from './instance-name.js';
 import { asRoot, etcPath, libexecPath, varLibPath } from './os/system-paths.js';
 
 export const MACHINE_HELPER = libexecPath('machine');
@@ -134,11 +135,11 @@ export function tailscaleStep(action: 'install' | 'up' | 'serve' | 'public-url',
 
 /**
  * add-project's arguments, exactly as the machine helper takes them (scripts/machine/, the helper's source; a test
- * keeps the two equal): an instance name (instance.sh's shape; never the viewer's, dash, nor one ending in -agent,
- * -eval or -work, whose users would be another instance's) and a GitHub owner/name.
+ * keeps the two equal): an instance name (src/instance-name.ts: never one whose users or units are another's) and a
+ * GitHub owner/name.
  */
 export function addProjectNameOk(s: unknown): s is string {
-  return typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s) && s !== 'dash' && !/-(agent|eval|work)$/.test(s);
+  return instanceNameOk(s);
 }
 export function addProjectRepoOk(s: unknown): s is string {
   if (typeof s !== 'string') return false;

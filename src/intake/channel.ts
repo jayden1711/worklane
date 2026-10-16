@@ -62,6 +62,7 @@ export function decisionPost(q: Pick<EventPayload<'decision.asked'>, 'id' | 'kin
     const tail = `\nFull plan: https://github.com/${o.repo}/issues/${q.issue}\nOptions: ${q.options.join(' / ')}.${q.options.includes(q.recommendation) ? ` Recommended: ${q.recommendation}.` : ''}\nReply in this thread with exactly one option; "approve plan ${q.issue}" approves it too.`;
     return { kind: 'thread', name: clip(oneLine(`plan${on}: ${q.question}`), 90), text: fit(`Decision needed (plan${on}): `, free, tail) };
   }
+  if (q.kind === 'automation') return { kind: 'notice', text: `An automation's run waits for its owner's approval. It is approved only on the dashboard, never here: ${base(o.dashboardUrl)}/inbox` };
   if (NEVER_FROM_CHAT.has(q.kind)) {
     const gh = q.issue !== null ? ` https://github.com/${o.repo}/issues/${q.issue}` : '';
     if (o.owners && q.issue !== null) {

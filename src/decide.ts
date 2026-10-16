@@ -48,7 +48,7 @@ export function answerDecision(log: EventLog, o: { id: string; answer: string; w
     };
     if (!q) return refuse(404, `no decision ${o.id}`);
     if (!mayAnswerKind(q.kind, who.role)) {
-      return refuse(403, OWNER_DECISIONS.has(q.kind) ? `@${who.login} can't answer this: a ${q.kind === 'plan' ? 'held plan' : 'high-risk merge'} is for the instance's owners (admin on ${o.repo}); @${who.login} is a ${who.role}` : `@${who.login} can't answer this: the owners and writers of ${o.repo} answer it; @${who.login} is a ${who.role}`);
+      return refuse(403, OWNER_DECISIONS.has(q.kind) ? `@${who.login} can't answer this: ${q.kind === 'plan' ? 'a held plan' : q.kind === 'automation' ? "an automation's run" : 'a high-risk merge'} is for the instance's owners (admin on ${o.repo}); @${who.login} is a ${who.role}` : `@${who.login} can't answer this: the owners and writers of ${o.repo} answer it; @${who.login} is a ${who.role}`);
     }
     if (!o.answer || !q.options.includes(o.answer)) return refuse(400, `answer must be one of ${q.options.join(', ')}`);
     // By voice (src/voice.ts): an owner's approval only, and never of what voice may not approve. Checked here, on the

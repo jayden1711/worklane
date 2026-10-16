@@ -58,18 +58,23 @@
 #     and nowhere else; never its dashboard token). Publish it on the tailnet with tailscale.sh serve-siri (8443).
 #     Each instance still needs siri.enabled in its intake.yaml, and an owner's device token. Left out: no gateway,
 #     and wl-dash's read of the Siri gateway tokens is removed.
+#   --hooks: the hub's hooks gateway for webhook automations (docs/automations.md), on 127.0.0.1:4396. wl-dash may
+#     then read each instance's hooks-gateway-token too (the token that works on that instance's /api/hooks/ routes and
+#     nowhere else; never its dashboard token; it holds no webhook secret, so it can't sign a delivery). Publish it on
+#     the tailnet with tailscale.sh serve-hooks (8444). Left out: no gateway, and wl-dash's read of those tokens is removed.
 #
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
-client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri=""
+usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--hooks] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri="" hooks=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --setup) setup=1; shift ;;
     --no-instances) no_instances=1; shift ;;
     --loopback) loopback=1; shift ;;
     --siri) siri=1; shift ;;
+    --hooks) hooks=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
     --console-user) console_user="${2:-}"; shift 2 ;;
@@ -101,7 +106,7 @@ url_ok() { [[ "$1" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub'
 
 if [ -n "$setup" ]; then
   # Exactly one of --public-url and --loopback.
-  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances$siri" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
+  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances$siri$hooks" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
   [ -n "$loopback" ] || url_ok "$public_url"
   [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
   say "viewer user $viewer (runs the hub; holds no credential)"
@@ -191,7 +196,7 @@ done
 
 state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
 for name in "$@"; do
-  [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "instance name $name: lowercase letters, digits and dashes" >&2; exit 2; }
+  need_instance_name "$name"
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   [ -d "$(state_of "$name")" ] || { echo "no state for instance $name at $(state_of "$name"); run engine.sh with it first" >&2; exit 1; }
   # An ACL on the way to the token would expose anything there that others may read: refuse first.
@@ -235,7 +240,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${hooks:+ --hooks-port 4396}${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -298,6 +303,13 @@ for name in "$@"; do
   else
     setfacl -x "g:$viewer" "$state/siri-gateway-token" 2>/dev/null || true
   fi
+  # The hooks gateway's token (works on the instance's /api/hooks/ routes only): readable by $viewer only with --hooks.
+  wait_for "$state/hooks-gateway-token" "$unit"
+  if [ -n "$hooks" ]; then
+    setfacl -m "g:$viewer:r--" "$state/hooks-gateway-token"
+  else
+    setfacl -x "g:$viewer" "$state/hooks-gateway-token" 2>/dev/null || true
+  fi
   hub_arg="${hub_arg:+$hub_arg,}$name=$state"
 done
 
@@ -329,6 +341,12 @@ for name in "$@"; do
   elif sudo -u "$viewer" test -r "$state/siri-gateway-token"; then
     echo "FAIL: $viewer can read $name's Siri gateway token without --siri" >&2; exit 1
   fi
+  if [ -n "$hooks" ]; then
+    sudo -u "$viewer" test -r "$state/hooks-gateway-token" || { echo "FAIL: $viewer can't read $name's hooks gateway token" >&2; exit 1; }
+    if sudo -u "$viewer" test -w "$state/hooks-gateway-token"; then echo "FAIL: $viewer can write $name's hooks gateway token" >&2; exit 1; fi
+  elif sudo -u "$viewer" test -r "$state/hooks-gateway-token"; then
+    echo "FAIL: $viewer can read $name's hooks gateway token without --hooks" >&2; exit 1
+  fi
   echo "OK: $name"
 done
 
@@ -337,6 +355,7 @@ echo "sign-in: $public_url (people sign in with GitHub; their role on each insta
 echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
 echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
 [ -z "$siri" ] || echo "Siri gateway: 127.0.0.1:4397; publish it on the tailnet once with: sudo bash scripts/setup/tailscale.sh serve-siri (https 8443; docs/siri.md)"
+[ -z "$hooks" ] || echo "hooks gateway (webhook automations): 127.0.0.1:4396; publish it on the tailnet once with: sudo bash scripts/setup/tailscale.sh serve-hooks (https 8444; docs/automations.md)"
 echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/ (the page asks for the key once: it is in $hub_token_file; never put it in a URL)"
 echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"
 if [ -s "$MACHINE_OWNERS" ]; then echo "machine owners (may change the slot caps and engine updates): $(cat "$MACHINE_OWNERS")"; else echo "machine owners: none yet, so only the break-glass may change the machine; rerun with --machine-owner <login>"; fi
