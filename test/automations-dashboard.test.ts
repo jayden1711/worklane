@@ -63,7 +63,7 @@ test('automations-dashboard: a viewer gets nothing; review writes nothing; only 
     assert.deepEqual(empty.body.automations, []);
     assert.equal(empty.body.limits!.enabled, true);
     assert.equal(empty.body.limits!.dailyUsd, 10, "25% of the policy's $40");
-    assert.deepEqual(empty.body.actions, ['create', 'edit', 'delete', 'pause', 'resume', 'run']);
+    assert.deepEqual(empty.body.actions, ['create', 'edit', 'delete', 'pause', 'resume', 'run', 'rotate', 'unbind']);
     // A writer may not create, even with a valid review.
     assert.equal((await s.post('example-collaborator', { action: 'create', automation: DEF })).status, 403);
     // Review: the exact change, nothing written.
