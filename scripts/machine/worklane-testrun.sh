@@ -97,6 +97,9 @@ PROTECTED=(/srv/worklane /opt/worklane /var/lib/worklane /etc/worklane /etc/sudo
 GPU_FILE=/etc/worklane/testrun-gpu.json
 GPU_LOCK_DIR=/run/worklane/gpu
 GPU_GROUP=worklane-gpu
+# The nodes' own group (scripts/setup/gpu-devices.sh makes them root:$GPU_DEV_GROUP 0660): a granted run's unit gets it
+# as a supplementary group, that unit alone. Never $GPU_GROUP (the locks'), never the test user's own groups.
+GPU_DEV_GROUP=worklane-gpu-dev
 DEV=/dev
 GPU_MIN_SYSTEMD=255
 # Network (above). Root's grants; the resolvers a granted run and a fetch may ask (nameserver lines); what neither
@@ -524,6 +527,9 @@ gpu_decide() {
   for i in "${GPU_IDX[@]}"; do GPU_NODES+=("$DEV/nvidia$i"); done
   GPU_PROPS=()
   for n in "${GPU_NODES[@]}"; do GPU_PROPS+=(-p "BindPaths=$n" -p "DeviceAllow=$n rw"); done
+  # With the nodes root:$GPU_DEV_GROUP 0660, the run opens them through that group, given to this unit only; a machine
+  # without the group (nodes still 0666) needs none.
+  if getent group "$GPU_DEV_GROUP" >/dev/null 2>&1; then GPU_PROPS+=(-p "SupplementaryGroups=$GPU_DEV_GROUP"); fi
   GPU_ON=1
   GPU_WHY="${skipped[*]:+skipped ${skipped[*]} (no node)}"
 }

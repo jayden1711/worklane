@@ -103,7 +103,19 @@ test('test-user.sh --print: the slice caps below the instances, rootless Docker 
     assert.ok(docker.split('\n').includes(line), `docker unit: ${line}`);
   }
   assert.match(r.stdout, /^wl-shop ALL=\(root\) NOPASSWD: \/usr\/local\/libexec\/worklane-testrun shop \*$/m, 'the coordinator reaches its own test user only');
-  assert.doesNotMatch(r.stdout, /^(User|Group)=root$|SupplementaryGroups|AmbientCapabilities/m);
+  // No unit, rule or helper line runs anything as root or with extra groups or capabilities. The one exception, by
+  // name: the helper gives a GPU-granted run's own unit the GPU nodes' group (docs/test-runs.md "GPU devices").
+  const from = r.stdout.indexOf('# /usr/local/libexec/worklane-testrun (scripts/machine/worklane-testrun.sh)');
+  const to = r.stdout.indexOf('# /etc/apparmor.d/worklane-test-rootlesskit');
+  assert.ok(from > 0 && to > from, 'the helper is printed, before the AppArmor profile');
+  const helper = r.stdout.slice(from, to);
+  assert.doesNotMatch(r.stdout.slice(0, from) + r.stdout.slice(to), /^(User|Group)=root$|SupplementaryGroups|AmbientCapabilities/m);
+  assert.doesNotMatch(helper, /^(User|Group)=root$|AmbientCapabilities/m);
+  assert.deepEqual(
+    helper.split('\n').filter((l) => l.includes('SupplementaryGroups') && !/^\s*#/.test(l)),
+    ['  if getent group "$GPU_DEV_GROUP" >/dev/null 2>&1; then GPU_PROPS+=(-p "SupplementaryGroups=$GPU_DEV_GROUP"); fi'],
+  );
+  assert.match(helper, /^GPU_DEV_GROUP=worklane-gpu-dev$/m);
   assert.ok(r.stdout.includes(readFileSync(helperSrc, 'utf8')), 'the helper is printed as it will be installed');
 });
 
