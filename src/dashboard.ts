@@ -7,6 +7,9 @@
 // It reads the log read-only, pushes changes over one SSE stream, and records
 // every write a person makes (answers, settings, chat, console) in the audit.
 // See dashboard-auth.ts.
+import { applyChange, ACTIONS as AUTOMATION_ACTIONS, AutomationsError, loadAutomations, mayDo, planChange, type AutomationAction, type ChangeRequest } from './automations/store.js';
+import { automationsView } from './automations/view.js';
+import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -226,6 +229,8 @@ export interface DashboardOptions {
   testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
+  /** The instance's automations.yaml (in its home): Extend -> Automations reads and, through Review -> Confirm, writes it. None: a checkout (no automations). */
+  automationsFile?: string;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
   /** What running agents' process groups use now, for the board; the OS adapter's processGroupUsage when unset. */
@@ -400,11 +405,20 @@ export function docsUrl(page: string, repository: unknown = enginePackage().repo
 const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
 
 /**
+ * The options a site's own dashboard starts with (cli.ts `dashboard`): its log, state, policy, intake and automations
+ * files, backlog and roles. INVARIANT: one list, so an instance's file reaches its dashboard's routes (#522: the
+ * automations file did not, and Extend said "a checkout" on every instance).
+ */
+export function siteOptions(site: ReturnType<typeof dashboardSite>) {
+  return { root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, eventsDb: site.eventsDb, stateDir: site.stateDir, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(site.automationsFile ? { automationsFile: site.automationsFile } : {}) };
+}
+
+/**
  * Which log and state a dashboard reads. A project checkout's own, or, with
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string; automationsFile?: string } {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
@@ -413,7 +427,7 @@ export function dashboardSite(root: string, instance?: string, dir = instancesDi
   const backlog = () => (i ? backlogFor(s.cfg, s.root, s.stateDir, instanceTokens(i, instanceEnv(i))) : backlogFor(s.cfg, s.root, s.stateDir));
   // A signed-in person's role here: their permission on the instance's repo, read with the instance's own token.
   const roleOf = i ? cachedRoles(repoPermission({ repo: i.repo.repo, token: instanceTokens(i, instanceEnv(i)), api: GITHUB_API })) : undefined;
-  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE) } : {}) };
+  return { root: s.root, cfg: s.cfg, eventsDb: s.logPath, stateDir: s.stateDir, port: instance ? instancePort(instance) : LOCAL_DASHBOARD_PORT, logs, policyFile: i ? join(i.home, 'policy.yaml') : null, backlog, ...(roleOf ? { roleOf } : {}), ...(i ? { intakeFile: join(i.home, INTAKE_FILE), automationsFile: join(i.home, AUTOMATIONS_FILE) } : {}) };
 }
 
 /**
@@ -1234,6 +1248,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return { login: opts.user || owners.default, role: 'owner', via: 'break-glass', deviceOk: false };
   };
 
+  /** The automations' limits in force here: the instance policy's part (off without one), narrowed by the repo's config. */
+  const automationLimitsHere = () => {
+    const policy = opts.policyFile ? (readPolicy(opts.policyFile).policy ?? null) : null;
+    const daily = policy ? Math.min(policy.budget.daily_usd, policy.settings.daily_budget_usd ?? Infinity, opts.cfg.agents.daily_budget_usd) : opts.cfg.agents.daily_budget_usd;
+    return limitsInForce(policy?.automations ?? AutomationsPolicy.parse(undefined), opts.cfg.project.automations, daily);
+  };
+
   /** Every write a person makes, recorded with who (login and role), how they came in, the instance and what was done. */
   const audit = (who: Who, action: string, detail: Record<string, unknown>) => {
     const log = new EventLog(opts.eventsDb);
@@ -1701,6 +1722,44 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname.startsWith('/api/runs/') && req.method === 'GET') {
           const run = readRun(opts.stateDir, decodeURIComponent(url.pathname.slice('/api/runs/'.length)));
           return run ? json(res, 200, run) : json(res, 404, { error: 'no such run' });
+        }
+        // Automations (src/automations/, Extend -> Automations): the owners' and writers' to read; a viewer gets nothing.
+        // A change is planned without confirm (nothing written) and carried out with it, against the file the review
+        // saw (its digest). Owners create, edit, delete and resume; writers pause and run now (mayDo). Every attempt is audited.
+        if (url.pathname === '/api/automations' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('automations are', who) });
+          if (!opts.automationsFile) return json(res, 200, { unavailable: "automations are a server instance's: this dashboard serves a checkout" });
+          return json(res, 200, automationsView({ loaded: loadAutomations(opts.automationsFile), limits: automationLimitsHere(), events: eventCache.all(), role: who.role, now: new Date() }));
+        }
+        if (url.pathname === '/api/automations' && req.method === 'POST') {
+          const body = ((await readBody(req)) ?? {}) as { action?: unknown; id?: unknown; automation?: unknown; digest?: unknown; confirm?: unknown };
+          const action = String(body.action ?? '') as AutomationAction;
+          const refused = (status: number, error: string) => {
+            audit(who, 'automation.refused_change', { action: action.slice(0, 20), id: String(body.id ?? '').slice(0, 40), why: error.slice(0, 300) });
+            return json(res, status, { error });
+          };
+          if (!opts.automationsFile) return refused(400, "automations are a server instance's: this dashboard serves a checkout");
+          if (!(AUTOMATION_ACTIONS as readonly string[]).includes(action)) return refused(400, `no action ${action.slice(0, 20)}`);
+          if (!mayDo(action, who.role)) return refused(403, `only the instance's owners (admin on ${repo}) may ${action} an automation${action === 'pause' || action === 'run' ? '' : '; writers may pause one or run it now'}; @${who.login} is a ${who.role}`);
+          const req2: ChangeRequest = { action, ...(typeof body.id === 'string' ? { id: body.id } : {}), ...(body.automation !== undefined ? { automation: body.automation } : {}) };
+          try {
+            if (body.confirm !== true) {
+              const plan = planChange(loadAutomations(opts.automationsFile), req2, who.login);
+              return json(res, 200, { ok: true, confirmed: false, action: plan.action, id: plan.id, changes: plan.changes, summary: plan.summary, digest: plan.digest });
+            }
+            const log = new EventLog(opts.eventsDb);
+            let plan;
+            try {
+              plan = applyChange({ path: opts.automationsFile, req: req2, digest: String(body.digest ?? ''), by: who.login, role: who.role, log });
+            } finally {
+              log.close();
+            }
+            audit(who, `automation.${plan.action}`, { id: plan.id, changes: plan.changes });
+            return json(res, 200, { ok: true, confirmed: true, action: plan.action, id: plan.id, changes: plan.changes, summary: plan.summary });
+          } catch (e) {
+            if (e instanceof AutomationsError) return refused(400, e.message);
+            throw e;
+          }
         }
         // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
         if (url.pathname === '/api/prs' && req.method === 'GET') {
