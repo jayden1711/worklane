@@ -409,6 +409,15 @@ export function docsUrl(page: string, repository: unknown = enginePackage().repo
 const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
 
 /**
+ * The options a site's own dashboard starts with (cli.ts `dashboard`): its log, state, policy, intake and automations
+ * files, backlog and roles. INVARIANT: one list, so an instance's file reaches its dashboard's routes (#522: the
+ * automations file did not, and Extend said "a checkout" on every instance).
+ */
+export function siteOptions(site: ReturnType<typeof dashboardSite>) {
+  return { root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, eventsDb: site.eventsDb, stateDir: site.stateDir, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(site.automationsFile ? { automationsFile: site.automationsFile } : {}) };
+}
+
+/**
  * Which log and state a dashboard reads. A project checkout's own, or, with
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.

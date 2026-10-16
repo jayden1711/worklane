@@ -35,7 +35,7 @@ import { lintSkills, SKILL_SECTIONS, skillLintReport, trackedSkills } from './sk
 import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
 import { APP_KEY_ROTATE_DAYS, appKeyAge, appKeyWarning, buildReport, tokenWarning } from './reports.js';
-import { dashboardSite, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
+import { dashboardSite, siteOptions, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBOARD_PORT, startDashboard, webUiBuilt } from './dashboard.js';
 import { DetachError, detachDashboard, detachedLines, useBold, writeDashboardPort } from './dashboard-detach.js';
 import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { keyFileNote } from './dashboard-key-url.js';
@@ -860,7 +860,7 @@ async function main(argv: string[]): Promise<number> {
         }
       }
       user = user || cfg.project.owners.default;
-      const d = await startDashboard({ root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, cfg, eventsDb: site.eventsDb, stateDir: site.stateDir, user, port: samePort ?? (portOpt ? Number(portOpt) : site.port), ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(instance ? { instance } : {}) });
+      const d = await startDashboard({ ...siteOptions(site), cfg, user, port: samePort ?? (portOpt ? Number(portOpt) : site.port), ...(instance ? { instance } : {}) });
       if (portFile) writeDashboardPort(portFile, Number(new URL(d.url).port));
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url} ${keyFileNote(d.keyFile)}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
