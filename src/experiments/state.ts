@@ -1,7 +1,7 @@
 // A study's state and research log, folded from its events (src/events/types.ts `experiment.*`): nothing else keeps
-// any. One session at a time, one proposal per session (the first one counts; a second for the same session, or one
-// for a session that isn't the current one, changes nothing), and a new session only while the study is idle.
-import { best, type Decision, type EntryKind, type Entry } from './keep.js';
+// any. One entry in flight at a time, one proposal per session (the first counts; a second for the same session, or
+// one for a session that isn't the current one, changes nothing), and a new entry only while the study is idle.
+import { best, type Decision, type Entry, type EntryKind, type Stage2 } from './keep.js';
 
 /** An event as the fold reads it (a StoredEvent fits). */
 export interface StudyEvent {
@@ -16,6 +16,7 @@ export interface LogEntry extends Entry {
   session: string;
   job: string | null;
   hypothesis: string;
+  variable: string;
   motivation: string;
   expected_effect: string;
   config: Record<string, string | number>;
@@ -27,6 +28,7 @@ export interface LogEntry extends Entry {
   step: string | null;
   tail: string;
   why: string;
+  timings: { train_ms: number; predict_ms: number; score_ms: number } | null;
 }
 
 export type Phase = 'idle' | 'session' | 'awaiting_approval' | 'queued' | 'running';
@@ -35,22 +37,19 @@ export interface StudyState {
   version: string;
   entries: LogEntry[];
   phase: Phase;
-  /** The entry in flight (any phase but idle). */
   current: number | null;
   paused: boolean;
   archived: boolean;
-  /** Three jobs in a row crashed, were refused or stopped: no session until someone resumes the study. */
+  /** Three jobs in a row crashed, were refused or stopped: no new entry until someone resumes the study. */
   broken: boolean;
   best: { n: number; value: number } | null;
 }
 
-/** Crashed, refused or stopped jobs in a row that pause a study (the circuit breaker). */
 export const BREAKER = 3;
 
 const str = (v: unknown) => (typeof v === 'string' ? v : '');
 
-/** The study's state at `version` (entries of other versions are left out; the pause state carries over). */
-export function foldStudy(events: readonly StudyEvent[], study: string, version: string, direction: 'min' | 'max'): StudyState {
+export function foldStudy(events: readonly StudyEvent[], study: string, version: string): StudyState {
   const entries: LogEntry[] = [];
   const byN = new Map<number, LogEntry>();
   let current: number | null = null;
@@ -71,12 +70,50 @@ export function foldStudy(events: readonly StudyEvent[], study: string, version:
       } else if (a === 'archive') archived = true;
       continue;
     }
+    if (e.type === 'experiment.verdict') {
+      const x = byN.get(p.n as number);
+      if (!x || x.decision !== 'held') continue;
+      if (p.answer === 'accept') x.decision = x.after ?? 'keep';
+      else {
+        x.decision = 'discard';
+        x.why = `rejected on review by ${str(p.by)}`;
+      }
+      continue;
+    }
     if (p.version !== undefined && p.version !== version) continue;
     const n = p.n as number;
     if (e.type === 'experiment.session') {
       if (phase !== 'idle' || byN.has(n)) continue;
       const kind = p.kind as EntryKind;
-      const entry: LogEntry = { n, kind, parent: (p.parent as number | null) ?? null, ...(p.of !== undefined ? { of: p.of as number } : {}), result: null, decision: 'running', ts: e.ts, session: str(p.session), job: null, hypothesis: kind === 'confirm' ? `Confirm run of #${p.of as number}` : '', motivation: '', expected_effect: '', config: {}, commit: null, files: [], approval: [], gpu_minutes: null, waited_s: null, step: null, tail: '', why: '' };
+      const entry: LogEntry = {
+        n,
+        kind,
+        parent: (p.parent as number | null) ?? null,
+        ...(p.of !== undefined ? { of: p.of as number } : {}),
+        ...(p.arm !== undefined ? { arm: p.arm as 'candidate' | 'best' } : {}),
+        ...(p.combines !== undefined ? { combines: p.combines as number } : {}),
+        size: (p.size as number) ?? 0,
+        seed: (p.seed as number) ?? 1,
+        result: null,
+        decision: 'running',
+        ts: e.ts,
+        session: str(p.session),
+        job: null,
+        hypothesis: '',
+        variable: '',
+        motivation: '',
+        expected_effect: '',
+        config: {},
+        commit: null,
+        files: [],
+        approval: [],
+        gpu_minutes: null,
+        waited_s: null,
+        step: null,
+        tail: '',
+        why: '',
+        timings: null,
+      };
       entries.push(entry);
       byN.set(n, entry);
       current = n;
@@ -91,7 +128,7 @@ export function foldStudy(events: readonly StudyEvent[], study: string, version:
         phase = 'idle';
         continue;
       }
-      Object.assign(entry, { job: str(p.job), hypothesis: entry.kind === 'confirm' ? entry.hypothesis : str(p.hypothesis), motivation: str(p.motivation), expected_effect: str(p.expected_effect), config: (p.config as Record<string, string | number>) ?? {}, commit: str(p.commit), files: (p.files as string[]) ?? [], approval: (p.approval as string[]) ?? [] });
+      Object.assign(entry, { job: str(p.job), hypothesis: str(p.hypothesis), variable: str(p.variable), motivation: str(p.motivation), expected_effect: str(p.expected_effect), config: (p.config as Record<string, string | number>) ?? {}, commit: str(p.commit), files: (p.files as string[]) ?? [], approval: (p.approval as string[]) ?? [] });
       phase = entry.approval.length ? 'awaiting_approval' : 'queued';
     } else if (e.type === 'experiment.approval') {
       const entry = entries.find((x) => x.job === p.job);
@@ -108,23 +145,34 @@ export function foldStudy(events: readonly StudyEvent[], study: string, version:
     } else if (e.type === 'experiment.recorded') {
       const entry = byN.get(n);
       if (!entry || current !== n || (phase !== 'running' && phase !== 'queued')) continue;
-      Object.assign(entry, { result: (p.score as number | null) ?? null, value: (p.value as number | null) ?? null, decision: p.decision as Decision, why: str(p.why), gpu_minutes: p.gpu_minutes as number, waited_s: p.waited_s as number, step: (p.step as string | null) ?? null, tail: str(p.tail) });
+      Object.assign(entry, { result: (p.score as number | null) ?? null, value: (p.value as number | null) ?? null, decision: p.decision as Decision, why: str(p.why), gpu_minutes: p.gpu_minutes as number, minutes: p.gpu_minutes as number, waited_s: p.waited_s as number, step: (p.step as string | null) ?? null, tail: str(p.tail), timings: (p.timings as LogEntry['timings']) ?? null });
+      if (p.vs !== undefined) entry.vs = p.vs as number;
       current = null;
       phase = 'idle';
+    } else if (e.type === 'experiment.judged') {
+      const entry = byN.get(n);
+      if (!entry) continue;
+      entry.stage2 = [...(entry.stage2 ?? []), p.stage2 as Stage2];
+      entry.decision = p.decision as Decision;
+      entry.why = str(p.why);
+      if (p.value !== undefined) entry.value = p.value as number | null;
+      if (p.after !== undefined) entry.after = p.after as 'keep' | 'winner';
     }
   }
   const since = entries.slice(resumedAt).filter((x) => x.decision !== 'running');
   const tail = since.slice(-BREAKER);
   const broken = tail.length === BREAKER && tail.every((x) => x.decision === 'crash' || x.decision === 'refused' || x.decision === 'stopped');
-  return { version, entries, phase, current, paused, archived, broken, best: best(entries, direction) };
+  return { version, entries, phase, current, paused, archived, broken, best: best(entries) };
 }
 
-/** Why no new session may start now, or null. */
+/** Why no new entry may start now, or null. */
 export function sessionHold(s: StudyState): string | null {
   if (s.archived) return 'archived';
   if (s.paused) return 'paused';
   if (s.broken) return `${BREAKER} jobs in a row crashed, were refused or stopped: resume it to go on`;
   if (s.phase !== 'idle') return `entry #${s.current} is ${s.phase.replace('_', ' ')}`;
+  const held = s.entries.find((e) => e.decision === 'held');
+  if (held) return `#${held.n} waits for an owner's review`;
   return null;
 }
 

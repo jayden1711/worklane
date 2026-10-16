@@ -26,7 +26,7 @@ export type Pin = z.infer<typeof Pin>;
 export const PinsFile = z.strictObject({
   version: z.literal(1),
   /** The instance's thresholds for an owner's approval (never above root's caps: those refuse a job outright). */
-  approve: z.strictObject({ above_minutes: z.number().int().min(1).max(1440), above_gb: z.number().int().min(1).max(99999) }).default({ ...APPROVE_DEFAULTS }),
+  approve: z.strictObject({ above_gb: z.number().int().min(1).max(99999) }).default({ ...APPROVE_DEFAULTS }),
   studies: z.record(z.string().regex(ID), Pin).default({}),
 });
 export type PinsFile = z.infer<typeof PinsFile>;

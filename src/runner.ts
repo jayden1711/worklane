@@ -52,6 +52,11 @@ export interface RunRequest {
   timeoutMs: number;
   onStart?: (pid: number) => void;
   onActivity?: (note: string) => void;
+  /**
+   * Every line of the session's stream (reasoning, text, tool calls and results), as it arrives: for a reader on the
+   * coordinator's side (the experiment monitor), never sent back to the session.
+   */
+  onStreamLine?: (line: unknown) => void;
   /** Once the session is up: the handle for messaging and stopping it (the console). Called again on a retried start. */
   onControl?: (c: RunControl) => void;
   /** A console message's progress: queued (held until the current turn ends), delivered, or dropped (the run ended first). */
@@ -683,6 +688,7 @@ export class CliRunner implements AgentRunner {
           }
           record?.line(j);
           feed?.line(j);
+          req.onStreamLine?.(j);
           refusals.line(j);
           if (stuck) {
             for (const v of stuck.detector.line(j)) {
@@ -766,7 +772,7 @@ export class CliRunner implements AgentRunner {
 }
 
 /** What a scripted run returns; `reads` are the files its session opened, kept in its run record. */
-export type FakeResult = Partial<RunResult> & { reads?: string[] };
+export type FakeResult = Partial<RunResult> & { reads?: string[]; /** Stream lines the session "emits" (onStreamLine). */ stream?: unknown[] };
 
 /**
  * Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. A run
@@ -779,7 +785,8 @@ export class FakeRunner implements AgentRunner {
   async run(req: RunRequest): Promise<RunResult> {
     this.calls.push(req);
     req.onStart?.(process.pid);
-    const { reads, ...r } = await this.script(req);
+    const { reads, stream, ...r } = await this.script(req);
+    for (const l of stream ?? []) req.onStreamLine?.(l);
     const reviewed = (r.structured as { files_reviewed?: unknown } | undefined)?.files_reviewed;
     const read = reads ?? (Array.isArray(reviewed) ? reviewed.map(String) : null);
     const out: RunResult = { reason: 'succeeded', detail: '', costUsd: 0.01, turns: 1, model: req.model, ...r };

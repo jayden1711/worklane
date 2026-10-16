@@ -6,15 +6,16 @@ import { redactString } from '../events/redact.js';
 import { globToRegExp } from '../guardrails/glob.js';
 import { configRefusal, type Study } from './study.js';
 
-export const TEXT_CAPS = { hypothesis: 200, motivation: 600, expected_effect: 200 } as const;
+export const TEXT_CAPS = { hypothesis: 200, variable: 200, motivation: 600, expected_effect: 200 } as const;
 
 /** The session's structured output (the runner's jsonSchema): one hypothesis, one config, and nothing else. */
 export const PROPOSAL_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['hypothesis', 'motivation', 'expected_effect', 'config'],
+  required: ['hypothesis', 'variable', 'motivation', 'expected_effect', 'config'],
   properties: {
     hypothesis: { type: 'string', maxLength: TEXT_CAPS.hypothesis },
+    variable: { type: 'string', maxLength: TEXT_CAPS.variable },
     motivation: { type: 'string', maxLength: TEXT_CAPS.motivation },
     expected_effect: { type: 'string', maxLength: TEXT_CAPS.expected_effect },
     config: { type: 'object' },
@@ -23,6 +24,8 @@ export const PROPOSAL_SCHEMA = {
 
 export interface Proposal {
   hypothesis: string;
+  /** The one thing it changes (one knob, or the code), in the session's words. */
+  variable: string;
   motivation: string;
   expected_effect: string;
   config: Record<string, string | number>;
@@ -37,11 +40,12 @@ export function readProposal(raw: unknown, study: Study): Proposal | { refused: 
   const o = raw as Record<string, unknown>;
   const extra = Object.keys(o).filter((k) => !(k in PROPOSAL_SCHEMA.properties));
   if (extra.length) return { refused: `unexpected fields: ${extra.join(', ')}` };
-  for (const k of ['hypothesis', 'motivation', 'expected_effect'] as const) if (typeof o[k] !== 'string' || !(o[k] as string).trim()) return { refused: `no ${k}` };
+  for (const k of ['hypothesis', 'variable', 'motivation', 'expected_effect'] as const) if (typeof o[k] !== 'string' || !(o[k] as string).trim()) return { refused: `no ${k}` };
   const why = configRefusal(o.config, study.config_schema);
   if (why) return { refused: `config: ${why}` };
   return {
     hypothesis: logText(o.hypothesis as string, TEXT_CAPS.hypothesis),
+    variable: logText(o.variable as string, TEXT_CAPS.variable),
     motivation: logText(o.motivation as string, TEXT_CAPS.motivation),
     expected_effect: logText(o.expected_effect as string, TEXT_CAPS.expected_effect),
     config: o.config as Record<string, string | number>,
@@ -80,8 +84,9 @@ const plainChange = (o: string, n: string) => (o === '000000' ? n === '100644' :
 export function checkChange(changes: readonly Change[], study: Study): { ok: true; files: string[]; lockfile: boolean } | { ok: false; why: string } {
   if (!changes.length) return { ok: false, why: 'no change' };
   const editable = study.editable.map(globToRegExp);
+  const evalFiles = [...study.eval.files, ...study.eval.predict_files];
   for (const c of changes) {
-    if (study.eval.files.includes(c.path)) return { ok: false, why: `changed the eval file ${c.path}` };
+    if (evalFiles.includes(c.path)) return { ok: false, why: `changed the eval file ${c.path}` };
     if (!editable.some((r) => r.test(c.path))) return { ok: false, why: `changed ${c.path}, outside the study's editable paths` };
     if (!plainChange(c.oldMode, c.newMode)) return { ok: false, why: `${c.path}: only plain files may change, never a symlink, a submodule or a mode (${c.oldMode} -> ${c.newMode})` };
   }
