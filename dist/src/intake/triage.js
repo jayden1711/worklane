@@ -1,0 +1,65 @@
+// What the intake agent may return, and what the pipeline accepts from it. The
+// agent reads untrusted report text, so its output is a fixed shape: a triage
+// kind, an optional duplicate/group target, a reproduction result, an issue draft
+// and a reply. It has no field for labels, trust, config or decisions, and any
+// such field it returns anyway is dropped and named.
+import { checkDraftedIssue, DRAFT_FORMAT } from '../backlog/types.js';
+import { TRIAGE_KINDS } from './report.js';
+export const INTAKE_SCHEMA = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind'],
+    properties: {
+        kind: { type: 'string', enum: [...TRIAGE_KINDS] },
+        duplicate_of: { type: 'integer', minimum: 1, description: 'An open issue this report is the same bug or request as.' },
+        group_with: { type: 'string', description: 'A recent report id this belongs with, when no issue exists yet.' },
+        reproduction: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['result', 'detail'],
+            properties: {
+                result: { type: 'string', enum: ['reproduced', 'not_reproduced', 'fixed_on_main', 'not_tried'] },
+                detail: { type: 'string' },
+                commit: { type: 'string' },
+            },
+        },
+        draft: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['title', 'body'],
+            properties: { title: { type: 'string' }, body: { type: 'string', description: `Markdown in ${DRAFT_FORMAT}` } },
+        },
+        reply: { type: 'string', description: 'What to ask the reporter, for needs_info or not_actionable. Short and polite; no internal details.' },
+    },
+};
+const ALLOWED = new Set(['kind', 'duplicate_of', 'group_with', 'reproduction', 'draft', 'reply']);
+/** The agent's output as the pipeline takes it: only the known fields, each checked; everything else dropped and named. */
+export function acceptTriage(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw))
+        return { ok: false, why: 'not an object' };
+    const o = raw;
+    const dropped = Object.keys(o).filter((k) => !ALLOWED.has(k));
+    if (!TRIAGE_KINDS.includes(o.kind))
+        return { ok: false, why: `unknown kind ${JSON.stringify(o.kind)}` };
+    const t = { kind: o.kind };
+    if (Number.isInteger(o.duplicate_of) && o.duplicate_of > 0)
+        t.duplicate_of = o.duplicate_of;
+    if (typeof o.group_with === 'string' && /^[0-9a-f]{20}$/.test(o.group_with))
+        t.group_with = o.group_with;
+    const rep = o.reproduction;
+    if (rep && typeof rep === 'object' && ['reproduced', 'not_reproduced', 'fixed_on_main', 'not_tried'].includes(rep.result) && typeof rep.detail === 'string') {
+        t.reproduction = { result: rep.result, detail: rep.detail.slice(0, 2000), ...(typeof rep.commit === 'string' && /^[0-9a-f]{7,40}$/.test(rep.commit) ? { commit: rep.commit } : {}) };
+    }
+    const d = o.draft;
+    if (d && typeof d === 'object' && typeof d.title === 'string' && typeof d.body === 'string')
+        t.draft = { title: d.title.slice(0, 200), body: d.body.slice(0, 20_000) };
+    if (typeof o.reply === 'string')
+        t.reply = o.reply.slice(0, 600);
+    return { ok: true, triage: t, dropped };
+}
+/** Is a draft fileable? The five parts, checked by the engine's contract parser (checkDraftedIssue). */
+export function checkDraft(draft) {
+    const c = checkDraftedIssue(draft.title, draft.body);
+    return c.ok ? { ok: true } : c;
+}
+//# sourceMappingURL=triage.js.map

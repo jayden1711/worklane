@@ -1,0 +1,186 @@
+// Worktrees the coordinator creates and owns. It never lists, touches or
+// removes a worktree it didn't create: names carry our prefix AND must be in
+// our ownership record, so other sessions' worktrees are always safe.
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { BRAND } from './brand.js';
+import { checkoutSparse } from './checkout.js';
+import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
+const ownedFile = (o) => join(o.stateDir, 'worktrees.json');
+function owned(o) {
+    try {
+        return JSON.parse(readFileSync(ownedFile(o), 'utf8'));
+    }
+    catch {
+        return [];
+    }
+}
+function setOwned(o, list) {
+    groupOnlyDir(o.stateDir);
+    writeGroupOnly(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
+}
+const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+/**
+ * What Claude Code's sandbox leaves in a worktree. It protects some paths
+ * from writes inside the working directory; on Linux it does that by
+ * mounting over them, so a protected path that doesn't exist yet is first
+ * created, empty, as the mount point, and stays after the run.
+ *
+ * Two kinds:
+ * - Files and folders at the worktree root, from the sandbox's own list
+ *   (in Claude Code 2.1.282: .gitconfig, .gitmodules, shell startup files,
+ *   .ripgreprc, .mcp.json, .vscode, .idea), plus the other shell files.
+ * - Anything under .claude/. Claude Code protects more of it with each
+ *   version (commands, agents, launch.json, loop.md, output-styles,
+ *   routines, scheduled_tasks.json, ...), so it is covered as a whole
+ *   rather than by name. .claude/ is harness config: agents edit tracked
+ *   files there through review, and never add new ones.
+ */
+export const SANDBOX_ROOT_PLACEHOLDERS = [
+    '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile', '.ripgreprc', '.mcp.json', '.vscode', '.idea',
+    '.bash_login', '.bash_logout', '.bash_aliases', '.zshenv', '.zlogin', '.zlogout',
+];
+const PROTECTED_DIR = '.claude';
+const EXCLUDE_MARKER = `# ${BRAND.cli}: empty mount points Claude Code's sandbox leaves in worktrees; never commit them`;
+const EXCLUDE_END = `# ${BRAND.cli}: end`;
+/**
+ * Keep the sandbox's placeholders out of anything an agent can commit: an
+ * exclude block in the repo's shared info/exclude (it covers every
+ * worktree), rewritten each time so it follows this list. Exclusion only
+ * affects untracked files: changes to tracked ones still show.
+ */
+export function excludeSandboxPlaceholders(repo) {
+    const file = join(resolve(repo, git(repo, 'rev-parse', '--git-common-dir')), 'info', 'exclude');
+    const lines = (existsSync(file) ? readFileSync(file, 'utf8') : '').split('\n');
+    const kept = [];
+    for (let i = 0; i < lines.length; i++) {
+        if (lines[i] !== EXCLUDE_MARKER) {
+            kept.push(lines[i]);
+            continue;
+        }
+        // Drop our previous block: through its end line, or (older blocks) through its patterns.
+        while (i + 1 < lines.length && (lines[i + 1] === EXCLUDE_END || lines[i + 1].startsWith('/')))
+            if (lines[++i] === EXCLUDE_END)
+                break;
+    }
+    const before = kept.join('\n').replace(/\n*$/, '');
+    const block = [EXCLUDE_MARKER, ...SANDBOX_ROOT_PLACEHOLDERS.map((p) => `/${p}`), `/${PROTECTED_DIR}/`, EXCLUDE_END].join('\n');
+    mkdirSync(join(file, '..'), { recursive: true });
+    writeFileSync(file, `${before ? `${before}\n` : ''}${block}\n`);
+}
+/** After a run, remove the sandbox's leftover mount points: only empty, untracked ones. */
+export function removeSandboxPlaceholders(worktree) {
+    const removed = [];
+    const tracked = (p) => git(worktree, 'ls-files', '--', p) !== '';
+    const remove = (p) => {
+        const full = join(worktree, p);
+        let st;
+        try {
+            st = lstatSync(full);
+        }
+        catch {
+            return false;
+        }
+        if (tracked(p))
+            return false; // the project's own file
+        try {
+            if (st.isFile() && st.size === 0)
+                unlinkSync(full);
+            else if (st.isDirectory()) {
+                // Children first: a folder of empty placeholders is itself a placeholder.
+                for (const child of readdirSync(full))
+                    remove(`${p}/${child}`);
+                if (readdirSync(full).length)
+                    return false;
+                rmdirSync(full);
+            }
+            else
+                return false;
+            removed.push(p);
+            return true;
+        }
+        catch {
+            return false; // not ours to remove (permissions): the exclude still keeps it out of commits
+        }
+    };
+    for (const p of SANDBOX_ROOT_PLACEHOLDERS)
+        remove(p);
+    if (existsSync(join(worktree, PROTECTED_DIR)))
+        for (const child of readdirSync(join(worktree, PROTECTED_DIR)))
+            remove(`${PROTECTED_DIR}/${child}`);
+    return removed;
+}
+export function worktreePath(o, name) {
+    return resolve(o.repo, o.root, `${BRAND.cli}-${name}`);
+}
+/** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first. */
+function addWorktree(o, name, branch, base) {
+    const path = worktreePath(o, name);
+    if (existsSync(path))
+        removeWorktree(o, name);
+    setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
+    excludeSandboxPlaceholders(o.repo);
+    const sparse = o.sparseExclude ?? [];
+    git(o.repo, 'worktree', 'add', '-q', ...(sparse.length ? ['--no-checkout'] : []), '-B', branch, path, base);
+    if (sparse.length)
+        checkoutSparse(o.repo, path, sparse);
+    return path;
+}
+/**
+ * createWorktree without blocking: the setup steps run as child processes the event loop waits on, for work
+ * done in the background (a worktree pool refilling while the coordinator keeps going).
+ */
+export async function createWorktreeAsync(o, name, branch, base) {
+    const path = addWorktree(o, name, branch, base);
+    const setupErrors = [];
+    for (const step of o.setup) {
+        const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
+        const r = await new Promise((resolve) => {
+            let stderr = '';
+            const child = spawn(file, args, { cwd: path, env, stdio: ['ignore', 'ignore', 'pipe'] });
+            const timer = setTimeout(() => child.kill('SIGKILL'), 900_000);
+            child.stderr.on('data', (d) => (stderr = (stderr + d.toString()).slice(-4000)));
+            child.on('error', () => {
+                clearTimeout(timer);
+                resolve({ status: null, stderr });
+            });
+            child.on('close', (status) => {
+                clearTimeout(timer);
+                resolve({ status, stderr });
+            });
+        });
+        if (r.status !== 0)
+            setupErrors.push(`${step}: exit ${r.status} ${r.stderr.trim().split('\n').pop() ?? ''}`);
+    }
+    return { path, setupErrors };
+}
+/** Create a worktree on a new branch at `base`, then run the project's setup steps. */
+export function createWorktree(o, name, branch, base) {
+    const path = addWorktree(o, name, branch, base);
+    const setupErrors = [];
+    for (const step of o.setup) {
+        const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
+        const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
+        if (r.status !== 0)
+            setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
+    }
+    return { path, setupErrors };
+}
+/** Remove one of OUR worktrees; refuses anything not in the ownership record. Verified after. */
+export function removeWorktree(o, name) {
+    const path = worktreePath(o, name);
+    if (!owned(o).includes(path))
+        throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+    spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
+    spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
+    const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
+    if (gone)
+        setOwned(o, owned(o).filter((p) => p !== path));
+    return gone;
+}
+/** Our worktrees still on disk (for startup cleanup of terminal tasks). */
+export function ownedWorktrees(o) {
+    return owned(o).filter((p) => existsSync(p));
+}
+//# sourceMappingURL=worktrees.js.map

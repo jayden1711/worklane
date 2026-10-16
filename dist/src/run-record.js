@@ -1,0 +1,236 @@
+// What an agent did in one run, as the dashboard shows it: each shell
+// command with whether it failed and the first lines of its output, every
+// file it wrote, and its final message. Recorded by the runner from the
+// stream-json it already reads, into the coordinator's own state dir (the
+// dashboard can't read the agent user's session files). Bounded in size and
+// redacted; a recording problem never affects the run.
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { redact } from './events/redact.js';
+import { groupOnlyDir } from './os/index.js';
+export const RUNS_DIR = 'runs';
+/** Run records kept per state dir; the oldest go first. */
+export const KEEP_RUNS = 500;
+const MAX_STEPS = 400;
+const MAX_COMMAND = 400;
+const MAX_OUTPUT_LINES = 6;
+const MAX_OUTPUT = 800;
+const MAX_FINAL = 4000;
+/** A failed run's why (Claude's error text or its stderr's tail), as kept in its record. */
+export const MAX_DETAIL = 2000;
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+const clip = (s, n) => (s.length > n ? `${s.slice(0, n)} …` : s);
+const firstLines = (s) => clip(s.trim().split('\n').slice(0, MAX_OUTPUT_LINES).join('\n'), MAX_OUTPUT);
+const text = (c) => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x && typeof x === 'object' && 'text' in x ? String(x.text ?? '') : '')).join('') : '');
+/** At most this many files read are kept per run. */
+const MAX_READ = 500;
+/** git diff / git show options that list names or counts, not contents: they don't count as reading. */
+const NAMES_ONLY = /^--(stat|shortstat|numstat|name-only|name-status|summary|dirstat|compact-summary)(=|$)/;
+/**
+ * What a shell command showed of the repo's files through git: the paths after `--`, `rev:path` arguments, and
+ * `all` for a diff or show of a range with no path (every changed file's diff). Each part of a compound command
+ * (&&, ;, |) is read on its own. A listing of names or counts shows no contents and counts for nothing.
+ */
+export function gitDiffReads(command) {
+    let all = false;
+    const paths = [];
+    for (const part of command.split(/&&|\|\||;|\|/)) {
+        const words = part.trim().split(/\s+/).map((w) => w.replace(/^['"]|['"]$/g, ''));
+        const at = words.findIndex((w, i) => w === 'git' && (words[i + 1] === 'diff' || words[i + 1] === 'show'));
+        if (at < 0)
+            continue;
+        const args = words.slice(at + 2);
+        if (args.some((a) => NAMES_ONLY.test(a)))
+            continue;
+        const dash = args.indexOf('--');
+        const named = dash >= 0 ? args.slice(dash + 1) : [];
+        const revPaths = (dash >= 0 ? args.slice(0, dash) : args).filter((a) => !a.startsWith('-') && /^[^:]+:.+$/.test(a)).map((a) => a.slice(a.indexOf(':') + 1));
+        paths.push(...named.filter(Boolean), ...revPaths);
+        if (!named.length && !revPaths.length)
+            all = true;
+    }
+    return { all, paths };
+}
+/** The issue a run belongs to, from its worktree or task file (issue-<n>). */
+export function runIssue(cwd, taskFile) {
+    for (const p of [cwd, taskFile ?? '']) {
+        // Either separator, whatever platform this runs on.
+        const m = (p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? '').match(/^issue-(\d+)(\.json)?$/);
+        if (m)
+            return Number(m[1]);
+    }
+    return null;
+}
+export class RunRecorder {
+    stateDir;
+    rec;
+    pending = new Map();
+    /** Reads waiting on their tool's result: a file counts as read only once the call that read it succeeded. */
+    pendingReads = new Map();
+    cwd;
+    constructor(stateDir, o, now = new Date()) {
+        this.stateDir = stateDir;
+        const id = `${now.toISOString().replace(/[:.]/g, '-')}-${o.role.replace(/[^A-Za-z0-9_-]/g, '_')}-${randomBytes(3).toString('hex')}`;
+        this.rec = { v: 1, id, issue: o.issue ?? runIssue(o.cwd, o.taskFile), role: o.role, model: o.model, startedAt: now.toISOString(), endedAt: null, reason: null, costUsd: null, turns: null, steps: [], files: [], otherTools: 0, final: '', truncated: false, ...(o.resumed ? { resumed: o.resumed } : {}) };
+        this.cwd = o.cwd;
+    }
+    get id() {
+        return this.rec.id;
+    }
+    /** One stream-json line from the agent's session. */
+    line(j) {
+        try {
+            const m = j;
+            if (m.type === 'system' && m.subtype === 'init') {
+                const plugins = (Array.isArray(m.plugins) ? m.plugins : []).flatMap((p) => (p && p.path !== 'builtin' && typeof p.name === 'string' ? [clip(p.name, 80)] : []));
+                const mcpServers = (Array.isArray(m.mcp_servers) ? m.mcp_servers : []).flatMap((s) => (s && typeof s.name === 'string' ? [clip(s.name, 80)] : []));
+                if (plugins.length || mcpServers.length)
+                    this.rec.loaded = { plugins: plugins.slice(0, 50), mcpServers: mcpServers.slice(0, 50) };
+            }
+            const content = Array.isArray(m.message?.content) ? m.message.content : [];
+            if (m.type === 'assistant') {
+                for (const c of content) {
+                    if (c.type === 'text' && typeof c.text === 'string' && c.text.trim())
+                        this.rec.final = clip(c.text, MAX_FINAL);
+                    if (c.type !== 'tool_use')
+                        continue;
+                    const input = (c.input ?? {});
+                    const tool = String(c.name);
+                    let step = null;
+                    if (tool === 'Bash') {
+                        step = { kind: 'command', tool, what: clip(String(input.command ?? ''), MAX_COMMAND), status: 'no result', exitCode: null, output: '' };
+                        const seen = gitDiffReads(String(input.command ?? ''));
+                        if ((seen.all || seen.paths.length) && typeof c.id === 'string')
+                            this.pendingReads.set(c.id, seen);
+                    }
+                    else if (tool === 'Read') {
+                        if (typeof c.id === 'string')
+                            this.pendingReads.set(c.id, { paths: [String(input.file_path ?? '')], all: false });
+                        this.rec.otherTools++;
+                    }
+                    else if (WRITE_TOOLS.has(tool)) {
+                        const file = this.relative(String(input.file_path ?? input.notebook_path ?? ''));
+                        if (file && !this.rec.files.includes(file))
+                            this.rec.files.push(file);
+                        step = { kind: 'write', tool, what: file, status: 'no result', exitCode: null, output: '' };
+                    }
+                    else
+                        this.rec.otherTools++;
+                    if (!step)
+                        continue;
+                    if (this.rec.steps.length >= MAX_STEPS) {
+                        this.rec.truncated = true;
+                        continue;
+                    }
+                    this.rec.steps.push(step);
+                    if (typeof c.id === 'string')
+                        this.pending.set(c.id, step);
+                }
+            }
+            else if (m.type === 'user') {
+                for (const c of content) {
+                    if (c.type !== 'tool_result' || typeof c.tool_use_id !== 'string')
+                        continue;
+                    const reads = this.pendingReads.get(c.tool_use_id);
+                    this.pendingReads.delete(c.tool_use_id);
+                    if (reads && !c.is_error) {
+                        if (reads.all)
+                            this.rec.diffedAll = true;
+                        for (const p of reads.paths)
+                            this.noteRead(p);
+                    }
+                    const step = this.pending.get(c.tool_use_id);
+                    if (!step)
+                        continue;
+                    this.pending.delete(c.tool_use_id);
+                    const out = text(c.content);
+                    step.status = c.is_error ? 'error' : 'ok';
+                    const code = out.match(/\bexit(?:ed with)? code:? (\d+)/i);
+                    step.exitCode = code ? Number(code[1]) : step.status === 'ok' && step.kind === 'command' ? 0 : null;
+                    step.output = firstLines(out);
+                }
+            }
+        }
+        catch {
+            // a line we can't read is left out
+        }
+    }
+    /** Write the record when the run ends; keeps only the newest KEEP_RUNS. Never throws. */
+    finish(end, now = new Date()) {
+        try {
+            Object.assign(this.rec, { endedAt: now.toISOString(), reason: end.reason, costUsd: end.costUsd, turns: end.turns, model: end.model });
+            if (end.detail?.trim() && end.reason !== 'succeeded')
+                this.rec.detail = clip(end.detail.trim(), MAX_DETAIL);
+            if (end.sessionId)
+                this.rec.sessionId = end.sessionId;
+            if (end.stuck && end.stuck.repeats > 1)
+                this.rec.stuck = { ...end.stuck };
+            // The session's own result text is its final message; else the last thing it said.
+            if (end.final?.trim())
+                this.rec.final = clip(end.final, MAX_FINAL);
+            const dir = join(this.stateDir, RUNS_DIR);
+            groupOnlyDir(dir);
+            const file = join(dir, `${this.rec.id}.json`);
+            const tmp = join(dir, `.${this.rec.id}.tmp`);
+            writeFileSync(tmp, JSON.stringify(redact(this.rec)), { mode: 0o600 });
+            renameSync(tmp, file);
+            const all = readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+            for (const old of all.slice(0, Math.max(0, all.length - KEEP_RUNS)))
+                rmSync(join(dir, old), { force: true });
+            return file;
+        }
+        catch {
+            return null;
+        }
+    }
+    noteRead(p) {
+        const file = this.relative(p).replace(/\\/g, '/').replace(/^\.\//, '');
+        if (!file)
+            return;
+        const read = (this.rec.read ??= []);
+        if (!read.includes(file) && read.length < MAX_READ)
+            read.push(file);
+    }
+    relative(p) {
+        const root = this.cwd.replace(/[\\/]+$/, '');
+        return p.startsWith(root + '/') || p.startsWith(root + '\\') ? p.slice(root.length + 1) : p;
+    }
+}
+const VALID_ID = /^[A-Za-z0-9_-]+$/;
+/** One run's record, or null (unknown, or not a valid id: never a path outside the runs dir). */
+export function readRun(stateDir, id) {
+    if (!VALID_ID.test(id))
+        return null;
+    const f = join(stateDir, RUNS_DIR, `${id}.json`);
+    if (!existsSync(f))
+        return null;
+    try {
+        return JSON.parse(readFileSync(f, 'utf8'));
+    }
+    catch {
+        return null;
+    }
+}
+/** An issue's runs, oldest first, without their steps. */
+export function runsForIssue(stateDir, issue) {
+    const dir = join(stateDir, RUNS_DIR);
+    let files = [];
+    try {
+        files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+    }
+    catch {
+        return [];
+    }
+    const out = [];
+    for (const f of files) {
+        const r = readRun(stateDir, f.slice(0, -'.json'.length));
+        if (!r || r.issue !== issue)
+            continue;
+        const { steps, otherTools: _o, final: _f, v: _v, ...rest } = r;
+        const commands = steps.filter((s) => s.kind === 'command');
+        out.push({ ...rest, commands: commands.length, failedCommands: commands.filter((s) => s.status === 'error').length });
+    }
+    return out;
+}
+//# sourceMappingURL=run-record.js.map

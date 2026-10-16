@@ -1,0 +1,82 @@
+// `intake check`: validate an instance's intake.yaml without waiting for the coordinator to read it. The same
+// loader the coordinator uses (loadIntakeConfig), so "valid" here means intake stays on at the next pass, and each
+// error here is the one that would turn it off. Read-only: nothing is written, and nothing is printed from the file
+// but which sources are on, how many channels, the superfan's channel id, and the schema's own messages.
+import { accessSync, constants, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { instancesDir, listInstances } from '../instance.js';
+import { INTAKE_FILE, loadIntakeConfig } from './config.js';
+/** What is on, a line per source. INVARIANT: only these fields of the file are ever printed (no ids of people). */
+export function intakeSummary(c) {
+    const n = c.discord.channels.length;
+    return [
+        `discord: ${c.discord.enabled ? `on, ${n} channel${n === 1 ? '' : 's'}` : 'off'}`,
+        `superfan: ${c.superfan.enabled ? `on, channel ${c.superfan.channel}` : 'off'}`,
+        `github: ${c.github.enabled ? 'on' : 'off'}`,
+        `slack: ${c.slack.enabled ? `on, ${c.slack.channels.length} channel${c.slack.channels.length === 1 ? '' : 's'}, ${c.slack.allowed_senders.length} may send` : 'off'}`,
+        `linear: ${c.linear.enabled ? `on, ${c.linear.allowed_senders.length} may send` : 'off'}`,
+    ];
+}
+/** Check one intake.yaml. Never throws: a file that can't be read is invalid, with why. */
+export function checkIntakeFile(file) {
+    try {
+        // WHY before the loader: it reports a file it can't open as bad YAML, and one it can't see as absent.
+        accessSync(file, constants.R_OK);
+    }
+    catch (e) {
+        const code = e.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR')
+            return { state: 'off', file };
+        // WHY: a file this user can't reach is not "absent, so off": the coordinator's own user may read it fine.
+        return { state: 'invalid', file, errors: [`can't be read from this user (${code ?? 'error'}); run this as the instance's user`] };
+    }
+    try {
+        const r = loadIntakeConfig(file);
+        if (!r)
+            return { state: 'off', file };
+        if ('error' in r)
+            return { state: 'invalid', file, errors: r.errors };
+        return { state: 'valid', file, summary: intakeSummary(r.config), warnings: r.warnings };
+    }
+    catch (e) {
+        return { state: 'invalid', file, errors: [`can't be read (${e.code ?? e.message.split('\n')[0]}); run this as the instance's user`] };
+    }
+}
+/** The CLI command: pick the instance (as `discord channels` does), check its intake.yaml. Exit 0 valid or off, 1 invalid. */
+export function intakeCheckCommand(o = {}) {
+    const out = o.out ?? ((l) => console.log(l));
+    const err = o.err ?? ((l) => console.error(l));
+    const dir = o.dir ?? instancesDir();
+    let name = o.instance;
+    if (!name) {
+        const all = listInstances(dir);
+        if (all.length !== 1) {
+            err(all.length ? `more than one instance here (${all.join(', ')}); pass --instance <name>` : `no instance here (${dir}); run this as the instance's user, or pass --instance <name>`);
+            return 1;
+        }
+        name = all[0];
+    }
+    else if (!existsSync(join(dir, name, 'instance.yaml'))) {
+        // WHY: a mistyped name must not read as "no intake.yaml: intake is off".
+        err(`no instance ${name} here (${dir}); run this as the instance's user`);
+        return 1;
+    }
+    const c = checkIntakeFile(join(dir, name, INTAKE_FILE));
+    if (c.state === 'off') {
+        out(`no ${c.file}: intake is off`);
+        return 0;
+    }
+    if (c.state === 'invalid') {
+        err(`${c.file}: invalid; intake is off until it is fixed`);
+        for (const e of c.errors)
+            err(`  ${e}`);
+        return 1;
+    }
+    out(`${c.file}: valid`);
+    for (const l of c.summary)
+        out(l);
+    for (const w of c.warnings)
+        out(`warning: ${w}`);
+    return 0;
+}
+//# sourceMappingURL=check.js.map

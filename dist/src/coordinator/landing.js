@@ -1,0 +1,432 @@
+// Landing: the land queue and batches, the gates before landing, opening PRs, and what follows a landing (deploy).
+import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { BRAND } from '../brand.js';
+import { release } from '../claims.js';
+import { computeLevel, loadMoneyPaths } from '../review.js';
+import { waitCategoriesOf } from '../merge-policy.js';
+import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
+import { claimLines } from '../claim-labels.js';
+import { checkedPush } from '../push-check.js';
+import { DIRECT_LAND_REFUSED, directLandRefusal, localRemote } from '../direct-land.js';
+import { receiptLines } from '../receipts.js';
+import { scanRange } from '../scan/secrets.js';
+import { fullRunLock } from '../slots.js';
+import { baselineGate, latestBaseline } from '../baseline.js';
+import { createWorktree, removeWorktree } from '../worktrees.js';
+import { Decisions } from './decisions.js';
+import { sh, evalLines, pushRefusal, DEFAULT_REVIEW } from './shared.js';
+import { slotDeferringSince } from './wait-caps.js';
+import { optimizePrLines } from '../optimize.js';
+export class Landing extends Decisions {
+    // ---------------------------------------------------------------- landing
+    /** Queued changes without a final landing result, oldest first. "deferred" isn't final. */
+    landQueue() {
+        const out = [];
+        for (const q of this.d.log.read(0, ['land.queued'])) {
+            const p = q.payload;
+            const final = this.d.log.read(q.id, ['land.result']).some((r) => r.payload.issue === p.issue && r.payload.outcome !== 'deferred');
+            if (!final && !out.some((x) => x.issue === p.issue))
+                out.push(p);
+        }
+        return out;
+    }
+    filesOf(issue, head) {
+        const e = this.events(issue).filter((x) => x.type === 'change.proposed' && x.payload.head === head).at(-1);
+        return e?.payload?.files ?? [];
+    }
+    /** Seed with the oldest; add later changes whose files don't overlap, at most one L3, up to batch_max. */
+    buildBatch(queue) {
+        const max = this.d.cfg.tests.land.batch_max;
+        const batch = [];
+        const files = new Set();
+        for (const q of queue) {
+            if (batch.length >= max)
+                break;
+            const f = this.filesOf(q.issue, q.head);
+            if (batch.length && f.some((x) => files.has(x)))
+                continue;
+            if (q.level === 'L3' && batch.some((b) => b.level === 'L3'))
+                continue;
+            batch.push(q);
+            f.forEach((x) => files.add(x));
+        }
+        return batch;
+    }
+    directRefused = null;
+    remoteIsLocal;
+    /**
+     * Why a direct land may not push the default branch now, or null: GitHub must enforce its protection, asked now
+     * (src/direct-land.ts). A refusal is recorded once until the answer changes (coordinator.error: health and the
+     * dashboard show it); the queue waits, and lands once protection is back.
+     */
+    async directLandBlocked() {
+        this.remoteIsLocal ??= localRemote(this.d.repo, this.remote);
+        const why = await directLandRefusal(this.d.protection, { repo: this.d.cfg.project.project.repo, branch: this.branch, local: this.remoteIsLocal });
+        if (why && why !== this.directRefused)
+            this.emit('coordinator.error', { instance: this.d.instance, where: 'direct land', kind: DIRECT_LAND_REFUSED, message: `nothing pushed: ${why}`.slice(0, 1000) });
+        this.directRefused = why;
+        return why;
+    }
+    async landNext() {
+        // Safety floor: under an emergency stop the queue waits; it lands once the stop is lifted.
+        if (this.landing || this.emergencyInForce())
+            return;
+        const queue = this.landQueue();
+        if (!queue.length)
+            return;
+        this.landing = true;
+        try {
+            if (this.d.cfg.project.land_mode === 'pr')
+                for (const q of queue)
+                    await this.proposePr(q);
+            // Direct: not even the gates run while the branch is unprotected (asked again just before the push, too).
+            else if (!(await this.directLandBlocked()))
+                await this.landBatch(this.buildBatch(queue));
+        }
+        finally {
+            this.landing = false;
+        }
+    }
+    gateTiers(batch) {
+        const gates = this.d.cfg.tests.gates;
+        const money = loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+        const touchesMoney = batch.some((q) => this.filesOf(q.issue, q.head).some((f) => money.some((re) => re.test(f))) || this.events(q.issue).some((e) => e.type === 'issue.seen' && e.payload.labels.includes('money-path')));
+        return [...new Set([...gates.land, ...(touchesMoney ? gates.money_path : [])])];
+    }
+    tierCommand(name) {
+        const t = this.d.cfg.tests.tiers.find((x) => x.name === name);
+        if (t)
+            return { command: t.command, exclusive: t.exclusive };
+        if (name === 'full')
+            return { command: this.d.cfg.tests.runner.full, exclusive: true };
+        return { command: this.d.cfg.tests.runner.changed, exclusive: false };
+    }
+    /** Run the land gates: baseline-aware, a failure retried once (flake), exclusive tiers under the machine-wide lock. */
+    async runGates(path, tiers) {
+        const notes = [];
+        /** Each tier's passing run, in ms (a flake's retry is the run that counts). */
+        const durations = [];
+        for (const tier of tiers) {
+            const { command, exclusive } = this.tierCommand(tier);
+            let lock = null;
+            if (exclusive) {
+                const got = await fullRunLock(`${BRAND.cli} ${this.d.cfg.project.project.name} land gate ${tier}`, 5_000, this.d.slotsDir);
+                if (!('lock' in got))
+                    return { ok: false, deferred: true, note: `tier ${tier} needs the machine-wide full-run slot (held by ${got.holder?.owner ?? 'another run'}); deferred` };
+                lock = got.lock;
+            }
+            try {
+                let verdict = null;
+                let tail = '';
+                let ms = 0;
+                for (let attempt = 1; attempt <= 2; attempt++) {
+                    const t0 = Date.now();
+                    const r = await this.project(command, path);
+                    ms = Math.max(0, Date.now() - t0);
+                    verdict = baselineGate(r.code, r.out, this.d.cfg.tests.failures, latestBaseline(this.d.log));
+                    tail = r.tail;
+                    if (verdict.outcome === 'pass')
+                        break;
+                }
+                if (verdict.outcome === 'fail')
+                    return { ok: false, deferred: false, note: `${tier}: ${verdict.note}${verdict.newFailures.length ? `: ${verdict.newFailures.join(', ')}` : ''}\n${tail}` };
+                notes.push(`${tier}: ${verdict.note}`);
+                durations.push(ms);
+            }
+            finally {
+                lock?.release();
+            }
+        }
+        return { ok: true, notes, durations };
+    }
+    /**
+     * Land a batch on the tip in one tested commit. On a red gate: retry once
+     * (flake), then split in half and land each half on its own (bors-style
+     * bisection); a single change that's still red is ejected with the evidence.
+     */
+    async landBatch(batch) {
+        if (!batch.length)
+            return;
+        const id = `b-${randomBytes(3).toString('hex')}`;
+        const issues = batch.map((q) => q.issue);
+        const result = (n, outcome, landed, detail) => this.emit('land.result', { issue: n, outcome, landed, detail: `[batch ${id}] ${detail}`.slice(0, 2000) });
+        const ownerOf = (n) => this.events(n).filter((e) => e.type === 'issue.claimed').at(-1).payload.owner;
+        this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+        const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
+        this.emit('land.batch', { id, issues, tip, outcome: 'started', detail: '' });
+        const name = `land-${id}`;
+        const { path, setupErrors } = createWorktree(this.wt, name, `${BRAND.cli}/${name}`, tip);
+        let applied = [];
+        let split = false;
+        try {
+            if (setupErrors.length) {
+                for (const n of issues) {
+                    result(n, 'error', null, `land worktree setup failed: ${setupErrors.join('; ')}`);
+                    await this.block(n, ownerOf(n), `landing failed: the land worktree's setup failed: ${setupErrors.join('; ')}`);
+                }
+                return;
+            }
+            for (const q of batch) {
+                const claimed = this.events(q.issue).filter((e) => e.type === 'issue.claimed').at(-1).payload;
+                const pick = spawnSync('git', ['cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
+                if (pick.status !== 0) {
+                    spawnSync('git', ['cherry-pick', '--abort'], { cwd: path });
+                    result(q.issue, 'conflict', null, `does not apply cleanly on ${tip.slice(0, 8)}${applied.length ? ` after ${applied.map((a) => `#${a.issue}`).join(', ')}` : ''}; never guessing at conflicts`);
+                    await this.block(q.issue, ownerOf(q.issue), `conflicts with ${this.branch}; needs a rebase`);
+                    continue;
+                }
+                applied.push(q);
+            }
+            if (!applied.length)
+                return;
+            for (const step of this.d.cfg.tests.land.pre) {
+                const r = await this.project(step, path);
+                if (r.code !== 0) {
+                    for (const q of applied) {
+                        result(q.issue, 'error', null, `pre-land step failed: ${step}\n${r.tail}`);
+                        await this.block(q.issue, ownerOf(q.issue), `landing failed: the pre-land step \`${step}\` failed\n${r.tail.split('\n').slice(-5).join('\n')}`);
+                    }
+                    return;
+                }
+            }
+            if (this.git(path, 'status', '--porcelain')) {
+                this.git(path, 'add', '-A');
+                this.git(path, '-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'commit', '-q', '-m', `Pre-land steps for ${applied.map((a) => `#${a.issue}`).join(', ')}`);
+            }
+            const gates = await this.runGates(path, this.gateTiers(applied));
+            if (!gates.ok) {
+                if (gates.deferred) {
+                    for (const q of applied) {
+                        // Capped by time: a slot held past the timeout (a wedged run, a leaked lock) goes to the owner instead of
+                        // waiting for ever; a long full run that ends within it just delays the land.
+                        const queuedAt = this.d.log.read(0, ['land.queued']).filter((e) => e.payload.issue === q.issue).at(-1)?.id ?? 0;
+                        const prior = this.d.log
+                            .read(queuedAt, ['land.result'])
+                            .filter((e) => e.payload.issue === q.issue)
+                            .map((e) => ({ ...e.payload, at: Date.parse(e.ts) }));
+                        const now = Date.now();
+                        const since = slotDeferringSince([...prior, { outcome: 'deferred', detail: gates.note, at: now }]);
+                        const timeoutMin = this.d.cfg.tests.land.defer_timeout_minutes;
+                        if (now - since < timeoutMin * 60_000) {
+                            result(q.issue, 'deferred', null, gates.note);
+                            continue;
+                        }
+                        const why = `deferred for ${Math.round((now - since) / 60_000)} min (tests.yaml land.defer_timeout_minutes: ${timeoutMin}), every time because ${gates.note.replace(/; deferred$/, '')}`;
+                        result(q.issue, 'error', null, why);
+                        this.emit('wait.capped', { issue: q.issue, number: null, kind: 'deferred_landing', detail: why.slice(0, 1000) });
+                        await this.block(q.issue, ownerOf(q.issue), `landing ${why}. Label it \`ready\` again once the slot is free.`);
+                    }
+                    this.emit('land.batch', { id, issues, tip, outcome: 'deferred', detail: gates.note.slice(0, 500) });
+                    return;
+                }
+                if (applied.length === 1) {
+                    const q = applied[0];
+                    result(q.issue, 'red', null, gates.note);
+                    this.emit('land.batch', { id, issues, tip, outcome: 'red', detail: gates.note.slice(0, 500) });
+                    await this.block(q.issue, ownerOf(q.issue), `land gate red after rebasing onto ${this.branch}: ${gates.note.split('\n')[0]}`);
+                    return;
+                }
+                this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'split', detail: gates.note.slice(0, 500) });
+                split = true;
+                return;
+            }
+            const scan = await scanRange(path, `${tip}..HEAD`);
+            if (scan.status !== 'clean') {
+                for (const q of applied) {
+                    result(q.issue, 'rejected', null, `secret scan ${scan.status} at landing`);
+                    await this.block(q.issue, ownerOf(q.issue), `landing failed: the secret scan at landing found ${scan.status === 'leaks' ? 'possible secrets' : 'it could not run'}; nothing was pushed`);
+                }
+                return;
+            }
+            const head = this.git(path, 'rev-parse', 'HEAD');
+            // A stop that came in while the gates ran: left queued, landed once it's lifted.
+            if (this.emergencyInForce()) {
+                for (const q of applied)
+                    result(q.issue, 'deferred', null, 'emergency stop in force; lands once it is lifted');
+                return;
+            }
+            // The branch's protection, asked again right before the push: none (or no answer) and nothing is pushed.
+            const unprotected = await this.directLandBlocked();
+            if (unprotected) {
+                for (const q of applied)
+                    result(q.issue, 'deferred', null, `not pushed: ${unprotected}`);
+                return;
+            }
+            // A plain (non-force) push only succeeds if the tip hasn't moved: compare-and-swap.
+            const push = checkedPush({ cwd: path, remote: this.remote, base: tip, head, ref: `refs/heads/${this.branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(this.d.cfg.project.land_mode === 'direct') });
+            if (!push.ok && 'refused' in push) {
+                for (const q of applied) {
+                    this.emit('push.refused', { issue: q.issue, head, stage: 'push', reasons: push.refused });
+                    result(q.issue, 'rejected', null, `push refused: ${push.refused.join('; ')}`);
+                    await this.block(q.issue, ownerOf(q.issue), pushRefusal(push.refused));
+                }
+                return;
+            }
+            if (!push.ok) {
+                // The tip moved under us: leave them queued; the next tick rebuilds on the new tip.
+                for (const q of applied)
+                    result(q.issue, 'deferred', null, `push rejected (tip moved): ${push.error.split('\n').pop()}`);
+                return;
+            }
+            this.emit('check.result', { issue: applied[0].issue, head, stage: 'land', checks: gates.notes.map((note, i) => ({ check: note, status: 'pass', exitCode: 0, duration_ms: gates.durations[i] ?? 0 })) });
+            this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'landed', detail: gates.notes.join('; ') });
+            for (const q of applied)
+                result(q.issue, 'landed', head, `landed on ${this.branch} (${gates.notes.join('; ')})`);
+            for (const q of applied)
+                await this.afterLand(q.issue, head, ownerOf(q.issue));
+        }
+        finally {
+            removeWorktree(this.wt, name);
+            if (split) {
+                const mid = Math.ceil(applied.length / 2);
+                await this.landBatch(applied.slice(0, mid));
+                await this.landBatch(applied.slice(mid));
+            }
+            applied = [];
+        }
+    }
+    /**
+     * land_mode pr: push the task's own branch and open a pull request for a
+     * human to merge. The coordinator never merges and never pushes the
+     * default branch; the PR closes the issue when it's merged.
+     */
+    async proposePr(q) {
+        const n = q.issue;
+        const branch = this.paths(n).branch;
+        if (branch === this.branch)
+            throw new Error(`refusing to push the default branch ${this.branch} in pr mode`);
+        const claimedBase = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1).payload.base;
+        const push = checkedPush({ cwd: this.d.repo, remote: this.remote, base: claimedBase, head: q.head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), force: true });
+        if (!push.ok && 'refused' in push) {
+            this.emit('push.refused', { issue: n, head: q.head, stage: 'push', reasons: push.refused });
+            this.emit('land.result', { issue: n, outcome: 'rejected', landed: null, detail: `push refused: ${push.refused.join('; ')}`.slice(0, 2000) });
+            await this.block(n, this.ownerOf(n), pushRefusal(push.refused));
+            return;
+        }
+        if (!push.ok) {
+            this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `pushing ${branch} failed: ${push.error.slice(-500)}` });
+            await this.block(n, this.ownerOf(n), `could not push the task branch ${branch}`);
+            return;
+        }
+        const last = (type) => this.events(n).filter((e) => e.type === type).at(-1)?.payload;
+        const lvl = last('review.level_set');
+        const verdict = last('eval.verdict');
+        const checks = last('check.result');
+        const browser = last('browser.evidence');
+        const doneWhen = (last('contract.agreed')?.done_when ?? []);
+        const issue = await this.d.backlog.get(n);
+        // The top of the body (src/pr-rules.ts): the worker's intent, and the risk class computed from the changed paths,
+        // raised (never lowered) by the worker's own claim. A body without both is refused: no PR opens.
+        const review = this.d.cfg.review ?? DEFAULT_REVIEW;
+        const files = this.changeFiles(this.d.repo, claimedBase, q.head);
+        const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+        const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
+        const claims = last('worker.claims');
+        const cls = effectiveClass(computed.cls, claims?.risk_class);
+        const why = cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why];
+        const body = [
+            prBodyHead({ intent: claims?.intent ?? '', cls, why }),
+            '',
+            `Closes #${n}`,
+            '',
+            `Opened by ${BRAND.name}. It merges this itself only if the instance's merge policy allows (required checks green on the evaluated commit, nothing high-risk, design-level, big or in doubt); otherwise it waits for a human.`,
+            '',
+            `**Review level:** ${lvl?.level ?? '?'}${lvl?.reasons.length ? ` (${lvl.reasons.slice(0, 6).join('; ')})` : ''}`,
+            `**Independent evaluator:** ${verdict ? `${verdict.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.confidence}${verdict.confidence_reason ? ` (${verdict.confidence_reason.slice(0, 1000)})` : verdict.unverified_claims?.length ? ` (lowered: ${verdict.unverified_claims.length} unverified claim(s))` : ''}${verdict.advice ? `: ${verdict.advice.slice(0, 500)}` : ''}` : 'none'}`,
+            ...(verdict?.cross_family ? [`**Cross-family evaluator (${verdict.cross_family.provider}):** ${verdict.cross_family.outcome === 'not_run' ? `not run: ${verdict.cross_family.reason ?? ''}` : `${verdict.cross_family.patch_correct ? 'approves' : 'rejects'}, confidence ${verdict.cross_family.confidence}; ${verdict.cross_family.outcome === 'agrees' ? 'agrees' : 'DISAGREES: held for a human'}${verdict.cross_family.reason ? ` (${verdict.cross_family.reason.slice(0, 500)})` : ''}`}`] : []),
+            ...evalLines(this.instructionResults(n)),
+            '',
+            ...receiptLines({ checks: checks?.checks ?? [], doneWhen, unverified: verdict?.unverified_claims ?? [] }),
+            '',
+            // Every claim labeled: measured (run and read), inferred (reasoned, not run) or guess (src/claim-labels.ts).
+            '### CLAIMS, LABELED',
+            ...claimLines('Worker', claims?.labeled ?? [], claims?.label_problems ?? []),
+            ...(claims?.handoffs?.length ? claims.handoffs.map((h) => `- handed to the reader instead of run: "${h.replace(/`/g, "'")}"`) : []),
+            ...claimLines('Evaluator', verdict?.claims ?? []),
+            ...(browser?.head === q.head ? ['', ...browser.lines] : []),
+            // An optimization task (src/optimize.ts): the benchmark's before and after, and every raw run.
+            ...((o) => (o.length ? ['', ...o] : []))(optimizePrLines(this.events(n), q.head)),
+        ].join('\n');
+        const refused = prBodyProblems(body, computed.cls);
+        if (refused.length) {
+            this.emit('land.result', { issue: n, outcome: 'rejected', landed: null, detail: `PR body refused: ${refused.join('; ')}`.slice(0, 2000) });
+            await this.block(n, this.ownerOf(n), `no PR opened for ${branch}: its body was refused (${refused.join('; ')})`);
+            return;
+        }
+        let url;
+        try {
+            // A draft until its required checks pass on the commit the evaluator approved (the PR watcher marks it ready).
+            const pr = await this.d.backlog.openPr(branch, this.branch, `${issue.title} (#${n})`, body, { draft: true, headSha: q.head });
+            url = pr.url;
+            this.emit('pr.opened', { issue: n, number: pr.number, url, head: q.head, draft: pr.draft });
+        }
+        catch (e) {
+            this.emit('land.result', { issue: n, outcome: 'error', landed: null, detail: `opening the PR failed: ${e.message.slice(0, 500)}` });
+            await this.block(n, this.ownerOf(n), `could not open a PR for ${branch}`);
+            return;
+        }
+        this.emit('land.result', { issue: n, outcome: 'pr_opened', landed: null, detail: url });
+        const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1).payload;
+        release(n, claimed.lease, { repo: this.d.repo, remote: this.remote });
+        try {
+            removeWorktree(this.wt, this.paths(n).name);
+        }
+        catch {
+            // already gone
+        }
+        await this.d.backlog.comment(n, `[${BRAND.cli}] Opened ${url} for review. Merging it closes this issue.`);
+        this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'pr opened' });
+    }
+    async afterLand(n, sha, owner) {
+        const claimed = this.events(n).filter((e) => e.type === 'issue.claimed').at(-1).payload;
+        release(n, claimed.lease, { repo: this.d.repo, remote: this.remote });
+        try {
+            removeWorktree(this.wt, this.paths(n).name);
+        }
+        catch {
+            // already gone
+        }
+        await this.d.backlog.removeLabel(n, 'in-review');
+        const staging = this.d.cfg.deploy?.environments.find((e) => !e.production && e.trigger);
+        if (!staging) {
+            await this.d.backlog.comment(n, `[${BRAND.cli}] Landed \`${sha.slice(0, 8)}\` on ${this.branch}. No deploy target configured, so done means landed.`);
+            await this.d.backlog.close(n);
+            this.emit('issue.released', { issue: n, instance: this.d.instance, why: 'landed' });
+            return;
+        }
+        const ok = await this.deploy(staging.name, staging.trigger, staging.verify, sha, n);
+        await this.d.backlog.comment(n, ok ? `[${BRAND.cli}] Landed \`${sha.slice(0, 8)}\` and verified it on ${staging.name}.` : `[${BRAND.cli}] @${owner} landed \`${sha.slice(0, 8)}\` but ${staging.name} is NOT serving it. Not closing.`);
+        if (ok)
+            await this.d.backlog.close(n);
+        else {
+            await this.d.backlog.addLabels(n, ['blocked']);
+            // Released (the claim already was, above), so relabelling it `ready` requeues it.
+            this.emit('issue.released', { issue: n, instance: this.d.instance, why: `deploy to ${staging.name} failed` });
+        }
+    }
+    /**
+     * Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. `issue`:
+     * the issue whose landing triggered it, recorded on each deploy event (so deploy.verified ends that task).
+     */
+    async deploy(env, trigger, verify, sha, issue, polls = 60, pollMs = 15_000) {
+        const of = issue === undefined ? {} : { issue };
+        this.emit('deploy.requested', { env, sha, ...of });
+        const t = await sh(trigger, this.d.repo);
+        if (t.code !== 0) {
+            this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}`, ...of });
+            return false;
+        }
+        for (let i = 0; i < polls; i++) {
+            const v = await sh(verify, this.d.repo, 120_000);
+            if (v.code === 0 && v.out.includes(sha)) {
+                this.emit('deploy.verified', { env, sha, ...of });
+                return true;
+            }
+            await new Promise((r) => setTimeout(r, pollMs));
+        }
+        this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`, ...of });
+        return false;
+    }
+}
+//# sourceMappingURL=landing.js.map

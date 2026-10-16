@@ -1,0 +1,166 @@
+// Twice-daily reports, built only from the event log: what landed, what's
+// in review, decisions waiting (with owner), what's blocked and why, spend,
+// and governor holds. Short, no padding.
+import { readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+import { BRAND } from './brand.js';
+import { failureModes, failureModesMarkdown, mergeCostMarkdown, stageLabelsMarkdown } from './failure-modes.js';
+import { mergeMetrics } from './merge-metrics.js';
+import { offsiteLine, offsiteStatus } from './offsite-backup.js';
+import { project } from './projection.js';
+import { readRun, RUNS_DIR } from './run-record.js';
+import { throughput, throughputMarkdown } from './throughput.js';
+import { localDay } from './local-day.js';
+const fmtH = (h) => (h < 1 ? `${Math.round(h * 60)}m` : `${h.toFixed(h < 10 ? 1 : 0)}h`);
+const money = (n) => `$${n.toFixed(2)}`;
+/** Run records that ended at or after `since`, from an instance's state dir (none if unreadable). */
+export function recentRunRecords(stateDir, since) {
+    let files = [];
+    try {
+        files = readdirSync(join(stateDir, RUNS_DIR)).filter((f) => f.endsWith('.json'));
+    }
+    catch {
+        return [];
+    }
+    const out = [];
+    for (const f of files) {
+        const r = readRun(stateDir, f.slice(0, -'.json'.length));
+        if (r && Date.parse(r.endedAt ?? r.startedAt) >= since.getTime())
+            out.push(r);
+    }
+    return out;
+}
+/** The weekly section goes in the first report of each Monday (and every preview, which has no slot). */
+export function weeklyDue(times, slot, now) {
+    return !slot || (slot === [...times].sort()[0] && now.getDay() === 1);
+}
+/** A warning line for the coordinator's GitHub token: 7 days before it expires, or always if it never does. */
+export function tokenWarning(expiresAt, now = new Date()) {
+    if (expiresAt === undefined)
+        return null; // not known (no instance, or not checked)
+    if (expiresAt === null)
+        return '**GitHub token has no expiry.** Set one: replace it with a token that expires.';
+    const days = Math.floor((Date.parse(expiresAt) - now.getTime()) / 86_400_000);
+    if (days > 7)
+        return null;
+    return days < 0 ? `**GitHub token expired** on ${expiresAt.slice(0, 10)}. Replace it now.` : `**GitHub token expires in ${days} day(s)**, on ${expiresAt.slice(0, 10)}. Replace it before then.`;
+}
+/** A GitHub App's private key never expires, so it is rotated on a schedule instead. */
+export const APP_KEY_ROTATE_DAYS = 90;
+/** Days since the App key file was installed on this machine (rotating it installs a new file), or null if unreadable. */
+export function appKeyAge(keyPath, now = new Date()) {
+    try {
+        return Math.max(0, Math.floor((now.getTime() - statSync(keyPath).mtimeMs) / 86_400_000));
+    }
+    catch {
+        return null;
+    }
+}
+/** A warning line once the App key is due for rotation. */
+export function appKeyWarning(days) {
+    if (days === null || days < APP_KEY_ROTATE_DAYS)
+        return null;
+    return `**GitHub App key installed ${days} days ago.** Rotate it: generate a new private key in the App's settings, install it with credentials.sh, then delete the old key there.`;
+}
+export function buildReport(events, cfg, opts) {
+    const now = opts.now ?? new Date();
+    const since = opts.since.getTime();
+    const after = (e) => Date.parse(e.ts) > since;
+    const p = project(events, localDay(now));
+    const title = (n) => p.tasks.find((t) => t.issue === n)?.title ?? `#${n}`;
+    const owner = (n) => p.tasks.find((t) => t.issue === n)?.owner;
+    const lines = [];
+    const day = now.toLocaleDateString('en-CA');
+    lines.push(`## ${BRAND.name} report: ${cfg.project.project.name}, ${day}${opts.slot ? ` ${opts.slot}` : ''}`);
+    const warn = tokenWarning(opts.tokenExpiresAt, now);
+    if (warn)
+        lines.push('', warn);
+    const keyWarn = opts.appKeyPath ? appKeyWarning(appKeyAge(opts.appKeyPath, now)) : null;
+    if (keyWarn)
+        lines.push('', keyWarn);
+    const landed = events.filter((e) => after(e) && e.type === 'land.result' && e.payload.outcome === 'landed');
+    const deployed = new Map(events.filter((e) => e.type === 'deploy.verified').map((e) => [e.payload.sha, e.payload.env]));
+    lines.push('', `**Landed** (${landed.length})`);
+    if (!landed.length)
+        lines.push('- nothing');
+    for (const e of landed) {
+        const { issue, landed: sha } = e.payload;
+        const env = deployed.get(sha);
+        lines.push(`- #${issue} ${title(issue)} (@${owner(issue) ?? '?'}) \`${sha.slice(0, 8)}\`${env ? `, serving on ${env}` : cfg.deploy?.environments.some((x) => !x.production) ? ', **not yet verified on staging**' : ''}`);
+    }
+    const review = p.tasks.filter((t) => ['verifying', 'evaluating', 'queued'].includes(t.status));
+    lines.push('', `**In review** (${review.length})`);
+    if (!review.length)
+        lines.push('- nothing');
+    for (const t of review)
+        lines.push(`- #${t.issue} ${t.title}: ${t.status}${t.level ? `, ${t.level}` : ''} (@${t.owner ?? '?'})`);
+    const open = p.decisions.filter((d) => !d.answer);
+    lines.push('', `**Decisions needed** (${open.length})`);
+    if (!open.length)
+        lines.push('- none');
+    for (const d of open)
+        lines.push(`- @${d.owner}: ${d.issue !== null ? `#${d.issue} ` : ''}${d.question} (waiting ${fmtH((now.getTime() - Date.parse(d.askedAt)) / 3_600_000)}${d.options.includes(d.recommendation) ? `; recommended: ${d.recommendation}` : ''})`);
+    const blocked = p.tasks.filter((t) => t.status === 'blocked');
+    lines.push('', `**Blocked** (${blocked.length})`);
+    if (!blocked.length)
+        lines.push('- nothing');
+    for (const t of blocked)
+        lines.push(`- #${t.issue} ${t.title} (@${t.owner ?? '?'}): ${(t.blockedReason ?? '').split('\n')[0].slice(0, 200)}`);
+    // Once a day (the first report of the day, and the preview): every auto-merge of the last 24 hours, with links.
+    const first = [...cfg.project.reports.times].sort()[0];
+    if (!opts.slot || opts.slot === first) {
+        const dayAgo = now.getTime() - 86_400_000;
+        const merged = events.filter((e) => e.type === 'merge.done' && Date.parse(e.ts) > dayAgo).map((e) => e.payload);
+        lines.push('', `**Auto-merged, last 24 h** (${merged.length})`);
+        if (!merged.length)
+            lines.push('- nothing');
+        for (const m of merged)
+            lines.push(`- [#${m.number}](${m.url}) ${m.title} \`${m.sha.slice(0, 8)}\``);
+    }
+    const stop = events.filter((e) => e.type === 'merge.stopped' || e.type === 'merge.resumed').at(-1);
+    if (stop?.type === 'merge.stopped')
+        lines.push('', `**Auto-merge stopped**: ${stop.payload.reason}. Every PR waits for you until the operator clears it.`);
+    // Instance settings the owner changed since the last report.
+    const changed = events.filter((e) => after(e) && e.type === 'settings.changed').map((e) => e.payload);
+    if (changed.length)
+        lines.push('', `**Settings changed** (${changed.length})`, ...changed.map((c) => `- ${c.key}: ${JSON.stringify(c.from)} → ${JSON.stringify(c.to)} (@${c.by})`));
+    // Usage, as the CLI estimates it: not billed money (a subscription isn't charged per run).
+    const spendSince = events.filter((e) => after(e) && e.type === 'run.cost').reduce((s, e) => s + e.payload.usd, 0);
+    lines.push('', `**Spend** (the CLI's cost estimate, not billed money): ~${money(spendSince)} since the last report; ~${money(p.spendToday)} today, against the ${money(cfg.agents.daily_budget_usd)} daily usage guard.`);
+    const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => e.payload.reason);
+    if (holds.length)
+        lines.push('', `**Machine**: dispatch held ${holds.length} time(s): ${[...new Set(holds)].slice(0, 3).join('; ')}.`);
+    // Off-machine backup (once set up): when the last verified copy was made; a warning once it's over a day old.
+    const offsite = offsiteLine(offsiteStatus(events, now));
+    if (offsite)
+        lines.push('', offsite);
+    // Weekly: how every run ended, the commonest causes, and fixes proposed for any cause seen 3+ times.
+    let proposals = [];
+    if (opts.weekly ?? weeklyDue(cfg.project.reports.times, opts.slot, now)) {
+        const weekAgo = new Date(now.getTime() - 7 * 86_400_000);
+        const f = failureModes(events, { since: weekAgo, until: now, records: opts.runRecords ?? [] });
+        proposals = f.proposals;
+        lines.push('', ...failureModesMarkdown(f));
+        // Where the week's failed runs first went wrong (labelled by the coordinator before the report).
+        const labels = events.filter((e) => e.type === 'run.stage_labeled' && Date.parse(e.ts) > weekAgo.getTime()).map((e) => e.payload);
+        if (labels.length)
+            lines.push('', ...stageLabelsMarkdown(labels.map((l) => ({ run: l.run, stage: l.stage, reason: l.reason, by: l.by, costUsd: 0, instance: l.instance }))));
+        // What resolving and avoiding conflicts cost per merged PR, flagged with a suggestion when it adds more than a few minutes.
+        lines.push('', ...mergeCostMarkdown(mergeMetrics(events, { since: weekAgo })));
+    }
+    // Throughput (merged PRs, cost per merged PR by stage, the owner's waits, the top costs with a tuning each):
+    // the dashboard's preview only, for the owner and the writers. The report posted to GitHub never has it.
+    if (opts.throughput)
+        lines.push('', ...throughputMarkdown(throughput(events, { now })));
+    return { markdown: lines.join('\n'), proposals };
+}
+/** The report slot due now (latest configured time already passed today), or null. */
+export function dueSlot(times, now = new Date()) {
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const passed = times.filter((t) => {
+        const [h, m] = t.split(':').map(Number);
+        return h * 60 + m <= mins;
+    });
+    return passed.sort().at(-1) ?? null;
+}
+//# sourceMappingURL=reports.js.map
