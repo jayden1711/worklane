@@ -15,7 +15,8 @@ import { useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { MessageCircle, PanelLeft, X } from 'lucide-react';
 import { ConversationPane, ConversationSidebar, mayConverse, ProjectEditor, type ChatView } from './Conversations';
-import { askChat, chatAnswer, fileChatDraft, fileConversationDraft, hub, hubInstance, newConversation, requestKey, sendConversationMessage, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatAttachment, type ChatCitation, type HubInfo } from '../api';
+import { askChat, chatAnswer, fileChatDraft, fileConversationDraft, hub, hubInstance, newConversation, requestKey, sendConversationMessage, type ChatPick, type ChatAction, type ChatAnswer, type ChatAnswerFile, type ChatAttachment, type ChatCitation, type HubInfo } from '../api';
+import { ChatPicker, useChatPicker } from './ChatPicker';
 import { AttachButton, AttachmentList, DropHint, filesOf, mayAttach, SentAttachments, useAttachments } from './ChatAttachments';
 import { navigate } from '../App';
 import { Badge, Button, cx } from './ui';
@@ -215,7 +216,12 @@ export function ChatAnswerView({ f, cli, onOpen = () => {}, onFile = () => Promi
         </ul>
       )}
       <div className="mt-2 flex flex-wrap items-center gap-2 text-[11.5px] text-ink-3">
-        <span data-testid="chat-cost">~${a.costUsd.toFixed(2)} (estimated)</span>
+        <span data-testid="chat-cost">~${a.costUsd.toFixed(2)} (estimated){a.model ? ` on ${a.model}${a.effort ? `, ${a.effort} effort` : ''}` : ''}</span>
+        {a.conversation && (
+          <span data-testid="chat-conversation-spend">
+            conversation ~${a.conversation.spentUsd.toFixed(2)} of ${a.conversation.capUsd}
+          </span>
+        )}
         {(a.readOnly || !f.owner) && <span data-testid="chat-read-only">Read-only: only the owner gets drafts and proposals.</span>}
       </div>
     </div>
@@ -284,9 +290,13 @@ export function ChatPanel({ cli, role, user }: { cli: string; role?: string | un
   const attachTo = hubInfo ? (target === '*' ? null : target) : null;
   const canAttach = mayAttach(role) && !(hubInfo && target === '*') && !(convsOn && view.kind === 'project');
   const att = useAttachments({ instance: attachTo, active: open && mayAttach(role) });
+  // The model and effort picker (owners and writers): for one instance, like attachments; "Every instance" runs on each one's default.
+  const [pick, setPick] = useState<ChatPick>({});
+  const pickOptions = useChatPicker(attachTo, open && mayAttach(role) && !(hubInfo && target === '*'));
   // WHY: a file is kept on the instance it was uploaded to; asking another one starts the attachments over.
   useEffect(() => {
     att.clear();
+    setPick({});
   }, [target]); // eslint-disable-line react-hooks/exhaustive-deps
   const bottom = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -377,7 +387,7 @@ export function ChatPanel({ cli, role, user }: { cli: string; role?: string | un
     if (convsOn && view.kind === 'conversation') {
       // The message goes in the body (never a URL), with one key per send so a retry is the same turn.
       try {
-        await sendConversationMessage(convInstance ?? null, view.id, question, requestKey(), sent.map((a) => a.id));
+        await sendConversationMessage(convInstance ?? null, view.id, question, requestKey(), sent.map((a) => a.id), pick);
         setQ('');
         att.clear();
         setConvErr(null);
@@ -395,7 +405,7 @@ export function ChatPanel({ cli, role, user }: { cli: string; role?: string | un
     const asks = await Promise.all(
       targets.map(async (instance) => {
         try {
-          const { id } = await askChat(instance, question, key, sent.map((a) => a.id));
+          const { id } = await askChat(instance, question, key, sent.map((a) => a.id), targets.length === 1 ? pick : undefined);
           return { instance, id, f: pendingFile(id) };
         } catch (e) {
           return { instance, id: null, f: { state: 'error' as const, why: (e as Error).message } };
@@ -513,6 +523,7 @@ export function ChatPanel({ cli, role, user }: { cli: string; role?: string | un
                 ))}
               </div>
             )}
+            <ChatPicker options={pickOptions} value={pick} onChange={setPick} />
             <AttachmentList items={att.items} onRemove={att.remove} onAnyway={att.anyway} />
             <textarea
               ref={input}

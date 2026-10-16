@@ -1219,7 +1219,8 @@ export type SetupFix =
   | { kind: 'signin'; label: string }
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
   | { kind: 'gh-login'; label: string; command: string }
-  | { kind: 'discord'; label: string };
+  | { kind: 'discord'; label: string }
+  | { kind: 'source'; source: SourceKind; label: string };
 export interface SetupStepView {
   id: string;
   group: string;
@@ -1383,6 +1384,53 @@ export const openDiscordTokenAsk = () => api<{ ok: boolean; ask: Ask }>('/api/fi
 /** Review (no `expect`: nothing written) or write the intake.yaml change these picks make; a write names the reviewed change's hash. */
 export const changeDiscordIntake = (values: Record<string, DiscordFormValue>, expect?: string) =>
   api<DiscordIntakePlan>('/api/first-run/discord/intake', { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
+/** The first-run page's Slack and Linear steps (src/intake/source-setup.ts), as GET /api/first-run/<slack|linear> serves them. */
+export type SourceKind = 'slack' | 'linear';
+export type SourceFormValue = boolean | string | string[] | null;
+export interface SourceCred {
+  credential: string;
+  key: string;
+  title: string;
+  configured: boolean;
+  file: string | null;
+  present: boolean;
+  error: string | null;
+  ask: (Ask & { kind: 'paste_secret' }) | null;
+}
+export type SourceSetup =
+  | { available: false; why: string }
+  | {
+      available: true;
+      kind: SourceKind;
+      instance: string;
+      canAct: boolean;
+      portal: string;
+      creds: SourceCred[];
+      intake: { file: string; exists: boolean; error: string | null; values: Record<string, SourceFormValue>; warnings: string[]; allowed: number; trusted: number };
+      form: { key: string; kind: 'boolean' | 'team' | 'ids' | 'label'; what: string }[];
+      slack?: { manifest: string; scopes: { scope: string; why: string }[] };
+      linear?: { permissions: { name: string; why: string }[] };
+      automation: { token: string; view: string; file: string; keys: string[]; restart: string };
+    };
+/** What the source's secret can see, from a child process on the instance that reads it itself; this page never sees it. */
+export type SourceView =
+  | { kind: 'slack'; team: { id: string; name: string }; bot: { user: string }; channels: { id: string; name: string; member: boolean }[]; members: { id: string; name: string }[]; at: string }
+  | {
+      kind: 'linear';
+      organization: { name: string };
+      viewer: { id: string; name: string };
+      teams: { id: string; name: string; key: string; labels: { id: string; name: string }[]; members: { id: string; name: string }[] }[];
+      labels: { id: string; name: string }[];
+      at: string;
+    };
+export type SourceIntakePlan = DiscordIntakePlan;
+export const getSourceSetup = (kind: SourceKind) => api<SourceSetup>(`/api/first-run/${kind}`);
+export const getSourceView = (kind: SourceKind, fresh = false) => api<SourceView>(`/api/first-run/${kind}/view${fresh ? '?fresh=1' : ''}`);
+/** Open the paste box for one of the source's secrets (a paste_secret ask); the secret itself goes through pasteSecret. */
+export const openSourceTokenAsk = (kind: SourceKind, credential: string) => api<{ ok: boolean; ask: Ask }>(`/api/first-run/${kind}/token-ask`, { method: 'POST', body: JSON.stringify({ confirm: true, credential }) });
+/** Review (no `expect`: nothing written) or write the intake.yaml change these picks make. */
+export const changeSourceIntake = (kind: SourceKind, values: Record<string, SourceFormValue>, expect?: string) =>
+  api<SourceIntakePlan>(`/api/first-run/${kind}/intake`, { method: 'POST', body: JSON.stringify(expect ? { values, confirm: true, expect } : { values }) });
 export const startCoordinator = () => api<{ ok: boolean; path: string; detail: string }>('/api/first-run/start', { method: 'POST', body: JSON.stringify({ confirm: true }) });
 export const addProject = (name: string, repo: string) => api<{ ok: boolean }>('/api/machine/add-project', { method: 'POST', body: JSON.stringify({ name, repo }) });
 /**
@@ -1580,13 +1628,23 @@ export interface ChatAnswer {
   refusedActions: string[];
   readOnly: boolean;
   costUsd: number;
+  /** What it ran on, and its conversation's spend after it against the cap (src/chat-pick.ts). */
+  model?: string;
+  effort?: ChatEffort;
+  conversation?: { id: string; spentUsd: number; capUsd: number };
 }
+export type ChatEffort = 'low' | 'medium' | 'high';
+/** The chat's model and effort choice: unset fields run on routing's default and the CLI's default effort. */
+export interface ChatPick { model?: string; effort?: ChatEffort }
+/** What this person may pick on an instance (src/chat-pick.ts chatPickerView): a viewer gets canPick false and no models. */
+export interface ChatPickerOptions { canPick: boolean; models: string[]; efforts: ChatEffort[]; defaultModel: string; capUsd: number }
 export type ChatAnswerFile = { v: number; id: string; at: string; owner: boolean; filed: { number: number } | null } & ({ state: 'pending' } | { state: 'answered'; answer: ChatAnswer } | { state: 'refused'; why: string });
 
 /** The chat on one instance: this page's (null), or a named one through the hub. */
 const chatCall = <T,>(instance: string | null, path: string, init: RequestInit = {}) => (instance ? instanceApi<T>(instance, path, init) : api<T>(path, init));
 /** `key` names one ask: a retry of the same POST returns the same question instead of running a second turn. */
-export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}) }) });
+export const askChat = (instance: string | null, question: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, '/api/chat', { method: 'POST', body: JSON.stringify({ question, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
+export const chatPickerOptions = (instance: string | null) => chatCall<ChatPickerOptions>(instance, '/api/chat/options');
 
 /** A chat attachment as the server keeps it (src/chat-attachments.ts): its random id, never its name, names it. */
 export interface ChatAttachment { id: string; name: string; kind: 'image' | 'pdf' | 'text' | 'csv' | 'json' | 'office'; label: string; size: number; sha256: string }
@@ -1638,7 +1696,7 @@ export const getConversation = (instance: string | null, id: string) => chatCall
 export const renameConversation = (instance: string | null, id: string, title: string) => chatCall<{ conversation: Conversation }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) });
 export const deleteConversation = (instance: string | null, id: string) => chatCall<{ ok: boolean }>(instance, `/api/chat/conversations/${enc(id)}`, { method: 'DELETE' });
 /** The message goes in the body, never the URL; `key` makes a retried send the same turn. */
-export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = []) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}) }) });
+export const sendConversationMessage = (instance: string | null, id: string, text: string, key: string, attachments: string[] = [], pick?: ChatPick) => chatCall<{ id: string }>(instance, `/api/chat/conversations/${enc(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, key, ...(attachments.length ? { attachments } : {}), ...(pick && (pick.model || pick.effort) ? { pick } : {}) }) });
 export const fileConversationDraft = (instance: string | null, id: string, turn: string) => chatCall<{ ok: boolean; number: number }>(instance, `/api/chat/conversations/${enc(id)}/turns/${enc(turn)}/file-issue`, { method: 'POST', body: '{}' });
 export const listProjects = (instance: string | null, cursor?: string | null) => chatCall<Paged<ProjectItem>>(instance, `/api/chat/projects${cursor ? `?cursor=${enc(cursor)}` : ''}`);
 export const getProject = (instance: string | null, id: string) => chatCall<{ project: ChatProject }>(instance, `/api/chat/projects/${enc(id)}`);
@@ -1666,9 +1724,19 @@ export interface IntakeHealth {
   dropped: Record<string, number>;
   reportToMerged: { count: number; medianMinutes: number | null };
 }
+/** One chat source's state for the Intake page's strip (counts only, never an id or a secret). */
+export interface IntakeSourceSummary {
+  name: 'discord' | SourceKind;
+  state: 'on' | 'off' | 'none' | 'invalid';
+  detail: string;
+}
 export interface IntakeView {
   reports: IntakeReport[];
   health: IntakeHealth;
+  /** A server instance's chat sources; null where there are none (local mode). */
+  sources?: IntakeSourceSummary[] | null;
+  /** Whether this person may set the sources up (an owner of a server instance). */
+  canSetUpSources?: boolean;
 }
 
 /** Throughput (GET /api/throughput, src/throughput.ts): merges, cost per merged PR by stage, waits, the top costs. */

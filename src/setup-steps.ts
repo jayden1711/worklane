@@ -17,7 +17,7 @@ import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER, githubRepoOf } from './install.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
-import { INTAKE_FILE } from './intake/config.js';
+import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
@@ -108,7 +108,7 @@ export interface InstanceFacts {
     github: { kind: 'app'; key_path: string } | { kind: 'gh-config-dir'; path: string };
     claude?: { config_dir: string } | undefined;
     agent_api_key?: string | undefined;
-    intake?: { discord_token?: string | undefined } | undefined;
+    intake?: { discord_token?: string | undefined; slack_app_token?: string | undefined; slack_bot_token?: string | undefined; linear_api_key?: string | undefined } | undefined;
   };
 }
 
@@ -165,7 +165,9 @@ export type Fix =
   /** WHY: Connect GitHub (src/gh-login.ts): gh's device login run for the person, its one-time code relayed to the page. */
   | { kind: 'gh-login'; label: string; command: string }
   /** WHY: the Discord step (src/intake/discord-setup.ts): token, invite, channel picks, intake.yaml after a shown diff. */
-  | { kind: 'discord'; label: string };
+  | { kind: 'discord'; label: string }
+  /** WHY: the Slack and Linear steps (src/intake/source-setup.ts): secrets, the source's view, picks, intake.yaml after a shown diff. */
+  | { kind: 'source'; source: 'slack' | 'linear'; label: string };
 
 export type GroupId = 'install' | 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'policy' | 'discord' | 'tailscale' | 'updates' | 'extras' | 'service' | 'first-task';
 
@@ -188,7 +190,8 @@ export const GROUPS: readonly GroupDef[] = [
   { id: 'coordinator', title: 'Coordinator running', optional: false, modes: ['server'], walked: true },
   { id: 'protection', title: 'Protection', optional: false, modes: MODES, walked: true },
   { id: 'policy', title: 'Instance policy', optional: false, modes: ['server'], walked: false },
-  { id: 'discord', title: 'Discord', optional: true, modes: MODES, walked: true },
+  // WHY: the id stays 'discord' (setup discord, doctor and init name it); the group holds every chat intake source.
+  { id: 'discord', title: 'Intake sources', optional: true, modes: MODES, walked: true },
   { id: 'tailscale', title: 'Tailscale', optional: true, modes: ['server'], walked: true },
   { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
   { id: 'extras', title: 'Extras', optional: true, modes: MODES, walked: false },
@@ -255,6 +258,11 @@ const recorded = (k: Checking, step: string, what: string): Detected | null => (
 const no = (detail: string): Detected => ({ done: false, detail });
 const firstLine = (s: string) => s.trim().split('\n')[0] ?? '';
 const isErr = <T extends object>(v: T | { error: string }): v is { error: string } => 'error' in v;
+/** Is this source on in the instance's intake.yaml (a file that doesn't load: no)? */
+const intakeOn = (home: string, source: 'slack' | 'linear'): boolean => {
+  const r = loadIntakeConfig(join(home, INTAKE_FILE));
+  return !!r && 'config' in r && r.config[source].enabled;
+};
 
 const nodeOk = (v = process.versions.node) => {
   const [maj, min] = v.split('.').map(Number) as [number, number];
@@ -848,6 +856,43 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       if (isErr(i)) return no(i.error);
       if (!i.credentials.intake?.discord_token) return no('no bot token in credentials.yaml');
       return existsSync(join(i.home, INTAKE_FILE)) ? ok(`bot token stored and ${INTAKE_FILE} written`) : no(`bot token stored, but no ${INTAKE_FILE} in the instance home`);
+    },
+  },
+  {
+    id: 'slack',
+    group: 'discord',
+    rows: [27],
+    title: 'Slack intake',
+    modes: ['server'],
+    optional: true,
+    reach: 'few',
+    today: `Create a Slack app from the manifest the First run page shows (Socket Mode, the app_mention event, four bot scopes), install it, and make an app-level token. Then here, or in a terminal: the two tokens (\`credentials.sh <name> intake-slack\`, as root), what the app sees (\`${BRAND.cli} slack view\`, as the instance's user), and intake.yaml's slack keys; who may send (slack.allowed_senders) stays in intake.yaml by hand. Restart the instance.`,
+    fix: { kind: 'source', source: 'slack', label: 'Set up' },
+    automation: 'sudo bash scripts/setup/credentials.sh <name> intake-slack (the two tokens), then intake.yaml in the instance home (slack.enabled, team, channels, allowed_senders; docs/intake.md 2.7) and a restart of the instance',
+    detect: (k) => {
+      const i = k.inst();
+      if (isErr(i)) return no(i.error);
+      const c = i.credentials.intake;
+      if (!c?.slack_app_token || !c.slack_bot_token) return no('Slack is not set up: credentials.yaml names no Slack tokens');
+      return intakeOn(i.home, 'slack') ? ok(`Slack tokens stored and slack on in ${INTAKE_FILE}`) : no(`Slack tokens stored, but slack is not on in ${INTAKE_FILE}`);
+    },
+  },
+  {
+    id: 'linear',
+    group: 'discord',
+    rows: [27],
+    title: 'Linear intake',
+    modes: ['server'],
+    optional: true,
+    reach: 'few',
+    today: `Make a Linear personal API key with only Read and Create comments, for one team. Then here, or in a terminal: the key (\`credentials.sh <name> intake-linear\`, as root), what it sees (\`${BRAND.cli} linear view\`, as the instance's user), and intake.yaml's linear keys; who may send (linear.allowed_senders) stays in intake.yaml by hand. Restart the instance.`,
+    fix: { kind: 'source', source: 'linear', label: 'Set up' },
+    automation: 'sudo bash scripts/setup/credentials.sh <name> intake-linear (the API key), then intake.yaml in the instance home (linear.enabled, team, label, allowed_senders; docs/intake.md 2.8) and a restart of the instance',
+    detect: (k) => {
+      const i = k.inst();
+      if (isErr(i)) return no(i.error);
+      if (!i.credentials.intake?.linear_api_key) return no('Linear is not set up: credentials.yaml names no Linear API key');
+      return intakeOn(i.home, 'linear') ? ok(`Linear key stored and linear on in ${INTAKE_FILE}`) : no(`Linear key stored, but linear is not on in ${INTAKE_FILE}`);
     },
   },
   // Tailscale
