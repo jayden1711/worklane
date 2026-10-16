@@ -3,7 +3,7 @@
 // that can't run reports why, and a feature the setup's mode can't have is
 // listed as off, with why.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
@@ -22,6 +22,7 @@ import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
+import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 
@@ -225,6 +226,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   out.push(...setupChecks(root, opts));
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
+  // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
+  if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   return out;
 }
@@ -247,6 +250,27 @@ export function gpuCheck(file = gpuFilePath(), present: (path: string) => boolea
   const on = `on for ${names.join(', ')} (GPU ${gpuIndices(f).join(', ')}; at most ${f.maxMinutes} min a GPU command)`;
   if (missing.length) return { name: 'gpu test runs', level: 'warn', detail: `${on}, but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing: those runs run without the GPU until ${missing.length === 1 ? 'it exists' : 'they exist'} (the NVIDIA driver loaded, the GPU present)` };
   return { name: 'gpu test runs', level: 'ok', detail: on };
+}
+
+/**
+ * Network for test runs (docs/test-runs.md "Network"), read-only: no tier has it unless root's file lists it. Which
+ * instances' tiers do, with the root command that changes it; a file the helper would refuse is a warning.
+ */
+export function networkCheck(file = networkFilePath(), rootUid = 0): DoctorCheck {
+  const how = `root changes it: ${networkCommands('<name>').enable} (or disable; status shows it)`;
+  let text: string;
+  try {
+    const st = lstatSync(file);
+    if (!st.isFile() || st.uid !== rootUid || (st.mode & 0o777) !== 0o644) return { name: 'test-run network', level: 'warn', detail: `${file} is not root's regular 0644 file, so the helper grants no network; ${how}` };
+    text = readFileSync(file, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { name: 'test-run network', level: 'ok', detail: `none for any tier (no ${NETWORK_FILE_NAME}); ${how}` };
+    return { name: 'test-run network', level: 'warn', detail: `${file} can't be read: ${(e as Error).message}` };
+  }
+  const f = parseNetworkFile(text);
+  if ('error' in f) return { name: 'test-run network', level: 'warn', detail: `${file} is ${f.error}, so the helper grants no network; ${how}` };
+  const on = Object.entries(f.instances).map(([n, t]) => `${n}: ${t.join(', ')}`);
+  return { name: 'test-run network', level: 'ok', detail: `${on.length ? `granted to ${on.join('; ')}` : 'none for any tier'} (every other tier has none); ${how}` };
 }
 
 /**

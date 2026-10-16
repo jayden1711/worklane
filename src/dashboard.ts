@@ -50,6 +50,7 @@ import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
 import { testRunsView } from './testrun/status.js';
 import { gpuFilePath, gpuOptIn } from './testrun/gpu.js';
+import { networkFilePath, networkPolicy } from './testrun/network.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
@@ -220,6 +221,9 @@ export interface DashboardOptions {
   /** Root's GPU opt-in file and the uid that must own it (tests: their own; src/testrun/gpu.ts). */
   gpuFile?: string;
   gpuFileUid?: number;
+  /** Root's network grants (src/testrun/network.ts), for tests; default /etc/<cli>/testrun-network.json, root's. */
+  networkFile?: string;
+  networkFileUid?: number;
   testRunLock?: string;
   /** The instance's policy file (its auto-merge kill switch and settings); none for a checkout. */
   policyFile?: string | null;
@@ -1309,7 +1313,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const held = testSlotsHeld(opts.slotsDir);
           // Root's GPU opt-in for this instance, read-only (src/testrun/gpu.ts): only a root shell changes it.
           const name = opts.instance ?? opts.cfg.project.project.name;
-          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) }, gpu: gpuOptIn(name, opts.gpuFile ?? gpuFilePath(), opts.gpuFileUid ?? 0), instance: name }));
+          return json(res, 200, testRunsView({ events: eventCache.all(), configured: !!opts.cfg.tests.test_run, writer: isWriter(who.role), cap: testSlotCap(opts.slotsDir), slots: held.map((h) => holder({ slot: h.slot, owner: h.owner, acquiredAt: h.acquiredAt })), lock: { path: opts.testRunLock ?? FULL_RUN_LOCK, holders: flockHolders(opts.testRunLock ?? FULL_RUN_LOCK) }, gpu: gpuOptIn(name, opts.gpuFile ?? gpuFilePath(), opts.gpuFileUid ?? 0), network: networkPolicy(name, opts.networkFile ?? networkFilePath(), opts.networkFileUid ?? 0), instance: name }));
         }
         // The audit log: every write made on this dashboard, newest first; the owners' to read.
         if (url.pathname === '/api/audit' && req.method === 'GET') {

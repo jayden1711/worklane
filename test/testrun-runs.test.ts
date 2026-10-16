@@ -494,6 +494,64 @@ test('GPU: a granted command stopped at its cap marks the run gpu_stopped, and i
   assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 15 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 2 s waiting for the GPU, 900\)/);
 });
 
+// ---------------------------------------------------------- Network (src/testrun/network.ts, docs/test-runs.md "Network")
+
+/** The rig's host, with what the helper would say of a command that asks for the network, and every call in order. */
+function netHost(host: RunHost, grant: (tier: string) => boolean, o: { fetchFails?: boolean } = {}) {
+  const calls: string[] = [];
+  const h: RunHost = {
+    ...host,
+    fetch: async (id, fetcher, cache) => {
+      calls.push(`fetch ${fetcher} ${cache}`);
+      return o.fetchFails ? { code: 3, out: 'fetch: node_modules/x resolves to "git+ssh://x": the fetch takes https:// tarballs only', err: 'fetch: refused' } : { code: 0, out: 'fetched' };
+    },
+    startDb: async (id, db) => {
+      calls.push('db-start');
+      return host.startDb(id, db);
+    },
+    exec: async (id, command, env, ms, signal, eo = {}) => {
+      calls.push(`exec ${command}${eo.network ? ` --network ${eo.network}` : ''}`);
+      const r = await host.exec(id, command, env, ms, signal, {});
+      return eo.network ? { ...r, network: grant(eo.network) ? { granted: true, tier: eo.network } : { granted: false, why: `tier ${eo.network} of test is not granted the network` } } : r;
+    },
+  };
+  return { h, calls };
+}
+const NET_RUN = {
+  fetch: [{ npm: 'npm' }],
+  caches: [{ name: 'npm', env: 'npm_config_cache', key: ['package.json'] }],
+  setup: ['echo installed'],
+  tiers: [{ name: 'unit', command: 'true', kind: 'fast' }, { name: 'e2e', command: 'echo e2e', kind: 'fast', network: true }],
+};
+
+test('network: the fetch runs first, the setup steps and every tier without the network; only a tier with network: true asks, and its record and check say what it got and the root command', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(NET_RUN);
+  const n = netHost(r.host, () => false);
+  const res = await runTestRun({ ...r.deps, host: n.h, instance: 'shop' }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, true, JSON.stringify(res.tiers));
+  assert.deepEqual(n.calls, ['fetch npm npm', 'exec echo installed', 'exec true', 'exec echo e2e --network e2e']);
+  const tiers = r.events('testrun.tier').map((e) => e.payload);
+  assert.deepEqual(tiers.map((t) => t.network), ['none', 'none']);
+  assert.equal(res.tiers[1]!.summary.split('\n')[0], 'Network: none (asked for the network, not granted: tier e2e of test is not granted the network). Only root grants it: sudo bash /opt/worklane/current/scripts/setup/testrun-network.sh enable shop --tiers e2e');
+  // Granted by root: recorded as granted. And setup_network asks for the setup steps, as the tier "setup".
+  const r2 = rig({ ...NET_RUN, setup_network: true });
+  const n2 = netHost(r2.host, (t) => t === 'e2e');
+  const res2 = await runTestRun({ ...r2.deps, host: n2.h }, { repo: r2.dir, sha: r2.sha, kind: 'fast', prs: [] });
+  assert.ok(n2.calls.includes('exec echo installed --network setup'));
+  assert.deepEqual(r2.events('testrun.tier').map((e) => e.payload.network), ['none', 'granted']);
+  assert.equal(res2.tiers[1]!.summary.split('\n')[0], 'Network: granted by root\'s policy (public addresses and the machine\'s DNS only)');
+});
+
+test('network: a fetch that fails fails every tier with its reason, and nothing after it runs (no database, no setup step)', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig({ ...NET_RUN, database: { image: pin }, tiers: [{ name: 'unit', command: 'true', kind: 'fast', database: true }] });
+  const n = netHost(r.host, () => false, { fetchFails: true });
+  const res = await runTestRun({ ...r.deps, host: n.h }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, false);
+  assert.deepEqual(n.calls, ['fetch npm npm']);
+  assert.equal(res.setup?.step, 'fetch 1 (npm, into the npm cache)');
+  assert.match(res.tiers[0]!.summary, /^fetch 1 \(npm, into the npm cache\) failed \(exit 3\):\n.*the fetch takes https:\/\/ tarballs only/);
+});
+
 test('after a restart: a GPU run cut off (no end recorded) is wiped and recorded, and never run again by itself; one cancelled by a graceful stop runs again', async () => {
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'tr-prs-')), 'events.db'));
   const [a, b] = ['a'.repeat(40), 'b'.repeat(40)];

@@ -14,6 +14,17 @@
 # and the file's max_minutes. On stderr, before the command: "worklane-testrun: gpu <N>[,<N>...] (devices ...; max
 # <s> s; waited <s> s)" or "worklane-testrun: gpu none (<why>)". No nvidia-smi, no driver call: nodes and locks only.
 #
+# Network (docs/test-runs.md "Network"): a run's commands have none. Every exec unit gets PrivateNetwork=yes (its own
+# loopback only) and an empty, read-only /run (no system daemon's socket: resolved, D-Bus, avahi, nscd and the like
+# would reach the network for it). A command that asks (exec --network <tier>) gets the network only when root's own
+# file, $NET_FILE (root:root 0644, written by scripts/setup/testrun-network.sh), lists that tier for this instance:
+# then the host's network, minus the LAN, link-local and multicast addresses (IPAddressDeny=), the machine's DNS
+# resolvers allowed. The tier's name comes from the coordinator, so the grant is per instance at most: a coordinator
+# can only name a tier root listed for its own instance. On stderr, after any GPU line: "worklane-testrun: network
+# granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
+# a fixed npm download of what the lockfile pins, with no script run, that never reaches this host's loopback or LAN.
+# The run's Postgres has no network either (docker run --network none): it is reached on its Unix socket only.
+#
 #   worklane-testrun <name> create <id> <branch> <head> <base> <head sha> <base sha> [<dir>]...
 #                                                             a new run: what the bundle on stdin carries goes into the
 #                                                             object store, then a workspace reading it, <dir>s left out
@@ -22,10 +33,16 @@
 #   worklane-testrun <name> cache <cache> <key>               a cache's directory for this key (printed)
 #   worklane-testrun <name> shared <dir>                      a directory all runs share, never wiped (printed)
 #   worklane-testrun <name> db-start <id> <image> <db> <ready_s> <max_connections>
-#                                                             the run's own Postgres: prints "<port> <password>"
-#   worklane-testrun <name> exec <id> <timeout_s> [--gpu] -- <command>
+#                                                             the run's own Postgres, no network: prints "<socket
+#                                                             directory> <password>" (the directory under its TMPDIR)
+#   worklane-testrun <name> fetch <id> npm <cache> <key> <timeout_s>
+#                                                             downloads what the run's lockfile pins into the cache
+#                                                             (npm ci --ignore-scripts in a directory of its own): no
+#                                                             script, no repo config; public addresses only
+#   worklane-testrun <name> exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command>
 #                                                             the run's variables on stdin, each NAME=value then a NUL;
-#                                                             --gpu asks for the GPU, which root's file may grant (GPU below)
+#                                                             --gpu asks for the GPU, which root's file may grant (GPU below);
+#                                                             --network asks for the network for that tier (Network above)
 #   worklane-testrun <name> wipe <id>                         the run's units, containers, volumes and files
 #   worklane-testrun <name> check                             the boundaries, as the test user and in the sandbox
 #   worklane-testrun <name> version                           this helper's protocol version (an integer)
@@ -59,7 +76,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=8
+PROTOCOL=9
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -82,10 +99,21 @@ GPU_LOCK_DIR=/run/worklane/gpu
 GPU_GROUP=worklane-gpu
 DEV=/dev
 GPU_MIN_SYSTEMD=255
+# Network (above). Root's grants; the resolvers a granted run and a fetch may ask (nameserver lines); what neither
+# ever reaches: the LAN (RFC 1918, CGNAT, IPv6 ULA), link-local, multicast and "this network". A fetch also never
+# reaches this host's loopback (its services); a granted run keeps it (its own test servers, its database's socket
+# needs none). Every unit's address families: no raw sockets, no packet sockets, no Bluetooth, nothing but these.
+NET_FILE=/etc/worklane/testrun-network.json
+RESOLV_CONF=/etc/resolv.conf
+# WHY built from the first octets: the repo's denylist refuses any literal private address in its files (a real LAN's
+# would be a project detail); these are only the ranges' names. The value is exactly
+# "link-local multicast 0.0.0.0/8 <10>.0.0.0/8 <100>.64.0.0/10 <172>.16.0.0/12 <192>.168.0.0/16 fc00::/7".
+NET_DENY="link-local multicast 0.0.0.0/8 $(printf '%s.0.0.0/8 %s.64.0.0/10 %s.16.0.0/12 %s.168.0.0/16' 10 100 172 192) fc00::/7"
+FAMILIES='AF_UNIX AF_INET AF_INET6 AF_NETLINK'
 
 die() { echo "worklane-testrun: $*" >&2; exit 2; }
 name="${1:-}" cmd="${2:-}"
-[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|exec|wipe|check|version ..."
+[[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|fetch|exec|wipe|check|version ..."
 user="wl-test-$name"
 root="$BASE/$name"
 store="$root/store"
@@ -213,6 +241,43 @@ fi
 git checkout -q --detach "$hsha"
 rm -f "$bundle"'
 
+# The fetch (fetch_cmd), as the test user, in the run's own fetch directory: the same commands as src/testrun/fetch.ts
+# npmFetchScript (a test checks they match). Only package.json and the lockfile are copied in, so no .npmrc of the
+# repo's (script-shell, node-options, git, registry, proxy) is read; the lockfile must pin every package to an https://
+# tarball with its integrity hash (no git, file:, link or workspace: npm builds those, running their scripts); npm ci
+# --ignore-scripts then fills the cache, and its node_modules goes. The install step after it is the project's own,
+# offline (npm ci --offline), with no network: that is where the scripts run.
+FETCH_NPM='set -euo pipefail
+w=../work
+for f in package.json package-lock.json npm-shrinkwrap.json; do
+  if [ -L "$w/$f" ]; then echo "fetch: $f is a symlink: the fetch takes regular files only" >&2; exit 3; fi
+done
+[ -f "$w/package.json" ] || { echo "fetch: no package.json at the root of the repo" >&2; exit 3; }
+lock=package-lock.json
+if [ -f "$w/npm-shrinkwrap.json" ]; then lock=npm-shrinkwrap.json; fi
+[ -f "$w/$lock" ] || { echo "fetch: no package-lock.json: the fetch takes only what a lockfile pins" >&2; exit 3; }
+cp -- "$w/package.json" package.json
+cp -- "$w/$lock" "$lock"
+node - "$lock" <<"JS"
+const fs = require("fs");
+const file = process.argv[process.argv.length - 1];
+const no = (m) => { console.error(`fetch: ${file}: ${m}`); process.exit(3); };
+let j = null;
+try { j = JSON.parse(fs.readFileSync(file, "utf8")); } catch { no("not JSON"); }
+if (!j || ![2, 3].includes(j.lockfileVersion) || !j.packages || typeof j.packages !== "object") no("needs lockfileVersion 2 or 3 (npm 7 and later), with its packages");
+for (const [k, p] of Object.entries(j.packages)) {
+  if (k === "") continue;
+  if (!p || typeof p !== "object") no(`${k}: not a package entry`);
+  if (p.link) no(`${k} is a link (a workspace or a file: dependency): the fetch takes registry tarballs only`);
+  if (p.inBundle) continue;
+  if (typeof p.resolved !== "string" || !p.resolved.startsWith("https://")) no(`${k} resolves to ${JSON.stringify(p.resolved ?? null).slice(0, 200)}: the fetch takes https:// tarballs only (git, file: and http: dependencies are built by running their scripts, or not pinned)`);
+  if (typeof p.integrity !== "string" || !/^sha(256|384|512)-/.test(p.integrity)) no(`${k} has no integrity hash`);
+}
+JS
+npm ci --ignore-scripts --no-audit --no-fund --no-update-notifier --prefer-offline --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=10000
+rm -rf node_modules
+echo "fetch: every package $lock pins is in the cache"'
+
 # A directory a workspace leaves out: src/checkout.ts sparseDirProblem's rule (a test keeps them alike).
 valid_dir() {
   local p="$1"
@@ -288,7 +353,7 @@ shared() {
 }
 
 db_start() {
-  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" maxconn="${5:-}" c pw port i envf
+  local id="${1:-}" image="${2:-}" db="${3:-}" ready="${4:-}" maxconn="${5:-}" c pw i envf pgdir
   [ "$#" -eq 5 ] || die "usage: db-start <id> <image@sha256:...> <db> <ready_s> <max_connections>"
   valid_id "$id"
   [[ "$image" =~ ^[a-z0-9][a-z0-9./_-]*(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || die "the image must be pinned to its digest, got $image"
@@ -298,6 +363,11 @@ db_start() {
   [[ "$maxconn" =~ ^[1-9][0-9]{1,3}$ ]] && [ "$maxconn" -ge 20 ] && [ "$maxconn" -le 2000 ] || die "max_connections: 20 to 2000, got $maxconn"
   [ -d "$(run_dir "$id")" ] || die "no run $id"
   [ -S "$sock_dir/docker.sock" ] || { echo "worklane-testrun: $user's Docker isn't running (systemctl status worklane-test-$name-docker)" >&2; exit 1; }
+  # The database's socket directory: in the run's own short TMPDIR (a socket's path is at most 107 bytes; the run's
+  # directory is too deep), made here as the test user, never one already there. The container's root is the test user
+  # (rootless Docker), and Postgres's entrypoint hands it to the postgres user, 3775: the run can enter it and connect.
+  pgdir="$(run_tmp "$id")/pg"
+  as_user mkdir -m 0700 -- "$pgdir" || die "can't make $pgdir (the run's TMPDIR must be there, and nothing at that path)"
   c="worklane-test-$name-$id"
   pw="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
   docker_as_user image inspect "$image" >/dev/null 2>&1 || docker_as_user pull -q "$image" >/dev/null
@@ -306,15 +376,16 @@ db_start() {
   envf="$(run_dir "$id")/.db-env"
   as_user rm -f -- "$envf"
   printf 'POSTGRES_PASSWORD=%s\n' "$pw" | as_user sh -c 'umask 077; set -C; cat > "$1"' _ "$envf"
-  # A unique name and a port the daemon picks, on loopback only: any number of runs at once, never a fixed port.
-  docker_as_user run -d --name "$c" --label "$LABEL=$name-$id" -p 127.0.0.1::5432 \
+  # A unique name; no network at all (--network none: no port, no way out for anything run inside it, such as COPY ...
+  # TO PROGRAM as its superuser), its socket alone, bound into the run's TMPDIR: any number of runs at once.
+  docker_as_user run -d --name "$c" --label "$LABEL=$name-$id" --network none -v "$pgdir:/var/run/postgresql" \
     --tmpfs /var/lib/postgresql/data:rw --env-file "$envf" -e POSTGRES_DB="$db" "$image" \
     -c max_connections="$maxconn" >/dev/null || { as_user rm -f -- "$envf"; exit 1; }
   as_user rm -f -- "$envf"
-  port="$(docker_as_user port "$c" 5432/tcp | sed -n 's/^127\.0\.0\.1:\([0-9]\{1,5\}\)$/\1/p' | head -1)"
-  [[ "$port" =~ ^[0-9]+$ ]] || { echo "worklane-testrun: no loopback port for $c" >&2; exit 1; }
+  # WHY 127.0.0.1, the container's own loopback (--network none keeps one): the image's first start runs a temporary
+  # server on the socket alone, then restarts; only the final server listens on TCP, so only it answers here.
   for i in $(seq "$ready"); do
-    docker_as_user exec "$c" pg_isready -q -U postgres -d "$db" -h 127.0.0.1 >/dev/null 2>&1 && { echo "$port $pw"; return 0; }
+    docker_as_user exec "$c" pg_isready -q -U postgres -d "$db" -h 127.0.0.1 >/dev/null 2>&1 && { echo "$pgdir $pw"; return 0; }
     sleep 1
   done
   echo "worklane-testrun: $c wasn't ready after ${ready}s" >&2
@@ -483,6 +554,71 @@ gpu_unlock() {
   for f in ${GPU_LOCKS[@]+"${GPU_LOCKS[@]}"}; do : > "$f" 2>/dev/null || true; done
 }
 
+# Whether root's $NET_FILE lets tier <tier> of this instance have the network: 0, or 1 with NET_WHY saying why not. The
+# file is root's, 0644, a regular file, in a directory only root writes, and exactly in the form
+# scripts/setup/testrun-network.sh writes (and src/testrun/network.ts reads): anything else grants nothing.
+NET_WHY=
+net_granted() {
+  local tier="$1" got lines=() n i m found=0
+  if [ ! -e "$NET_FILE" ] && [ ! -L "$NET_FILE" ]; then NET_WHY="no tier of any instance has the network on this machine (no $NET_FILE)"; return 1; fi
+  if [ -L "$NET_FILE" ] || [ ! -f "$NET_FILE" ]; then NET_WHY="$NET_FILE is not a regular file"; return 1; fi
+  got="$(stat -c '%U %a' -- "$NET_FILE")"
+  [ "$got" = "$(id -un) 644" ] || { NET_WHY="$NET_FILE is $got, not $(id -un)'s and 0644"; return 1; }
+  got="$(stat -c '%U %a' -- "$(dirname "$NET_FILE")")"
+  [[ "$got" =~ ^$(id -un)\ [0-7][0145][0145]$ ]] || { NET_WHY="$(dirname "$NET_FILE") is $got: only $(id -un) may write it"; return 1; }
+  while IFS= read -r m || [ -n "$m" ]; do lines+=("$m"); done < "$NET_FILE"
+  n="${#lines[@]}"
+  local bad="$NET_FILE is not in the form scripts/setup/testrun-network.sh writes; rewrite it with that script"
+  [ "$n" -ge 4 ] && [ "$n" -le 70 ] && [ "${lines[0]}" = '{' ] && [ "${lines[1]}" = '  "version": 1,' ] && [ "${lines[$((n - 1))]}" = '}' ] || { NET_WHY="$bad"; return 1; }
+  if [ "$n" -eq 4 ]; then
+    [ "${lines[2]}" = '  "instances": {}' ] || { NET_WHY="$bad"; return 1; }
+  else
+    [ "${lines[2]}" = '  "instances": {' ] && [ "${lines[$((n - 2))]}" = '  }' ] || { NET_WHY="$bad"; return 1; }
+    for ((i = 3; i < n - 2; i++)); do
+      [[ "${lines[$i]}" =~ ^\ \ \ \ \"([a-z][a-z0-9-]{0,20})\":\ \{\ \"tiers\":\ \[(\"[a-z][a-z0-9_-]{0,39}\"(,\ \"[a-z][a-z0-9_-]{0,39}\"){0,31})\]\ \}(,?)$ ]] || { NET_WHY="$bad (line $((i + 1)))"; return 1; }
+      if [ "$i" -lt $((n - 3)) ]; then [ "${BASH_REMATCH[4]}" = , ]; else [ -z "${BASH_REMATCH[4]}" ]; fi || { NET_WHY="$bad (line $((i + 1)))"; return 1; }
+      if [ "${BASH_REMATCH[1]}" = "$name" ]; then
+        [ "$found" -eq 0 ] || { NET_WHY="$bad ($name is listed twice)"; return 1; }
+        found=1
+        case ", ${BASH_REMATCH[2]}," in *", \"$tier\","*) found=2 ;; esac
+      fi
+    done
+  fi
+  [ "$found" -eq 2 ] && return 0
+  NET_WHY="tier $tier of $name is not granted the network in $NET_FILE"
+  return 1
+}
+
+# The machine's DNS resolvers (/etc/resolv.conf's nameserver lines, at most 3), one per line: the addresses a fetch or a
+# granted run may reach although they are loopback or on the LAN. Only an address, never anything else from the file.
+resolvers() {
+  local l a k=0
+  [ -r "$RESOLV_CONF" ] || return 0
+  while IFS= read -r l || [ -n "$l" ]; do
+    [[ "$l" =~ ^nameserver[[:space:]]+([0-9a-fA-F:.]{2,45})[[:space:]]*$ ]] || continue
+    a="${BASH_REMATCH[1]}"
+    [[ "$a" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || ( "$a" == *:* && "$a" =~ ^[0-9a-fA-F:]+$ ) ]] || continue
+    printf '%s\n' "$a"
+    k=$((k + 1)); [ "$k" -lt 3 ] || break
+  done < "$RESOLV_CONF"
+  return 0
+}
+
+# The unit properties of a run with no network (NET_PROPS), or of one granted it.
+NET_PROPS=()
+net_props() {
+  local granted="$1" fetch="${2:-0}" allow
+  NET_PROPS=(-p "RestrictAddressFamilies=$FAMILIES")
+  if [ "$granted" -eq 0 ]; then
+    # WHY /run too: a daemon's socket there would reach the network for the run (resolved's lookups, D-Bus, avahi).
+    NET_PROPS+=(-p PrivateNetwork=yes -p TemporaryFileSystem=/run:ro)
+    return 0
+  fi
+  allow="$(resolvers | tr '\n' ' ')"
+  if [ "$fetch" -eq 1 ]; then NET_PROPS+=(-p "IPAddressDeny=localhost $NET_DENY"); else NET_PROPS+=(-p "IPAddressDeny=$NET_DENY"); fi
+  [ -z "${allow// /}" ] || NET_PROPS+=(-p "IPAddressAllow=${allow% }")
+}
+
 # What exec leaves behind on any exit: the run's variables file, and the notes in the GPU locks it held.
 exec_cleanup() {
   if [ -n "$ENV_FILE" ]; then rm -f -- "$ENV_FILE"; fi
@@ -490,11 +626,24 @@ exec_cleanup() {
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 started locking waited runtime unit pid
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" started locking waited runtime unit pid
   local -a envfile=() noexpand=() gpuprops=()
-  if [ "$#" -eq 5 ] && [ "$3" = --gpu ] && [ "$4" = -- ]; then gpu=1; set -- "$1" "$2" -- "$5"; fi
-  [ "$#" -eq 4 ] && [ "$3" = -- ] || die "usage: exec <id> <timeout_s> [--gpu] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
-  valid_id "$id"; shift 2
+  local usage="usage: exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
+  [ "$#" -ge 2 ] || die "$usage"
+  shift 2
+  # Each option at most once, in any order, before --; then exactly the command.
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do
+    case "$1" in
+      --gpu) [ "$gpu" -eq 0 ] || die "$usage"; gpu=1; shift ;;
+      --network) [ -z "$net" ] && [ "$#" -ge 2 ] || die "$usage"; net="$2"; shift 2
+        [[ "$net" =~ ^[a-z][a-z0-9_-]{0,39}$ ]] || die "--network takes a tier's name, got $net" ;;
+      *) die "$usage" ;;
+    esac
+  done
+  [ "$#" -eq 2 ] && [ "$1" = -- ] || die "$usage"
+  set -- "$id" "$timeout" "$2"
+  valid_id "$id"
+  shift 1
   [[ "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || die "timeout_s: seconds, got $timeout"
   # A GPU command's clock starts here: its wait for the GPU counts against its timeout.
   if [ "$gpu" -eq 1 ]; then started="$(date +%s)"; fi
@@ -529,6 +678,14 @@ exec_run() {
       echo "worklane-testrun: gpu none ($GPU_WHY)" >&2
     fi
   fi
+  # Network (above): none, unless asked for a tier that root's file grants it to. Only asking prints a line.
+  if [ -n "$net" ] && net_granted "$net"; then
+    net_props 1
+    echo "worklane-testrun: network granted ($net; public addresses and the machine's DNS only)" >&2
+  else
+    net_props 0
+    [ -z "$net" ] || echo "worklane-testrun: network none ($NET_WHY)" >&2
+  fi
   # The run's variables (RUN_ENV), for systemd to read from a file of root's only: never on systemd-run's argv nor in
   # the unit's Environment= (the INVARIANT above). Only the run's own processes get them.
   if [ "${#RUN_ENV[@]}" -gt 0 ]; then
@@ -549,7 +706,7 @@ exec_run() {
     -p WorkingDirectory="$d/work" -p RuntimeMaxSec="$runtime" -p KillMode=control-group -p UMask=0077
     -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes
     -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
-    ${gpuprops[@]+"${gpuprops[@]}"}
+    ${gpuprops[@]+"${gpuprops[@]}"} "${NET_PROPS[@]}"
     -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$d"
     -p TemporaryFileSystem="$TMP_BASE:ro" -p BindPaths="$t" -p ReadWritePaths="$t"
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible"
@@ -570,6 +727,47 @@ exec_run() {
   fi
   exec_cleanup
   ENV_FILE=
+  return "$rc"
+}
+
+# Fill a cache with what the run's lockfile pins (FETCH_NPM above), in a unit of its own: the exec sandbox, but the
+# host's network minus its loopback, the LAN, link-local and multicast (the machine's DNS resolvers allowed); no run's
+# TMPDIR (where a database's socket is) and no workspace it can write. Root's grant is never needed: no code of the
+# repo's runs here, only npm, on files the helper copied.
+fetch_cmd() {
+  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d fd dir cmd flag inaccessible p unit rc=0
+  local -a noexpand=()
+  [ "$#" -eq 5 ] || die "usage: fetch <id> npm <cache> <key> <timeout_s>"
+  valid_id "$id"
+  [ "$eco" = npm ] || die "fetch: npm only, got $eco"
+  [[ "$c" =~ ^[a-z][a-z0-9_-]{0,39}$ && "$key" =~ ^[0-9a-f]{16,64}$ ]] || die "usage: fetch <id> npm <cache name> <hex key> <timeout_s>"
+  [[ "$timeout" =~ ^[1-9][0-9]{0,4}$ ]] || die "timeout_s: seconds, got $timeout"
+  d="$(run_dir "$id")"
+  [ -d "$d/work" ] || die "no run $id"
+  dir="$root/cache/$c-$key"
+  [ -d "$dir" ] && [ ! -L "$dir" ] && [ "$(stat -c %U -- "$dir")" = "$user" ] || die "no cache $c with key $key (the cache command makes it)"
+  fd="$d/fetch"
+  as_user rm -rf -- "$fd"
+  as_user mkdir -m 0700 -- "$fd" "$fd/home" || die "can't make $fd"
+  cmd="$(systemd_command "$(systemd_version)" "$FETCH_NPM")"
+  flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
+  [ -z "$flag" ] || noexpand=("$flag")
+  inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
+  while IFS= read -r p; do inaccessible="$inaccessible -$p"; done < <(protected_paths)
+  net_props 1 1
+  unit="worklane-test-$name-$id-fetch-$$"
+  echo "worklane-testrun: fetch npm (no script run; public addresses and the machine's DNS only)" >&2
+  systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} --unit="$unit" --slice="$SLICE" --uid="$user" --gid="$user" \
+    -p WorkingDirectory="$fd" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
+    -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=tmpfs -p PrivateTmp=yes -p PrivateDevices=yes \
+    -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes \
+    "${NET_PROPS[@]}" \
+    -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$fd" -p ReadWritePaths="$dir" \
+    -p TemporaryFileSystem="$TMP_BASE:ro" -p "InaccessiblePaths=$inaccessible" \
+    --setenv=HOME="$fd/home" --setenv=TMPDIR=/tmp --setenv=PATH=/usr/local/bin:/usr/bin:/bin --setenv=LANG=C.UTF-8 --setenv=CI=1 \
+    --setenv=USER="$user" --setenv=LOGNAME="$user" --setenv=npm_config_cache="$dir" \
+    /bin/bash -o pipefail -c "$cmd" < /dev/null || rc=$?
+  as_user rm -rf -- "$fd" || true
   return "$rc"
 }
 
@@ -675,6 +873,7 @@ case "$cmd" in
   cache) cache "$@" ;;
   shared) shared "$@" ;;
   db-start) db_start "$@" ;;
+  fetch) fetch_cmd "$@" ;;
   exec) exec_cmd "$@" ;;
   wipe) wipe "$@" ;;
   check) check "$@" ;;

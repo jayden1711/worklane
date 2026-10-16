@@ -3292,7 +3292,7 @@ test('with test_run on, an agent run never starts the full suite: done_when suit
     const write = (what: string) => `node -e "require('fs').appendFileSync(process.argv[1], '${what}\\n')" ${JSON.stringify(mark)}`;
     f.cfg.tests.runner.full = write('full');
     f.cfg.tests.runner.changed = write('changed');
-    if (on) f.cfg.tests.test_run = { setup: [], tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, full_checkout: false, gpu: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
+    if (on) f.cfg.tests.test_run = { setup: [], fetch: [], setup_network: false, tiers: [{ name: 'chain', command: 'x', kind: 'fast', database: false, shardable: false, full_checkout: false, gpu: false, network: false, timeout_s: 60 }, { name: 'suite', command: 'npm test', kind: 'full', database: false, shardable: false, full_checkout: false, gpu: false, network: false, timeout_s: 60 }], caches: [], shared: [], checks: {}, env: {} };
     f.backlog.open({ title: 'Totals count negative quantities', body, author: 'example-owner', labels: ['ready'] });
     const runner = agents();
     const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
