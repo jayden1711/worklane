@@ -16,6 +16,7 @@ import { approvalDigest, readAllowlist, livePending, pendingPath, previewDir, ty
 import { readPreview, recordOf, type Preview } from './root-ops.js';
 import { pluginsOff, PLUGINS_OFF_FILE } from './run.js';
 import { pluginStepOk } from './steps.js';
+import { cachedUpdates, previewDiff } from './updates.js';
 
 type Role = 'owner' | 'writer' | 'viewer';
 export interface PluginsWho {
@@ -101,8 +102,11 @@ export interface PluginsContext {
   eventsDb: string;
   /** The broker's blocked servers (src/mcp/client.ts brokerStatus); null without a broker. */
   blocked: () => Promise<Record<string, unknown> | null>;
+  /** The dashboard's own state (the cached update check). Unset: no update check. */
+  stateDir?: string;
   /** Test seams. */
   allowlistOwnerUid?: number;
+  fetchJson?: (url: string) => Promise<unknown>;
 }
 
 /** The page's data for this role: null for a viewer (who gets a 403). */
@@ -153,7 +157,8 @@ export async function pluginsView(ctx: PluginsContext, role: Role | null): Promi
     offProblem: off.problem,
     entries: entries.map((e) => ({ id: e.record.id, kind: e.record.kind, label: labelOf(e.record), on: isOn(e.record.id), reach: reachOf(e.record), digest: e.digest, confirmed_at: e.confirmed_at, staged_by: e.staged_by, record: e.record })),
     pending: pending.map((p) => ({ ...p, command: confirmCommand(ctx.instance!, p.id, p.digest) })),
-    previews: previewsOf(ctx.instance).map(visible),
+    previews: previewsOf(ctx.instance).map((p) => ({ ...visible(p), diff: previewDiff(ctx.instance!, p, entries.find((e) => e.record.id === p.id)) })),
+    updates: ctx.stateDir ? cachedUpdates(ctx.stateDir, entries, ctx.fetchJson ? { fetchJson: ctx.fetchJson } : {}) : { at: null, updates: [] },
     fetchStatus: status,
     blocked,
     requests,

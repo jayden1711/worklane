@@ -122,6 +122,8 @@ export interface RunRecord {
   truncated: boolean;
   /** Why a run that didn't succeed ended: Claude's error text or its stderr's tail (redacted). Absent in older records. */
   detail?: string;
+  /** What the session loaded beyond Claude Code itself (approved plugins and MCP servers). */
+  loaded?: { plugins: string[]; mcpServers: string[] };
 }
 
 /** An issue's runs without their steps (GET /api/runs?issue=n). */
@@ -2116,6 +2118,15 @@ export interface PluginPreview {
   snapshotNetwork?: string[];
   flags?: string[];
   refusals?: string[];
+  /** For an update: how it differs from the approved one (files; an MCP server's tools). */
+  diff?: { added: string[]; removed: string[]; changed: string[]; tools?: { added: string[]; removed: string[]; changed: { name: string; fields: string[] }[]; instructions: boolean } } | null;
+}
+export interface PluginUpdate {
+  id: string;
+  kind: 'plugin' | 'npm';
+  from: string;
+  to: string;
+  fetch: Record<string, string>;
 }
 export interface PluginPending {
   id: string;
@@ -2141,6 +2152,7 @@ export interface PluginsView {
   fetchStatus?: { id: string; state: string; reason: string; at: string } | null;
   blocked?: Record<string, { at: string; diff: { added: string[]; removed: string[]; changed: { name: string; fields: string[] }[]; instructions: boolean } }> | null;
   requests?: { id: string; args: string[]; status: string; detail: string; at: string }[];
+  updates?: { at: string | null; updates: PluginUpdate[] };
   audit?: { at: string; action: string; login?: string; by?: string; root?: boolean; detail?: unknown }[];
 }
 export interface PluginReview {

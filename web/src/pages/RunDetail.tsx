@@ -164,6 +164,18 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
             </Card>
             {run.role === 'researcher' && <RunResearch id={run.id} />}
             <RunWhy detail={run.detail} />
+            {run.loaded && (
+              <Card className="primitive-card-pad" data-testid="run-loaded">
+                <div className="text-[12px] font-medium text-ink-3">Loaded beyond Claude Code</div>
+                <div className="mt-1 text-[13px] text-ink">
+                  {run.loaded.plugins.length ? `Plugins: ${run.loaded.plugins.join(', ')}` : 'No plugins'}
+                  {run.loaded.mcpServers.length ? ` · MCP servers: ${run.loaded.mcpServers.join(', ')}` : ''} ·{' '}
+                  <a href="/extend/plugins" className="text-blue-ink hover:underline" onClick={(e) => (e.preventDefault(), navigate('/extend/plugins'))}>
+                    Extend
+                  </a>
+                </div>
+              </Card>
+            )}
             <Card className="primitive-card-pad" data-testid="run-final">
               <div className="text-[12px] font-medium text-ink-3">Final message</div>
               <div className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink">{run.final || <span className="text-ink-3">none</span>}</div>

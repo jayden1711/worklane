@@ -3,7 +3,7 @@
 // Every change is Review then Confirm (the PolicyForm pattern); approving ends in one root command shown here, because
 // a dashboard can stage an approval but never make one (src/plugins/approval.ts).
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { getPlugins, pluginAction, type PluginEntry, type PluginPreview, type PluginReview, type PluginsView, type State } from '../api';
+import { getPlugins, pluginAction, type PluginEntry, type PluginPreview, type PluginReview, type PluginsView, type PluginUpdate, type State } from '../api';
 import { Header } from '../components/Header';
 import { ago, Badge, Button, Card, cx } from '../components/ui';
 import { navigate } from '../App';
@@ -224,6 +224,20 @@ function PreviewCard({ p, approved, onDone }: { p: PluginPreview; approved: Plug
         </div>
       )}
       {p.runtime && <div className="break-all text-[12px] text-ink-2">{p.runtime.type === 'npm' ? `npm ${p.runtime.package}@${p.runtime.version}` : `${p.runtime.plugin}'s server ${p.runtime.server}`}</div>}
+      {p.diff && (
+        <div className="space-y-0.5 rounded-chip bg-inset px-2 py-1 text-[12px] text-ink-2 shadow-hairline" data-testid="plugin-diff">
+          <div className="font-medium text-ink">Compared with the approved one</div>
+          {p.diff.added.length > 0 && <div className="break-words text-red">Added: {p.diff.added.join(', ')}</div>}
+          {p.diff.removed.length > 0 && <div className="break-words">Removed: {p.diff.removed.join(', ')}</div>}
+          {p.diff.changed.length > 0 && <div className="break-words">Changed: {p.diff.changed.join(', ')}</div>}
+          {p.diff.tools && (
+            <div className="break-words">
+              Tools: {[p.diff.tools.added.length ? `added ${p.diff.tools.added.join(', ')}` : '', p.diff.tools.removed.length ? `removed ${p.diff.tools.removed.join(', ')}` : '', ...p.diff.tools.changed.map((c) => `${c.name} changed its ${c.fields.join(', ')}`), p.diff.tools.instructions ? 'instructions changed' : ''].filter(Boolean).join('; ') || 'unchanged'}
+            </div>
+          )}
+          {!p.diff.added.length && !p.diff.removed.length && !p.diff.changed.length && !p.diff.tools && <div>No file changed.</div>}
+        </div>
+      )}
       {refusals.length > 0 && (
         <ul className="list-disc space-y-0.5 pl-5 text-[12px] text-red" data-testid="plugin-refusals">
           {refusals.map((r) => (
@@ -297,7 +311,7 @@ function PreviewCard({ p, approved, onDone }: { p: PluginPreview; approved: Plug
 }
 
 /** One approved entry: what it reaches, and its owner actions (each Review then Confirm). */
-function EntryRow({ e, owner, onDone }: { e: PluginEntry; owner: boolean; onDone: () => void }) {
+function EntryRow({ e, owner, update, onDone }: { e: PluginEntry; owner: boolean; update?: PluginUpdate | undefined; onDone: () => void }) {
   const [review, setReview] = useState<{ action: 'toggle' | 'remove'; lines: string[]; body: Record<string, unknown> } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -347,6 +361,17 @@ function EntryRow({ e, owner, onDone }: { e: PluginEntry; owner: boolean; onDone
           </li>
         )}
       </ul>
+      {owner && update && (
+        <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink" data-testid="plugin-update">
+          <Badge tone="info">update available</Badge>
+          <span className="break-all font-mono text-[12px]">
+            {update.kind === 'plugin' ? `${update.from.slice(0, 7)} → ${update.to.slice(0, 7)}` : `${update.from} → ${update.to}`}
+          </span>
+          <Button size="sm" variant="outline" onClick={() => void fetchMore(update.fetch)} data-testid="plugin-fetch-update">
+            Fetch the update
+          </Button>
+        </div>
+      )}
       {msg && <div className="text-[12px] text-red">{msg}</div>}
       {owner &&
         (review ? (
@@ -459,7 +484,7 @@ export function ExtendPage({ state, path }: { state: State; path: string }) {
           <Section title="Allowed for agents" testId="plugins-allowed">
             <Card className="divide-y divide-line">
               {entries.map((e) => (
-                <EntryRow key={e.id} e={e} owner={owner} onDone={load} />
+                <EntryRow key={e.id} e={e} owner={owner} update={view?.updates?.updates.find((u) => u.id === e.id)} onDone={load} />
               ))}
             </Card>
           </Section>

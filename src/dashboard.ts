@@ -1273,6 +1273,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             instance: opts.instance ?? null,
             instanceHome: opts.instance && opts.policyFile ? dirname(opts.policyFile) : null,
             eventsDb: opts.eventsDb,
+            stateDir: opts.stateDir,
             blocked: () => (opts.instance ? brokerStatus(opts.instance) : Promise.resolve(null)),
             who: { login: who.login, role: who.role, breakGlass: who.via === 'break-glass' },
             readBody,
