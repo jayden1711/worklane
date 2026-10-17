@@ -1,0 +1,394 @@
+// The dashboard chat: the chief_of_staff role answering the owner's questions
+// about an instance. It runs like any agent (the instance's agent user,
+// sandboxed: the lane's denyRead covers the instance's private state and every
+// credential store), with no shell, no network and no write tools. What it
+// knows comes from a per-turn context bundle the coordinator writes (recent
+// events, run records, machine health, pull requests and issues, all redacted;
+// bundle.ts) plus the repository. It never acts: an issue draft is validated
+// and returned as a preview for the owner to file; a proposed action is only a
+// reference to an existing confirm flow (a settings change, a decision answer,
+// pause/resume). Anyone who isn't the owner gets a read-only answer. Turns are
+// kept per instance in its state (0600, redacted).
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { checkDraftedIssue } from './backlog/types.js';
+import { writeBundle } from './bundle.js';
+import { redact, redactString } from './events/redact.js';
+import { groupOnlyDir } from './os/index.js';
+import { acceptSummary, EMPTY_SUMMARY, readSummary, renderSummary, writeSummary } from './chat-summary.js';
+import { CHAT_SCHEMA, rolePrompt } from './roles.js';
+import { readRun, RUNS_DIR } from './run-record.js';
+import { SETTING_KEYS } from './settings.js';
+import { ATTACHMENT_ID, attachmentPrompt, MAX_ATTACHMENTS } from './chat-attachments.js';
+import { CHAT_EFFORTS } from './chat-pick.js';
+export const CHAT_HISTORY = join('chat', 'history.jsonl');
+const RECENT_EVENTS = 200;
+const HISTORY_TURNS = 6;
+const QUIET = new Set(['coordinator.tick', 'run.heartbeat']);
+/** The only tools a chat run has: reading files. No shell, no network, no writes. */
+export const CHAT_TOOLS = ['Read', 'Glob', 'Grep'];
+const NOT_ALLOWED = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'];
+/** The newest run records' summaries, oldest first (what the chat's runs file lists). */
+export function recentRuns(stateDir, n = 50) {
+    const dir = join(stateDir, RUNS_DIR);
+    let files = [];
+    try {
+        files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort().slice(-n);
+    }
+    catch {
+        return [];
+    }
+    return files.flatMap((f) => {
+        const r = readRun(stateDir, f.slice(0, -'.json'.length));
+        if (!r)
+            return [];
+        const { steps, otherTools: _o, final: _f, v: _v, ...rest } = r;
+        const commands = steps.filter((s) => s.kind === 'command');
+        return [{ ...rest, commands: commands.length, failedCommands: commands.filter((s) => s.status === 'error').length }];
+    });
+}
+/** Open issues, PRs and decisions from the event log, for a context. */
+export function contextFromEvents(events) {
+    const issues = new Map();
+    const prs = new Map();
+    const asked = new Map();
+    for (const e of events) {
+        const p = e.payload;
+        if (e.type === 'issue.seen')
+            issues.set(p.issue, { number: p.issue, title: String(p.title), status: 'seen', labels: p.labels ?? [] });
+        const i = typeof p.issue === 'number' ? issues.get(p.issue) : undefined;
+        if (i && ['issue.claimed', 'issue.blocked', 'issue.released', 'issue.closed', 'land.queued'].includes(e.type))
+            i.status = e.type.split('.')[1];
+        if (e.type === 'pr.opened')
+            prs.set(p.number, { number: p.number, issue: p.issue ?? null, title: issues.get(p.issue)?.title ?? `#${p.issue}`, state: 'open', url: String(p.url) });
+        const pr = typeof p.number === 'number' ? prs.get(p.number) : undefined;
+        if (pr && e.type === 'pr.ready')
+            pr.state = 'ready';
+        if (pr && e.type === 'merge.decided')
+            pr.state = p.auto ? 'merging' : 'waiting for the owner';
+        if (pr && e.type === 'pr.closed')
+            pr.state = p.merged ? 'merged' : 'closed';
+        if (e.type === 'decision.asked')
+            asked.set(String(p.id), { id: String(p.id), question: String(p.question), options: p.options ?? [] });
+        if (e.type === 'decision.answered')
+            asked.delete(String(p.id));
+    }
+    return { issues: [...issues.values()], prs: [...prs.values()], decisions: [...asked.values()] };
+}
+/**
+ * The bundle files for one context: what the chat may know, nothing else. Each line carries the id the answer
+ * cites. Everything is redacted again by writeBundle; nothing here comes from credentials or config files.
+ */
+export function bundleFiles(c, prefix = '') {
+    const clip = (s, n) => (s.length > n ? `${s.slice(0, n)} …` : s);
+    const events = c.events.filter((e) => !QUIET.has(e.type)).slice(-RECENT_EVENTS);
+    return {
+        [`${prefix}README.md`]: `Context for instance ${c.instance} (${c.repo}). Cite by the ids shown: event:<n>, run:<id>, pr:#<n>, issue:#<n>.\nFiles: ${prefix}events.md, ${prefix}runs.md, ${prefix}health.json, ${prefix}prs.md, ${prefix}issues.md, ${prefix}decisions.md.\n`,
+        [`${prefix}events.md`]: events.map((e) => `event:${e.id} ${e.ts} ${e.type} ${clip(JSON.stringify(redact(e.payload)), 400)}`).join('\n') + '\n',
+        [`${prefix}runs.md`]: c.runs.map((r) => `run:${r.id} ${r.role}${r.issue !== null ? ` issue #${r.issue}` : ''} ${r.reason ?? 'running'} ~$${(r.costUsd ?? 0).toFixed(2)} commands ${r.commands} (failed ${r.failedCommands}) files ${r.files.length}`).join('\n') + '\n',
+        [`${prefix}health.json`]: `${JSON.stringify(c.health ?? null, null, 2)}\n`,
+        [`${prefix}prs.md`]: c.prs.map((p) => `pr:#${p.number} ${p.state}${p.issue !== null ? ` for issue #${p.issue}` : ''}: ${p.title}`).join('\n') + '\n',
+        [`${prefix}issues.md`]: c.issues.map((i) => `issue:#${i.number} ${i.status}: ${i.title}${i.labels.length ? ` [${i.labels.join(', ')}]` : ''}`).join('\n') + '\n',
+        [`${prefix}decisions.md`]: c.decisions.map((d) => `decision ${d.id}: ${d.question} (options: ${d.options.join(', ')})`).join('\n') + '\n',
+    };
+}
+/** A draft issue the harness can check: the five parts, checked by the contract parser (checkDraftedIssue). */
+export function validateDraft(title, body) {
+    const c = checkDraftedIssue(title, body);
+    return c.ok ? { ok: true, title: title.trim(), body, labels: ['ready'] } : { ok: false, title, body, why: c.why };
+}
+function validateAction(a, decisions) {
+    const why = typeof a.why === 'string' ? { why: a.why.slice(0, 300) } : {};
+    if (a.kind === 'settings') {
+        if (!SETTING_KEYS.includes(String(a.key)))
+            return `settings ${String(a.key)}: not a setting (${SETTING_KEYS.join(', ')})`;
+        return { kind: 'settings', key: String(a.key), value: a.value, confirm: 'settings.change', ...why };
+    }
+    if (a.kind === 'decision') {
+        const d = decisions.find((x) => x.id === a.id);
+        if (!d)
+            return `decision ${String(a.id)}: not an open decision`;
+        if (!d.options.includes(String(a.answer)))
+            return `decision ${d.id}: "${String(a.answer)}" is not one of ${d.options.join(', ')}`;
+        return { kind: 'decision', id: d.id, answer: String(a.answer), confirm: 'decision.answer', ...why };
+    }
+    if (a.kind === 'pause' || a.kind === 'resume')
+        return { kind: a.kind, confirm: a.kind === 'pause' ? 'emergency.pause' : 'emergency.resume', ...why };
+    return `${String(a.kind)}: not an action the chat may propose`;
+}
+function citationsOf(raw, c) {
+    const kept = [];
+    const unknown = [];
+    const events = new Set(c.events.map((e) => String(e.id)));
+    const runs = new Set(c.runs.map((r) => r.id));
+    for (const x of raw) {
+        const id = String(x.id ?? '').replace(/^#/, '');
+        const n = Number(id);
+        if (x.kind === 'event' && events.has(id))
+            kept.push({ kind: 'event', id, instance: c.instance, label: `event ${id}`, href: `/events/${id}` });
+        else if (x.kind === 'run' && runs.has(id))
+            kept.push({ kind: 'run', id, instance: c.instance, label: `run ${id}`, href: `/runs/${id}` });
+        else if (x.kind === 'pr' && c.prs.some((p) => p.number === n))
+            kept.push({ kind: 'pr', id, instance: c.instance, label: `PR #${id}`, href: c.prs.find((p) => p.number === n).url });
+        else if (x.kind === 'issue' && c.issues.some((i) => i.number === n))
+            kept.push({ kind: 'issue', id, instance: c.instance, label: `issue #${id}`, href: `https://github.com/${c.repo}/issues/${id}` });
+        else
+            unknown.push(`${String(x.kind)}:${id}`);
+    }
+    return { kept, unknown };
+}
+/** The last turns of this instance's chat, for the next prompt. */
+export function chatHistory(stateDir, turns = HISTORY_TURNS) {
+    const f = join(stateDir, CHAT_HISTORY);
+    if (!existsSync(f))
+        return [];
+    return readFileSync(f, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .flatMap((l) => {
+        try {
+            return [JSON.parse(l)];
+        }
+        catch {
+            return [];
+        }
+    })
+        .slice(-turns);
+}
+/** One chat turn for one instance. */
+export async function chatTurn(o) {
+    const owner = o.cfg.project.owners.default;
+    const readOnly = !o.by || o.by.toLowerCase() !== owner.toLowerCase();
+    const turn = `${(o.now ?? (() => new Date()))().getTime()}-${randomBytes(3).toString('hex')}`;
+    // Attachments: text inline in the prompt, images and PDFs in the bundle for Read; all of it data, never instructions.
+    const attached = attachmentPrompt(o.stateDir, o.attachments ?? [], join(o.bundleRoot, turn));
+    const dir = writeBundle(o.bundleRoot, turn, o.gid, bundleFiles(o.context), attached.binary);
+    // The conversation so far is the owner's running summary, never the transcript; anyone else starts empty. A
+    // conversation turn has its own thread instead (o.conversation), and no summary.
+    const previous = readOnly || o.conversation !== undefined ? { ...EMPTY_SUMMARY } : readSummary(o.stateDir);
+    const role = o.cfg.agents.roles.chief_of_staff;
+    const model = o.run?.model ?? role?.model ?? 'sonnet';
+    // WHY: the copies in the bundle are for this turn only; afterwards only the instance's state holds the file, so the
+    // retention days (sweepAttachments) are the only place it lives on.
+    const dropCopies = () => {
+        for (const f of Object.keys(attached.binary))
+            rmSync(join(dir, f), { force: true });
+    };
+    const r = await o.runner.run({
+        role: 'chat',
+        stateDir: o.stateDir,
+        prompt: [
+            `Context files for instance ${o.context.instance}: ${dir} (start with README.md). The repository is the current directory.`,
+            '',
+            ...(o.conversation !== undefined ? [o.conversation] : ['Conversation summary so far (your memory of it, not a source; return it updated):', renderSummary(previous)]),
+            '',
+            readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
+            '',
+            `Question: ${o.question}`,
+            ...(attached.text ? ['', attached.text] : []),
+        ].join('\n'),
+        appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
+        cwd: o.repo,
+        model,
+        ...(o.run?.effort ? { effort: o.run.effort } : {}),
+        allowedTools: CHAT_TOOLS,
+        disallowedTools: NOT_ALLOWED,
+        maxTurns: 30,
+        // WHY: chatRunOptions' cap is already the least of the role's, the conversation's and the day's: no floor over it.
+        maxBudgetUsd: o.run ? o.run.maxBudgetUsd : Math.max(0.05, Math.min(role?.budget_usd ?? 1, o.remainingUsd)),
+        jsonSchema: CHAT_SCHEMA,
+        stallMs: 10 * 60_000,
+        timeoutMs: 20 * 60_000,
+        ...(o.onRun ? { onControl: (c) => void (c.runId && o.onRun(c.runId)) } : {}),
+    }).finally(dropCopies);
+    o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
+    const s = (r.reason === 'succeeded' ? r.structured : undefined);
+    const answer = s?.answer ? redactString(s.answer) : `The chat run ended without an answer (${r.reason}).`;
+    const { kept, unknown } = citationsOf(s?.citations ?? [], o.context);
+    const acts = readOnly ? [] : (s?.actions ?? []).map((a) => validateAction(a, o.context.decisions));
+    const out = {
+        turn,
+        instance: o.context.instance,
+        answer,
+        citations: kept,
+        unknownCitations: unknown,
+        issueDraft: !readOnly && s?.issue_draft ? validateDraft(String(s.issue_draft.title ?? ''), String(s.issue_draft.body ?? '')) : null,
+        actions: acts.filter((a) => typeof a !== 'string'),
+        refusedActions: acts.filter((a) => typeof a === 'string'),
+        readOnly,
+        costUsd: r.costUsd,
+        model: r.model || model,
+        ...(o.run?.effort ? { effort: o.run.effort } : {}),
+    };
+    // The conversation, kept per instance: only the owner's turns, redacted, 0600. A conversation turn is kept in its
+    // own conversation by the caller, never here.
+    if (!readOnly && o.conversation === undefined) {
+        try {
+            groupOnlyDir(join(o.stateDir, 'chat'));
+            appendFileSync(join(o.stateDir, CHAT_HISTORY), `${JSON.stringify(redact({ at: (o.now ?? (() => new Date()))().toISOString(), by: o.by, question: o.question, answer: out.answer, citations: kept.map((c) => `${c.kind}:${c.id}`) }))}\n`, { mode: 0o600 });
+        }
+        catch {
+            // history is best effort
+        }
+        // The summary the next turn gets: this turn's, made safe (every heading, redacted, capped); a turn that
+        // returned none leaves the previous one as it was.
+        if (s?.summary) {
+            try {
+                writeSummary(o.stateDir, acceptSummary(s.summary, previous));
+            }
+            catch {
+                // the summary is best effort too
+            }
+        }
+    }
+    return out;
+}
+// ---------------------------------------------------------------- the dashboard's request/answer files
+//
+// The dashboard can't run agents (no sudo to the agent user; and one claude per login is enforced in the
+// coordinator), so a question is a request file the coordinator takes, and the answer a file it writes:
+//   <state>/chat/requests/<id>.json   { v: 1, id, at, by, question }        written by askChat
+//   <state>/chat/answers/<id>.json    { v: 1, id, at, state: 'pending' | 'answered' | 'refused', answer?, why? }
+export class ChatError extends Error {
+}
+export const MAX_QUESTION = 4000;
+export const CHAT_ID = /^[0-9]+-[a-f0-9]+$/;
+/** A conversation's id (src/chat-conversations.ts). */
+export const CONVERSATION_ID = /^c-[a-f0-9]{16}$/;
+export const chatDirs = (stateDir) => ({ requests: join(stateDir, 'chat', 'requests'), answers: join(stateDir, 'chat', 'answers'), keys: join(stateDir, 'chat', 'keys') });
+export function writeJson(dir, id, v) {
+    groupOnlyDir(dir);
+    const tmp = join(dir, `.${id}.${randomBytes(3).toString('hex')}.tmp`);
+    writeFileSync(tmp, JSON.stringify(redact(v)), { mode: 0o600 });
+    renameSync(tmp, join(dir, `${id}.json`));
+}
+/** A pick's shape (which models a person may pick is chatRunOptions'): a model name and a listed effort; null when it isn't one. */
+export function cleanPick(p) {
+    if (!p || typeof p !== 'object' || Array.isArray(p))
+        return null;
+    const { model, effort, ...extra } = p;
+    if (Object.keys(extra).length)
+        return null;
+    if (model !== undefined && (typeof model !== 'string' || !model || model.length > 200))
+        return null;
+    if (effort !== undefined && !CHAT_EFFORTS.includes(effort))
+        return null;
+    if (model === undefined && effort === undefined)
+        return null;
+    return { ...(model !== undefined ? { model: model } : {}), ...(effort !== undefined ? { effort: effort } : {}) };
+}
+/** A client's request key: the same (asker, key) is one question, however often it is sent. */
+export const CHAT_KEY = /^[A-Za-z0-9_-]{8,128}$/;
+/**
+ * Ask the chat (anyone with dashboard access; only the owner gets drafts and proposals). Returns the request id.
+ * With a `key`, a retried or double-submitted ask returns the first one's id and runs no second turn.
+ */
+export function askChat(o) {
+    const question = o.question.trim();
+    if (!question)
+        throw new ChatError('the question is empty');
+    if (question.length > MAX_QUESTION)
+        throw new ChatError(`the question is over ${MAX_QUESTION} characters`);
+    if (!o.by)
+        throw new ChatError('who is asking is unknown');
+    if (o.key !== undefined && !CHAT_KEY.test(o.key))
+        throw new ChatError('the request key must be 8-128 letters, digits, _ or -');
+    const attachments = o.attachments ?? [];
+    if (attachments.length > MAX_ATTACHMENTS || attachments.some((a) => !ATTACHMENT_ID.test(a)))
+        throw new ChatError('attachments must be at most ' + MAX_ATTACHMENTS + ' attachment ids');
+    const pick = cleanPick(o.pick);
+    if (o.pick !== undefined && !pick)
+        throw new ChatError(`a pick is a routing model and an effort (${CHAT_EFFORTS.join(', ')})`);
+    if (pick && !o.picker)
+        throw new ChatError("viewers can't pick the chat's model or effort");
+    const d = chatDirs(o.stateDir);
+    const keyName = o.key === undefined ? null : createHash('sha256').update(`${o.by.toLowerCase()}\0${o.key}`).digest('hex').slice(0, 32);
+    if (keyName) {
+        try {
+            const prior = JSON.parse(readFileSync(join(d.keys, `${keyName}.json`), 'utf8')).id;
+            if (typeof prior === 'string' && chatAnswer(o.stateDir, prior))
+                return { id: prior };
+        }
+        catch {
+            // not asked before
+        }
+    }
+    const now = o.now ?? new Date();
+    const id = `${now.getTime()}-${randomBytes(4).toString('hex')}`;
+    writeJson(d.answers, id, { v: 1, id, at: now.toISOString(), state: 'pending' });
+    if (keyName)
+        writeJson(d.keys, keyName, { id });
+    writeJson(d.requests, id, { v: 1, id, at: now.toISOString(), by: o.by, question, ...(attachments.length ? { attachments } : {}), ...(pick ? { pick, picker: o.picker } : {}) });
+    return { id };
+}
+/**
+ * At start-up: a question whose turn was cut off by a restart (its request was taken, its answer still pending) is
+ * refused once, never run again. Returns the ids refused.
+ */
+export function refuseInterruptedChats(stateDir, now = new Date()) {
+    const d = chatDirs(stateDir);
+    if (!existsSync(d.answers))
+        return [];
+    const out = [];
+    for (const f of readdirSync(d.answers).filter((x) => x.endsWith('.json'))) {
+        const id = f.slice(0, -'.json'.length);
+        if (!CHAT_ID.test(id) || chatAnswer(stateDir, id)?.state !== 'pending' || existsSync(join(d.requests, f)))
+            continue;
+        writeChatAnswer(stateDir, id, { refused: 'interrupted: the coordinator restarted during this turn; ask again' }, now);
+        out.push(id);
+    }
+    return out;
+}
+/** The answer file for a request (pending until the coordinator has run the turn), or null. */
+export function chatAnswer(stateDir, id) {
+    if (!CHAT_ID.test(id))
+        return null;
+    try {
+        return JSON.parse(readFileSync(join(chatDirs(stateDir).answers, `${id}.json`), 'utf8'));
+    }
+    catch {
+        return null;
+    }
+}
+/** The coordinator's side: requests waiting, oldest first; each removed as it's taken (a malformed one too). */
+export function takeChatRequests(stateDir) {
+    const d = chatDirs(stateDir).requests;
+    if (!existsSync(d))
+        return [];
+    const out = [];
+    for (const f of readdirSync(d).filter((x) => x.endsWith('.json')).sort()) {
+        const p = join(d, f);
+        try {
+            const r = JSON.parse(readFileSync(p, 'utf8'));
+            // A conversation turn's request names a well-formed conversation, or it is dropped: never run as a single-shot one.
+            if (r && r.v === 1 && CHAT_ID.test(r.id) && typeof r.by === 'string' && typeof r.question === 'string' && (r.conversation === undefined || (typeof r.conversation === 'string' && CONVERSATION_ID.test(r.conversation)))) {
+                const { pick: rawPick, picker, ...rest } = r;
+                const pick = cleanPick(rawPick);
+                out.push({
+                    ...rest,
+                    attachments: Array.isArray(r.attachments) ? r.attachments.filter((a) => typeof a === 'string' && ATTACHMENT_ID.test(a)).slice(0, MAX_ATTACHMENTS) : [],
+                    // A pick without a role the dashboard read is no pick: the answer runs on the default.
+                    ...(pick && (picker === 'owner' || picker === 'writer') ? { pick, picker } : {}),
+                });
+            }
+        }
+        catch {
+            // unreadable: dropped
+        }
+        rmSync(p, { force: true });
+    }
+    return out;
+}
+/** The coordinator's side: the answer (or refusal) where the dashboard reads it. */
+export function writeChatAnswer(stateDir, id, a, now = new Date()) {
+    writeJson(chatDirs(stateDir).answers, id, 'answer' in a ? { v: 1, id, at: now.toISOString(), state: 'answered', answer: a.answer } : { v: 1, id, at: now.toISOString(), state: 'refused', why: a.refused });
+}
+/** A hub question: one turn per selected instance, each from its own bundle, as its own agent user. */
+export async function hubChat(question, by, instances) {
+    const out = [];
+    for (const i of instances)
+        out.push(await chatTurn({ ...i, question, by }));
+    return out;
+}
+//# sourceMappingURL=chat.js.map

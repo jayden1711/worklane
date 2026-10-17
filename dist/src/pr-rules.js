@@ -1,0 +1,166 @@
+// Review rules for the harness's own agent PRs: what every PR body starts with (a one-paragraph intent and a
+// risk class), the size limit a change is sent back over ("split it", unless it's mechanical), and the docs-only
+// fast path (the light checks decide the harness's own merge call). Pure logic plus one git read, shared by the
+// coordinator, the merge flow and the tests. Part of the merge policy (a self-modification path, src/review.ts),
+// so a change here waits for the owner.
+import { spawnSync } from 'node:child_process';
+import { globToRegExp } from './guardrails/glob.js';
+import { whyHighRisk } from './merge-policy.js';
+export const RISK_CLASSES = ['docs-only', 'logic', 'protected'];
+const rank = (c) => RISK_CLASSES.indexOf(c);
+/** The owner's definition of documentation for the fast path: narrower than review.ts's `docs` category. */
+export const DOCS_ONLY_GLOBS = ['**/*.md', 'docs/**'];
+const DOCS_RES = DOCS_ONLY_GLOBS.map((g) => globToRegExp(g));
+export const isDocPath = (p) => DOCS_RES.some((re) => re.test(p));
+/**
+ * The risk class computed from the changed paths: the merge policy's high-risk categories (review.yaml's L3, CI
+ * config, the locked self-modification and agent-instructions categories, the repo's wait list) and the money-path
+ * config, all already in `level` (computeLevel). Protected wins over docs-only (AGENTS.md is a .md file).
+ */
+export function riskClassOf(o) {
+    const risky = whyHighRisk({ level: o.level, waitCategories: o.waitCategories });
+    if (risky.length)
+        return { cls: 'protected', why: risky.map((w) => w.text) };
+    if (o.paths.length && o.paths.every(isDocPath))
+        return { cls: 'docs-only', why: ['only documentation changes'] };
+    return { cls: 'logic', why: [] };
+}
+/** The class a PR goes out with: the computed one, raised (never lowered) by the agent's own claim. */
+export function effectiveClass(computed, claimed) {
+    return claimed && rank(claimed) > rank(computed) ? claimed : computed;
+}
+export const INTENT_PREFIX = '**Intent:** ';
+export const CLASS_PREFIX = '**Risk class:** ';
+/** One paragraph: the worker's intent with blank lines and runs of whitespace folded into single spaces. */
+export function oneParagraph(text) {
+    return (text ?? '').replace(/\s+/g, ' ').trim();
+}
+/** The head of every agent PR body: the intent paragraph, then the risk class (and why). */
+export function prBodyHead(o) {
+    const why = o.why.length ? ` (${o.why.slice(0, 4).join('; ')}${o.why.length > 4 ? `; and ${o.why.length - 4} more` : ''})` : '';
+    return `${INTENT_PREFIX}${oneParagraph(o.intent)}\n\n${CLASS_PREFIX}${o.cls}${why}`;
+}
+/**
+ * Why an agent PR body is refused (empty: it's fine). It must start with a one-paragraph intent and then a risk
+ * class, and that class may not be lower than the one computed from the changed paths.
+ */
+export function prBodyProblems(body, computed) {
+    const [first = '', second = ''] = body.replace(/\r\n/g, '\n').split(/\n\s*\n/);
+    const out = [];
+    if (!first.startsWith(INTENT_PREFIX) || !first.slice(INTENT_PREFIX.length).trim())
+        out.push(`the body does not start with a one-paragraph intent ("${INTENT_PREFIX.trim()} ...")`);
+    const m = second.startsWith(CLASS_PREFIX) ? /^(docs-only|logic|protected)\b/.exec(second.slice(CLASS_PREFIX.length)) : null;
+    if (!m)
+        out.push(`the intent is not followed by a risk class ("${CLASS_PREFIX.trim()} docs-only | logic | protected")`);
+    else if (rank(m[1]) < rank(computed))
+        out.push(`the risk class ${m[1]} is lower than the one its changed paths give (${computed}); a class can be raised, never lowered`);
+    return out;
+}
+// ---------------------------------------------------------------- size
+/** Lockfiles: never counted toward the size limit. */
+export const LOCKFILE_GLOBS = [
+    '**/package-lock.json', '**/npm-shrinkwrap.json', '**/yarn.lock', '**/pnpm-lock.yaml', '**/bun.lockb', '**/poetry.lock', '**/uv.lock',
+    '**/Pipfile.lock', '**/Cargo.lock', '**/go.sum', '**/Gemfile.lock', '**/composer.lock',
+];
+/** A line with all its whitespace taken out: what formatting can't change. */
+const bare = (l) => l.replace(/\s+/g, '');
+/**
+ * The counted lines that aren't mechanical: with whitespace ignored and blank lines dropped, the added lines that
+ * no removed line matches and the removed lines no added line matches, across the whole change. A reindent, a
+ * reflow into other lines' whitespace, or a file moved (even reformatted on the way) leaves none.
+ */
+function nonMechanical(files) {
+    const pool = new Map();
+    for (const f of files)
+        for (const l of f.removed.map(bare).filter(Boolean))
+            pool.set(l, (pool.get(l) ?? 0) + 1);
+    let unmatched = 0;
+    for (const f of files)
+        for (const l of f.added.map(bare).filter(Boolean)) {
+            const n = pool.get(l) ?? 0;
+            if (n)
+                pool.set(l, n - 1);
+            else
+                unmatched++;
+        }
+    for (const n of pool.values())
+        unmatched += n;
+    return unmatched;
+}
+/**
+ * Over `maxLines` changed lines (added plus removed; lockfiles and generated files not counted), a change is sent
+ * back to be split, unless it's mechanical: whitespace ignored and blank lines dropped, its added lines are exactly
+ * its removed lines (renames, moves, reindents, formatting). A pure rename counts 0 lines (rename detection).
+ */
+export function sizeVerdict(files, o) {
+    const skip = [...LOCKFILE_GLOBS, ...o.generated].map((g) => globToRegExp(g));
+    const counted = files.filter((f) => !skip.some((re) => re.test(f.path)));
+    const lines = counted.reduce((s, f) => s + f.added.length + f.removed.length, 0);
+    if (lines <= o.maxLines)
+        return { ok: true, lines, why: `${lines} changed lines (limit ${o.maxLines})` };
+    const real = nonMechanical(counted);
+    if (real === 0)
+        return { ok: true, lines, why: `${lines} changed lines, all mechanical (renames, moves or formatting)` };
+    return {
+        ok: false,
+        lines,
+        why: `split it: ${lines} changed lines (over review.yaml max_pr_lines ${o.maxLines}, lockfiles and generated files not counted), and not mechanical (${real} of them are more than renames, moves or formatting)`,
+    };
+}
+/** The change base..head as sizeVerdict reads it: one `git diff -M -U0`, each file under its new path. */
+export function sizeFiles(cwd, base, head) {
+    const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '-M', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+    if (r.status !== 0)
+        throw new Error(`git diff failed: ${r.stderr}`);
+    const out = [];
+    let cur = null;
+    let inHunk = false;
+    for (const l of r.stdout.split('\n')) {
+        const header = /^diff --git a\/(.*) b\/(.*)$/.exec(l);
+        if (header) {
+            cur = { path: header[2], added: [], removed: [] };
+            out.push(cur);
+            inHunk = false;
+        }
+        else if (!cur)
+            continue;
+        else if (l.startsWith('@@'))
+            inHunk = true;
+        else if (inHunk && l.startsWith('+'))
+            cur.added.push(l.slice(1));
+        else if (inHunk && l.startsWith('-'))
+            cur.removed.push(l.slice(1));
+        else if (!inHunk && l.startsWith('rename to '))
+            cur.path = l.slice('rename to '.length);
+        else if (!inHunk && l.startsWith('+++ b/'))
+            cur.path = l.slice('+++ b/'.length);
+    }
+    return out;
+}
+// ---------------------------------------------------------------- docs-only fast path
+/**
+ * The required checks the harness's own merge call waits on for a PR: every required check, or for a docs-only PR
+ * the light ones (review.yaml docs_only_checks, those of them that are required). Empty docs_only_checks: no fast path.
+ * GitHub's ruleset still requires every required check before it lets the merge through (see docs).
+ */
+export function checksFor(o) {
+    const light = o.required.filter((c) => o.docsOnlyChecks.includes(c));
+    if (o.cls !== 'docs-only' || !light.length)
+        return { checks: o.required, fast: false };
+    return { checks: light, fast: true };
+}
+/**
+ * A docs-only PR the harness decided on its light checks, while GitHub reports it blocked: the ruleset still
+ * requires every required check. Those still running (or not reported yet): wait, and look again on the next poll.
+ * One that failed: a human looks (the light checks don't speak for it). None outstanding: blocked for another
+ * reason, which the merge policy reports as usual.
+ */
+export function rulesetHold(full) {
+    const failed = full.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled');
+    if (failed.length)
+        return { act: 'hold', why: `docs-only fast path: the ruleset's required check(s) ${failed.map((c) => `${c.name} (${c.outcome})`).join(', ')} did not pass on GitHub` };
+    if (full.some((c) => c.outcome === 'pending' || c.outcome === 'missing'))
+        return { act: 'wait' };
+    return { act: 'none' };
+}
+//# sourceMappingURL=pr-rules.js.map

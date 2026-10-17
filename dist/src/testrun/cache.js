@@ -1,0 +1,27 @@
+// Cache keys: the sha256 of the files that pin what a cache holds (the lockfile), read at the run's commit from the
+// coordinator's clone. A changed lockfile is a new key and so a new, empty cache, never a stale one; a key file the
+// commit doesn't have is part of the key too ("missing"), so adding one later changes it.
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+export function cacheKey(repo, sha, files) {
+    const h = createHash('sha256');
+    for (const f of files) {
+        h.update(`${f}\0`);
+        try {
+            h.update(execFileSync('git', ['-C', repo, 'show', `${sha}:${f}`], { maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }));
+        }
+        catch {
+            h.update('\0missing\0');
+        }
+        h.update('\0');
+    }
+    return h.digest('hex').slice(0, 32);
+}
+/** Each cache's variable -> its directory for this commit's key. */
+export async function cacheDirs(caches, repo, sha, dir) {
+    const out = {};
+    for (const c of caches)
+        out[c.env] = await dir(c.name, cacheKey(repo, sha, c.key));
+    return out;
+}
+//# sourceMappingURL=cache.js.map

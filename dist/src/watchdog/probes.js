@@ -1,0 +1,280 @@
+// The watchdog's triggers, each a pure function from what it read (unit states, the update log, disks, an
+// instance's event log and files) to the findings that are true now. reconcile() turns findings into incidents:
+// each finding raises its incident (once: raising an open one only updates it), and each open incident in the
+// probe's scope that is no longer found is resolved (once). A probe that couldn't look (no systemd here, a disk it
+// couldn't read) reports nothing for what it didn't see, so nothing is resolved on a guess.
+import { BRAND } from '../brand.js';
+import { helperFix } from '../testrun/helper.js';
+import { project } from '../projection.js';
+import { openIncidents, raiseIncident, readIncidents, resolveIncident } from './incidents.js';
+import { asRoot } from '../os/system-paths.js';
+import { authHoldsOf, authIncidentKey, authIncidentText } from '../claude-auth-failure.js';
+/** Raise every finding and resolve every open incident in scope that wasn't found. */
+export function reconcile(findings, scope, o = {}) {
+    const raised = [];
+    const resolved = [];
+    const opts = { ...(o.dir ? { dir: o.dir } : {}), ...(o.now ? { now: o.now } : {}) };
+    for (const f of findings) {
+        const r = raiseIncident(f.kind, f.key, f.detail, f.fix, { ...opts, instance: f.instance, tried: f.tried, ...(f.severity ? { severity: f.severity } : {}) });
+        if (r.opened)
+            raised.push(r.incident);
+    }
+    const found = new Set(findings.map((f) => `${f.kind}\n${f.key}`));
+    for (const x of openIncidents(readIncidents(o.dir))) {
+        if (!scope.kinds.includes(x.kind))
+            continue;
+        if (scope.instance !== 'any' && x.instance !== scope.instance)
+            continue;
+        if (scope.keys && !scope.keys.has(x.key))
+            continue;
+        if (found.has(`${x.kind}\n${x.key}`))
+            continue;
+        const r = resolveIncident(x.kind, x.key, opts);
+        if (r)
+            resolved.push(r);
+    }
+    return { raised, resolved };
+}
+// ------------------------------------------------------------------ machine
+/** The units the watchdog looks at: the hub, and each instance's coordinator and dashboard. */
+export function watchedUnits(instances) {
+    return [
+        { unit: `${BRAND.cli}-dashboard-hub.service`, instance: null, what: 'the dashboard hub' },
+        ...instances.flatMap((name) => [
+            { unit: `${BRAND.cli}-${name}.service`, instance: name, what: `instance ${name}'s coordinator` },
+            { unit: `${BRAND.cli}-dashboard-${name}.service`, instance: name, what: `instance ${name}'s dashboard` },
+        ]),
+    ];
+}
+/** Restarts within this long that make a crash loop. */
+export const CRASH_LOOP = { restarts: 3, windowMs: 15 * 60_000 };
+/** Down (failed or stopped) and crash-looping units. Units not installed here (not-found) are not looked at. */
+export function unitFindings(states, units, history, now) {
+    const findings = [];
+    const seen = new Set();
+    for (const s of states) {
+        const u = units.find((x) => x.unit === s.unit);
+        if (!u || s.loadState === 'not-found' || !s.activeState)
+            continue;
+        seen.add(s.unit);
+        const h = [...(history.get(s.unit) ?? []), ...(s.restarts === null ? [] : [{ at: now, restarts: s.restarts }])].filter((x) => now - x.at <= CRASH_LOOP.windowMs);
+        history.set(s.unit, h);
+        const grew = h.length ? h.at(-1).restarts - h[0].restarts : 0;
+        const restarting = s.subState === 'auto-restart';
+        const unitCmd = `systemctl status ${s.unit}; journalctl -u ${s.unit} -n 100`;
+        if (grew >= CRASH_LOOP.restarts || (restarting && grew > 0)) {
+            findings.push({ kind: 'crash_loop', key: s.unit, instance: u.instance, detail: `${u.what} (${s.unit}) keeps restarting: ${grew} restart${grew === 1 ? '' : 's'} in the last ${CRASH_LOOP.windowMs / 60_000} min (${s.activeState}/${s.subState ?? '?'})`, fix: `Read why it exits (${unitCmd}) and fix that; it restarts on its own once it stays up`, tried: [`systemd restarted it ${grew} time${grew === 1 ? '' : 's'}`] });
+        }
+        else if (s.activeState === 'failed' || s.activeState === 'inactive') {
+            findings.push({ kind: 'unit_down', key: s.unit, instance: u.instance, detail: `${u.what} (${s.unit}) is ${s.activeState}${s.subState ? ` (${s.subState})` : ''}`, fix: `Read why it stopped (${unitCmd}), then start it: sudo systemctl start ${s.unit}`, tried: s.restarts ? [`systemd restarted it ${s.restarts} time${s.restarts === 1 ? '' : 's'} before giving up`] : [] });
+        }
+    }
+    return { findings, seen };
+}
+/** A rolled-back engine update (held or not), until a later install. */
+export function updateFindings(log) {
+    const last = [...log].reverse().find((e) => e.event === 'installed' || e.event === 'rolled_back');
+    if (!last || last.event !== 'rolled_back')
+        return [];
+    const sha = (last.from ?? last.to ?? 'unknown').slice(0, 12);
+    const why = last.reason ?? (last.migration ? `instance ${last.migration.instance}'s migration failed: ${last.migration.error}` : last.failed?.length ? `failed: ${last.failed.join('; ')}` : 'its checks after the install failed');
+    const tried = [`rolled back to ${last.back ? last.back.slice(0, 12) : 'the previous engine'}`, ...(last.held ? [`held ${sha}: the updater skips it until a newer commit`] : [])];
+    return [{ kind: 'update_rollback', key: sha, instance: null, detail: `the update to ${sha} was rolled back${last.held ? ' and is held' : ''}: ${why}`, fix: 'Read the rollback on the Machine page (the update log), fix it in a new commit; the hold lifts when a newer one installs', tried }];
+}
+/** How long a signer's addition stays an open incident: posted once when seen, resolved (and posted once more) after this. */
+export const SIGNER_NOTICE_MS = 24 * 60 * 60_000;
+const SIGNER_ADDED = /^added ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
+/**
+ * Every release signer added to the updater's allowed signers file in the last day, from the machine change log
+ * (scripts/setup/updates-root.cjs writes one line per signer added, by updates.sh --signer or --confirm-signer): one
+ * incident each, keyed by the key's fingerprint, naming the principal, the fingerprint and who ran it. A public key
+ * and a principal are not secrets.
+ */
+export function signerFindings(changes, now) {
+    const out = new Map();
+    for (const c of changes) {
+        if (c.what !== 'updates.allowed_signers' || typeof c.to !== 'string')
+            continue;
+        const m = SIGNER_ADDED.exec(c.to);
+        const age = now - Date.parse(c.at);
+        if (!m || !(age >= 0 && age < SIGNER_NOTICE_MS))
+            continue;
+        const [, principal, fingerprint] = m;
+        out.set(`${principal} ${fingerprint}`, {
+            kind: 'update_signer_added',
+            key: `${principal} ${fingerprint}`,
+            instance: null,
+            detail: `the release signer ${principal}, key fingerprint ${fingerprint}, was added to ${asRoot.etc('allowed_signers')} by ${c.by} at ${c.at}: engine releases signed with that key now verify on this machine`,
+            fix: `Nothing, if you added it. If you didn't: turn engine updates off (the Machine page), remove its line from ${asRoot.etc('allowed_signers')} at a root shell, and find out who ran it. This notice closes by itself after a day`,
+            tried: [],
+        });
+    }
+    return [...out.values()];
+}
+/** How long a Claude account profile change stays an open alert: posted once when seen, resolved after this. */
+export const PROFILE_NOTICE_MS = 24 * 60 * 60_000;
+/**
+ * Every Claude account profile added, staged, confirmed, chosen or removed in the last day (scripts/setup/
+ * claude-account.sh writes one machine change line each, what: claude_account.profile): one alert each, naming what
+ * happened, the instances and who asked. The account's email or org appears only in a confirmation (a root admin saw
+ * it); the line carries no token. A staged one says how it is confirmed, or removed if nobody asked for it.
+ */
+export function profileFindings(changes, now) {
+    const out = [];
+    for (const c of changes) {
+        if (c.what !== 'claude_account.profile' || typeof c.to !== 'string')
+            continue;
+        const age = now - Date.parse(c.at);
+        if (!(age >= 0 && age < PROFILE_NOTICE_MS))
+            continue;
+        const to = c.to.slice(0, 300);
+        const inst = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(c.by);
+        const staged = /^staged ([a-z][a-z0-9-]{0,20}) for /.exec(to);
+        out.push({
+            kind: 'claude_profile_changed',
+            key: `${c.at} ${to}`,
+            instance: inst ? inst[1] : null,
+            detail: `Claude account profile: ${to}, by ${c.by}${inst ? ` (instance ${inst[1]}'s dashboard)` : ''} at ${c.at}${staged ? '. Staged: nothing may use it until an admin confirms it on the machine' : ''}`,
+            fix: staged
+                ? `If you added it, confirm it on the machine (it shows the account and asks you to type the name): sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} confirm-profile ${staged[1]}. If you didn't, remove it there: sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} remove ${staged[1]}`
+                : `Nothing, if you or your failover did it. If not: choose the account back on the Machine page, and find out who asked. This notice closes by itself after a day`,
+            tried: [],
+        });
+    }
+    return out;
+}
+const SIGNER_STAGED = /^staged ([^\s]+) ssh-ed25519 [A-Za-z0-9+/]+ \((SHA256:[A-Za-z0-9+/]{43})\)$/;
+/**
+ * Every release signer STAGED in the last day (the machine helper's stage-update-signer, asked for from a dashboard), from
+ * the machine change log: one incident each, naming the principal, the fingerprint, the coordinator user that staged it
+ * and so its instance. Staging trusts the key for nothing, but an owner should know someone asked, before anyone at
+ * a root shell is asked to confirm it.
+ */
+export function stagedSignerFindings(changes, now) {
+    const out = new Map();
+    for (const c of changes) {
+        if (c.what !== 'updates.pending_signer' || typeof c.to !== 'string')
+            continue;
+        const m = SIGNER_STAGED.exec(c.to);
+        const age = now - Date.parse(c.at);
+        if (!m || !(age >= 0 && age < SIGNER_NOTICE_MS))
+            continue;
+        const [, principal, fingerprint] = m;
+        const inst = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(c.by);
+        out.set(`${principal} ${fingerprint}`, {
+            kind: 'update_signer_staged',
+            key: `${principal} ${fingerprint}`,
+            instance: inst ? inst[1] : null,
+            detail: `a release signer was staged: ${principal}, key fingerprint ${fingerprint}, by ${c.by}${inst ? ` (instance ${inst[1]})` : ''} at ${c.at}. It is trusted for nothing until an admin confirms it at a root shell`,
+            fix: `If you asked for it, confirm it on the machine: sudo bash ${asRoot.opt('current/scripts/setup/updates.sh')} --confirm-signer ${fingerprint} (it asks you to type the principal). If not, discard it on the Machine page's Updater setup. It is dropped after 24 hours either way`,
+            tried: [],
+        });
+    }
+    return [...out.values()];
+}
+/** The share of a disk in use at or above which the watchdog alerts. */
+export const DISK_PCT = 85;
+/** Disks at or over the limit. `disks`: each path measured, with how much of its volume is used. */
+export function diskFindings(disks, limit = DISK_PCT) {
+    return disks
+        .filter((d) => d.usedPct >= limit)
+        .map((d) => ({ kind: 'disk_full', key: d.path, instance: null, detail: `the volume holding ${d.path} is ${Math.round(d.usedPct)}% full (${d.freeGb.toFixed(1)} GB free; the limit is ${limit}%)`, fix: `Free space on that volume (old worktrees, logs, caches), or grow it`, tried: [] }));
+}
+// ------------------------------------------------------------------ instance
+/** Default hours ready work may sit with nothing moving before it's flagged (watchdog.json stall_hours). */
+export const STALL_HOURS = 6;
+/** Event types that mean the instance is getting on with its work. */
+const PROGRESS = new Set(['issue.claimed', 'run.started', 'run.finished', 'pr.opened', 'pr.ready', 'merge.done', 'land.result', 'check.result', 'decision.asked', 'issue.blocked']);
+/** GitHub error kinds (src/github/errors.ts) that mean the instance's token or its permissions are wrong. */
+const GITHUB_AUTH_KINDS = new Set(['unauthenticated', 'insufficient_scope', 'insufficient_role', 'sso_required', 'forbidden']);
+/** How far back a failure counts: one hour for sign-in and GitHub access. */
+export const AUTH_WINDOW_MS = 3600_000;
+/**
+ * Watchdog passes in a row (one a minute) in which the instance's GitHub token couldn't be renewed because GitHub
+ * wasn't reached (no answer at all, not a refusal) before that is reported, amber: GitHub not reachable. The token is
+ * renewed once it has 10 minutes left (src/github-app.ts), so a blip of a minute or two (DNS, a dropped connection)
+ * heals by itself with nobody told, and 5 failed passes still leave about 5 minutes of the old token: someone hears
+ * of it before work that needs GitHub stops.
+ */
+export const GITHUB_UNREACHABLE_PASSES = 5;
+/** A login that expires within this long is flagged. */
+export const LOGIN_EXPIRY_MS = 3 * 86_400_000;
+const at = (e) => Date.parse(e.ts);
+/** Every instance-level trigger: Claude sign-in and login expiry, GitHub access, stalled work, auto-merge stopped, the test sandbox. */
+export function instanceFindings(f) {
+    const out = [];
+    const i = f.instance;
+    const recent = f.events.filter((e) => f.now - at(e) <= AUTH_WINDOW_MS);
+    // Claude: a run stopped on a login mismatch since the last run that finished well, or the CLI says signed out.
+    const lastAuthFail = [...recent].reverse().find((e) => e.type === 'run.finished' && e.payload.reason === 'auth_mismatch');
+    const okAfter = lastAuthFail && f.events.some((e) => e.id > lastAuthFail.id && e.type === 'run.finished' && e.payload.reason === 'succeeded');
+    const refreshes = recent.filter((e) => e.type === 'run.transient_retry' && e.payload.cause === 'token_refresh').length;
+    // A probe that says signed out counts only while no run on the login has succeeded since it started saying so: a run
+    // that finished well had a working login, so the probe was wrong (or the login came back), and no one is needed.
+    const since = f.authFailingSince;
+    const probeOut = f.auth?.loggedIn === false && !(since !== undefined && f.events.some((e) => at(e) >= since && e.type === 'run.finished' && e.payload.reason === 'succeeded'));
+    if ((lastAuthFail && !okAfter) || probeOut) {
+        const why = probeOut ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${String(lastAuthFail.payload.detail).slice(0, 200)}`;
+        out.push({ kind: 'claude_auth', key: i, instance: i, detail: why, fix: "Sign the instance's agent user in to Claude again (a new setup-token for that user), then check it with claude auth status as that user", tried: refreshes ? [`retried ${refreshes} run${refreshes === 1 ? '' : 's'} after a token refresh in the last hour`] : [] });
+    }
+    // Claude: a login the API refused (a run ended auth_failed), until a call on that login succeeded. Not bound to the
+    // last hour: nothing may start on a held login, so no newer run says anything about it (src/claude-auth-failure.ts).
+    const holds = authHoldsOf(f.events);
+    if (holds.length)
+        out.push({ kind: 'claude_auth', key: authIncidentKey(i), instance: i, ...authIncidentText(holds) });
+    const exp = f.auth?.expiresAt ? Date.parse(f.auth.expiresAt) : NaN;
+    if (f.auth?.loggedIn && Number.isFinite(exp) && exp - f.now <= LOGIN_EXPIRY_MS) {
+        const days = Math.max(0, Math.floor((exp - f.now) / 86_400_000));
+        out.push({ kind: 'claude_login_expiring', key: i, instance: i, detail: exp <= f.now ? `the agent user's Claude login expired on ${f.auth.expiresAt.slice(0, 10)}` : `the agent user's Claude login expires in ${days} day${days === 1 ? '' : 's'}, on ${f.auth.expiresAt.slice(0, 10)}`, fix: "Renew the agent user's Claude login (a new setup-token for that user) before then", tried: [] });
+    }
+    // GitHub: the token wouldn't mint, or a call failed on the token or its permissions in the last hour. A refused
+    // token (401, unauthenticated) stands only until a call with it succeeds after it: the token works again. A refused
+    // permission (a 403 on one call) is not cleared by another call succeeding, which proves nothing about that one.
+    const okAt = f.githubOkAt ?? null;
+    const standing = (e) => !(e.payload.kind === 'unauthenticated' && okAt !== null && okAt > at(e));
+    const ghFail = [...recent].reverse().find((e) => e.type === 'coordinator.error' && GITHUB_AUTH_KINDS.has(e.payload.kind) && standing(e));
+    if (f.githubTokenError || ghFail) {
+        const p = ghFail?.payload;
+        out.push({ kind: 'github_auth', key: i, instance: i, detail: f.githubTokenError ? `the instance's GitHub token couldn't be had: ${f.githubTokenError}` : `${p.where}: GitHub refused the instance's token (${p.kind}): ${p.message}`, fix: "Check the instance's GitHub App: installed on the repo, with the permissions the setup lists, and its private key in place (or replace an expired token)", tried: ['retries every tick; nothing that needs GitHub can move until it works'] });
+    }
+    // GitHub not reached at all (no answer, not a refusal), pass after pass: amber, under its own key, never the red one.
+    const net = f.githubUnreachable;
+    if (net && net.passes >= GITHUB_UNREACHABLE_PASSES) {
+        out.push({ kind: 'github_auth', key: `${i}:network`, instance: i, severity: 'amber', detail: `GitHub not reachable: the instance's GitHub token couldn't be renewed in ${net.passes} passes in a row, since ${new Date(net.since).toISOString()} (${net.detail}). Nothing says the token or the App is wrong`, fix: "Check this machine's network, DNS and proxy, and GitHub's status page; nothing to change on the GitHub App. It resolves by itself once GitHub answers", tried: ['asks GitHub again every pass; work that needs GitHub waits until it answers'] });
+    }
+    const perm = [...f.events].reverse().find((e) => e.type === 'testrun.checks_permission');
+    const level = perm?.payload?.level;
+    if (perm && (level === 'none' || level === 'read')) {
+        out.push({ kind: 'github_auth', key: `${i}:checks`, instance: i, detail: `the GitHub App can't post check runs (checks: ${level})`, fix: "Give the instance's GitHub App the Checks: write permission, and accept it on the installation", tried: ['test runs go on; their results are not posted as checks'] });
+    }
+    // Ready work and nothing moving for stall_hours (not while an emergency stop holds everything on purpose).
+    const hours = f.stallHours ?? STALL_HOURS;
+    if (!f.emergency) {
+        const ready = project(f.events).tasks.filter((t) => t.status === 'ready');
+        const last = [...f.events].reverse().find((e) => PROGRESS.has(e.type));
+        const since = last ? at(last) : f.events.length ? at(f.events[0]) : f.now;
+        if (ready.length && f.now - since >= hours * 3600_000) {
+            const idle = Math.floor((f.now - since) / 3600_000);
+            out.push({ kind: 'stalled', key: i, instance: i, detail: `${ready.length} ready issue${ready.length === 1 ? '' : 's'} (${ready.slice(0, 5).map((t) => `#${t.issue}`).join(', ')}) and nothing has moved for ${idle} h`, fix: "Look at the instance's Board and Logs for what holds it (a full slot cap, the budget, a paused run window, a coordinator error)", tried: [] });
+        }
+    }
+    // The main watch stopped auto-merge on an unaccounted commit.
+    if (f.stop && f.stop.by === 'main_watch') {
+        const u = [...f.events].reverse().find((e) => e.type === 'main_watch.unaccounted')?.payload;
+        out.push({ kind: 'auto_merge_stopped', key: i, instance: i, detail: `auto-merge is stopped: ${f.stop.reason}`, fix: 'Look at the commit; when it is accounted for (or reverted), an admin clears the stop on the dashboard', tried: ['stopped auto-merge', ...(u?.revert ? [`opened a revert PR: ${u.revert}`] : [])] });
+    }
+    // The test sandbox's own check (the helper's check): no test run starts until it passes.
+    const sandbox = [...f.events].reverse().find((e) => e.type === 'testrun.sandbox')?.payload;
+    if (sandbox && !sandbox.ok) {
+        out.push({ kind: 'test_sandbox', key: i, instance: i, detail: `the test sandbox check failed: ${sandbox.detail}`, fix: `Run the machine's check (sudo bash scripts/setup/test-user.sh check ${i}) and fix its FAIL lines; no restart needed`, tried: ['no test run starts until it passes; each open PR has a check that says so', 'checked again by itself, every 5 minutes at most; test runs go on when it passes'] });
+    }
+    // The sandbox helper's protocol isn't this engine's (an engine update that didn't reinstall the root helper).
+    const helper = [...f.events].reverse().find((e) => e.type === 'testrun.helper')?.payload;
+    if (helper && !helper.ok) {
+        out.push({ kind: 'helper_outdated', key: i, instance: i, detail: helper.detail, fix: helperFix(i), tried: ['no test run starts; each PR gets a check that says so', 'asked again when the instance starts'] });
+    }
+    return out;
+}
+/** The instance-level kinds: an instance's own probe answers for these, for itself only. */
+export const INSTANCE_KINDS = ['claude_auth', 'claude_login_expiring', 'github_auth', 'stalled', 'auto_merge_stopped', 'test_sandbox', 'helper_outdated'];
+//# sourceMappingURL=probes.js.map

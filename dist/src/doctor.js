@@ -1,0 +1,373 @@
+// `doctor`: verify an install. Each check is ok, warn or fail; any fail
+// makes the command exit non-zero. Nothing here is skipped silently: a check
+// that can't run reports why, and a feature the setup's mode can't have is
+// listed as off, with why.
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { BRAND } from './brand.js';
+import { ConfigInvalid, loadConfig } from './config/load.js';
+import { checkGuardrails } from './guardrails/check.js';
+import { loadFingerprintSets } from './guardrails/context.js';
+import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal } from './agent-settings.js';
+import { GIT_HOOK_MARKER } from './install.js';
+import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
+import { instanceTargets, planMigrations, projectConfigFiles } from './migrations.js';
+import { projectStateDir } from './guardrails/context.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { diskFloorCheck } from './governor-holds.js';
+import { findTool, toolBin } from './tool-path.js';
+import { checkIntakeFile } from './intake/check.js';
+import { INTAKE_FILE } from './intake/config.js';
+import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
+import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn } from './init.js';
+import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
+import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
+import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe } from './setup-steps.js';
+import { modelWarnings } from './model-routing.js';
+const CLAUDE_MD_TOKEN_BUDGET = 2500;
+/**
+ * An instance's agent API key file (credentials.yaml agent_api_key): present, owned by the agent user, and open to
+ * nobody else (no group or other bits). The file is never read. The coordinator user normally can't even see it
+ * (it lives in the agent user's home), which is right: then this says to run doctor as root to check the mode.
+ */
+export function apiKeyCheck(file, agentUser, access = fileAccess, uidOf = userUid) {
+    if (!agentUser)
+        return { level: 'fail', detail: `${file}: an API key needs agents to run as their own user (instance.yaml run_as)` };
+    const a = access(file);
+    if (a.kind === 'unsupported')
+        return { level: 'warn', detail: 'API-key instances run agents as their own POSIX user; not checkable on native Windows' };
+    if (a.kind === 'missing')
+        return { level: 'fail', detail: `${file} not found: install it with \`scripts/setup/credentials.sh <name> api-key\`` };
+    if (a.kind === 'hidden')
+        return { level: 'warn', detail: `${file} can't be seen from this user, as intended (it is ${agentUser}'s); to check its owner and mode, run doctor as root` };
+    const uid = uidOf(agentUser);
+    if (uid === null)
+        return { level: 'fail', detail: `the agent user ${agentUser} does not exist on this machine` };
+    if (a.uid !== uid)
+        return { level: 'fail', detail: `${file} is not owned by ${agentUser}: reinstall it with credentials.sh` };
+    if (a.openToOthers)
+        return { level: 'fail', detail: `${file} is mode ${a.mode}: only ${agentUser} may read it (0400). Run: chmod 0400 ${file}` };
+    return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
+}
+export function doctor(rootArg, opts = {}) {
+    const root = resolve(rootArg);
+    const out = [];
+    const add = (name, level, detail) => out.push({ name, level, detail });
+    const [maj, min] = process.versions.node.split('.').map(Number);
+    // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
+    if (maj < 22 || (maj === 22 && min < 13))
+        add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
+    else
+        add('node', 'ok', `Node ${process.versions.node}`);
+    let cfg = null;
+    try {
+        cfg = loadConfig(root);
+        add('config', 'ok', `${BRAND.configDir}/ valid`);
+        // WHY (#468): a model the engine doesn't list is a warning, never a refusal (the config still loads).
+        const models = modelWarnings(cfg.agents);
+        add('config models', models.length ? 'warn' : 'ok', models.length ? models.join('\n') : 'every model named is one the engine lists');
+    }
+    catch (e) {
+        add('config', 'fail', e instanceof ConfigInvalid ? e.message : e.message);
+    }
+    // Migrations: anything newer than this engine, or pending steps the coordinator won't start with.
+    const targets = [['migrations', { configFiles: projectConfigFiles(root), eventsDb: join(projectStateDir(root), 'events.db') }], ...(opts.instance ? [[`migrations ${opts.instance}`, instanceTargets(join(instancesDir(), opts.instance))]] : [])];
+    for (const [name, t] of targets) {
+        const plan = planMigrations(t);
+        const manual = plan.pending.filter((p) => !p.auto);
+        const lines = [...plan.newer, ...plan.pending.map((p) => `${p.path}: ${p.kind} version ${p.from} -> ${p.to}${p.auto ? ' (applied at the next start)' : ''}: ${p.steps.join('; ')}`)];
+        if (plan.newer.length)
+            add(name, 'fail', `${lines.join('\n')}\nnewer than this engine: update the engine, or restore the backup made before the migration`);
+        else if (manual.length)
+            add(name, 'fail', `${lines.join('\n')}\nthe coordinator won't start until you run \`${BRAND.cli} migrate${name === 'migrations' ? '' : ` --instance ${opts.instance}`}\` (it backs each file up first)`);
+        else
+            add(name, 'ok', lines.length ? lines.join('\n') : 'config and state at the current versions');
+    }
+    // A repo config may only tighten the policy of the instance that runs it; the coordinator refuses to start otherwise.
+    if (cfg) {
+        const repo = cfg.project.project.repo;
+        const policies = [...(opts.policy ? [{ name: opts.policy, ...readPolicy(resolve(opts.policy)) }] : []), ...policiesForRepo(repo)];
+        if (!policies.length)
+            add('policy', 'ok', `no instance on this machine runs ${repo}; to check against one, pass --policy <its policy.yaml>`);
+        for (const p of policies) {
+            const errs = p.policy ? policyViolations(cfg, p.policy) : p.errors;
+            const what = p.policy ? 'within the policy' : 'policy unreadable';
+            if (!errs.length)
+                add(`policy ${p.name}`, 'ok', what);
+            else
+                add(`policy ${p.name}`, 'fail', errs.map((e) => `${e.file}${e.path ? ` at ${e.path}` : ''}: ${e.message}`).join('\n'));
+        }
+    }
+    // The disk floor (src/governor-holds.ts): under it, or under it after one more worktree, the coordinator starts
+    // nothing, so doctor says so with the same numbers and fix the Board's banner gives.
+    if (cfg) {
+        try {
+            const c = diskFloorCheck((opts.disk ?? diskFree)(root), cfg.project.governor, cfg.tests.worktree.est_size_gb);
+            add('disk floor', c.level, c.detail);
+        }
+        catch (e) {
+            add('disk floor', 'warn', `can't measure the free disk at ${root}: ${e.message}`);
+        }
+    }
+    const os = detectOs(cfg?.project.os ?? 'auto');
+    if (canRunAgents(os))
+        add('os', 'ok', os);
+    else
+        add('os', 'warn', wslAvailable() ? 'native Windows: run agents inside WSL2' : 'native Windows without WSL2: dashboard and Issues only; agents run on another machine');
+    // Hook wiring. An instance's agents get their hooks and rules from its agent settings, for agent runs only
+    // (agent-settings.ts). The checkout's .claude/settings.json is for local runs without an instance, and is where
+    // instances installed before agent settings still find them.
+    const instances = [...new Set([...(opts.instance ? [opts.instance] : []), ...(cfg ? policiesForRepo(cfg.project.project.repo).map((p) => p.name) : [])])];
+    for (const name of instances) {
+        // WHY: the coordinator turns intake off on a broken intake.yaml with one log line; here it is a failing check.
+        const intake = checkIntakeFile(join(instancesDir(), name, INTAKE_FILE));
+        if (intake.state === 'off')
+            add(`intake ${name}`, 'ok', `no ${INTAKE_FILE} in the instance home: intake is off`);
+        else if (intake.state === 'invalid')
+            add(`intake ${name}`, 'fail', `${intake.file} is invalid, so intake is off until it is fixed (\`${BRAND.cli} intake check --instance ${name}\` checks an edit):\n${intake.errors.join('\n')}`);
+        else
+            add(`intake ${name}`, intake.warnings.length ? 'warn' : 'ok', [`${INTAKE_FILE} valid: ${intake.summary.join('; ')}`, ...intake.warnings].join('\n'));
+        // An API-key instance: its key file is the agent user's alone.
+        try {
+            const inst = loadInstance(name);
+            if (inst.credentials.agent_api_key) {
+                const k = apiKeyCheck(inst.credentials.agent_api_key, inst.runAs?.user ?? null);
+                add(`api key ${name}`, k.level, k.detail);
+            }
+        }
+        catch {
+            // an instance this user can't load is reported by its own checks
+        }
+        const file = agentSettingsPath(join(instancesDir(), name));
+        if (!existsSync(file)) {
+            // Hooks in the checkout's own .claude/settings.json (an install from before agent settings) don't count: the
+            // runner never falls back to them.
+            const old = legacyProjectHooks(root) ? ` The hooks in this checkout's .claude/settings.json are no longer used for agent runs.` : '';
+            add(`agent hooks ${name}`, 'fail', `${file} missing: ${name}'s agent runs and its coordinator won't start.${old} As its coordinator user, run \`${installCommand(name, root)}\``);
+            continue;
+        }
+        let s;
+        try {
+            s = JSON.parse(readFileSync(file, 'utf8'));
+        }
+        catch (e) {
+            add(`agent hooks ${name}`, 'fail', `${file} unreadable: ${e.message}`);
+            continue;
+        }
+        for (const c of hookChecks(s))
+            add(`agent hook ${name} ${c.event}`, c.ok ? 'ok' : 'fail', c.ok ? `${c.detail}, for agent runs only (${file})` : c.detail);
+        if (s.disableAllHooks !== false)
+            add(`agent hooks ${name}`, 'fail', 'disableAllHooks is not pinned to false: a project file could turn the hooks off');
+        const refusal = projectSettingsRefusal(root, s);
+        if (refusal)
+            add(`project settings`, 'fail', `${name}'s agent runs won't start: ${refusal}`);
+    }
+    const settingsPath = join(root, '.claude', 'settings.json');
+    const where = instances.length ? ` (for people's sessions and local runs; ${instances.join(', ')}'s agents get theirs from their agent settings)` : '';
+    if (!existsSync(settingsPath)) {
+        if (instances.length)
+            add('hooks', 'ok', `no .claude/settings.json in the repo, and none needed: ${instances.join(', ')}'s agents get their hooks from their agent settings`);
+        else
+            add('hooks', 'warn', `no .claude/settings.json: an instance's agents get their hooks from \`${BRAND.cli} install --instance <name>\` (run by its coordinator); for local runs without an instance, run \`${BRAND.cli} install\``);
+    }
+    else {
+        try {
+            const s = JSON.parse(readFileSync(settingsPath, 'utf8'));
+            for (const c of hookChecks(s, (p) => p.replace('$CLAUDE_PROJECT_DIR', root))) {
+                // Without an instance, these are the hooks local runs rely on; with one, they're only for people's sessions.
+                if (!c.ok && c.detail === 'not installed' && instances.length)
+                    continue;
+                add(`hook ${c.event}`, c.ok ? 'ok' : 'fail', `${c.detail}${where}`);
+            }
+        }
+        catch (e) {
+            add('hooks', 'fail', `.claude/settings.json unreadable: ${e.message}`);
+        }
+    }
+    if (cfg) {
+        const problems = checkGuardrails(cfg.guardrails, root);
+        if (problems.length)
+            add('guardrails', 'fail', problems.map((p) => `${p.kind}: ${p.example ?? p.rule}: ${p.message}`).join('\n'));
+        else
+            add('guardrails', 'ok', `${cfg.guardrails.rules.length} rules, ${cfg.guardrails.examples.must_block.length + cfg.guardrails.examples.must_ask.length + cfg.guardrails.examples.must_allow.length} examples, no conflicts`);
+        const sets = loadFingerprintSets(root);
+        for (const name of Object.keys(cfg.guardrails.fingerprints)) {
+            if (!sets[name]?.size)
+                add(`fingerprints ${name}`, 'warn', `not fetched; until it is, agents are denied any command containing a DB connection string. Run \`${BRAND.cli} guardrails refresh\``);
+            else
+                add(`fingerprints ${name}`, 'ok', `${sets[name].size} stored (hashes only)`);
+        }
+        if (/your-github-handle|owner\/repo/.test(JSON.stringify(cfg.project)))
+            add('owners', 'warn', 'config.yaml still has template placeholders');
+    }
+    // Secret scanning
+    const gl = findTool('gitleaks');
+    if (!gl)
+        add('gitleaks', 'fail', `not on PATH or in ${toolBin()}: commit and transcript scans cannot run`);
+    else
+        add('gitleaks', 'ok', execFileSync(gl, ['version'], { encoding: 'utf8' }).trim());
+    try {
+        const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+        const hook = join(resolve(root, common), 'hooks', 'pre-commit');
+        if (existsSync(hook) && readFileSync(hook, 'utf8').includes(GIT_HOOK_MARKER))
+            add('pre-commit', 'ok', 'gitleaks pre-commit installed');
+        else
+            add('pre-commit', 'warn', `not installed (\`${BRAND.cli} install --git-hooks\`); the land queue still re-scans`);
+    }
+    catch {
+        add('pre-commit', 'warn', 'not a git repository');
+    }
+    // Agent runtime
+    const claude = findTool('claude');
+    if (!claude)
+        add('claude', cfg?.project.agent_runtime.kind === 'cli' ? 'fail' : 'warn', `Claude Code CLI not on PATH or in ${toolBin()}`);
+    else {
+        const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
+        add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
+    }
+    // Lean CLAUDE.md
+    const claudeMd = join(root, 'CLAUDE.md');
+    if (existsSync(claudeMd)) {
+        const approxTokens = Math.round(readFileSync(claudeMd, 'utf8').length / 4);
+        add('CLAUDE.md', approxTokens > CLAUDE_MD_TOKEN_BUDGET ? 'warn' : 'ok', `~${approxTokens} tokens (target <= ${CLAUDE_MD_TOKEN_BUDGET}; move detail into skills and module docs)`);
+    }
+    // Skills: every SKILL.md has the six sections, none empty.
+    try {
+        const bad = lintSkills(root);
+        const n = trackedSkills(root).length;
+        if (bad.length)
+            add('skills', 'fail', skillLintReport(bad));
+        else if (n)
+            add('skills', 'ok', `${n} SKILL.md file(s) pass the skill lint`);
+    }
+    catch {
+        // not a git repository: reported under pre-commit
+    }
+    out.push(...setupChecks(root, opts));
+    const gpu = gpuCheck();
+    if (gpu)
+        out.push(gpu);
+    // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
+    if (cfg?.tests.test_run)
+        out.push(networkCheck());
+    if (opts.agentshield)
+        out.push(agentShield(root));
+    return out;
+}
+/**
+ * GPU test runs (docs/test-runs.md "GPU"): nothing while root's file is absent (off). On for some instance but a node
+ * its runs need is missing (the driver not loaded, a GPU index that isn't there): a warning, since each of those runs
+ * then runs without the GPU. A file the helper would refuse: a warning too, saying so.
+ */
+export function gpuCheck(file = gpuFilePath(), present = (p) => existsSync(p), rootUid = 0, nodes = (i) => nvidiaNodes(i)) {
+    const f = readGpuFile(file, rootUid);
+    if ('state' in f) {
+        if (f.state === 'off' && f.why.startsWith('GPU test runs are off'))
+            return null;
+        return { name: 'gpu test runs', level: 'warn', detail: `${f.why}; fix it with ${gpuCommands('<name>').status} (and enable/disable)` };
+    }
+    const names = Object.keys(f.instances);
+    if (!names.length)
+        return null;
+    const need = nodes(gpuIndices(f));
+    const missing = need.filter((n) => !present(n));
+    const on = `on for ${names.join(', ')} (GPU ${gpuIndices(f).join(', ')}; at most ${f.maxMinutes} min a GPU command)`;
+    if (missing.length)
+        return { name: 'gpu test runs', level: 'warn', detail: `${on}, but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing: those runs run without the GPU until ${missing.length === 1 ? 'it exists' : 'they exist'} (the NVIDIA driver loaded, the GPU present)` };
+    return { name: 'gpu test runs', level: 'ok', detail: on };
+}
+/**
+ * Network for test runs (docs/test-runs.md "Network"), read-only: no tier has it unless root's file lists it. Which
+ * instances' tiers do, with the root command that changes it; a file the helper would refuse is a warning.
+ */
+export function networkCheck(file = networkFilePath(), rootUid = 0) {
+    const how = `root changes it: ${networkCommands('<name>').enable} (or disable; status shows it)`;
+    let text;
+    try {
+        const st = lstatSync(file);
+        if (!st.isFile() || st.uid !== rootUid || (st.mode & 0o777) !== 0o644)
+            return { name: 'test-run network', level: 'warn', detail: `${file} is not root's regular 0644 file, so the helper grants no network; ${how}` };
+        text = readFileSync(file, 'utf8');
+    }
+    catch (e) {
+        if (e.code === 'ENOENT')
+            return { name: 'test-run network', level: 'ok', detail: `none for any tier (no ${NETWORK_FILE_NAME}); ${how}` };
+        return { name: 'test-run network', level: 'warn', detail: `${file} can't be read: ${e.message}` };
+    }
+    const f = parseNetworkFile(text);
+    if ('error' in f)
+        return { name: 'test-run network', level: 'warn', detail: `${file} is ${f.error}, so the helper grants no network; ${how}` };
+    const on = Object.entries(f.instances).map(([n, t]) => `${n}: ${t.join(', ')}`);
+    return { name: 'test-run network', level: 'ok', detail: `${on.length ? `granted to ${on.join('; ')}` : 'none for any tier'} (every other tier has none); ${how}` };
+}
+/**
+ * The setup steps (src/setup-steps.ts), as doctor shows them: every step that applies to the mode, checked live, the
+ * same checks and the same done or not done as the dashboard's first-run page. Then what the mode can't do, each
+ * with why. When init was never run and no mode is given, one line saying how to get the checklist.
+ */
+export function setupChecks(root, opts) {
+    const file = opts.instance && opts.mode === 'server' ? serverInitFile(opts.instance) : localInitFile(root);
+    // A record this user can't read is said plainly, never shown as every step "not reached yet".
+    const unreadable = initStateUnreadable(file);
+    if (unreadable)
+        return [{ name: 'setup', level: 'fail', detail: `${unreadable}: init writes it readable by the instance's coordinator group; run \`sudo ${BRAND.cli} init --mode server <owner/repo> --instance ${opts.instance ?? '<name>'}\` again with this engine to fix its access` }];
+    const state = readInitState(file);
+    const mode = opts.mode ?? state?.mode;
+    if (!mode)
+        return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
+    const probe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run } : {}) };
+    const s = state?.mode === mode ? state : null;
+    // A server instance's own clone, state and policy; a checkout's own state.
+    let site = { root, stateDir: projectStateDir(root), policyFile: null };
+    const instance = opts.instance ?? s?.instance ?? null;
+    if (mode === 'server' && instance) {
+        try {
+            const i = loadInstance(instance);
+            site = { root: i.repo.path, stateDir: i.stateDir, policyFile: join(i.home, 'policy.yaml') };
+        }
+        catch {
+            // its steps say it can't be read
+        }
+    }
+    const view = checkSetup({ ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context }, probe);
+    // init's walked groups first, one line each (what init stops at, with what it found), then every step's own line.
+    // A walked group with no step in this mode (Discord in local mode) still has its line, as init walks it.
+    const out = GROUPS.filter((d) => d.walked && d.modes.includes(mode)).map((d) => {
+        const g = view.groups.find((x) => x.id === d.id) ?? { id: d.id, title: d.title, optional: d.optional, done: true, ready: true, steps: [] };
+        const need = g.steps.filter((x) => x.walk);
+        const missing = need.find((x) => !x.done);
+        const said = missing ? missing.detail : need.length ? need.map((x) => x.detail).join('; ') : g.steps.length ? `${g.steps.filter((x) => x.done).length} of ${g.steps.length} steps done, none needed to run` : `nothing to set up in ${mode} mode`;
+        return { name: `setup ${g.id}`, level: groupLevel(g), detail: `${g.title} (${mode} mode): ${said}${missing && !g.optional ? `; \`${BRAND.cli} init\` picks up here` : ''}` };
+    });
+    for (const g of view.groups)
+        for (const i of g.steps)
+            out.push({ name: `setup step ${i.id}`, level: stepLevel(i), detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}` });
+    for (const u of unavailableIn(mode, (c) => probe.which(c) !== null))
+        out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
+    return out;
+}
+/** AgentShield scan of hooks, MCP config and permissions (MIT, run via npx). */
+export function agentShield(root) {
+    const r = spawnSync('npx', ['-y', 'ecc-agentshield@1.6.0', 'scan', '--path', join(root, '.claude'), '--format', 'json'], {
+        cwd: root,
+        encoding: 'utf8',
+        timeout: 300_000,
+        shell: shimsNeedShell,
+    });
+    if (r.error || (r.status !== 0 && !r.stdout))
+        return { name: 'agentshield', level: 'fail', detail: `could not run: ${r.error?.message ?? r.stderr.trim().split('\n').pop()}` };
+    try {
+        const report = JSON.parse(r.stdout);
+        const findings = report.findings ?? [];
+        const serious = findings.filter((f) => ['critical', 'high'].includes((f.severity ?? '').toLowerCase()));
+        const grade = report.score?.grade ? ` grade ${report.score.grade}` : '';
+        if (serious.length)
+            return { name: 'agentshield', level: 'fail', detail: `${serious.length} critical/high finding(s)${grade}:\n` + serious.map((f) => `  ${f.severity}: ${f.title ?? f.rule}`).join('\n') };
+        return { name: 'agentshield', level: findings.length ? 'warn' : 'ok', detail: `${findings.length} finding(s), none critical/high${grade}` };
+    }
+    catch {
+        return { name: 'agentshield', level: 'fail', detail: 'unexpected output (not JSON)' };
+    }
+}
+//# sourceMappingURL=doctor.js.map
