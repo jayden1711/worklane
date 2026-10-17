@@ -58,6 +58,10 @@ CDI_UNIT=nvidia-cdi-refresh.service
 CDI_DROPIN=/etc/systemd/system/nvidia-cdi-refresh.service.d/worklane-gpu-devices.conf
 FIXER_UNIT_NAME=worklane-gpu-devices.service
 FIXER_UNIT="/etc/systemd/system/$FIXER_UNIT_NAME"
+# WHY: nvidia-persistenced's --user drop sets only its uid and gid, never the groups from /etc/group (measured: a member
+# of the device group, it still fails to open the nodes); the groups systemd gives its root process before the drop stay.
+PD_UNIT=nvidia-persistenced.service
+PD_DROPIN=/etc/systemd/system/nvidia-persistenced.service.d/worklane-gpu-devices.conf
 usage="usage: gpu-devices.sh check | apply --users <user>[,<user>...] [--no-dynamic-nodes] | revert"
 
 cmd="${1:-}"
@@ -175,6 +179,15 @@ check() {
       fails+=("$CDI_UNIT runs a root NVML call that puts nvidia-uvm back to root:root 0666, and nothing runs the fixer after it: run apply")
     fi
   else echo "  no $CDI_UNIT on this machine: a root nvidia-smi still puts nvidia-uvm back to 0666 (run $FIXER)"; fi
+  say "$PD_UNIT (the driver's persistence daemon, as $PERSISTENCED_USER)"
+  if pd_applies; then
+    if pd_dropin_ok; then echo "  $PD_DROPIN: gives it $GROUP"
+    elif [ "$(systemctl is-enabled "$PD_UNIT" 2>/dev/null)" = masked ]; then echo "  masked: it doesn't run"
+    else
+      echo "  no (or an unloaded) $PD_DROPIN: it runs as $PERSISTENCED_USER without $GROUP"
+      fails+=("$PD_UNIT can't open the nodes: its --user drop loses the device group even for a member: run apply")
+    fi
+  else echo "  no $PD_UNIT or no user $PERSISTENCED_USER here: nothing to give the group to"; fi
   r=0; nvidia_in_initramfs || r=$?; case "$r" in 0) echo "  the initramfs has the nvidia module (apply and revert update it)" ;; 1) echo "  the initramfs has no nvidia module" ;; *) echo "  the initramfs: can't tell (no lsinitramfs or image)" ;; esac
 
   say "who has an NVIDIA node open now (each would need the group, or loses the GPU at its next open)"
@@ -258,6 +271,16 @@ udev_text() {
   printf 'ACTION=="add", SUBSYSTEM=="module", DEVPATH=="/module/nvidia_modeset", RUN+="%s"\n' "$FIXER"
 }
 cdi_unit_exists() { systemctl cat "$CDI_UNIT" >/dev/null 2>&1; }
+# The persistence daemon's unit and user both exist (a machine without either has nothing to give the group to).
+pd_applies() { systemctl cat "$PD_UNIT" >/dev/null 2>&1 && id -u "$PERSISTENCED_USER" >/dev/null 2>&1; }
+pd_dropin_text() {
+  printf '# Written by scripts/setup/gpu-devices.sh (docs/test-runs.md "GPU devices"): the daemon opens the nodes as its own user, outside the group list.\n'
+  printf '[Service]\nSupplementaryGroups=%s\n' "$GROUP"
+}
+# Whether systemd has loaded the group into the unit (a drop-in not yet daemon-reloaded doesn't count).
+pd_dropin_ok() {
+  [ -f "$PD_DROPIN" ] && grep -qx "SupplementaryGroups=$GROUP" "$PD_DROPIN" && [[ " $(systemctl show "$PD_UNIT" -p SupplementaryGroups --value 2>/dev/null) " == *" $GROUP "* ]]
+}
 # The drop-in's text. INVARIANT: ExecStartPost carries the + prefix: it runs with full privileges, outside this unit's
 # CapabilityBoundingSet (no CAP_CHOWN there, so the fixer couldn't set the group).
 dropin_text() {
@@ -351,6 +374,19 @@ apply() {
   udevadm control --reload 2>/dev/null || true
   echo "installed $UDEV_RULE"
 
+  if pd_applies; then
+    say "$PD_DROPIN"
+    install -d -o root -g root -m 0755 "$(dirname "$PD_DROPIN")"
+    tmp="$(dirname "$PD_DROPIN")/.$(basename "$PD_DROPIN").tmp"
+    rm -f "$tmp"
+    install -o root -g root -m 0644 /dev/null "$tmp"
+    pd_dropin_text > "$tmp"
+    grep -qx "SupplementaryGroups=$GROUP" "$tmp" || { rm -f "$tmp"; echo "the drop-in came out wrong; nothing installed" >&2; exit 1; }
+    mv -f "$tmp" "$PD_DROPIN"
+    systemctl daemon-reload
+    echo "installed: $PD_UNIT runs with $GROUP from the next start (reboot, or: systemctl restart $PD_UNIT)"
+  fi
+
   if cdi_unit_exists; then
     say "$CDI_DROPIN, $FIXER_UNIT"
     install -d -o root -g root -m 0755 "$(dirname "$CDI_DROPIN")"
@@ -398,9 +434,9 @@ EOF
 
 revert() {
   local p
-  say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE, $CDI_DROPIN, $FIXER_UNIT and $FIXER"
-  rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$CDI_DROPIN" "$FIXER_UNIT" "$FIXER"
-  rmdir "$(dirname "$CDI_DROPIN")" 2>/dev/null || true
+  say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE, $CDI_DROPIN, $PD_DROPIN, $FIXER_UNIT and $FIXER"
+  rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$CDI_DROPIN" "$PD_DROPIN" "$FIXER_UNIT" "$FIXER"
+  rmdir "$(dirname "$CDI_DROPIN")" "$(dirname "$PD_DROPIN")" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
   udevadm control --reload 2>/dev/null || true
   p="$(command -v nvidia-modprobe 2>/dev/null || true)"

@@ -16,7 +16,10 @@
 #         CapabilityBoundingSet, which has no CAP_CHOWN) shows apply's drop-in: the fixer runs after it, and when one
 #         of its ExecStart lines fails (ExecStartPost never runs then) as worklane-gpu-devices.service; without
 #         either, or without the + on ExecStartPost, the nodes stay reset; check says FAIL on a 0666 nvidia-uvm and
-#         on a missing drop-in. At the end, revert takes its files away and leaves the group.
+#         on a missing drop-in. A stand-in nvidia-persistenced.service that drops to its own uid and gid the way the real
+#         daemon does (groups from /etc/group never applied) opens a node with apply's SupplementaryGroups= drop-in and
+#         is refused without it, a member of the group or not; check says FAIL without the drop-in. At the end, revert
+#         takes its files away and leaves the group.
 #   off:  no root file: every node absent in a run that asks for the GPU, and in one that doesn't
 #   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check and the
 #         0660 nodes' permission (the unit's own worklane-gpu-dev group; never worklane-gpu, and the lock stays out of
@@ -58,8 +61,11 @@ cleanup() {
   sudo bash scripts/setup/gpu-devices.sh revert >/dev/null 2>&1 || true
   sudo systemctl stop nvidia-cdi-refresh.service worklane-gpu-devices.service 2>/dev/null || true
   sudo rm -rf /etc/systemd/system/nvidia-cdi-refresh.service /etc/systemd/system/nvidia-cdi-refresh.service.d /run/worklane-ci-cdi-fail
+  sudo systemctl stop nvidia-persistenced.service 2>/dev/null || true
+  sudo rm -rf /etc/systemd/system/nvidia-persistenced.service /etc/systemd/system/nvidia-persistenced.service.d
+  sudo userdel nvidia-persistenced 2>/dev/null || true
   sudo systemctl daemon-reload 2>/dev/null || true
-  sudo systemctl reset-failed nvidia-cdi-refresh.service worklane-gpu-devices.service 2>/dev/null || true
+  sudo systemctl reset-failed nvidia-cdi-refresh.service worklane-gpu-devices.service nvidia-persistenced.service 2>/dev/null || true
   sudo groupdel worklane-gpu-dev 2>/dev/null || true
   rm -rf "$t"
 }
@@ -220,6 +226,34 @@ nodes_reset || fail "the nodes were fixed by an ExecStartPost without +"
 restore_nodes
 printf '%s\n' "$GOOD_DROPIN" | sudo tee "$DROPIN" > /dev/null; sudo systemctl daemon-reload
 grep -qx 'ExecStartPost=+/usr/local/libexec/worklane-gpu-devices' "$DROPIN" || fail "the drop-in wasn't restored"
+
+echo "== nvidia-persistenced: its --user drop loses the device group even for a member; the SupplementaryGroups= drop-in keeps it"
+PD=nvidia-persistenced.service
+PDDROPIN=/etc/systemd/system/nvidia-persistenced.service.d/worklane-gpu-devices.conf
+# WHY: the real daemon (Type=forking) starts as root and then sets only its uid and gid, so the groups systemd gave the
+# root process stay and /etc/group is never read (measured); setpriv --keep-groups does exactly that.
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin nvidia-persistenced
+cat > "$t/pd-open.py" <<'PY'
+import errno, os, sys
+try:
+    os.close(os.open("/dev/nvidiactl", os.O_RDWR))
+except OSError as e:
+    sys.exit(0 if e.errno in (errno.ENXIO, errno.ENODEV) else 1)
+PY
+printf '[Unit]\nDescription=CI stand-in for %s\n[Service]\nType=oneshot\nExecStart=%s --reuid=nvidia-persistenced --regid=nvidia-persistenced --keep-groups %s %s\n' "$PD" "$(command -v setpriv)" "$(command -v python3)" "$t/pd-open.py" | sudo tee "/etc/systemd/system/$PD" > /dev/null
+sudo systemctl daemon-reload
+sudo bash scripts/setup/gpu-devices.sh apply --users "$me" > "$t/apply-pd" 2>&1 || { cat "$t/apply-pd" >&2; fail "apply with $PD present"; }
+[ "$(stat -c '%U:%G %a' "$PDDROPIN")" = 'root:root 644' ] || fail "the persistenced drop-in isn't root:root 0644"
+grep -qx 'SupplementaryGroups=worklane-gpu-dev' "$PDDROPIN" || fail "the persistenced drop-in has no SupplementaryGroups="
+getent group worklane-gpu-dev | cut -d: -f4 | tr ',' '\n' | grep -qx nvidia-persistenced || fail "apply didn't make nvidia-persistenced a member: the test below would not be about the missing groups"
+echo "  with the drop-in the daemon's own uid opens the node (past the permission check)"
+sudo systemctl start "$PD" || fail "the stand-in daemon couldn't open the node with the drop-in"
+echo "  without it, still a member in /etc/group, it is refused (EACCES)"
+sudo mv "$PDDROPIN" "$t/pd-dropin.saved"; sudo systemctl daemon-reload
+if sudo systemctl start "$PD" 2>/dev/null; then fail "$PD opened the node with no drop-in: the stand-in doesn't lose the group like the real daemon"; fi
+sudo systemctl reset-failed "$PD" 2>/dev/null || true
+sudo mv "$t/pd-dropin.saved" "$PDDROPIN"; sudo systemctl daemon-reload
+sudo systemctl start "$PD" || fail "the drop-in wasn't restored"
 # check's nvidia-uvm part needs a loaded driver, which isn't here: a copy of the script whose only two differences are
 # the module directory (nvidia_uvm "loaded" while $t/sysmod/nvidia_uvm exists) and the uvm node it opens as a member
 # (a stand-in with the null device's numbers, so it really opens, root:worklane-gpu-dev 0660 as the fixed driver's).
@@ -254,6 +288,12 @@ rc="$(stub_check check-nodropin)"
 grep -A3 '^FAIL: ' "$t/check-nodropin"
 [ "$rc" = 1 ] && grep -q "^  - $CDI runs a root NVML call that puts nvidia-uvm back to root:root 0666, and nothing runs the fixer after it: run apply" "$t/check-nodropin" || { cat "$t/check-nodropin" >&2; fail "check with no drop-in: exit $rc"; }
 sudo mv "$t/dropin.saved" "$DROPIN"; sudo systemctl daemon-reload
+echo "== check FAILs when $PD has no drop-in"
+sudo mv "$PDDROPIN" "$t/pd-dropin.saved"; sudo systemctl daemon-reload
+rc="$(stub_check check-nopd)"
+grep -A3 '^FAIL: ' "$t/check-nopd"
+[ "$rc" = 1 ] && grep -q "^  - $PD can't open the nodes: its --user drop loses the device group even for a member: run apply" "$t/check-nopd" || { cat "$t/check-nopd" >&2; fail "check with no persistenced drop-in: exit $rc"; }
+sudo mv "$t/pd-dropin.saved" "$PDDROPIN"; sudo systemctl daemon-reload
 echo "== check FAILs when the member can't open the uvm node"
 sudo chgrp root /dev/worklane-uvm-standin
 rc="$(stub_check check-noopen)"
@@ -453,7 +493,7 @@ grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f s
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
 echo "== revert: its files go, the group stays"
 sudo bash scripts/setup/gpu-devices.sh revert
-for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices "$DROPIN" /etc/systemd/system/worklane-gpu-devices.service; do [ ! -e "$f" ] || fail "revert left $f"; done
+for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices "$DROPIN" "$PDDROPIN" /etc/systemd/system/worklane-gpu-devices.service; do [ ! -e "$f" ] || fail "revert left $f"; done
 getent group worklane-gpu-dev > /dev/null || fail "revert removed the group"
 # Nothing of this step is left for the steps after it: the sandbox's own check still passes.
 cleanup
