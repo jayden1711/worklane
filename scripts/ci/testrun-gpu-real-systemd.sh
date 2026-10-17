@@ -18,8 +18,10 @@
 #         either, or without the + on ExecStartPost, the nodes stay reset; check says FAIL on a 0666 nvidia-uvm and
 #         on a missing drop-in. A stand-in nvidia-persistenced.service that drops to its own uid and gid the way the real
 #         daemon does (groups from /etc/group never applied) opens a node with apply's SupplementaryGroups= drop-in and
-#         is refused without it, a member of the group or not; check says FAIL without the drop-in. At the end, revert
-#         takes its files away and leaves the group.
+#         is refused without it, a member of the group or not; check says FAIL without the drop-in. The boot unit
+#         (worklane-gpu-devices.service, enabled by apply, after systemd-modules-load and nvidia-cdi-refresh) puts the
+#         nodes back with nvidia-cdi-refresh skipped (ExecCondition fails) and with it absent, after a late writer;
+#         check says FAIL when it isn't enabled. At the end, revert takes its files away and leaves the group.
 #   off:  no root file: every node absent in a run that asks for the GPU, and in one that doesn't
 #   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check and the
 #         0660 nodes' permission (the unit's own worklane-gpu-dev group; never worklane-gpu, and the lock stays out of
@@ -491,9 +493,42 @@ f_end="$(tail -n 1 "$t/gpu-hold-f.out")"
 grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f since " "$t/hold2.err" || { cat "$t/hold2.err" >&2; fail "gpu hold didn't say who held the GPU"; }
 [ "$(cat "$t/hold2.start")" -ge "$f_end" ] || fail "gpu hold's command ran before the GPU run ended"
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
+echo "== the boot unit: nodes made late are put back with $CDI skipped or absent; check FAILs without the unit enabled"
+BOOT=worklane-gpu-devices.service
+[ "$(systemctl is-enabled "$BOOT")" = enabled ] || fail "apply didn't enable $BOOT"
+for u in systemd-modules-load.service "$CDI"; do systemctl show "$BOOT" -p After --value | tr ' ' '\n' | grep -qx "$u" || fail "$BOOT isn't ordered after $u"; done
+systemctl show "$BOOT" -p WantedBy --value | tr ' ' '\n' | grep -qx multi-user.target || fail "$BOOT isn't wanted by multi-user.target"
+# A late writer, as measured: nvidia-uvm and nvidia-uvm-tools made root:root 0666 after the last fixer pass.
+late_writer() { sudo chown root:root /dev/nvidia-uvm /dev/nvidia-uvm-tools; sudo chmod 0666 /dev/nvidia-uvm /dev/nvidia-uvm-tools; }
+uvm_fixed() { [ "$(stat -c '%U:%G %a' /dev/nvidia-uvm)" = 'root:worklane-gpu-dev 660' ] && [ "$(stat -c '%U:%G %a' /dev/nvidia-uvm-tools)" = 'root:worklane-gpu-dev 660' ]; }
+echo "  $CDI skipped (its ExecCondition fails, so none of its commands and no drop-in run): the boot job puts them back"
+printf '[Service]\nExecCondition=/bin/false\n' | sudo tee "$(dirname "$DROPIN")/ci-skip.conf" > /dev/null; sudo systemctl daemon-reload
+sudo systemctl start "$CDI" || fail "$CDI, skipped by its ExecCondition, failed to start"
+late_writer
+nodes_reset || fail "the late writer didn't reset the nodes"
+sudo systemctl start "$BOOT" || fail "$BOOT failed"
+uvm_fixed || fail "$BOOT ran and nvidia-uvm and nvidia-uvm-tools are still not root:worklane-gpu-dev 660"
+echo "  $CDI absent: apply writes and enables the boot unit alone"
+sudo rm -rf /etc/systemd/system/nvidia-cdi-refresh.service /etc/systemd/system/nvidia-cdi-refresh.service.d; sudo systemctl daemon-reload
+sudo bash scripts/setup/gpu-devices.sh apply --users "$me" > "$t/apply-nocdi" 2>&1 || { cat "$t/apply-nocdi" >&2; fail "apply with no $CDI"; }
+grep -q "^no $CDI here: only $BOOT runs the fixer, at boot" "$t/apply-nocdi" || { cat "$t/apply-nocdi" >&2; fail "apply didn't say $CDI is absent"; }
+[ ! -e "$DROPIN" ] || fail "apply wrote the $CDI drop-in with no $CDI"
+[ "$(systemctl is-enabled "$BOOT")" = enabled ] || fail "$BOOT isn't enabled with no $CDI"
+late_writer
+nodes_reset || fail "the late writer didn't reset the nodes (absent case)"
+sudo systemctl start "$BOOT" || fail "$BOOT failed (absent case)"
+uvm_fixed || fail "$BOOT ran and the nodes are not back (absent case)"
+echo "  check names the missing boot unit, and only then"
+rc="$(stub_check check-boot-ok)"
+if grep -q '^  - nothing runs the fixer once udev and the NVIDIA services have settled at boot' "$t/check-boot-ok"; then cat "$t/check-boot-ok" >&2; fail "check names the boot unit while it is enabled"; fi
+sudo systemctl disable "$BOOT" > /dev/null
+rc="$(stub_check check-noboot)"
+[ "$rc" = 1 ] && grep -q '^  - nothing runs the fixer once udev and the NVIDIA services have settled at boot' "$t/check-noboot" || { cat "$t/check-noboot" >&2; fail "check with the boot unit disabled: exit $rc"; }
+sudo systemctl enable "$BOOT" > /dev/null
+
 echo "== revert: its files go, the group stays"
 sudo bash scripts/setup/gpu-devices.sh revert
-for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices "$DROPIN" "$PDDROPIN" /etc/systemd/system/worklane-gpu-devices.service; do [ ! -e "$f" ] || fail "revert left $f"; done
+for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices "$DROPIN" "$PDDROPIN" /etc/systemd/system/worklane-gpu-devices.service /etc/systemd/system/multi-user.target.wants/worklane-gpu-devices.service; do [ ! -e "$f" ] || fail "revert left $f"; done
 getent group worklane-gpu-dev > /dev/null || fail "revert removed the group"
 # Nothing of this step is left for the steps after it: the sandbox's own check still passes.
 cleanup

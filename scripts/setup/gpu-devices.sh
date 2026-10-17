@@ -22,7 +22,10 @@
 #   - Any root process that starts NVML (nvidia-smi, and the nvidia-cdi-refresh.service the container toolkit runs at
 #     boot) then puts nvidia-uvm and nvidia-uvm-tools back to root:root 0666 and the nvidia-caps nodes to root:root.
 #     A drop-in on nvidia-cdi-refresh.service runs the fixer after it, and worklane-gpu-devices.service runs it when
-#     that unit fails. apply --no-dynamic-nodes also sets NVreg_ModifyDeviceFiles=0: NVML then changes no node, and
+#     that unit fails; the same unit runs at every boot after systemd-modules-load and nvidia-cdi-refresh, once udev
+#     has settled, for a machine where that unit is absent or skipped, or whose late writer is something else (measured:
+#     nvidia-uvm and nvidia-uvm-tools made after the last fixer run, with none after them).
+#     apply --no-dynamic-nodes also sets NVreg_ModifyDeviceFiles=0: NVML then changes no node, and
 #     /dev/nvidia-caps stays empty (MIG's capability nodes aren't made: don't use it on a MIG GPU).
 #   - the driver's options (NVreg_DeviceFileUID, NVreg_DeviceFileGID, NVreg_DeviceFileMode) are what NVML applies to
 #     nvidiactl, nvidia<N> and nvidia-modeset: /etc/modprobe.d/worklane-gpu-devices.conf sets them to 0, the group, 0660.
@@ -171,6 +174,12 @@ check() {
   elif p="$(command -v nvidia-modprobe 2>/dev/null)"; then echo "  $p: not setuid ($(stat -c '%a %U' -- "$(readlink -f -- "$p")"))"
   else echo "  no nvidia-modprobe"
   fi
+  say "what runs the fixer at boot, once udev has settled ($FIXER_UNIT_NAME)"
+  if boot_unit_ok; then echo "  $FIXER_UNIT_NAME: enabled; after systemd-modules-load and $CDI_UNIT"
+  else
+    echo "  $FIXER_UNIT_NAME is missing, wrong or not enabled"
+    fails+=("nothing runs the fixer once udev and the NVIDIA services have settled at boot (a node made after udev's own run stays root:root): run apply")
+  fi
   say "what puts the nodes back after udev set them (a root NVML call: nvidia-smi, $CDI_UNIT at boot)"
   if cdi_unit_exists; then
     if dropin_ok; then echo "  $CDI_DROPIN: runs $FIXER after $CDI_UNIT, and $FIXER_UNIT_NAME when it fails"
@@ -288,8 +297,14 @@ dropin_text() {
   printf '[Unit]\nOnFailure=%s\n[Service]\nExecStartPost=+%s\n' "$FIXER_UNIT_NAME" "$FIXER"
 }
 fixer_unit_text() {
-  printf '# Written by scripts/setup/gpu-devices.sh: started by %s when it fails, so its ExecStartPost never ran.\n' "$CDI_UNIT"
-  printf '[Unit]\nDescription=The NVIDIA device nodes back to root:%s\n[Service]\nType=oneshot\nExecStart=%s\n' "$GROUP" "$FIXER"
+  printf '# Written by scripts/setup/gpu-devices.sh: every boot, after udev has settled, and when %s fails (its ExecStartPost never ran).\n' "$CDI_UNIT"
+  printf '[Unit]\nDescription=The NVIDIA device nodes back to root:%s\nAfter=systemd-modules-load.service %s\n' "$GROUP" "$CDI_UNIT"
+  printf '[Service]\nType=oneshot\nExecStart=-/usr/bin/udevadm settle --timeout=30\nExecStart=%s\n[Install]\nWantedBy=multi-user.target\n' "$FIXER"
+}
+# The boot unit is in place and enabled (whether or not the NVIDIA container toolkit's unit exists).
+boot_unit_ok() {
+  [ -f "$FIXER_UNIT" ] && grep -qx "ExecStart=$FIXER" "$FIXER_UNIT" && grep -qx 'WantedBy=multi-user.target' "$FIXER_UNIT" \
+    && [ "$(systemctl is-enabled "$FIXER_UNIT_NAME" 2>/dev/null)" = enabled ]
 }
 dropin_ok() {
   [ -f "$CDI_DROPIN" ] && [ -f "$FIXER_UNIT" ] && grep -qx "ExecStartPost=+$FIXER" "$CDI_DROPIN" && grep -qx "OnFailure=$FIXER_UNIT_NAME" "$CDI_DROPIN" && grep -qx "ExecStart=$FIXER" "$FIXER_UNIT"
@@ -387,24 +402,30 @@ apply() {
     echo "installed: $PD_UNIT runs with $GROUP from the next start (reboot, or: systemctl restart $PD_UNIT)"
   fi
 
+  say "$FIXER_UNIT (every boot, once udev has settled; and when $CDI_UNIT fails)"
+  tmp="$(dirname "$FIXER_UNIT")/.$(basename "$FIXER_UNIT").tmp"
+  rm -f "$tmp"
+  install -o root -g root -m 0644 /dev/null "$tmp"
+  fixer_unit_text > "$tmp"
+  mv -f "$tmp" "$FIXER_UNIT"
+  systemctl daemon-reload
+  systemctl enable "$FIXER_UNIT_NAME" >/dev/null
+  boot_unit_ok || { echo "the boot unit came out wrong or didn't enable" >&2; exit 1; }
+  echo "installed and enabled $FIXER_UNIT_NAME"
+
   if cdi_unit_exists; then
-    say "$CDI_DROPIN, $FIXER_UNIT"
+    say "$CDI_DROPIN"
     install -d -o root -g root -m 0755 "$(dirname "$CDI_DROPIN")"
     tmp="$(dirname "$CDI_DROPIN")/.$(basename "$CDI_DROPIN").tmp"
     rm -f "$tmp"
     install -o root -g root -m 0644 /dev/null "$tmp"
     dropin_text > "$tmp"
     mv -f "$tmp" "$CDI_DROPIN"
-    tmp="$(dirname "$FIXER_UNIT")/.$(basename "$FIXER_UNIT").tmp"
-    rm -f "$tmp"
-    install -o root -g root -m 0644 /dev/null "$tmp"
-    fixer_unit_text > "$tmp"
-    mv -f "$tmp" "$FIXER_UNIT"
     systemctl daemon-reload
     dropin_ok || { echo "the drop-in came out wrong" >&2; exit 1; }
     echo "installed: the fixer runs after $CDI_UNIT, and as $FIXER_UNIT_NAME when it fails"
   else
-    echo "no $CDI_UNIT here: nothing to run the fixer after. A root nvidia-smi still puts nvidia-uvm back to 0666: run $FIXER."
+    echo "no $CDI_UNIT here: only $FIXER_UNIT_NAME runs the fixer, at boot. A root nvidia-smi later still puts nvidia-uvm back to 0666 (--no-dynamic-nodes stops that, or run $FIXER)."
   fi
 
   if p="$(setuid_modprobe)"; then
@@ -435,6 +456,7 @@ EOF
 revert() {
   local p
   say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE, $CDI_DROPIN, $PD_DROPIN, $FIXER_UNIT and $FIXER"
+  systemctl disable "$FIXER_UNIT_NAME" >/dev/null 2>&1 || true
   rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$CDI_DROPIN" "$PD_DROPIN" "$FIXER_UNIT" "$FIXER"
   rmdir "$(dirname "$CDI_DROPIN")" "$(dirname "$PD_DROPIN")" 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
