@@ -2,6 +2,39 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## v0.5.2 (2026-10-17)
+
+### Highlights
+
+The GPU device nodes stay `root:worklane-gpu-dev 0660` after a reboot (#575). On Ubuntu's NVIDIA driver (measured on 24.04, driver 595), a root process that starts NVML, such as `nvidia-smi` or the container toolkit's `nvidia-cdi-refresh.service` at boot, put `nvidia-uvm` and `nvidia-uvm-tools` back to `root:root 0666` and the `nvidia-caps` nodes to `root:root`, and a node made after udev's own fixer run kept the wrong owner. `gpu-devices.sh apply` now also writes a boot unit that runs the fixer after udev has settled, a drop-in that runs it after `nvidia-cdi-refresh.service` (and when that unit fails), and a drop-in that gives `nvidia-persistenced` the device group, so it stops failing every boot. `check` fails when any of them is missing.
+
+`apply --users <you> --no-dynamic-nodes` is opt-in and **not for MIG GPUs**: it also sets `NVreg_ModifyDeviceFiles=0`, so NVML changes no node at all, and `/dev/nvidia-caps` stays empty (MIG's capability nodes aren't made).
+
+### After install
+
+- **A machine whose GPU nodes were closed with `gpu-devices.sh`:** rerun it as root, once, after the install: `sudo bash /opt/worklane/current/scripts/setup/gpu-devices.sh apply --users <you> [--no-dynamic-nodes]`, then `sudo reboot`, then `sudo bash /opt/worklane/current/scripts/setup/gpu-devices.sh check` **before touching anything** (it shows whether the boot alone left the nodes right). `apply` refuses while another `modprobe.d` file sets `NVreg_DeviceFile*` or `NVreg_ModifyDeviceFiles`: remove that file first.
+- No new sudoers rules, so no machine-helper rerun.
+
+### What changed in guardrails
+
+- A new root-owned boot unit (`worklane-gpu-devices.service`) and root-owned drop-ins for `nvidia-cdi-refresh.service` and `nvidia-persistenced.service`, written by `gpu-devices.sh apply` and removed by `revert`. They run the existing fixer (`root:root 0755`, no arguments) and give the persistence daemon the device group. No new sudoers rules, and no device access beyond `worklane-gpu-dev` (#575).
+
+### Known advisories
+
+- **node-forge** (Dependabot, high, runtime): no patched version exists. Tracked in #551. The MCP broker never enables sandbox-runtime's MITM proxy (the path the advisory reaches), and a test pins that (#552, in 0.5.1).
+
+### Features
+
+- Pin the engine to v0.5.1 (#558)
+
+### Fixes
+
+- gpu-devices: run the fixer after nvidia-cdi-refresh.service, and when it fails; fix stale nvidia-modprobe text (#575)
+
+### Guardrail changes
+
+- none in this release
+
 ## v0.5.1 (2026-10-16)
 
 ### Upgrading (from v0.5.0)
