@@ -3,7 +3,7 @@
 #
 #   sudo bash scripts/setup/gpu-devices.sh check                      read-only: the nodes, the driver's options, who
 #                                                                     has a node open, the group; PASS or FAIL (exit 1)
-#   sudo bash scripts/setup/gpu-devices.sh apply --users <you>[,<user>...]
+#   sudo bash scripts/setup/gpu-devices.sh apply --users <you>[,<user>...] [--no-dynamic-nodes]
 #   sudo bash scripts/setup/gpu-devices.sh revert
 #
 # By default every /dev/nvidia* node is root:root 0666: any local user (an agent user, a test user outside its sandbox,
@@ -14,20 +14,27 @@
 # (the sandbox helper adds it), and must never be able to open a lock; and the owner's device access shouldn't hang on
 # who may hold a lock.
 #
-# How the nodes get made, and what apply changes for each (the facts are in docs/test-runs.md "GPU devices"):
-#   - the driver's options (NVreg_DeviceFileUID, NVreg_DeviceFileGID, NVreg_DeviceFileMode), read by nvidia-modprobe for
-#     nvidiactl, nvidia<N> and nvidia-modeset: /etc/modprobe.d/worklane-gpu-devices.conf sets them to 0, the group, 0660.
+# How the nodes get made, and what apply changes for each (the facts, measured on Ubuntu 24.04 with driver 595, are in
+# docs/test-runs.md "GPU devices"):
 #   - Ubuntu's driver packages' udev rule (71-nvidia.rules: /sbin/ub-device-create on the driver's and nvidia_uvm's
-#     "add") makes every node root:root 0666 whatever those options say: /etc/udev/rules.d/99-worklane-gpu-devices.rules
-#     runs /usr/local/libexec/worklane-gpu-devices after it, on the same events.
-#   - nvidia-modprobe makes nvidia-uvm and nvidia-uvm-tools 0666 root:root whatever the options say, and it is setuid
-#     root: any user could set them back. apply takes its setuid bit away (dpkg-statoverride, so a package upgrade
-#     keeps it off); nodes are made at boot by udev, as root, so nothing needs it setuid. And since it then can't load
-#     nvidia-uvm on demand for a user, /etc/modules-load.d/worklane-gpu-devices.conf loads it at every boot.
+#     "add") makes the nodes root:root 0666: /etc/udev/rules.d/99-worklane-gpu-devices.rules runs
+#     /usr/local/libexec/worklane-gpu-devices after it, on the same events.
+#   - Any root process that starts NVML (nvidia-smi, and the nvidia-cdi-refresh.service the container toolkit runs at
+#     boot) then puts nvidia-uvm and nvidia-uvm-tools back to root:root 0666 and the nvidia-caps nodes to root:root.
+#     A drop-in on nvidia-cdi-refresh.service runs the fixer after it, and worklane-gpu-devices.service runs it when
+#     that unit fails. apply --no-dynamic-nodes also sets NVreg_ModifyDeviceFiles=0: NVML then changes no node, and
+#     /dev/nvidia-caps stays empty (MIG's capability nodes aren't made: don't use it on a MIG GPU).
+#   - the driver's options (NVreg_DeviceFileUID, NVreg_DeviceFileGID, NVreg_DeviceFileMode) are what NVML applies to
+#     nvidiactl, nvidia<N> and nvidia-modeset: /etc/modprobe.d/worklane-gpu-devices.conf sets them to 0, the group, 0660.
+#   - nvidia-modprobe, where a distribution ships it, makes nvidia-uvm and nvidia-uvm-tools 0666 root:root whatever
+#     the options say, and it is setuid root: any user could set them back. apply takes its setuid bit away
+#     (dpkg-statoverride, so a package upgrade keeps it off); udev makes the nodes at boot, as root. Without it nothing
+#     loads nvidia-uvm on demand for a user, so /etc/modules-load.d/worklane-gpu-devices.conf loads it at every boot.
 #
 # Never in the group: root (needs none), any harness user (wl-*: coordinators, test users, agent users) or a user an
 # instance's agents or evals run as (instance.yaml run_as). nvidia-persistenced, the driver's own daemon user, is
-# added when it exists. revert takes the files away and gives nvidia-modprobe its setuid bit back; the group stays.
+# added when it exists. revert takes the files away and gives nvidia-modprobe, where there is one, its setuid bit back;
+# the group stays.
 source "$(dirname "$0")/lib.sh"
 
 GROUP=worklane-gpu-dev
@@ -44,22 +51,31 @@ MODULES_LOAD=/etc/modules-load.d/worklane-gpu-devices.conf
 SYS_MODULE=/sys/module
 UVM_NODE=/dev/nvidia-uvm
 PERSISTENCED_USER=nvidia-persistenced
-usage="usage: gpu-devices.sh check | apply --users <user>[,<user>...] | revert"
+# WHY: a root NVML call (nvidia-smi; this unit, which the container toolkit runs at boot) resets nvidia-uvm to 0666
+# after udev's fixer ran: a drop-in runs the fixer after the unit, and FIXER_UNIT_NAME when the unit fails (ExecStartPost
+# never runs then).
+CDI_UNIT=nvidia-cdi-refresh.service
+CDI_DROPIN=/etc/systemd/system/nvidia-cdi-refresh.service.d/worklane-gpu-devices.conf
+FIXER_UNIT_NAME=worklane-gpu-devices.service
+FIXER_UNIT="/etc/systemd/system/$FIXER_UNIT_NAME"
+usage="usage: gpu-devices.sh check | apply --users <user>[,<user>...] [--no-dynamic-nodes] | revert"
 
 cmd="${1:-}"
 [ -n "$cmd" ] || { echo "$usage" >&2; exit 2; }
 shift
 users=""
+static=""
 case "$cmd" in
   check | revert) [ "$#" -eq 0 ] || { echo "$usage" >&2; exit 2; } ;;
   apply)
-    [ "$#" -eq 2 ] && [ "$1" = --users ] || { echo "$usage" >&2; exit 2; }
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] && [ "$1" = --users ] || { echo "$usage" >&2; exit 2; }
     users="$2"
+    if [ "$#" -eq 3 ]; then [ "$3" = --no-dynamic-nodes ] || { echo "$usage" >&2; exit 2; }; static=1; fi
     [[ "$users" =~ ^[a-z_][a-z0-9_-]{0,31}(,[a-z_][a-z0-9_-]{0,31}){0,15}$ ]] || { echo "--users: user names, comma-separated, got $users" >&2; exit 2; }
     ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
-as_root "$cmd" ${users:+--users "$users"}
+as_root "$cmd" ${users:+--users "$users"} ${static:+--no-dynamic-nodes}
 
 # Every NVIDIA character device node, one path a line.
 nodes() {
@@ -72,12 +88,15 @@ nodes() {
 }
 # Why a node isn't as it must be (root:$GROUP, nothing for others, no execute or set-id bit), or nothing.
 node_problem() {
-  local got o g m
+  local got o g m why=""
   got="$(stat -c '%U %G %a' -- "$1")"
   read -r o g m <<< "$got"
-  if [ "$o" != root ] || [ "$g" != "$GROUP" ]; then echo "$o:$g, not root:$GROUP"; return 0; fi
-  if (( (8#$m & 8#7117) != 0 )); then echo "mode $m: more than 0660"; fi
-  return 0
+  if [ "$o" != root ] || [ "$g" != "$GROUP" ]; then why="$o:$g, not root:$GROUP"
+  elif (( (8#$m & 8#7117) != 0 )); then why="mode $m: more than 0660"; fi
+  [ -z "$why" ] && return 0
+  # WHY: a root NVML call (nvidia-smi, $CDI_UNIT) resets these two to root:root 0666 whenever it runs.
+  case "$1" in "$DEV"/nvidia-uvm*) why="$why (a root NVML call such as nvidia-smi puts it back: run $FIXER)" ;; esac
+  echo "$why"
 }
 # The setuid-root nvidia-modprobe, if there is one.
 setuid_modprobe() {
@@ -126,6 +145,7 @@ check() {
       case "$name" in
         DeviceFileUID) [ "$val" = 0 ] || fails+=("the driver's DeviceFileUID is ${val:-unknown}, not 0") ;;
         DeviceFileGID) [ -n "$gid" ] && [ "$val" = "$gid" ] || fails+=("the driver's DeviceFileGID is ${val:-unknown}, not $GROUP's gid (${gid:-no group}): reboot after apply") ;;
+        ModifyDeviceFiles) if grep -qs 'NVreg_ModifyDeviceFiles=0' "$MODPROBE_FILE" && [ "$val" != 0 ]; then fails+=("the driver's ModifyDeviceFiles is ${val:-unknown}, not 0 as $MODPROBE_FILE asks: reboot after apply"); fi ;;
         DeviceFileMode) [[ "$val" =~ ^[0-9]+$ ]] && (( (val & 8#7117) == 0 )) || fails+=("the driver's DeviceFileMode is ${val:-unknown} (octal $(printf '%o' "${val:-0}")), more than 0660: reboot after apply") ;;
       esac
     done
@@ -147,6 +167,14 @@ check() {
   elif p="$(command -v nvidia-modprobe 2>/dev/null)"; then echo "  $p: not setuid ($(stat -c '%a %U' -- "$(readlink -f -- "$p")"))"
   else echo "  no nvidia-modprobe"
   fi
+  say "what puts the nodes back after udev set them (a root NVML call: nvidia-smi, $CDI_UNIT at boot)"
+  if cdi_unit_exists; then
+    if dropin_ok; then echo "  $CDI_DROPIN: runs $FIXER after $CDI_UNIT, and $FIXER_UNIT_NAME when it fails"
+    else
+      echo "  $CDI_UNIT has no (or a wrong) $CDI_DROPIN, or $FIXER_UNIT is missing"
+      fails+=("$CDI_UNIT runs a root NVML call that puts nvidia-uvm back to root:root 0666, and nothing runs the fixer after it: run apply")
+    fi
+  else echo "  no $CDI_UNIT on this machine: a root nvidia-smi still puts nvidia-uvm back to 0666 (run $FIXER)"; fi
   r=0; nvidia_in_initramfs || r=$?; case "$r" in 0) echo "  the initramfs has the nvidia module (apply and revert update it)" ;; 1) echo "  the initramfs has no nvidia module" ;; *) echo "  the initramfs: can't tell (no lsinitramfs or image)" ;; esac
 
   say "who has an NVIDIA node open now (each would need the group, or loses the GPU at its next open)"
@@ -219,7 +247,7 @@ check() {
 # The modprobe options file for this gid, as apply writes it.
 modprobe_text() {
   printf '# Written by scripts/setup/gpu-devices.sh: NVIDIA device nodes root:%s 0660 (docs/test-runs.md "GPU devices").\n' "$GROUP"
-  printf 'options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=%s NVreg_DeviceFileMode=0660\n' "$1"
+  printf 'options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=%s NVreg_DeviceFileMode=0660%s\n' "$1" "${static:+ NVreg_ModifyDeviceFiles=0}"
 }
 udev_text() {
   printf '# Written by scripts/setup/gpu-devices.sh (docs/test-runs.md "GPU devices"): after the driver package'"'"'s own rule\n'
@@ -228,6 +256,20 @@ udev_text() {
   printf 'ACTION=="add", SUBSYSTEM=="module", DEVPATH=="/module/nvidia", RUN+="%s"\n' "$FIXER"
   printf 'ACTION=="add", SUBSYSTEM=="module", DEVPATH=="/module/nvidia_uvm", RUN+="%s"\n' "$FIXER"
   printf 'ACTION=="add", SUBSYSTEM=="module", DEVPATH=="/module/nvidia_modeset", RUN+="%s"\n' "$FIXER"
+}
+cdi_unit_exists() { systemctl cat "$CDI_UNIT" >/dev/null 2>&1; }
+# The drop-in's text. INVARIANT: ExecStartPost carries the + prefix: it runs with full privileges, outside this unit's
+# CapabilityBoundingSet (no CAP_CHOWN there, so the fixer couldn't set the group).
+dropin_text() {
+  printf '# Written by scripts/setup/gpu-devices.sh (docs/test-runs.md "GPU devices"): the nodes back to root:%s after this unit.\n' "$GROUP"
+  printf '[Unit]\nOnFailure=%s\n[Service]\nExecStartPost=+%s\n' "$FIXER_UNIT_NAME" "$FIXER"
+}
+fixer_unit_text() {
+  printf '# Written by scripts/setup/gpu-devices.sh: started by %s when it fails, so its ExecStartPost never ran.\n' "$CDI_UNIT"
+  printf '[Unit]\nDescription=The NVIDIA device nodes back to root:%s\n[Service]\nType=oneshot\nExecStart=%s\n' "$GROUP" "$FIXER"
+}
+dropin_ok() {
+  [ -f "$CDI_DROPIN" ] && [ -f "$FIXER_UNIT" ] && grep -qx "ExecStartPost=+$FIXER" "$CDI_DROPIN" && grep -qx "OnFailure=$FIXER_UNIT_NAME" "$CDI_DROPIN" && grep -qx "ExecStart=$FIXER" "$FIXER_UNIT"
 }
 # Rebuild the initramfs when it carries the nvidia module (its modprobe options go in with it).
 initramfs_update() {
@@ -274,7 +316,7 @@ apply() {
   rm -f "$tmp"
   install -o root -g root -m 0644 /dev/null "$tmp"
   modprobe_text "$gid" > "$tmp"
-  grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_DeviceFileMode=0660" "$tmp" || { rm -f "$tmp"; echo "the options file came out wrong; nothing installed" >&2; exit 1; }
+  grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_DeviceFileMode=0660${static:+ NVreg_ModifyDeviceFiles=0}" "$tmp" || { rm -f "$tmp"; echo "the options file came out wrong; nothing installed" >&2; exit 1; }
   mv -f "$tmp" "$MODPROBE_FILE"
   sed 's/^/  /' "$MODPROBE_FILE"
 
@@ -283,7 +325,7 @@ apply() {
   tmp="$(dirname "$MODULES_LOAD")/.$(basename "$MODULES_LOAD").tmp"
   rm -f "$tmp"
   install -o root -g root -m 0644 /dev/null "$tmp"
-  printf '# Written by scripts/setup/gpu-devices.sh: nvidia-uvm at every boot (nvidia-modprobe, no longer setuid, cannot load it on demand).\nnvidia-uvm\n' > "$tmp"
+  printf '# Written by scripts/setup/gpu-devices.sh: nvidia-uvm at every boot (nothing loads it on demand for a user without a setuid nvidia-modprobe).\nnvidia-uvm\n' > "$tmp"
   grep -qx 'nvidia-uvm' "$tmp" || { rm -f "$tmp"; echo "the modules-load file came out wrong; nothing installed" >&2; exit 1; }
   mv -f "$tmp" "$MODULES_LOAD"
   echo "installed $MODULES_LOAD (systemd-modules-load reads only *.conf, so the temp was never live)"
@@ -308,6 +350,26 @@ apply() {
   mv -f "$tmp" "$UDEV_RULE"
   udevadm control --reload 2>/dev/null || true
   echo "installed $UDEV_RULE"
+
+  if cdi_unit_exists; then
+    say "$CDI_DROPIN, $FIXER_UNIT"
+    install -d -o root -g root -m 0755 "$(dirname "$CDI_DROPIN")"
+    tmp="$(dirname "$CDI_DROPIN")/.$(basename "$CDI_DROPIN").tmp"
+    rm -f "$tmp"
+    install -o root -g root -m 0644 /dev/null "$tmp"
+    dropin_text > "$tmp"
+    mv -f "$tmp" "$CDI_DROPIN"
+    tmp="$(dirname "$FIXER_UNIT")/.$(basename "$FIXER_UNIT").tmp"
+    rm -f "$tmp"
+    install -o root -g root -m 0644 /dev/null "$tmp"
+    fixer_unit_text > "$tmp"
+    mv -f "$tmp" "$FIXER_UNIT"
+    systemctl daemon-reload
+    dropin_ok || { echo "the drop-in came out wrong" >&2; exit 1; }
+    echo "installed: the fixer runs after $CDI_UNIT, and as $FIXER_UNIT_NAME when it fails"
+  else
+    echo "no $CDI_UNIT here: nothing to run the fixer after. A root nvidia-smi still puts nvidia-uvm back to 0666: run $FIXER."
+  fi
 
   if p="$(setuid_modprobe)"; then
     say "$p: its setuid bit off"
@@ -336,8 +398,10 @@ EOF
 
 revert() {
   local p
-  say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE and $FIXER"
-  rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$FIXER"
+  say "removing $MODPROBE_FILE, $MODULES_LOAD, $UDEV_RULE, $CDI_DROPIN, $FIXER_UNIT and $FIXER"
+  rm -f -- "$MODPROBE_FILE" "$MODULES_LOAD" "$UDEV_RULE" "$CDI_DROPIN" "$FIXER_UNIT" "$FIXER"
+  rmdir "$(dirname "$CDI_DROPIN")" 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
   udevadm control --reload 2>/dev/null || true
   p="$(command -v nvidia-modprobe 2>/dev/null || true)"
   if [ -n "$p" ]; then

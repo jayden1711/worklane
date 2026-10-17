@@ -11,7 +11,12 @@
 #         coordinator get EACCES on every node (they got through on 0666: the same probe, before); the owner gets
 #         through. check's nvidia-uvm part, on a copy whose module directory and uvm node are stand-ins (no driver
 #         here): PASS with nvidia_uvm "loaded" and a uvm node the member opens; FAIL when the module isn't loaded,
-#         and FAIL when the member can't open the node. At the end, revert takes its files away and leaves the group.
+#         and FAIL when the member can't open the node. A stand-in nvidia-cdi-refresh.service (a root NVML call: it
+#         puts nvidia-uvm, nvidia-uvm-tools and a caps node back to root:root, under that unit's own
+#         CapabilityBoundingSet, which has no CAP_CHOWN) shows apply's drop-in: the fixer runs after it, and when one
+#         of its ExecStart lines fails (ExecStartPost never runs then) as worklane-gpu-devices.service; without
+#         either, or without the + on ExecStartPost, the nodes stay reset; check says FAIL on a 0666 nvidia-uvm and
+#         on a missing drop-in. At the end, revert takes its files away and leaves the group.
 #   off:  no root file: every node absent in a run that asks for the GPU, and in one that doesn't
 #   on:   root's file lists ci, GPU 0: nvidiactl, nvidia-uvm and nvidia0 present and past the cgroup check and the
 #         0660 nodes' permission (the unit's own worklane-gpu-dev group; never worklane-gpu, and the lock stays out of
@@ -51,6 +56,10 @@ cleanup() {
   for u in gpuagent gpuother; do sudo userdel -r "$u" 2>/dev/null || true; done
   sudo groupdel worklane-gpu 2>/dev/null || true
   sudo bash scripts/setup/gpu-devices.sh revert >/dev/null 2>&1 || true
+  sudo systemctl stop nvidia-cdi-refresh.service worklane-gpu-devices.service 2>/dev/null || true
+  sudo rm -rf /etc/systemd/system/nvidia-cdi-refresh.service /etc/systemd/system/nvidia-cdi-refresh.service.d /run/worklane-ci-cdi-fail
+  sudo systemctl daemon-reload 2>/dev/null || true
+  sudo systemctl reset-failed nvidia-cdi-refresh.service worklane-gpu-devices.service 2>/dev/null || true
   sudo groupdel worklane-gpu-dev 2>/dev/null || true
   rm -rf "$t"
 }
@@ -121,6 +130,15 @@ for u in wl-test-ci wl-ci gpuagent root; do
   grep -q '^refused: ' <<<"$out" || fail "apply --users $me,$u: $out"
 done
 if getent group worklane-gpu-dev > /dev/null; then fail "a refused apply made the group"; fi
+# WHY: the real nvidia-cdi-refresh.service is a oneshot with Restart=on-failure and a CapabilityBoundingSet without
+# CAP_CHOWN; its nvidia-smi -L puts nvidia-uvm, nvidia-uvm-tools and the caps nodes back to root:root (measured on a
+# GPU machine). This stand-in does that, and fails on demand (the marker file), as a failing ExecStart line would.
+CDI=nvidia-cdi-refresh.service
+DROPIN=/etc/systemd/system/nvidia-cdi-refresh.service.d/worklane-gpu-devices.conf
+FAILFILE=/run/worklane-ci-cdi-fail
+printf '[Unit]\nDescription=CI stand-in for %s\nStartLimitBurst=5\nStartLimitIntervalSec=10s\n[Service]\nType=oneshot\nRestart=on-failure\nRestartSec=1s\nCapabilityBoundingSet=CAP_SYS_MODULE CAP_SYS_ADMIN CAP_MKNOD\nExecStart=/bin/sh -c %s\n' "$CDI" \
+  "'chown root:root /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps/nvidia-cap1; chmod 0666 /dev/nvidia-uvm /dev/nvidia-uvm-tools; chmod 0444 /dev/nvidia-caps/nvidia-cap1; [ ! -e $FAILFILE ]'" | sudo tee "/etc/systemd/system/$CDI" > /dev/null
+sudo systemctl daemon-reload
 sudo bash scripts/setup/gpu-devices.sh apply --users "$me" > "$t/apply" 2>&1 || { cat "$t/apply" >&2; fail "apply --users $me"; }
 gid="$(getent group worklane-gpu-dev | cut -d: -f3)"
 [ "$(getent group worklane-gpu-dev | cut -d: -f4)" = "$me" ] || fail "the device group isn't just $me: $(getent group worklane-gpu-dev)"
@@ -132,9 +150,76 @@ grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_De
 grep -q 'RUN+="/usr/local/libexec/worklane-gpu-devices"' /etc/udev/rules.d/99-worklane-gpu-devices.rules || fail "the udev rule doesn't run the fixer"
 [ "$(stat -c '%U:%G %a' /etc/modules-load.d/worklane-gpu-devices.conf)" = 'root:root 644' ] && grep -qx nvidia-uvm /etc/modules-load.d/worklane-gpu-devices.conf || fail "the modules-load file (nvidia-uvm at boot)"
 if ls -a /etc/modprobe.d /etc/modules-load.d /etc/udev/rules.d /usr/local/libexec | grep -q '\.tmp$'; then fail "a temp file was left"; fi
+echo "== apply --no-dynamic-nodes also asks for NVreg_ModifyDeviceFiles=0; the next plain apply takes it away"
+sudo bash scripts/setup/gpu-devices.sh apply --users "$me" --no-dynamic-nodes > "$t/apply-static" 2>&1 || { cat "$t/apply-static" >&2; fail "apply --no-dynamic-nodes"; }
+grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_DeviceFileMode=0660 NVreg_ModifyDeviceFiles=0" /etc/modprobe.d/worklane-gpu-devices.conf || fail "apply --no-dynamic-nodes didn't write NVreg_ModifyDeviceFiles=0"
+sudo bash scripts/setup/gpu-devices.sh apply --users "$me" > "$t/apply-plain" 2>&1 || { cat "$t/apply-plain" >&2; fail "apply again"; }
+grep -qx "options nvidia NVreg_DeviceFileUID=0 NVreg_DeviceFileGID=$gid NVreg_DeviceFileMode=0660" /etc/modprobe.d/worklane-gpu-devices.conf || fail "a plain apply left NVreg_ModifyDeviceFiles=0 in the options"
+if out="$(sudo bash scripts/setup/gpu-devices.sh apply --users "$me" --nonsense 2>&1)"; then fail "apply took an unknown option"; fi
 # udev's step, as on the driver's "add" (no driver here to send one): the installed fixer, as root.
 sudo /usr/local/libexec/worklane-gpu-devices
 for n in "${ALL_NODES[@]}"; do [ "$(stat -c '%U:%G %a' "$n")" = 'root:worklane-gpu-dev 660' ] || fail "$n is $(stat -c '%U:%G %a' "$n") after the fixer"; done
+
+echo "== a root NVML call puts the nodes back: the $CDI drop-in runs the fixer after it, and when it fails"
+[ "$(stat -c '%U:%G %a' "$DROPIN")" = 'root:root 644' ] || fail "the drop-in isn't root:root 0644"
+grep -qx 'ExecStartPost=+/usr/local/libexec/worklane-gpu-devices' "$DROPIN" || fail "the drop-in has no ExecStartPost=+ fixer"
+grep -qx 'OnFailure=worklane-gpu-devices.service' "$DROPIN" || fail "the drop-in has no OnFailure="
+[ "$(stat -c '%U:%G %a' /etc/systemd/system/worklane-gpu-devices.service)" = 'root:root 644' ] || fail "worklane-gpu-devices.service isn't root:root 0644"
+[ "$(systemctl show "$CDI" -p OnFailure --value)" = worklane-gpu-devices.service ] || fail "systemd didn't load the drop-in's OnFailure="
+# The nodes as the fixer leaves them after this stand-in: the caps node is 0444, and o= takes the others' bit away (440).
+nodes_fixed() { local n w; for n in "${ALL_NODES[@]}"; do w='root:worklane-gpu-dev 660'; [ "$n" != /dev/nvidia-caps/nvidia-cap1 ] || w='root:worklane-gpu-dev 440'; [ "$(stat -c '%U:%G %a' "$n")" = "$w" ] || return 1; done; }
+nodes_reset() { [ "$(stat -c '%U:%G %a' /dev/nvidia-uvm)" = 'root:root 666' ] && [ "$(stat -c '%U:%G %a' /dev/nvidia-uvm-tools)" = 'root:root 666' ]; }
+# wait <seconds> <command...>: until the command succeeds.
+wait_for() { local i; for ((i = 0; i < $1; i++)); do if "${@:2}"; then return 0; fi; sleep 1; done; return 1; }
+unit_failed() { [ "$(systemctl is-failed "$CDI" 2>/dev/null)" = failed ]; }
+restore_nodes() {
+  sudo rm -f "$FAILFILE"
+  sudo systemctl reset-failed "$CDI" worklane-gpu-devices.service 2>/dev/null || true
+  sudo chown root:root /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps/nvidia-cap1
+  sudo chmod 0666 /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps/nvidia-cap1
+  sudo /usr/local/libexec/worklane-gpu-devices
+  for n in "${ALL_NODES[@]}"; do [ "$(stat -c '%U:%G %a' "$n")" = 'root:worklane-gpu-dev 660' ] || fail "$n is $(stat -c '%U:%G %a' "$n") after restoring"; done
+}
+# with <text>: the drop-in's text for the next steps, as systemd reads it.
+set_dropin() { printf '%b' "$1" | sudo tee "$DROPIN" > /dev/null; sudo systemctl daemon-reload; }
+GOOD_DROPIN="$(sudo cat "$DROPIN")"
+
+echo "  the unit runs: its call resets the nodes, the drop-in's ExecStartPost puts them back"
+sudo systemctl start "$CDI"
+nodes_fixed || fail "after $CDI ran with the drop-in, a node isn't back: $(stat -c '%n %U:%G %a' "${ALL_NODES[@]}" | tr '\n' ' ')"
+restore_nodes
+
+echo "  without the drop-in the stand-in's call leaves nvidia-uvm and nvidia-uvm-tools root:root 0666 (the bug)"
+set_dropin '[Service]\n'
+sudo systemctl start "$CDI"
+nodes_reset || fail "the stand-in didn't reset the nodes: the steps below prove nothing"
+nodes_fixed && fail "nodes are fixed with no drop-in"
+restore_nodes
+
+echo "  a failing ExecStart line: ExecStartPost never runs, so the failure hook runs the fixer"
+set_dropin "$GOOD_DROPIN\n"
+sudo touch "$FAILFILE"
+sudo systemctl start "$CDI" 2>/dev/null && fail "$CDI started with its marker file there"
+wait_for 60 unit_failed || fail "$CDI never reached the failed state"
+wait_for 20 nodes_fixed || fail "$CDI failed and the nodes were not put back by worklane-gpu-devices.service: $(stat -c '%n %U:%G %a' "${ALL_NODES[@]}" | tr '\n' ' ')"
+echo "  ...and without OnFailure= nothing does: the nodes stay root:root 0666 after the failure"
+restore_nodes
+set_dropin '[Service]\nExecStartPost=+/usr/local/libexec/worklane-gpu-devices\n'
+sudo touch "$FAILFILE"
+sudo systemctl start "$CDI" 2>/dev/null && fail "$CDI started with its marker file there"
+wait_for 60 unit_failed || fail "$CDI never reached the failed state (no OnFailure=)"
+sleep 3
+nodes_reset || fail "the nodes were put back with no OnFailure=: the stand-in's failure didn't test what it should"
+restore_nodes
+
+echo "  without the + the fixer can't set the group under the unit's capability bound: the unit fails and the nodes stay reset"
+set_dropin '[Service]\nExecStartPost=/usr/local/libexec/worklane-gpu-devices\n'
+sudo systemctl start "$CDI" 2>/dev/null && fail "ExecStartPost without + succeeded under the unit's CapabilityBoundingSet"
+wait_for 60 unit_failed || fail "$CDI never reached the failed state (no +)"
+nodes_reset || fail "the nodes were fixed by an ExecStartPost without +"
+restore_nodes
+printf '%s\n' "$GOOD_DROPIN" | sudo tee "$DROPIN" > /dev/null; sudo systemctl daemon-reload
+grep -qx 'ExecStartPost=+/usr/local/libexec/worklane-gpu-devices' "$DROPIN" || fail "the drop-in wasn't restored"
 # check's nvidia-uvm part needs a loaded driver, which isn't here: a copy of the script whose only two differences are
 # the module directory (nvidia_uvm "loaded" while $t/sysmod/nvidia_uvm exists) and the uvm node it opens as a member
 # (a stand-in with the null device's numbers, so it really opens, root:worklane-gpu-dev 0660 as the fixed driver's).
@@ -157,6 +242,18 @@ rc="$(stub_check check-nouvm)"
 grep -A3 '^FAIL: ' "$t/check-nouvm"
 [ "$rc" = 1 ] && grep -q "^  - the nvidia_uvm module isn't loaded" "$t/check-nouvm" || { cat "$t/check-nouvm" >&2; fail "check with nvidia_uvm not loaded: exit $rc"; }
 mkdir "$t/sysmod/nvidia_uvm"
+echo "== check FAILs when nvidia-uvm is 0666 again (a root NVML call), and says what does it"
+sudo chown root:root /dev/nvidia-uvm; sudo chmod 0666 /dev/nvidia-uvm
+rc="$(stub_check check-uvm0666)"
+grep -A3 '^FAIL: ' "$t/check-uvm0666"
+[ "$rc" = 1 ] && grep -q '^  - /dev/nvidia-uvm is root:root, not root:worklane-gpu-dev (a root NVML call such as nvidia-smi puts it back: run /usr/local/libexec/worklane-gpu-devices)' "$t/check-uvm0666" || { cat "$t/check-uvm0666" >&2; fail "check with nvidia-uvm 0666: exit $rc"; }
+sudo /usr/local/libexec/worklane-gpu-devices
+echo "== check FAILs when $CDI has no drop-in"
+sudo mv "$DROPIN" "$t/dropin.saved"; sudo systemctl daemon-reload
+rc="$(stub_check check-nodropin)"
+grep -A3 '^FAIL: ' "$t/check-nodropin"
+[ "$rc" = 1 ] && grep -q "^  - $CDI runs a root NVML call that puts nvidia-uvm back to root:root 0666, and nothing runs the fixer after it: run apply" "$t/check-nodropin" || { cat "$t/check-nodropin" >&2; fail "check with no drop-in: exit $rc"; }
+sudo mv "$t/dropin.saved" "$DROPIN"; sudo systemctl daemon-reload
 echo "== check FAILs when the member can't open the uvm node"
 sudo chgrp root /dev/worklane-uvm-standin
 rc="$(stub_check check-noopen)"
@@ -356,7 +453,7 @@ grep -q "gpu hold: waiting for /run/worklane/gpu/0.lock (held by ci/gpu-hold-f s
 for id in gpu-hold-e gpu-hold-f; do wipe ci "$id"; done
 echo "== revert: its files go, the group stays"
 sudo bash scripts/setup/gpu-devices.sh revert
-for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices; do [ ! -e "$f" ] || fail "revert left $f"; done
+for f in /etc/modprobe.d/worklane-gpu-devices.conf /etc/modules-load.d/worklane-gpu-devices.conf /etc/udev/rules.d/99-worklane-gpu-devices.rules /usr/local/libexec/worklane-gpu-devices "$DROPIN" /etc/systemd/system/worklane-gpu-devices.service; do [ ! -e "$f" ] || fail "revert left $f"; done
 getent group worklane-gpu-dev > /dev/null || fail "revert removed the group"
 # Nothing of this step is left for the steps after it: the sandbox's own check still passes.
 cleanup
