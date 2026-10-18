@@ -19,11 +19,12 @@ import { installOwnerOnlySecret } from './os/index.js';
 import { secretsDir } from './console/secrets.js';
 import type { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, readAccountStatus, SETUP_TOKEN, ClaudeTokenError } from './claude-account.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, readAccountStatus, readSwitchLines, SETUP_TOKEN, ClaudeTokenError, switchedOnto } from './claude-account.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import type { MachineRequester } from './machine-owners.js';
 import type { RunAs } from './runner.js';
 import { asRoot } from './os/system-paths.js';
+import { resetWords, type UsagePause } from './usage-limit.js';
 
 /** The root script, as an admin runs it on the machine (confirm-profile, and every instance's steps). */
 export const CLAUDE_ACCOUNT_SCRIPT = asRoot.opt('current/scripts/setup/claude-account.sh');
@@ -259,10 +260,45 @@ export function latestSwitch(a: string | null, b: string | null): string | null 
   return Date.parse(a) >= Date.parse(b) ? a : b;
 }
 
-/** The accounts × instances table: for each profile, each instance's agent user's last real call on it, and which is active. */
-export function profilesTable(o: { dir?: string; instances?: string[] }) {
+/**
+ * When this instance last moved to another login: a whole-login switch that put it on the new login and resumed it
+ * (switch.jsonl, switchedOnto), or a profile switch (profiles.json), whichever is later; null: never. A usage-limit
+ * pause that began before it ends: the coordinator's accountSwitched (src/service.ts) and the accounts table both read
+ * this, so the table never shows a limit the coordinator no longer holds.
+ */
+export function accountSwitchedAt(instance: string, dir = CLAUDE_ACCOUNT_DIR): string | null {
+  return latestSwitch(switchedOnto(instance, readSwitchLines(dir)), profileSwitchedAt(instance, dir));
+}
+
+/** A usage limit on an account, as the accounts table shows it: when it resets, and that in words (resetWords). */
+export interface ProfileLimit {
+  resetAt: string;
+  resets: string;
+}
+
+/**
+ * The usage-limit pause in force on an instance, as its coordinator holds it (src/coordinator/base.ts resumeIfDue):
+ * from the log's usage.paused, until usage.resumed, its reset, or a switch since it began (accountSwitchedAt: a
+ * whole-login or a profile switch, the coordinator's own switch time). The last two end it at the coordinator's next
+ * tick; the table drops it at once. null: none.
+ */
+function limitOf(usage: { instance: string; pause: UsagePause | null }, dir: string | undefined, now: number): ProfileLimit | null {
+  const pause = usage.pause;
+  if (!pause || !(Date.parse(pause.resetAt) > now)) return null;
+  const switched = accountSwitchedAt(usage.instance, dir);
+  if (switched !== null && Date.parse(switched) >= Date.parse(pause.since)) return null;
+  return { resetAt: pause.resetAt, resets: resetWords(pause.resetAt, now) };
+}
+
+/**
+ * The accounts × instances table: for each profile, each instance's agent user's last real call on it, and which is
+ * active. `usage`: an instance's usage-limit pause, from its own log (pauseOf); it marks that instance's active
+ * account's cell (#566). The table names it as `limitsOf`: another instance's pause is in its own log, not read here.
+ */
+export function profilesTable(o: { dir?: string; instances?: string[]; usage?: { instance: string; pause: UsagePause | null }; now?: number }) {
   const failover = readProfiles(o.dir).failover;
   const p = readProfiles(o.dir);
+  const limit = o.usage ? limitOf(o.usage, o.dir, o.now ?? Date.now()) : null;
   const status = readAccountStatus(o.dir);
   // The instances: every one status.json has an agent user for, and every one with an active profile.
   const agents = new Map<string, string>();
@@ -284,20 +320,23 @@ export function profilesTable(o: { dir?: string; instances?: string[] }) {
         const check = user ? (prof?.users[user] ?? null) : null;
         // default's account comes from status.json when no profile check has run on it yet.
         const st = name === DEFAULT_PROFILE && !check ? (status?.users.find((u) => u.instance === instance && u.kind === 'agent') ?? null) : null;
+        const active = activeProfile(instance, p) === name;
         return {
           instance,
           user,
-          active: activeProfile(instance, p) === name,
+          active,
           account: check?.account ?? st?.account ?? null,
           subscription: check?.subscription ?? st?.subscription ?? null,
           apiOk: check ? check.apiOk : (st?.apiOk ?? null),
           apiError: check ? check.apiError : (st?.apiError ?? null),
           checkedAt: check?.checkedAt ?? (st ? status!.at : null),
+          /** The usage limit on it: only the paused instance's active account (a pause is the instance's, on the account it runs on). */
+          limit: active && instance === o.usage?.instance ? limit : null,
         };
       }),
     };
   });
-  return { instances, profiles: rows, active: Object.fromEntries(instances.map((i) => [i, activeProfile(i, p)])), failover };
+  return { instances, profiles: rows, active: Object.fromEntries(instances.map((i) => [i, activeProfile(i, p)])), failover, limitsOf: o.usage?.instance ?? null };
 }
 
 export type ProfilesTable = ReturnType<typeof profilesTable>;
@@ -399,11 +438,14 @@ export function recordProfileSwitches(log: EventLog, instance: string, dir = CLA
   return todo.length;
 }
 
-/** The panel's profile data: the accounts × instances table and the last few profile steps (newest first). */
-export function profilesView(dir = CLAUDE_ACCOUNT_DIR, now = Date.now(), instance?: string) {
+/**
+ * The panel's profile data: the accounts × instances table and the last few profile steps (newest first). `pause`:
+ * this instance's usage-limit pause (pauseOf its own log), for its active account's cell; undefined: not read.
+ */
+export function profilesView(dir = CLAUDE_ACCOUNT_DIR, now = Date.now(), instance?: string, pause?: UsagePause | null) {
   // A staged profile's confirmation, at a root shell on the machine (never through the dashboard). The relayed
   // sign-in under way, for this instance (its link only while it waits for the code).
-  return { profiles: profilesTable({ dir }), profileOps: readProfileOps(dir, now).slice(-5).reverse(), confirmScript: CLAUDE_ACCOUNT_SCRIPT, signin: instance ? signinView({ dir, instance, now }) : null };
+  return { profiles: profilesTable({ dir, now, ...(instance && pause !== undefined ? { usage: { instance, pause } } : {}) }), profileOps: readProfileOps(dir, now).slice(-5).reverse(), confirmScript: CLAUDE_ACCOUNT_SCRIPT, signin: instance ? signinView({ dir, instance, now }) : null };
 }
 
 /**
