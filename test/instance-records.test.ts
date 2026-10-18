@@ -522,6 +522,49 @@ test('with its coordinator running at the kill step, the removal refuses and the
   assert.doesNotMatch(d.ran, /pkill|systemctl (kill|stop)/);
 });
 
+/**
+ * instance_in_flight over a stand-in process table (PROC_DIR), every pid the registry user's: 4242 outside every
+ * allowed unit, 4243 exiting (its /proc dir reaped) right after its uid is read, 4244 in the user's own user manager,
+ * 4245 still there but its cgroup unreadable, 4246 outside every allowed unit but exiting right after its cgroup read.
+ */
+function inFlightRun() {
+  const root = mkdtempSync(join(tmpdir(), 'inflight-'));
+  const proc = join(root, 'proc');
+  const uid = process.getuid!();
+  const pids: Record<string, [string, string]> = {
+    '4242': ['0::/system.slice/cron.service', 'busy'],
+    '4243': [`0::/user.slice/user-${uid}.slice/user@${uid}.service/app.slice/forkloop.service`, 'sleep'],
+    '4244': [`0::/user.slice/user-${uid}.slice/user@${uid}.service/init.scope`, 'systemd'],
+    '4246': ['0::/system.slice/cron.service', 'brief'],
+  };
+  for (const [pid, [cg, comm]] of Object.entries(pids)) {
+    mkdirSync(join(proc, pid), { recursive: true });
+    writeFileSync(join(proc, pid, 'cgroup'), `${cg}\n`);
+    writeFileSync(join(proc, pid, 'comm'), `${comm}\n`);
+  }
+  mkdirSync(join(proc, '4245'));
+  writeFileSync(join(proc, '4245', 'comm'), 'odd\n');
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'node'), `#!/bin/sh\nprintf 'user\\twl-alpha\\n'\n`, { mode: 0o755 });
+  const stubs = [
+    `user_exists() { [ "$1" = wl-alpha ]; }`,
+    `id() { case "$1" in -u) echo ${uid} ;; -nu) echo wl-alpha ;; esac; }`,
+    `systemctl() { echo inactive; }`,
+    // The race, made certain: 4243 exits and is reaped between the uid read and the cgroup and comm reads.
+    `stat() { local o; o="$(command stat "$@")" || return; [ "\${3:-}" != "$PROC_DIR/4243" ] || rm -rf -- "$PROC_DIR/4243"; printf '%s\\n' "$o"; }`,
+    // And 4246 between its cgroup read and its comm read.
+    `sed() { local rc=0; command sed "$@" || rc=$?; [ "\${3:-}" != "$PROC_DIR/4246/cgroup" ] || rm -rf -- "$PROC_DIR/4246"; return "$rc"; }`,
+  ].join('\n');
+  return spawnSync('bash', ['-c', `source "$1"; ${stubs}; PROC_DIR="$2"; instance_in_flight alpha`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+}
+
+test("work in flight: a process outside the instance's units is named; one that exits between its uid read and its cgroup read is not (a fork loop's short-lived children); one still there is, unreadable or not", { skip: !posix && 'bash, stat -c' }, () => {
+  const r = inFlightRun();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'process 4242 (busy) as wl-alpha, in cron.service\nprocess 4245 (odd) as wl-alpha, in \n', 'the live ones outside its units, a failed read never a pass for one still there; the user manager is allowed');
+});
+
 test("the removal holds the updater off: an agent slot with its pid, busy to the updater's own quiet check, gone when it lets go", () => {
   const dir = mkdtempSync(join(tmpdir(), 'slots-'));
   const r2 = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as { holdSlot: (pid: number, owner: string, dir: string) => string; releaseSlot: (f: string, pid: number) => void; updaterQuiet: (dir: string) => { quiet: boolean; why?: string } };
