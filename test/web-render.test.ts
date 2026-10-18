@@ -21,6 +21,8 @@ import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
+import { profilesView } from '../src/claude-profiles.js';
+import { resetWords } from '../src/usage-limit.js';
 import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
@@ -2343,6 +2345,38 @@ test('Claude account: a machine owner sees each agent user and the switch step b
   assert.doesNotMatch(done, /data-testid="claude-switch-token"/);
   // Not a machine owner: nothing at all (the server refuses them the data too).
   assert.equal(r.renderClaudeAccount(view('ivy')), '');
+});
+
+test("#566: the accounts table shows the usage-limit badge and its reset time on the paused instance's active account only; nothing without a pause", () => {
+  const ownersFile = machineOwnersFile('ada');
+  const dir = mkdtempSync(join(tmpdir(), 'claude-limit-render-'));
+  writeFileSync(join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', logged_in: true, api_ok: true }, { instance: 'web', kind: 'agent', user: 'wl-web-agent', logged_in: true, api_ok: true }] }));
+  writeFileSync(join(dir, 'profiles.json'), JSON.stringify({ profiles: { spare: { kind: 'setup-token', users: { 'wl-shop-agent': { instance: 'shop', user: 'wl-shop-agent', api_ok: true } } } }, active: {} }));
+  const now = Date.now();
+  const reset = new Date(now + 2 * 3600_000 + 30 * 60_000).toISOString();
+  const pause = { since: new Date(now - 60_000).toISOString(), resetAt: reset, source: 'claude' as const, kind: 'five_hour', issue: 3, role: 'worker', id: 1 };
+  // As the server sends it to shop's dashboard: shop's own pause (or none), read from shop's log.
+  const html = (p: typeof pause | null) => r.renderClaudeAccount({ ...claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'shop', ownersFile }), ...profilesView(dir, now, 'shop', p) });
+  const cells = (h: string) => [...h.matchAll(/<td[^>]*data-testid="claude-profile-cell" data-profile="([^"]+)" data-instance="([^"]+)"[^>]*>([^]*?)<\/td>/g)].map((m) => ({ at: `${m[1]}/${m[2]}`, body: m[3]! }));
+
+  const paused = html(pause);
+  const all = cells(paused);
+  assert.deepEqual(all.map((c) => c.at), ['default/shop', 'default/web', 'spare/shop', 'spare/web']);
+  const marked = all.filter((c) => /data-testid="claude-profile-limit"/.test(c.body));
+  assert.deepEqual(marked.map((c) => c.at), ['default/shop'], "the badge on shop's active account only");
+  for (const c of all.filter((x) => x.at !== 'default/shop')) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
+  assert.match(marked[0]!.body, /usage limit/);
+  assert.ok(marked[0]!.body.includes(`resets ${resetWords(reset, now)}`), `the reset as the usage-limit notices word it: ${marked[0]!.body}`);
+  assert.match(resetWords(reset, now), /UTC \(in 2 h 30 min\)$/);
+  // web's limit is in web's own log: its column says so instead of showing nothing as if it had none.
+  assert.deepEqual([...paused.matchAll(/data-testid="claude-profile-limit-elsewhere" data-instance="([^"]+)"/g)].map((m) => m[1]), ['web']);
+  assert.match(paused, /data-testid="claude-profile-limit-elsewhere"[^>]*>[^<]*not shown here/);
+
+  // No pause: no badge and no reset time anywhere.
+  const free = html(null);
+  assert.equal(cells(free).length, 4);
+  assert.doesNotMatch(free, /data-testid="claude-profile-limit"/);
+  for (const c of cells(free)) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
 });
 
 test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {
