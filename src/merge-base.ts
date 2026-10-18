@@ -29,7 +29,7 @@ export type MergeResult =
 export function mergeBaseInto(worktree: string, base: string, message: string, identity: { name: string; email: string }): MergeResult {
   const r = git(worktree, '-c', `user.name=${identity.name}`, '-c', `user.email=${identity.email}`, '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff', '--no-edit', '-m', message, base);
   if (r.status === 0) return { clean: true, head: git(worktree, 'rev-parse', 'HEAD').stdout.trim() };
-  // Each path as itself (-z, through changedNames): a quoted `"lib/na\303\257ve.ts"` names no file (#683).
+  // A valid UTF-8 path as itself (-z, through changedNames): a quoted `"lib/na\303\257ve.ts"` names no file (#683).
   const unmerged = changedNamesOrNull(worktree, ['--diff-filter=U']) ?? [];
   if (!unmerged.length) return { error: (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ') || `git merge exited ${r.status}` };
   const conflicted: Record<string, string> = {};

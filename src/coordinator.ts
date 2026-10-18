@@ -1515,8 +1515,9 @@ export class Coordinator extends AutomationRuns {
     const id = this.identity;
     const strangers = this.git(path, 'log', '--format=%h %an <%ae> / %cn <%ce>', `${base}..${head}`).split('\n').filter(Boolean).filter((l) => !l.endsWith(` ${id.name} <${id.email}> / ${id.name} <${id.email}>`));
     if (strangers.length) return { rejected: `commits must carry the harness identity ${id.name} <${id.email}>, which your environment already sets; never set GIT_AUTHOR_*/GIT_COMMITTER_*, user.name/user.email or --author. Recommit these without an identity of your own: ${strangers.slice(0, 5).join('; ')}` };
-    // A rename as both its paths, so moving a protected file away is still a change to it; each path as itself, so
-    // `.claude/agents/naïve.md` is protected and not the quoted string git would print without -z (#683).
+    // A rename as both its paths, so moving a protected file away is still a change to it; a valid UTF-8 path as
+    // itself, so `.claude/agents/naïve.md` is protected and not the quoted string git would print without -z (any
+    // other name keeps its ASCII directories, its bad bytes read as U+FFFD) (#683).
     const names = changedNames(path, [`${base}..${head}`]);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
@@ -1820,7 +1821,7 @@ export class Coordinator extends AutomationRuns {
     const prFiles = changedNames(this.d.repo, [mb, pr.headSha]);
     const imports: Record<string, string[]> = {};
     if (mainChanged.length) {
-      // -z, as prFiles: each path as itself, so an import of a file with an odd byte in its name still resolves.
+      // -z, as prFiles: a valid UTF-8 path as itself, so an import of a file with an odd byte in its name still resolves.
       const tree = new Set(execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', pr.headSha], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).split('\0').filter(Boolean));
       for (const f of prFiles) {
         if (!/\.((m|c)?(j|t)sx?|py)$/.test(f)) continue;

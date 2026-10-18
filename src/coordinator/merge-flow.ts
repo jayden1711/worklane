@@ -89,7 +89,7 @@ export abstract class MergeFlow extends FixRuns {
         isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
         firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
-        // A rename as both its paths and each path as itself, so a locked category on either one holds (#683).
+        // A rename as both its paths and a valid UTF-8 path as itself, so a locked category on either one holds (#683).
         files: (sha) => changedNamesOrNull(this.d.repo, [`${sha}^1`, sha]) ?? [],
         diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },

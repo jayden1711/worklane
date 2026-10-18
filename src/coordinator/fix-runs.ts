@@ -566,8 +566,8 @@ export abstract class FixRuns extends Landing {
           return r.status === 0 ? r.stdout : null;
         };
         const resolved = Object.fromEntries(files.map((f) => [f, committed(f)]));
-        // Each path as itself and a rename as both its paths (#683): an edit to `lib/naïve.ts`, or moving a file the
-        // merge didn't touch onto one it did, is still a stray.
+        // A valid UTF-8 path as itself and a rename as both its paths (#683): an edit to `lib/naïve.ts`, or moving a
+        // file the merge didn't touch onto one it did, is still a stray, and so is any file whose name isn't UTF-8.
         const strays = resolutionStrays(path, files, merged.otherFiles, staged);
         outside = outsideHunks(merged.conflicted, resolved, strays);
         resolution = ['How the conflicts were resolved (a combined diff of the merge commit against both parents):', '```diff', (this.gitOrNull(path, 'show', '--format=', '--cc', 'HEAD') ?? '').slice(0, 12_000), '```'].join('\n');

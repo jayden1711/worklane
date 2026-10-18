@@ -91,7 +91,7 @@ const nameList = (cwd: string, args: string[], o: NameListOptions) =>
   runBytes(cwd, [o.tree ? 'diff-tree' : 'diff', '--name-only', '--no-renames', '-z', ...nameArgs(args)], o.timeout);
 
 /**
- * The paths `git diff <args>` (or `git diff-tree <args>`) touches: a rename as both its paths, each path as itself.
+ * The paths `git diff <args>` (or `git diff-tree <args>`) touches: a rename as both its paths, each read by nameOf.
  * `args` are revisions, a range, `--cached`, `--diff-filter=...` and diff-tree's `-r -m --first-parent --no-commit-id`.
  * Throws when git fails.
  */
@@ -105,7 +105,7 @@ export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptio
   return out instanceof Error ? null : names(out);
 }
 
-/** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each path as itself. */
+/** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each read by nameOf. */
 export function untrackedNames(cwd: string): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
 }
