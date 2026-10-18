@@ -367,6 +367,12 @@ test('#622: a wall-clock step forward ends no cached role early (the cache still
  * the repo, and the wall clock steps by `wallStep` while 4:59 and then 5:01 really pass. The hub's session role at each.
  */
 async function hubRoleAcrossStep(t: TestContext, wallStep: number) {
+  // Stubbed before the hub starts (it may keep a reference to Date.now): the real clocks plus an offset, 0 until the step.
+  const wallReal = Date.now.bind(Date);
+  const monoReal = performance.now.bind(performance);
+  const offset = { wall: 0, mono: 0 };
+  t.mock.method(Date, 'now', () => wallReal() + offset.wall);
+  t.mock.method(performance, 'now', () => monoReal() + offset.mono);
   const s = await setup({ hubDefaultClocks: true });
   try {
     s.gh.perms.set('example/a:ada', 'admin');
@@ -375,17 +381,17 @@ async function hubRoleAcrossStep(t: TestContext, wallStep: number) {
     const req = { headers: { cookie: p.cookie } } as IncomingMessage;
     const before = s.h.session(req, 'a')?.role ?? null;
     s.gh.perms.delete('example/a:ada');
-    const clocks = { wall: Date.now() + wallStep, mono: performance.now() + ROLE_CACHE_MS - 1000 };
-    t.mock.method(Date, 'now', () => clocks.wall);
-    t.mock.method(performance, 'now', () => clocks.mono);
+    offset.wall = wallStep;
+    offset.mono = ROLE_CACHE_MS - 1000;
     const at459 = s.h.session(req, 'a')?.role ?? null;
-    clocks.mono += 2000;
+    offset.mono += 2000;
     const at501 = s.h.session(req, 'a')?.role ?? null;
-    t.mock.restoreAll();
+    offset.wall = 0;
+    offset.mono = 0;
     return { before, at459, at501 };
   } finally {
-    t.mock.restoreAll();
     await s.close();
+    t.mock.restoreAll();
   }
 }
 
