@@ -437,7 +437,7 @@ export abstract class MergeFlow extends FixRuns {
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
-    const exists =(p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
+    const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
     const judged = carriedHead(mergeIns, number, pr.headSha);
@@ -1178,7 +1178,7 @@ export abstract class MergeFlow extends FixRuns {
     const files = this.changeFiles(this.d.repo, claimed.base, head);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
-    const cls =effectiveClass(riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, this.claimedClass(n));
+    const cls = effectiveClass(riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, this.claimedClass(n));
     return checksFor({ cls, required, docsOnlyChecks: review.docs_only_checks });
   }
 
