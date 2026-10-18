@@ -153,7 +153,7 @@ export function mergedSince(events: Ev[], since: Date, now: Date): MergedItem[] 
  * the digest read beside them. Only waitStep changes it; the list is read off it (itemsOf), never written to it.
  */
 export interface WaitFold {
-  /** The latest event time folded in (ms); Infinity once one had no readable time. */
+  /** The latest event time folded in (ms, stampOf: an unreadable one counts as passed). */
   latest: number;
   title: Map<number, string>;
   prIssue: Map<number, number>;
@@ -205,10 +205,19 @@ export function waitFold(): WaitFold {
   };
 }
 
+/**
+ * An event's time as Waiting on you reads it (ms). WHY: an unreadable time is never after any `now`, so it counts as
+ * passed: the event is read (as the projection, which reads every event, already has it), and it can't hold the cached
+ * read back for the life of the process.
+ */
+function stampOf(e: Ev): number {
+  const t = Date.parse(e.ts);
+  return Number.isNaN(t) ? -Infinity : t;
+}
+
 /** Fold one event in, after every event before it (the log's order). */
 export function waitStep(f: WaitFold, e: Ev): void {
-  const t = Date.parse(e.ts);
-  f.latest = Number.isNaN(t) ? Infinity : Math.max(f.latest, t);
+  f.latest = Math.max(f.latest, stampOf(e));
   const p = e.payload as Record<string, unknown>;
   switch (e.type) {
     case 'issue.seen':
@@ -395,36 +404,50 @@ function digestOf(f: WaitFold, tasks: readonly Pick<Task, 'issue' | 'status' | '
  * And the PRs merged on their own since the last digest (`since`; 24 hours back by default), for sampling.
  */
 export function waitingOnYou(events: Ev[], now = new Date(), o: DigestOptions = {}): Digest {
-  const t = now.getTime();
-  const evs = events.filter((e) => Date.parse(e.ts) <= t);
+  const k = readAt(events, events.map(stampOf), now.getTime(), localDay(now));
+  return digestOf(k.f, k.tasks, now, o);
+}
+
+/**
+ * The fold and the projection's tasks that a read at `t` reads: of the events whose time (`stamps`, stampOf of each,
+ * in the same order) is not after it.
+ */
+function readAt(events: Ev[], stamps: readonly number[], t: number, day: string): { f: WaitFold; tasks: readonly Task[] } {
+  const evs = events.filter((_, i) => stamps[i]! <= t);
   const f = waitFold();
   for (const e of evs) waitStep(f, e);
-  return digestOf(f, project(evs as Parameters<typeof project>[0], localDay(now)).tasks, now, o);
+  return { f, tasks: project(evs as Parameters<typeof project>[0], day).tasks };
 }
 
 /**
- * The fold of one snapshot of the log as the dashboard's event cache keeps it, stepped through only what was appended
- * since the last read, and that snapshot's projection tasks, the same fold its state keeps under this key
- * (src/dashboard.ts). Both are of the one snapshot, so an event appended meanwhile is in both or in neither. Null when
- * the fold can't stand for the log at `now`: that snapshot is read whole instead (waitingOnYou).
+ * What a read at `now` reads of one snapshot of the log, from what the dashboard's event cache keeps of it: the fold,
+ * stepped through only what was appended since the last read, and the projection's tasks, the same fold its state
+ * keeps under this key (src/dashboard.ts). Both are of the one snapshot, so an event appended meanwhile is in both or
+ * in neither.
  */
-function folded(s: EventSnapshot, now: Date): { f: WaitFold; tasks: readonly Task[] } | null {
-  const f = s.fold('waitingOnYou', waitFold, waitStep);
-  // WHY: a read at `now` leaves out an event stamped after it (another clock ahead of this one) or with no readable
-  // time, and the fold has every event; so it stands for that read only when it has none such.
-  if (!(f.latest <= now.getTime())) return null;
+function folded(s: EventSnapshot, now: Date): { f: WaitFold; tasks: readonly Task[] } {
+  const t = now.getTime();
   const day = localDay(now);
-  return { f, tasks: s.memo(`project ${day}`, (ev) => project(ev, day)).tasks };
+  const f = s.fold('waitingOnYou', waitFold, waitStep);
+  if (f.latest <= t) return { f, tasks: s.memo(`project ${day}`, (ev) => project(ev, day)).tasks };
+  // WHY: some event is stamped after `now` (another clock ahead of this one), and a read at `now` leaves it out, so the
+  // fold of every event can't stand for it. What it leaves out is the k latest-stamped events, so k names that read: it
+  // is folded once per snapshot and k and kept, and a read costs a pass over the log only when the log changes or the
+  // clock passes (or steps back over) one of those stamps, not on every read. Each event's time is read once, as it is
+  // appended (a fold of its own).
+  const stamps = s.fold('waitingOnYou stamps', () => [] as number[], (a, e) => void a.push(stampOf(e)));
+  let k = 0;
+  for (const x of stamps) if (x > t) k++;
+  return s.memo(`waitingOnYou ${day} ${k}`, (ev) => readAt(ev, stamps, t, day));
 }
 
 /**
- * waitingOnYou for the log an event cache holds, from the fold it keeps (#633): the same answer, without reading the
- * whole log. Of one snapshot: the one handed in, or the cache's as it is now.
+ * waitingOnYou for the log an event cache holds, from what it keeps (#633): the same answer, without reading the whole
+ * log on each read. Of one snapshot: the one handed in, or the cache's as it is now.
  */
 export function waitingCached(src: Snapshots, now = new Date(), o: DigestOptions = {}): Digest {
-  const s = src.snapshot();
-  const k = folded(s, now);
-  return k ? digestOf(k.f, k.tasks, now, o) : waitingOnYou(s.all(), now, o);
+  const k = folded(src.snapshot(), now);
+  return digestOf(k.f, k.tasks, now, o);
 }
 
 /** What the dashboard's state carries of Waiting on you (#633): how many things wait, and what the Needs you queue keys each by. */
@@ -435,9 +458,8 @@ export interface WaitingCount {
 
 /** waitingCached's list as the state carries it (without the merged PRs and batches the digest reads beside it). */
 export function waitingCount(src: Snapshots, now = new Date(), o: Pick<DigestOptions, 'updates'> = {}): WaitingCount {
-  const s = src.snapshot();
-  const k = folded(s, now);
-  const items = k ? itemsOf(k.f, k.tasks, now, o.updates) : waitingOnYou(s.all(), now, o).items;
+  const k = folded(src.snapshot(), now);
+  const items = itemsOf(k.f, k.tasks, now, o.updates);
   return { count: items.length, keys: items.map((i) => ({ kind: i.kind, issue: i.issue, ...(i.decision !== undefined ? { decision: i.decision } : {}) })) };
 }
 

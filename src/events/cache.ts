@@ -58,6 +58,8 @@ export class EventCache {
   private folds = new Map<string, { s: unknown; n: number }>();
   /** How many times the log was read whole (tests). */
   fullReads = 0;
+  /** How many times a memo was computed (tests). */
+  memoRuns = 0;
 
   constructor(
     readonly path: string,
@@ -133,6 +135,7 @@ export class EventCache {
     // WHY: only the newest snapshot's views are kept; one taken before the cache read more is computed and not kept.
     const kept = events === this.snap;
     if (kept && this.memos.has(key)) return this.memos.get(key) as T;
+    this.memoRuns++;
     const v = deepFreeze(fn(events));
     if (kept) this.memos.set(key, v);
     return v;

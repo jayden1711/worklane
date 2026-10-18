@@ -266,7 +266,7 @@ const keyOf = (i: { kind: string; issue: number | null; pr: number | null; decis
 test('#633: the cached, incremental Waiting on you answers what reading the whole log answered (#627), over random logs', (t) => {
   const MIN = 60_000;
   let viaFold = 0;
-  let wholeRead = 0;
+  let aheadRead = 0;
   const kinds = new Set<WaitKind>();
   const ended = new Map<string, number>();
   for (let seed = 1; seed <= 25; seed++) {
@@ -292,7 +292,7 @@ test('#633: the cached, incremental Waiting on you answers what reading the whol
       assert.deepEqual(asJson(waitingCached(cache, when, { updates })), want, `seed ${seed}, ${all.length} events, now ${when.toISOString()}: the cached answer is the whole-log one`);
       assert.deepEqual(waitingCount(cache, when, { updates }), keysOf(want.items), `seed ${seed}: the state's count is the list's length`);
       if (latest <= at) viaFold++;
-      else wholeRead++;
+      else aheadRead++;
       for (const i of want.items) kinds.add(i.kind);
       const keys = new Set(want.items.map(keyOf));
       for (const k of prev) if (!keys.has(k)) ended.set(k.split(':')[0]!, (ended.get(k.split(':')[0]!) ?? 0) + 1);
@@ -314,12 +314,15 @@ test('#633: the cached, incremental Waiting on you answers what reading the whol
       compare(now);
       // The same log read again later: the fold is reused, and only the time moves.
       if (r.chance(0.3)) compare((now += r.int(1, 600) * MIN));
+      // A clock stepped back (an NTP correction): read at an earlier time, then the clock goes on from where it was.
+      if (r.chance(0.15)) compare(now - r.int(1, 240) * MIN);
     }
     raw.close();
   }
-  // Both ways the cache answers were taken: from the fold, and from the whole log while an event was stamped ahead.
-  t.diagnostic(`compared ${viaFold + wholeRead} times: from the fold ${viaFold}, from the whole log ${wholeRead}; ended: ${JSON.stringify(Object.fromEntries(ended))}`);
-  assert.ok(viaFold > wholeRead && wholeRead > 0, `from the fold ${viaFold} times, from the whole log ${wholeRead}`);
+  // Both ways the cache answers were taken: from the fold of every event, and, while an event was stamped ahead, from
+  // the read at that time (the events not after it, folded once per change of the log or of which stamps are passed).
+  t.diagnostic(`compared ${viaFold + aheadRead} times: from the fold ${viaFold}, from the read at a time some stamp is after ${aheadRead}; ended: ${JSON.stringify(Object.fromEntries(ended))}`);
+  assert.ok(viaFold > aheadRead && aheadRead > 0, `from the fold ${viaFold} times, from the read at a time some stamp is after ${aheadRead}`);
   assert.deepEqual([...kinds].sort(), [...WAIT_KINDS].sort(), 'every kind of wait was listed at some point');
   for (const k of ['awaiting_decision', 'plan_held', 'blocked', 'landing_failed', 'needs_owner', 'check_held', 'hotspot_held', 'emergency_halt', 'merge_stopped', 'deploy_failed']) assert.ok(ended.get(k), `some ${k} ended (answered, unblocked, resumed, merged, released...)`);
 });
@@ -408,4 +411,44 @@ test("#633: /api/state's waiting is read from the same snapshot of the log as th
     log.close();
     await d.close();
   }
+});
+
+// --- Stamps the clock hasn't reached, or can't read ------------------------------------------------------------------
+
+test('#633: an event whose time cannot be read counts as passed, in the whole-log read and the cached one alike; one stamped ahead costs a pass over the log once per change, not on every read', () => {
+  const MIN = 60_000;
+  const db = join(mkdtempSync(join(tmpdir(), 'waiting-stamps-')), 'events.db');
+  new EventLog(db).close();
+  const raw = new DatabaseSync(db);
+  const insert = (ts: string, id: string) => raw.prepare('INSERT INTO events (ts, type, actor, source, payload) VALUES (?, ?, ?, ?, ?)').run(ts, 'decision.asked', 'coordinator', 'coordinator', JSON.stringify(askedPayload(id)));
+  const t0 = Date.parse('2026-06-01T08:00:00Z');
+  const at = (m: number) => new Date(t0 + m * MIN);
+  const updates: UpdateEntry[] = [];
+  const cache = new EventCache(db);
+  const listed = (now: Date) => {
+    const whole = asJson(waitingOnYou(cache.all(), now, { updates }));
+    assert.deepEqual(asJson(waitingCached(cache, now, { updates })), whole, `${now.toISOString()}: the cached answer is the whole-log one`);
+    assert.deepEqual(waitingCount(cache, now, { updates }), keysOf(whole.items), `${now.toISOString()}: the state's count is the list's`);
+    return whole.items.map((i) => i.decision);
+  };
+  insert(at(0).toISOString(), 'd1');
+  insert('not a time', 'u1');
+  assert.deepEqual(listed(at(1)), ['d1', 'u1'], 'a decision with an unreadable time waits, as the projection already has it');
+  const runs = cache.memoRuns;
+  for (let m = 2; m < 6; m++) assert.deepEqual(listed(at(m)), ['d1', 'u1']);
+  assert.equal(cache.memoRuns, runs, 'an unchanged log with an unreadable time in it: every read is from the fold, with no pass over the log');
+
+  insert(at(60).toISOString(), 'f1');
+  assert.deepEqual(listed(at(10)), ['d1', 'u1'], 'stamped an hour ahead: not listed yet');
+  const ahead = cache.memoRuns;
+  assert.ok(ahead > runs, 'the read at a time before that stamp was folded once, and kept');
+  for (let m = 11; m < 60; m += 12) assert.deepEqual(listed(at(m)), ['d1', 'u1']);
+  assert.equal(cache.memoRuns, ahead, 'later reads before that stamp, the log unchanged: no pass over the log');
+  assert.deepEqual(listed(at(61)), ['d1', 'f1', 'u1'], 'listed once the clock passes its time');
+  assert.deepEqual(listed(at(30)), ['d1', 'u1'], 'and left out again by a clock stepped back before it');
+  // Read at exactly an event's time, while a later one is still ahead: its time is not after now, so it is read.
+  insert(at(120).toISOString(), 'f2');
+  assert.deepEqual(listed(at(59)), ['d1', 'u1']);
+  assert.deepEqual(listed(at(60)), ['d1', 'f1', 'u1'], 'read at exactly its time: listed');
+  raw.close();
 });
