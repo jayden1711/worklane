@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { changedNames, changedNamesOrNull } from './coordinator/change-files.js';
+import { isNonUtf8Path } from './review.js';
 
 const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' });
 /** A blob's id at `rev:path` (or the index's, `:path`), or null when there is none. */
@@ -52,11 +53,17 @@ export function stagedBlobs(worktree: string, otherFiles: string[]): Record<stri
 /**
  * Where a committed resolution (HEAD, the merge commit) strays from the conflicted files: a file the merge changed
  * cleanly whose committed blob isn't the one the merge staged (`staged`, from stagedBlobs), and a file the merge
- * commit changes against the branch that the merge didn't touch at all (a rename as both its paths).
+ * commit changes against the branch that the merge didn't touch at all (a rename as both its paths). A file whose
+ * blobs can't be read is a stray too: a name that isn't valid UTF-8 (review.ts isNonUtf8Path) names no blob, so its
+ * staged and committed lookups would both come back empty and compare equal whatever the resolver did.
  */
 export function resolutionStrays(worktree: string, conflicted: string[], otherFiles: string[], staged: Record<string, string | null>): string[] {
   const expected = new Set([...conflicted, ...otherFiles]);
-  return [...otherFiles.filter((f) => blob(worktree, `HEAD:${f}`) !== staged[f]), ...changedNames(worktree, ['HEAD^1', 'HEAD']).filter((f) => !expected.has(f))];
+  const strays = [
+    ...otherFiles.filter((f) => isNonUtf8Path(f) || blob(worktree, `HEAD:${f}`) !== staged[f]),
+    ...changedNames(worktree, ['HEAD^1', 'HEAD']).filter((f) => !expected.has(f) || isNonUtf8Path(f)),
+  ];
+  return [...new Set(strays)];
 }
 
 /** Undo an unfinished merge (a conflict nobody will resolve here). */

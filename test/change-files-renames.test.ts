@@ -15,6 +15,7 @@ import { BRAND } from '../src/brand.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { Coordinator } from '../src/coordinator.js';
 import * as changeFilesModule from '../src/coordinator/change-files.js';
+import { loosenedProblems } from '../src/delegation.js';
 import { isProtectedPath } from '../src/guardrails/engine.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 // A namespace import, so the file still loads against a merge-base.ts without the stray check's helpers (fail-without).
@@ -309,6 +310,74 @@ test('a newline path committed to a repo comes out of changeFiles as itself and 
   assert.deepEqual(files.map((f) => f.path), ['.claude/skills/a\nb/SKILL.md']);
   assert.equal(level(files, engine).level, 'L3');
   assert.deepEqual(await inspect(dir, base, head), { rejected: 'changes protected harness files: .claude/skills/a\nb/SKILL.md' });
+});
+
+// ---- A name that isn't valid UTF-8 can't be read as itself, so it waits for the owner
+
+/** `text` as `rel` (bytes, so a name that isn't valid UTF-8 can be made anywhere) in the index of `dir`, no file on disk. */
+function stageBytes(dir: string, rel: Buffer, text: string) {
+  const sha = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: text, encoding: 'utf8' }).trim();
+  execFileSync('git', ['update-index', '--add', '-z', '--index-info'], { cwd: dir, input: Buffer.concat([Buffer.from(`100644 ${sha}\t`), rel, Buffer.from([0])]) });
+}
+/** A name with the byte 0xff in it: `before` 0xff `after`. */
+const ff = (before: string, after: string) => Buffer.concat([Buffer.from(before), Buffer.from([0xff]), Buffer.from(after)]);
+
+test('a changed name that isn\'t valid UTF-8 is L3 "path that isn\'t valid UTF-8" and never merges itself, whatever review.yaml lists', () => {
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  // Review.yaml files that would let it through if anything could: no L3 at all, the category emptied, docs everywhere.
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const hostile = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } }, categories: { 'non-utf8-path': [], docs: ['**'] } });
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const };
+  const got: unknown[] = [];
+  for (const [rel, text] of [[ff('web/bad', '.ts'), "await db.query('DROP TABLE users');\n"], [ff('docs/bad', '.md'), '# notes\n']] as const) {
+    const { dir, base } = repo({ 'README.md': '# x\n' });
+    stageBytes(dir, rel, text);
+    git(dir, 'commit', '-q', '-m', 'add a file');
+    const head = git(dir, 'rev-parse', 'HEAD');
+    const files = changeFiles(dir, base, head);
+    for (const c of [engine, plain, hostile]) {
+      const lvl = level(files, c);
+      const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
+      const paths = files.map((f) => f.path);
+      got.push({ paths, level: lvl.level, reason: lvl.reasons.find((r) => r.startsWith('path that')), cls: riskClassOf({ paths, level: lvl, waitCategories: [] }).cls, auto: merge.auto });
+    }
+  }
+  const want = (p: string) => ({ paths: [p], level: 'L3', reason: `path that isn't valid UTF-8: ${JSON.stringify(p)}`, cls: 'protected', auto: false });
+  assert.deepEqual(got, [...Array(3).fill(want('web/bad�.ts')), ...Array(3).fill(want('docs/bad�.md'))]);
+  // The helper's other readers name it the same way: never a string that drops or hides the bad byte.
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  stageBytes(dir, ff('src/bad', '.ts'), 'x\n');
+  git(dir, 'commit', '-q', '-m', 'add');
+  assert.deepEqual(changeFilesModule.changedNames(dir, [base, 'HEAD']), ['src/bad�.ts']);
+  assert.deepEqual(changeFilesModule.changedStatuses(dir, [base, 'HEAD']), [{ status: 'A', path: 'src/bad�.ts' }]);
+  // And review.yaml can't loosen it.
+  assert.deepEqual(loosenedProblems({ levels: { L3_human: { when: [] } }, merge: { loosened: ['non-utf8-path'] } }), ['merge.loosened: non-utf8-path is high-risk or a safety floor and can never be loosened']);
+});
+
+test('conflict fix: a file whose name isn\'t valid UTF-8 and that the merge brought in cleanly is a stray (its blob can\'t be read)', { skip: process.platform !== 'linux' && 'names that are not UTF-8 on disk: Linux only' }, () => {
+  const big = (tag: string) => Array.from({ length: 30 }, (_, i) => `line ${i} ${tag}`).join('\n') + '\n';
+  const bad = (dir: string) => Buffer.concat([Buffer.from(`${dir}/`), ff('lib/bad', '.ts')]);
+  const { dir } = repo({ 'x.ts': 'one\ntwo\nthree\n' });
+  mkdirSync(join(dir, 'lib'));
+  writeFileSync(bad(dir), big('n'));
+  commit(dir, 'add lib/bad\\xff.ts');
+  git(dir, 'checkout', '-q', '-b', 'pr');
+  write(dir, { 'x.ts': 'one\nTWO-pr\nthree\n' });
+  commit(dir, 'pr');
+  git(dir, 'checkout', '-q', 'main');
+  write(dir, { 'x.ts': 'one\nTWO-main\nthree\n' });
+  writeFileSync(bad(dir), `${big('n')}base\n`);
+  const baseSha = commit(dir, 'base');
+  git(dir, 'checkout', '-q', 'pr');
+  const merged = mergeBase.mergeBaseInto(dir, baseSha, 'Merge main into pr', IDENTITY);
+  assert.ok('conflicted' in merged, JSON.stringify(merged));
+  assert.deepEqual([Object.keys(merged.conflicted), merged.otherFiles], [['x.ts'], ['lib/bad�.ts']]);
+  const staged = mergeBase.stagedBlobs(dir, merged.otherFiles);
+  write(dir, { 'x.ts': 'one\nTWO-pr TWO-main\nthree\n' });
+  writeFileSync(bad(dir), `${big('n')}base\nevil\n`);
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '--no-edit');
+  assert.deepEqual(mergeBase.resolutionStrays(dir, ['x.ts'], merged.otherFiles, staged), ['lib/bad�.ts']);
 });
 
 // ---- One way to list changed names or counts

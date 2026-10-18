@@ -28,6 +28,23 @@ export const CONTROL_CHARACTER_PATH = 'control-character-path';
 export const hasControlCharacter = (path: string): boolean => /\p{Cc}/u.test(path);
 
 /**
+ * A changed path whose name isn't valid UTF-8 (a byte like 0xff). It can't be read as itself: every reader decodes
+ * its bad bytes as U+FFFD, and that string names no file git knows, so its lines and blobs can't be asked for. Like
+ * a control character, such a change is always L3 ("path that isn't valid UTF-8") and never auto-merges
+ * (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
+ */
+export const NON_UTF8_PATH = 'non-utf8-path';
+/**
+ * Whether a path, as read, came from a name that isn't valid UTF-8: it holds U+FFFD, which is what any UTF-8 decode
+ * (the helper's, or a plain `encoding: 'utf8'`) makes of a bad byte. A name with a real U+FFFD in it counts too; the
+ * owner looks at it.
+ */
+export const isNonUtf8Path = (path: string): boolean => path.includes('�');
+
+/** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
+export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH];
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
  * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
@@ -168,6 +185,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     if (input.moneyPaths.some((re) => re.test(f.path))) add('money-path', f.path);
     if ((f.addedLines ?? []).some((l) => /\b(DROP\s+(TABLE|COLUMN|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/i.test(l))) add('deletes-data', f.path);
     if (hasControlCharacter(f.path)) add(CONTROL_CHARACTER_PATH, f.path);
+    if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -201,6 +219,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   // Quoted (JSON) in the reason, so the control character itself never reaches a comment or a log line.
   const odd = categories[CONTROL_CHARACTER_PATH] ?? [];
   if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
+  const notUtf8 = categories[NON_UTF8_PATH] ?? [];
+  if (notUtf8.length) raise('L3', `path that isn't valid UTF-8: ${notUtf8.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

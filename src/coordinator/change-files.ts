@@ -1,8 +1,10 @@
 // What a change touches, as the review levels, the merge decision, the guards and the content checks read it (#683).
 //
-// INVARIANT: this module is the only place in src/ that asks git which paths a change touches or how many lines it
-// changes (--name-only, --name-status, --numstat, --raw, --stat, or a patch's file headers). test/change-files-renames.test.ts
-// fails on any of those anywhere else in src/ or scripts/ that it doesn't list by name, with why.
+// Every reader in src/ of which paths a change touches or how many lines it changes goes through this module, except
+// two listed by name with why in test/change-files-renames.test.ts (src/comment-policy.ts and src/push-check.ts).
+// That test is a word list, not a proof: it fails on a reader word (--name-only, --numstat, diff-tree, a `+++`
+// header, ...) in a file of src/ or scripts/ it doesn't list, but a flag built by concatenation, or a header regex
+// that never spells the header, gets past it.
 //
 // Rename detection is off: a renamed file is its old path deleted and its new path added, so a rule on either path
 // sees it. With it on, git prints one combined path for a rename (`test/{a.ts => b.ts}`), which matches no glob, and
@@ -10,6 +12,11 @@
 // `--no-renames` also turns off copies, whatever diff.renames says. Paths come NUL-separated and unquoted (-z): git
 // otherwise C-quotes a name with a non-ASCII byte, a tab, a quote, a backslash or a newline (`"src/\303\251.ts"`),
 // and the quoted string matches no glob and names no file. They are passed back to git literally.
+//
+// Names are read as bytes. A valid UTF-8 name comes back as itself. One that isn't (a byte like 0xff) can't be: it
+// comes back with U+FFFD for its bad bytes, git can't be handed it back (a process's arguments are UTF-8 here), and
+// review.ts puts it in non-utf8-path, which is L3 and always waits for the owner.
+import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
 import type { SizeFile } from '../pr-rules.js';
 import type { ChangeFile } from '../review.js';
@@ -24,10 +31,39 @@ function run(cwd: string, args: string[], timeout?: number): string | Error {
   return r.stdout;
 }
 
-const must = (out: string | Error): string => {
+/** run, with stdout as bytes: for output that holds paths. */
+function runBytes(cwd: string, args: string[], timeout?: number): Buffer | Error {
+  const r = spawnSync('git', ['--literal-pathspecs', ...args], { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+  if (r.error) return r.error;
+  if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  return r.stdout;
+}
+
+const must = <T>(out: T | Error): T => {
   if (out instanceof Error) throw out;
   return out;
 };
+
+/** The NUL-separated fields of `-z` output, as bytes (a trailing NUL ends the last one). */
+function fields(out: Buffer): Buffer[] {
+  const parts: Buffer[] = [];
+  let start = 0;
+  for (let i = out.indexOf(0); i !== -1; i = out.indexOf(0, start)) {
+    parts.push(out.subarray(start, i));
+    start = i + 1;
+  }
+  if (start < out.length) parts.push(out.subarray(start));
+  return parts;
+}
+
+/**
+ * A name as read: itself when it is valid UTF-8. Otherwise its bad bytes become U+FFFD (the decoder's replacement,
+ * added here too if a decoder ever didn't), which review.ts isNonUtf8Path reads as a name that isn't valid UTF-8.
+ */
+function nameOf(bytes: Buffer): string {
+  const s = bytes.toString('utf8');
+  return isUtf8(bytes) || s.includes('�') ? s : `${s}�`;
+}
 
 /**
  * The options a caller may add to a name list: which side to compare (`--cached`), which kinds of change
@@ -41,8 +77,8 @@ function nameArgs(args: string[]): string[] {
   return args;
 }
 
-/** The NUL-separated paths of `--name-only -z`. */
-const names = (out: string): string[] => out.split('\0').filter(Boolean);
+/** The NUL-separated paths of `--name-only -z`, each read by nameOf. */
+const names = (out: Buffer): string[] => fields(out).filter((b) => b.length).map(nameOf);
 
 export interface NameListOptions {
   /** `git diff-tree` (one commit against its parent) instead of `git diff`. */
@@ -52,7 +88,7 @@ export interface NameListOptions {
 }
 
 const nameList = (cwd: string, args: string[], o: NameListOptions) =>
-  run(cwd, [o.tree ? 'diff-tree' : 'diff', '--name-only', '--no-renames', '-z', ...nameArgs(args)], o.timeout);
+  runBytes(cwd, [o.tree ? 'diff-tree' : 'diff', '--name-only', '--no-renames', '-z', ...nameArgs(args)], o.timeout);
 
 /**
  * The paths `git diff <args>` (or `git diff-tree <args>`) touches: a rename as both its paths, each path as itself.
@@ -71,14 +107,14 @@ export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptio
 
 /** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each path as itself. */
 export function untrackedNames(cwd: string): string[] {
-  return names(must(run(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
 }
 
 /** Each path `git diff <args>` touches with its status letter (A, M, D, T, ...): a rename as a delete and an add. */
 export function changedStatuses(cwd: string, args: string[]): { status: string; path: string }[] {
-  const parts = must(run(cwd, ['diff', '--name-status', '--no-renames', '-z', ...nameArgs(args)])).split('\0');
+  const parts = fields(must(runBytes(cwd, ['diff', '--name-status', '--no-renames', '-z', ...nameArgs(args)])));
   const out: { status: string; path: string }[] = [];
-  for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i]!, path: parts[i + 1]! });
+  for (let i = 0; i + 1 < parts.length; i += 2) out.push({ status: parts[i]!.toString('utf8'), path: nameOf(parts[i + 1]!) });
   return out;
 }
 
@@ -115,13 +151,16 @@ export function hunkLines(diff: string): { added: string[]; removed: string[] } 
 export function changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
   const range = `${base}..${head}`;
   // -z: "added TAB removed TAB path NUL" for each file (renames off, so never the two-path form).
-  return must(run(cwd, ['diff', '--numstat', '--no-renames', '-z', range]))
-    .split('\0')
-    .filter(Boolean)
+  return fields(must(runBytes(cwd, ['diff', '--numstat', '--no-renames', '-z', range])))
+    .filter((rec) => rec.length)
     .map((rec) => {
-      const [a, r, ...p] = rec.split('\t');
-      const path = p.join('\t');
-      const { added, removed } = hunkLines(must(run(cwd, ['diff', '-U0', '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', range, '--', path])));
+      const t1 = rec.indexOf(9);
+      const t2 = rec.indexOf(9, t1 + 1);
+      const [a, r] = [rec.subarray(0, t1).toString('latin1'), rec.subarray(t1 + 1, t2).toString('latin1')];
+      const bytes = rec.subarray(t2 + 1);
+      const path = nameOf(bytes);
+      // A name that isn't valid UTF-8 can't be handed back to git, so its lines aren't read: it is L3 and waits anyway.
+      const { added, removed } = isUtf8(bytes) ? hunkLines(must(run(cwd, ['diff', '-U0', '--no-renames', '--no-color', '--no-ext-diff', '--no-textconv', range, '--', path]))) : { added: [], removed: [] };
       return { path, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added, removedLines: removed };
     });
 }
