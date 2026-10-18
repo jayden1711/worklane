@@ -85,7 +85,14 @@ export function needsYou(state: Pick<State, 'decisions' | 'inbox' | 'tasks'>, wa
   };
   const blockedKey = (issue: number) => `blocked:${issue}`;
   const planHeld = new Set<number>();
+  // WHY: the shell keeps Waiting on you's answer up to a minute off the queue (App.tsx useWaiting), and the live state
+  // is newer: a wait it shows has ended (its decision answered, its task no longer blocked) is not counted, so the badge
+  // drops the moment the owner answers or unblocks.
+  const answered = new Set(state.decisions.filter((d) => d.answer).map((d) => d.id));
+  const status = new Map(state.tasks.map((t) => [t.issue, t.status]));
+  const ended = (w: WaitItem) => (!!w.decision && answered.has(w.decision)) || ((w.kind === 'blocked' || w.kind === 'landing_failed') && w.issue !== null && status.has(w.issue) && status.get(w.issue) !== 'blocked');
   (waiting?.items ?? []).forEach((w, n) => {
+    if (ended(w)) return;
     if (w.kind === 'plan_held' && w.issue !== null) planHeld.add(w.issue);
     const key = w.decision ? `decision:${w.decision}` : (w.kind === 'blocked' || w.kind === 'landing_failed') && w.issue !== null ? blockedKey(w.issue) : `wait:${n}`;
     add(item(key, w));

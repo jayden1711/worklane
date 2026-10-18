@@ -1871,6 +1871,12 @@ test('#585 Needs you is one queue: what the three tabs list, each once, blocking
   const viewer = r.renderNeedsYou(asOther, null);
   assert.match(viewer, /What waits on the owner is for the instance(&#x27;|')s owners and writers[^<]*: this queue has the decisions and your blocked tasks\./);
   assert.equal([...viewer.matchAll(/data-testid="needs-you-item"/g)].length, r.navCounts(asOther)['nav-needs-you']);
+  // The Inbox's L2 landings are not in the queue (nothing waits on them): a line counts them, with the way to the Inbox.
+  const landed = asOwner.tasks.slice(0, 2);
+  const withLanded = r.renderNeedsYou({ ...asOwner, inbox: { ...(asOwner as unknown as { inbox: object }).inbox, notify: landed } } as never, w, now);
+  assert.match(withLanded, /Not in the queue: 2 L2 changes landed for you to look over, on the <a href="\/needs-you\/inbox"[^>]*>Inbox<\/a>/);
+  assert.equal([...withLanded.matchAll(/data-testid="needs-you-item"/g)].length, rows.length, 'the landings add no row');
+  assert.doesNotMatch(r.renderNeedsYou({ ...asOwner, inbox: { ...(asOwner as unknown as { inbox: object }).inbox, notify: [] } } as never, w, now), /Not in the queue/);
   // The queue is the group's first tab, on its own address.
   assert.match(r.renderAt('/needs-you', asOwner), /<a href="\/needs-you"[^>]*aria-current="page"[^>]*data-testid="tab-needs-you"/);
 });

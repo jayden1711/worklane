@@ -536,7 +536,9 @@ export const waitingDelay = (keptAt: number | undefined, live: boolean, now: num
  * and on every instance switch loaded a busy instance's dashboard on each. On the queue (`live`) it is read on every
  * change, as Waiting on you reads it; elsewhere at most once a minute, after a change, and an instance switch shows what
  * was kept for that instance (web/src/cache.ts) without asking again. Each read waits for the browser to be idle, so
- * it follows the page's own reads.
+ * it follows the page's own reads. What the kept answer lists that the live state shows has ended (a decision
+ * answered, a task unblocked) isn't counted (needs-you.ts). The guard on the wiring is CI's real-Chrome
+ * test/dashboard-switch-speed.test.ts (it failed with a read on every switch); web-nav pins only waitingDelay.
  */
 function useWaiting(on: boolean, live: boolean, lastId: number | undefined): { data: Waiting | null; error: string | null } {
   const url = on ? viewUrl('/api/waiting') : null;

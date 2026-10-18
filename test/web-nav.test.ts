@@ -170,6 +170,19 @@ test('Needs you is one queue, urgency-sorted', () => {
   // Before Waiting on you answers, or for a viewer it is refused to: the decisions and your blocked tasks.
   assert.deepEqual(nav.needsYou(state).map(shown), ['plan_held #2', 'awaiting_decision', 'awaiting_decision #1', 'blocked #4', 'blocked #5']);
   assert.equal(nav.navCounts(state)['nav-needs-you'], 5);
+  // The answer the shell kept can be up to a minute old; the live state is newer. Once it shows decision a and plan p
+  // answered and #4 moving again, they are not counted, though the kept answer still lists them.
+  const answer = { by: 'example-owner', answer: 'yes', at: hoursAgo(0) };
+  const later = {
+    ...state,
+    decisions: decisions.map((x) => (x.id === 'a' || x.id === 'p' ? { ...x, answer } : x)),
+    inbox: { decisions: [], blocked: [blocked[1]], notify: [] },
+    tasks: [{ issue: 1, title: 'one', status: 'building' }, { issue: 4, title: 'four', status: 'building' }, { issue: 9, title: 'nine', status: 'blocked' }],
+  };
+  assert.deepEqual(nav.needsYou(later, waiting).map(shown), [
+    'awaiting_decision', 'needs_owner #7', 'blocked #9', 'emergency_halt', 'blocked #5', 'hotspot_held #10', 'hotspot_held #10', 'deploy_failed',
+  ]);
+  assert.equal(nav.navCounts(later, waiting)['nav-needs-you'], 8);
   // The page states the order, from the same table the sort reads: every kind is named, and which side it is on.
   for (const [kind, k] of Object.entries(nav.KIND)) assert.ok(nav.ORDER.includes(k.label), `the order names ${kind}`);
   // WHY: /api/waiting is computed from the whole log on each read (about 350 ms on a 200 000-event log), and reading it
