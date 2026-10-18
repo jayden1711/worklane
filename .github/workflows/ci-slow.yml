@@ -2416,6 +2416,8 @@ jobs:
           sudo jq -e '."kit-notes".diff.changed == [{"name":"echo","fields":["description"]}]' /var/lib/worklane-mcp-ci/state/blocked.json
           sudo rm -f /etc/kit-rugpull
           sudo rm -rf "$cc" "$h"
+      - name: "MCP broker (#551): its unit runs with ProtectKernelTunables and ProtectControlGroups and still starts servers in their sandboxes; a server inside it can't write /proc/sys or the cgroup tree"
+        run: bash scripts/ci/mcp-broker-kernel.sh ci
       - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
         run: sudo bash scripts/ci/disk-full-coordinator.sh ci
       - name: "instance-remove (v0.5.1): delta has a record in every root file that keys instances, beside ci's; refused, changing nothing, while delta's coordinator runs"

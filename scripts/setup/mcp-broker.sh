@@ -66,10 +66,13 @@ UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+# /proc/sys, /sys and the cgroup tree read-only for the broker and every server it starts. bubblewrap (the servers'
+# sandbox) still mounts its fresh /proc under these: ci-slow's add-project job proves it on real systemd
+# (scripts/ci/mcp-broker-kernel.sh).
+ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectControlGroups=yes
 NoNewPrivileges=yes
-# Not ProtectKernelTunables or ProtectControlGroups: their read-only mounts over /proc/sys and /sys/fs/cgroup stop
-# bubblewrap (the servers' sandbox) mounting a fresh /proc inside its own namespace.
 Restart=on-failure
 RestartSec=5
 
