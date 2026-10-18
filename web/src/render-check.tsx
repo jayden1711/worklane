@@ -276,8 +276,9 @@ export const renderVoiceBannerUnderUsage = (usage: UsageInfo[], current: string 
     </PausedScope>,
   );
 /**
- * #587: the actions that start work (Your first task's File it, Not picked up's Add ready, an automation's Run now, a
- * study's Start) and the emergency stop's banner (when `state` is given), under a page's usage view.
+ * #587: the actions that start work or write at once (Your first task's File it, Not picked up's Add ready, an
+ * automation's Run now, a study's Start) and the emergency stop's banner (when `state` is given), under a page's usage
+ * view.
  */
 export const renderUnderUsage = (usage: UsageInfo[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: State }) =>
   renderToStaticMarkup(
@@ -287,6 +288,21 @@ export const renderUnderUsage = (usage: UsageInfo[], current: string | null, o: 
       <IgnoredIssues initial={o.ignored as never} />
       <AutomationDetail a={o.automation as never} actions={['run']} digest="d" timezone="UTC" />
       <StudyPage s={o.study as never} actions={['start']} />
+    </PausedScope>,
+  );
+/** #664: a decision's card (Decisions) and its own page (DecisionDetail), under a page's usage view. */
+export const renderDecisionUnderUsage = (usage: UsageInfo[], current: string | null, o: { card: Decision; detail: DecisionDetail }) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      <DecisionCard d={o.card} selected={false} />
+      <DecisionDetailView d={o.detail} prBody={null} diff={null} />
+    </PausedScope>,
+  );
+/** #664: Your first task's form once its issue is filed (what it says then), under a page's usage view. */
+export const renderFirstTaskFiledUnderUsage = (usage: UsageInfo[], current: string | null, first: unknown, filed: { number: number; labelCreated: boolean; url: string | null }) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      <FirstTaskForm canEdit initial={first as never} initialFiled={filed} onDone={() => {}} />
     </PausedScope>,
   );
 /** The page header with its menu button and the narrow-screen navigation drawer, open; on a hub, its instances with their dots. */

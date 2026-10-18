@@ -1,9 +1,9 @@
 // WHY (#468): a new person's first issue had no done_when block and no ready label, and was ignored without a word.
 // "Your first task" (first run, a checkout only) files one shaped as the coordinator takes it, or gives the template;
 // the Issues page's "Not picked up" says, for each open issue the harness isn't working on, why, with a fix where safe.
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import { addReady, fileFirstTask, getFirstTask, getIgnored, type DoneWhenPick, type FirstTaskInfo, type IgnoredIssue } from '../api';
-import { Badge, Button, Card, cx } from './ui';
+import { Badge, Button, Card, cx, InstancePaused } from './ui';
 
 const field = 'h-8 rounded-control bg-field px-2.5 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-surface px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
@@ -22,7 +22,19 @@ export function FirstTaskTemplate({ t }: { t: FirstTaskInfo['template'] }) {
   );
 }
 
-export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, onDone }: { canEdit: boolean; initial?: FirstTaskInfo | null; initialPreview?: { title: string; body: string } | null; onDone: () => void }) {
+/** A filed first task: its issue, whether the ready label had to be created, and its page. */
+type Filed = { number: number | undefined; labelCreated: boolean; url: string | null };
+
+/**
+ * What the form says once the issue is filed. The issue (with ready) is on GitHub either way; while the instance is
+ * paused on the usage limit, the coordinator starts no agent on it (dispatch waits), so it says that instead of "within
+ * a minute" (#664). Read when shown, so it follows the pause.
+ */
+const filedSays = (f: Filed, paused: boolean) =>
+  `filed as #${f.number}${f.labelCreated ? ' (the ready label was created)' : ''}: ${paused ? 'agents pick it up when the instance resumes' : 'the coordinator picks it up within a minute'}; watch it on the Board`;
+
+export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, initialFiled = null, onDone }: { canEdit: boolean; initial?: FirstTaskInfo | null; initialPreview?: { title: string; body: string } | null; initialFiled?: Filed | null; onDone: () => void }) {
+  const paused = useContext(InstancePaused);
   const [info, setInfo] = useState<FirstTaskInfo | null>(initial);
   const [title, setTitle] = useState('');
   const [outcome, setOutcome] = useState('');
@@ -30,7 +42,7 @@ export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, 
   const [rows, setRows] = useState<Row[]>([{ kind: 'test', test: '' }]);
   const [preview, setPreview] = useState<{ title: string; body: string } | null>(initialPreview);
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string | null } | null>(null);
+  const [msg, setMsg] = useState<{ ok: false; text: string } | { ok: true; filed: Filed } | null>(initialFiled ? { ok: true, filed: initialFiled } : null);
   useEffect(() => {
     if (initial) return;
     getFirstTask()
@@ -52,7 +64,7 @@ export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, 
       if (!confirm) setPreview({ title: r.title, body: r.body });
       else {
         setPreview(null);
-        setMsg({ ok: true, text: `filed as #${r.number}${r.labelCreated ? ' (the ready label was created)' : ''}: the coordinator picks it up within a minute; watch it on the Board`, url: r.url ?? null });
+        setMsg({ ok: true, filed: { number: r.number, labelCreated: !!r.labelCreated, url: r.url ?? null } });
         onDone();
       }
     } catch (e) {
@@ -125,7 +137,7 @@ export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, 
           <code className={code}>{preview.body}</code>
           <p className="text-[12px] text-ink-2">Filed with the label ready (created if the repo has none).</p>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" work="starts" disabled={busy} onClick={() => void send(true)} data-testid="first-task-file">
+            <Button size="sm" work="now" disabled={busy} onClick={() => void send(true)} data-testid="first-task-file">
               {busy ? 'Filing…' : 'File it'}
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPreview(null)}>
@@ -136,12 +148,12 @@ export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, 
       )}
       {msg && (
         <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="first-task-result">
-          {msg.text}
-          {msg.url && (
+          {msg.ok ? filedSays(msg.filed, paused) : msg.text}
+          {msg.ok && msg.filed.url && (
             <>
               {' '}
-              <a href={msg.url} target="_blank" rel="noreferrer" className="text-blue-ink hover:underline">
-                {msg.url}
+              <a href={msg.filed.url} target="_blank" rel="noreferrer" className="text-blue-ink hover:underline">
+                {msg.filed.url}
               </a>
             </>
           )}
@@ -191,7 +203,7 @@ export function IgnoredIssues({ initial = null }: { initial?: { issues: IgnoredI
                     <Badge tone={r.kind === 'held' || r.kind === 'waiting' ? 'neutral' : 'warn'}>{KIND_LABEL[r.kind]}</Badge>
                     <span className="min-w-0 break-words">{r.text}</span>
                     {v.canFix && r.fix === 'add-ready' && (
-                      <Button size="sm" variant="outline" work="starts" disabled={busy === i.issue} onClick={() => {
+                      <Button size="sm" variant="outline" work="now" disabled={busy === i.issue} onClick={() => {
                         setBusy(i.issue);
                         addReady(i.issue)
                           .then(load)

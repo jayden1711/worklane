@@ -22,21 +22,27 @@ export function Why({ id, children }: { id: string; children: ReactNode }) {
  * owner's decision on #587: nothing new is refused while paused (switching the Claude account is how a usage pause is
  * fixed, so machine and account writes stay allowed); the action stays usable and says when it takes effect. Work it
  * starts waits for the resume. On #664: landing has no usage-pause check (src/coordinator.ts's tick lands every pass),
- * so a land action lands now and only the agent runs it needs (an evaluator, a CI or conflict fix) wait.
+ * so a land action lands now and only the agent runs it needs (an evaluator, a CI or conflict fix) wait. Also on #664:
+ * an action whose own write happens at once, with no usage-pause check (File it and Add ready write the issue or the
+ * ready label to GitHub in the request; an intake approval files its issue on the next intake pass), says that write
+ * happens now; only the agent runs it leads to wait.
  */
 export const PAUSED_SAYS = {
   starts: 'paused: this takes effect when the instance resumes',
   lands: 'lands now; only agent runs wait',
+  now: 'happens now; only agent runs wait',
 } as const;
 /** The work a Button does, for what it says while paused: one key of PAUSED_SAYS, so a button says exactly one. */
 export type Work = keyof typeof PAUSED_SAYS;
 /**
  * The work approving a decision does, by its kind (Decision.kind, as the projection records it from decision.asked;
  * the Board's approve reads the same field): a landing ('land') is queued and landed on the coordinator's next pass
- * (src/coordinator/decisions.ts, then landing.ts's landNext, neither with a usage-pause check); an intake or a plan
- * approval starts agent work, which waits for the resume. Any other kind says nothing.
+ * (src/coordinator/decisions.ts, then landing.ts's landNext, neither with a usage-pause check); an intake approval
+ * files its issue on the next intake pass, whose usage-pause check stops only new reports, not answered decisions
+ * (src/coordinator/intake.ts intakePass, then intakeDecisions), so it happens now; a plan approval starts agent work,
+ * which waits for the resume. Any other kind says nothing.
  */
-const DECISION_WORK: Readonly<Record<string, Work>> = { land: 'lands', intake: 'starts', plan: 'starts' };
+const DECISION_WORK: Readonly<Record<string, Work>> = { land: 'lands', intake: 'now', plan: 'starts' };
 export const decisionWork = (kind: string | null | undefined): Work | null => (kind && Object.hasOwn(DECISION_WORK, kind) ? DECISION_WORK[kind]! : null);
 /** Whether the instance this page acts on is paused on the Claude usage limit (App provides it, from /api/usage). */
 export const InstancePaused = createContext(false);
@@ -46,7 +52,7 @@ export const InstancePaused = createContext(false);
  * `why`: the reason it can't be pressed now; set, the button is disabled and says so (its own line, or the `whyAt`
  * element's when one line already says it for a row of buttons). A bare `disabled` is silent: test/web-buttons.test.ts
  * holds every one to a list that only shrinks (#587).
- * `work`: the action starts or lands work. While the instance is paused it stays usable and says PAUSED_SAYS[work]
+ * `work`: the action starts or lands work, or writes at once. While the instance is paused it stays usable and says PAUSED_SAYS[work]
  * beside it, as its description (a `why` that holds says that instead). An emergency stop is no pause here: it is
  * shown on every page and halts the coordinator itself.
  */

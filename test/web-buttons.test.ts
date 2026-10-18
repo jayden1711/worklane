@@ -24,6 +24,8 @@ interface Render {
   renderPausedWork(usage: unknown[], current: string | null, why?: string): string;
   renderLandsUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; configPr: unknown }): string;
   renderVoiceBannerUnderUsage(usage: unknown[], current: string | null, view: unknown, decisions: { id: string; kind: string }[]): string;
+  renderDecisionUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; detail: unknown }): string;
+  renderFirstTaskFiledUnderUsage(usage: unknown[], current: string | null, first: unknown, filed: { number: number; labelCreated: boolean; url: string | null }): string;
 }
 let r: Render;
 
@@ -136,8 +138,15 @@ test('a button this person can never use is not drawn; one held by the device sa
 const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
 /** The owner's words (#664): an action that lands work while paused. Landing has no usage-pause check; agent runs wait. */
 const LANDS_HINT = 'lands now; only agent runs wait';
-/** The actions that start work in renderUnderUsage: File it, Add ready, an automation's Run now, a study's Start. */
-const STARTS = ['first-task-file', 'issue-ignored-add-ready', 'automation-run', 'experiment-start'];
+/**
+ * The owner's words (#664): an action whose own write happens at once while paused (File it, Add ready, an intake
+ * approval: the issue or the ready label is on GitHub now); only the agent runs it leads to wait.
+ */
+const NOW_HINT = 'happens now; only agent runs wait';
+/** The actions that start work in renderUnderUsage: an automation's Run now, a study's Start. */
+const STARTS = ['automation-run', 'experiment-start'];
+/** The actions in renderUnderUsage that write to GitHub at once: File it (the issue, with ready), Add ready (the label). */
+const NOW = ['first-task-file', 'issue-ignored-add-ready'];
 const usageOf = (instance: string, paused: boolean) => ({ instance, paused: paused ? { since: '2026-10-18T09:00:00Z', resetAt: '2026-10-18T14:00:00Z', source: 'claude', kind: 'five_hour' } : null, today: { runs: 3, limitHits: paused ? 1 : 0 }, lastHit: null });
 const starters = {
   first: { local: true, why: null, template: { label: 'ready', body: 'b' }, tests: [] },
@@ -164,6 +173,32 @@ test('paused reason: a paused instance\'s start actions are not refused; each sa
   const hub = [usageOf('a', false), usageOf('b', true)];
   assert.doesNotMatch(r.renderUnderUsage(hub, 'a', starters), /takes effect when the instance resumes/, 'a is running; b is paused');
   assert.equal(described(r.renderUnderUsage(hub, 'b', starters), 'automation-run').text, PAUSED_HINT);
+});
+
+test('paused reason: File it and Add ready write to GitHub at once, so while paused each says it happens now and only agent runs wait', () => {
+  // The owner's decision on #664: the issue (filed with ready) or the ready label is written in the request
+  // (src/dashboard.ts's first-task and ready routes, no usage-pause check); only the agent picking it up waits.
+  const html = r.renderUnderUsage([usageOf('example', true)], null, starters);
+  for (const id of NOW) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.equal(b.text, NOW_HINT, `${id}'s aria-describedby names the happens-now text: ${b.tag}`);
+  }
+  assert.equal(html.split(NOW_HINT).length - 1, NOW.length, 'once per action that writes at once, and on no other');
+  // Running: nothing said, nothing held.
+  const running = r.renderUnderUsage([usageOf('example', false)], null, starters);
+  for (const id of NOW) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+  assert.doesNotMatch(running, /happens now/);
+});
+
+test("paused reason: File it's success line says agents pick the issue up when the instance resumes while paused, and within a minute while running", () => {
+  const filed = { number: 5, labelCreated: true, url: 'https://github.com/o/r/issues/5' };
+  const said = (paused: boolean) => {
+    const html = r.renderFirstTaskFiledUnderUsage([usageOf('example', paused)], null, starters.first, filed);
+    return /data-testid="first-task-result"[^>]*>([\s\S]*?)<\/p>/.exec(html)?.[1]?.replaceAll('<!-- -->', '').replace(/<[^>]+>/g, '');
+  };
+  assert.equal(said(true), 'filed as #5 (the ready label was created): agents pick it up when the instance resumes; watch it on the Board https://github.com/o/r/issues/5', 'paused: filed, and picked up on the resume');
+  assert.equal(said(false), 'filed as #5 (the ready label was created): the coordinator picks it up within a minute; watch it on the Board https://github.com/o/r/issues/5', 'running: as before');
 });
 
 test('paused reason: a land action says it lands now and only agent runs wait; a start action says it waits for the resume', () => {
@@ -201,7 +236,37 @@ test('paused reason: the real land buttons (Board approve, config PR merge) say 
   for (const id of LANDS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
 });
 
-test("paused reason: the voice banner's Approve says what its decision's kind does: a landing lands now, an intake waits", () => {
+/** The option button `option` with this test id, described as `described` does (a decision draws one per option). */
+function optionDescribed(html: string, testId: string, option: string) {
+  const tags = [...html.matchAll(new RegExp(`<button[^>]*data-testid="${testId}"[^>]*>`, 'g'))].map((m) => m[0]);
+  const tag = tags.find((t) => t.includes(`data-option="${option}"`));
+  assert.ok(tag, `a ${testId} button for ${option} is drawn`);
+  const id = /aria-describedby="([^"]+)"/.exec(tag)?.[1];
+  const text = id ? new RegExp(`id="${id.replace(/[^\w]/g, '\\$&')}"[^>]*>([\\s\\S]*?)</(p|span)>`).exec(html)?.[1]?.replaceAll('<!-- -->', '') : undefined;
+  return { tag, disabled: /\sdisabled=""/.test(tag), id, text };
+}
+
+test("paused reason: a decision's approve option, on its card and its own page, says what its kind does: a landing lands now, an intake happens now, a plan waits", () => {
+  const card = (kind: string) => ({ id: `${kind}-9`, kind, issue: 9, owner: 'example-owner', question: 'Q?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [], askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true });
+  const detail = (kind: string) => ({ id: `${kind}-9`, kind, issue: 9, owner: 'example-owner', question: 'Q?', options: ['approve', 'reject'].map((option) => ({ option, does: 'd', cannot: 'c', recommended: option === 'approve' })), recommendation: 'approve', askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true, ifNothing: 'n', withheld: null });
+  const render = (kind: string, paused: boolean) => r.renderDecisionUnderUsage([usageOf('example', paused)], null, { card: card(kind), detail: detail(kind) });
+  const want: Record<string, string | undefined> = { land: LANDS_HINT, intake: NOW_HINT, plan: PAUSED_HINT, question: undefined };
+  for (const [kind, text] of Object.entries(want)) {
+    const html = render(kind, true);
+    for (const testId of ['decision-option', 'decision-detail-option']) {
+      const approve = optionDescribed(html, testId, 'approve');
+      assert.equal(approve.disabled, false, `${kind} ${testId}: not refused while paused: ${approve.tag}`);
+      assert.equal(approve.text, text, `${kind} ${testId}: the approve option says ${text ?? 'nothing'}: ${approve.tag}`);
+      assert.equal(optionDescribed(html, testId, 'reject').id, undefined, `${kind} ${testId}: only the approve option says it`);
+    }
+    if (text) assert.equal(html.split(text).length - 1, 2, `${kind}: once on the card, once on the page`);
+    // Running: nothing said.
+    const running = render(kind, false);
+    for (const testId of ['decision-option', 'decision-detail-option']) assert.equal(optionDescribed(running, testId, 'approve').id, undefined, `${kind} ${testId}: nothing while running`);
+  }
+});
+
+test("paused reason: the voice banner's Approve says what its decision's kind does: a landing lands now, an intake happens now, a plan waits", () => {
   const pending = (decision: string) => ({ pending: { kind: 'approve', issue: 12, decision, title: 'T', effect: 'e', until: Date.now() + 10_000 }, left: 10 });
   const decisions = [
     { id: 'land-12', kind: 'land' },
@@ -212,7 +277,7 @@ test("paused reason: the voice banner's Approve says what its decision's kind do
   const paused = [usageOf('example', true)];
   const say = (decision: string) => described(r.renderVoiceBannerUnderUsage(paused, null, pending(decision), decisions), 'voice-banner-confirm');
   assert.equal(say('land-12').text, LANDS_HINT, 'a merge decision lands now');
-  assert.equal(say('intake-12').text, PAUSED_HINT, 'an intake decision starts work: it waits for the resume');
+  assert.equal(say('intake-12').text, NOW_HINT, 'an intake decision files its issue now: only agent runs wait');
   assert.equal(say('plan-12').text, PAUSED_HINT, 'a plan decision starts work: it waits for the resume');
   assert.equal(say('q-12').id, undefined, 'any other kind says nothing');
   for (const d of ['land-12', 'intake-12']) assert.equal(say(d).disabled, false, `${d}: not refused while paused`);
@@ -234,8 +299,8 @@ test('emergency stop is unchanged: its banner still says the coordinator halted 
   const state = { brand: { cli: 'wl' }, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: { at: new Date().toISOString(), running: 2 }, lastStop: null, lastResume: null } };
   const html = r.renderUnderUsage([usageOf('example', false)], null, { ...starters, state });
   assert.match(html.replaceAll('<!-- -->', ''), /data-testid="emergency-stop"[\s\S]*?Emergency stop in force[\s\S]*?by ops: spend\.[\s\S]*?This coordinator halted 2 running agent\(s\) [^<]* and starts none\. Agents on this\s+machine stay stopped until it(&#x27;|')s lifted on the machine with <code[^>]*>wl resume-all</);
-  for (const id of STARTS) assert.deepEqual([described(html, id).disabled, described(html, id).id], [false, undefined], `${id}: as without the stop`);
-  assert.doesNotMatch(html, /takes effect when the instance resumes/, 'an emergency stop is not a usage pause');
+  for (const id of [...STARTS, ...NOW]) assert.deepEqual([described(html, id).disabled, described(html, id).id], [false, undefined], `${id}: as without the stop`);
+  assert.doesNotMatch(html, /takes effect when the instance resumes|happens now/, 'an emergency stop is not a usage pause');
   // Paused on the usage limit as well: the stop's banner is the same banner.
   const banner = (h: string) => /<div role="alert"[^>]*data-testid="emergency-stop">[\s\S]*?<\/div>/.exec(h)?.[0];
   const both = r.renderUnderUsage([usageOf('example', true)], null, { ...starters, state });

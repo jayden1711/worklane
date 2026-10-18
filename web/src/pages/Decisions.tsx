@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Reac
 import { api, decide, type Decision, type DecisionDetail, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
 import { useEntrance } from '../components/patterns';
-import { ago, Avatar, Badge, Button, cx, Empty, Kbd, Why } from '../components/ui';
+import { ago, Avatar, Badge, Button, cx, decisionWork, Empty, Kbd, Why } from '../components/ui';
 import { Header } from '../components/Header';
 import { useArrivalOrder } from '../arrival-order';
 
@@ -105,9 +105,10 @@ export const proseOf = (recommendation: string, options: readonly string[], rece
  * A decision's three lines, in this order, then its reasoning: (1) what happened; (2) the recommended option, by
  * name (or the recommendation in words, when it isn't an option); (3) each option once, with what it does: a button
  * where this person may answer (the recommended one the dark primary), its name otherwise. The decision card and the
- * detail page both draw it; `testId` is the option buttons'.
+ * detail page both draw it; `testId` is the option buttons'. `kind`: the decision's kind; its approve option says,
+ * while paused, what approving does (decisionWork: a landing lands now, an intake files now, a plan waits).
  */
-export function DecisionLines({ happened, recommendation, prose, options, answerable, ans, proposed = null, keys = false, testId }: {
+export function DecisionLines({ happened, recommendation, prose, options, answerable, ans, proposed = null, keys = false, testId, kind = null }: {
   happened: string;
   recommendation: string;
   prose: string[];
@@ -117,6 +118,7 @@ export function DecisionLines({ happened, recommendation, prose, options, answer
   proposed?: string | null;
   keys?: boolean;
   testId: string;
+  kind?: string | null;
 }) {
   const named = options.some((o) => o.option === recommendation) ? recommendation : null;
   // Line 2 is the named option, else the first prose; the rest of the prose is the Why, after the options.
@@ -146,7 +148,7 @@ export function DecisionLines({ happened, recommendation, prose, options, answer
             <li key={o.option} className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1" data-choice={o.option} data-recommended={rec ? 'true' : undefined}>
               {answerable ? (
                 // Each option is an action: one click answers. Destructive ones (reject, close, deny) are red, the rest raised.
-                <Button type="button" size="sm" className="shrink-0" data-option={o.option} data-testid={testId} variant={rec ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} why={!!busy && 'Saving…'} whyAt={savingId} onClick={() => void ans.answer(o.option)} title={rec ? 'recommended' : undefined}>
+                <Button type="button" size="sm" className="shrink-0" data-option={o.option} data-testid={testId} variant={rec ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} why={!!busy && 'Saving…'} whyAt={savingId} work={o.option === 'approve' ? decisionWork(kind) : null} onClick={() => void ans.answer(o.option)} title={rec ? 'recommended' : undefined}>
                   {busy === o.option ? `${o.option}…` : o.option}
                   {proposed === o.option && (
                     <span className="rounded-full bg-blue-tint px-1.5 text-[10.5px] font-medium text-blue-ink" data-testid="decision-proposed">
@@ -317,7 +319,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed, sending = null
             Open
           </a>
         </div>
-        <DecisionLines happened={d.happened ?? d.question} recommendation={d.recommendation} prose={proseOf(d.recommendation, d.options, detail)} options={options} answerable={!d.answer && d.canAnswer !== false} ans={ans} proposed={proposed ?? null} keys testId="decision-option" />
+        <DecisionLines happened={d.happened ?? d.question} recommendation={d.recommendation} prose={proseOf(d.recommendation, d.options, detail)} options={options} answerable={!d.answer && d.canAnswer !== false} ans={ans} proposed={proposed ?? null} keys testId="decision-option" kind={d.kind} />
         <CardDetails d={d} receipts={receipts} evidence={evidence} />
       </div>
       <div className="primitive-card-footer flex min-h-10 items-center gap-2 border-t border-line text-[12px]">
