@@ -243,7 +243,8 @@ export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIss
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 /** #581: the sidebar's rows for a state, the old addresses' redirects, and Extend's tabs. */
-export { landOn, navFor, redirectFor } from './App';
+export { navFor } from './App';
+export { landOn, redirectFor } from './redirects';
 export { EXTEND_TABS } from './pages/Extend';
 
 export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>

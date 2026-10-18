@@ -197,6 +197,8 @@ type VoiceMachine = { pending: unknown; hear(text: string, active: boolean): { d
 type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
 type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
+/** The render entry's bundle (file URL), for a test that loads it again as a browser would. */
+let bundle: string;
 let asOwner: State;
 let asOther: State;
 let asWriter: State;
@@ -227,7 +229,8 @@ before(async () => {
     ssr: { noExternal: true },
     build: { ssr: join(repoRoot, 'web', 'src', 'render-check.tsx'), outDir: out, emptyOutDir: true, rollupOptions: { output: { entryFileNames: 'render-check.mjs' } } },
   });
-  r = (await import(pathToFileURL(join(out, 'render-check.mjs')).href)) as Render;
+  bundle = pathToFileURL(join(out, 'render-check.mjs')).href;
+  r = (await import(bundle)) as Render;
 
   // The demo's coordinator keeps its state under the state dir: a temporary one, not the user's.
   const prev = process.env[`${BRAND.envPrefix}_STATE_DIR`];
@@ -1774,6 +1777,32 @@ test('#581 the old Extend route redirects', () => {
   assert.match(extend, /aria-current="page"[^>]*data-testid="extend-tab-automations"/);
   // The new page renders at its own route.
   assert.match(r.renderPage('experiments', asOwner), /data-testid="page-experiments"/);
+});
+
+test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {
+  // App.tsx's module body preloads the page for window.location when there is a window, through redirectFor. Loaded
+  // with a window (as a browser loads it), every module it uses must be ready by then: CI's real Chrome caught
+  // "is not iterable" there, the redirect list read before it was defined, and every page failed to load.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window as Record<string, unknown>;
+  // Whatever else a module reads from the browser while it loads: a no-op that answers anything (never a promise).
+  const anything: unknown = new Proxy(function () {}, { get: (_, k) => (k === 'then' ? undefined : k === Symbol.toPrimitive ? () => '' : anything), apply: () => anything, construct: () => anything as object });
+  const browser = (own: Record<string, unknown>) => new Proxy(own, { get: (o, k) => (k in o ? o[k as string] : k === 'then' ? undefined : anything) });
+  const hadDocument = 'document' in g;
+  g.window = browser({ ...stub, location: { pathname: '/extend/experiments/example-speed', search: '', hash: '' } });
+  g.document = anything;
+  try {
+    // App.tsx is in a chunk of its own (the pages are split); load that chunk again, so its body runs with a window.
+    const entry = readFileSync(new URL(bundle), 'utf8');
+    const chunk = entry.match(/import \{[^}]*\bas navFor\b[^}]*\} from "(\.\/[^"]+)"/)?.[1];
+    assert.ok(chunk, "the render entry imports navFor from App.tsx's chunk");
+    const url = new URL(chunk, bundle).href;
+    const again = (await import(`${url}?at=old-address`)) as Record<string, unknown>;
+    assert.ok(Object.keys(again).length > 0, 'the module loaded');
+  } finally {
+    g.window = stub;
+    if (!hadDocument) delete g.document;
+  }
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

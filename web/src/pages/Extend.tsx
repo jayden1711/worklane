@@ -1,7 +1,7 @@
 // WHY: one place for what an instance does beyond its issues (Automations, and Plugins as its own tab),
 // so neither adds a page of its own. The sidebar lists Extend for owners and writers only (App.tsx NAV roles); a tab
 // is drawn only where its feature exists, so there is never a dead tab. Experiments has its own page (#581):
-// /extend/experiments redirects there (App.tsx REDIRECTS).
+// /extend/experiments redirects there (redirects.ts REDIRECTS).
 import { type State } from '../api';
 import { navigate } from '../App';
 import { AutomationsTab } from '../components/Automations';

@@ -17,6 +17,7 @@ import { WakeWord } from './voice/WakeIndicator';
 import { logsRefusal, runsRefusal } from './refusals';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { background, idle } from './prefetch';
+import { landOn, redirectFor } from './redirects';
 
 /**
  * A page as its own chunk (code split): the first load ships the shell and the page shown. Once its module is in
@@ -91,27 +92,6 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/first-run/, FirstRunPage],
 ];
 if (typeof window !== 'undefined') void (PAGE_FOR.find(([re]) => re.test(redirectFor(window.location.pathname) ?? window.location.pathname))?.[1] ?? BoardPage).preload();
-
-/**
- * Old addresses and where each moved: a path at or under `from` lands at the same place under `to`, so an id after it
- * is kept. WHY (#581): Experiments left Extend for a sidebar item of its own; a bookmark or a link to the old address
- * still opens it.
- */
-export const REDIRECTS: readonly { from: string; to: string }[] = [{ from: '/extend/experiments', to: '/experiments' }];
-
-/** Where an old address moved (REDIRECTS); null: it's a current one. */
-export function redirectFor(path: string): string | null {
-  for (const r of REDIRECTS) if (path === r.from || path.startsWith(`${r.from}/`)) return r.to + path.slice(r.from.length);
-  return null;
-}
-
-/** The path to show. An old address is replaced (not pushed, so Back doesn't return to it) by its new one, query and hash kept. */
-export function landOn(loc: Pick<Location, 'pathname' | 'search' | 'hash'> = window.location, history: Pick<History, 'state' | 'replaceState'> = window.history): string {
-  const to = redirectFor(loc.pathname);
-  if (to === null) return loc.pathname;
-  history.replaceState(history.state, '', to + loc.search + loc.hash);
-  return to;
-}
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
