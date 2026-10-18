@@ -41,6 +41,37 @@ provider_keys: { glm: /home/<agent user>/.config/<name>-provider-keys/glm }
 
 A local server that needs no key still gets a placeholder key file, because `claude` needs one.
 
+**The provider's host, allowed by root in `/etc/worklane/providers.json`.** A provider run sends the provider's key
+and every prompt (the issue, and the repository content the agent reads) to its `base_url`. Anyone who can change
+`agents.yaml` on the default branch can change that URL, so the hosts it may name are the machine's root's to allow.
+**No file means no provider host: provider runs are off** until root writes one:
+
+```json
+{"hosts": ["api.provider.example", "127.0.0.1:8080"]}
+```
+
+```sh
+sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
+```
+
+- **Exact match:** a `base_url`'s host and port must equal an entry: the same host name or address, and the same
+  port. An entry without a port means the scheme's default port (443 for `https://`), so `api.provider.example`
+  doesn't allow `https://api.provider.example:8443`. No wildcards, no suffixes. Write each entry the way a URL
+  normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`).
+- **The URL's shape, whatever the list says:** `https://`, except plain `http://` to this machine (`localhost`,
+  `127.x.x.x`, `[::1]`); no `user:password@`, no query and no fragment (a key there would be a credential in the
+  repo). A path is fine. The config schema refuses any other `base_url`: the config is invalid and the coordinator
+  says why.
+- **The file is refused** (no host at all, and why) when root doesn't own it, its group or others may write it, it is
+  a symlink, it is over 8192 bytes, it isn't `{"hosts": [...]}` (any other key refuses it), or it has more than 64
+  hosts or an entry that isn't `host` or `host:port` in that form. Native Windows has no root-owned `/etc`, so no
+  provider host there.
+- **When it's checked:** at start (the coordinator prints root's hosts, or that provider runs are off and why, and each
+  configured provider outside them); when the coordinator resolves each provider run (outside the list, the run takes
+  the role's normal model, with a `provider.fallback` event); and by the runner again right before it would set
+  `ANTHROPIC_BASE_URL` (a host refused since the run was resolved: the run doesn't start). Each refusal is logged once
+  per provider and reason. The file is read each time, so a change applies without a restart.
+
 ## Hosted models and the instance's model cap
 
 - **The tier:** every hosted model declares a price `tier` (`haiku`, `sonnet` or `opus`), set by its per-token price
@@ -88,6 +119,7 @@ Use a hosted provider only for repositories whose content may go to that provide
 
 A run named for a provider runs on its role's normal model instead in any of these cases:
 - the instance hasn't opted in;
+- root hasn't allowed the provider's host (`/etc/worklane/providers.json`), or there is no such file;
 - the provider or its key is missing;
 - the role hasn't passed its evals on the provider's model;
 - the local server is down, or slower than `latency_ms`;
@@ -135,8 +167,9 @@ The throughput panel and the weekly report show cost, tokens and time per merged
    - an account and an API key, scoped and with a spend limit;
    - its Anthropic-compatible `base_url` and model id, with prices, in `agents.yaml`;
    - the key installed with `credentials.sh <name> provider-key <credential>`.
-3. **The opt-in:** `policy.yaml` `settings.providers`.
-4. **Evals per role and candidate model:** 3 samples, visible and held-out, recorded in the gate, before any role moves.
+3. **The hosts, as root:** each provider's host (and port) in `/etc/worklane/providers.json`, root:root 0644.
+4. **The opt-in:** `policy.yaml` `settings.providers`.
+5. **Evals per role and candidate model:** 3 samples, visible and held-out, recorded in the gate, before any role moves.
 
 ## Other vendors' coding CLIs: `cli:codex`, `cli:gemini`
 

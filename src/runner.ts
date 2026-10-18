@@ -11,6 +11,7 @@ import { join, posix } from 'node:path';
 import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
+import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
 import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { outboundEnv } from './network.js';
@@ -530,6 +531,15 @@ export class CliRunner implements AgentRunner {
     const budget = this.retry.budgetMs ?? TRANSIENT_BUDGET_MS;
     const first = now();
     for (let tries = 1; ; tries++) {
+      // INVARIANT (#392): a provider run's endpoint is a host root allows (src/provider-hosts.ts), read again before
+      // each try, so a change to agents.yaml or the file since the coordinator resolved the run can't slip past.
+      // Refused: not started, never retried. Not a fallback here: that would skip the coordinator's model cap and
+      // usage pause, which it applied when it resolved the run.
+      const hostRefused = req.provider && req.provider.kind !== 'cli' ? providerHostRefusal(req.provider.baseUrl) : null;
+      if (req.provider && hostRefused) {
+        logRefusalOnce(req.provider.name, hostRefused);
+        return { reason: 'failed', detail: `${req.provider.name}: ${hostRefused}; not starting`, costUsd: 0, turns: 0, model: req.model };
+      }
       const started = now();
       const key = this.loginOf(req);
       // Every run: the login's start lock, around the auth check and claude's start. Agent runs: its run lock too.
@@ -568,7 +578,7 @@ export class CliRunner implements AgentRunner {
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
     const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
-    // A provider run's endpoint (agents.yaml providers.*.base_url, checked by the config schema): set after agentEnv and
+    // A provider run's endpoint (agents.yaml providers.*.base_url, its host root's to allow, checked in run()): set after agentEnv and
     // runAsEnv, which strip every redirecting variable, so it is the only endpoint a provider run gets.
     const endpoint: Record<string, string> = req.provider ? { ANTHROPIC_BASE_URL: req.provider.baseUrl } : {};
     const agentVars = agentEnv(base, req.provider ? 'cli' : this.runtime, {

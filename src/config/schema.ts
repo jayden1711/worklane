@@ -4,6 +4,7 @@ import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
+import { baseUrlProblem } from '../provider-hosts.js';
 import { CROSS_FAMILY_OFF, crossFamilyRefusal } from '../cross-eval.js';
 import type { RoutedRun } from '../model-routing.js';
 import { ROUTING_ALIASES, type Routing, type RoutingKey } from '../routing.js';
@@ -19,7 +20,14 @@ const model = z.string().min(1);
 
 /** An open-model provider (src/providers.ts): an Anthropic-compatible endpoint, a credential by name, its model id. */
 const provider = z.strictObject({
-  base_url: z.string().url().refine((u) => /^https?:\/\//.test(u), 'an http(s) URL'),
+  /**
+   * https:// (http:// only to loopback), no user, password, query or fragment (src/provider-hosts.ts). Its host must
+   * also be one root allows in /etc/<cli>/providers.json, checked on this machine at start and before each run.
+   */
+  base_url: z.string().superRefine((u, ctx) => {
+    const why = baseUrlProblem(u);
+    if (why) ctx.addIssue({ code: 'custom', message: `base_url ${why}` });
+  }),
   /** The key's name in the instance's credentials.yaml provider_keys; the key itself is never in the repo. */
   credential: z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/, 'a credential name (lowercase letters, digits, _ or -)'),
   model: z.string().min(1),

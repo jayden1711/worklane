@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
 import { agentSettings } from '../src/install.js';
+import { machineProviderHosts } from '../src/provider-hosts.js';
 
 // INVARIANT (#312): a test file runs only with the isolation preloaded (test/isolate.ts, `--import
 // ./dist/test/isolate.js` before --test, as npm test and CI run it). Without it the test would read and write this
@@ -70,6 +71,17 @@ export const asDevicePerson = (login: string): Record<string, string> => ({ ...a
 export function machineOwnersFile(...logins: string[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'machine-owners-')), 'machine-owners.json');
   writeFileSync(f, `${JSON.stringify({ owners: logins })}\n`, { mode: 0o644 });
+  return f;
+}
+/**
+ * Root's provider hosts for this test process (src/provider-hosts.ts): a providers.json allowing `hosts`, this user's,
+ * 0644, which the engine then reads with this user as root. Returns the file.
+ */
+export function allowProviderHosts(...hosts: string[]): string {
+  const f = join(mkdtempSync(join(tmpdir(), 'provider-hosts-')), 'providers.json');
+  writeFileSync(f, `${JSON.stringify({ hosts })}\n`, { mode: 0o644 });
+  machineProviderHosts.file = f;
+  machineProviderHosts.ownerUid = typeof process.getuid === 'function' ? process.getuid() : 0;
   return f;
 }
 /** A person asking for a machine change through the dashboard, from an allowed device. */
