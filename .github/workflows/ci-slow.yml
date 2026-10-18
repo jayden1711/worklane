@@ -2487,8 +2487,10 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            # The incident store's owner is whichever coordinator wrote it last: its group and mode only.
-            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
+            # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
+            # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json | sed -E 's/^(\S+) 6[46]0 /\1 6x0 /'
             sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
@@ -2535,7 +2537,7 @@ jobs:
           grep -q 'not removed: nothing changed' "$F/rm3.out"
           id wl-delta && sudo test -d /srv/worklane/delta && sudo jq -e '.canary.instance=="delta"' /etc/worklane/updates.json
           if sudo test -e /var/lib/worklane/removed; then echo "a refused run exported something" >&2; exit 1; fi
-      - name: "instance-remove: delta exported first (root's 0600), every item gone, ci's records, units, hub and helper rule as they were; a rerun finds nothing left"
+      - name: "instance-remove: delta exported first (root's 0600), every item gone, ci's records, units, hub and helper rule as they were; delta's slot lock in agent-slots without group write, ci's untouched; a rerun finds nothing left"
         run: |
           # Planted before the removal: a setuid+setgid file of delta's under an engine path; links (in its home, and
           # under an engine path, the link itself delta's) at a file outside owned by nobody; a file of delta's outside.
@@ -2545,6 +2547,13 @@ jobs:
           sudo ln -sfn /etc/worklane-ci-canary /var/lib/worklane/agent-slots/delta-link && sudo chown -h wl-delta /var/lib/worklane/agent-slots/delta-link
           sudo install -o wl-delta -g wl-delta -m 0600 /dev/null /var/tmp/delta-leftover
           delta_uid="$(id -u wl-delta)"
+          # #555, in the shared group agent-slots: a stale slot lock of delta's (its holder's pid dead) and a directory
+          # of delta's, both group-writable; and ci's own stale slot lock, which nothing may touch.
+          S=/var/lib/worklane/agent-slots; dead="$(sh -c 'echo $$')"
+          printf '{"pid":%s,"owner":"delta stale","acquiredAt":"2026-10-16T00:00:00Z"}' "$dead" | sudo install -o wl-delta -g agent-slots -m 0660 /dev/stdin "$S/agent-951.lock"
+          sudo install -d -o wl-delta -g agent-slots -m 2770 "$S/delta-gwdir"
+          printf '{"pid":%s,"owner":"ci stale","acquiredAt":"2026-10-16T00:00:00Z"}' "$dead" | sudo install -o wl-ci -g agent-slots -m 0660 /dev/stdin "$S/agent-950.lock"
+          ci_lock="$(sudo stat -c '%U:%G %a' "$S/agent-950.lock") $(sudo sha256sum "$S/agent-950.lock" | cut -d' ' -f1)"
           # The removal holds the updater off for its whole run: while it waits for the typed name, the updater's own
           # quiet check says the machine is busy, and delta's coordinator stays stopped.
           (sleep 12; echo delta) | script -qec "sudo bash $GITHUB_WORKSPACE/scripts/setup/instance-remove.sh delta" /dev/null > "$F/rm4.out" 2>&1 &
@@ -2572,6 +2581,20 @@ jobs:
           for f in "$rc_" "$lo"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ]; done
           sudo grep -qx 'root:root 6755 -> 755 /var/lib/worklane/agent-slots/delta-suid' "$rc_"
           sudo grep -qx '/var/tmp/delta-leftover' "$lo"
+          # #555: delta's slot lock in the shared group ends without group write, listed with its old and new mode;
+          # its directory there keeps group write, listed with why; ci's slot lock is as it was, and not listed.
+          sudo cat "$rc_"
+          [ "$(sudo stat -c '%U:%G %a' "$S/agent-951.lock")" = "root:agent-slots 640" ]
+          sudo grep -qx "root:agent-slots 660 -> 640 $S/agent-951.lock" "$rc_"
+          [ "$(sudo stat -c '%U:%G %a' "$S/delta-gwdir")" = "root:agent-slots 2770" ]
+          sudo grep -q "^root:agent-slots 2770 -> 2770 $S/delta-gwdir (g+w kept: " "$rc_"
+          [ "$(sudo stat -c '%U:%G %a' "$S/agent-950.lock") $(sudo sha256sum "$S/agent-950.lock" | cut -d' ' -f1)" = "$ci_lock" ]
+          if sudo grep -q 'agent-950' "$rc_"; then echo "ci's slot lock was changed by delta's removal" >&2; exit 1; fi
+          # The engine needs no group write on that file: ci's coordinator takes the stale lock over with the engine's
+          # own tryLock (a copy linked into place, through the directory's group write), then lets it go.
+          (cd / && sudo -u wl-ci node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/locks.js"); const r = m.tryLock(process.argv[1], "ci takeover"); if (!("lock" in r)) { console.error("not taken:", JSON.stringify(r)); process.exit(1); } r.lock.release(); console.log("taken over and let go:", process.argv[1]);' "$S/agent-951.lock")
+          if sudo test -e "$S/agent-951.lock"; then echo "the stale lock was not taken over" >&2; exit 1; fi
+          sudo rm -f "$S/agent-950.lock"; sudo rmdir "$S/delta-gwdir"
           sudo rm -f /var/lib/worklane/agent-slots/delta-suid /var/lib/worklane/agent-slots/delta-link /var/tmp/delta-leftover /etc/worklane-ci-canary
           # Exported first: the bundle and the records, root's 0600, in root's 0700 archive.
           [ "$(sudo stat -c '%U:%G %a' /var/lib/worklane/removed)" = "root:root 700" ]
@@ -2622,8 +2645,10 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            # The incident store's owner is whichever coordinator wrote it last: its group and mode only.
-            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
+            # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
+            # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json | sed -E 's/^(\S+) 6[46]0 /\1 6x0 /'
             sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
