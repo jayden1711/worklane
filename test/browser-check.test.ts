@@ -20,6 +20,8 @@ const evidence = (over: Partial<FlowEvidence> = {}): FlowEvidence => ({
   blockedRequests: [],
   trace: { longTasks: 1, maxTaskMs: 120, droppedFramePct: 10, frames: 30 },
   screenshot: null,
+  views: [],
+  viewErrors: [],
   durationMs: 900,
   ...over,
 });

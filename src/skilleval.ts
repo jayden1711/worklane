@@ -172,7 +172,24 @@ export interface AskRequest {
   cwd: string;
   maxBudgetUsd: number;
 }
+/** A failed call rejects with AskFailed: a call can fail after it spent (max turns, its budget), and says how much. */
 export type Ask = (req: AskRequest) => Promise<{ structured: unknown; costUsd: number }>;
+
+/** A model call that failed, with what it cost (the CLI's estimate; 0 when it reported none). */
+export class AskFailed extends Error {
+  constructor(
+    message: string,
+    readonly costUsd: number,
+  ) {
+    super(message);
+  }
+}
+
+/** What a failed call cost: AskFailed's reported cost, else 0. */
+export function failedCost(e: unknown): number {
+  const usd = (e as { costUsd?: unknown } | null)?.costUsd;
+  return typeof usd === 'number' && Number.isFinite(usd) && usd > 0 ? usd : 0;
+}
 
 const NO_TOOLS = ['Bash', 'Edit', 'Write', 'MultiEdit', 'Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'NotebookEdit', 'Task'];
 
@@ -194,7 +211,8 @@ export const cliAsk: Ask = (req) =>
       } catch {
         // reported below
       }
-      if (code !== 0 || r.is_error || r.structured_output === undefined) return reject(new Error(`claude failed: ${(err || r.result || out).slice(0, 300)}`));
+      // A failed call can still have spent (it hit --max-turns or its budget): its cost goes with the error.
+      if (code !== 0 || r.is_error || r.structured_output === undefined) return reject(new AskFailed(`claude failed: ${(err || r.result || out).slice(0, 300)}`, r.total_cost_usd ?? 0));
       resolve({ structured: r.structured_output, costUsd: r.total_cost_usd ?? 0 });
     });
     child.stdin.end(req.prompt);
@@ -219,7 +237,7 @@ export function runnerAsk(runner: AgentRunner, onCost: (r: { costUsd: number; mo
       timeoutMs: 15 * 60_000,
     });
     onCost(r);
-    if (r.reason !== 'succeeded' || r.structured === undefined) throw new Error(`${BRAND.cli} eval run ${r.reason}: ${r.detail.slice(0, 300)}`);
+    if (r.reason !== 'succeeded' || r.structured === undefined) throw new AskFailed(`${BRAND.cli} eval run ${r.reason}: ${r.detail.slice(0, 300)}`, r.costUsd);
     return { structured: r.structured, costUsd: r.costUsd };
   };
 }

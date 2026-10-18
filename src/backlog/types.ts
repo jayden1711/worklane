@@ -157,19 +157,32 @@ export const LABELS = [
 
 export type DoneWhenList = z.infer<typeof DoneWhen>;
 
-/** The ```done_when fenced block in an issue body, validated. */
-/** Identifies the ```done_when block an intake decision was about: a hash of its text, or "none". */
-export function contractKey(body: string): string {
-  const m = body.match(/```done_when\s*\n([\s\S]*?)\n```/);
-  return m ? createHash('sha256').update(m[1]!.replace(/\r\n/g, '\n')).digest('hex').slice(0, 16) : 'none';
+/**
+ * The text of each ```done_when fenced block in a body, Windows (CRLF) line endings read as LF. Every reader of a
+ * contract (the coordinator, checkDraftedIssue, the refusal's key) goes through here, so they agree on the blocks and
+ * on their text (#643).
+ */
+function doneWhenBlocks(body: string): string[] {
+  return [...body.replace(/\r\n/g, '\n').matchAll(/```done_when\s*\n([\s\S]*?)\n```/g)].map((m) => m[1]!);
 }
 
+/** Identifies the ```done_when block(s) an intake decision was about: a hash of their text, or "none". */
+export function contractKey(body: string): string {
+  const blocks = doneWhenBlocks(body);
+  return blocks.length ? createHash('sha256').update(blocks.join('\0')).digest('hex').slice(0, 16) : 'none';
+}
+
+/**
+ * The ```done_when fenced block in an issue body, validated. A body with more than one is refused: which block is the
+ * contract would otherwise depend on who reads it (#643: a decoy above a draft's Deliverable).
+ */
 export function parseContract(body: string): { ok: true; done_when: DoneWhenList } | { ok: false; why: string } {
-  const m = body.match(/```done_when\s*\n([\s\S]*?)\n```/);
-  if (!m) return { ok: false, why: 'no ```done_when block in the issue body' };
+  const blocks = doneWhenBlocks(body);
+  if (!blocks.length) return { ok: false, why: 'no ```done_when block in the issue body' };
+  if (blocks.length > 1) return { ok: false, why: `${blocks.length} \`\`\`done_when blocks in the issue body; it needs exactly one` };
   let raw: unknown;
   try {
-    raw = parseYaml(m[1]!);
+    raw = parseYaml(blocks[0]!);
   } catch (e) {
     return { ok: false, why: `done_when is not valid YAML: ${(e as Error).message.split('\n')[0]}` };
   }
@@ -211,9 +224,9 @@ export function issueParts(body: string): Record<IssuePart, string | null> {
 
 /**
  * Can an issue the harness drafted itself be filed? A title; all five parts, none empty; the Outcome one sentence on
- * one line; the Deliverable a ```done_when block parseContract accepts, its commands YAML block scalars
- * (`- command: |`, which keeps quoting and colons inside commands from breaking the block); the Review point naming
- * a review level (L0 to L3).
+ * one line; the Deliverable a ```done_when block parseContract accepts, and the body's only one, its commands YAML
+ * block scalars (`- command: |`, which keeps quoting and colons inside commands from breaking the block); the Review
+ * point naming a review level (L0 to L3).
  */
 export function checkDraftedIssue(title: string, body: string): { ok: true; done_when: DoneWhenList } | { ok: false; why: string } {
   if (!title.trim()) return { ok: false, why: 'the draft has no title' };
@@ -223,11 +236,13 @@ export function checkDraftedIssue(title: string, body: string): { ok: true; done
   if (parts.Outcome!.includes('\n')) return { ok: false, why: 'the Outcome must be one sentence on one line' };
   const c = parseContract(parts.Deliverable!);
   if (!c.ok) return { ok: false, why: `Deliverable: ${c.why}` };
-  const block = parts.Deliverable!.match(/```done_when\s*\n([\s\S]*?)\n```/)![1]!;
+  const block = doneWhenBlocks(parts.Deliverable!)[0]!;
   const inline = block.split('\n').filter((l) => /^\s*-?\s*command:\s*\S/.test(l) && !/^\s*-?\s*command:\s*[|>][-+]?\s*$/.test(l));
   if (inline.length) return { ok: false, why: `commands must be YAML block scalars ("- command: |"), not inline: ${inline[0]!.trim()}` };
   if (!/\bL[0-3]\b/.test(parts['Review point']!)) return { ok: false, why: 'the Review point must name the expected review level (L0 to L3) and what would make it wait for the owner' };
-  return c;
+  // INVARIANT (#643): what passes here is what the coordinator reads: the whole body through its own parser, so a
+  // second block anywhere (a decoy in Sources) is refused, never format-checked in one place and run from another.
+  return parseContract(body);
 }
 
 export interface Actionability {

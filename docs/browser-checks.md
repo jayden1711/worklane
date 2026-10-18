@@ -5,7 +5,7 @@ none unless an issue asks for one, and then the check is unavailable, which fail
 
 A project with a web app can have its changes checked in a real browser: the harness starts the app in the
 task's worktree, drives headless Chromium through named flows, and records console errors, failed and slow
-requests, a performance-trace summary and a screenshot. Each flow is run at the base commit first, so only what
+requests, a performance-trace summary and screenshots (desktop, dark mode, phone width). Each flow is run at the base commit first, so only what
 the change adds counts against it, and the PR shows the two side by side. Only PRs that touch the app's UI paths,
 or issues that ask for it, run a browser check; everything else pays nothing.
 
@@ -51,7 +51,27 @@ name other than lowercase letters, digits and dashes is refused, with the reason
 4. Runs the steps. A step that fails ends the flow; it is evidence, not a crash.
 5. Records console errors and uncaught exceptions, failed requests (4xx/5xx or a network error), requests slower
    than `slow_request_ms`, a trace summary (main-thread long tasks of 50 ms or more, the longest task, the share
-   of frames dropped; "not measured" when the trace has no frame events), and a screenshot in `outDir`.
+   of frames dropped; "not measured" when the trace has no frame events), and screenshots in `outDir` of where
+   the flow ended:
+   - `<flow>.png`: the run's own view, 1440 px wide, light.
+   - `<flow>.dark.png`: the same width with `prefers-color-scheme: dark` emulated.
+   - `<flow>.phone.png`: 390 px wide (at 2x), a mobile viewport, light again.
+
+   The dot is a separator no flow name has, so names never collide, even with every flow in one folder (as
+   previews do). Each shot is of the viewport only, never the whole page, so a run keeps three images at most.
+
+   If the desktop shot fails, the run fails. If the dark or phone shot fails, the evidence says why in its place,
+   and the run doesn't fail for it. The dark and phone shots share a budget of 10 s, and each of their commands gets
+   5 s or what is left of the budget, whichever is less (both scaled like the timeouts below). So together they
+   never take longer than the budget, however slow the page or Chrome is. A view the budget cuts off is listed as
+   skipped, and a view not reached in it as not tried; neither fails the run.
+
+   The verdict is about the flow only. Console errors and failed requests seen once the desktop shot is taken
+   come from the dark and phone relayout, so they are listed per view, "not judged" (20 at most), and never fail
+   the check.
+
+   The two extra shots add about 1 s to each flow run. A coordinator check runs each flow twice, at the base and
+   at the head, so about 2 s per flow per check. Previews run every flow on every previewed PR, whatever it touches.
 6. Always stops Chrome and the app, the app's own children included (`taskkill /T` on Windows), however it ends.
 
 With no Chrome or Chromium on the machine (set `CHROME` to its path), the run is skipped with that reason and
@@ -105,7 +125,9 @@ The PR description gets a `BROWSER CHECKS` section:
 - for a UI fix, the reproduction run before the change beside the run after it.
 
 Text from the app (console messages, URLs) is shown as code, so its markup or mentions never render. The
-screenshot is named, not given by path: the path is on the machine that ran the check.
+screenshots (desktop, dark mode, phone width) are named, not given by path: the path is on the machine that ran
+the check. A view that couldn't be shot is listed with why. Errors seen during the dark and phone shots are
+listed under each view as not judged.
 
 In the claims receipts, a passing browser check is recorded as one (`kind: browser` on the check, never inferred
 from its name). It backs a worker's claim about the browser, the UI or a screenshot. It doesn't back a claim

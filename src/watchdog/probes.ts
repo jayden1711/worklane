@@ -12,7 +12,7 @@ import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
 import { asRoot } from '../os/system-paths.js';
-import { authHoldsOf, authIncidentKey, authIncidentText } from '../claude-auth-failure.js';
+import { authHoldsOf, authIncidentKey, authIncidentOwnerDetail, authIncidentText } from '../claude-auth-failure.js';
 
 export interface Finding {
   kind: WatchdogKind;
@@ -22,6 +22,8 @@ export interface Finding {
   fix: string;
   tried: string[];
   severity?: Severity;
+  /** The machine owners' fuller detail (Incident.ownerDetail): never posted. */
+  ownerDetail?: string;
 }
 
 /** Which open incidents a probe answers for: its kinds, for one instance (or the machine), or any; only these keys when given. */
@@ -38,7 +40,7 @@ export function reconcile(findings: Finding[], scope: Scope, o: { dir?: string; 
   const resolved: Incident[] = [];
   const opts = { ...(o.dir ? { dir: o.dir } : {}), ...(o.now ? { now: o.now } : {}) };
   for (const f of findings) {
-    const r = raiseIncident(f.kind, f.key, f.detail, f.fix, { ...opts, instance: f.instance, tried: f.tried, ...(f.severity ? { severity: f.severity } : {}) });
+    const r = raiseIncident(f.kind, f.key, f.detail, f.fix, { ...opts, instance: f.instance, tried: f.tried, ...(f.severity ? { severity: f.severity } : {}), ...(f.ownerDetail !== undefined ? { ownerDetail: f.ownerDetail } : {}) });
     if (r.opened) raised.push(r.incident);
   }
   const found = new Set(findings.map((f) => `${f.kind}\n${f.key}`));
@@ -252,6 +254,19 @@ export interface InstanceFacts {
 
 const at = (e: StoredEvent) => Date.parse(e.ts);
 
+/** The auth methods the runner compares (src/runner.ts): only these are ever named in a posted detail. */
+const AUTH_METHODS = new Set(['none', 'unknown', 'claude.ai', 'oauth_token', 'api_key', 'api_key_helper', 'provider']);
+
+/**
+ * An auth_mismatch run's why, in fixed words: the method `claude auth status` reported when it is one the runner knows,
+ * never what the CLI printed (which can name the account, #680).
+ */
+function mismatchWords(detail: string): string {
+  const m = /\bclaude reports ([^\s:;]+)/.exec(detail)?.[1];
+  if (m === 'unknown') return "claude auth status didn't say which auth method the login uses; not starting. What it printed is on the Health page, for the machine's owners";
+  return `claude reports ${m && AUTH_METHODS.has(m) ? `${m} auth` : 'an auth method'}, not the one this runtime expects; not starting (no silent billing switch)`;
+}
+
 /** Every instance-level trigger: Claude sign-in and login expiry, GitHub access, stalled work, auto-merge stopped, the test sandbox. */
 export function instanceFindings(f: InstanceFacts): Finding[] {
   const out: Finding[] = [];
@@ -267,13 +282,18 @@ export function instanceFindings(f: InstanceFacts): Finding[] {
   const since = f.authFailingSince;
   const probeOut = f.auth?.loggedIn === false && !(since !== undefined && f.events.some((e) => at(e) >= since && e.type === 'run.finished' && (e.payload as { reason: string }).reason === 'succeeded'));
   if ((lastAuthFail && !okAfter) || probeOut) {
-    const why = probeOut ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${String((lastAuthFail!.payload as { detail: string }).detail).slice(0, 200)}`;
-    out.push({ kind: 'claude_auth', key: i, instance: i, detail: why, fix: "Sign the instance's agent user in to Claude again (a new setup-token for that user), then check it with claude auth status as that user", tried: refreshes ? [`retried ${refreshes} run${refreshes === 1 ? '' : 's'} after a token refresh in the last hour`] : [] });
+    // The run's detail can quote what `claude auth status` printed when it wasn't JSON (src/runner.ts), which can name
+    // the account; the incident is posted to the ops channel, so its detail is fixed words, and the run's own words are
+    // the machine owners' (ownerDetail, #680).
+    const raw = probeOut ? null : String((lastAuthFail!.payload as { detail: string }).detail);
+    const why = raw === null ? "the agent user's claude auth status says it is signed out" : `a run stopped on its Claude login: ${mismatchWords(raw)}`;
+    out.push({ kind: 'claude_auth', key: i, instance: i, detail: why, ownerDetail: raw === null ? why : `a run stopped on its Claude login: ${raw.slice(0, 400)}`, fix: "Sign the instance's agent user in to Claude again (a new setup-token for that user), then check it with claude auth status as that user", tried: refreshes ? [`retried ${refreshes} run${refreshes === 1 ? '' : 's'} after a token refresh in the last hour`] : [] });
   }
   // Claude: a login the API refused (a run ended auth_failed), until a call on that login succeeded. Not bound to the
   // last hour: nothing may start on a held login, so no newer run says anything about it (src/claude-auth-failure.ts).
+  // The detail (posted) names no account; the machine owners' detail does (#680).
   const holds = authHoldsOf(f.events);
-  if (holds.length) out.push({ kind: 'claude_auth', key: authIncidentKey(i), instance: i, ...authIncidentText(holds) });
+  if (holds.length) out.push({ kind: 'claude_auth', key: authIncidentKey(i), instance: i, ...authIncidentText(holds), ownerDetail: authIncidentOwnerDetail(holds) });
   const exp = f.auth?.expiresAt ? Date.parse(f.auth.expiresAt) : NaN;
   if (f.auth?.loggedIn && Number.isFinite(exp) && exp - f.now <= LOGIN_EXPIRY_MS) {
     const days = Math.max(0, Math.floor((exp - f.now) / 86_400_000));
