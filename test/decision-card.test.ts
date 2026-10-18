@@ -156,6 +156,9 @@ test('a decision card leads with three plain lines', () => {
   }
   // What each choice does comes with the state (no detail request per card), as the detail says it.
   assert.deepEqual(land.effects, ['approve', 'reject'].map((option) => ({ option, does: optionEffect('land', option).does })));
+  // The owners' and writers' only: a viewer's state keeps its field allowlist (src/viewer-events.ts), so its card says the question.
+  assert.ok(open(fixture.writer).every((d) => typeof d.happened === 'string' && Array.isArray(d.effects)), "a writer's open decisions carry both");
+  for (const d of fixture.viewer.decisions) assert.ok(!('happened' in d) && !('effects' in d), `a viewer's ${d.id} carries neither`);
   // Other kinds: an investigation's option, and a recommendation in words (not an option) said as it is.
   const lines = (id: string) => children(element(r.renderDecisionCard(byId(fixture.owner, id)), 'data-testid="decision-body"')!).slice(1, 4).map(text);
   assert.deepEqual(lines('d-inv').slice(0, 2), ['An investigation on #2 finished and asks how to go on: nothing is changed until you say.', 'Recommended: approve-fix']);
