@@ -61,6 +61,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/review.test.ts', 'test/merge-policy.test.ts', 'test/guardrails.test.ts',
       'test/push-check.test.ts', 'test/push-guard.test.ts', 'test/push-hook-guard.test.ts', 'test/push-gate.test.ts', 'test/push-gate-hook.test.ts',
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
+      // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
+      'test/managed-apps.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },

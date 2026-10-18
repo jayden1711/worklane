@@ -152,6 +152,7 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/denylist.test.ts', 'the tests of the harness controls'],
     ['test/push-gate.test.ts', 'the tests of the harness controls'],
     ['test/package-files.test.ts', 'the tests of the harness controls'],
+    ['test/managed-apps.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
     ['src/coordinator/base.ts', 'the coordinator'],
@@ -182,7 +183,7 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
     assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes ${what}: ${path}` }, path);
   };
   // A tests-only change to a test that holds a control: L0 and merged by the harness before these were named.
-  for (const path of ['test/review.test.ts', 'test/merge-policy.test.ts', 'test/denylist.test.ts', 'test/push-gate.test.ts', 'test/package-files.test.ts', 'test/guardrails.test.ts', 'test/push-check.test.ts', 'test/main-watch.test.ts']) waits(path, 'the tests of the harness controls');
+  for (const path of ['test/review.test.ts', 'test/merge-policy.test.ts', 'test/denylist.test.ts', 'test/push-gate.test.ts', 'test/package-files.test.ts', 'test/guardrails.test.ts', 'test/push-check.test.ts', 'test/main-watch.test.ts', 'test/managed-apps.test.ts']) waits(path, 'the tests of the harness controls');
   // The denylist's data and the release rules: one file of each, as the owner asked.
   waits('.denylist.json', 'the push gate, denylist and secret scan');
   waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
