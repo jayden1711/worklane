@@ -235,6 +235,9 @@ test('issue #341: a switch drops the account cached for the old login, as each u
   const users = (JSON.parse(st.stdout) as { users: { user: string; account: string | null }[] }).users;
   assert.deepEqual(users.map((u) => [u.user, u.account]), AGENTS.map((u) => [u, 'new@example.com']));
   assert.ok(!m.run(['status']).stdout.includes('old@example.com'));
+  // The account dropped (kept in memory for a rollback) is in no output, progress line or command line.
+  const all = m.outputs(r) + r.stdout + r.stderr;
+  assert.ok(!all.includes('old@example.com') && !all.includes('"a-1"'), 'the dropped account is never shown');
 });
 
 test('issue #341: a cached profile that is a link, a fifo or not JSON is never followed or rewritten; the switch says its account name may be the old one', { skip: !posix }, () => {

@@ -252,7 +252,9 @@ process.stdout.write(JSON.stringify(r));
 cached_account() {
   local action="$1" user="$2"
   shift 2
-  (cd / && sudo -H -u "$user" "$(command -v node)" -e '
+  # Bounded, like claude_status_json and claude_api_check: a home on a hung FUSE or network mount must not hold root's
+  # switch (every instance paused) for ever. Cut off, it prints no full answer, which the callers read as "couldn't".
+  (cd / && sudo -H -u "$user" timeout 30 "$(command -v node)" -e '
 const fs = require("node:fs");
 const path = require("node:path");
 const [action, ...files] = process.argv.slice(1);
