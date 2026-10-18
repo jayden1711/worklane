@@ -3,15 +3,18 @@
 // (audited); a writer's PR gets the full run and check on its head, is never auto-merged, and merging it trips nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { startDashboard } from '../src/dashboard.js';
+import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
-import { CONFIG_PATH, type CheckRunAt, type MainWatchApi, type MergedPull } from '../src/main-watch.js';
+import { mainWatchPost } from '../src/intake/channel.js';
+import { IntakeConfig, type IntakeSource } from '../src/intake/report.js';
+import { CONFIG_PATH, protectionView, type CheckRunAt, type MainWatchApi, type MergedPull } from '../src/main-watch.js';
 import type { PrTestRuns, OpenPr } from '../src/coordinator/test-runs.js';
 import type { TestRunRequest, TestRuns } from '../src/coordinator/pr-batch.js';
 import { FakeRunner } from '../src/runner.js';
@@ -26,6 +29,8 @@ function watchApi(f: Fixture) {
   const roles = new Map<string, Role | null>();
   const mergedAt = new Map<string, string>();
   const calls: string[] = [];
+  /** GitHub's compare, by `base...head`; not set: head is behind base (not in that merge). */
+  const compares = new Map<string, { status: string; aheadBy: number; behindBy: number }>();
   // Check runs as the backlog has them, all finished a minute before the merge they are read for.
   const runsOf = async (sha: string): Promise<CheckRunAt[]> => {
     const at = Date.parse([...mergedAt.values()].at(-1) ?? new Date().toISOString()) - 60_000;
@@ -38,12 +43,27 @@ function watchApi(f: Fixture) {
     checkRuns: async (sha) => (calls.push('runs'), runsOf(sha)),
     statuses: async () => (calls.push('statuses'), []),
     role: async (login) => (calls.push('role'), roles.get(login) ?? null),
-    compare: async () => (calls.push('compare'), { status: 'behind', aheadBy: 0, behindBy: 1 }),
+    compare: async (base, head) => (calls.push('compare'), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
   };
-  return { api, pulls, roles, mergedAt, calls };
+  return { api, pulls, roles, mergedAt, calls, compares };
 }
 
-function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: TestRuns } = {}) {
+/** A chat source that records every post (Discord itself is never called). */
+function fakeChat() {
+  const posts: { where: string; text: string }[] = [];
+  const src: IntakeSource & { posts: typeof posts } = {
+    name: 'discord',
+    posts,
+    take: async () => [],
+    reply: async (t, text) => (posts.push({ where: t.id, text }), true),
+    openThread: async () => '900000',
+    watch: () => undefined,
+  };
+  return src;
+}
+const OPS_CHANNEL = '300000000001';
+
+function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: TestRuns; chat?: IntakeSource } = {}) {
   const f = fixture();
   mkdirSync(f.stateDir, { recursive: true });
   f.cfg.project.land_mode = 'pr';
@@ -55,19 +75,29 @@ function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: Tes
   const gh = watchApi(f);
   const clock = { t: Date.now() };
   const prTestRuns = o.listing ? ({ tick: async () => ({ started: [], cancelled: [] }), idle: async () => undefined, stop: () => undefined, recover: async () => [], ready: () => true, listing: o.listing } as unknown as PrTestRuns) : undefined;
-  const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), {
-    prPollMs: 0,
-    autoMerge: () => true,
-    roleOf: exampleRoles,
-    mainWatch: { api: gh.api, now: () => clock.t },
-    ...(prTestRuns ? { prTestRuns } : {}),
-    ...(o.testRuns ? { testRuns: o.testRuns } : {}),
-  });
+  const intakeCfg = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: ['100000000001'], people: { '100000000001': 'example-owner' }, ops_channel: OPS_CHANNEL, dashboard_url: 'https://dashboard.example.test' } });
+  /** A coordinator over the fixture: `log`, another handle on the same event log (a restart). */
+  const start = (log = f.log) =>
+    coordinator({ ...f, log }, new FakeRunner(() => ({ structured: {} })), {
+      prPollMs: 0,
+      autoMerge: () => true,
+      roleOf: exampleRoles,
+      mainWatch: { api: gh.api, now: () => clock.t },
+      ...(prTestRuns ? { prTestRuns } : {}),
+      ...(o.testRuns ? { testRuns: o.testRuns } : {}),
+      ...(o.chat ? { intake: { config: () => intakeCfg, sources: [o.chat] } } : {}),
+    });
+  let c = start();
   const watch = async (minutes = 1) => {
     for (let i = 0; i < minutes; i++) {
       clock.t += 61_000;
       await (c as unknown as { watchMain(): Promise<void> }).watchMain();
     }
+  };
+  /** A restart: a new coordinator (and main watch) over the same state directory and event log file. */
+  const restart = () => {
+    c = start(new EventLog(join(f.base, 'events.db')));
+    return c;
   };
   // Someone else's clone of the repo, to push and merge from.
   const person = join(mkdtempSync(join(tmpdir(), 'person-')), 'p');
@@ -89,7 +119,18 @@ function world(o: { batching?: boolean; listing?: () => OpenPr[]; testRuns?: Tes
     git(person, ...ident, 'commit', '-q', '-m', `add ${file}`);
     return git(person, 'rev-parse', 'HEAD');
   };
-  return { f, gh, c, watch, person, commit, clock };
+  return {
+    f,
+    gh,
+    get c() {
+      return c;
+    },
+    watch,
+    restart,
+    person,
+    commit,
+    clock,
+  };
 }
 
 const stopFile = (f: Fixture) => join(f.stateDir, 'auto-merge-stopped.json');
@@ -317,4 +358,120 @@ test('main watch: an admin accepts a PR as a bootstrap merge on the dashboard (a
   } finally {
     await d.close();
   }
+});
+
+/** The revert PRs the harness opened. */
+const reverts = (f: Fixture) => f.backlog.prs().filter((p) => p.head.startsWith(`${BRAND.cli}/revert-`));
+
+test('main watch caps: a multi-commit trip with a missing check opens one revert PR, the others\' alerts say why and list the trip; a direct push in the same pass still trips with its own alert and revert', async () => {
+  const w = world();
+  await w.watch(2);
+  // One fetch sees four commits: PR #42 rebased onto main as three, its required check never run (it can't), then a direct push.
+  const c1 = w.commit('r1.txt');
+  const c2 = w.commit('r2.txt');
+  const c3 = w.commit('r3.txt');
+  const direct = w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  const at = new Date(w.clock.t).toISOString();
+  const pr: MergedPull = { number: 42, url: 'https://github.com/x/y/pull/42', mergedAt: at, mergeCommit: c3, mergedBy: 'example-owner', mergedByBot: false, head: 'e'.repeat(40), base: 'main', commits: 3 };
+  for (const c of [c1, c2, c3]) w.gh.pulls.set(c, [pr]);
+  w.gh.mergedAt.set(c3, at);
+  w.gh.compares.set(`${c1}...${c3}`, { status: 'ahead', aheadBy: 2, behindBy: 0 });
+  w.gh.compares.set(`${c2}...${c3}`, { status: 'ahead', aheadBy: 1, behindBy: 0 });
+  w.gh.roles.set('example-owner', 'owner');
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, c2, c3, direct], 'every commit judged, each with its own alert');
+  assert.match(alerts[0]!.reason, /#42 was merged into main with required checks not green .*ci missing/);
+  // One revert PR for the trip, one for the direct push.
+  const opened = reverts(w.f);
+  assert.deepEqual(opened.map((p) => p.head).sort(), [c1, direct].map((s) => `${BRAND.cli}/revert-${s.slice(0, 12)}`).sort());
+  const tripPr = opened.find((p) => p.head.endsWith(c1.slice(0, 12)))!.url;
+  assert.equal(alerts[0]!.revert, tripPr);
+  assert.equal(alerts[0]!.no_revert, null);
+  assert.ok(alerts[0]!.trip && alerts.slice(0, 3).every((a) => a.trip === alerts[0]!.trip), 'one trip');
+  for (const a of alerts.slice(1, 3)) {
+    assert.equal(a.revert, null);
+    assert.match(a.no_revert ?? '', /^the per-trip cap is reached \(main_watch\.revert_prs_per_trip: 1\): this trip's revert PR /);
+    assert.ok(a.no_revert!.includes(tripPr), 'names the trip\'s revert PR');
+  }
+  assert.match(alerts[2]!.no_revert ?? '', new RegExp(`the trip's commits so far: ${c1.slice(0, 8)}, ${c2.slice(0, 8)}, ${c3.slice(0, 8)}$`));
+  assert.match(mainWatchPost(alerts[1]!, { dashboardUrl: 'https://dashboard.example.test' }).text, /No revert PR was opened: the per-trip cap is reached/, 'the asks channel says so too');
+  // The direct push: a trip of its own, with its own alert, revert PR and direct-push record.
+  assert.notEqual(alerts[3]!.trip, alerts[0]!.trip);
+  assert.equal(alerts[3]!.revert, opened.find((p) => p.head.endsWith(direct.slice(0, 12)))!.url);
+  assert.deepEqual(of<EventPayload<'main_watch.direct_push'>>(w.f, 'main_watch.direct_push').map((p) => p.sha), [direct]);
+  // Fail closed: a capped commit still stops auto-merge.
+  assert.equal(of(w.f, 'merge.stopped').length, 4);
+  assert.notEqual(w.c.autoMergeStopped(), null);
+});
+
+test('main watch caps: at most 3 revert PRs a day on an instance, across a restart; past the cap the alert says so and opens none, and the commit still stops auto-merge', async () => {
+  const w = world();
+  await w.watch(2);
+  for (const x of ['d1.txt', 'd2.txt', 'd3.txt']) w.commit(x);
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(15);
+  assert.equal(reverts(w.f).length, 3);
+  // A restart, then an admin clears the stop.
+  w.restart();
+  unlinkSync(stopFile(w.f));
+  assert.equal(w.c.autoMergeStopped(), null);
+  const fourth = w.commit('d4.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(6);
+  const last = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted').at(-1)!;
+  assert.equal(last.sha, fourth);
+  assert.equal(last.revert, null);
+  assert.equal(last.no_revert, 'the per-day cap is reached (main_watch.revert_prs_per_day: 3): the main watch opened 3 revert PRs in the last 24 hours');
+  assert.equal(reverts(w.f).length, 3, 'no fourth revert PR');
+  // Fail closed: stopped again, by this commit.
+  assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { sha: string }).sha, fourth);
+  assert.notEqual(w.c.autoMergeStopped(), null);
+  // A day later the cap has room again.
+  w.clock.t += 24 * 3600_000;
+  const fifth = w.commit('d5.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(8);
+  assert.equal(of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted').at(-1)!.sha, fifth);
+  assert.equal(reverts(w.f).length, 4);
+});
+
+test('main watch dead check: a required check with no run for dead_check_days is posted to the ops channel once and shown on the dashboard, and cleared when it runs again', async () => {
+  const chat = fakeChat();
+  const w = world({ chat });
+  await w.watch(2);
+  w.gh.roles.set('example-owner', 'owner');
+  const merge = async (branch: string, checks: boolean) => {
+    const pr = await personPr(w, branch);
+    if (!checks) w.f.backlog.setChecks(pr.head, []);
+    git(w.person, 'fetch', '-q', 'origin');
+    git(w.person, 'reset', '-q', '--hard', 'origin/main');
+    git(w.person, ...ident, 'merge', '-q', '--no-ff', '-m', `Merge pull request #${pr.number}`, pr.head);
+    git(w.person, 'push', '-q', 'origin', 'main');
+    const m = git(w.person, 'rev-parse', 'HEAD');
+    const at = new Date(w.clock.t).toISOString();
+    w.gh.mergedAt.set(m, at);
+    w.gh.pulls.set(m, [{ number: pr.number, url: `https://github.com/x/y/pull/${pr.number}`, mergedAt: at, mergeCommit: m, mergedBy: 'example-owner', mergedByBot: false, head: pr.head, base: 'main' }]);
+  };
+  const dead = () => of<EventPayload<'main_watch.dead_check'>>(w.f, 'main_watch.dead_check').map((d) => [d.check, d.state]);
+  const posts = (re: RegExp) => chat.posts.filter((p) => p.where === OPS_CHANNEL && re.test(p.text));
+  const view = () => protectionView(join(w.f.stateDir, 'main-watch.json'), w.f.cfg.project.project.repo).deadChecks.map((d) => d.check);
+  await merge('feature/one', false);
+  await w.watch(8);
+  assert.equal(of(w.f, 'main_watch.unaccounted').length, 1);
+  assert.deepEqual(dead(), [], 'one merge without it is not a dead check yet');
+  w.clock.t += 7 * 24 * 3600_000;
+  await w.watch(3);
+  assert.deepEqual(dead(), [['ci', 'raised']]);
+  assert.equal(posts(/the required check "ci" has had no run on any commit judged since .* keep tripping the watch until it posts/).length, 1);
+  assert.deepEqual(view(), ['ci'], 'on the dashboard');
+  await w.watch(3);
+  assert.equal(dead().length, 1, 'once');
+  assert.equal(posts(/"ci" has had no run/).length, 1, 'posted once');
+  await merge('feature/two', true);
+  await w.watch(8);
+  assert.deepEqual(dead(), [['ci', 'raised'], ['ci', 'cleared']]);
+  assert.equal(posts(/"ci" has a run again/).length, 1);
+  assert.deepEqual(view(), []);
 });

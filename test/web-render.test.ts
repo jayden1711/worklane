@@ -1053,6 +1053,14 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
 });
 
+test('a dead required check on the Machine page: named, since when, and why merges keep tripping; nothing when there is none', () => {
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: null, alert: null, stopped: null, canClear: false };
+  assert.doesNotMatch(r.renderProtection({ ...watch, deadChecks: [] }, BRAND.name), /main-watch-dead-check/);
+  const html = r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since: new Date(Date.now() - 8 * 86_400_000).toISOString() }] }, BRAND.name);
+  assert.match(html, /data-testid="main-watch-dead-check"[\s\S]*Required check [\s\S]*ci[\s\S]*has had no run on any commit checked since[\s\S]*Merges keep tripping the watch until it posts/);
+  assert.doesNotMatch(r.renderProtection({ mode: 'github', deadChecks: [{ check: 'ci', since: new Date().toISOString() }] }, BRAND.name), /main-watch-dead-check/, 'only while the watch guards the branch');
+});
+
 test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
   const a = 'a'.repeat(40);
   const b = 'b'.repeat(40);

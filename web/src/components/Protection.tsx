@@ -46,8 +46,27 @@ export function ProtectionStatus({ protection, brand }: { protection: Protection
           {protection.mode === 'main_watch' && protection.directPush && <DirectPushLine push={protection.directPush} />}
         </div>
       )}
+      {protection.mode === 'main_watch' && <DeadChecks protection={protection} />}
       {protection.mode === 'main_watch' && <AcceptedMerges protection={protection} />}
     </section>
+  );
+}
+
+/** A required check raised as dead by the main watch (src/main-watch.ts protectionView): no run on any commit judged since. */
+type DeadCheck = { check: string; since: string };
+
+/** Each dead required check, until a run of it appears: why every merge keeps tripping the watch. */
+export function DeadChecks({ protection }: { protection: Protection & { deadChecks?: DeadCheck[] } }) {
+  const list = protection.deadChecks ?? [];
+  if (!list.length) return null;
+  return (
+    <div className="rounded-card bg-surface px-3 py-2.5 text-[12.5px] text-ink-2 shadow-card" data-testid="main-watch-dead-checks">
+      {list.map((d) => (
+        <div key={d.check} data-testid="main-watch-dead-check">
+          <Badge tone="warn">No runs</Badge> Required check <span className="font-mono text-ink">{d.check}</span> has had no run on any commit checked since {ago(d.since)}. Merges keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.
+        </div>
+      ))}
+    </div>
   );
 }
 

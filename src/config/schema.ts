@@ -139,8 +139,18 @@ export const ProjectConfig = z.strictObject({
    * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
    * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
    * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.
+   * `revert_prs_per_trip`, `revert_prs_per_day`: at most so many revert PRs per trip (a pass's unaccounted commits
+   * with one reason) and per 24 hours on this instance; past a cap the commit still stops auto-merge and alerts.
+   * Read as committed before the pass. `dead_check_days`: a required check with no run that long is warned of once.
    */
-  main_watch: z.strictObject({ direct_push_alert: z.boolean().default(true) }).prefault({}),
+  main_watch: z
+    .strictObject({
+      direct_push_alert: z.boolean().default(true),
+      revert_prs_per_trip: z.number().int().min(1).max(100).default(1),
+      revert_prs_per_day: z.number().int().min(1).max(100).default(3),
+      dead_check_days: z.number().int().min(1).max(365).default(7),
+    })
+    .prefault({}),
   /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
