@@ -118,12 +118,66 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/decide.ts', 'who may approve'],
     ['src/intake/people.ts', 'who may approve'],
     ['src/machine-owners.ts', 'who may approve'],
+    ['src/roles.ts', 'the evaluator and the agent runner'],
+    ['src/coordinator.ts', 'the evaluator and the agent runner'],
+    ['src/runner.ts', 'the evaluator and the agent runner'],
+    ['src/sandbox.ts', 'the sandbox and test runs'],
+    ['src/testrun/affected.ts', 'the sandbox and test runs'],
+    ['scripts/push-gate.mjs', 'the push gate, denylist and secret scan'],
+    ['scripts/push-gate-hook.mjs', 'the push gate, denylist and secret scan'],
+    ['scripts/check-denylist.mjs', 'the push gate, denylist and secret scan'],
+    ['scripts/lib/denylist.mjs', 'the push gate, denylist and secret scan'],
+    ['scripts/check-dco.mjs', 'the push gate, denylist and secret scan'],
+    ['.denylist.json', 'the push gate, denylist and secret scan'],
+    ['.denylist-allow', 'the push gate, denylist and secret scan'],
+    ['.gitleaks.toml', 'the push gate, denylist and secret scan'],
+    ['.githooks/pre-push', 'the push gate, denylist and secret scan'],
+    ['test/review.test.ts', 'the tests of the harness controls'],
+    ['test/merge-policy.test.ts', 'the tests of the harness controls'],
+    ['test/guardrails.test.ts', 'the tests of the harness controls'],
+    ['test/push-check.test.ts', 'the tests of the harness controls'],
+    ['test/main-watch.test.ts', 'the tests of the harness controls'],
+    ['test/denylist.test.ts', 'the tests of the harness controls'],
+    ['test/push-gate.test.ts', 'the tests of the harness controls'],
+    ['test/package-files.test.ts', 'the tests of the harness controls'],
+    ['docs/releasing.md', 'the release procedure and the design rules'],
+    ['docs/design.md', 'the release procedure and the design rules'],
   ] as const) {
     assert.ok(engineFiles.includes(path), `${path} is a real file`);
     assert.equal(part(path), what, path);
   }
   // Nothing else in the engine falls in it by accident.
-  for (const path of ['src/coordinator.ts', 'src/dashboard.ts', 'web/src/pages/Waiting.tsx', 'test/merge-policy.test.ts', 'docs/design.md', 'scripts/push-gate.mjs']) assert.equal(part(path), undefined, path);
+  for (const path of ['src/dashboard.ts', 'src/coordinator/decisions.ts', 'web/src/pages/Waiting.tsx', 'test/helpers.ts', 'test/dashboard.test.ts', 'docs/notes-for-the-test.md', 'README.md', 'scripts/release.mjs']) assert.equal(part(path), undefined, path);
+});
+
+test('regression: a change to the evaluator, the sandbox, the denylist, a guard test or the release rules waits for the owner, even a tests-only or docs-only one, whatever review.yaml tries', () => {
+  // The review.yaml of a repo that lists none of them (no `engine` category, nothing at L3, nothing waiting).
+  const loose = {
+    ...review,
+    categories: {} as Record<string, string[]>,
+    levels: { ...review.levels, L2_notify: { ...review.levels.L2_notify, when: [] as string[] }, L3_human: { ...review.levels.L3_human, when: [] as string[] } },
+    merge: { ...review.merge, wait_categories: [] as string[] },
+  };
+  const waits = (path: string, what: string) => {
+    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [] }, loose);
+    assert.equal(lvl.level, 'L3', `${path}: always L3`);
+    const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose), lines: 3, files: 1 }));
+    assert.equal(d.auto, false, path);
+    assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes ${what}: ${path}` }, path);
+  };
+  // A tests-only change to a test that holds a control: L0 and merged by the harness before these were named.
+  for (const path of ['test/review.test.ts', 'test/merge-policy.test.ts', 'test/denylist.test.ts', 'test/push-gate.test.ts', 'test/package-files.test.ts', 'test/guardrails.test.ts', 'test/push-check.test.ts', 'test/main-watch.test.ts']) waits(path, 'the tests of the harness controls');
+  // The denylist's data and the release rules: one file of each, as the owner asked.
+  waits('.denylist.json', 'the push gate, denylist and secret scan');
+  waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
+  waits('docs/releasing.md', 'the release procedure and the design rules');
+  waits('docs/design.md', 'the release procedure and the design rules');
+  // Another test, and another doc, still merge on their own.
+  for (const path of ['test/dashboard.test.ts', 'docs/notes-for-the-test.md']) {
+    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [] }, loose);
+    assert.equal(lvl.level, 'L0', path);
+    assert.equal(mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose), lines: 3, files: 1 })).auto, true, path);
+  }
 });
 
 test('regression: a harness PR touching any self-modification file waits for the owner at L3 and never auto-merges, whatever review.yaml tries', () => {
