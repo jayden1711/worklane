@@ -14,7 +14,7 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { mainWatchPost } from '../src/intake/channel.js';
 import { IntakeConfig, type IntakeSource } from '../src/intake/report.js';
-import { CONFIG_PATH, protectionView, type CheckRunAt, type MainWatchApi, type MergedPull } from '../src/main-watch.js';
+import { CONFIG_PATH, protectionView, type CheckRunAt, type MainWatchApi, type MergedPull, type WorkflowAt } from '../src/main-watch.js';
 import type { PrTestRuns, OpenPr } from '../src/coordinator/test-runs.js';
 import type { TestRunRequest, TestRuns } from '../src/coordinator/pr-batch.js';
 import { FakeRunner } from '../src/runner.js';
@@ -44,8 +44,11 @@ function watchApi(f: Fixture) {
     statuses: async () => (calls.push('statuses'), []),
     role: async (login) => (calls.push('role'), roles.get(login) ?? null),
     compare: async (base, head) => (calls.push('compare'), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
+    workflows: async () => (calls.push('workflows'), wf.list),
   };
-  return { api, pulls, roles, mergedAt, calls, compares };
+  /** The Actions workflows' list; null: GitHub answers 403 or 404. */
+  const wf = { list: null as WorkflowAt[] | null };
+  return { api, pulls, roles, mergedAt, calls, compares, wf };
 }
 
 /** A chat source that records every post (Discord itself is never called). */
@@ -646,4 +649,33 @@ test('main watch dead check: a required check with no run for dead_check_days is
   assert.deepEqual(dead(), [['ci', 'raised'], ['ci', 'cleared']]);
   assert.equal(posts(/"ci" has a run again/).length, 1);
   assert.deepEqual(view(), []);
+});
+
+test('main watch dead check: the raised warning records the disabled workflow that would post the check, and is shown with it; posted once', async () => {
+  const chat = fakeChat();
+  const w = world({ chat });
+  const disabled: WorkflowAt = { name: 'ci', path: '.github/workflows/ci.yml', state: 'disabled_inactivity' };
+  w.gh.wf.list = [disabled];
+  await w.watch(2);
+  w.gh.roles.set('example-owner', 'owner');
+  const pr = await personPr(w, 'feature/one');
+  w.f.backlog.setChecks(pr.head, []);
+  git(w.person, 'fetch', '-q', 'origin');
+  git(w.person, 'reset', '-q', '--hard', 'origin/main');
+  git(w.person, ...ident, 'merge', '-q', '--no-ff', '-m', `Merge pull request #${pr.number}`, pr.head);
+  git(w.person, 'push', '-q', 'origin', 'main');
+  const m = git(w.person, 'rev-parse', 'HEAD');
+  const at = new Date(w.clock.t).toISOString();
+  w.gh.mergedAt.set(m, at);
+  w.gh.pulls.set(m, [{ number: pr.number, url: `https://github.com/x/y/pull/${pr.number}`, mergedAt: at, mergeCommit: m, mergedBy: 'example-owner', mergedByBot: false, head: pr.head, base: 'main' }]);
+  await w.watch(8);
+  assert.equal(of(w.f, 'main_watch.unaccounted').length, 1);
+  w.clock.t += 7 * 24 * 3600_000;
+  await w.watch(3);
+  const raised = of<EventPayload<'main_watch.dead_check'>>(w.f, 'main_watch.dead_check');
+  assert.deepEqual(raised.map((d) => [d.check, d.state, d.workflow]), [['ci', 'raised', disabled]], 'the event log took the note');
+  assert.deepEqual(protectionView(join(w.f.stateDir, 'main-watch.json'), w.f.cfg.project.project.repo).deadChecks.map((d) => d.workflow), [disabled]);
+  assert.equal(chat.posts.filter((p) => p.where === OPS_CHANNEL && /"ci" has had no run/.test(p.text)).length, 1);
+  assert.equal(w.gh.calls.filter((c) => c === 'workflows').length, 1);
+  assert.equal(of(w.f, 'merge.stopped').length, 1, 'the stop as before');
 });

@@ -9,7 +9,8 @@
 // or a bot, a rewritten history. The coordinator then stops auto-merge (the stop file), alerts, and opens a revert PR
 // for a human (coordinator/merge-flow.ts), within its caps: per trip (one pass's unaccounted commits with one reason)
 // and per day; a capped commit still stops and alerts. A rebase-merged PR's commit is reverted with the PR's later
-// commits, in one revert; when there is no revert PR, the alert says why. A required check with no run for days is warned of once.
+// commits, in one revert; when there is no revert PR, the alert says why. A required check with no run for days is warned of once,
+// saying when the Actions workflow that would post it is disabled (one read of the workflows, where the token may).
 // A commit that landed without a PR at all (GitHub's commit-to-PR link has
 // no merged PR for it, or a force-push rewrote the branch) is also posted to the ops channel at once, mentioning the
 // Discord owners (src/direct-push-alert.ts; config.yaml main_watch.direct_push_alert, on by default). The last checked commit is kept in a state file, so a restart neither
@@ -85,6 +86,16 @@ export interface Compared {
   behindBy: number;
 }
 
+/**
+ * A GitHub Actions workflow as the workflows API lists it (GET /repos/{o}/{r}/actions/workflows): its name, its file
+ * and its `state` (GitHub's REST description: active, deleted, disabled_fork, disabled_inactivity, disabled_manually).
+ */
+export interface WorkflowAt {
+  name: string;
+  path: string;
+  state: string;
+}
+
 /** The calls the watch makes: one REST request each (github/main-watch-api.ts). */
 export interface MainWatchApi {
   protection(branch: string): Promise<'enforced' | 'none'>;
@@ -99,6 +110,8 @@ export interface MainWatchApi {
    * else the commit's own GitHub author (`from: 'commit'`); null when neither is known. A login only, never an email.
    */
   pusher?(branch: string, sha: string): Promise<{ login: string; from: 'activity' | 'commit' } | null>;
+  /** The repo's Actions workflows; null when the token may not read them (403) or there are none to read (404). */
+  workflows?(): Promise<WorkflowAt[] | null>;
 }
 
 /** What is known about the commit being checked; each field is one API call's answer (harness: the log's). */
@@ -272,8 +285,10 @@ export interface WatchState {
   /**
    * Required checks with no run or status on the head of any commit judged since `since` (dead checks): `warned`
    * once one has stayed so for main_watch.dead_check_days. Dropped when one appears, or the check isn't required.
+   * `workflowAt`: when the Actions workflows were last read for it (ms; read before it is raised, then once per
+   * dead window); `workflow`: the disabled workflow that would post it, from that read (disabledWorkflowFor).
    */
-  dead?: Record<string, { since: string; warned: boolean }>;
+  dead?: Record<string, { since: string; warned: boolean; workflowAt?: number; workflow?: WorkflowAt }>;
   /**
    * The required_checks the last judged commit was judged by (requiredAt: as committed before it): what dead checks
    * are raised and dropped against, never the config loaded at startup. Null until a commit is judged.
@@ -388,6 +403,48 @@ export function revertCapsAt(git: WatchGit, rev: string): { perTrip: number; per
   return { perTrip: mw.revert_prs_per_trip, perDay: mw.revert_prs_per_day };
 }
 
+/**
+ * The check names a workflow file's jobs post, as matchers: a job's `name` (or its id when it has none), or that name
+ * followed by GitHub's matrix suffix " (…)" or a called workflow's " / …"; a name with `${{ … }}` in it matches any
+ * text in each of their places. None when the file can't be read or parsed.
+ */
+function jobChecks(text: string | null): ((check: string) => boolean)[] {
+  if (text === null) return [];
+  try {
+    const doc = parseDocument(text);
+    const raw: unknown = doc.errors.length ? null : doc.toJS();
+    const jobs = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).jobs : null;
+    if (!jobs || typeof jobs !== 'object') return [];
+    return Object.entries(jobs as Record<string, unknown>).map(([id, job]) => {
+      const n = job && typeof job === 'object' && typeof (job as Record<string, unknown>).name === 'string' ? ((job as Record<string, unknown>).name as string) : id;
+      if (!n.includes('${{')) return (c: string) => c === n || c.startsWith(`${n} (`) || c.startsWith(`${n} / `);
+      // A pattern from the file: kept short, so matching it stays cheap whatever was committed.
+      if (n.length > 200 || n.split('${{').length > 6) return () => false;
+      const re = new RegExp(`^${n.split(/\$\{\{.*?\}\}/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+')}$`);
+      return (c: string) => re.test(c);
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The disabled workflow (state disabled_*) that would post `check`, from the Actions workflows' list: one named as
+ * the check, whose file is named so, or whose file (read with `show`, as committed) has a job that posts it. Null:
+ * none of them, which says nothing (an active one, or none found). Its fields are clipped for the dashboard.
+ */
+export function disabledWorkflowFor(check: string, list: WorkflowAt[], show: (path: string) => string | null): WorkflowAt | null {
+  for (const w of list) {
+    if (!/^disabled_[a-z_]{1,40}$/.test(w.state)) continue;
+    const file = (w.path.split('/').pop() ?? '').replace(/\.ya?ml$/, '');
+    if (w.name === check || file === check || jobChecks(show(w.path)).some((m) => m(check))) {
+      const clip = (x: string) => x.replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 200);
+      return { name: clip(w.name), path: clip(w.path), state: w.state };
+    }
+  }
+  return null;
+}
+
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
 /** The PR number a merge subject names: "Merge #N: …" (this repo's merges) or GitHub's "Merge pull request #N from …". */
 export function subjectPrNumber(subject: string): number | null {
@@ -447,8 +504,11 @@ export interface MainWatchDeps {
   unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null; through?: { sha: string; commits: number } | null }): Promise<void>;
   /** How long a required check may have no run before it is a dead check (config.yaml main_watch.dead_check_days). */
   deadCheckMs?: () => number;
-  /** A dead check is raised (once per check, until it clears), or cleared: a run of it appeared, or it isn't required now. */
-  deadCheck?(o: { check: string; since: string; state: 'raised' | 'cleared' }): void;
+  /**
+   * A dead check is raised (once per check, until it clears), or cleared: a run of it appeared, or it isn't required
+   * now. `workflow`, on a raise: the workflow that would post it is disabled (disabledWorkflowFor).
+   */
+  deadCheck?(o: { check: string; since: string; state: 'raised' | 'cleared'; workflow?: WorkflowAt }): void;
 }
 
 /** The default for main_watch.dead_check_days, in ms. */
@@ -527,13 +587,43 @@ export class MainWatch {
         if (d.warned) this.d.deadCheck?.({ check: name, since: d.since, state: 'cleared' });
         delete dead[name];
         changed = true;
-      } else if (!d.warned && this.now - Date.parse(d.since) >= after) {
+      } else if (!d.warned && this.now - Date.parse(d.since) >= after && (!this.d.api.workflows || d.workflowAt !== undefined)) {
+        // Raised once its workflows were read (workflowRead), so the one warning can say a disabled one.
         d.warned = true;
-        this.d.deadCheck?.({ check: name, since: d.since, state: 'raised' });
+        this.d.deadCheck?.({ check: name, since: d.since, state: 'raised', ...(d.workflow ? { workflow: d.workflow } : {}) });
         changed = true;
       }
     }
     return changed;
+  }
+
+  /**
+   * One read of the repo's Actions workflows (api.workflows) for the dead checks due to be raised, so a warning can say
+   * when the workflow that would post its check is disabled; read again only once a dead window has passed since (the
+   * dashboard's note), while the check stays dead. Never more than that: it is a call like any other, under the limit
+   * of one a minute. A 403, a 404 or any error reads as no disabled workflow: the warning goes out as it would without
+   * this, at most a call later, and judging and the stop never wait on it. Whether a call was made.
+   */
+  private async workflowRead(s: WatchState): Promise<boolean> {
+    if (!this.d.api.workflows) return false;
+    const after = this.d.deadCheckMs?.() ?? DEAD_CHECK_MS;
+    const due = Object.entries(s.dead ?? {}).filter(([name, d]) => (!s.deadFor || s.deadFor.includes(name)) && this.now - Date.parse(d.since) >= after && (d.workflowAt === undefined || this.now - d.workflowAt >= after));
+    if (!due.length || !this.take(s)) return false;
+    let list: WorkflowAt[] | null = null;
+    try {
+      list = await this.d.api.workflows();
+    } catch {
+      list = null;
+    }
+    const last = s.last;
+    for (const [name, d] of due) {
+      d.workflowAt = this.now;
+      const w = Array.isArray(list) ? disabledWorkflowFor(name, list, (path) => (last ? this.d.git.show(last, path) : null)) : null;
+      if (w) d.workflow = w;
+      else delete d.workflow;
+    }
+    writeWatchState(this.d.stateFile, s);
+    return true;
   }
 
   /** One pass: at most one API call. */
@@ -544,6 +634,9 @@ export class MainWatch {
       this.setMode(s, 'off', this.d.offWhy?.() ?? 'no required_checks in config.yaml to judge commits by');
       return writeWatchState(this.d.stateFile, s);
     }
+    // A dead check due to be raised waits on its workflows' read, so that goes first: the protection's recheck (every
+    // few hours) can wait the minute.
+    if (s.mode === 'main_watch' && (await this.workflowRead(s)) && this.deadChecks(s)) writeWatchState(this.d.stateFile, s);
     if (s.mode === null || s.mode === 'off' || this.now - s.protectionAt >= PROTECTION_RECHECK_MS) {
       if (!this.take(s)) return;
       const p = await this.d.api.protection(this.d.branch);
@@ -638,10 +731,13 @@ export function protectionView(file: string, repo: string) {
     detail: s.detail,
     lastChecked: s.last ? { sha: s.last, url: `https://github.com/${repo}/commit/${s.last}`, at: s.lastAt } : null,
     accepted: readAccepted(acceptedFileFor(file)),
-    /** Required checks raised as dead (no run on any commit judged since `since`): merges keep tripping until one posts. */
+    /**
+     * Required checks raised as dead (no run on any commit judged since `since`): merges keep tripping until one posts.
+     * `workflow`: the workflow that would post it is disabled, as last read.
+     */
     deadChecks: Object.entries(s.dead ?? {})
       .filter(([, d]) => d.warned)
-      .map(([check, d]) => ({ check, since: d.since })),
+      .map(([check, d]) => ({ check, since: d.since, ...(d.workflow ? { workflow: d.workflow } : {}) })),
   };
 }
 
