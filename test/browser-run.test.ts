@@ -179,7 +179,8 @@ const pngWidth = (path: string) => readFileSync(path).readUInt32BE(16);
 
 /**
  * A tiny app: a page whose button logs an error, throws, fetches a missing path, a slow path and another host; dark
- * in dark mode; and whose layout code throws at phone width (seen, never judged).
+ * in dark mode; and whose layout code throws at phone width (seen, never judged). WHY the viewport meta: in a mobile
+ * viewport a page without one is laid out 980 px wide, so a max-width query never matches (as on a real phone).
  */
 function fixtureApp(dir: string) {
   writeFileSync(
@@ -189,7 +190,7 @@ import { spawn } from 'node:child_process';
 // A child of the app, as a dev server has (a watcher, a bundler): stopping the app must stop it too.
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
 import('node:fs').then((fs) => fs.writeFileSync('child.pid', String(child.pid)));
-const page = \`<!doctype html><title>shop</title><style>@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }</style><button data-testid="go">Go</button><div data-testid="out"></div>
+const page = \`<!doctype html><title>shop</title><meta name="viewport" content="width=device-width"><style>@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }</style><button data-testid="go">Go</button><div data-testid="out"></div>
 <script>
 matchMedia('(max-width: 500px)').addEventListener('change', (e) => { if (e.matches) throw new Error('phone layout broke'); });
 document.querySelector('[data-testid=go]').onclick = async () => {
