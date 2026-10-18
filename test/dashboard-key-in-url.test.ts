@@ -1,5 +1,5 @@
 // A dashboard key never travels in a URL (src/dashboard-key-url.ts): every route of the local dashboard, the hub's
-// sign-in port, its break-glass port and the terminal's upgrade refuses a request whose query carries one, with a
+// sign-in port (an upgrade request included) and its break-glass port refuses a request whose query carries one, with a
 // 401 that never repeats it, even when the right key is in the header too. The printed URLs carry no key.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -15,7 +15,6 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { startHub, type HubInstance } from '../src/dashboard-hub.js';
 import { KEY_IN_URL_REFUSED, keyInUrl } from '../src/dashboard-key-url.js';
-import { TERMINAL_PATH } from '../src/console/terminal-server.js';
 import { seedDemo } from '../src/demo.js';
 import { EventLog } from '../src/events/log.js';
 import { engineCli, exampleProject, exampleRoles } from './helpers.js';
@@ -125,16 +124,16 @@ test("the hub's sign-in port and its break-glass refuse a key in the URL on ever
     const cb = await fetch(`${hubBase}/auth/callback?code=abc&state=def`);
     assert.equal(cb.status, 400);
     assert.match(await cb.text(), /did not start here/);
-    // The terminal's WebSocket upgrade, too.
+    // A WebSocket upgrade, too (the hub serves none: the owner terminal is removed, #742).
     const port = Number(new URL(h.url).port);
     const upgrade = await new Promise<number>((done, fail) => {
-      const r = request({ host: '127.0.0.1', port, path: `${TERMINAL_PATH}?instance=a&t=${h.token}`, headers: { connection: 'Upgrade', upgrade: 'websocket', origin: hubBase, 'sec-websocket-version': '13', 'sec-websocket-key': randomBytes(16).toString('base64') } });
+      const r = request({ host: '127.0.0.1', port, path: `/api/hub?instance=a&t=${h.token}`, headers: { connection: 'Upgrade', upgrade: 'websocket', origin: hubBase, 'sec-websocket-version': '13', 'sec-websocket-key': randomBytes(16).toString('base64') } });
       r.on('response', (res) => (done(res.statusCode ?? 0), res.resume()));
       r.on('upgrade', () => done(101));
       r.on('error', fail);
       r.end();
     });
-    assert.equal(upgrade, 401, "the terminal's upgrade with a key in its URL");
+    assert.equal(upgrade, 401, 'an upgrade request with a key in its URL');
   } finally {
     await h.close();
     await a.close();

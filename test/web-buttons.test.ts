@@ -77,11 +77,11 @@ test("a disabled machine button says the device isn't allowed", () => {
   // The server's own view for a machine owner whose page didn't come from an allowed device.
   const away = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: false }))) as { canChange: boolean; why: string | null };
   assert.equal(away.canChange, true, 'a machine owner: the buttons are drawn');
-  assert.match(away.why ?? '', /allowed devices \(dashboards\.sh --console-devices/, 'the reason is the refusal a change would get');
+  assert.match(away.why ?? '', /allowed devices \(dashboards\.sh --machine-devices/, 'the reason is the refusal a change would get');
   const b = described(r.renderMachine(away), 'machine-setting-review-button');
   assert.ok(b.disabled, 'held');
   assert.ok(b.id, `aria-describedby names the reason: ${b.tag}`);
-  assert.match(b.text ?? '', /^A machine change needs one of the console(&#x27;|')s allowed devices \(dashboards\.sh --console-devices/);
+  assert.match(b.text ?? '', /^A machine change needs one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices/);
   // From an allowed device the device reason is gone (what is held then is only an unchanged value).
   const here = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: true })));
   assert.equal(here.why, null);

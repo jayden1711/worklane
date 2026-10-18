@@ -82,7 +82,6 @@ interface Render {
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
   accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
-  keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -2144,9 +2143,6 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.match(html, /data-testid="ask-answered"[^>]*>approved by @olive \(owner\)/);
   const viewer = r.renderSetup({ role: 'viewer', login: 'vic', asks: asks.map((a) => ({ ...a, canAnswer: false })) });
   assert.doesNotMatch(viewer, /data-testid="ask-secret"|data-testid="ask-run"|data-testid="ask-option"/);
-  assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
-  assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
-  assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
 test("Add project: enabled for a machine owner on an allowed device; otherwise disabled, saying why", () => {

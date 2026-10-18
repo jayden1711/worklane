@@ -109,7 +109,6 @@ const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
 const HELPERS = [
   { dest: '/usr/local/libexec/worklane-testrun', src: 'scripts/machine/worklane-testrun.sh', check: 'bash' }, // test-user.sh
   { dest: '/usr/local/libexec/worklane-machine', src: 'scripts/machine/worklane-machine.cjs', check: 'node' }, // machine-helper.sh
-  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // console-shell.sh
   { dest: '/usr/local/libexec/worklane-gpu-devices', src: 'scripts/machine/worklane-gpu-devices.sh', check: 'bash' }, // gpu-devices.sh (run by udev)
   { dest: '/usr/local/libexec/worklane-exp', src: 'scripts/machine/worklane-exp.sh', check: 'bash' }, // experiments.sh
 ];

@@ -238,19 +238,6 @@ export function userGid(user: string): number | null {
   }
 }
 
-/**
- * How to run `argv` (a fixed command) in a pseudo-terminal, for the dashboard's owner terminal. Linux only:
- * util-linux `script` makes the PTY, so no native module is needed. `script -c` hands its command to a shell, so
- * every word must be plain (no shell metacharacters). Returns the [file, args] to spawn.
- */
-export function ptyCommand(argv: string[], size: { cols: number; rows: number }): [file: string, args: string[]] {
-  if (process.platform !== 'linux') throw new Error('the owner terminal needs Linux (util-linux script)');
-  if (!argv.length || argv.some((w) => !/^[A-Za-z0-9_./:=@-]+$/.test(w))) throw new Error('the terminal command must be plain words');
-  const cols = Math.max(20, Math.min(400, Math.floor(size.cols) || 80));
-  const rows = Math.max(5, Math.min(200, Math.floor(size.rows) || 24));
-  return ['/usr/bin/script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows}; exec ${argv.join(' ')}`, '/dev/null']];
-}
-
 const hexPort = (p: number) => p.toString(16).toUpperCase().padStart(4, '0');
 
 /**

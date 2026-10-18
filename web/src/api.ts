@@ -597,16 +597,6 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 /**
- * The subprotocols the owner terminal's WebSocket offers: its own (src/dashboard-auth.ts TERMINAL_PROTOCOL) and the
- * session's CSRF token as `csrf.<token>` (CSRF_PROTOCOL_PREFIX), since a browser can't set headers on the upgrade.
- * The token never goes in the URL; the hub answers with the terminal's protocol alone.
- */
-export async function terminalProtocols(): Promise<string[]> {
-  await me;
-  return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
-}
-
-/**
  * A live stream (server-sent events) at `path`, read with fetch so the break-glass key goes in the Authorization
  * header like every other call (a session's cookie goes by itself). It reconnects after a drop, with Last-Event-ID.
  * INVARIANT: no stream URL carries the key; EventSource, which can't send headers, isn't used (test/web-key-in-url.test.ts).
@@ -1003,6 +993,8 @@ export interface AsksView {
   role: 'owner' | 'writer' | 'viewer';
   login: string;
   asks: Ask[];
+  /** An owner's: what the machine still needs from root that no ask covers (src/console/routes.ts); absent from older servers. */
+  notices?: string[];
 }
 export const getAsks = () => api<AsksView>('/api/asks');
 export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/api/asks/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) });

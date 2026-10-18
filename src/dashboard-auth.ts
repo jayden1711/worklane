@@ -35,8 +35,8 @@ export const LOGIN_HEADER = 'x-dashboard-login';
 /** On the hub's role check (/api/role): read the permission from GitHub now, not the instance's cache. */
 export const FRESH_HEADER = 'x-dashboard-fresh-role';
 /**
- * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the console's
- * allowed devices (src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
+ * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the machine
+ * devices (dashboards.sh --machine-devices; src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
  * itself, so a browser's own copy never reaches an instance. Machine changes need it (src/machine-owners.ts).
  */
 export const DEVICE_HEADER = 'x-dashboard-console-device';
@@ -52,27 +52,13 @@ export interface ConsoleSession {
   csrfOk: boolean;
   /** The owner's break-glass (no person named). */
   breakGlass?: boolean;
-  /** The hub identified this write's device as an allowed console device (DEVICE_HEADER). */
+  /** The hub identified this write's device as one of the machine devices (DEVICE_HEADER). */
   deviceOk?: boolean;
 }
 export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSession | null;
 
 /** The header every write carries its CSRF token in. */
 export const CSRF_HEADER = 'x-csrf-token';
-/**
- * The owner terminal's WebSocket subprotocol. A browser can't set headers on a WebSocket upgrade, so the page offers
- * two subprotocols: this one and `csrf.<the session's CSRF token>`. The hub reads the token from the second and
- * answers with this one alone, never echoing the token.
- */
-export const TERMINAL_PROTOCOL = 'terminal.v1';
-/** The prefix of the subprotocol that carries the CSRF token on the terminal's upgrade. */
-export const CSRF_PROTOCOL_PREFIX = 'csrf.';
-/** The CSRF token a WebSocket upgrade offers as a subprotocol (`csrf.<token>`); undefined when it offers none. */
-export function csrfFromProtocols(req: IncomingMessage): string | undefined {
-  const offered = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map((p) => p.trim());
-  const p = offered.find((x) => x.startsWith(CSRF_PROTOCOL_PREFIX));
-  return p ? p.slice(CSRF_PROTOCOL_PREFIX.length) : undefined;
-}
 /**
  * The instance API paths (after /api/) whose GET says whether a machine change would pass now, the device included.
  * The hub asks Tailscale for the device on these reads, as on every write, and the instance serves these views

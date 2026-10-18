@@ -22,7 +22,7 @@
 #
 #   bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net      (first, once)
 #   bash scripts/setup/dashboards.sh --setup --loopback          (first, before the machine has an https origin)
-#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
 #
 #   --setup: before the sign-in App exists (the hub can't start without it). Starts the hub in setup mode
 #     (worklane-dashboard-hub-setup.service, as wl-dash, loopback port 4399, no instances): one page that makes the
@@ -43,15 +43,17 @@
 #   --machine-owner: the GitHub logins that may change the machine itself from the dashboard (the slot caps, engine
 #     updates), comma-separated. Written to /etc/worklane/machine-owners.json, root:root 0644. An instance's owners
 #     who aren't machine owners see the machine settings read-only. A machine change also needs a signed-in session
-#     and one of the --console-devices, as the terminal does. Left out: the file is kept as it
+#     and one of the --machine-devices. Left out: the file is kept as it
 #     is (none yet: only the break-glass may change the machine).
 #
-#   --console-user (console_user): the admin user the hub's owner terminal runs as. Run console-shell.sh
-#     with the same user first. Without it the terminal never opens. With it, the hub's unit drops
-#     NoNewPrivileges and its read-only filesystem: sudo (to start the terminal, and in it) needs both.
-#   --console-devices (console_devices): the Tailscale devices the terminal may be opened from, as Tailscale
-#     tags (tag:owner-laptop) and/or MagicDNS node names, comma-separated. Prefer tags you alone own in the
-#     tailnet policy. Empty or missing: every device is refused. Kept in the hub's unit on this machine only.
+#   --machine-devices: the Tailscale devices a machine change from the page may come from, as Tailscale tags
+#     (tag:owner-laptop) and/or MagicDNS node names, comma-separated. Prefer tags you alone own in the tailnet
+#     policy. Empty or missing: every device is refused (the break-glass still works). Kept in the hub's unit on this
+#     machine only. --console-devices, its name while the owner terminal shared it, is read as it, never added to it.
+#
+#   The owner terminal is removed (#742). --console-user, which turned it on, is accepted and ignored, so an older
+#   command line still runs. Every run removes what an older install had of it: the console shell ($CONSOLE_SHELL)
+#   and its sudoers rule ($CONSOLE_SUDOERS); and the hub's unit always gets its full sandbox.
 #
 #   --siri: the hub's Siri gateway (docs/siri.md), on 127.0.0.1:4397, for "Hey Siri, tell / ask" Shortcuts. wl-dash
 #     may then read each instance's siri-gateway-token too (the token that works on that instance's /api/siri/ routes
@@ -66,8 +68,8 @@
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--console-user <admin user> --console-devices <tags,names>] [--siri] [--hooks] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
-client_id="" public_url="" console_user="" console_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri="" hooks=""
+usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--hooks] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+client_id="" public_url="" console_user="" machine_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri="" hooks=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --setup) setup=1; shift ;;
@@ -77,8 +79,10 @@ while [ "$#" -gt 0 ]; do
     --hooks) hooks=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
+    # The removed owner terminal's: accepted so an older command line runs, and ignored (said below).
     --console-user) console_user="${2:-}"; shift 2 ;;
-    --console-devices) console_devices="${2:-}"; shift 2 ;;
+    # --console-devices: the same list under its older name, read as the machine devices.
+    --machine-devices|--console-devices) machine_devices="${2:-}"; shift 2 ;;
     --machine-owner) machine_owner="${2:-}"; machine_owner_set=1; shift 2 ;;
     --) shift; break ;;
     -*) echo "$usage" >&2; exit 2 ;;
@@ -86,16 +90,18 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -z "$machine_owner_set" ] || machine_owners_json "$machine_owner" >/dev/null || exit 2
+# Where the units go: the hub's unit's directory (lib.sh HUB_UNIT), /etc/systemd/system.
+units_dir="$(dirname "$HUB_UNIT")"
 # Write each unit to a dotted temp name, validate it under its real name, then move it into place.
 put() {
-  local file="$1" tmp="/etc/systemd/system/.$1.tmp" check
+  local file="$1" tmp="$units_dir/.$1.tmp" check
   shift
   "$@" > "$tmp"; chmod 0644 "$tmp"
   check="$(mktemp -d)/$file"; cp "$tmp" "$check"
   if ! systemd-analyze verify "$check"; then rm -f "$tmp" "$check"; echo "$file invalid; nothing installed" >&2; exit 1; fi
   rm -f "$check"
-  mv -f "$tmp" "/etc/systemd/system/$file"
-  echo "installed /etc/systemd/system/$file"
+  mv -f "$tmp" "$units_dir/$file"
+  echo "installed $units_dir/$file"
 }
 
 wait_for() { for _ in $(seq 1 30); do [ -s "$1" ] && return 0; sleep 1; done; echo "no $1 after 30 s; see journalctl -u $2" >&2; exit 1; }
@@ -106,7 +112,7 @@ url_ok() { [[ "$1" =~ ^https://[a-z0-9.-]+$ ]] || { echo "--public-url: the hub'
 
 if [ -n "$setup" ]; then
   # Exactly one of --public-url and --loopback.
-  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$console_devices$machine_owner_set$no_instances$siri$hooks" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
+  [ "$#" -eq 0 ] && [ -n "$public_url$loopback" ] && [ -z "$client_id$console_user$machine_devices$machine_owner_set$no_instances$siri$hooks" ] && { [ -z "$public_url" ] || [ -z "$loopback" ]; } || { echo "$usage" >&2; exit 2; }
   [ -n "$loopback" ] || url_ok "$public_url"
   [ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
   say "viewer user $viewer (runs the hub; holds no credential)"
@@ -179,17 +185,13 @@ fi
 { [ "$#" -ge 1 ] || [ -n "$no_instances" ]; } && [ -n "$client_id" ] && [ -n "$public_url" ] || { echo "$usage" >&2; echo "(no --client-id or --public-url, and none stored by --setup in $signin_dir)" >&2; exit 2; }
 [[ "$client_id" =~ ^[A-Za-z0-9._-]{8,64}$ ]] || { echo "--client-id: the sign-in App's client id (letters, digits, dots, dashes)" >&2; exit 2; }
 url_ok "$public_url"
-if [ -n "$console_user" ]; then
-  [[ "$console_user" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$console_user" != root && "$console_user" != wl-* ]] || { echo "console user: your admin user's login name (never root or a wl- user)" >&2; exit 2; }
-  [ -x "$CONSOLE_SHELL" ] && [ -f "$CONSOLE_SUDOERS" ] || { echo "no console shell or its sudoers rule: run console-shell.sh $console_user first" >&2; exit 1; }
+if [ -n "$machine_devices" ]; then
+  [[ "$machine_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--machine-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
 fi
-if [ -n "$console_devices" ]; then
-  [ -n "$console_user" ] || { echo "--console-devices goes with --console-user" >&2; exit 2; }
-  [[ "$console_devices" =~ ^[a-z0-9:.,-]+$ ]] || { echo "--console-devices: Tailscale tags (tag:x) and/or node names, comma-separated, lowercase" >&2; exit 2; }
-fi
-[ -z "$console_user" ] || [ -n "$console_devices" ] || echo "note: no --console-devices, so the owner terminal refuses every device until you list yours" >&2
+[ -z "$console_user" ] || echo "note: --console-user is ignored: the owner terminal is removed; this run removes its console shell and sudoers rule, and the hub keeps its full sandbox" >&2
+[ -n "$machine_devices" ] || echo "note: no --machine-devices, so a machine change from the page is refused from every device until you list yours (the break-glass still works)" >&2
 command -v setfacl >/dev/null || { echo "needs setfacl: install the acl package (apt install acl), then run this again" >&2; exit 1; }
-[ -x /usr/local/bin/worklane ] || { echo "no /usr/local/bin/worklane; run engine.sh first" >&2; exit 1; }
+[ -x "$ENGINE_CLI" ] || { echo "no $ENGINE_CLI; run engine.sh first" >&2; exit 1; }
 for f in client-secret session-secret; do
   [ -s "$signin_dir/$f" ] || { echo "no $signin_dir/$f: run credentials.sh dashboard-signin first" >&2; exit 1; }
 done
@@ -240,31 +242,31 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${hooks:+ --hooks-port 4396}${console_user:+ --console-user $console_user}${console_devices:+ --console-devices $console_devices}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${hooks:+ --hooks-port 4396}${machine_devices:+ --machine-devices $machine_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10
-$(hub_sandbox)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=$(home_of "$viewer")
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
 }
 
-# The hub's sandbox. With the owner terminal, sudo must be able to switch users (no NoNewPrivileges), and the
-# admin's shell, a child of the hub, must see the real filesystem (no read-only mounts), so both are dropped.
-hub_sandbox() {
-  if [ -n "$console_user" ]; then
-    echo "NoNewPrivileges=no"
-    return
-  fi
-  cat <<EOF
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=$(home_of "$viewer")
-PrivateTmp=yes
-EOF
+# What an older install had of the removed owner terminal: its console shell and its sudoers rule (the hub's user
+# could run that shell as the admin user). Gone before the hub restarts with its sandbox back.
+remove_owner_terminal() {
+  local f
+  for f in "$CONSOLE_SUDOERS" "$CONSOLE_SHELL"; do
+    if [ -e "$f" ] || [ -L "$f" ]; then
+      rm -f "$f"
+      echo "removed $f (the owner terminal's; the terminal is removed)"
+    fi
+  done
 }
 
 
@@ -317,11 +319,12 @@ done
 hub_arg="${hub_arg:--}"
 say "the hub, as $viewer"
 # Setup mode is over (the sign-in secret is in place): its unit goes, and the real hub takes its port.
-if [ -e "/etc/systemd/system/$setup_unit" ]; then
+if [ -e "$units_dir/$setup_unit" ]; then
   systemctl disable --now "$setup_unit" 2>/dev/null || true
-  rm -f "/etc/systemd/system/$setup_unit"
-  echo "removed /etc/systemd/system/$setup_unit (setup mode)"
+  rm -f "$units_dir/$setup_unit"
+  echo "removed $units_dir/$setup_unit (setup mode)"
 fi
+remove_owner_terminal
 put worklane-dashboard-hub.service hub_unit "$@"
 systemctl daemon-reload
 systemctl enable --now worklane-dashboard-hub.service

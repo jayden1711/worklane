@@ -242,17 +242,19 @@ hub_option() {
   [ -f "$HUB_UNIT" ] || return 0
   sed -n 's/^ExecStart=.* '"$1"' \([^ ]*\).*$/\1/p' "$HUB_UNIT" | head -1
 }
+# The hub's machine devices: its --machine-devices, else an older unit's --console-devices, the same list (#742).
+hub_machine_devices() { local v; v="$(hub_option --machine-devices)"; [ -n "$v" ] || v="$(hub_option --console-devices)"; printf '%s' "$v"; }
 # The instances the hub serves (its --hub <name>=<state>,...), one per line.
 hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
 
 # The hub's own settings, to run dashboards.sh again with another list of instances and nothing else changed: one word
-# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, --siri and --hooks when it has
-# those gateways).
+# a line (its sign-in App's client id, its URL, its machine devices, --siri and --hooks when it has those gateways).
+# An older unit's --console-devices (the removed owner terminal's list) is kept as the machine devices; its
+# --console-user is dropped (#742).
 hub_keep_args() {
   local v
   printf '%s\n' --client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)"
-  v="$(hub_option --console-user)"; [ -z "$v" ] || printf '%s\n' --console-user "$v"
-  v="$(hub_option --console-devices)"; [ -z "$v" ] || printf '%s\n' --console-devices "$v"
+  v="$(hub_machine_devices)"; [ -z "$v" ] || printf '%s\n' --machine-devices "$v"
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
   [ -z "$(hub_option --hooks-port)" ] || printf '%s\n' --hooks
 }
@@ -744,18 +746,10 @@ updates_config_json() {
   node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, channel: "release", allowed_signers: "/etc/worklane/allowed_signers", repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
 }
 
-# The sudoers rule for the dashboard's owner terminal: the hub's viewer user may run the console shell as the
-# admin user, with exactly `check` or `shell`, and nothing else; never as root. sudo inside that shell still
-# asks for the admin's password (the rule is NOPASSWD only for the console shell itself).
+# The removed owner terminal's root files (#742), which an older install has and dashboards.sh removes: its console
+# shell, and the sudoers rule that let the hub's viewer user run it as the admin user. Nothing installs them now.
 CONSOLE_SHELL=/usr/local/libexec/worklane-console-shell
-CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console   # what install_sudoers worklane-console writes
-console_sudoers() {
-  local viewer="$1" admin="$2"
-  [[ "$viewer" =~ ^wl-[a-z][a-z0-9-]{0,20}$ ]] || { echo "console_sudoers: $viewer is not a viewer user" >&2; return 1; }
-  [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$admin" != root && "$admin" != "$viewer" ]] || { echo "console_sudoers: $admin can't be the console user" >&2; return 1; }
-  printf '# The dashboard hub (%s) may start the owner terminal as %s: the console shell, exactly check or shell.\n' "$viewer" "$admin"
-  printf '%s ALL=(%s) NOPASSWD: %s check, %s shell\n' "$viewer" "$admin" "$CONSOLE_SHELL" "$CONSOLE_SHELL"
-}
+CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console
 
 # The machine owners (src/machine-owners.ts): the GitHub logins that may change the machine from the dashboard
 # (slot caps, engine updates), as opposed to an instance's owners. Root's file; every instance user reads it.

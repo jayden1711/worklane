@@ -4,8 +4,8 @@
 //   POST /api/claude-account/profile-add?profile=<name>   body {"value": "<token from claude setup-token>"}
 //   POST /api/machine/claude-profile                      body {"action": "use"|"remove", "profile"}
 //
-// Each is a machine owner's who is an owner of this instance, on one of the console's allowed devices (the same gate as
-// the owner terminal and any machine change), or the owner's break-glass. Every refusal is audited, a request with no
+// Each is a machine owner's who is an owner of this instance, on one of the machine devices (the same gate as any
+// machine change), or the owner's break-glass. Every refusal is audited, a request with no
 // session's too, and a refused request starts nothing: no token is read, no file written, no machine request recorded.
 // The token never reaches an event, the audit, a response or an error: it goes from the body (zeroed after) to a 0400
 // file for this coordinator user, which profile-add reads once as root and deletes; a refused request deletes it.

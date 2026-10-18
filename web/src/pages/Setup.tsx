@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, hubInstance, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, terminalProtocols, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
 import { Header } from '../components/Header';
@@ -359,6 +359,14 @@ export function SetupConsoleView({ data, onChanged, shown, focus }: { data: Asks
   const done = asks.filter((a) => a.status !== 'open').reverse();
   return (
     <div className="space-y-6">
+      {(data.notices ?? []).map((n) => (
+        <Card key={n} className="p-4" data-testid="setup-notice">
+          <div className="flex items-start gap-2">
+            <Badge tone="warn">On the machine</Badge>
+            <p className="text-[13px] text-ink-2">{n}</p>
+          </div>
+        </Card>
+      ))}
       {!asks.length && <Empty title="Nothing to set up" hint="When the harness needs something it can't do itself (a secret, an approval, a machine step), it asks here." />}
       {!!open.length && (
         <section className="space-y-3">
@@ -380,90 +388,10 @@ export function SetupConsoleView({ data, onChanged, shown, focus }: { data: Asks
   );
 }
 
-const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
-const KEYS: Record<string, string> = { Enter: '\r', Backspace: '\x7f', Tab: '\t', Escape: '\x1b', ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowRight: '\x1b[C', ArrowLeft: '\x1b[D', Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~' };
-
-/** The keys a terminal gets for a key press, or null for one it doesn't take. */
-export function keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null {
-  if (e.metaKey) return null;
-  if (e.ctrlKey && /^[a-z]$/i.test(e.key)) return String.fromCharCode(e.key.toUpperCase().charCodeAt(0) - 64);
-  if (KEYS[e.key]) return KEYS[e.key]!;
-  return e.key.length === 1 ? e.key : null;
-}
-
-/** The owner terminal (hub only): opened on demand, the hub decides whether it may. */
-function Terminal({ instance }: { instance: string }) {
-  const [out, setOut] = useState('');
-  const [state, setState] = useState<'closed' | 'opening' | 'open'>('closed');
-  const [note, setNote] = useState<string | null>(null);
-  const ws = useRef<WebSocket | null>(null);
-  const screen = useRef<HTMLPreElement>(null);
-  useEffect(() => () => ws.current?.close(), []);
-  useEffect(() => {
-    if (screen.current) screen.current.scrollTop = screen.current.scrollHeight;
-  }, [out]);
-  const open = async () => {
-    setOut('');
-    setNote(null);
-    setState('opening');
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    // The session's CSRF token goes as a subprotocol: a browser can't set headers on a WebSocket upgrade.
-    const s = new WebSocket(`${proto}://${location.host}/api/terminal?instance=${encodeURIComponent(instance)}&cols=120&rows=32`, await terminalProtocols());
-    ws.current = s;
-    s.onopen = () => setState('open');
-    s.onmessage = (m) => {
-      const msg = JSON.parse(String(m.data)) as { type: string; data?: string; why?: string };
-      if (msg.type === 'output') setOut((o) => (o + msg.data!.replace(ANSI, '').replace(/\r\n?/g, '\n')).slice(-200_000));
-      else if (msg.type === 'refused' || msg.type === 'closed') setNote(`${msg.type === 'refused' ? 'Refused' : 'Closed'}: ${msg.why}`);
-    };
-    s.onclose = () => setState('closed');
-  };
-  return (
-    <Card className="p-4" data-testid="owner-terminal">
-      <div className="flex items-center gap-2">
-        <div className="flex-1">
-          <div className="text-[14px] font-medium text-ink">Owner terminal</div>
-          <p className="text-[12px] text-ink-3">A login shell as this machine's admin user. Needs one of your allowed Tailscale devices; sudo asks for your password; every command is recorded; it closes after 10 minutes idle.</p>
-        </div>
-        {state === 'closed' ? (
-          <Button size="sm" variant="outline" onClick={() => void open()} data-testid="terminal-open">
-            Open
-          </Button>
-        ) : (
-          <Button size="sm" variant="outline" onClick={() => ws.current?.close()}>
-            Close
-          </Button>
-        )}
-      </div>
-      {note && <p className="mt-2 text-[12px] text-red">{note}</p>}
-      {state !== 'closed' && (
-        <pre
-          ref={screen}
-          tabIndex={0}
-          className={cx('mt-3 h-96 overflow-auto rounded-control bg-inset p-2 font-mono text-[12px] leading-snug text-ink outline-none focus:ring-2 focus:ring-ring')}
-          onKeyDown={(e) => {
-            const d = keyData(e);
-            if (d === null) return;
-            e.preventDefault();
-            ws.current?.send(JSON.stringify({ type: 'input', data: d }));
-          }}
-          onPaste={(e) => {
-            e.preventDefault();
-            ws.current?.send(JSON.stringify({ type: 'input', data: `\x1b[200~${e.clipboardData.getData('text')}\x1b[201~` }));
-          }}
-        >
-          {out}
-        </pre>
-      )}
-    </Card>
-  );
-}
-
 export function SetupPage() {
   const [data, setData] = useState<AsksView | null>(null);
   const [adding, setAdding] = useState<AddProjectData | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [inst, setInst] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const [linkErr, setLinkErr] = useState<string | null>(null);
   const load = () => {
@@ -478,7 +406,6 @@ export function SetupPage() {
   };
   useEffect(() => {
     load();
-    void hubInstance.then(setInst);
     // A one-time link from Discord (taken out of the address bar on load): exchanged once, by POST.
     const link = pendingSetupLink();
     if (link)
@@ -523,7 +450,6 @@ export function SetupPage() {
         )}
         {adding && <AddProjectView data={adding} onChanged={load} />}
         {data && <SetupConsoleView data={data} onChanged={load} shown={shown} focus={focus} />}
-        {inst && data?.role === 'owner' && <Terminal instance={inst} />}
       </div>
     </div>
   );

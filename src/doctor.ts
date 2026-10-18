@@ -25,6 +25,7 @@ import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu
 import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
+import { ownerTerminalNotice, type TerminalPaths } from './console/owner-terminal-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -224,12 +225,23 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   out.push(...setupChecks(root, opts));
+  const terminal = ownerTerminalCheck();
+  if (terminal) out.push(terminal);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * The removed owner terminal (#742): nothing while the machine has nothing of it left; a warning while its console
+ * shell, its sudoers rule or a hub unit without its sandbox is still there, saying how root removes them.
+ */
+export function ownerTerminalCheck(paths: TerminalPaths = {}): DoctorCheck | null {
+  const notice = ownerTerminalNotice(paths);
+  return notice ? { name: 'owner terminal', level: 'warn', detail: notice } : null;
 }
 
 /**
