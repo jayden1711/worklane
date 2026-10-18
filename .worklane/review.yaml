@@ -41,6 +41,7 @@ categories:
     - .githooks/**
     - docs/releasing.md
     - docs/design.md
+    - docs/design/**
 levels:
   L0_auto:      { when: [docs-only, tests-only, comments, copy], max_lines: 200 }
   L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }
