@@ -7,8 +7,9 @@
 #   pull_request: all of them with the full-ci label (FULL=true) or a workflow change; the bootstrap jobs when the
 #     install path changes; the real systemd and real users jobs when the root and machine scripts (bootstrap.sh too:
 #     its server ending is proven in add-project's job), the OS layer, the test-run host or the runner's sign-in check
-#     change; the wizard's end-to-end job when either of those changes, or the wizard's own pages and server code do
-#     (PR_BASE, PR_HEAD: the PR's base and head commits).
+#     change; the wizard's end-to-end job when either of those changes, or the wizard's own pages and server code do;
+#     add-project's job when the plugin fixtures it fetches change (PR_BASE, PR_HEAD: the PR's base and head commits).
+#     The full-ci label added later comes here as a pull_request run too (ci-slow-full-ci.yml calls ci-slow.yml).
 set -euo pipefail
 
 BOOTSTRAP="bootstrap bootstrap-windows"
@@ -42,6 +43,9 @@ case "${EVENT:-}" in
       if grep -qE '^(scripts/(setup|machine|ci)/|scripts/bootstrap\.sh|src/os/|src/testrun/|src/runner\.ts)' <<< "$files"; then run="$run $MACHINE"; fi
       # WHY: the wizard's walk runs the install and the machine scripts too, so either of the above runs it as well.
       if [ -n "$run" ] || grep -qE '^(web/src/(App\.tsx|api\.ts|pages/(FirstRun|Settings|Machine|Setup)\.tsx|components/(SetupScreens|SetupConfig|ClaudeSignin|DiscordSetup|PolicyForm|RepoConfigForm|TailscaleSetup|UpdaterSetup)\.tsx)|src/(setup-[a-z-]+|setup/[a-z-]+|claude-signin|gh-login|policy-edit|config-change|tailscale-setup|updater-setup|hub-setup|auto-config|init|dashboard|dashboard-hub|browser/cdp)\.ts)' <<< "$files"; then run="$run $WIZARD"; fi
+      # WHY: add-project's plugins and MCP broker steps fetch and run test/fixtures/plugins (the escape fixture only
+      # there, in the broker's sandbox), and no other slow job reads them: a fixture change needed full-ci before.
+      if grep -qE '^test/fixtures/plugins/' <<< "$files" && [[ " $run " != *" add-project-real-systemd "* ]]; then run="$run add-project-real-systemd"; fi
     fi
     ;;
   *)
