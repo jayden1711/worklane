@@ -11,6 +11,10 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
 - Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
 
+### Guardrail changes
+
+- none in this release
+
 ## v0.5.2 (2026-10-17)
 
 ### Highlights
