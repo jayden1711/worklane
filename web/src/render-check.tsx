@@ -18,7 +18,7 @@ import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
-import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { GroupTabs, InstanceList, NAV, NavDrawer, NavMenu, navCounts, SetupModeHidden, SidebarBody, SignInPage, StopBanner, tabsAt, WhoAmI } from './App';
 import { ExtendPage } from './pages/Extend';
 import { ExperimentsPage } from './pages/Experiments';
 import { Header } from './components/Header';
@@ -230,7 +230,7 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     <NavMenu.Provider value={{ open, setOpen: () => {} }}>
       <Header title="Board" />
       <NavDrawer open={open} setOpen={() => {}}>
-        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status, ...(o.why ? { why: o.why } : {}) }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
+        <SidebarBody state={state} path="/" counts={navCounts(state)} health={{ hub: o.hub ?? null, status, ...(o.why ? { why: o.why } : {}) }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
       </NavDrawer>
     </NavMenu.Provider>,
   );
@@ -244,6 +244,9 @@ export const renderHeader = (title: string) => renderToStaticMarkup(<Header titl
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 /** #581: the sidebar's rows for a state, the old addresses' redirects, and Extend's tabs. */
 export { navFor } from './App';
+/** #585: a page's header at a path, as the dashboard draws it there: with its sidebar group's tabs and their counts. */
+export const renderAt = (path: string, state: State, title = 'Page') => renderToStaticMarkup(<GroupTabs.Provider value={tabsAt(path, state, navCounts(state))}><Header title={title} /></GroupTabs.Provider>);
+export { navCounts } from './App';
 export { landOn, redirectFor } from './redirects';
 export { EXTEND_TABS } from './pages/Extend';
 

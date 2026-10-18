@@ -44,7 +44,7 @@ test('in a real Chrome: Details opens every section; the PR body answering last 
     await cdp.send('Page.navigate', { url: `${f.base_url}/decisions` });
     await until('the landing decision card', () => js<boolean>(cdp, `!!${q('[data-decision="d-land"] [data-testid="decision-details"]')}`), 20_000);
     await pressSteady(cdp, q('[data-decision="d-land"] [data-testid="decision-details"]'), 'Details');
-    await until('the detail page', () => js<boolean>(cdp, `location.pathname === '/decisions/d-land' && !!${q('[data-testid="decision-detail"]')}`), 20_000);
+    await until('the detail page', () => js<boolean>(cdp, `location.pathname === '/needs-you/decisions/d-land' && !!${q('[data-testid="decision-detail"]')}`), 20_000);
     assert.equal((await js<string[]>(cdp, SECTIONS)).length, 13, 'every section');
     assert.match(await js<string>(cdp, `${q('[data-section="if-nothing"]')}.innerText`), /No timeout: it waits/);
 

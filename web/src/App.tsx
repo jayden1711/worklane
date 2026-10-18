@@ -1,7 +1,7 @@
 import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Menu, X, Bot, FlaskConical, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { Activity, Menu, X, Bot, FlaskConical, Gauge, LogOut, Inbox as InboxIcon, Layers, ListChecks, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote } from 'lucide-react';
 import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type Role, type State } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
@@ -68,24 +68,24 @@ const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthP
 const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/$/, BoardPage],
   [/^\/overview/, Overview],
-  [/^\/prs/, PullRequests],
-  [/^\/health/, HealthPage],
-  [/^\/inbox/, InboxPage],
-  [/^\/waiting/, WaitingPage],
-  [/^\/decisions\/./, DecisionDetailPage],
-  [/^\/decisions/, Decisions],
-  [/^\/setup/, SetupPage],
-  [/^\/issues\/\d/, IssueDetail],
-  [/^\/issues/, Issues],
-  [/^\/intake/, IntakePage],
-  [/^\/land/, Landing],
+  [/^\/work\/prs/, PullRequests],
+  [/^\/machine\/health/, HealthPage],
+  [/^\/needs-you\/inbox/, InboxPage],
+  [/^\/needs-you\/waiting/, WaitingPage],
+  [/^\/needs-you\/decisions\/./, DecisionDetailPage],
+  [/^\/needs-you\/decisions/, Decisions],
+  [/^\/settings\/setup/, SetupPage],
+  [/^\/work\/issues\/\d/, IssueDetail],
+  [/^\/work\/issues/, Issues],
+  [/^\/work\/intake/, IntakePage],
+  [/^\/shipping\/land/, Landing],
+  [/^\/agents\/activity/, ActivityPage],
   [/^\/agents/, Agents],
   [/^\/extend/, ExtendPage],
   [/^\/experiments/, ExperimentsPage],
-  [/^\/activity/, ActivityPage],
-  [/^\/deploys/, Deploys],
-  [/^\/reports/, Reports],
-  [/^\/logs/, LogsPage],
+  [/^\/shipping\/deploys/, Deploys],
+  [/^\/machine\/reports/, Reports],
+  [/^\/machine\/logs/, LogsPage],
   [/^\/machine/, MachinePage],
   [/^\/settings/, SettingsPage],
   [/^\/runs\//, RunDetail],
@@ -94,6 +94,9 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
 if (typeof window !== 'undefined') void (PAGE_FOR.find(([re]) => re.test(redirectFor(window.location.pathname) ?? window.location.pathname))?.[1] ?? BoardPage).preload();
 
 export function navigate(to: string) {
+  // A link to an old address (redirects.ts) goes straight to the new one: no entry for it in the history.
+  const old = /^[^?#]*/.exec(to)![0];
+  to = (redirectFor(old) ?? old) + to.slice(old.length);
   if (window.location.pathname === to) return;
   window.history.pushState(null, '', to);
   window.dispatchEvent(new PopStateEvent('popstate'));
@@ -146,8 +149,9 @@ export function pageKey(e: KeyboardEvent) {
 }
 
 /**
- * A sidebar page. `roles`: only these see it (in the sidebar, the command menu and the chords); absent: everyone.
- * `when`: shown only where this says so of the state; absent: always.
+ * A sidebar row. `roles`: only these see it (in the sidebar, the command menu and the chords); absent: everyone.
+ * `when`: shown only where this says so of the state; absent: always. `tabs`: a group's pages (#585), each a tab under
+ * the page header; the row opens the first one, on its key.
  */
 export interface NavItem {
   to: string;
@@ -157,35 +161,66 @@ export interface NavItem {
   testId: string;
   roles?: readonly Role[];
   when?: (state: NavState) => boolean;
+  tabs?: readonly NavTab[];
+}
+
+/** A page inside a sidebar group: its own address and `g` key, and a tab in the group's tab row. */
+export interface NavTab {
+  to: string;
+  label: string;
+  chord: string;
+  testId: string;
 }
 
 /** What of the state decides the sidebar's rows. */
 export type NavState = Pick<State, 'setupMode' | 'role' | 'experiments'>;
 
+// WHY (#585): nineteen sidebar rows became a handful of groups (the owner's list); every page kept its key, and its old
+// address redirects (redirects.ts). The Setup console lives under Settings.
+const NEEDS_YOU_TABS: readonly NavTab[] = [
+  { to: '/needs-you/inbox', label: 'Inbox', chord: 'i', testId: 'tab-inbox' },
+  { to: '/needs-you/waiting', label: 'Waiting on you', chord: 'w', testId: 'tab-waiting' },
+  { to: '/needs-you/decisions', label: 'Decisions', chord: 'd', testId: 'tab-decisions' },
+];
+const WORK_TABS: readonly NavTab[] = [
+  { to: '/', label: 'Board', chord: 'b', testId: 'tab-board' },
+  { to: '/work/issues', label: 'Issues', chord: 's', testId: 'tab-issues' },
+  { to: '/work/intake', label: 'Intake', chord: 'n', testId: 'tab-intake' },
+  { to: '/work/prs', label: 'Pull requests', chord: 'p', testId: 'tab-prs' },
+];
+const SHIPPING_TABS: readonly NavTab[] = [
+  { to: '/shipping/land', label: 'Land queue', chord: 'l', testId: 'tab-land' },
+  { to: '/shipping/deploys', label: 'Deploys', chord: 'y', testId: 'tab-deploys' },
+];
+const AGENTS_TABS: readonly NavTab[] = [
+  { to: '/agents', label: 'Agents', chord: 'a', testId: 'tab-agents' },
+  { to: '/agents/activity', label: 'Activity', chord: 'e', testId: 'tab-activity' },
+];
+const MACHINE_TABS: readonly NavTab[] = [
+  { to: '/machine', label: 'Machine', chord: 'm', testId: 'tab-machine' },
+  { to: '/machine/health', label: 'Health', chord: 'h', testId: 'tab-health' },
+  { to: '/machine/logs', label: 'Logs', chord: 'j', testId: 'tab-logs' },
+  { to: '/machine/reports', label: 'Reports', chord: 'r', testId: 'tab-reports' },
+];
+const SETTINGS_TABS: readonly NavTab[] = [
+  { to: '/settings', label: 'Settings', chord: ',', testId: 'tab-settings' },
+  { to: '/settings/setup', label: 'Setup console', chord: 'u', testId: 'tab-setup' },
+];
+
 export const NAV: NavItem[] = [
-  { to: '/', label: 'Board', icon: SquareKanban, chord: 'b', testId: 'nav-board' },
+  { to: '/needs-you/inbox', label: 'Needs you', icon: InboxIcon, chord: 'i', testId: 'nav-needs-you', tabs: NEEDS_YOU_TABS },
+  { to: '/', label: 'Work', icon: SquareKanban, chord: 'b', testId: 'nav-work', tabs: WORK_TABS },
   { to: '/overview', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
-  { to: '/inbox', label: 'Inbox', icon: InboxIcon, chord: 'i', testId: 'nav-inbox' },
-  { to: '/waiting', label: 'Waiting on you', icon: Hourglass, chord: 'w', testId: 'nav-waiting' },
-  { to: '/decisions', label: 'Decisions', icon: Vote, chord: 'd', testId: 'nav-decisions' },
-  { to: '/setup', label: 'Setup console', icon: Wrench, chord: 'u', testId: 'nav-setup' },
-  { to: '/issues', label: 'Issues', icon: ListChecks, chord: 's', testId: 'nav-issues' },
-  { to: '/intake', label: 'Intake', icon: MessagesSquare, chord: 'n', testId: 'nav-intake' },
-  { to: '/land', label: 'Land queue', icon: GitMerge, chord: 'l', testId: 'nav-land' },
-  { to: '/prs', label: 'Pull requests', icon: GitPullRequest, chord: 'p', testId: 'nav-prs' },
-  { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
+  { to: '/shipping/land', label: 'Shipping', icon: Rocket, chord: 'l', testId: 'nav-shipping', tabs: SHIPPING_TABS },
+  { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents', tabs: AGENTS_TABS },
   // Automations (and Plugins, as another tab): what an instance does beyond its issues. Owners and writers only.
   { to: '/extend', label: 'Extend', icon: Puzzle, chord: 'x', testId: 'nav-extend', roles: ['owner', 'writer'] },
   // Experiments (#581): owners and writers, only where root's file turns experiments on for this instance (the server's
   // `experiments`; off, unknown or absent hides it). Its page still opens at its address, to say how to set it up.
+  // A sidebar item of its own, not a Work tab (#585 keeps #581's choice).
   { to: '/experiments', label: 'Experiments', icon: FlaskConical, chord: 't', testId: 'nav-experiments', roles: ['owner', 'writer'], when: (s) => s.experiments === true },
-  { to: '/activity', label: 'Activity', icon: History, chord: 'e', testId: 'nav-activity' },
-  { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
-  { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
-  { to: '/logs', label: 'Logs', icon: ScrollText, chord: 'j', testId: 'nav-logs' },
-  { to: '/health', label: 'Health', icon: HeartPulse, chord: 'h', testId: 'nav-health' },
-  { to: '/machine', label: 'Machine', icon: Server, chord: 'm', testId: 'nav-machine' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings' },
+  { to: '/machine', label: 'Machine', icon: Server, chord: 'm', testId: 'nav-machine', tabs: MACHINE_TABS },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, chord: ',', testId: 'nav-settings', tabs: SETTINGS_TABS },
 ];
 
 /** First run: the one page in setup mode (it isn't in NAV: once configured, Settings links to it). */
@@ -198,9 +233,84 @@ export const FIRST_RUN_NAV = { to: '/first-run', label: 'First run', icon: ListC
 export const navFor = (state: NavState | null): NavItem[] =>
   state?.setupMode ? [FIRST_RUN_NAV] : NAV.filter((n) => (!n.roles || (!!state?.role && n.roles.includes(state.role))) && (!n.when || (!!state && n.when(state))));
 
+/** Every page this person can open, a group's tabs in its place, with the group's icon: the command menu's and the `g` keys'. */
+export const pagesFor = (state: NavState | null): (NavTab & { icon: typeof Bot })[] => navFor(state).flatMap((n) => (n.tabs ?? [n]).map((t) => ({ to: t.to, label: t.label, chord: t.chord, testId: t.testId, icon: n.icon })));
+
+/** Whether a path is at an address or under it ('/' only itself). */
+const under = (path: string, to: string) => (to === '/' ? path === '/' : path === to || path.startsWith(`${to}/`));
+
+/** The sidebar row a path is on, and its tab in a group: the longest address it is at or under. Null: none (a run, First run). */
+export function placeOf(path: string): { row: NavItem; tab: NavTab | null } | null {
+  let best: { row: NavItem; tab: NavTab | null } | null = null;
+  let len = -1;
+  for (const row of NAV) {
+    for (const t of row.tabs ?? [row]) {
+      if (under(path, t.to) && t.to.length > len) {
+        best = { row, tab: row.tabs ? t : null };
+        len = t.to.length;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * The sidebar's badges, by row (its test id), and each tab's, by address. Needs you: each open decision once (the
+ * Inbox's are among them) and each of your blocked tasks; Work: the PRs waiting for you, as the Pull requests row had.
+ */
+export function navCounts(state: Pick<State, 'decisions' | 'inbox' | 'tasks' | 'landQueue' | 'prCounts' | 'runs'> | null): Counts {
+  const open = state?.decisions.filter((d) => !d.answer) ?? [];
+  const tabs = {
+    '/needs-you/inbox': state ? state.inbox.decisions.length + state.inbox.blocked.length : 0,
+    '/needs-you/decisions': open.length,
+    '/work/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
+    '/shipping/land': state?.landQueue.length ?? 0,
+    '/work/prs': state?.prCounts?.needYou ?? 0,
+    '/agents': state?.runs?.active.length ?? 0,
+  };
+  const needsYou = state ? new Set([...open, ...state.inbox.decisions].map((d) => d.id)).size + state.inbox.blocked.length : 0;
+  return { ...tabs, 'nav-needs-you': needsYou, 'nav-work': tabs['/work/prs'], 'nav-shipping': tabs['/shipping/land'], 'nav-agents': tabs['/agents'] };
+}
+
+/** Badges that ask for the person: amber. */
+const WARN = new Set(['nav-needs-you', 'nav-work', '/needs-you/inbox', '/needs-you/decisions', '/work/prs']);
+
+/** The tab row the page header draws: the group the page is in, its tabs, the one shown, and their badges. */
+export const GroupTabs = createContext<{ label: string; tabs: readonly NavTab[]; active: string; counts: Counts } | null>(null);
+
+/** The group's tab row for a path, or null (a page that isn't in a group, or setup mode). */
+export function tabsAt(path: string, state: NavState | null, counts: Counts) {
+  const at = state && !state.setupMode ? placeOf(path) : null;
+  return at?.tab && at.row.tabs ? { label: at.row.label, tabs: at.row.tabs, active: at.tab.to, counts } : null;
+}
+
+/** Under the page header: the tabs of the group the page is in, each its own address (as Extend's tabs). */
+export function GroupTabRow() {
+  const g = useContext(GroupTabs);
+  if (!g) return null;
+  return (
+    <nav className="flex flex-wrap gap-1 border-b border-line px-6 max-md:px-4" aria-label={g.label} data-testid="group-tabs">
+      {g.tabs.map((t) => (
+        <a
+          key={t.to}
+          href={t.to}
+          onClick={(e) => (e.preventDefault(), navigate(t.to))}
+          className={cx('-mb-px inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-1.5 text-[12.5px] max-md:min-h-11', t.to === g.active ? 'border-ink font-medium text-ink' : 'border-transparent text-ink-2 hover:text-ink')}
+          aria-current={t.to === g.active ? 'page' : undefined}
+          data-testid={t.testId}
+        >
+          {t.label}
+          {!!g.counts[t.to] && <span className={cx('rounded-full px-1.5 text-[11.5px] font-medium tabular-nums', WARN.has(t.to) ? 'bg-orange-tint text-orange' : 'text-ink-3')}>{g.counts[t.to]}</span>}
+        </a>
+      ))}
+    </nav>
+  );
+}
+
 /** Setup mode, at the address of a page that isn't shown yet: what it needs, and the way to First run. */
 export function SetupModeHidden({ path }: { path: string }) {
-  const page = NAV.find((n) => (n.to === '/' ? path === '/' : path.startsWith(n.to)))?.label ?? 'This page';
+  const at = placeOf(redirectFor(path) ?? path);
+  const page = at?.tab?.label ?? at?.row.label ?? 'This page';
   return (
     <div data-testid="setup-mode-hidden">
       <Header title={page} sub="not set up yet" />
@@ -236,7 +346,7 @@ function CommandMenu({ open, setOpen, state, toggleTheme }: { open: boolean; set
             <Command.List className="max-h-[50vh] overflow-y-auto p-1.5">
               <Command.Empty className="p-6 text-center text-[13px] text-ink-3">No results.</Command.Empty>
               <Command.Group heading="Pages">
-                {navFor(state).map((n) => (
+                {pagesFor(state).map((n) => (
                   <Item key={n.to} onSelect={() => go(n.to)} hint={`g ${n.chord}`}>
                     <n.icon className="size-4" /> {n.label}
                   </Item>
@@ -431,8 +541,9 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   const [nav, setNav] = useState(false);
   useEffect(() => setNav(false), [path]);
   const [voice] = useVoicePrefs();
-  const navNow = useRef(NAV);
-  navNow.current = navFor(state);
+  // The `g` keys: every page's, a group's tabs included.
+  const navNow = useRef(pagesFor(null));
+  navNow.current = pagesFor(state);
 
   useEffect(() => {
     const on = (e: KeyboardEvent) => {
@@ -461,21 +572,11 @@ function InstanceDashboard({ health }: { health: Health | null }) {
     if (state) document.title = `${state.project.name} · ${state.brand.name}`;
   }, [state]);
 
-  const counts = useMemo(
-    () => ({
-      '/inbox': state ? state.inbox.decisions.length + state.inbox.blocked.length : 0,
-      '/decisions': state?.decisions.filter((d) => !d.answer).length ?? 0,
-      '/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
-      '/land': state?.landQueue.length ?? 0,
-      '/prs': state?.prCounts?.needYou ?? 0,
-      '/agents': state?.runs?.active.length ?? 0,
-    }),
-    [state],
-  );
+  const counts = useMemo(() => navCounts(state), [state]);
 
-  const issueMatch = path.match(/^\/issues\/(\d+)/);
+  const issueMatch = path.match(/^\/work\/issues\/(\d+)/);
   const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
-  const decisionMatch = path.match(/^\/decisions\/([A-Za-z0-9._-]+)$/);
+  const decisionMatch = path.match(/^\/needs-you\/decisions\/([A-Za-z0-9._-]+)$/);
   let page: React.ReactNode;
   // Can't load: still a header, so the menu (and every other page) stays reachable on a narrow screen.
   if (!state) page = error ? <><Header title="Can't load" /><div className="p-8 text-[13px] text-red">Can't load: {error}</div></> : <Loading />;
@@ -485,27 +586,27 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (!usageAnswered) page = <Loading />;
   // WHY: setup mode (no config yet) serves the first-run page alone; any other page's address says what it needs (#468).
   else if (state.setupMode) page = path === '/' || path === '/first-run' ? <FirstRunPage state={state} /> : <SetupModeHidden path={path} />;
-  else if (path === '/inbox') page = <InboxPage state={state} />;
-  else if (path === '/waiting') page = <WaitingPage state={state} />;
-  else if (path === '/decisions') page = <Decisions state={state} />;
+  else if (path === '/needs-you/inbox') page = <InboxPage state={state} />;
+  else if (path === '/needs-you/waiting') page = <WaitingPage state={state} />;
+  else if (path === '/needs-you/decisions') page = <Decisions state={state} />;
   else if (decisionMatch) page = <DecisionDetailPage state={state} id={decisionMatch[1]!} />;
-  else if (path === '/setup') page = <SetupPage />;
+  else if (path === '/settings/setup') page = <SetupPage />;
   else if (path === '/first-run') page = <FirstRunPage state={state} />;
   else if (runMatch) page = <RunDetail id={runMatch[1]!} refused={runsRefusal(state)} />;
   else if (issueMatch) page = <IssueDetail state={state} issue={Number(issueMatch[1])} />;
-  else if (path.startsWith('/issues')) page = <Issues state={state} />;
-  else if (path === '/land') page = <Landing state={state} />;
-  else if (path === '/prs') page = <PullRequests state={state} />;
+  else if (path.startsWith('/work/issues')) page = <Issues state={state} />;
+  else if (path === '/shipping/land') page = <Landing state={state} />;
+  else if (path === '/work/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
   else if (path === '/experiments' || path.startsWith('/experiments/')) page = <ExperimentsPage state={state} path={path} />;
-  else if (path === '/activity') page = <ActivityPage state={state} />;
-  else if (path === '/intake') page = <IntakePage state={state} />;
-  else if (path === '/deploys') page = <Deploys state={state} />;
-  else if (path === '/reports') page = <Reports state={state} pulse={pulse} />;
+  else if (path === '/agents/activity') page = <ActivityPage state={state} />;
+  else if (path === '/work/intake') page = <IntakePage state={state} />;
+  else if (path === '/shipping/deploys') page = <Deploys state={state} />;
+  else if (path === '/machine/reports') page = <Reports state={state} pulse={pulse} />;
   else if (path === '/settings') page = <SettingsPage owner={state.role === 'owner'} brand={state.brand.name} />;
-  else if (path === '/logs') page = <LogsPage refused={logsRefusal(state)} />;
-  else if (path === '/health') page = <HealthPage />;
+  else if (path === '/machine/logs') page = <LogsPage refused={logsRefusal(state)} />;
+  else if (path === '/machine/health') page = <HealthPage />;
   else if (path === '/machine') page = <MachinePage state={state} />;
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
@@ -521,9 +622,11 @@ function InstanceDashboard({ health }: { health: Health | null }) {
           {state && <StopBanner state={state} />}
           <UsageBanner usage={usage} now={now} />
           {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
-          <Entrances key={path}>
-            <Suspense fallback={<Loading />}>{page}</Suspense>
-          </Entrances>
+          <GroupTabs.Provider value={tabsAt(path, state, counts)}>
+            <Entrances key={path}>
+              <Suspense fallback={<Loading />}>{page}</Suspense>
+            </Entrances>
+          </GroupTabs.Provider>
         </main>
         <UpdatingMark />
         <NavDrawer open={nav} setOpen={setNav}>
@@ -557,7 +660,7 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
         </div>
         {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}
         {health && !health.hub && (
-          <a href="/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/health'))} title="Health">
+          <a href="/machine/health" className="ml-auto" onClick={(e) => (e.preventDefault(), navigate('/machine/health'))} title="Health">
             <StatusDot status={health.status[''] ?? 'green'} why={health.why?.['']} testId="instance-status-dot" />
           </a>
         )}
@@ -573,9 +676,9 @@ export function SidebarBody({ state, path, counts, health, live, theme, toggleTh
             href={n.to}
             icon={<n.icon className="size-4" />}
             label={n.label}
-            count={counts[n.to]}
-            countTone={n.to === '/decisions' || n.to === '/inbox' || n.to === '/prs' ? 'warn' : undefined}
-            active={n === FIRST_RUN_NAV ? path === '/' || path === '/first-run' : n.to === '/' ? path === '/' : path.startsWith(n.to)}
+            count={counts[n.testId]}
+            countTone={WARN.has(n.testId) ? 'warn' : undefined}
+            active={n === FIRST_RUN_NAV ? path === '/' || path === '/first-run' : placeOf(path)?.row === n}
             onSelect={() => navigate(n.to)}
             testId={n.testId}
           />

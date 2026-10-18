@@ -129,6 +129,8 @@ interface Render {
   renderWhoAmI(state: { user: string; role?: string; via?: string }, o?: { hubPage?: boolean }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
   renderSetupModeHidden(path: string): string;
+  renderAt(path: string, state: State, title?: string): string;
+  navCounts(state: unknown): Record<string, number | undefined>;
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
@@ -517,13 +519,13 @@ test('narrow screens: the page header\'s menu button opens a drawer with every p
   assert.match(drawer, /data-testid="nav-drawer-close"[^>]*aria-label="Close navigation"|aria-label="Close navigation"[^>]*data-testid="nav-drawer-close"/);
   assert.match(drawer, />Navigation</);
   // Every page of the sidebar, as a link to its route.
-  assert.ok(r.navRows.length >= 18, 'the sidebar rows were read');
+  assert.equal(r.navRows.length, 9, 'the sidebar groups were read (#585)');
   for (const n of r.navRows) assert.match(drawer, new RegExp(`<a href="${n.to.replace(/[/]/g, '\\/')}"[^>]*data-testid="${n.testId}"`), `the drawer links to ${n.label}`);
   assert.match(drawer, /data-testid="search-button"/);
   assert.match(drawer, /data-testid="theme-toggle"/);
   assert.match(drawer, /data-testid="live-indicator"/);
   // Off a hub: this instance's status dot, linking to Health.
-  assert.match(amber.slice(amber.indexOf('id="nav-drawer"')), /<a href="\/health"[^>]*>.*?data-status="amber" data-testid="instance-status-dot"/);
+  assert.match(amber.slice(amber.indexOf('id="nav-drawer"')), /<a href="\/machine\/health"[^>]*>.*?data-status="amber" data-testid="instance-status-dot"/);
   // On a hub: the instance list, each with its dot.
   const hubDrawer = hub.slice(hub.indexOf('id="nav-drawer"'));
   assert.match(hubDrawer, /data-testid="instance-switcher"/);
@@ -1777,6 +1779,38 @@ test('#581 the old Extend route redirects', () => {
   assert.match(extend, /aria-current="page"[^>]*data-testid="extend-tab-automations"/);
   // The new page renders at its own route.
   assert.match(r.renderPage('experiments', asOwner), /data-testid="page-experiments"/);
+});
+
+test('#585 a grouped page\'s header draws its group\'s tabs with the counts their rows had; the sidebar has one Needs you badge', () => {
+  const issues = r.renderAt('/work/issues', asOwner, 'Issues');
+  assert.deepEqual([...issues.matchAll(/<a href="([^"]+)"[^>]*data-testid="(tab-[a-z]+)"/g)].map((m) => `${m[2]} ${m[1]}`), ['tab-board /', 'tab-issues /work/issues', 'tab-intake /work/intake', 'tab-prs /work/prs']);
+  assert.match(issues, /<nav[^>]*aria-label="Work"[^>]*data-testid="group-tabs"/);
+  assert.match(issues, /aria-current="page"[^>]*data-testid="tab-issues"/);
+  assert.equal([...issues.matchAll(/aria-current="page"/g)].length, 1, 'one tab is the page shown');
+  // An issue's own page is on the Issues tab.
+  assert.match(r.renderAt('/work/issues/3', asOwner), /aria-current="page"[^>]*data-testid="tab-issues"/);
+  // The tab carries the count its sidebar row had.
+  const c = r.navCounts(asOwner);
+  assert.ok(c['/work/issues']! > 0, 'the demo has open issues');
+  assert.match(issues, new RegExp(`data-testid="tab-issues"[^>]*>Issues<span[^>]*>${c['/work/issues']}</span>`));
+  // The Setup console is a tab under Settings.
+  assert.match(r.renderAt('/settings', asOwner), /<a href="\/settings\/setup"[^>]*data-testid="tab-setup"[^>]*>Setup console</);
+  // A page outside a group has no tab row; nor does any page in setup mode.
+  for (const p of ['/overview', '/extend', '/experiments', '/runs/r-1', '/first-run']) assert.doesNotMatch(r.renderAt(p, asOwner), /group-tabs/, p);
+  assert.doesNotMatch(r.renderAt('/work/issues', { ...asOwner, setupMode: true } as never), /group-tabs/);
+  // The sidebar: one Needs you row with its one badge, and no row of its own for the Inbox or Decisions.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  let drawer: string;
+  try {
+    drawer = r.renderNavDrawer(asOwner);
+  } finally {
+    g.window = stub;
+  }
+  assert.ok(c['nav-needs-you']! > 0, 'the demo has open decisions');
+  assert.match(drawer, new RegExp(`<a href="/needs-you/inbox"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
+  assert.doesNotMatch(drawer, /data-testid="nav-(inbox|decisions|waiting)"/);
 });
 
 test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {
