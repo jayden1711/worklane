@@ -293,7 +293,7 @@ function Meter({ label, value, max, text }: { label: string; value: number; max:
         <b className="font-medium tabular-nums text-ink">{text}</b>
       </div>
       <div className="mt-0.5 h-1.5 overflow-hidden rounded bg-hover-2" aria-hidden="true">
-        <i className={cx('block h-full rounded', pct >= 90 ? 'bg-orange' : 'bg-blue')} style={{ width: `${pct}%` }} />
+        <i className={cx('block h-full rounded', pct >= 90 ? 'bg-orange' : 'bg-ring')} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -319,8 +319,8 @@ function BestChart({ points, direction }: { points: { n: number; value: number |
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="mt-1 h-auto w-full" role="img" aria-label={`Best ${direction === 'min' ? 'lowest' : 'highest'} result over ${ps.length} scored jobs`} data-testid="experiment-chart">
       {ps.map((p, i) => !p.kept && <circle key={p.n} cx={x(i)} cy={H - y(p.value)} r="1.8" fill="var(--ink-3)" opacity="0.45" />)}
-      <path d={steps.join(' ')} fill="none" stroke="var(--blue)" strokeWidth="2" />
-      {ps.map((p, i) => p.kept && <circle key={`k${p.n}`} cx={x(i)} cy={H - y(p.value)} r="2.4" fill="var(--blue)" />)}
+      <path d={steps.join(' ')} fill="none" stroke="var(--ring)" strokeWidth="2" />
+      {ps.map((p, i) => p.kept && <circle key={`k${p.n}`} cx={x(i)} cy={H - y(p.value)} r="2.4" fill="var(--ring)" />)}
     </svg>
   );
 }

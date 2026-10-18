@@ -8,7 +8,7 @@
 // text-white on bg-green) is checked on that fill. No text is drawn in the accent, and placeholder text passes too.
 // A control's edge reaches 3:1 (WCAG 1.4.11) on the resting backgrounds, and no field or button draws its own edge
 // with the divider colour; dividers don't need 3:1. The focus ring reaches 3:1 on every light background, and no
-// focus or selection style draws the accent instead of the ring.
+// focus or selection style draws the accent instead of the ring. A progress bar's fill reaches 3:1 on its track.
 // Every colour class names a theme colour (a typo'd one draws nothing). Dark mode's block is pinned byte for byte.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -438,6 +438,56 @@ test('every colour class in web/src names a theme colour, and every var() names 
   }
   assert.ok(seen > 500, `the scan finds the colour classes (${seen}; else it is broken)`);
   assert.deepEqual(bad, [], 'a colour class or var() that names no theme colour or custom property');
+});
+
+/** Chart marks drawn in a theme colour straight on a card (no track under them): the file, a snippet that finds the
+ *  line, and what the mark is. */
+const CHART_MARKS: [string, string, string][] = [
+  ['web/src/components/ThroughputPanel.tsx', 'rounded-t-[4px]', 'merged PRs per day'],
+  ['web/src/components/Experiments.tsx', 'strokeWidth="2"', 'best-result line'],
+  ['web/src/components/Experiments.tsx', 'r="2.4"', 'kept-result dots'],
+];
+
+test('a progress bar is 3:1 on its track, and a chart mark on every light background', () => {
+  // A bar's fill is the graphic that carries its value (WCAG 1.4.11). The accent is 2.23:1 on the hover-2 track and
+  // 2.73:1 on the inset one; the bars draw in --ring instead, which is the accent in dark mode, so dark is unchanged.
+  const tokens = lightTokens();
+  const colour = (name: string): Rgba => parseColour(BUILT_IN[name] ?? resolve(`var(--${name})`, tokens));
+  const failing: string[] = [];
+  let tracks = 0;
+  for (const file of files(webSrc)) {
+    const rel = file.slice(repoRoot.length);
+    const lines = readFileSync(file, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      // A track: a thin, clipped strip in one light background, with the bar (h-full) on the next line.
+      if (!/(?<![\w-])h-(?:0\.5|1|1\.5|2)(?![\w-])/.test(line) || !/(?<![\w-])overflow-hidden(?![\w-])/.test(line)) return;
+      const under = uses(line, `${rel}:${i + 1}`).filter((u) => u.kind === 'bg' && !u.variant && BACKGROUNDS.includes(u.name) && u.alpha === undefined);
+      const bar = lines[i + 1] ?? '';
+      if (under.length !== 1 || !/(?<![\w-])h-full(?![\w-])/.test(bar)) return;
+      tracks++;
+      const base = colour(under[0]!.name);
+      for (const f of uses(bar, `${rel}:${i + 2}`).filter((u) => u.kind === 'bg')) {
+        const fill = colour(f.name);
+        if (f.alpha !== undefined) fill.a *= f.alpha;
+        const r = contrast(over(fill, base), base);
+        if (r < 3) failing.push(`${rel}:${i + 2}: bg-${f.name} on a bg-${under[0]!.name} track: ${r.toFixed(2)}:1, needs 3:1`);
+      }
+    });
+  }
+  assert.ok(tracks >= 7, `the scan finds the progress tracks (${tracks}; else it is broken)`);
+  for (const [rel, snippet, what] of CHART_MARKS) {
+    const at = readFileSync(join(repoRoot, rel), 'utf8').split('\n').map((line, i) => ({ line, n: i + 1 })).filter(({ line }) => line.includes(snippet));
+    assert.equal(at.length, 1, `${rel} has one line with ${snippet} (the ${what})`);
+    const { line, n } = at[0]!;
+    const names = [...line.matchAll(/(?<![\w-])bg-([a-z][\w-]*)|(?:fill|stroke)="var\(--([\w-]+)\)"/g)].map((m) => m[1] ?? m[2] ?? '').filter((x) => x && x !== 'none');
+    assert.ok(names.length > 0, `${rel}:${n} draws the ${what} in a theme colour`);
+    for (const name of names)
+      for (const bg of BACKGROUNDS) {
+        const r = contrast(colour(name), colour(bg));
+        if (r < 3) failing.push(`${rel}:${n}: ${what} in ${name} on ${bg}: ${r.toFixed(2)}:1, needs 3:1`);
+      }
+  }
+  assert.deepEqual(failing, [], 'a progress bar or chart mark is under WCAG 1.4.11');
 });
 
 test('dark mode is unchanged', () => {

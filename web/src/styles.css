@@ -24,8 +24,8 @@
   /* Dividers. A control's edge (a button, a field, a toggle) is --line-strong, which reaches 3:1. */
   --line: #b0aea5;
   --line-strong: #807e76;
-  /* The accent: fills and large marks only (2.96:1 on the page, under 3:1, so never text, and light mode's focus ring
-     is the darker --ring set below). Text in the accent's
+  /* The accent: fills and large marks only (2.96:1 on the page, under 3:1, so never text, and light mode's focus ring,
+     progress bars and chart marks are the darker --ring set below). Text in the accent's
      colour is --blue-ink; text on an accent fill is dark (--ink, 5.90:1; white is 3.12:1). */
   --blue: #d97757;
   --blue-ink: #8a412a;
@@ -48,8 +48,8 @@
   --shadow-overlay: 0 0 0 1px var(--line), 0 25px 50px 0 #0000000d, 0 12px 24px 0 #0000000a, 0 6px 12px 0 #00000008;
 }
 /* Light mode only: the hairline draws the edge of fields and toggles, so it takes the control-edge colour; the
-   focus and selection ring is a darker accent, since the accent itself is under 3:1 here (#b5543a is 3.49:1 or more
-   on every light background). Here rather than in :root or the shared block below, which dark mode also reads, so
+   focus and selection ring (and progress bars and chart marks, which draw in --ring) is a darker accent, since the
+   accent itself is under 3:1 here (#b5543a is 3.49:1 or more on every light background). Here rather than in :root or the shared block below, which dark mode also reads, so
    dark mode is unchanged. */
 :root:not(.dark) {
   --shadow-hairline: 0 0 0 1px var(--line-strong);

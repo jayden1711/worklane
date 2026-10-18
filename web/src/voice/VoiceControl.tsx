@@ -72,7 +72,7 @@ export function VoiceBanner({ view, onConfirm, onCancel }: { view: BannerView | 
         </div>
       )}
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-inset" aria-hidden>
-        <div className="h-full bg-blue transition-[width] duration-200" style={{ width: `${pct}%` }} />
+        <div className="h-full bg-ring transition-[width] duration-200" style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
