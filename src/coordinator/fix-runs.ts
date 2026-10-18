@@ -19,7 +19,7 @@ import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../wo
 import { seen } from '../intake/store.js';
 import { Landing } from './landing.js';
 import { buildRoute } from './model-routing.js';
-import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, logTail, pushRefusal } from './shared.js';
+import { MERGEABLE_RECHECK_MS, CLAIM_HELD_GIVE_UP_MS, laneOf, StoppedByOwner, Halted, ShuttingDown, UsagePaused, AuthPaused, DEFAULT_REVIEW, logTail, pushRefusal, lockScopeOf } from './shared.js';
 import { storageFailure } from '../events/log.js';
 import { SESSION_ID, type RunRequest, type RunResult } from '../runner.js';
 import { resumeFailed, reviewBrief, reviewFeedback, type ReviewFeedback } from '../review-feedback.js';
@@ -588,7 +588,7 @@ export abstract class FixRuns extends Landing {
       if (!verdict.patch_correct) return await give(`the evaluator rejected the resolution: ${verdict.advice || 'no reason given'}`);
       const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
       const touched = change.files.filter((f) => files.includes(f.path));
-      const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review) : null;
+      const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review) : null;
       const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, confidenceReason: verdict.confidence_reason, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
       const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok && 'refused' in push) {

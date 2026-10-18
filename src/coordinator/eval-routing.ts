@@ -2,7 +2,7 @@
 // files the judging run actually read (from its run record, never from its own list). The decisions are pure
 // (src/eval-routing.ts, src/unread.ts); this runs them around the evaluator's run.
 import { evaluatorModel, routingLevel, shouldEscalate, type EvalRouting, type Verdict } from '../eval-routing.js';
-import { computeLevel, type ChangeFile, type Level } from '../review.js';
+import { computeLevel, type ChangeFile, type Level, type LockScope } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
 import { readRun } from '../run-record.js';
 import type { RunResult } from '../runner.js';
@@ -16,10 +16,10 @@ export const ESCALATED_COST_ROLE = 'evaluator-escalated';
  * The level a change routes at, before any verdict: its review level from the files and labels (a comment-only
  * change routes as L0), raised to L2 by a tamper flag. A level that can't be computed routes to the strong model.
  */
-export function evalLevel(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; tampered: string[] }): Level {
+export function evalLevel(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; tampered: string[]; scope?: LockScope }): Level {
   let level: Level;
   try {
-    level = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths() }, o.review).level;
+    level = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths(), scope: o.scope }, o.review).level;
   } catch {
     return 'L3';
   }
