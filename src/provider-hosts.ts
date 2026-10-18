@@ -70,33 +70,62 @@ export function baseUrlProblem(raw: unknown): string | null {
   return null;
 }
 
+/** A host as WHATWG URL parsed it: made only by parsedHost, so a refusal can't be handed raw text in its place. */
+export type ParsedHost = string & { readonly __parsedHost: true };
+const parsedHost = (host: string): ParsedHost => new URL(`https://${host}/`).hostname as ParsedHost;
+
+/** Every way an allowlist entry is refused. */
+export const ENTRY_REFUSALS = ['not-a-string', 'too-long', 'wildcard', 'not-host-port', 'not-a-host', 'not-normalised', 'bad-port'] as const;
+export type EntryRefusal = (typeof ENTRY_REFUSALS)[number];
+
 /**
- * One allowlist entry: host[:port], in the form WHATWG URL gives the host; or why it isn't one. `at`: its position in
- * "hosts", from 1.
+ * What a refusal of entry `at` (its position in "hosts", from 1) says.
  *
- * INVARIANT (#392): a refusal names the entry by position and never quotes what root wrote until it has matched
- * host[:port], which can't hold a user, password, query or fragment. The refusal reaches the start-up log and writers
- * on the Health page, and a mistyped entry (`user:secret@host`, `https://user:secret@host/`, `host?key=secret`) may
- * hold a credential. As src/network.ts does for the proxy.
+ * INVARIANT (#392): it is given the position, the kind and at most a host WHATWG URL parsed from the entry, never the
+ * entry; so it can't quote any part of what root wrote. A parsed host can't hold a user, password, query or fragment
+ * (URL refuses a host that decodes to one: `%40`, a fullwidth `＠`). The refusal reaches the start-up log and writers
+ * on the Health page, and a mistyped entry (`user:secret@host`, `host?key=secret`, `user%3Asecret%40host`) may hold a
+ * credential. As src/network.ts does for the proxy.
  */
-function entryOf(raw: unknown, at: number): { host: string; port: string | null } | string {
+function refusalText(at: number, why: EntryRefusal, host: ParsedHost | null): string {
   const name = `hosts entry ${at}`;
-  if (typeof raw !== 'string' || !raw) return `${name} must be a non-empty string`;
-  if (raw.length > PROVIDER_HOSTS_LIMITS.entry) return `${name} is longer than ${PROVIDER_HOSTS_LIMITS.entry} characters`;
-  if (raw.includes('*')) return `${name}: no wildcards; name each host`;
+  const notShown = 'not shown, as it may hold a credential';
+  switch (why) {
+    case 'not-a-string': return `${name} must be a non-empty string`;
+    case 'too-long': return `${name} is longer than ${PROVIDER_HOSTS_LIMITS.entry} characters`;
+    case 'wildcard': return `${name}: no wildcards; name each host`;
+    case 'not-host-port': return `${name} must be host or host:port (no scheme, user, path, query or fragment); ${notShown}`;
+    case 'not-a-host': return `${name} is not a host name or address; ${notShown}`;
+    case 'not-normalised': return `${name} must be written as a URL normalises it: ${JSON.stringify(host)}`;
+    case 'bad-port': return `${name} (${JSON.stringify(host)}) has a bad port`;
+  }
+}
+
+/** One allowlist entry: host[:port], in the form WHATWG URL gives the host; or how it is refused (with the host URL parsed from it, if any). */
+export function providerHostEntry(raw: unknown): { host: string; port: string | null } | { refused: EntryRefusal; host: ParsedHost | null } {
+  const no = (refused: EntryRefusal, host: ParsedHost | null = null) => ({ refused, host });
+  if (typeof raw !== 'string' || !raw) return no('not-a-string');
+  if (raw.length > PROVIDER_HOSTS_LIMITS.entry) return no('too-long');
+  if (raw.includes('*')) return no('wildcard');
   const m = /^(\[[0-9a-f:.]+\]|[^\s:/?#@[\]\\]+)(?::(\d{1,5}))?$/.exec(raw);
-  if (!m) return `${name} must be host or host:port (no scheme, user, path, query or fragment); not shown, as it may hold a credential`;
+  if (!m) return no('not-host-port');
   const [, host, port] = m as unknown as [string, string, string | undefined];
-  let canonical: string;
+  let canonical: ParsedHost;
   try {
-    canonical = new URL(`https://${host}/`).hostname;
+    canonical = parsedHost(host);
   } catch {
-    return `${name} (${JSON.stringify(host)}) is not a host name or address`;
+    return no('not-a-host');
   }
   // WHY: matched exactly against what WHATWG URL makes of a base_url, so the entry must already be in that form.
-  if (canonical !== host) return `${name} (${JSON.stringify(host)}) must be written as a URL normalises it: ${JSON.stringify(canonical)}`;
-  if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return `${name} (${JSON.stringify(host)}) has a bad port`;
+  if (canonical !== host) return no('not-normalised', canonical);
+  if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return no('bad-port', canonical);
   return { host, port: port ?? null };
+}
+
+/** providerHostEntry, with a refusal as its text (refusalText). */
+function entryOf(raw: unknown, at: number): { host: string; port: string | null } | string {
+  const e = providerHostEntry(raw);
+  return 'refused' in e ? refusalText(at, e.refused, e.host) : e;
 }
 
 /**
