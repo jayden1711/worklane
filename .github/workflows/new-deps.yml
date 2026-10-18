@@ -3,7 +3,8 @@ name: new-deps
 # peerDependencies, or a runtime package in package-lock.json, transitive ones included) is named in the PR body's
 # "## New dependencies" section with its licence and why (scripts/ci/new-deps.mjs). Its own workflow, not ci.yml,
 # because it also runs when the body is edited: ci.yml on an edit would restart every test. Green here is not
-# approval: a new runtime dependency still waits for the owner's OK before it merges.
+# approval: a new runtime dependency still waits for the owner's OK before it merges. Its last step refuses vendor
+# attribution in the body (scripts/push-gate.mjs --pr-body, #576).
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -31,3 +32,8 @@ jobs:
           check="$RUNNER_TEMP/new-deps.mjs"
           git show HEAD^1:scripts/ci/new-deps.mjs > "$check" 2>/dev/null || cp scripts/ci/new-deps.mjs "$check"
           node "$check" HEAD^1 HEAD
+      # #576: no vendor attribution in the body (the repo's attribution is the DCO sign-off). Here, not in ci.yml,
+      # because an edited body is checked again; the body is read from the event payload, never from the shell line.
+      - name: no vendor attribution in the PR body
+        if: '!cancelled()'
+        run: node scripts/push-gate.mjs --pr-body

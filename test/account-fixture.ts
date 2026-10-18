@@ -12,12 +12,14 @@ import { DEVICE_VIEWS } from '../src/dashboard-auth.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { raiseIncident } from '../src/watchdog/incidents.js';
+import { instanceFindings, reconcile } from '../src/watchdog/probes.js';
 import { exampleProject, exampleRole, machineOwnersFile, repoRoot } from './helpers.js';
 
 const tag = randomBytes(4).toString('hex');
 /** What names the account, made up at each run: no viewer may see any of these (nor a writer on the accounts panel). */
 export const ACCOUNT = { email: `agents-${tag}@example.com`, org: `org-${tag}`, plan: `plan-${tag}`, profile: `night-${tag}` };
+/** The account email's local part alone (#680: the ops channel and a writer's incident name neither it nor the email). */
+export const ACCOUNT_LOCAL = new RegExp(ACCOUNT.email.split('@')[0]!, 'i');
 export const ACCOUNT_TEXT = new RegExp([ACCOUNT.email, ACCOUNT.org, ACCOUNT.plan, ACCOUNT.profile].map((s) => s.replace(/[.]/g, '\\.')).join('|'));
 
 /** A person with no role here at all (no read on the repo): the dashboard refuses them everything. */
@@ -43,7 +45,8 @@ export function apiPaths(): string[] {
   return [...out].sort();
 }
 
-export async function accountDashboard() {
+/** `machineOwners`: the machine's owners (example-owner, this instance's owner, by default). */
+export async function accountDashboard(o: { machineOwners?: string[] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'account-visibility-'));
   const { dir: root } = exampleProject();
   const cfg = loadConfig(root);
@@ -67,11 +70,19 @@ export async function accountDashboard() {
   log.append('claude_auth.checked', { key, login: ACCOUNT.email, ok: false, by: 'timer', detail: `still refused for ${ACCOUNT.email}`, cost_usd: 0 }, 'coordinator');
   // The hold as an engine before #567 recorded it: its reason named the account.
   log.append('governor.hold', { reason: `Claude sign-in failed (${ACCOUNT.email}): no new runs until a call on that login succeeds`, load: null, free_disk_pct: null, kind: 'sign_in' }, 'coordinator');
+  const events = log.read();
   log.close();
   const slotsDir = join(dir, 'slots');
   mkdirSync(slotsDir);
   mkdirSync(join(dir, 'state'));
-  raiseIncident('claude_auth', `${instance}:refused`, `Claude refused a login this instance's runs use: ${ACCOUNT.email} (${ACCOUNT.plan})`, `Sign ${ACCOUNT.profile} in again`, { dir: slotsDir });
+  // The red incident as the engine raises it from those events (the watchdog's probe), so each role's
+  // /api/health/incidents is what the engine's own incident gives that role (#680).
+  // This dashboard isn't told an instance name, so it lists the machine's incidents (instance null): the finding is
+  // filed as one, with the engine's own words.
+  const found = instanceFindings({ instance, events, now: Date.now(), stop: null, auth: { loggedIn: true }, githubTokenError: null, emergency: false })
+    .filter((f) => f.kind === 'claude_auth')
+    .map((f) => ({ ...f, instance: null }));
+  reconcile(found, { kinds: ['claude_auth'], instance: null }, { dir: slotsDir });
   const d = await startDashboard({
     root,
     cfg,
@@ -79,7 +90,7 @@ export async function accountDashboard() {
     stateDir: join(dir, 'state'),
     user: 'example-owner',
     roleOf: async (login: string) => (login === STRANGER ? null : exampleRole(login)),
-    machineOwnersFile: machineOwnersFile('example-owner'),
+    machineOwnersFile: machineOwnersFile(...(o.machineOwners ?? ['example-owner'])),
     claudeAccountDir: acct,
     secretsHome: join(dir, 'home'),
     slotsDir,

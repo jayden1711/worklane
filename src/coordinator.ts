@@ -348,7 +348,8 @@ export class Coordinator extends AutomationRuns {
         // The judge has no tools: it reads only what the prompt carries, wherever it runs.
         cwd: this.d.repo,
         doneWhenOf: async (n) => {
-          const c = parseContract((await this.d.backlog.get(n)).body);
+          const worked = this.intakeWorkedBody(await this.d.backlog.get(n));
+          const c = worked.ok ? parseContract(worked.body) : worked;
           if (!c.ok) return { commands: [], tests: [] };
           const list = localDoneWhen(c.done_when, this.d.cfg.tests);
           return { commands: doneWhenCommands(list, this.d.cfg.tests.runner), tests: list.flatMap((x) => ('test' in x ? [x.test] : [])) };
@@ -664,7 +665,9 @@ export class Coordinator extends AutomationRuns {
       // Fix-forward's fix task: this instance filed it (its own event log says so), so it is worked whoever the tracker says opened it.
       const fixTask = issue.state === 'open' && issue.labels.includes('ready') && this.fixForward.isFixTask(issue.number) ? { actionable: true, why: 'fix-forward: the fix task for a red default branch' } : null;
       const act = fixTask ?? this.goalChild(issue) ?? canaryTask(issue, { instance: this.d.instance, canaryInstance: issue.labels.includes(CANARY_LABEL.name) ? machineCanaryInstance() : null, bot: this.identity.name }) ?? this.optimizeTask(issue) ?? this.automationTask(issue) ?? (await actionable(issue, this.d.cfg.project.owners.writers, this.d.backlog));
-      const contract = parseContract(issue.body);
+      // #643: a report on its own GitHub issue is worked from the draft intake checked, never the reporter's body.
+      const worked = this.intakeWorkedBody(issue);
+      const contract = worked.ok ? parseContract(worked.body) : worked;
       // Recorded only when something about the issue changed, not on every tick.
       const seen = { issue: issue.number, title: issue.title, labels: issue.labels, author: issue.author, owner: null, actionable: act.actionable && contract.ok, why: act.actionable ? (contract.ok ? act.why : contract.why) : act.why };
       const prev = this.lastSeen(issue.number);
@@ -673,7 +676,7 @@ export class Coordinator extends AutomationRuns {
       if (!contract.ok) {
         // Judged again whenever the done_when block changes: an edit that is still invalid gets the new error.
         // (A refusal recorded before block hashes existed is compared by its error instead.)
-        const key = contractKey(issue.body);
+        const key = worked.ok ? contractKey(worked.body) : 'intake';
         const last = this.events(issue.number).filter((e) => e.type === 'contract.missing').at(-1)?.payload as EventPayload<'contract.missing'> | undefined;
         const edited = !!last && (last.block_hash !== undefined ? last.block_hash !== key : last.why !== contract.why);
         if (!last || edited) {
@@ -682,7 +685,7 @@ export class Coordinator extends AutomationRuns {
             issue.number,
             edited
               ? `[${BRAND.cli}] Still not starting after the edit: ${contract.why}. Fix the \`\`\`done_when block; each edit is checked again.`
-              : `[${BRAND.cli}] Not starting: ${contract.why}. Add a \`\`\`done_when block (no contract, no build).`,
+              : `[${BRAND.cli}] Not starting: ${contract.why}. ${worked.ok ? 'Add a ```done_when block (no contract, no build).' : 'A writer opens a new issue with its contract to have it worked.'}`,
           );
         }
         continue;
@@ -703,7 +706,7 @@ export class Coordinator extends AutomationRuns {
       }
       this.endHotspotHold(issue.number, true);
       this.graph.claims.set(issue.number, owns);
-      const p = this.runTask(issue, contract.done_when)
+      const p = this.runTask(worked.ok ? { ...issue, body: worked.body } : issue, contract.done_when)
         .catch(async (e: Error) => {
           this.emit('coordinator.error', { instance: this.d.instance, where: `task #${issue.number}`, kind: 'error', message: e.message.slice(0, 500) });
           // Never left silently claimed: the owner is told on the issue, and the claim released.

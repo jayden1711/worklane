@@ -2,6 +2,19 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## v0.5.3 (unreleased)
+
+### Upgrading (from v0.5.2)
+
+- **GitHub-sourced intake reports are worked from the draft intake checked (#643).** Two cases change on upgrade:
+  - An outsider's report filed `ready` on its own GitHub issue (the `<cli>:intake` label) by an older engine, and not started yet, has no checked draft kept, so it is now refused with a comment saying why. Removing `ready` doesn't bring it back to intake: its report stays in the seen ledger for 365 days. To have it worked, a writer opens a new issue with its contract.
+  - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
+- Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
+
+### Guardrail changes
+
+- none in this release
+
 ## v0.5.2 (2026-10-17)
 
 ### Highlights

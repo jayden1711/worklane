@@ -500,4 +500,8 @@ test('slow-jobs.sh on a PR: the jobs whose paths it touches, all of them for a w
   assert.deepEqual(pr('web/src/pages/FirstRun.tsx'), ['wizard-e2e-real-systemd']);
   assert.deepEqual(pr('src/setup-steps.ts'), ['wizard-e2e-real-systemd']);
   assert.deepEqual(pr('web/src/pages/Board.tsx'), []);
+  // The plugin fixtures: add-project's job alone, the only one that fetches them (its plugins and MCP broker steps).
+  assert.deepEqual(pr('test/fixtures/plugins/escape/.mcp.json'), ['add-project-real-systemd']);
+  assert.deepEqual(pr('test/fixtures/plugins/kit/.claude-plugin/plugin.json'), ['add-project-real-systemd']);
+  assert.deepEqual(pr('test/fixtures/other/a.json'), []);
 });

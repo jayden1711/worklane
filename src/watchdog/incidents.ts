@@ -89,8 +89,14 @@ export interface Incident {
   severity: Severity;
   /** Fixed per kind: never data. */
   title: string;
-  /** What broke, redacted. */
+  /** What broke, redacted. Posted to the ops channel (./post.ts), so it never names a Claude account (#680). */
   detail: string;
+  /**
+   * What broke as the machine's owners may read it, redacted: it may name a Claude account (its email or org) or quote
+   * Claude's own words, which can name it (a claude_auth incident). Unset: `detail` is all there is. Never posted
+   * (postText reads `detail`), and only the machine owners' Health view has it, in place of `detail` (./view.ts).
+   */
+  ownerDetail?: string;
   /** The one action that fixes it, redacted. */
   fix: string;
   /** What the harness already tried on its own (restarts, a rollback, a retry), redacted. */
@@ -112,6 +118,8 @@ export interface RaiseOptions {
   instance?: string | null;
   severity?: Severity;
   tried?: string[];
+  /** The machine owners' fuller detail (Incident.ownerDetail); unset keeps what the open incident has. */
+  ownerDetail?: string;
   /** The store's directory; the machine's slot directory when unset. */
   dir?: string;
   now?: Date;
@@ -192,7 +200,7 @@ export function raiseIncident(kind: string, key: string, detail: string, fix: st
   const now = (o.now ?? new Date()).toISOString();
   const nowMs = Date.parse(now);
   return withIncidents(o.dir, (f) => {
-    const fields = { detail: clip(detail, 600), fix: clip(fix, 300), tried: (o.tried ?? []).map((t) => clip(t, 200)).slice(0, 5) };
+    const fields = { detail: clip(detail, 600), fix: clip(fix, 300), tried: (o.tried ?? []).map((t) => clip(t, 200)).slice(0, 5), ...(o.ownerDetail !== undefined ? { ownerDetail: clip(o.ownerDetail, 600) } : {}) };
     const open = f.incidents.find((x) => x.kind === kind && x.key === key && !x.resolvedAt);
     if (open) {
       Object.assign(open, fields, { lastSeen: now }, o.severity ? { severity: o.severity } : {});
