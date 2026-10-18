@@ -5,7 +5,7 @@ import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
 import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
-import { AGENT_INSTRUCTIONS, computeLevel, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
 import { execFileSync } from 'node:child_process';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { loosenedProblems } from '../src/delegation.js';
@@ -86,9 +86,15 @@ test("regression: a change to the agents' role prompts, skills, AGENTS.md or any
 /** The engine's own files, as git tracks them. */
 const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
 
+/** Files the guard names before the repo has one (the owner's own file, written when a study is set up): exact paths only. */
+const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`];
+
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
   for (const part of SELF_MODIFICATION_PARTS) {
-    for (const glob of part.globs) assert.ok(engineFiles.some((f) => globToRegExp(glob).test(f)), `${part.what}: ${glob} matches no file in the repo`);
+    for (const glob of part.globs) {
+      if (NOT_YET_FILES.includes(glob)) assert.ok(!engineFiles.includes(glob), `${glob} exists now: take it out of NOT_YET_FILES, so the glob is checked like the others`);
+      else assert.ok(engineFiles.some((f) => globToRegExp(glob).test(f)), `${part.what}: ${glob} matches no file in the repo`);
+    }
   }
   assert.deepEqual(LOCKED_CATEGORIES[SELF_MODIFICATION], SELF_MODIFICATION_PARTS.flatMap((p) => p.globs));
   // The files the guard is for, each landing in the part that names it.
@@ -142,12 +148,16 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/package-files.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
+    ['src/coordinator/base.ts', 'the coordinator'],
+    ['src/coordinator/decisions.ts', 'the coordinator'],
+    ['src/coordinator/merge-flow.ts', 'the merge policy'],
+    [`${BRAND.configDir}/experiments.yaml`, 'the experiment studies'],
   ] as const) {
-    assert.ok(engineFiles.includes(path), `${path} is a real file`);
+    if (!NOT_YET_FILES.includes(path)) assert.ok(engineFiles.includes(path), `${path} is a real file`);
     assert.equal(part(path), what, path);
   }
   // Nothing else in the engine falls in it by accident.
-  for (const path of ['src/dashboard.ts', 'src/coordinator/decisions.ts', 'web/src/pages/Waiting.tsx', 'test/helpers.ts', 'test/dashboard.test.ts', 'docs/notes-for-the-test.md', 'README.md', 'scripts/release.mjs']) assert.equal(part(path), undefined, path);
+  for (const path of ['src/dashboard.ts', 'src/experiments/study.ts', 'web/src/pages/Waiting.tsx', 'test/helpers.ts', 'test/dashboard.test.ts', 'docs/notes-for-the-test.md', 'README.md', 'scripts/release.mjs']) assert.equal(part(path), undefined, path);
 });
 
 test('regression: a change to the evaluator, the sandbox, the denylist, a guard test or the release rules waits for the owner, even a tests-only or docs-only one, whatever review.yaml tries', () => {
@@ -172,6 +182,10 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
   waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
   waits('docs/releasing.md', 'the release procedure and the design rules');
   waits('docs/design.md', 'the release procedure and the design rules');
+  // The rest of the coordinator, and a study's definition (a file the repo doesn't have until a study is set up).
+  waits('src/coordinator/decisions.ts', 'the coordinator');
+  waits('src/coordinator/fix-runs.ts', 'the coordinator');
+  waits(`${BRAND.configDir}/experiments.yaml`, 'the experiment studies');
   // Another test, and another doc, still merge on their own.
   for (const path of ['test/dashboard.test.ts', 'docs/notes-for-the-test.md']) {
     const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [] }, loose);
@@ -346,4 +360,13 @@ test('report: the daily digest lists the last 24 h of auto-merges with links, on
   assert.match(buildReport([merged, stopped], cfg, { since: now, now: new Date('2026-10-10T18:05:00Z'), slot: '18:00' }).markdown, /\*\*Auto-merge stopped\*\*: main went red after #9/);
   const resumed = ev(4, 'merge.resumed', { detail: 'cleared' }, '2026-10-10T13:00:00Z');
   assert.doesNotMatch(buildReport([merged, stopped, resumed], cfg, { since: now, now: new Date('2026-10-10T18:05:00Z'), slot: '18:00' }).markdown, /Auto-merge stopped/);
+});
+
+test("the engine's own review.yaml already holds every self-modification file, without the code's floor (an engine that predates a part reads this file from main)", () => {
+  const own = loadConfig(repoRoot).review!;
+  // The categories the engine's config makes wait, as an older engine (which lacks the newest parts) would apply them.
+  const waiting = [...new Set([...own.levels.L3_human.when, ...own.merge.wait_categories, 'ci-config'])].filter((c) => c !== SELF_MODIFICATION);
+  const globs = (c: string) => (own.categories[c] ?? DEFAULT_CATEGORIES[c] ?? []).map((g) => globToRegExp(g));
+  const unheld = engineFiles.filter((f) => SELF_MODIFICATION_PARTS.some((p) => p.globs.some((g) => globToRegExp(g).test(f))) && !waiting.some((c) => globs(c).some((re) => re.test(f))));
+  assert.deepEqual(unheld, [], 'files the code locks that this repo\'s review.yaml leaves to auto-merge: list them in a category under L3_human and merge.wait_categories');
 });

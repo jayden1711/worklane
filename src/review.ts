@@ -56,6 +56,10 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
+  // After the merge policy's own part above (the first part a file matches names it): the rest of the coordinator.
+  { what: 'the coordinator', globs: ['src/coordinator/**'] },
+  // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
+  { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
 ];
 
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
