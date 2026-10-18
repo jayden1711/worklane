@@ -658,9 +658,11 @@ export const EventSchemas = {
   /**
    * A commit on the default branch nothing accounts for (a direct push, a merge with checks not green, an unknown
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
-   * `trip`: its trip (src/main-watch.ts tripOf); `no_revert`: why no revert PR was opened, when a cap says so.
+   * `trip`: its trip (src/main-watch.ts tripOf); `no_revert`: why no revert PR was opened (a cap, a later commit of
+   * the trip that one reverts already, or why opening it failed: a conflict, the push checks' refusal). `revert_through`:
+   * the revert PR reverts the commits from `sha` through this one (a rebase-merged PR's), not `sha` alone.
    */
-  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional() }),
+  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional(), revert_through: sha.optional() }),
   /** A required check with no run on any commit the main watch judged since `since`: raised once, cleared when one appears. */
   'main_watch.dead_check': z.strictObject({ check: z.string(), since: z.string(), state: z.enum(['raised', 'cleared']) }),
   /**
