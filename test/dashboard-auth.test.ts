@@ -3,7 +3,7 @@
 // API): roles from repo permission, the 5-minute role cache, per-instance
 // visibility, CSRF, sessions, cookies, the audit, the break-glass and the
 // loopback-only listeners. No real network.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request, type Server } from 'node:http';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -310,6 +310,52 @@ test('someone removed from the repo keeps access only until the 5-minute cache r
   } finally {
     await s.close();
   }
+});
+
+/**
+ * The role cache as every caller builds it (dashboardSite, the hub, intake): no clock given. Both clocks are stood in
+ * for: the wall clock (Date.now), which an NTP correction steps, and the monotonic one (performance.now), which counts
+ * the time that really passed. `revoke` takes the person's permission away after the first lookup.
+ */
+function steppedClocks(t: TestContext) {
+  const clocks = { wall: Date.parse('2026-10-12T12:00:00Z'), mono: 1_000 };
+  t.mock.method(Date, 'now', () => clocks.wall);
+  t.mock.method(performance, 'now', () => clocks.mono);
+  let perm = 'write';
+  let asked = 0;
+  const roleOf = cachedRoles(async () => {
+    asked++;
+    return perm;
+  });
+  return { clocks, roleOf, revoke: () => void (perm = 'none'), asked: () => asked };
+}
+
+test('#622: a wall-clock step back keeps no revoked role past the 5-minute cache (it ages by the monotonic clock)', async (t) => {
+  const c = steppedClocks(t);
+  assert.equal(await c.roleOf('wes'), 'writer');
+  c.revoke();
+  // The wall clock steps back 10 minutes; 5 min - 1 s really passes: still the cached role, GitHub not asked again.
+  c.clocks.wall -= 10 * 60_000;
+  c.clocks.mono += ROLE_CACHE_MS - 1000;
+  assert.equal(await c.roleOf('wes'), 'writer', 'still cached at 4:59');
+  assert.equal(c.asked(), 1);
+  // 5 min + 1 s has really passed, though the wall clock reads 5 minutes before the role was cached: asked again.
+  c.clocks.mono += 2000;
+  assert.equal(await c.roleOf('wes'), null, 'the revoked role is read again once 5 minutes have really passed');
+  assert.equal(c.asked(), 2);
+});
+
+test('#622: a wall-clock step forward ends no cached role early (the cache still runs its full 5 minutes)', async (t) => {
+  const c = steppedClocks(t);
+  assert.equal(await c.roleOf('wes'), 'writer');
+  c.revoke();
+  c.clocks.wall += 10 * 60_000;
+  c.clocks.mono += ROLE_CACHE_MS - 1000;
+  assert.equal(await c.roleOf('wes'), 'writer', 'still cached at 4:59, though the wall clock moved 10 minutes');
+  assert.equal(c.asked(), 1);
+  c.clocks.mono += 2000;
+  assert.equal(await c.roleOf('wes'), null, 'read again at 5:01');
+  assert.equal(c.asked(), 2);
 });
 
 test('a person sees only the instances they have a role on; any other instance is refused, even with a valid session', async () => {
