@@ -2,7 +2,7 @@
 // agents never see it. Errors are classified (a 403 isn't "missing
 // permission" unless it is).
 import { execFileSync } from 'node:child_process';
-import { redact } from '../events/redact.js';
+import { redact, redactString, TRACKER } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
@@ -152,8 +152,10 @@ export class GitHubBacklog implements Backlog {
     await this.req('POST', `/repos/${this.repo}/issues/${n}/assignees`, { assignees: logins });
   }
 
+  // Issue, comment and PR text drops identifiers too (emails, internal hosts, private IPs, paths: events/redact.ts);
+  // req() redacts secrets from everything else it sends. A merge's commit message is left as written (its sign-off).
   async comment(n: number, body: string) {
-    await this.req('POST', `/repos/${this.repo}/issues/${n}/comments`, { body });
+    await this.req('POST', `/repos/${this.repo}/issues/${n}/comments`, { body: redactString(body, TRACKER) });
   }
 
   async comments(n: number) {
@@ -166,10 +168,12 @@ export class GitHubBacklog implements Backlog {
   }
 
   async createIssue(title: string, body: string, labels: string[]) {
-    return (await this.req<{ number: number }>('POST', `/repos/${this.repo}/issues`, { title, body, labels })).number;
+    return (await this.req<{ number: number }>('POST', `/repos/${this.repo}/issues`, { title: redactString(title, TRACKER), body: redactString(body, TRACKER), labels })).number;
   }
 
   async openPr(head: string, base: string, title: string, body: string, opts: { draft?: boolean } = {}) {
+    title = redactString(title, TRACKER);
+    body = redactString(body, TRACKER);
     const owner = this.repo.split('/')[0];
     const open = await this.req<GhPull[]>('GET', `/repos/${this.repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`);
     if (open[0]) return { url: open[0].html_url, number: open[0].number, draft: Boolean(open[0].draft) };

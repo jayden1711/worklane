@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
 import { ReviewConfig } from '../src/config/schema.js';
 import { computeLevel, loadMoneyPaths, SELF_MODIFICATION, selfModificationPart, type ChangeFile } from '../src/review.js';
 
@@ -59,6 +61,71 @@ test("regression: a change to the agents' tool guard (src/hook.ts) is self-modif
   assert.deepEqual(r.categories[SELF_MODIFICATION], ['src/hook.ts']);
   assert.ok(r.reasons.includes(`${SELF_MODIFICATION}: src/hook.ts`), r.reasons.join('; '));
   assert.equal(selfModificationPart('src/hook.ts'), "the agents' tool guard");
+});
+
+// WHY (#655): the guard's deny lists, the read-only agents' tool lists and refusals, and the task file's frozen and
+// hidden paths live beside src/hook.ts. Unlocked, a change to any of them widened what the guard allows at L1.
+const GUARD_MODULES = [
+  'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
+  'src/intake/run.ts', 'src/intake/chat.ts', 'src/research.ts', 'src/contract.ts',
+];
+
+test("regression: a change to each module the agents' tool guard decides with is self-modification, L3, with a review.yaml that lists no src/**", () => {
+  const notL3 = GUARD_MODULES.filter((path) => {
+    const r = level([f(path, 1, 1)]);
+    return r.level !== 'L3' || r.categories[SELF_MODIFICATION]?.[0] !== path || selfModificationPart(path) !== "the agents' tool guard";
+  });
+  assert.deepEqual(notL3, [], `not locked as the agents' tool guard: ${notL3.map((p) => `${p} (${level([f(p, 1, 1)]).level})`).join(', ')}`);
+});
+
+// The modules src/hook.ts imports that are left unlocked, each with why. Any other import (a new deny list, or the hook
+// split into src/hook/) must be locked, or named here: both changes wait for the owner (this file is locked too).
+const HOOK_IMPORTS_NOT_LOCKED: Record<string, string> = {
+  'src/os/index.ts': 'the OS adapter: the child env and the post-edit check\'s shell',
+  'src/brand.ts': 'names only',
+  'src/config/load.ts': 'loads the guardrail rules the hook applies, so it does decide; left unlocked because a lock matches every repo\'s src/config/load.ts; locking tracked in #665',
+  'src/comment-policy.ts': 'the post-edit comment check: it never denies a tool call and fails open by design (#330); CI holds the policy',
+};
+
+/** A source file's relative imports as src/ paths (`./x.js` from src/hook.ts is `src/x.ts`), and any it can't name. */
+function relativeImports(text: string): { modules: string[]; unnamed: string[] } {
+  // TypeScript's own import scan: both quotes, side-effect imports, re-exports, import(), require, import x = require.
+  const modules = ts.preProcessFile(text, true, true).importedFiles.map((f) => f.fileName).filter((n) => n.startsWith('.'))
+    .map((n) => posix.join('src', n).replace(/\.js$/, '.ts'));
+  // An import() or require() whose path isn't a literal can't be named, nor a require made by createRequire.
+  const unnamed: string[] = [];
+  const file = ts.createSourceFile('hook.ts', text, ts.ScriptTarget.Latest, true);
+  const literal = (n: ts.Node | undefined) => !!n && (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n));
+  const visit = (n: ts.Node): void => {
+    if (ts.isIdentifier(n) && n.text === 'createRequire') unnamed.push('createRequire');
+    if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require')) && !literal(n.arguments[0])) unnamed.push(n.getText(file));
+    ts.forEachChild(n, visit);
+  };
+  visit(file);
+  return { modules, unnamed: [...new Set(unnamed)] };
+}
+
+test('the import reader sees every import form, and reports one it cannot name', () => {
+  const sample = [
+    "import { a } from './a.js';", 'import { b } from "./b.js";', "import './c.js';", "export { d } from './d.js';",
+    "export * from './e.js';", "import type { F } from './f.js';", "const g = await import('./g.js');",
+    'const h = await import(`./h.js`);', "const i = require('./i.js');", "import k = require('./k.js');",
+    "import { x } from 'node:fs';",
+  ].join('\n');
+  assert.deepEqual(relativeImports(sample), { modules: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'k'].map((m) => `src/${m}.ts`), unnamed: [] });
+  assert.deepEqual(relativeImports("const m = await import('./' + name);").unnamed, ["import('./' + name)"]);
+  assert.deepEqual(relativeImports('const m = await import(`./${name}.js`);').unnamed, ['import(`./${name}.js`)']);
+  assert.deepEqual(relativeImports("const r = require(name);").unnamed, ['require(name)']);
+  assert.deepEqual(relativeImports("const load = createRequire(import.meta.url); load('./z.js');").unnamed, ['createRequire']);
+});
+
+test("every module src/hook.ts imports is locked, or named as one that is left unlocked, with why", () => {
+  const { modules: imports, unnamed } = relativeImports(readFileSync(join(fileURLToPath(new URL('../../', import.meta.url)), 'src', 'hook.ts'), 'utf8'));
+  assert.deepEqual(unnamed, [], 'src/hook.ts loads a module this test cannot name: import it by a literal path');
+  assert.ok(imports.length > 5, `parsed the imports: ${imports.join(', ')}`);
+  const unaccounted = imports.filter((p) => !selfModificationPart(p) && !(p in HOOK_IMPORTS_NOT_LOCKED));
+  assert.deepEqual(unaccounted, [], 'lock these with the agents\' tool guard (src/review.ts), or name them in HOOK_IMPORTS_NOT_LOCKED with why');
+  for (const p of Object.keys(HOOK_IMPORTS_NOT_LOCKED)) assert.ok(imports.includes(p), `${p}: src/hook.ts no longer imports it; take it out of the list`);
 });
 
 test('a failed or low-confidence verdict bumps one level; an agent can raise but not lower', () => {

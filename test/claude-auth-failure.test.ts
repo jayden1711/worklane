@@ -8,7 +8,9 @@ import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CliRunner, FakeRunner, type RunRequest } from '../src/runner.js';
-import { AUTH_CHECK, AUTH_FAILED_CHAT_TEXT, AUTH_RECHECK_MS, authHoldsOf, isAuthFailure } from '../src/claude-auth-failure.js';
+import { AUTH_CHECK, AUTH_FAILED_CHAT_TEXT, AUTH_RECHECK_MS, authHoldPost, authHoldsOf, isAuthFailure } from '../src/claude-auth-failure.js';
+import { postText } from '../src/watchdog/post.js';
+import type { Incident } from '../src/watchdog/incidents.js';
 import { requestAuthRecheck } from '../src/claude-auth-recheck.js';
 import { readRun, RUNS_DIR } from '../src/run-record.js';
 import { instanceFindings, type InstanceFacts } from '../src/watchdog/probes.js';
@@ -134,18 +136,75 @@ const failed = (id: number, key = '/home/example/.claude') => ev(id, 'claude_aut
 const recovered = (id: number, key = '/home/example/.claude', holdId = 1) => ev(id, 'claude_auth.recovered', { key, login: 'agents@example.com', via: 'check', role: 'login-check', held_ms: 1, hold_id: holdId });
 const red = (f: InstanceFacts) => instanceFindings(f).filter((x) => x.kind === 'claude_auth');
 
-test("watchdog: one auth_failed run raises a red claude_auth naming the login and Claude's message (a day later still: not bound to the last hour); an unrelated success elsewhere doesn't resolve it; a success on that login does", () => {
+test("watchdog: one auth_failed run raises a red claude_auth naming the instance's lane whose login was refused, never the account or Claude's message (a day later still: not bound to the last hour); an unrelated success elsewhere doesn't resolve it; a success on that login does", () => {
   const one = red(facts([failed(1)]));
   assert.equal(one.length, 1);
   assert.equal(one[0]!.key, 'alice:refused');
   assert.equal(one[0]!.severity, undefined, "the kind's own severity: red");
-  assert.match(one[0]!.detail, /agents@example\.com .*Invalid API key · Please run \/login/);
+  assert.match(one[0]!.detail, /the default lane's .*worker run/);
+  assert.doesNotMatch(one[0]!.detail, /agents@example\.com|Invalid API key/, 'the incident is posted to the ops channel (#680)');
   // Another login's success, and an ordinary run.finished succeeded (another instance's or a lane's), resolve nothing.
   assert.equal(red(facts([failed(1), recovered(2, '/home/example/.claude-eval'), ev(3, 'run.finished', { issue: 5, role: 'worker', reason: 'succeeded', detail: '' })])).length, 1);
   // A call on that login succeeded: resolved.
   assert.equal(red(facts([failed(1), recovered(2)])).length, 0);
   // A plain failure never raises it.
   assert.equal(red(facts([ev(1, 'run.finished', { issue: 5, role: 'worker', reason: 'failed', detail: 'tests failed' })])).length, 0);
+});
+
+// ---- #680: what reaches the Discord ops channel names no account
+
+/** A made-up account whose login is an email; Claude's words and the check's name it too, as they can. */
+const SOMEONE = 'someone@example.com';
+const NAMED = /someone/i;
+/** A finding's machine-owners detail (read untyped, so this file builds on an engine without it). */
+const ownerOf = (f: object) => (f as { ownerDetail?: string }).ownerDetail;
+
+test("#680: a refused login's ops notice and its incident post name neither the account's email nor its local part, even when Claude's words do; they say which instance and lane, and send the owner to the Machine page", () => {
+  const events = [
+    ev(1, 'claude_auth.failed', { key: '/home/example/.claude-eval', login: SOMEONE, lane: 'eval', issue: 4, role: 'evaluator', detail: `claude's login was refused (HTTP 401): OAuth token has expired for ${SOMEONE}` }),
+    ev(2, 'claude_auth.checked', { key: '/home/example/.claude-eval', login: SOMEONE, ok: false, by: 'timer', detail: `still refused for ${SOMEONE}`, cost_usd: 0 }, '2026-10-15T06:10:00.000Z'),
+  ];
+  const [hold] = authHoldsOf(events);
+  assert.equal(hold!.login, SOMEONE, 'the hold itself keeps the account, for the sign-in banner');
+  const DASH_URL = 'https://dashboard.example.test';
+  const notice = authHoldPost(hold!, { dashboardUrl: DASH_URL, instance: 'alice' });
+  const f = red(facts(events))[0]!;
+  const incident: Incident = { id: 'inc-1', kind: 'claude_auth', key: f.key, instance: 'alice', severity: 'red', title: 'Claude sign-in is failing', detail: f.detail, fix: f.fix, tried: f.tried, since: '2026-10-15T06:00:00.000Z', lastSeen: '2026-10-16T12:00:00.000Z', resolvedAt: null, posted: {} };
+  const posted = postText(incident, 'raised', { dashboardUrl: DASH_URL });
+  for (const [what, text] of [['the notice', notice], ['the incident post', posted]] as const) {
+    assert.doesNotMatch(text, NAMED, `${what} names the account: ${text}`);
+    assert.match(text, /alice/, `${what} says which instance`);
+    assert.match(text, /\beval lane\b/, `${what} says which lane's login`);
+    assert.match(text, /Machine page/, `${what} sends the owner to the Machine page`);
+  }
+  assert.match(notice, /https:\/\/dashboard\.example\.test\/machine/);
+  // The machine owners' detail (Health page only, never posted) keeps the account and Claude's words.
+  assert.match(ownerOf(f) ?? '', /someone@example\.com .*OAuth token has expired/);
+  assert.doesNotMatch(postText({ ...incident, ownerDetail: ownerOf(f) } as Incident, 'raised', { dashboardUrl: DASH_URL }), NAMED, 'postText never reads ownerDetail');
+});
+
+test("#680: claude auth status printing the account, not JSON, stops the run auth_mismatch; the claude_auth incident's ops post names neither the email nor its local part, and only the machine owners' detail keeps what it printed", { skip: posixOnly }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-auth-'));
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(${JSON.stringify(`Logged in as ${SOMEONE}`)}); process.exit(0); }\nprocess.exit(1);\n`);
+  chmodSync(bin, 0o755);
+  let t = Date.now();
+  const runner = new CliRunner('cli', { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: join(dir, 'login') }, bin, undefined, undefined, undefined, { now: () => t, sleep: async (ms) => ((t += ms), true) });
+  const out = await runner.run(req(dir));
+  assert.equal(out.reason, 'auth_mismatch');
+  assert.match(out.detail, /claude reports unknown: Logged in as someone@example\.com/, "the run's detail carries what the CLI printed");
+  const f = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: out.detail })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.equal(f.key, 'alice');
+  const incident: Incident = { id: 'inc-2', kind: 'claude_auth', key: f.key, instance: 'alice', severity: 'red', title: 'Claude sign-in is failing', detail: f.detail, fix: f.fix, tried: f.tried, since: '2026-10-15T06:00:00.000Z', lastSeen: '2026-10-15T06:10:00.000Z', resolvedAt: null, posted: {}, ...(ownerOf(f) !== undefined ? { ownerDetail: ownerOf(f) } : {}) } as Incident;
+  const posted = postText(incident, 'raised', { dashboardUrl: 'https://dashboard.example.test' });
+  assert.doesNotMatch(posted, NAMED, `the ops post names the account: ${posted}`);
+  assert.match(posted, /a run stopped on its Claude login: claude auth status didn't say which auth method/);
+  assert.match(ownerOf(f) ?? '', /Logged in as someone@example\.com/, "the machine owners' Health view keeps what it printed");
+  // A method the runner knows is named; one it doesn't is not repeated.
+  const known = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: 'runtime cli expects claude.ai or oauth_token auth, claude reports api_key; not starting (no silent billing switch)' })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.match(known.detail, /claude reports api_key auth, not the one this runtime expects/);
+  const odd = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: `runtime cli expects claude.ai or oauth_token auth, claude reports ${SOMEONE}; not starting` })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.doesNotMatch(odd.detail, NAMED);
 });
 
 // ---- 3. the pause, the chat's words, the way out
@@ -165,7 +224,7 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
   let refused = true;
   const runner = new FakeRunner((r: RunRequest) => {
     if (r.role === 'login-check' || r.role === 'worker') {
-      if (refused) return { reason: 'auth_failed', detail: "claude's login was refused (HTTP 401): Invalid API key · Please run /login", turns: 0, costUsd: 0, login: { key: 'claude', account: 'agents@example.com' } };
+      if (refused) return { reason: 'auth_failed', detail: `claude's login was refused (HTTP 401): Invalid API key for ${SOMEONE} · Please run /login`, turns: 0, costUsd: 0, login: { key: 'claude', account: SOMEONE } };
       return r.role === 'worker' ? { structured: realFix(r) } : { costUsd: 0.02 };
     }
     return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(r) } };
@@ -184,7 +243,7 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
   assert.equal(runs('login-check'), 0, 'no check before AUTH_RECHECK_MS');
   const holds = authHoldsOf(f.log.read());
   assert.equal(holds.length, 1);
-  assert.equal(holds[0]!.login, 'agents@example.com');
+  assert.equal(holds[0]!.login, SOMEONE);
   // Requeued, not failed or blocked, and no attempt counted.
   assert.equal(f.log.read(0, ['issue.blocked']).length, 0);
   const labels = (await f.backlog.get(issue)).labels;
@@ -193,13 +252,16 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
   const holdReasons = f.log.read(0, ['governor.hold']).map((e) => (e.payload as { reason: string }).reason).filter((r) => /Claude sign-in failed/.test(r));
   assert.equal(holdReasons.length, 1, 'the dashboard hold reason, once');
   // #567: the reason reaches every viewer's state and the report posted on the repo, so it names no account; the
-  // owners and writers see the login on the sign-in banner and the incident.
-  assert.doesNotMatch(holdReasons[0]!, /agents@example\.com/);
+  // owners and writers see the login on the sign-in banner.
+  assert.doesNotMatch(holdReasons[0]!, NAMED);
   assert.equal(holdReasons[0], SIGN_IN_HOLD_REASON);
+  // #680: the ops channel's notice and the incident (posted there too) name neither the email nor its local part.
   const notices = chat.posts.filter((p) => p.where === ASKS && /Claude sign-in failed/.test(p.text));
   assert.equal(notices.length, 1, 'one ops notice');
-  assert.match(notices[0]!.text, /agents@example\.com.*Invalid API key/s);
+  assert.doesNotMatch(notices[0]!.text, NAMED, notices[0]!.text);
+  assert.match(notices[0]!.text, /alice.*default lane.*Machine page/s);
   assert.equal(incidents.filter((x) => x.startsWith('raise claude_auth alice:refused')).length, 1, 'the red incident, raised once');
+  assert.doesNotMatch(incidents.join('\n'), NAMED);
   // A check while it still fails: still held, and the next one waits AUTH_RECHECK_MS again.
   const start = Date.now();
   t.mock.timers.enable({ apis: ['Date'], now: start + AUTH_RECHECK_MS + 1000 });
@@ -236,7 +298,10 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
   const attempts = f.log.read(0, ['run.started']).map((e) => e.payload as EventPayload<'run.started'>).filter((p) => p.role === 'worker' && p.issue === issue).map((p) => p.attempt);
   assert.deepEqual(attempts.slice(0, 2), [1, 1], 'the refused run was no attempt: the task starts again at attempt 1');
   assert.ok(f.log.read(0, ['land.result']).some((e) => (e.payload as { outcome: string }).outcome === 'landed'), 'and the work landed');
-  assert.equal(chat.posts.filter((p) => p.where === ASKS && /Claude sign-in works again/.test(p.text)).length, 1, 'one ops notice that it works again');
+  const back = chat.posts.filter((p) => p.where === ASKS && /Claude sign-in works again/.test(p.text));
+  assert.equal(back.length, 1, 'one ops notice that it works again');
+  assert.doesNotMatch(back[0]!.text, NAMED, back[0]!.text);
+  assert.doesNotMatch(chat.posts.map((p) => p.text).join('\n'), NAMED, 'nothing the channel was sent names the account');
 });
 
 test("the owner's re-check runs the check at once (one a minute at most), and a check that fails keeps the hold", { skip }, async () => {
