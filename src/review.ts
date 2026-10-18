@@ -20,7 +20,9 @@ export const AGENT_INSTRUCTIONS = 'agent-instructions';
 
 /**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
- * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, and who may approve.
+ * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
+ * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
+ * controls, and the release and design rules.
  * Always L3 and never auto-merged (merge-policy.ts waitCategoriesOf), whatever review.yaml says; review.yaml can't
  * redefine, drop or loosen it. Each part says, in the words "Waiting on you" shows, what such a change changes; the
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
@@ -39,6 +41,21 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
   { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*'] },
   { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
+  // WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as
+  // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
+  { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
+  { what: 'the sandbox and test runs', globs: ['src/sandbox.ts', 'src/testrun/**'] },
+  { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },
+  // A tests-only change is L0 and merges itself: so the tests that hold the controls above are named here, one by one.
+  {
+    what: 'the tests of the harness controls',
+    globs: [
+      'test/review.test.ts', 'test/merge-policy.test.ts', 'test/guardrails.test.ts',
+      'test/push-check.test.ts', 'test/push-guard.test.ts', 'test/push-hook-guard.test.ts', 'test/push-gate.test.ts', 'test/push-gate-hook.test.ts',
+      'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
+    ],
+  },
+  { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
 ];
 
 export const LOCKED_CATEGORIES: Record<string, string[]> = {

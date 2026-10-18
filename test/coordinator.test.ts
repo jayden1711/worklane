@@ -2082,7 +2082,8 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       let attempt = 0;
       const worker = (req: RunRequest) => {
         mkdirSync(dirname(join(req.cwd, path)), { recursive: true });
-        writeFileSync(join(req.cwd, path), `// a change to the harness's own controls, attempt ${++attempt}\n`);
+        // WHY: gitleaks reads a .gitleaks.toml in the change as its own config, so the line must be valid TOML there.
+        writeFileSync(join(req.cwd, path), `${path.endsWith('.toml') ? '#' : '//'} a change to the harness's own controls, attempt ${++attempt}\n`);
         commitAll(req.cwd, `Change ${path}`);
         return { summary: `changed ${path}` };
       };
