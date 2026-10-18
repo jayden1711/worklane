@@ -268,3 +268,96 @@ export async function pressSteady(cdp: Cdp, element: string, what: string = elem
   const at = await steadyCentre(cdp, element, what);
   for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent', { type, x: at.x, y: at.y, button: 'left', clickCount: 1 });
 }
+
+/** In the page: an animation that ends (an entrance: a fade, a pop), as opposed to one that loops (a spinner). */
+export const ENTRANCE_ANIM = `((x) => x.effect && x.effect.getComputedTiming().iterations !== Infinity)`;
+
+/**
+ * In the page: why an element is not fully shown, or '' when it is (owner-approved, option A): a non-zero box inside
+ * the viewport, not in a hidden or inert container, nothing up the tree display:none or visibility:hidden, its opacity
+ * and every ancestor's at least 0.99, and no entrance animation still running on it or inside it. A visibility check is
+ * this being '', so what a failure reports is the check's own reason, never a second guess at it (#639).
+ */
+export const NOT_SHOWN_WHY = `((el) => {
+  const name = (e) => e.tagName.toLowerCase() + (e.dataset && e.dataset.testid ? '[data-testid=' + e.dataset.testid + ']' : '');
+  if (!el || !el.isConnected) return 'not in the page';
+  const shut = el.closest('[hidden],[inert]');
+  if (shut) return 'inside ' + (shut.hasAttribute('hidden') ? 'hidden ' : 'inert ') + name(shut);
+  const r = el.getBoundingClientRect();
+  const box = () => 'box ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' at ' + Math.round(r.left) + ',' + Math.round(r.top);
+  if (!(r.width > 0 && r.height > 0)) return 'an empty ' + box();
+  if (r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return 'outside the viewport (' + box() + ', viewport ' + innerWidth + 'x' + innerHeight + ')';
+  for (let e = el; e; e = e.parentElement) {
+    const st = getComputedStyle(e);
+    if (st.display === 'none') return 'display:none on ' + name(e);
+    if (st.visibility === 'hidden' || st.visibility === 'collapse') return 'visibility:' + st.visibility + ' on ' + name(e);
+    if (Number(st.opacity) < 0.99) return 'opacity ' + st.opacity + ' on ' + name(e);
+  }
+  const a = el.getAnimations({ subtree: true }).find((x) => ${ENTRANCE_ANIM}(x) && x.playState !== 'finished');
+  return a ? 'entrance animation ' + (a.animationName || '?') + ' ' + a.playState + ' at ' + Math.round(Number(a.currentTime)) + ' ms' : '';
+})`;
+
+/** The Board's cards, and the switcher rows marked as the instance shown (on a hub). */
+export const BOARD_CARDS = '[data-testid="page-board"] [data-testid="board-card"]';
+export const CURRENT_ROWS = '[data-testid="instance-row"][aria-current="true"]';
+
+/** What the page showed when a Board check ran (BOARD_SNAPSHOT), each part of the check and what bears on it. */
+export type BoardSnapshot = {
+  path: string;
+  /** The Board page is in the page at all. */
+  board: boolean;
+  cards: number;
+  /** Each distinct card instance (data-card-instance), '' for a card without one. */
+  instances: string[];
+  /** Cards fully shown (NOT_SHOWN_WHY ''), and up to 3 distinct reasons the others aren't. */
+  shown: number;
+  notShown: string[];
+  /** The text of each switcher row marked aria-current. */
+  current: string[];
+  /** The text of each board-instance-error ("can't load its board"). */
+  errors: string[];
+  /** The "updating…" mark (a view shown from what was kept, its fresh answer still on the way). */
+  updating: boolean;
+};
+
+/** In the page: a BoardSnapshot, read in one go (no render between its parts). */
+export const BOARD_SNAPSHOT = `(() => {
+  const why = ${NOT_SHOWN_WHY};
+  const cards = [...document.querySelectorAll(${JSON.stringify(BOARD_CARDS)})];
+  const whys = cards.map((c) => why(c));
+  return {
+    path: location.pathname,
+    board: !!document.querySelector('[data-testid="page-board"]'),
+    cards: cards.length,
+    instances: [...new Set(cards.map((c) => c.dataset.cardInstance ?? ''))],
+    shown: whys.filter((w) => w === '').length,
+    notShown: [...new Set(whys.filter((w) => w !== ''))].slice(0, 3),
+    current: [...document.querySelectorAll(${JSON.stringify(CURRENT_ROWS)})].map((e) => e.textContent.trim()),
+    errors: [...document.querySelectorAll('[data-testid="board-instance-error"]')].map((e) => e.textContent.trim().slice(0, 200)),
+    updating: !!document.querySelector('[data-testid="updating"]'),
+  };
+})()`;
+
+/**
+ * One line saying which part of "the Board shows `instance`'s own cards" failed and what the page had instead: each
+ * part of the check ([FAIL] or [ok]: at least one card, every card `instance`'s, one of them fully shown and why not,
+ * `instance` the only row marked current), then what bears on it (a board-instance-error, "updating…", the path).
+ * `ok` is the check's own answer, read with `s` in one go: a false check with every part holding is said, not hidden.
+ */
+export function explainBoard(what: string, instance: string, { ok, snap: s }: { ok: boolean; snap: BoardSnapshot }): string {
+  const parts = [
+    { part: 'card count', ok: s.cards > 0, got: `${s.cards} (needs at least 1)` },
+    { part: 'card instances', ok: s.instances.every((x) => x === instance), got: `${s.instances.length ? JSON.stringify(s.instances) : 'none'} (needs only ${JSON.stringify(instance)})` },
+    { part: 'a card fully shown', ok: s.shown > 0, got: s.cards ? `${s.shown} of ${s.cards}${s.notShown.length ? `, not shown: ${s.notShown.join(' / ')}` : ''}` : 'no cards' },
+    { part: 'aria-current row', ok: s.current.join() === instance, got: `${JSON.stringify(s.current)} (needs only ${JSON.stringify(instance)})` },
+  ];
+  const failed = parts.filter((p) => !p.ok).map((p) => p.part);
+  const verdict = ok ? 'passed' : failed.length ? `failed: ${failed.join(', ')}` : 'failed, though every part holds in this snapshot (the check and this report disagree)';
+  return [
+    `${what}: ${verdict}`,
+    ...parts.map((p) => `[${p.ok ? 'ok' : 'FAIL'}] ${p.part}: ${p.got}`),
+    `board-instance-error: ${s.errors.length ? s.errors.map((e) => JSON.stringify(e)).join(', ') : 'none'}`,
+    `"updating…" shown: ${s.updating ? 'yes' : 'no'}`,
+    `page ${s.path}, ${s.board ? 'the Board' : 'no Board'} in it`,
+  ].join('; ');
+}
