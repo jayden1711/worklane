@@ -155,14 +155,44 @@ in_set || fail "after test-user.sh install Docker isn't in the set"
 pull 300 || fail "Docker couldn't pull after test-user.sh install"
 
 echo "== join (measured, not asserted): can a test run join the Docker daemon's user+net namespaces?"
+# Two targets. The daemon's own namespaces: its user namespace, and its network namespace (with rootlesskit's
+# detach-netns, the host's: it pulls from there, in its exempt cgroup). And the network namespace its containers get,
+# which its slirp4netns (in the exempt cgroup) gives a way out: a bind-mounted file under its runtime directory, and
+# any process of the test user's in a network namespace other than the host's.
 dpid="$(pgrep -u "$U" -x dockerd | head -n 1)"
 [ -n "$dpid" ] || fail "no dockerd of $U's"
-echo "  dockerd: pid $dpid, user ns $(sudo readlink "/proc/$dpid/ns/user"), net ns $(sudo readlink "/proc/$dpid/ns/net")"
-# Control: root, joining the same namespaces, reaches the stand-in through Docker's slirp4netns (so a run that joins does too).
-ctl="$(sudo nsenter --target "$dpid" --user --net --preserve-credentials python3 "$t/probe.py" "$PUB" "$PORT" 2>&1 || true)"
-echo "  control, root in Docker's namespaces -> $PUB: $ctl"
-[ "$ctl" = OK ] || fail "even root in Docker's namespaces can't reach $PUB: the join probe below couldn't tell"
-# A run as the coordinator makes it (the real helper, its real sudoers rule and sandbox), its command the probe.
+hostnet="$(sudo readlink /proc/1/ns/net)"
+echo "  host: net ns $hostnet; dockerd: pid $dpid, user ns $(sudo readlink "/proc/$dpid/ns/user"), net ns $(sudo readlink "/proc/$dpid/ns/net")"
+nsfile="$(sudo find /run/worklane-test-ci-docker -maxdepth 3 -name netns 2>/dev/null | head -n 1)"
+echo "  Docker's container netns file: ${nsfile:-none found} $([ -z "$nsfile" ] || sudo stat -c '(%U:%G %a)' "$nsfile")"
+npids=""
+for p in $(pgrep -u "$U"); do
+  n="$(sudo readlink "/proc/$p/ns/net" 2>/dev/null || true)"
+  if [ -n "$n" ] && [ "$n" != "$hostnet" ]; then npids="$npids $p"; echo "  $U's pid $p ($(ps -o comm= -p "$p")) is in net ns $n"; fi
+done
+# Control: root in that netns reaches the stand-in (so a process of the test user's that joins it would too).
+if [ -n "$nsfile" ]; then
+  echo "  control, root in Docker's container netns -> $PUB: $(sudo nsenter --net="$nsfile" python3 "$t/probe.py" "$PUB" "$PORT" 2>&1 || true)"
+fi
+# The attempts, the same from a plain test-user unit and from a run: <probe> <pub> <port> <dockerd pid> <netns file|-> <pid>...
+cat > "$t/join.sh" <<'EOF'
+p="$1" pub="$2" port="$3" d="$4" f="$5"; shift 5
+try() { local what="$1" out; shift; if out="$("$@" python3 "$p" "$pub" "$port" 2>&1)"; then echo "$what: joined; -> $pub: $out"; else echo "$what: refused: $out"; fi; }
+echo "own netns: -> $pub: $(python3 "$p" "$pub" "$port")"
+try "the daemon's user+net" nsenter --target "$d" --user --net --preserve-credentials
+try "the daemon's user ns only" nsenter --target "$d" --user --preserve-credentials
+if [ "$f" != - ]; then
+  if [ -e "$f" ]; then try "the containers' netns (file)" nsenter --user="/proc/$d/ns/user" --net="$f" --preserve-credentials
+  else echo "the containers' netns (file): refused: $f isn't visible here"; fi
+fi
+for n in "$@"; do try "the containers' netns (pid $n)" nsenter --user="/proc/$d/ns/user" --net="/proc/$n/ns/net" --preserve-credentials; done
+EOF
+chmod 0644 "$t/join.sh"
+# Upper bound: a test-user process outside any run's sandbox (a plain unit, the host's /run and /proc).
+sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=60 \
+  /bin/bash "$t/join.sh" "$t/probe.py" "$PUB" "$PORT" "$dpid" "${nsfile:--}" $npids < /dev/null > "$t/join-plain.out" 2>&1 || true
+sed 's/^/  plain test-user unit: /' "$t/join-plain.out"
+# A run as the coordinator makes it (the real helper, its real sudoers rule and sandbox), its command the same attempts.
 as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
 r="$(mktemp -d)"
 id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
@@ -172,19 +202,22 @@ git -C "$r" bundle create --quiet "$r/b" refs/worklane/test-run/egress-join/head
 as_ create egress-join main refs/worklane/test-run/egress-join/head refs/worklane/test-run/egress-join/base "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" > /dev/null
 rm -rf "$r"
 probe64="$(base64 -w0 < "$t/probe.py")"
-# No ${...}: systemd would expand those. Each line: what was tried, and what came of it.
-cmd="printf %s $probe64 | base64 -d > \"\$TMPDIR/p.py\"; echo \"in its own netns -> $PUB: \$(python3 \"\$TMPDIR/p.py\" $PUB $PORT)\"; ls -l /proc/$dpid/ns/user /proc/$dpid/ns/net 2>&1 | sed 's/^/ns: /'; if out=\$(nsenter --target $dpid --user --net --preserve-credentials python3 \"\$TMPDIR/p.py\" $PUB $PORT 2>&1); then echo \"joined; -> $PUB: \$out\"; else echo \"join refused: \$out\"; fi"
+join64="$(base64 -w0 < "$t/join.sh")"
+# No ${...}: systemd would expand those.
+cmd="printf %s $probe64 | base64 -d > \"\$TMPDIR/p.py\"; printf %s $join64 | base64 -d > \"\$TMPDIR/j.sh\"; bash \"\$TMPDIR/j.sh\" \"\$TMPDIR/p.py\" $PUB $PORT $dpid ${nsfile:--}$npids"
 as_ exec egress-join 60 -- "$cmd" < /dev/null > "$t/join.out" 2> "$t/join.err" || true
 sed 's/^/  run: /' "$t/join.out"
 as_ wipe egress-join > /dev/null
-grep -q '^in its own netns -> ' "$t/join.out" || { cat "$t/join.err" >&2; fail "the run's probe didn't run"; }
-own="$(sed -n "s/^in its own netns -> $PUB: //p" "$t/join.out")"
-[ "$own" != OK ] || fail "the run reached $PUB from its own namespace"
-if grep -q '^joined; ' "$t/join.out"; then
-  via="$(sed -n "s/^joined; -> $PUB: //p" "$t/join.out")"
-  summary "ANSWER (#543, measured): a test run CAN join the Docker daemon's user+net namespaces (nsenter as the test user, from the helper's real exec sandbox); from there it reached $PUB: $via."
+grep -q '^own netns: ' "$t/join.out" || { cat "$t/join.err" >&2; fail "the run's probe didn't run"; }
+[ "$(sed -n "s/^own netns: -> $PUB: //p" "$t/join.out")" != OK ] || fail "the run reached $PUB from its own namespace"
+summary "### #543: can a test run join the Docker daemon's namespaces? (measured on this runner)"
+summary "Host net ns $hostnet; dockerd pid $dpid in net ns $(sudo readlink "/proc/$dpid/ns/net"); containers' netns file: ${nsfile:-none}; other test-user pids in a non-host netns:${npids:- none}."
+while IFS= read -r l; do summary "- from a run (the helper's real exec sandbox): $l"; done < "$t/join.out"
+while IFS= read -r l; do summary "- from a plain test-user unit (no run sandbox): $l"; done < "$t/join-plain.out"
+if grep -q ": joined; -> $PUB: OK$" "$t/join.out"; then
+  summary "ANSWER: a test run CAN get out through Docker's namespaces: $(grep ": joined; -> $PUB: OK$" "$t/join.out" | head -n 1)."
 else
-  summary "ANSWER (#543, measured): a test run can NOT join the Docker daemon's user+net namespaces from the helper's real exec sandbox: $(sed -n 's/^join refused: //p' "$t/join.out" | head -n 1)."
+  summary "ANSWER: a test run can NOT get out through Docker's namespaces here (each attempt above was refused or reached nothing)."
 fi
 
 echo "== check, at the end"
