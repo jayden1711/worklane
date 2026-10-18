@@ -566,7 +566,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
             </span>
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-inset shadow-hairline" role="progressbar" aria-valuemin={0} aria-valuemax={setup.total} aria-valuenow={setup.done} aria-label="Setup progress" data-testid="first-run-progress">
-            <div className={cx('h-full rounded-full transition-[width] duration-300', setup.requiredLeft ? 'bg-blue' : 'bg-green')} style={{ width: `${pct}%` }} />
+            <div className={cx('h-full rounded-full transition-[width] duration-300', setup.requiredLeft ? 'bg-ring' : 'bg-green')} style={{ width: `${pct}%` }} />
           </div>
         </section>
       )}

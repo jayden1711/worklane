@@ -6,6 +6,7 @@ import { categoryRecords, delegationIssue, suggestions } from '../delegation.js'
 import type { EventPayload, EventType } from '../events/types.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import { Corrections } from './corrections.js';
+import { lockScopeOf } from './shared.js';
 
 export abstract class Delegation extends Corrections {
   async checkDelegation(): Promise<void> {
@@ -49,7 +50,7 @@ export abstract class Delegation extends Corrections {
       if (claimed && head) {
         try {
           const files = this.changeFiles(this.d.repo, claimed.base, head);
-          categories = Object.keys(computeLevel({ files, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review).categories).sort();
+          categories = Object.keys(computeLevel({ files, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review).categories).sort();
         } catch {
           // the commits aren't here (a squash or a force-push upstream): observed with no categories
         }

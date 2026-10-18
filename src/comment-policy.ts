@@ -576,3 +576,27 @@ export function policyAt(root: string, rev: string): CommentPolicy | null {
   if (!r.success) throw new Error(`config.yaml at ${rev}: comment_policy: ${r.error.issues.map((e) => `${e.path.join('.')} ${e.message}`).join('; ')}`);
   return r.data;
 }
+
+export interface CheckRun {
+  /** INVARIANT: 0 is off or every new comment passes, 1 findings, 2 couldn't check: CI's exit code (#330). */
+  code: 0 | 1 | 2;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * INVARIANT: the one PR check (#330): the CLI's `check-comments` and scripts/check-comments.mjs both print this, so
+ * a managed repo's CI and this repo's give the same words and exit code. The policy is the one committed at `base`.
+ */
+export function runCommentCheck(root: string, base: string, head = 'HEAD'): CheckRun {
+  try {
+    const policy = policyAt(root, base);
+    if (!policy?.enabled) return { code: 0, stdout: `comment policy: off in the config at ${base} (config.yaml comment_policy.enabled); nothing checked\n`, stderr: '' };
+    const findings = checkRange(root, base, head, policy);
+    if (!findings.length) return { code: 0, stdout: `comment policy: every comment added in ${base}..${head} passes\n`, stderr: '' };
+    const why = `start with WHY: or INVARIANT:, or cite an issue or decision id; no narration; at most ${policy.max_lines} lines`;
+    return { code: 1, stdout: '', stderr: `comment policy: ${findings.length} comment(s) added in ${base}..${head} break it (${why}):\n${formatFindings(findings)}\n` };
+  } catch (e) {
+    return { code: 2, stdout: '', stderr: `comment policy: could not check ${base}..${head}: ${(e as Error).message}\n` };
+  }
+}

@@ -70,7 +70,7 @@ function TokenForm({ onDone }: { onDone: (err: string | null) => void }) {
         void send();
       }}
     >
-      <input ref={field} type="password" autoComplete="off" spellCheck={false} name="claude-setup-token" aria-label="The token claude setup-token printed" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-switch-token" />
+      <input ref={field} type="password" autoComplete="off" spellCheck={false} name="claude-setup-token" aria-label="The token claude setup-token printed" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-switch-token" />
       <Button type="submit" size="sm" why={busy && 'Sending…'} data-testid="claude-switch-token-send">
         Use this token
       </Button>

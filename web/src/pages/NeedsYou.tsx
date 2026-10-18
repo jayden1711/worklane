@@ -1,7 +1,8 @@
 // Needs you (#585): one queue of everything that waits for you, from the Inbox, Waiting on you and Decisions (the tabs
 // beside it), each thing once, in the order needs-you.ts computes and this page states. Each row opens its own page.
-// What waits on the owner is read by the shell (it counts the sidebar's badge from the same answer) and handed here.
-import type { State, Waiting } from '../api';
+// What waits on the owner is read here, again on every change of the log, as Waiting on you reads it; the sidebar's
+// badge is counted from the state, which carries what Waiting on you lists (#633).
+import { useView, type State, type Waiting } from '../api';
 import { navigate } from '../App';
 import { Badge, Card, Empty } from '../components/ui';
 import { Header } from '../components/Header';
@@ -32,9 +33,15 @@ function Row({ i, now }: { i: NeedItem; now?: number }) {
   );
 }
 
-/** The queue from the state and what /api/waiting answered (null data: not answered yet, or refused). */
-export function NeedsYouPage({ state, waiting, now }: { state: State; waiting: { data: Waiting | null; error: string | null }; now?: number }) {
+/**
+ * The queue from the state and what /api/waiting answers (null data: not answered yet, or refused): read here, unless
+ * `waiting` hands it in (the render checks).
+ */
+export function NeedsYouPage({ state, waiting: given, now }: { state: State; waiting?: { data: Waiting | null; error: string | null }; now?: number }) {
   const refused = waitingRefusal(state);
+  // Never asked where the state says it would be refused (a viewer).
+  const read = useView<Waiting>(given || refused ? null : '/api/waiting', state.lastId);
+  const waiting = given ?? read;
   const pending = !refused && !waiting.data && !waiting.error;
   const items = needsYou(state, waiting.data);
   const landed = state.inbox.notify.length;
