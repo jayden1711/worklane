@@ -190,21 +190,59 @@ function heredocWord(text: string, from: number): { word: string; end: number } 
   return word ? { word, end: j } : null;
 }
 
-/** WHY: nesting counts (#634: `$(( $((a)) << b ))`): the index past the bracket closing the one at `from`, else -1. */
-function closing(text: string, from: number, open: string, close: string): number {
-  let depth = 0;
-  for (let j = from; j < text.length; j++) {
-    if (text[j] === open) depth++;
-    else if (text[j] === close && --depth === 0) return j + 1;
+/** The index of the quote closing the one at `at` (`'…'`, `"…"` or `$'…'`) on this line, else -1 (#634). */
+function quoteEnd(text: string, at: number): number {
+  const ansi = text[at] === '$';
+  const q = ansi ? "'" : text[at]!;
+  for (let j = at + (ansi ? 2 : 1); j < text.length; j++) {
+    if (text[j] === '\\' && (ansi || q === '"')) j++;
+    else if (text[j] === q) return j;
   }
   return -1;
 }
 
 /**
- * INVARIANT: an opener whose `line:column` key is in `ignored` is read as plain code (scanShLines' rescan, #634).
+ * INVARIANT: linear in the line (#634): a stack pass records every opener it meets, so none is scanned twice;
+ * quotes open where the line scanner's do (`opens`). Past the work cap (a backstop) the file is "could not check".
+ * `match(from, '(')`: the index past the bracket closing the one at `from`, else -1; nesting counts
+ * (`$(( $((a)) << b ))`) and quoted text is skipped (`${x:-"}"}`).
+ */
+function bracketMatcher(text: string, line: number, opens: (column: number) => boolean) {
+  const memo = { '(': new Map<number, number>(), '{': new Map<number, number>() };
+  const cap = 4 * text.length + 64;
+  let work = 0;
+  return (from: number, open: '(' | '{'): number => {
+    const known = memo[open].get(from);
+    if (known !== undefined) return known;
+    const close = open === '(' ? ')' : '}';
+    const stack: number[] = [];
+    for (let j = from; j < text.length; j++) {
+      if (++work > cap) throw new Error(`line ${line}: its brackets and quotes are too tangled to read`);
+      const c = text[j]!;
+      if (c === '\\') j++;
+      else if ((c === "'" || c === '"' || (c === '$' && text[j + 1] === "'")) && opens(j)) {
+        const end = quoteEnd(text, j);
+        work += (end < 0 ? text.length : end) - j;
+        if (end < 0) break;
+        j = end;
+      } else if (c === open) stack.push(j);
+      else if (c === close && stack.length) {
+        memo[open].set(stack.pop()!, j + 1);
+        if (!stack.length) return j + 1;
+      }
+    }
+    for (const o of stack) memo[open].set(o, -1);
+    return -1;
+  };
+}
+
+/**
+ * INVARIANT: an opener whose `line:column` key is in `ignored` is read as plain code (scanShLines' rescan, #634);
+ * with `ignored` null, every quote and heredoc opener is.
  * A `#` comment scanner for shell, fed line by line (quotes and heredocs carry across lines).
  */
-function shScanner(ignored: ReadonlySet<string>) {
+function shScanner(ignored: ReadonlySet<string> | null) {
+  const code = (key: string) => ignored === null || ignored.has(key);
   let quote: { kind: "'" | '"' | "$'"; key: string } | null = null;
   // INVARIANT: heredocs open on one line are read in order, each body until its own word (#628: `<<A <<B`).
   const heredocs: { word: string; tabs: boolean; key: string }[] = [];
@@ -216,6 +254,7 @@ function shScanner(ignored: ReadonlySet<string>) {
       if ((open.tabs ? text.replace(/^\t+/, '') : text) === open.word) heredocs.shift();
       return null;
     }
+    let match: ReturnType<typeof bracketMatcher> | null = null;
     for (let j = 0; j < text.length; j++) {
       const c = text[j]!;
       const key = `${line}:${j}`;
@@ -224,14 +263,15 @@ function shScanner(ignored: ReadonlySet<string>) {
         if (c === '\\' && quote.kind !== "'") j++;
         else if (c === quote.kind.slice(-1)) quote = null;
       } else if (c === '\\') j++;
-      else if (c === '$' && text[j + 1] === "'" && !ignored.has(key)) {
+      else if (c === '$' && text[j + 1] === "'" && !code(key)) {
         quote = { kind: "$'", key };
         j++;
-      } else if ((c === "'" || c === '"') && !ignored.has(key)) quote = { kind: c, key };
+      } else if ((c === "'" || c === '"') && !code(key)) quote = { kind: c, key };
       else if (c === '#' && (j === 0 || /\s/.test(text[j - 1]!))) return text.slice(j);
       else if ((c === '(' && text[j + 1] === '(') || (c === '$' && text[j + 1] === '{')) {
         // WHY: `<<` inside (( )), $(( )) or ${…} is a shift or text, never a heredoc (#618, #634).
-        const end = c === '$' ? closing(text, j + 1, '{', '}') : closing(text, j, '(', ')');
+        match ??= bracketMatcher(text, line, (column) => !code(`${line}:${column}`));
+        const end = c === '$' ? match(j + 1, '{') : match(j, '(');
         if (end > 0) j = end - 1;
       } else if (c === '<' && text[j + 1] === '<') {
         // WHY: only an unquoted `<<` starts a heredoc (#628); `<<<` is a here-string.
@@ -240,7 +280,7 @@ function shScanner(ignored: ReadonlySet<string>) {
           continue;
         }
         const tabs = text[j + 2] === '-';
-        const h = ignored.has(key) ? null : heredocWord(text, j + (tabs ? 3 : 2));
+        const h = code(key) ? null : heredocWord(text, j + (tabs ? 3 : 2));
         if (h) {
           heredocs.push({ word: h.word, tabs, key });
           j = h.end - 1;
@@ -256,22 +296,28 @@ function shScanner(ignored: ReadonlySet<string>) {
 
 type Found = { line: number; text: string; own: boolean };
 
+/** How many unclosed openers the rescan reads as code one at a time before it reads every opener as code (#634). */
+const MAX_RESCANS = 100;
+
 /**
  * INVARIANT: fails closed (#634): when a quote or heredoc never closes, the scan is redone with that opener read as
- * code, so a misread construct can't leave the rest of the script unchecked.
+ * code, so a misread construct can't leave the rest of the script unchecked. Past MAX_RESCANS openers the last scan
+ * reads every quote and heredoc opener as code (round 3): it may judge text inside quotes, but it hides no line.
  */
 function scanShLines(lines: { line: number; text: string }[]): Found[] {
   const ignored = new Set<string>();
+  let all = false;
   for (;;) {
-    const sh = shScanner(ignored);
+    const sh = shScanner(all ? null : ignored);
     const found: Found[] = [];
     for (const l of lines) {
       const c = sh.next(l.text, l.line);
       if (c !== null) found.push({ line: l.line, text: c, own: l.text.trim() === c.trim() });
     }
     const open = sh.unclosed();
-    if (open === null || ignored.has(open) || ignored.size >= 100) return found;
-    ignored.add(open);
+    if (open === null) return found;
+    if (ignored.has(open) || ignored.size >= MAX_RESCANS) all = true;
+    else ignored.add(open);
   }
 }
 

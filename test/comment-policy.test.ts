@@ -130,6 +130,44 @@ test('#634: $\'…\' escapes, whole-word heredoc delimiters, ${…} and nested $
   assert.deepEqual(verdict('a.ts', '/* eslint quotes: [2, "double"] */\n'), []);
 });
 
+/** A shell script and the same script as a workflow's `run:` block (its lines 2 below) get one verdict (#634). */
+function shAndRun(sh: string, lines: number[]): void {
+  const untagged = (ls: number[]) => ls.map((l) => `${l}: no WHY:, INVARIANT: or issue/decision id`);
+  assert.deepEqual(verdict('a.sh', sh), untagged(lines), sh.slice(0, 80));
+  const yaml = `steps:\n  - run: |\n${sh
+    .trimEnd()
+    .split('\n')
+    .map((l) => `      ${l}`)
+    .join('\n')}\n  - name: next\n`;
+  assert.deepEqual(verdict('ci.yml', yaml), untagged(lines.map((l) => l + 2)), `run: ${sh.slice(0, 80)}`);
+}
+
+test('#634 round 3: a brace inside quotes in ${…} doesn\'t close it, so the quote after it hides nothing', () => {
+  shAndRun('echo ${x:-"}"}\n# untagged 2\necho "hi"\n# untagged 4\n', [2, 4]);
+  shAndRun('echo ${x:-"a}b"}\n# untagged 2\necho "hi"\n# untagged 4\n', [2, 4]);
+  shAndRun("echo ${x:-'}'}\n# untagged 2\necho 'hi'\n# untagged 4\n", [2, 4]);
+  shAndRun("echo ${x:-$'\\'}'}\n# untagged 2\necho 'hi'\n# untagged 4\n", [2, 4]);
+});
+
+test('#634 round 3: bracket matching is linear in the line: 200 KB of (( or ${ on one line reads in well under a second', () => {
+  for (const unit of ['((', '${', '$((', '${"', '(("']) {
+    const times = Math.ceil(200_000 / unit.length);
+    const started = performance.now();
+    assert.deepEqual(verdict('a.sh', `${unit.repeat(times)}\n# after\n`), ['2: no WHY:, INVARIANT: or issue/decision id'], unit);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1000, `${unit} x ${times}: ${Math.round(ms)} ms`);
+  }
+});
+
+test('#634 round 3: past the rescan cap the scan fails closed: every quote and heredoc opener is code, nothing is hidden', () => {
+  for (const n of [101, 150]) {
+    const openers = Array.from({ length: n }, (_, k) => `cat <<W${k}`).join('\n');
+    shAndRun(`${openers}\n# untagged\n`, [n + 1]);
+    const oneLine = Array.from({ length: n }, (_, k) => `<<W${k}`).join(' ');
+    shAndRun(`cat ${oneLine}\n# untagged\necho "a # b"\n`, [2, 3]);
+  }
+});
+
 test('directives are exempt only in their real syntax; prose that starts like one is judged', () => {
   for (const ok of ['// @ts-expect-error: upstream type', '// eslint-disable-next-line no-console', '/* eslint-disable */', '/* eslint no-console: off */', '/* global window, document: readonly */', '// #region helpers', '// #endregion', '# shellcheck disable=SC2086', '/* istanbul ignore next */', '// prettier-ignore']) {
     assert.deepEqual(verdict(ok.startsWith('#') ? 'a.sh' : 'a.ts', `${ok}\n`), [], ok);
