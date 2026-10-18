@@ -303,7 +303,7 @@ The engine and the helper change together, but root installs the helper. So at s
 
 **root** `sudo bash /opt/worklane/current/scripts/setup/test-user.sh update-helper`, then restart the instance.
 
-The updater keeps the helpers in step on its own. With the services stopped, just before it switches to a new engine, it replaces each root helper the machine has (this one, the machine helper and the console shell) with the new engine's copy when they differ. It writes a checked temp file beside the helper with the same owner and mode, then renames it over the helper. It never touches sudoers. If a helper can't be replaced, it rolls back and holds the update. Every rollback puts the old engine's helpers back.
+The updater keeps the helpers in step on its own. With the services stopped, just before it switches to a new engine, it replaces each root helper the machine has (this one and the machine helper among them) with the new engine's copy when they differ. It writes a checked temp file beside the helper with the same owner and mode, then renames it over the helper. It never touches sudoers. If a helper can't be replaced, it rolls back and holds the update. Every rollback puts the old engine's helpers back.
 
 A setup step that fails (the workspace, a cache, the database, a setup command) is named in the check, with the last 20 lines of its stderr, redacted. Its stdout is never shown: `db-start` prints the database's password there.
 

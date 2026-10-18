@@ -10,10 +10,14 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - An outsider's report filed `ready` on its own GitHub issue (the `<cli>:intake` label) by an older engine, and not started yet, has no checked draft kept, so it is now refused with a comment saying why. Removing `ready` doesn't bring it back to intake: its report stays in the seen ledger for 365 days. To have it worked, a writer opens a new issue with its contract.
   - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
 - Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
+- **The dashboard's owner terminal is removed (#742).** The Setup console no longer opens a login shell as the machine's admin user; use ssh, or the break-glass (port 4398, through ssh). The device list for machine changes stays: it is now `dashboards.sh --machine-devices`, and a hub unit's older `--console-devices` is read as it, with no device added, so machine changes from the page keep the same gate before and after the rerun below. Migration, on a machine that had the terminal (`--console-user` in the hub's unit), as root, once, after the install:
+  - `sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --machine-devices <the unit's --console-devices> --client-id <id> --public-url <url> <name>...` (the older command line works too: `--console-user` is ignored and `--console-devices` is read as `--machine-devices`). It removes the console shell (`/usr/local/libexec/worklane-console-shell`) and its sudoers rule (`/etc/sudoers.d/worklane-console`), and writes the hub's unit with `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp=yes` again. Add project, `tailscale.sh public-url` and instance removal rerun it the same way.
+  - Until then the engine never starts the console shell, but the sudoers rule is still there and the hub runs without its sandbox: the Setup console shows its owner a notice, and `doctor` warns (`owner terminal`).
+- The setup step `console-devices` (Owner terminal devices) is now `machine-devices` (Machine-change devices); a skip recorded for the old one doesn't carry over.
 
 ### Guardrail changes
 
-- none in this release
+- **Removed: a sudoers rule and a root helper (#742).** The owner terminal's rule (the hub's viewer user may run the console shell as the admin user) and the root-owned console shell are gone; `dashboards.sh` removes both from an older install on its next run, and nothing installs them. The engine updater no longer keeps the console shell in step. The hub's unit always keeps its full sandbox. The device allowlist for machine changes is unchanged, under its new name `--machine-devices`.
 
 ## v0.5.2 (2026-10-17)
 

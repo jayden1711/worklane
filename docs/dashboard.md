@@ -62,7 +62,7 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 
 | Permission on the repo | Role | May |
 | --- | --- | --- |
-| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps, the terminal), filing chat drafts, the audit log |
+| admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps), filing chat drafts, the audit log |
 | maintain, write | writer | read runs, throughput, reports, intake and the digest; message (steer) a running agent, not stop it; ask the chat; answer ordinary decisions and intake approvals; save views |
 | triage, read | viewer | the tasks (without costs), decisions, PRs and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part; of the agents' Claude account only whether one is set. No writes at all; no Watch on the Board, and Board cards without runs, usage, diffs or checks |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
@@ -169,55 +169,48 @@ serve-siri` publishes on the tailnet's port 8443: "Hey Siri, tell" leaves an ide
 answers aloud at a viewer's level, with a per-device token an owner makes in Settings, Siri devices. See
 [docs/siri.md](siri.md).
 
-## The owner terminal
+## Machine devices
 
-The Setup console page on the hub can open a terminal: a login shell as the machine's admin user. sudo in it asks for that user's password every time. It's off until the owner turns it on, and it's refused, with a plain message and an entry in the hub's audit log (`terminal-audit.jsonl` in the hub's state), unless all of these hold:
+A machine change from the page (below) must come from one of the machine devices: the Tailscale devices the owner lists in the hub's unit, as root on the machine:
 
-- the person is signed in and is the instance's owner, and the request carries the session's CSRF token (the page offers it as a WebSocket subprotocol, `csrf.<token>` beside `terminal.v1`, since a browser can't set headers on the upgrade; the hub answers with `terminal.v1` alone), from this site's origin;
-- the request comes from a Tailscale device the owner listed;
-- `sudo -n true` as the admin user fails, so sudo still needs a password.
+```bash
+sudo bash scripts/setup/dashboards.sh --machine-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+```
 
-Every command line is recorded in the audit log, except input typed while the terminal doesn't echo, such as a password. It closes after 10 minutes idle.
-
-To turn it on, as root on the machine, after reviewing both scripts:
-
-1. Install the console shell and its one sudoers line:
-
-   ```bash
-   sudo bash scripts/setup/console-shell.sh <admin user>
-   ```
-
-   The hub's viewer, `wl-dash`, may then run exactly `worklane-console-shell check` and `worklane-console-shell shell` as that user, and nothing else, never as root. The script refuses an admin user with a NOPASSWD sudo rule.
-2. Re-run the hub setup with the admin user and your devices:
-
-   ```bash
-   sudo bash scripts/setup/dashboards.sh --console-user <admin user> --console-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
-   ```
-
-   `--console-devices` takes Tailscale tags (`tag:...`) and/or MagicDNS node names, comma-separated. Prefer tags that only you can assign in your tailnet policy, because a node can be renamed. The list lives in the hub's systemd unit on the machine, never in a repository. With no list, every device is refused.
-
-   **This weakens the hub's sandbox.** With `--console-user`, the hub's unit drops `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp`. sudo can't switch users under NoNewPrivileges, and the admin's shell, a child of the hub, would otherwise see a read-only filesystem and a private `/tmp`. Without `--console-user`, the unit keeps all four.
+`--machine-devices` takes Tailscale tags (`tag:...`) and/or MagicDNS node names, comma-separated. Prefer tags that only you can assign in your tailnet policy, because a node can be renamed. The list lives in the hub's systemd unit on the machine, never in a repository. With no list, every device is refused, and only the break-glass may change the machine. The hub keeps its full sandbox (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`) either way. Add project, a rerun through Tailscale setup and instance removal keep the list as the hub's unit has it.
 
 How the device is identified: the hub sits behind `tailscale serve --https=443 http://127.0.0.1:4399` (Tailscale HTTPS, above).
-- A terminal request counts only if the kernel says tailscaled (root) opened the connection, from `/proc/net/tcp`. A program on the machine connecting to the port itself is refused, whatever headers it sends.
+- A request counts only if the kernel says tailscaled (root) opened the connection, from `/proc/net/tcp`. A program on the machine connecting to the port itself is refused, whatever headers it sends.
 - On such a connection, serve's `X-Forwarded-For` holds the peer's Tailscale address. serve replaces any `X-Forwarded-For` the browser sent.
 - That address is looked up with `tailscale whois --json` for the node's name and tags.
 - The `Tailscale-User-*` headers are never used: they name a person, not a device, and serve sets them only for user-owned nodes.
 
-A request through an ssh tunnel, or on the break-glass port 4398, can't be tied to a device, so the terminal is refused there.
+A request through an ssh tunnel, or on the break-glass port 4398, can't be tied to a device. On 4398 the break-glass itself is allowed instead.
+
+### The owner terminal (removed)
+
+The Setup console no longer opens a terminal (#742). It was a login shell as the machine's admin user, which the hub's viewer user started through a sudoers rule and a root-installed console shell, and it made the hub's unit drop its sandbox. For a shell on the machine, use ssh; the break-glass (port 4398, through ssh) stays.
+
+An install that had it (`--console-user` in the hub's unit, or `/usr/local/libexec/worklane-console-shell` present) keeps its root files until root runs `dashboards.sh` again. Until then, the Setup console shows its owner a notice, and `doctor` warns. The rerun:
+
+```bash
+sudo bash scripts/setup/dashboards.sh --machine-devices <the devices the unit's --console-devices lists> --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+```
+
+removes the console shell and its sudoers rule (`/etc/sudoers.d/worklane-console`) and writes the hub's unit with its full sandbox. An older command line still runs: `--console-user` is accepted and ignored, and `--console-devices` is read as `--machine-devices`, with no device added.
 
 ## Machine owners
 
 The machine itself (the agent and test-run slot caps, engine updates) belongs to its machine owners, a list of GitHub logins, not to each instance's owners:
 
 ```bash
-sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--console-user ... --console-devices ...] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--machine-devices ...] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
 ```
 
 The list goes to `/etc/worklane/machine-owners.json` (`{"owners": ["<login>", ...]}`, root:root 0644; `src/machine-owners.ts`). A rerun without `--machine-owner` keeps it. A machine change from the dashboard (Settings, or a root step) needs all of:
 - the instance's owner, who is also a machine owner;
 - a signed-in session, with its CSRF token;
-- one of the console's allowed devices (`--console-devices`), as the hub identifies it for the terminal.
+- one of the machine devices (`--machine-devices`, above), as the hub identifies it.
 
 The instance's dashboard checks these before it records the request, and the coordinator checks the machine owner again before it runs it. The break-glass (port 4398, on the machine) is still allowed. An instance owner who isn't a machine owner sees the machine settings read-only, with the machine owners' logins. With no file (or one anyone but root may write), there are no machine owners, and only the break-glass may change the machine.
 
@@ -225,7 +218,7 @@ The first install sets the first machine owner: `sudo bash scripts/bootstrap.sh 
 
 ## Add project
 
-The Setup console's **Add project** sets up a new instance on this machine: a name (`^[a-z][a-z0-9-]{0,20}$`) and the GitHub repo (`owner/name`), checked in the page and again on the server. It's enabled only for an owner of the instance you're on who is a machine owner, signed in, on one of the console's allowed devices (the same rules as a machine change, above). Anyone else sees it disabled, with the reason and the machine owners' logins.
+The Setup console's **Add project** sets up a new instance on this machine: a name (`^[a-z][a-z0-9-]{0,20}$`) and the GitHub repo (`owner/name`), checked in the page and again on the server. It's enabled only for an owner of the instance you're on who is a machine owner, signed in, on one of the machine devices (the same rules as a machine change, above). Anyone else sees it disabled, with the reason and the machine owners' logins.
 
 A submit is recorded as the machine request `add-project <name> <owner/repo>` (`POST /api/machine/add-project`; the view is `GET /api/add-project`, `src/console/add-project.ts`), with an audit entry; a refused one is audited too. The dashboard never runs it. The coordinator runs the machine helper, which runs the installed engine's `scripts/setup/add-project.sh` as root. One project at a time.
 
