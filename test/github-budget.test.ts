@@ -67,12 +67,12 @@ test('a GitHub response lowers the budget, never raises it within a window; a ne
 test('an exhausted budget refuses until its reset, then allows calls again', async () => {
   const dir = fresh();
   const b = new GitHubBudget(credentialKey('token-c'), dir, { maxWaitMs: 0 });
-  b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 2) }); // 1 to 2 s away
+  const reset = Math.floor(Date.now() / 1000) + 2; // 1 to 2 s away
+  b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) });
   await assert.rejects(b.take('x'), (e: BudgetPaused) => e.kind === 'rate_limited' && e.retryAfter >= 1);
   const waiting = new GitHubBudget(credentialKey('token-c'), dir, { maxWaitMs: 5000, pollMs: 50 });
-  const t0 = Date.now();
   await waiting.take('x');
-  assert.ok(Date.now() - t0 >= 900, `it waited for the reset (${Date.now() - t0} ms)`);
+  assert.ok(Date.now() >= reset * 1000, `went ${reset * 1000 - Date.now()} ms before the reset`);
 });
 
 test('a secondary limit pauses every caller of that credential, in every process, until it lifts', async () => {
@@ -80,14 +80,16 @@ test('a secondary limit pauses every caller of that credential, in every process
   const key = credentialKey('token-d');
   const a = new GitHubBudget(key, dir);
   seed(a, 4000);
-  a.pause('secondary_rate_limited', 1);
+  // 3 s: long enough that a child process started on a loaded machine still meets the pause.
+  a.pause('secondary_rate_limited', 3);
+  const until = a.read().pausedUntil;
   // Another process, same credential: refused while the pause stands, without a call reaching GitHub.
   const counts = await racers(dir, key, 1);
+  assert.ok(Date.now() < until, 'the child ran inside the pause');
   assert.equal(counts[0], 0, 'no call while paused');
   // Same credential with room to wait: it waits the pause out, then goes.
-  const t0 = Date.now();
   await new GitHubBudget(key, dir, { maxWaitMs: 5000, pollMs: 50 }).take('waiter');
-  assert.ok(Date.now() - t0 >= 500, `waited ${Date.now() - t0} ms`);
+  assert.ok(Date.now() >= until, `went ${until - Date.now()} ms before the pause lifted`);
   // Another credential is not paused.
   await new GitHubBudget(credentialKey('token-e'), dir, { maxWaitMs: 0 }).take('other');
 });
