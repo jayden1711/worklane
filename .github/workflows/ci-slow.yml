@@ -2264,7 +2264,9 @@ jobs:
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
       - name: "plugins: through the helper as ci's coordinator, a throwaway user fetches this commit's fixture and root keeps a preview; a stage grants nothing; the coordinator can't confirm or write the allowlist; root confirms only with the id typed back; remove only deletes"
         env:
-          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The commit this job checked out and runs (on a PR, its merge into main), never the PR head: a PR branched
+          # before a fixture change would run main's steps against its old fixture (#631).
+          FIXTURE_SHA: ${{ github.sha }}
         run: |
           url="https://github.com/${{ github.repository }}.git"
           st=/var/lib/worklane/plugins/fetch-status/ci.json
@@ -2326,7 +2328,8 @@ jobs:
           test -d "$s"   # runs in flight keep their copy
       - name: "MCP broker: wl-ci-mcp alone reads the server's secret; the server is snapshotted in quarantine, approved by root, and reached by the agent only through the broker with its run's ticket; a rug pull blocks it; a real claude admits only the connector"
         env:
-          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The commit under test, as in the plugins step (#631).
+          FIXTURE_SHA: ${{ github.sha }}
         run: |
           url="https://github.com/${{ github.repository }}.git"
           st=/var/lib/worklane/plugins/fetch-status/ci.json
