@@ -335,10 +335,10 @@ exec ${JSON.stringify(process.execPath)} "$@"
   writeFileSync(join(m.T, 'hang-install-wl-beta-agent'), '');
   appendFileSync(join(m.s, 'lib.sh'), 'CLAUDE_TOKEN_INSTALL_SECONDS=2\n');
   const before = readFileSync(m.cred('wl-beta-agent'), 'utf8');
-  const t0 = Date.now();
+  const t0 = performance.now();
   const r = m.run(['switch', '--json'], `${TOKEN}\n`, 30_000);
   assert.equal(r.error, undefined, `the switch hung (killed at the test's deadline): ${r.stdout}`);
-  assert.ok(Date.now() - t0 < 25_000, 'cut off at the bound');
+  assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound');
   assert.equal(r.status, 1, r.stderr + r.stdout);
   const mine = r.events.filter((e) => e.user === 'wl-beta-agent');
   assert.deepEqual(mine.map((e) => `${e.step} ${e.state}`), ['install failed'], 'no check on a login it could not store');
@@ -377,10 +377,10 @@ test('issue #613: claude_login_ok whose claude never answers is cut off: no, wit
   const m = machine();
   writeFileSync(join(m.T, 'bin', 'claude'), '#!/usr/bin/env bash\nexec sleep 120\n');
   appendFileSync(join(m.s, 'lib.sh'), 'CLAUDE_LOGIN_SECONDS=2\n');
-  const t0 = Date.now();
+  const t0 = performance.now();
   const r = loginOk(m, 'wl-alpha-agent');
   assert.equal(r.error, undefined, "claude_login_ok hung (killed at the test's deadline)");
-  assert.ok(Date.now() - t0 < 25_000, 'cut off at the bound');
+  assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound');
   assert.equal(r.status, 1);
   assert.match(r.stderr, /^claude auth status, as wl-alpha-agent, didn't answer within 2 s \(its home may be on a hung mount\)$/m);
 });
