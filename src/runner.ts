@@ -531,8 +531,9 @@ export class CliRunner implements AgentRunner {
     const budget = this.retry.budgetMs ?? TRANSIENT_BUDGET_MS;
     const first = now();
     for (let tries = 1; ; tries++) {
-      // INVARIANT (#392): a provider run's endpoint is a host root allows (src/provider-hosts.ts), read again before
-      // each try, so a change to agents.yaml or the file since the coordinator resolved the run can't slip past.
+      // INVARIANT (#392): a provider run's endpoint is a host root allows (src/provider-hosts.ts). Root's file is read
+      // again before each try, so a host root took out since the coordinator resolved the run (or a run handed a
+      // provider some other way) can't slip past.
       // Refused: not started, never retried. Not a fallback here: that would skip the coordinator's model cap and
       // usage pause, which it applied when it resolved the run.
       const hostRefused = req.provider && req.provider.kind !== 'cli' ? providerHostRefusal(req.provider.baseUrl) : null;

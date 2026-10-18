@@ -62,12 +62,13 @@ test('the file: root\'s, not writable by its group or others, not a symlink, bou
 
 test('a base_url\'s host and port must match an entry exactly: no suffix, look-alike, other port or other scheme\'s default', () => {
   const h = ok('api.provider.test', 'alt.provider.test:8443', '127.0.0.1:8080', '[::1]:11434');
-  for (const u of ['https://api.provider.test', 'https://api.provider.test/anthropic', 'https://api.provider.test:443/v1', 'https://alt.provider.test:8443/x', 'http://127.0.0.1:8080', 'https://127.0.0.1:8080', 'http://[::1]:11434']) assert.equal(providerHostRefusal(u, h), null, u);
-  for (const u of ['https://api.provider.test.evil.test', 'https://evil-api.provider.test', 'https://provider.test', 'https://API.PROVIDER.TEST.', 'https://api.provider.test:8443', 'https://alt.provider.test', 'http://127.0.0.1:8081', 'http://127.0.0.1', 'http://localhost:8080']) {
+  for (const u of ['https://api.provider.test', 'https://api.provider.test/', 'https://api.provider.test/anthropic', 'https://api.provider.test/v1/', 'https://alt.provider.test:8443/x', 'http://127.0.0.1:8080', 'https://127.0.0.1:8080', 'http://[::1]:11434']) assert.equal(providerHostRefusal(u, h), null, u);
+  for (const u of ['https://api.provider.test.evil.test', 'https://evil-api.provider.test', 'https://provider.test', 'https://api.provider.test:8443', 'https://alt.provider.test', 'http://127.0.0.1:8081', 'http://127.0.0.1']) {
     assert.match(providerHostRefusal(u, h) ?? '', /is not an allowed provider host \(api\.provider\.test, alt\.provider\.test:8443, 127\.0\.0\.1:8080, \[::1\]:11434, from \/etc\/x\/providers\.json\)/, u);
   }
-  // Uppercase is the same host once WHATWG URL normalises it.
-  assert.equal(providerHostRefusal('https://API.provider.test', h), null);
+  // A spelling WHATWG URL rewrites onto an allowed host is refused, never matched: claude gets the string itself.
+  assert.match(providerHostRefusal('https://API.provider.test', h)!, /must be written as a URL normalises it: https:\/\/api\.provider\.test$/);
+  assert.match(providerHostRefusal('https://api.provider.test:443/v1', h)!, /normalises it: https:\/\/api\.provider\.test\/v1$/);
 });
 
 test('no file, or a refused one, means no provider host at all: provider runs are off', () => {
@@ -86,8 +87,10 @@ test('a credentialed, non-http(s), plain-http-off-this-machine, query or fragmen
     ['ftp://api.provider.test', /must be https:\/\/.*not ftp:/],
     ['file:///etc/passwd', /not file:/],
     ['ws://api.provider.test', /not ws:/],
-    ['http://api.provider.test', /plain http:\/\/ only to this machine/],
-    ['http://192.0.2.5:8080', /plain http:\/\/ only to this machine/],
+    ['http://api.provider.test', /plain http:\/\/ only to a loopback address/],
+    ['http://192.0.2.5:8080', /plain http:\/\/ only to a loopback address/],
+    // A name, even localhost: plain http stays on this machine only by a literal loopback address.
+    ['http://localhost:8080', /plain http:\/\/ only to a loopback address: 127\.x\.x\.x or \[::1\]\), not http:\/\/localhost:8080/],
     ['https://api.provider.test/?key=sk-123', /query or fragment/],
     ['https://api.provider.test/#x', /query or fragment/],
     ['https://api.provider.test/ x', /whitespace/],
@@ -98,7 +101,35 @@ test('a credentialed, non-http(s), plain-http-off-this-machine, query or fragmen
     assert.match(baseUrlProblem(u) ?? '', why, u);
     assert.match(providerHostRefusal(u, h) ?? '', why, u);
   }
-  for (const u of ['http://localhost:8080', 'http://127.0.0.1:8080', 'http://127.1.2.3', 'http://[::1]:11434', 'https://api.provider.test/anthropic']) assert.equal(baseUrlProblem(u), null, u);
+  for (const u of ['http://127.0.0.1:8080', 'http://127.1.2.3', 'http://[::1]:11434', 'https://api.provider.test/anthropic', 'https://localhost:8443']) assert.equal(baseUrlProblem(u), null, u);
+});
+
+test('a base_url not already written as WHATWG URL normalises it is refused, saying the form: claude gets the string itself', () => {
+  // Every one of these parses onto an allowed host (#607 review probe); none may reach claude as written.
+  const h = ok('allowed.test', '127.0.0.1:8080', '[::1]:11434');
+  const cases: [string, string][] = [
+    ['https:allowed.test', 'https://allowed.test'],
+    ['https:/allowed.test', 'https://allowed.test'],
+    ['https:\\\\allowed.test', 'https://allowed.test'],
+    ['HTTPS://allowed.test', 'https://allowed.test'],
+    ['https://ALLOWED.TEST', 'https://allowed.test'],
+    ['https://allowed%2Etest', 'https://allowed.test'],
+    ['https://allowed．test', 'https://allowed.test'],
+    ['https://allowed.test\\evil.test', 'https://allowed.test/evil.test'],
+    ['https://allowed.test:443', 'https://allowed.test'],
+    ['https://allowed.test:', 'https://allowed.test'],
+    ['http://0x7f.0.0.1:8080', 'http://127.0.0.1:8080'],
+    ['http://2130706433:8080', 'http://127.0.0.1:8080'],
+    ['http://127.1:8080', 'http://127.0.0.1:8080'],
+    ['http://[0:0:0:0:0:0:0:1]:11434', 'http://[::1]:11434'],
+    ['https://allowed.test/a/../v1', 'https://allowed.test/v1'],
+  ];
+  for (const [u, form] of cases) {
+    assert.doesNotThrow(() => new URL(u), `${u} parses (the probe's premise)`);
+    const why = `must be written as a URL normalises it: ${form}`;
+    assert.equal(baseUrlProblem(u), why, u);
+    assert.equal(providerHostRefusal(u, h), `its base_url ${why}`, u);
+  }
 });
 
 const base = { daily_budget_usd: 10, roles: { workers: { enabled: true, model: 'sonnet' }, evaluator: { enabled: true, model: 'opus' } } };
@@ -113,7 +144,8 @@ test('at config load: the schema refuses a credentialed, non-http(s) or plain-ht
   assert.equal(AgentsConfig.safeParse({ ...base, providers: { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'm' } } }).success, true, 'plain http to loopback');
   assert.match(issues('https://user:secret@open.example.com/anthropic')!, /providers\.hosted\.glm\.base_url: base_url must not carry a user or password/);
   assert.match(issues('ftp://open.example.com')!, /base_url must be https:\/\//);
-  assert.match(issues('http://open.example.com/anthropic')!, /plain http:\/\/ only to this machine/);
+  assert.match(issues('http://open.example.com/anthropic')!, /plain http:\/\/ only to a loopback address/);
+  assert.match(issues('https://open.example.com:443/anthropic')!, /base_url must be written as a URL normalises it: https:\/\/open\.example\.com\/anthropic/);
   assert.match(issues('https://open.example.com/anthropic?key=sk-1')!, /query or fragment/);
 });
 

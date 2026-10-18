@@ -58,10 +58,14 @@ sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
   port. An entry without a port means the scheme's default port (443 for `https://`), so `api.provider.example`
   doesn't allow `https://api.provider.example:8443`. No wildcards, no suffixes. Write each entry the way a URL
   normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`).
-- **The URL's shape, whatever the list says:** `https://`, except plain `http://` to this machine (`localhost`,
-  `127.x.x.x`, `[::1]`); no `user:password@`, no query and no fragment (a key there would be a credential in the
-  repo). A path is fine. The config schema refuses any other `base_url`: the config is invalid and the coordinator
-  says why.
+- **The URL's shape, whatever the list says:**
+  - `https://`. Plain `http://` is allowed only to a loopback address (`127.x.x.x`, `[::1]`), never to a name: not
+    even `localhost`, so it doesn't depend on name resolution.
+  - No `user:password@`, no query and no fragment (a key there would be a credential in the repo). A path is fine.
+  - Written exactly as a URL normalises it, because that string is what `claude` gets: lowercase, no default port
+    (`:443`), no backslashes, `%2E` or other dot spellings, and `127.0.0.1` rather than `0x7f.0.0.1` or `127.1`. The
+    refusal names the form to use. A trailing `/` is fine.
+  - The config schema refuses any other `base_url`: the config is invalid, and the coordinator says why.
 - **The file is refused** (no host at all, and why) when root doesn't own it, its group or others may write it, it is
   a symlink, it is over 8192 bytes, it isn't `{"hosts": [...]}` (any other key refuses it), or it has more than 64
   hosts or an entry that isn't `host` or `host:port` in that form. Native Windows has no root-owned `/etc`, so no

@@ -6,8 +6,9 @@
 //   {"hosts": ["api.provider.example", "127.0.0.1:8080"]}
 //
 // A base_url must name one of those hosts exactly: the same host name or address, and the same port (an entry without
-// a port is the scheme's default port). No wildcards. It must be https://, except to a loopback address (this
-// machine), and carry no user, password, query or fragment. The URL's shape is checked by the config schema (a bad
+// a port is the scheme's default port). No wildcards. It must be https://, except to a loopback address (127.x.x.x or
+// [::1]), carry no user, password, query or fragment, and be written as WHATWG URL normalises it, since that string is
+// what claude gets. The URL's shape is checked by the config schema (a bad
 // one is a config error); the host against root's list when the coordinator starts, when it resolves each provider
 // run (src/coordinator/providers.ts: the run takes its fallback, the role's normal model), and again by the runner
 // right before it sets ANTHROPIC_BASE_URL (src/runner.ts: a refused run doesn't start).
@@ -33,13 +34,21 @@ export interface ProviderHosts {
   error: string | null;
 }
 
-/** Whether a URL's host is this machine's loopback: localhost, 127.0.0.0/8 or [::1] (WHATWG URL's normalised forms). */
-export const isLoopbackHost = (hostname: string): boolean => hostname === 'localhost' || hostname === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+/**
+ * Whether a URL's host is a loopback address: 127.0.0.0/8 or [::1] (WHATWG URL's normalised forms). WHY: a literal
+ * address, never a name such as localhost, so plain http staying on this machine doesn't rest on name resolution.
+ */
+export const isLoopbackHost = (hostname: string): boolean => hostname === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
 
 /**
  * Why `raw` can't be a provider's base_url, whatever the allowlist says; null when its shape is fine. http(s) only,
- * https except to loopback, no user or password, no query or fragment (a key in either would be a credential in the
- * repo). A path is allowed: some providers serve the Anthropic API under one.
+ * https except to a loopback address, no user or password, no query or fragment (a key in either would be a
+ * credential in the repo). A path is allowed: some providers serve the Anthropic API under one.
+ *
+ * INVARIANT: already in the form WHATWG URL normalises it to (its href, or that without the trailing / of an empty
+ * path). The host is checked on the parsed URL, but the string itself becomes claude's ANTHROPIC_BASE_URL; a spelling
+ * WHATWG rewrites (https:host, a backslash, %2E, a fullwidth dot, 0x7f.0.0.1, uppercase, :443) would rest on claude
+ * parsing it the same way. A canonical one means the same host under any parser.
  */
 export function baseUrlProblem(raw: unknown): string | null {
   if (typeof raw !== 'string' || !raw) return 'must be a URL string';
@@ -51,12 +60,13 @@ export function baseUrlProblem(raw: unknown): string | null {
   } catch {
     return 'is not a URL';
   }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return `must be https:// (or http:// to this machine), not ${u.protocol}`;
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return `must be https:// (or http:// to a loopback address), not ${u.protocol}`;
   // WHY: WHATWG URL drops an empty "user@" or ":@"; the raw authority is checked too, as for network.json's proxy.
   if (u.username || u.password || /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*@/.test(raw)) return 'must not carry a user or password';
   if (u.search || u.hash || raw.includes('?') || raw.includes('#')) return 'must not carry a query or fragment';
   if (!u.hostname) return 'has no host';
-  if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) return `must be https:// (plain http:// only to this machine: localhost, 127.x.x.x or [::1]), not http://${u.host}`;
+  if (u.protocol === 'http:' && !isLoopbackHost(u.hostname)) return `must be https:// (plain http:// only to a loopback address: 127.x.x.x or [::1]), not http://${u.host}`;
+  if (raw !== u.href && `${raw}/` !== u.href) return `must be written as a URL normalises it: ${u.pathname === '/' ? u.href.slice(0, -1) : u.href}`;
   return null;
 }
 
