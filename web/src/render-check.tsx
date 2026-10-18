@@ -2,7 +2,7 @@
 // rendered to static markup from a given state, so a test can see that every page
 // still shows its data. Not part of the served UI.
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { TailscaleAction, TailscaleData } from './api';
+import type { InstanceScope, TailscaleAction, TailscaleData } from './api';
 import type { ConfigPr, HeldDraftView, GoalGraph, DiscordBot, DiscordIntakePlan, DiscordSetup, DiscordFormValue, ClaudeSigninData, SetupStepView, ConfigChange, PolicyChange, DeployGate, AddProjectData, RepoPickerData, AsksView, ClaudeAccountData, ChatAnswerFile, CheckRun, FirstRun, Flaky, GhLoginView, HarnessEvals, Learnings, CoordinatorError, DotStatus, HealthView, HubInfo, InstanceIncidents, IntakeView as IntakeViewData, PrsView, Protection, State, Throughput, Trust, Waiting, Metrics, Constraints } from './api';
 import { HealthPanelView, type InstanceHealth } from './components/HealthPanel';
 import { DeployGateStatus } from './components/DeployGate';
@@ -210,7 +210,8 @@ export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsol
 export const renderAddProject = (data: AddProjectData, picker?: RepoPickerData | null) => renderToStaticMarkup(<AddProjectView data={data} picker={picker === undefined ? null : picker} />);
 export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
-export const renderClaudeAccount = (data: ClaudeAccountData, now?: number) => renderToStaticMarkup(<ClaudeAccountView data={data} {...(now !== undefined ? { now } : {})} />);
+/** The Claude account panel; `scope`: the hub page's instance scope, as ClaudeAccountPanel passes it (absent: off a hub). */
+export const renderClaudeAccount = (data: ClaudeAccountData, now?: number, scope?: InstanceScope | null) => renderToStaticMarkup(<ClaudeAccountView data={data} scope={scope ?? null} {...(now !== undefined ? { now } : {})} />);
 export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
 /** A decision's detail page from its data; `prBody` and `diff` as already read (undefined: not asked yet). */
@@ -235,7 +236,10 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     </NavMenu.Provider>,
   );
 };
-export const renderSetupModeHidden = (path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
+/** The sidebar on a hub page with this scope, as the Dashboard passes it: its header and the instance list. */
+export const renderSidebar = (state: State, o: { hub: HubInfo; scope: InstanceScope }) =>
+  renderToStaticMarkup(<SidebarBody state={state} all={o.scope.all} path="/" counts={{}} health={{ hub: o.hub, status: {} }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={<InstanceList hub={o.hub} current={o.scope.current ?? ''} all={o.scope.all} onSelect={() => {}} />} />);
+export const renderSetupModeHidden =(path: string) => renderToStaticMarkup(<SetupModeHidden path={path} />);
 export { nextStep } from './pages/FirstRun';
 /** #468: Your first task's form (its picks loaded, a preview shown), and the Issues page's "Not picked up". */
 export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?: { title: string; body: string } } = {}) => renderToStaticMarkup(<FirstTaskForm canEdit={o.canEdit ?? true} initial={info as never} initialPreview={o.preview ?? null} onDone={() => {}} />);
@@ -252,6 +256,8 @@ export { EXTEND_TABS } from './pages/Extend';
 
 export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
   renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
+/** #569: what the Repo config form's checks slot shows for one checks-seen answer. */
+export { checksSeenSlot } from './checks-seen';
 /** #468: the config PRs as the page follows them; one row with its merge plan shown. */
 export const renderConfigPrs = (prs: ConfigPr[], o: { canAct?: boolean; plan?: { command: string; then: string } } = {}) =>
   renderToStaticMarkup(o.plan ? <ul><ConfigPrRow pr={prs[0]!} canAct={o.canAct ?? true} initialPlan={o.plan} onDone={() => {}} /></ul> : <ConfigPrList prs={prs} canAct={o.canAct ?? true} onDone={() => {}} />);

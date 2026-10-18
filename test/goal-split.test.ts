@@ -125,3 +125,18 @@ test('goal split: an invalid split files nothing and goes to the owner', { skip 
   assert.match((f.log.read(0, ['issue.blocked']).at(-1)?.payload as { why: string }).why, /form a cycle: api -> schema -> api|form a cycle: schema -> api -> schema/);
   assert.equal((await f.backlog.list('ready')).filter((i) => i.number !== g).length, 0, 'no child filed');
 });
+
+test("goal split: the goal planner runs at routing.planner_effort (#579); unset, at none", { skip }, async () => {
+  for (const effort of ['max', undefined] as const) {
+    const f = fixture();
+    if (effort) f.cfg.agents.planner_effort = effort;
+    f.backlog.open({ title: 'Export orders', body: GOAL, author: 'example-owner', labels: ['ready', 'type:goal'] });
+    const runner = goalAgents(SPLIT);
+    const c = coordinator(f, runner);
+    await c.tick();
+    await c.idle();
+    const gp = runner.calls.find((r) => r.role === 'goal-planner')!;
+    assert.equal(gp.effort, effort);
+    assert.equal('effort' in gp, effort !== undefined, 'unset: not even the key');
+  }
+});

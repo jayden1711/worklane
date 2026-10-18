@@ -501,8 +501,8 @@ function netHost(host: RunHost, grant: (tier: string) => boolean, o: { fetchFail
   const calls: string[] = [];
   const h: RunHost = {
     ...host,
-    fetch: async (id, fetcher, cache) => {
-      calls.push(`fetch ${fetcher} ${cache}`);
+    fetch: async (id, fetcher, cache, key, ms, signal, files = []) => {
+      calls.push(`fetch ${fetcher} ${cache}${files.map((f) => ` ${f}`).join('')}`);
       return o.fetchFails ? { code: 3, out: 'fetch: node_modules/x resolves to "git+ssh://x": the fetch takes https:// tarballs only', err: 'fetch: refused' } : { code: 0, out: 'fetched' };
     },
     startDb: async (id, db) => {
@@ -550,6 +550,21 @@ test('network: a fetch that fails fails every tier with its reason, and nothing 
   assert.deepEqual(n.calls, ['fetch npm npm']);
   assert.equal(res.setup?.step, 'fetch 1 (npm, into the npm cache)');
   assert.match(res.tiers[0]!.summary, /^fetch 1 \(npm, into the npm cache\) failed \(exit 3\):\n.*the fetch takes https:\/\/ tarballs only/);
+});
+
+test('network: a pip fetch passes its requirements files and its cache to the host, before the setup steps; one that fails is named as pip\'s', { skip: !hasPerl && 'perl' }, async () => {
+  const PIP_RUN = { ...NET_RUN, fetch: [{ pip: 'pip', requirements: ['requirements.txt', 'req/dev.txt'] }], caches: [{ name: 'pip', env: 'PIP_FIND_LINKS', key: ['requirements.txt'] }] };
+  const r = rig(PIP_RUN);
+  const n = netHost(r.host, () => false);
+  const res = await runTestRun({ ...r.deps, host: n.h }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, true, JSON.stringify(res.tiers));
+  assert.deepEqual(n.calls.slice(0, 2), ['fetch pip pip requirements.txt req/dev.txt', 'exec echo installed']);
+  const r2 = rig(PIP_RUN);
+  const n2 = netHost(r2.host, () => false, { fetchFails: true });
+  const res2 = await runTestRun({ ...r2.deps, host: n2.h }, { repo: r2.dir, sha: r2.sha, kind: 'fast', prs: [] });
+  assert.equal(res2.ok, false);
+  assert.deepEqual(n2.calls, ['fetch pip pip requirements.txt req/dev.txt']);
+  assert.equal(res2.setup?.step, 'fetch 1 (pip, into the pip cache)');
 });
 
 test('after a restart: a GPU run cut off (no end recorded) is wiped and recorded, and never run again by itself; one cancelled by a graceful stop runs again', async () => {

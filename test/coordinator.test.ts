@@ -582,6 +582,33 @@ test('plan mode: under plan_gate risky, a size:M issue is planned read-only firs
   assert.equal(t.f.log.read(0, ['decision.asked']).filter((e) => (e.payload as { kind: string }).kind === 'plan').length, 0);
 });
 
+test("a role's effort (#579): the planner, repro, worker and evaluator runs (its cheap tier too) reach the runner with agents.yaml's; unset sends none", { skip }, async () => {
+  const efforts = (t: ReturnType<typeof plannedTask>) => t.runner.calls.map((r) => [r.role, r.model, r.effort ?? null]);
+  const t = plannedTask(() => PLAN, undefined, { gate: 'off' });
+  const a = t.f.cfg.agents;
+  a.roles.workers!.effort = 'high';
+  a.roles.evaluator!.effort = 'xhigh';
+  a.planner_effort = 'low';
+  // The cheap tier judges this L1 change: it shares the evaluator's effort.
+  Object.assign(a.routing, { eval_cheap: 'haiku', eval_cheap_levels: ['L0', 'L1'] });
+  await t.run();
+  assert.deepEqual(efforts(t), [
+    ['planner', 'sonnet', 'low'],
+    ['evaluator-repro', 'opus', 'xhigh'],
+    ['worker', 'sonnet', 'high'],
+    ['evaluator-verdict', 'haiku', 'xhigh'],
+  ]);
+  const u = plannedTask(() => PLAN, undefined, { gate: 'off' });
+  await u.run();
+  assert.deepEqual(efforts(u), [
+    ['planner', 'sonnet', null],
+    ['evaluator-repro', 'opus', null],
+    ['worker', 'sonnet', null],
+    ['evaluator-verdict', 'opus', null],
+  ]);
+  assert.ok(u.runner.calls.every((r) => !('effort' in r)), 'unset: not even the key');
+});
+
 test('plan mode: the planner is told the decisions already made, each with the answer that stands, so it asks none of them again', { skip }, async () => {
   const t = plannedTask(() => PLAN);
   t.f.log.append('decision.asked', { id: 'd-fmt', kind: 'question', issue: null, owner: 'example-owner', question: 'Which format do exports use?', options: ['csv', 'json'], recommendation: 'csv', receipts: [] }, 'coordinator');

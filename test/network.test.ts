@@ -16,6 +16,7 @@ import { agentEnv, CliRunner, runAsEnv, type RunRequest } from '../src/runner.js
 import { instanceEnv, instanceTokens } from '../src/service.js';
 import { BRAND } from '../src/brand.js';
 import { onRealMachine } from './isolate.js';
+import { allowProviderHosts } from './helpers.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX file owners and modes, and POSIX stand-ins for claude and gh';
 const me = typeof process.getuid === 'function' ? process.getuid() : -1;
@@ -213,6 +214,7 @@ test('a provider run keeps its own endpoint from agents.yaml, and only that one'
   const s = standInClaude();
   const base = instanceEnv(i, poisoned({ PATH: process.env.PATH ?? '', HOME: i.home }));
   const provider = { name: 'local', kind: 'local' as const, baseUrl: 'http://127.0.0.1:11434', keyFile: '/home/user/provider/key' };
+  allowProviderHosts('127.0.0.1:11434');
   const r = await withNetwork(null, () => new CliRunner('cli', base, s.bin).run(req(s.dir, { provider })));
   assert.equal(r.reason, 'succeeded', r.detail);
   const env = s.got('run');

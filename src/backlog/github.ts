@@ -4,6 +4,7 @@
 import { execFileSync } from 'node:child_process';
 import { redact } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
+import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
 
@@ -33,6 +34,7 @@ export class GitHubBacklog implements Backlog {
     private token: () => string | Promise<string> = ghToken,
     private fetchImpl: Fetch = fetch,
     private api = 'https://api.github.com',
+    private budget: (token: string) => GitHubBudget = (t) => budgetFor(t),
   ) {}
 
   /**
@@ -41,10 +43,20 @@ export class GitHubBacklog implements Backlog {
    */
   private async req<T>(method: string, path: string, body?: unknown, raw = false): Promise<T> {
     body = body === undefined ? body : redact(body);
+    // The machine's shared budget for this token (src/github/budget.ts): it decides when the call runs, never what it does.
+    const token = await this.token();
+    const budget = this.budget(token);
+    const resource = path === '/graphql' ? 'graphql' : 'core';
+    try {
+      await budget.take('backlog', resource);
+    } catch (e) {
+      if (e instanceof BudgetPaused) throw new GitHubError(429, e.kind, e.message, e.retryAfter);
+      throw e;
+    }
     const res = await this.fetchImpl(`${this.api}${path}`, {
       method,
       headers: {
-        authorization: `Bearer ${await this.token()}`,
+        authorization: `Bearer ${token}`,
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         ...(body ? { 'content-type': 'application/json' } : {}),
@@ -52,6 +64,8 @@ export class GitHubBacklog implements Backlog {
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    const headers = Object.fromEntries(res.headers.entries());
+    budget.observe(resource, headers);
     // GitHub took the token: the watchdog's sign that GitHub access works (src/watchdog/probes.ts, github_auth).
     if (res.ok) noteGitHubOk(this.token);
     if (res.status === 204) return undefined as T;
@@ -65,7 +79,9 @@ export class GitHubBacklog implements Backlog {
       json = text;
     }
     if (!res.ok) {
-      const c = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), json);
+      const c = classifyGitHubError(res.status, headers, json);
+      // A secondary limit stops every caller on the token, not just this one; so does a limit known only by Retry-After.
+      if (c.kind === 'secondary_rate_limited' || (c.kind === 'rate_limited' && headers['x-ratelimit-reset'] === undefined && c.retryAfter)) budget.pause(c.kind, c.retryAfter ?? SECONDARY_DEFAULT_S);
       // A validation failure says why in errors[] ("Validation Failed" alone says nothing).
       const details = ((json as { errors?: { message?: string }[] } | undefined)?.errors ?? []).map((x) => x?.message).filter(Boolean);
       throw new GitHubError(res.status, c.kind, details.length ? `${c.message}: ${details.join('; ')}` : c.message, c.retryAfter);
