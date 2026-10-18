@@ -267,7 +267,7 @@ test("paused reason: a decision's approve option, on its card and its own page, 
   }
 });
 
-test("paused reason: the voice banner's Approve says what its decision's kind does: an intake happens now, a plan waits; voice never approves a landing", () => {
+test("paused reason: the voice banner's Approve says what its decision's kind does (decisionWork); voice reaches only plan decisions, so a plan waits; voice never approves a landing", () => {
   const pending = (decision: string) => ({ pending: { kind: 'approve', issue: 12, decision, title: 'T', effect: 'e', until: Date.now() + 10_000 }, left: 10 });
   const decisions = [
     { id: 'land-12', kind: 'land' },
@@ -279,7 +279,9 @@ test("paused reason: the voice banner's Approve says what its decision's kind do
   const say = (decision: string) => described(r.renderVoiceBannerUnderUsage(paused, null, pending(decision), decisions), 'voice-banner-confirm');
   // The decisionWork mechanism only: voice never approves a landing (the pin below), so no real banner shows this.
   assert.equal(say('land-12').text, LANDS_HINT, 'mechanism: decisionWork gives a land kind the land text');
-  assert.equal(say('intake-12').text, NOW_HINT, 'an intake decision files its issue now: only agent runs wait');
+  // The decisionWork mechanism only: voice can't reach an intake decision (asked with issue null; approvalFor matches
+  // the spoken number), so no real banner shows this either.
+  assert.equal(say('intake-12').text, NOW_HINT, 'mechanism: decisionWork gives an intake kind the happens-now text');
   assert.equal(say('plan-12').text, PAUSED_HINT, 'a plan decision starts work: it waits for the resume');
   assert.equal(say('q-12').id, undefined, 'any other kind says nothing');
   for (const d of ['land-12', 'intake-12']) assert.equal(say(d).disabled, false, `${d}: not refused while paused`);

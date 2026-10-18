@@ -17,9 +17,10 @@ export type BannerView = { pending: Pending; left: number } | { done: string; ok
 /**
  * The 10-second banner shown for every spoken confirm, with the same confirm and cancel as buttons. `decisions`: the
  * open decisions (State.decisions); an approval's Approve says, while paused, what the work its decision's kind does
- * (decisionWork: an intake files its issue now, a plan waits for the resume). Voice never approves a landing: the
- * server marks every land decision voiceRefused (src/voice.ts voiceExclusion, NEVER_FROM_CHAT) and approvalFor refuses
- * it, so no banner offers one.
+ * (decisionWork). Voice reaches only plan decisions, so in practice it says the plan text (the work waits for the
+ * resume). Voice never approves a landing: the server marks every land decision voiceRefused (src/voice.ts
+ * voiceExclusion, NEVER_FROM_CHAT) and approvalFor refuses it. Voice can't reach an intake decision either (the
+ * owner's decision on #664): one is asked with issue null, and approvalFor matches on the spoken issue number.
  */
 export function VoiceBanner({ view, decisions = [], onConfirm, onCancel }: { view: BannerView | null; decisions?: Pick<Decision, 'id' | 'kind'>[]; onConfirm: () => void; onCancel: () => void }) {
   if (!view) return null;
