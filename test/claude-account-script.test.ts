@@ -3,12 +3,13 @@
 // polls after SIGTERM, or never) and claude (signed in when its user's credentials hold a setup token). The real
 // install_claude_token writes each user's login. Checked: the pause and the wait with its timeout, the token for every
 // agent and eval user at 0600 and in no output, `claude auth status` as each user, an instance whose check fails left
-// paused, the rerun, the token from a dashboard, and status.
+// paused, the rerun, the token from a dashboard, status, and the account Claude Code cached for the old login dropped
+// with each token installed (#341).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readAccountStatus, readSwitchLines, switchedOnto, switchView } from '../src/claude-account.js';
@@ -22,6 +23,8 @@ const TOKEN = `sk-ant-oat01-${SECRET}`;
 /** Whether any 8 characters of the token's secret part are in this text. */
 const leaked = (text: string) => Array.from({ length: SECRET.length - 7 }, (_, i) => SECRET.slice(i, i + 8)).some((w) => text.includes(w));
 const OLD = `sk-ant-oat01-${'O'.repeat(40)}`;
+/** ~/.claude.json on a machine signed in to the old account: its account cached (#341), and keys a switch must keep. */
+const CACHE = { numStartups: 7, theme: 'dark', oauthAccount: { emailAddress: 'old@example.com', organizationName: 'Example', accountUuid: 'a-1' }, projects: { '/srv/x': { allowedTools: [] } } };
 
 interface Line {
   step: string;
@@ -52,7 +55,7 @@ user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { systemctl is-active -q "$1"; }
 # The files here are this test's: only the link check is left (find -user would need the real users).
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ]; }
-MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" CLAUDE_ACCOUNT_DIR="$T/var" CLAUDE_ACCOUNT_LOCK="$T/lock"
+MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" CLAUDE_ACCOUNT_DIR="$T/var" CLAUDE_ACCOUNT_LOCK="$T/lock" MACHINE_CHANGES="$T/machine-changes.jsonl"
 MINUTE=1 SWITCH_POLL=0.05
 `,
   );
@@ -87,7 +90,10 @@ case "$1" in
   *) exit 64 ;;
 esac
 `);
-  // claude auth status --json: signed in when this user's credentials hold a setup token, unless fail-auth-<user> exists.
+  // claude auth status --json: signed in when this user's credentials ($CLAUDE_CONFIG_DIR, else ~/.claude, as the real
+  // one reads them) hold a setup token, unless fail-auth-<user> exists.
+  // The account it names is the one cached in Claude Code's profile (.claude.json in $CLAUDE_CONFIG_DIR, else in $HOME),
+  // as the real one does (#341): not the token's. With no account cached, the token's (as if fetched again for it).
   // claude -p (the login's proof, one minimal real call): answered, unless the API refuses the login: refuse-new (the new
   // token, for every user) or refuse-api-<user> exists; then a 401 as claude prints it, with the token on stderr too.
   exe('claude', `#!/usr/bin/env node
@@ -95,8 +101,10 @@ const fs = require('node:fs');
 const T = ${JSON.stringify(T)};
 fs.appendFileSync(T + '/claude-calls', process.env.USER + ' ' + process.argv.slice(2).join(' ') + '\\n');
 let tok = '';
-try { tok = JSON.parse(fs.readFileSync(process.env.HOME + '/.claude/.credentials.json', 'utf8')).claudeAiOauth.accessToken; } catch {}
+try { tok = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process.env.HOME + '/.claude') + '/.credentials.json', 'utf8')).claudeAiOauth.accessToken; } catch {}
 const ok = /^sk-ant-oat01-/.test(tok) && !fs.existsSync(T + '/fail-auth-' + process.env.USER);
+let cached = null;
+try { cached = JSON.parse(fs.readFileSync((process.env.CLAUDE_CONFIG_DIR || process.env.HOME) + '/.claude.json', 'utf8')).oauthAccount || null; } catch {}
 if (process.argv[2] === '-p') {
   const refused = !ok || (tok.includes('_new-') && fs.existsSync(T + '/refuse-new')) || fs.existsSync(T + '/refuse-api-' + process.env.USER);
   if (!refused) { process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', total_cost_usd: 0.02 })); process.exit(0); }
@@ -104,13 +112,16 @@ if (process.argv[2] === '-p') {
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: true, api_error_status: 401, result: 'Invalid API key · Please run /login (' + tok + ')' }));
   process.exit(1);
 }
-process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.ai', email: tok.includes('_new-') ? 'new@example.com' : 'old@example.com', orgName: 'Example', subscriptionType: 'max' } : { loggedIn: false, authMethod: 'none' }, null, 2));
+const email = cached ? cached.emailAddress : tok.includes('_new-') ? 'new@example.com' : 'old@example.com';
+process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.ai', email, orgName: 'Example', subscriptionType: 'max' } : { loggedIn: false, authMethod: 'none' }, null, 2));
 `);
   const user = (u: string) => {
     writeFileSync(join(T, 'users', u), '');
     const c = join(T, 'homes', u, '.claude');
     mkdirSync(c, { recursive: true, mode: 0o700 });
     writeFileSync(join(c, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: OLD, expiresAt: Date.now() + 86_400_000 }, other: 1 }), { mode: 0o600 });
+    // Claude Code's profile, as a machine signed in to the old account has it: that account cached, among other keys.
+    writeFileSync(join(T, 'homes', u, '.claude.json'), JSON.stringify(CACHE, null, 2), { mode: 0o600 });
   };
   for (const u of ['wl-alpha', 'wl-alpha-agent', 'wl-alpha-eval', 'wl-beta', 'wl-beta-agent']) user(u);
   const inst = join(T, 'homes', 'wl-alpha', '.local', 'state', 'worklane', 'instances', 'alpha');
@@ -193,6 +204,90 @@ test('switch pauses every instance, installs the token for each agent and eval u
   const v = switchView(readSwitchLines(join(m.T, 'var')))!;
   assert.deepEqual([v.status, v.waitingForToken, v.tokenFrom], ['done', false, null]);
   assert.deepEqual(v.instances.map((i) => [i.name, i.users.map((u) => u.user), i.resume?.state]), [['alpha', ['wl-alpha-agent', 'wl-alpha-eval'], 'done'], ['beta', ['wl-beta-agent'], 'done']]);
+});
+
+test('issue #341: a switch drops the account cached for the old login, as each user, keeping every other key, so status never names the old account as current', { skip: !posix }, () => {
+  const m = machine();
+  const home = (u: string) => join(m.T, 'homes', u);
+  // Before: status names the old account (it is the one signed in).
+  assert.match(m.run(['status']).lines[0]!, /signed in +old@example\.com/);
+  // A cache in the login's own config dir (CLAUDE_CONFIG_DIR, as runs and profiles ask claude) is dropped too.
+  writeFileSync(join(home('wl-beta-agent'), '.claude', '.claude.json'), JSON.stringify(CACHE), { mode: 0o600 });
+  const r = m.run(['switch', '--json']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  for (const u of AGENTS) {
+    const f = join(home(u), '.claude.json');
+    const { oauthAccount, ...rest } = CACHE;
+    assert.equal(oauthAccount.emailAddress, 'old@example.com');
+    assert.deepEqual(JSON.parse(readFileSync(f, 'utf8')), rest, `${u}: the old account dropped, every other key kept`);
+    assert.equal(statSync(f).mode & 0o777, 0o600, `${u}: its mode kept`);
+    assert.ok(!lstatSync(f).isSymbolicLink());
+    assert.match(r.events.find((e) => e.step === 'install' && e.user === u)!.detail, /the account cached for the previous login dropped/);
+    // Written as that user (sudo -u), never as root.
+    assert.ok(readFileSync(join(m.T, 'calls'), 'utf8').split('\nsudo ').some((c) => c.startsWith(`-H -u ${u} `) && c.includes('oauthAccount')), `${u}: as that user`);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(home('wl-beta-agent'), '.claude', '.claude.json'), 'utf8')), (({ oauthAccount: _, ...rest }) => rest)(CACHE));
+  assert.ok(!readdirSync(home('wl-beta-agent')).some((f) => f.includes('.tmp')), 'no temp file left');
+  // After: the switch's own check and status name the new account, never the old one as current.
+  assert.match(r.events.find((e) => e.step === 'check' && e.user === 'wl-alpha-agent')!.detail, /signed in as new@example\.com/);
+  const st = m.run(['status', '--json']);
+  assert.equal(st.status, 0, st.stderr);
+  const users = (JSON.parse(st.stdout) as { users: { user: string; account: string | null }[] }).users;
+  assert.deepEqual(users.map((u) => [u.user, u.account]), AGENTS.map((u) => [u, 'new@example.com']));
+  assert.ok(!m.run(['status']).stdout.includes('old@example.com'));
+  // The account dropped (kept in memory for a rollback) is in no output, progress line or command line.
+  const all = m.outputs(r) + r.stdout + r.stderr;
+  assert.ok(!all.includes('old@example.com') && !all.includes('"a-1"'), 'the dropped account is never shown');
+});
+
+test('issue #341: a cached profile that is a link, a fifo or not JSON is never followed or rewritten; the switch says its account name may be the old one', { skip: !posix }, () => {
+  const m = machine();
+  const elsewhere = join(m.T, 'elsewhere.json');
+  writeFileSync(elsewhere, JSON.stringify(CACHE));
+  const linked = join(m.T, 'homes', 'wl-alpha-agent', '.claude.json');
+  rmSync(linked);
+  symlinkSync(elsewhere, linked);
+  const broken = join(m.T, 'homes', 'wl-beta-agent', '.claude.json');
+  writeFileSync(broken, '{ not json', { mode: 0o600 });
+  // A fifo in place of one is never waited on (the switch would hang there, as root).
+  const fifo = join(m.T, 'homes', 'wl-alpha-eval', '.claude', '.claude.json');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  const r = m.run(['switch', '--json']);
+  assert.equal(r.status, 0, 'the token is in and works: a stale name does not fail the switch');
+  assert.equal(readFileSync(elsewhere, 'utf8'), JSON.stringify(CACHE), 'the link is never followed');
+  assert.ok(lstatSync(linked).isSymbolicLink(), 'nor replaced');
+  assert.equal(readFileSync(broken, 'utf8'), '{ not json', 'left as it was');
+  assert.ok(lstatSync(fifo).isFIFO());
+  for (const [u, why] of [['wl-alpha-agent', 'a link'], ['wl-beta-agent', 'not JSON'], ['wl-alpha-eval', 'not a plain file']] as const) {
+    assert.match(r.events.find((e) => e.step === 'install' && e.user === u)!.detail, new RegExp(`couldn't drop the account cached for the previous login in \\S*\\.claude\\.json \\(${why}\\): claude auth status may still name the previous account`), u);
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(m.T, 'homes', 'wl-alpha-eval', '.claude.json'), 'utf8')), (({ oauthAccount: _, ...rest }) => rest)(CACHE), "the user's other profile still dropped");
+});
+
+test('issue #341: profile-add into a dir left from an earlier profile drops the account cached there, so its check (and confirm-profile) names the new one', { skip: !posix }, () => {
+  const m = machine();
+  const d = join(m.T, 'homes', 'wl-beta-agent', '.claude-profiles', 'work');
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  writeFileSync(join(d, '.claude.json'), JSON.stringify(CACHE), { mode: 0o600 });
+  const r = m.run(['profile-add', 'work', '--json']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.ok(r.lines.some((l) => /"step":"install","state":"done".*the account cached there for an earlier login dropped/.test(l)), r.stdout);
+  assert.deepEqual(JSON.parse(readFileSync(join(d, '.claude.json'), 'utf8')), (({ oauthAccount: _, ...rest }) => rest)(CACHE));
+  const p = JSON.parse(readFileSync(join(m.T, 'var', 'profiles.json'), 'utf8')) as { profiles: { work: { users: Record<string, { account: string }> } } };
+  assert.equal(p.profiles.work.users['wl-beta-agent']!.account, 'new@example.com', 'the account its check recorded is the new token\'s');
+
+  // One that can't be dropped (a link) refuses the profile: nothing added, the link never followed.
+  const m2 = machine();
+  const d2 = join(m2.T, 'homes', 'wl-beta-agent', '.claude-profiles', 'work');
+  mkdirSync(d2, { recursive: true, mode: 0o700 });
+  writeFileSync(join(m2.T, 'elsewhere.json'), JSON.stringify(CACHE));
+  symlinkSync(join(m2.T, 'elsewhere.json'), join(d2, '.claude.json'));
+  const r2 = m2.run(['profile-add', 'work', '--json']);
+  assert.equal(r2.status, 1, r2.stdout);
+  assert.ok(r2.lines.some((l) => /"step":"install","state":"failed".*couldn't drop the account cached in .*\(a link\)/.test(l)), r2.stdout);
+  assert.equal(readFileSync(join(m2.T, 'elsewhere.json'), 'utf8'), JSON.stringify(CACHE));
+  assert.ok(!existsSync(d2), 'the half-added profile dir removed');
+  assert.ok(!leaked(m2.outputs(r2)) && !leaked(r.stdout + r.stderr));
 });
 
 test('the wait has a timeout: an instance whose runs are still going is stopped then, and still switched', { skip: !posix }, () => {
@@ -338,6 +433,9 @@ test('issue #463: the API refuses the new login: the switch is refused, every ag
   }
   assert.deepEqual(AGENTS.map((u) => readFileSync(m.cred(u), 'utf8')), before, 'every login exactly as it was');
   for (const u of AGENTS) assert.equal(statSync(m.cred(u)).mode & 0o777, 0o600, u);
+  // #341: the account cached for the old login, dropped for the new one, is back with it (every other key kept).
+  for (const u of AGENTS) assert.deepEqual(JSON.parse(readFileSync(join(m.T, 'homes', u, '.claude.json'), 'utf8')), CACHE, u);
+  assert.match(m.run(['status']).lines[0]!, /signed in +old@example\.com/, 'the old login, named as it is');
   const end = r.events.at(-1)!;
   assert.deepEqual([end.step, end.state], ['switch', 'failed']);
   assert.match(end.detail, /^refused: the API refused the new login \(Claude said: HTTP 401: Invalid API key · Please run \/login .*\)\. Every agent user is back on its previous login\. Make a new token/);
