@@ -132,6 +132,10 @@ interface Render {
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
+  navFor(state: unknown): { to: string; testId: string }[];
+  redirectFor(path: string): string | null;
+  landOn(loc: { pathname: string; search: string; hash: string }, history: { state: unknown; replaceState(data: unknown, unused: string, url: string): void }): string;
+  EXTEND_TABS: readonly { id: string; to: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
   renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
@@ -487,7 +491,7 @@ test('narrow screens: the page header\'s menu button opens a drawer with every p
   const g = globalThis as Record<string, unknown>;
   const stub = g.window;
   delete g.window;
-  const drawerOf = (o?: Parameters<Render['renderNavDrawer']>[1]) => r.renderNavDrawer(asOwner as never, o);
+  const drawerOf = (o?: Parameters<Render['renderNavDrawer']>[1]) => r.renderNavDrawer({ ...asOwner, experiments: true } as never, o);
   let open: string, amber: string, hub: string, closed: string;
   try {
     open = drawerOf();
@@ -1702,7 +1706,7 @@ test('#468 setup mode: the sidebar offers First run alone (all pages once config
   let setupMode: string, configured: string;
   try {
     setupMode = r.renderNavDrawer({ ...asOwner, setupMode: true } as never);
-    configured = r.renderNavDrawer({ ...asOwner, setupMode: false } as never);
+    configured = r.renderNavDrawer({ ...asOwner, setupMode: false, experiments: true } as never);
   } finally {
     g.window = stub;
   }
@@ -1714,6 +1718,62 @@ test('#468 setup mode: the sidebar offers First run alone (all pages once config
   assert.match(hidden, /data-testid="setup-mode-hidden-why"[^>]*>Issues shows once this checkout has its config, and it has none yet\./);
   assert.match(hidden, /href="\/first-run"[^>]*data-testid="setup-mode-hidden-link"/);
   assert.match(r.renderSetupModeHidden('/nowhere'), /This page shows once/);
+});
+
+/** The test ids of the sidebar rows navFor gives a state. */
+const navIds = (state: unknown) => r.navFor(state).map((n) => n.testId);
+
+test('#581 nav shows Experiments for an owner or writer on an enabled instance', () => {
+  for (const who of [asOwner, asWriter]) {
+    const ids = navIds({ ...who, experiments: true });
+    assert.ok(ids.includes('nav-experiments'), `${(who as { role?: string }).role}: ${ids.join(' ')}`);
+    assert.equal(r.navFor({ ...who, experiments: true }).find((n) => n.testId === 'nav-experiments')!.to, '/experiments');
+  }
+  // Its own row in the sidebar, as a link to its route.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  try {
+    assert.match(r.renderNavDrawer({ ...asWriter, experiments: true } as never), /<a href="\/experiments"[^>]*data-testid="nav-experiments"/);
+  } finally {
+    g.window = stub;
+  }
+});
+
+test('#581 nav hides Experiments for a viewer and on a disabled instance', () => {
+  assert.equal((asOther as { role?: string }).role, 'viewer');
+  assert.ok(!('experiments' in asOther), 'the server sends a viewer no experiments key');
+  // A viewer: never, even with the flag forged in.
+  assert.ok(!navIds({ ...asOther, experiments: true }).includes('nav-experiments'));
+  // Off or unknown on this machine (false), or from a server that doesn't say (absent): hidden, fail closed.
+  for (const who of [asOwner, asWriter]) {
+    assert.ok(!navIds({ ...who, experiments: false }).includes('nav-experiments'));
+    const { experiments: _, ...without } = who as State & { experiments?: boolean };
+    assert.ok(!navIds(without).includes('nav-experiments'));
+  }
+  // Setup mode: First run alone.
+  assert.deepEqual(navIds({ ...asOwner, experiments: true, setupMode: true }), ['nav-first-run']);
+});
+
+test('#581 the old Extend route redirects', () => {
+  assert.equal(r.redirectFor('/extend/experiments'), '/experiments');
+  assert.equal(r.redirectFor('/extend/experiments/'), '/experiments/');
+  assert.equal(r.redirectFor('/extend/experiments/example-speed'), '/experiments/example-speed', 'the study id is kept');
+  for (const keep of ['/extend', '/extend/automations', '/extend/automations/nightly', '/extend/plugins', '/extend/experimentsx', '/experiments', '/']) assert.equal(r.redirectFor(keep), null, keep);
+  // Replaced, not pushed (Back doesn't land on the old address again), with the query and the hash kept.
+  const calls: string[] = [];
+  const history = { state: { k: 1 }, replaceState: (data: unknown, _: string, url: string) => void calls.push(`${JSON.stringify(data)} ${url}`) };
+  assert.equal(r.landOn({ pathname: '/extend/experiments/example-speed', search: '?x=1', hash: '#log' }, history), '/experiments/example-speed');
+  assert.deepEqual(calls, ['{"k":1} /experiments/example-speed?x=1#log']);
+  assert.equal(r.landOn({ pathname: '/extend/automations', search: '', hash: '' }, history), '/extend/automations');
+  assert.equal(calls.length, 1, 'a current address is left alone');
+  // Extend keeps Automations and Plugins, and opens on Automations.
+  assert.deepEqual(r.EXTEND_TABS.map((t) => t.id), ['automations', 'plugins']);
+  const extend = r.renderPage('extend', asOwner);
+  assert.doesNotMatch(extend, /extend-tab-experiments/);
+  assert.match(extend, /aria-current="page"[^>]*data-testid="extend-tab-automations"/);
+  // The new page renders at its own route.
+  assert.match(r.renderPage('experiments', asOwner), /data-testid="page-experiments"/);
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

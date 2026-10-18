@@ -1,7 +1,7 @@
 import { createContext, createElement, lazy, Suspense, useContext, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
-import { Activity, BarChart3, Menu, X, Bot, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
+import { Activity, BarChart3, Menu, X, Bot, FlaskConical, GitMerge, GitPullRequest, Gauge, HeartPulse, History, Hourglass, LogOut, ScrollText, Inbox as InboxIcon, Layers, ListChecks, MessagesSquare, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote, Wrench } from 'lucide-react';
 import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type Role, type State } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
@@ -58,6 +58,7 @@ const Reports = lazyPage(() => import('./pages/Reports').then((m) => m.Reports))
 const SettingsPage = lazyPage(() => import('./pages/Settings').then((m) => m.SettingsPage));
 const LogsPage = lazyPage(() => import('./pages/Logs').then((m) => m.LogsPage));
 const ExtendPage = lazyPage(() => import('./pages/Extend').then((m) => m.ExtendPage));
+const ExperimentsPage = lazyPage(() => import('./pages/Experiments').then((m) => m.ExperimentsPage));
 const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
 const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
 const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
@@ -79,6 +80,7 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/land/, Landing],
   [/^\/agents/, Agents],
   [/^\/extend/, ExtendPage],
+  [/^\/experiments/, ExperimentsPage],
   [/^\/activity/, ActivityPage],
   [/^\/deploys/, Deploys],
   [/^\/reports/, Reports],
@@ -88,7 +90,28 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/runs\//, RunDetail],
   [/^\/first-run/, FirstRunPage],
 ];
-if (typeof window !== 'undefined') void (PAGE_FOR.find(([re]) => re.test(window.location.pathname))?.[1] ?? BoardPage).preload();
+if (typeof window !== 'undefined') void (PAGE_FOR.find(([re]) => re.test(redirectFor(window.location.pathname) ?? window.location.pathname))?.[1] ?? BoardPage).preload();
+
+/**
+ * Old addresses and where each moved: a path at or under `from` lands at the same place under `to`, so an id after it
+ * is kept. WHY (#581): Experiments left Extend for a sidebar item of its own; a bookmark or a link to the old address
+ * still opens it.
+ */
+export const REDIRECTS: readonly { from: string; to: string }[] = [{ from: '/extend/experiments', to: '/experiments' }];
+
+/** Where an old address moved (REDIRECTS); null: it's a current one. */
+export function redirectFor(path: string): string | null {
+  for (const r of REDIRECTS) if (path === r.from || path.startsWith(`${r.from}/`)) return r.to + path.slice(r.from.length);
+  return null;
+}
+
+/** The path to show. An old address is replaced (not pushed, so Back doesn't return to it) by its new one, query and hash kept. */
+export function landOn(loc: Pick<Location, 'pathname' | 'search' | 'hash'> = window.location, history: Pick<History, 'state' | 'replaceState'> = window.history): string {
+  const to = redirectFor(loc.pathname);
+  if (to === null) return loc.pathname;
+  history.replaceState(history.state, '', to + loc.search + loc.hash);
+  return to;
+}
 
 export function navigate(to: string) {
   if (window.location.pathname === to) return;
@@ -97,9 +120,9 @@ export function navigate(to: string) {
 }
 
 function useRoute() {
-  const [path, setPath] = useState(window.location.pathname);
+  const [path, setPath] = useState(() => landOn());
   useEffect(() => {
-    const on = () => setPath(window.location.pathname);
+    const on = () => setPath(landOn());
     window.addEventListener('popstate', on);
     return () => window.removeEventListener('popstate', on);
   }, []);
@@ -142,7 +165,10 @@ export function pageKey(e: KeyboardEvent) {
   return !typing(e) && !e.metaKey && !e.ctrlKey && !e.altKey && Date.now() >= chordUntil;
 }
 
-/** A sidebar page. `roles`: only these see it (in the sidebar, the command menu and the chords); absent: everyone. */
+/**
+ * A sidebar page. `roles`: only these see it (in the sidebar, the command menu and the chords); absent: everyone.
+ * `when`: shown only where this says so of the state; absent: always.
+ */
 export interface NavItem {
   to: string;
   label: string;
@@ -150,7 +176,11 @@ export interface NavItem {
   chord: string;
   testId: string;
   roles?: readonly Role[];
+  when?: (state: NavState) => boolean;
 }
+
+/** What of the state decides the sidebar's rows. */
+export type NavState = Pick<State, 'setupMode' | 'role' | 'experiments'>;
 
 export const NAV: NavItem[] = [
   { to: '/', label: 'Board', icon: SquareKanban, chord: 'b', testId: 'nav-board' },
@@ -166,6 +196,9 @@ export const NAV: NavItem[] = [
   { to: '/agents', label: 'Agents', icon: Bot, chord: 'a', testId: 'nav-agents' },
   // Automations (and Plugins, as another tab): what an instance does beyond its issues. Owners and writers only.
   { to: '/extend', label: 'Extend', icon: Puzzle, chord: 'x', testId: 'nav-extend', roles: ['owner', 'writer'] },
+  // Experiments (#581): owners and writers, only where root's file turns experiments on for this instance (the server's
+  // `experiments`; off, unknown or absent hides it). Its page still opens at its address, to say how to set it up.
+  { to: '/experiments', label: 'Experiments', icon: FlaskConical, chord: 't', testId: 'nav-experiments', roles: ['owner', 'writer'], when: (s) => s.experiments === true },
   { to: '/activity', label: 'Activity', icon: History, chord: 'e', testId: 'nav-activity' },
   { to: '/deploys', label: 'Deploys', icon: Rocket, chord: 'y', testId: 'nav-deploys' },
   { to: '/reports', label: 'Reports', icon: BarChart3, chord: 'r', testId: 'nav-reports' },
@@ -182,7 +215,8 @@ export const FIRST_RUN_NAV = { to: '/first-run', label: 'First run', icon: ListC
  * WHY (#468): in setup mode (no config yet) nothing but First run has anything to show, so the sidebar, the command
  * menu and the `g` chords offer First run alone. (The Setup console is a server's; setup mode is a checkout's only.)
  */
-export const navFor = (state: Pick<State, 'setupMode' | 'role'> | null): NavItem[] => (state?.setupMode ? [FIRST_RUN_NAV] : NAV.filter((n) => !n.roles || (!!state?.role && n.roles.includes(state.role))));
+export const navFor = (state: NavState | null): NavItem[] =>
+  state?.setupMode ? [FIRST_RUN_NAV] : NAV.filter((n) => (!n.roles || (!!state?.role && n.roles.includes(state.role))) && (!n.when || (!!state && n.when(state))));
 
 /** Setup mode, at the address of a page that isn't shown yet: what it needs, and the way to First run. */
 export function SetupModeHidden({ path }: { path: string }) {
@@ -484,6 +518,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/prs') page = <PullRequests state={state} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
+  else if (path === '/experiments' || path.startsWith('/experiments/')) page = <ExperimentsPage state={state} path={path} />;
   else if (path === '/activity') page = <ActivityPage state={state} />;
   else if (path === '/intake') page = <IntakePage state={state} />;
   else if (path === '/deploys') page = <Deploys state={state} />;

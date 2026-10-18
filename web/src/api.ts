@@ -288,6 +288,11 @@ export interface State {
   /** Whether they may read the service log and the machine settings (owners and writers). */
   canReadLogs?: boolean;
   canReadMachine?: boolean;
+  /**
+   * Whether root's file turns experiments on for this instance (#581): the sidebar shows Experiments only when true.
+   * Sent to owners and writers only; absent for a viewer or from an older server (hidden: fail closed).
+   */
+  experiments?: boolean;
   owners: { default: string; writers: string[]; areas: { name: string; owner: string; paths: string[]; labels: string[] }[] };
   /** Absent for a viewer (the budget, spend and agent runs are the owners' and writers'). */
   budget?: number;
@@ -2310,7 +2315,7 @@ export interface AutomationPlan {
 /** Review (no digest, no confirm: nothing written) or Confirm (with the review's digest) one change to the automations. */
 export const changeAutomation = (body: { action: AutomationAction; id?: string; automation?: AutomationDef; digest?: string; confirm?: boolean }) => api<AutomationPlan>('/api/automations', { method: 'POST', body: JSON.stringify(body) });
 
-/** Extend -> Experiments (src/experiments/view.ts): the owners' and writers' view. */
+/** The Experiments page (src/experiments/view.ts): the owners' and writers' view. */
 export type ExpAction = 'start' | 'pause' | 'resume' | 'stop_job' | 'approve' | 'decline' | 'archive';
 export interface ExpStage2 {
   size: number;

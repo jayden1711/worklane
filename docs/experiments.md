@@ -160,24 +160,36 @@ sudo bash scripts/setup/egress-firewall.sh check
 - CI's real-systemd job proves the sandbox, the egress rule (with PrivateNetwork off), the quota, a timing metric, the
   four study kinds end to end, and a canary job that tries each boundary once and must fail every attempt.
 
-## On the dashboard: Extend -> Experiments
+## On the dashboard: Experiments
 
-Owners and writers see **Extend** in the sidebar (`g x`), with an **Experiments** tab beside Automations.
+Owners and writers see **Experiments** as its own item in the sidebar (`g t`), only where root's file turns experiments
+on for this instance (`/api/state`'s `experiments`; off or unknown hides it, failing closed). This supersedes the earlier
+design of an Experiments tab under Extend: the owner chose a top-level item (#581). Extend keeps Automations and Plugins,
+and studies are still driven by the Automations scheduler. The old addresses, `/extend/experiments` and
+`/extend/experiments/<id>`, redirect to `/experiments` and `/experiments/<id>`.
 
+- **Not set up yet** (no root file for this instance): the page still opens at `/experiments` for owners and writers. It
+  says experiments are not set up yet and shows the root command that sets them up (owners copy it; writers read that
+  an owner sets it up).
+- **No experiments here**: only an instance with separate users has them. A checkout's dashboard, or a same-user
+  instance's, says which one it is.
 - **Empty state** (no study defined): what a study does, three guarantees, and one action: **Copy setup command**
   (owners, when the machine isn't set up), else **Copy an example study** to commit as the repo's `experiments.yaml`.
-- **A study** (`/extend/experiments/<id>`): its state and version; best so far; the queue; spend today; a held result's
+- **A study** (`/experiments/<id>`): its state and version; best so far; the queue; spend today; a held result's
   review card; and the research log, one row a hypothesis: its stage-1 result, each stage-2 size's mean ± spread
   against the best, and the budget each run used.
 - **Buttons** are only those this person may use and that apply now. Owners: Start, Approve or Decline a waiting job,
-  Accept or Reject a held result, Resume, Archive. Writers: Pause, and Stop job while one runs. Viewers have no tab.
+  Accept or Reject a held result, Resume, Archive. Writers: Pause, and Stop job while one runs. Viewers have no sidebar
+  item, and the server sends them nothing (`GET /api/experiments` is 403; their state has no `experiments` key).
 - **Review -> Confirm**: every action first shows what it would do and the exact change; Confirm does exactly that, and
   is refused if anything moved since the review. Every attempt is audited.
 
 ### How a new user finds it
-1. The sidebar shows Extend; its second tab is Experiments.
-2. The empty state says what a study is; its one button copies the root command (or an example study, once set up).
-3. After the root script and a merged `experiments.yaml`, the study's card says "not started"; its page has Start, whose
-   Review shows the pins.
+1. Before setup, the sidebar has no Experiments item: open `/experiments` on the instance's dashboard. It says
+   experiments are not set up yet and gives the root command.
+2. Once root's file lists the instance, the sidebar shows Experiments. The empty state says what a study is; its one
+   button copies an example study.
+3. After a merged `experiments.yaml`, the study's card says "not started"; its page has Start, whose Review shows the
+   pins.
 4. The first job (the baseline) waits: the study shows "Waiting for you" with the reason, and Approve job.
 5. From then on each round adds a log row; holds, the circuit breaker and approvals show on the study's page.

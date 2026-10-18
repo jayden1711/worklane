@@ -19,6 +19,8 @@ import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
 import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { ExtendPage } from './pages/Extend';
+import { ExperimentsPage } from './pages/Experiments';
 import { Header } from './components/Header';
 import { AuditLogView, type AuditEntry } from './components/AuditLog';
 import { ConsolePanel, LiveFeedView, type ConsoleData, type FeedItem, type LiveList } from './components/LiveRun';
@@ -96,6 +98,8 @@ export const pages = {
   board: (s: State) => <BoardPage state={s} pulse={0} />,
   machine: (s: State) => <MachinePage state={s} />,
   health: () => <HealthPage />,
+  extend: (s: State) => <ExtendPage state={s} path="/extend" />,
+  experiments: (s: State) => <ExperimentsPage state={s} path="/experiments" />,
 };
 
 export function renderPage(name: keyof typeof pages, state: State): string {
@@ -238,6 +242,9 @@ export const renderFirstTask = (info: unknown, o: { canEdit?: boolean; preview?:
 export const renderIgnored = (data: unknown) => renderToStaticMarkup(<IgnoredIssues initial={data as never} />);
 export const renderHeader = (title: string) => renderToStaticMarkup(<Header title={title} />);
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
+/** #581: the sidebar's rows for a state, the old addresses' redirects, and Extend's tabs. */
+export { landOn, navFor, redirectFor } from './App';
+export { EXTEND_TABS } from './pages/Extend';
 
 export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
   renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
