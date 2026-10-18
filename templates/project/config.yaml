@@ -68,6 +68,10 @@ required_checks: []
 # constraints. At min_sightings, one proposal each: a draft ast-grep rule plus test cases (repos with sgconfig.yml)
 # or a test, as a draft PR quoting the evidence; an issue instead for a protected area. Never auto-merged.
 # checks_from_feedback: { enabled: false, min_sightings: 2, max_proposals_per_week: 3 }
+# The comment policy: each comment a change adds must start with WHY: or INVARIANT:, or cite an issue or decision
+# id (#123, D-12, docs/design.md §4); narration words fail even when tagged; at most max_lines lines. Old
+# comments are never judged; a JSDoc block of only @param/@returns lines is exempt. TS/JS, shell and YAML files.
+# comment_policy: { enabled: false, max_lines: 4, narration: [added, fixed, changed, now, phase, step 1, as discussed, per review, todo from pr] }
 os: auto                  # auto | macos | linux | windows-wsl
 owners:
   default: your-github-handle   # owns anything no area matches

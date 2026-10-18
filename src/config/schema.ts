@@ -63,6 +63,18 @@ export const Area = z.strictObject({
   labels: z.array(z.string()).default([]),
 });
 
+/**
+ * The comment policy (#330, src/comment-policy.ts): off unless a project turns it on. `narration` is matched as
+ * whole words, case-insensitive; `max_lines` counts a comment block's lines of text.
+ */
+export const CommentPolicyConfig = z
+  .strictObject({
+    enabled: z.boolean().default(false),
+    max_lines: z.number().int().min(1).max(100).default(4),
+    narration: z.array(z.string().trim().min(1)).default(['added', 'fixed', 'changed', 'now', 'phase', 'step 1', 'as discussed', 'per review', 'todo from pr']),
+  })
+  .prefault({});
+
 export const ProjectConfig = z.strictObject({
   version: z.literal(1),
   project: z.strictObject({
@@ -272,6 +284,8 @@ export const ProjectConfig = z.strictObject({
    * of its runs over the week) is over `slow_test_budget_s` seconds is listed as over budget, beside the 20 slowest.
    */
   metrics: z.strictObject({ slow_test_budget_s: z.number().positive().max(86_400).default(30) }).prefault({}),
+  /** New comments carry WHY:, INVARIANT: or an issue id (#330): the PR diff check, and the agents' post-edit hook. */
+  comment_policy: CommentPolicyConfig,
   os: z.enum(['auto', 'macos', 'linux', 'windows-wsl']).default('auto'),
   owners: z.strictObject({
     default: handle,
