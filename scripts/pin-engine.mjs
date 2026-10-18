@@ -67,7 +67,8 @@ const commit = git('rev-parse', `${tag}^{commit}`);
 const parents = git('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
 const facts = {
   parents: parents.length,
-  changed: parents.length === 1 ? git('diff', '--name-only', parents[0], commit).split('\n').filter(Boolean) : [],
+  // --no-renames: a file moved into dist/ still names the path it left (#683).
+  changed: parents.length === 1 ? git('diff', '--name-only', '--no-renames', parents[0], commit).split('\n').filter(Boolean) : [],
   hasCli: ok('cat-file', '-e', `${commit}:dist/src/cli.js`),
   version: (() => {
     try {

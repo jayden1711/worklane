@@ -43,7 +43,8 @@ export function gateGit(repo: string, remote: string, main: string, deploy: stri
       return r.status === 0 ? r.stdout.trim() || null : null;
     },
     changed: (from, to) => {
-      const r = from ? git('diff', '--name-only', '-z', `${from}..${to}`) : git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '-m', '--first-parent', to);
+      // A rename as both its paths: test selection runs everything when a changed file is gone (#683).
+      const r = from ? git('diff', '--name-only', '--no-renames', '-z', `${from}..${to}`) : git('diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-r', '-z', '-m', '--first-parent', to);
       return r.status === 0 ? r.stdout.split('\0').filter(Boolean) : [];
     },
   };

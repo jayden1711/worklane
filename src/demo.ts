@@ -48,7 +48,7 @@ function agents() {
     }
     if (req.role === 'evaluator-verdict') {
       const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
-      const files_reviewed = base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+      const files_reviewed = base ? git(req.cwd, 'diff', '--name-only', '--no-renames', `${base}..HEAD`).split('\n').filter(Boolean) : [];
       return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed }, costUsd: 0.18 };
     }
     // workers

@@ -160,7 +160,8 @@ export class PrTestRuns {
 
   private changed(pr: OpenPr): string[] {
     if (this.d.changed) return this.d.changed(pr);
-    const out = execFileSync('git', ['-C', this.d.repo, 'diff', '--name-only', '-z', `${this.d.remote}/${pr.base}...${pr.headSha}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
+    // A rename as both its paths: test selection runs everything when a changed file is gone (#683).
+    const out = execFileSync('git', ['-C', this.d.repo, 'diff', '--name-only', '--no-renames', '-z', `${this.d.remote}/${pr.base}...${pr.headSha}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
     return out.split('\0').filter(Boolean);
   }
 

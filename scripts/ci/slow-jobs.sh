@@ -34,7 +34,8 @@ case "${EVENT:-}" in
     fi
     ;;
   pull_request)
-    files="$(git diff --name-only "$(git merge-base "$PR_BASE" "$PR_HEAD")" "$PR_HEAD")"
+    # --no-renames: a file moved out of a slow job's paths still names them (#683).
+    files="$(git diff --name-only --no-renames "$(git merge-base "$PR_BASE" "$PR_HEAD")" "$PR_HEAD")"
     if [ "${FULL:-false}" = true ] || grep -qE '^\.github/workflows/' <<< "$files"; then
       run="$ALL"
     else

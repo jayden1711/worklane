@@ -85,6 +85,8 @@ export const LOCKFILE_GLOBS = [
 /** One file of a change (git diff -M): its added and removed lines. A pure rename has none, a binary file none. */
 export interface SizeFile {
   path: string;
+  /** A rename's old path. */
+  from?: string;
   added: string[];
   removed: string[];
 }
@@ -120,7 +122,8 @@ function nonMechanical(files: SizeFile[]): number {
  */
 export function sizeVerdict(files: SizeFile[], o: { maxLines: number; generated: string[] }): SizeVerdict {
   const skip = [...LOCKFILE_GLOBS, ...o.generated].map((g) => globToRegExp(g));
-  const counted = files.filter((f) => !skip.some((re) => re.test(f.path)));
+  // A rename is left out only when both its paths are: an edit moved into a generated path still counts (#683).
+  const counted = files.filter((f) => ![f.path, ...(f.from === undefined ? [] : [f.from])].every((p) => skip.some((re) => re.test(p))));
   const lines = counted.reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines <= o.maxLines) return { ok: true, lines, why: `${lines} changed lines (limit ${o.maxLines})` };
   const real = nonMechanical(counted);
@@ -149,6 +152,7 @@ export function sizeFiles(cwd: string, base: string, head: string): SizeFile[] {
     else if (l.startsWith('@@')) inHunk = true;
     else if (inHunk && l.startsWith('+')) cur.added.push(l.slice(1));
     else if (inHunk && l.startsWith('-')) cur.removed.push(l.slice(1));
+    else if (!inHunk && l.startsWith('rename from ')) cur.from = l.slice('rename from '.length);
     else if (!inHunk && l.startsWith('rename to ')) cur.path = l.slice('rename to '.length);
     else if (!inHunk && l.startsWith('+++ b/')) cur.path = l.slice('+++ b/'.length);
   }

@@ -554,7 +554,7 @@ export abstract class FixRuns extends Landing {
         if ('ended' in s) return await give(s.ended);
         summary = s.summary;
         removeSandboxPlaceholders(path);
-        if (this.git(path, 'diff', '--name-only', '--diff-filter=U')) return await give('the fix run left conflicts unresolved');
+        if (this.git(path, 'diff', '--name-only', '--no-renames', '--diff-filter=U')) return await give('the fix run left conflicts unresolved');
         // Still exactly the merge of the PR's head and the base: no rewritten history, no extra commits.
         if (this.gitOrNull(path, 'rev-parse', 'HEAD^1') !== pr.headSha || this.gitOrNull(path, 'rev-parse', 'HEAD^2') !== baseSha) return await give('the fix run did not finish the merge commit of the branch and its base (it rewrote history, added commits, or left the merge uncommitted)');
         // Exactly as committed (no trimming): the comparison is line for line, the last line included.
@@ -566,7 +566,8 @@ export abstract class FixRuns extends Landing {
         const expected = new Set([...files, ...merged.otherFiles]);
         const strays = [
           ...merged.otherFiles.filter((f) => this.gitOrNull(path, 'rev-parse', `HEAD:${f}`) !== staged[f]),
-          ...this.git(path, 'diff', '--name-only', 'HEAD^1', 'HEAD').split('\n').filter((f) => f && !expected.has(f)),
+          // A rename as both its paths: moving a file the merge didn't touch onto one it did is still a stray (#683).
+          ...this.git(path, 'diff', '--name-only', '--no-renames', 'HEAD^1', 'HEAD').split('\n').filter((f) => f && !expected.has(f)),
         ];
         outside = outsideHunks(merged.conflicted, resolved, strays);
         resolution = ['How the conflicts were resolved (a combined diff of the merge commit against both parents):', '```diff', (this.gitOrNull(path, 'show', '--format=', '--cc', 'HEAD') ?? '').slice(0, 12_000), '```'].join('\n');

@@ -260,7 +260,8 @@ function option(args: string[], name: string): string | undefined {
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
   const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-  const files = execFileSync('git', ['diff', '--name-only', '--diff-filter=AM', base], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  // --no-renames: a renamed test file is an added one, and is checked (with renames on it was R, and skipped; #683).
+  const files = execFileSync('git', ['diff', '--name-only', '--no-renames', '--diff-filter=AM', base], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
   const res = globs.map((g) => globToRegExp(g));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }

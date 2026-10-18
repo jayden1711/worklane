@@ -22,7 +22,7 @@ export type MergeResult =
 export function mergeBaseInto(worktree: string, base: string, message: string, identity: { name: string; email: string }): MergeResult {
   const r = git(worktree, '-c', `user.name=${identity.name}`, '-c', `user.email=${identity.email}`, '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff', '--no-edit', '-m', message, base);
   if (r.status === 0) return { clean: true, head: git(worktree, 'rev-parse', 'HEAD').stdout.trim() };
-  const unmerged = git(worktree, 'diff', '--name-only', '--diff-filter=U').stdout.split('\n').filter(Boolean);
+  const unmerged = git(worktree, 'diff', '--name-only', '--no-renames', '--diff-filter=U').stdout.split('\n').filter(Boolean);
   if (!unmerged.length) return { error: (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ') || `git merge exited ${r.status}` };
   const conflicted: Record<string, string> = {};
   for (const f of unmerged) {
@@ -32,7 +32,8 @@ export function mergeBaseInto(worktree: string, base: string, message: string, i
       conflicted[f] = ''; // deleted on one side: the resolver decides
     }
   }
-  const staged = git(worktree, 'diff', '--name-only', '--cached').stdout.split('\n').filter(Boolean);
+  // A rename as both its paths, as the fix run's stray check lists the merge commit (#683).
+  const staged = git(worktree, 'diff', '--name-only', '--no-renames', '--cached').stdout.split('\n').filter(Boolean);
   return { clean: false, conflicted, otherFiles: staged.filter((f) => !(f in conflicted)) };
 }
 
@@ -41,8 +42,8 @@ export function abortMerge(worktree: string): void {
   git(worktree, 'merge', '--abort');
 }
 
-/** Files changed between two commits (a..b), for "did main touch what this PR touches". */
+/** Files changed between two commits (a..b), for "did main touch what this PR touches"; a rename as both its paths. */
 export function changedFiles(repo: string, from: string, to: string): string[] {
-  const r = git(repo, 'diff', '--name-only', `${from}...${to}`);
+  const r = git(repo, 'diff', '--name-only', '--no-renames', `${from}...${to}`);
   return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : [];
 }

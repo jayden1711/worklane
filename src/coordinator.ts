@@ -1283,7 +1283,7 @@ export class Coordinator extends AutomationRuns {
       };
       if (r.reason !== 'succeeded' || !s) return unavailable(`evaluator run ${r.reason}`);
       if (s.not_reproducible || !s.test_path) return unavailable(s.not_reproducible ?? 'no test path');
-      const changed = this.git(path, 'diff', '--name-only', base).split('\n').filter(Boolean).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
+      const changed = this.git(path, 'diff', '--name-only', '--no-renames', base).split('\n').filter(Boolean).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
       if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${changed.join(', ')}`);
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
@@ -1512,7 +1512,8 @@ export class Coordinator extends AutomationRuns {
     const id = this.identity;
     const strangers = this.git(path, 'log', '--format=%h %an <%ae> / %cn <%ce>', `${base}..${head}`).split('\n').filter(Boolean).filter((l) => !l.endsWith(` ${id.name} <${id.email}> / ${id.name} <${id.email}>`));
     if (strangers.length) return { rejected: `commits must carry the harness identity ${id.name} <${id.email}>, which your environment already sets; never set GIT_AUTHOR_*/GIT_COMMITTER_*, user.name/user.email or --author. Recommit these without an identity of your own: ${strangers.slice(0, 5).join('; ')}` };
-    const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
+    // A rename as both its paths, so moving a protected file away is still a change to it (#683).
+    const names = this.git(path, 'diff', '--name-only', '--no-renames', `${base}..${head}`).split('\n').filter(Boolean);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
     const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
@@ -1812,7 +1813,7 @@ export class Coordinator extends AutomationRuns {
     const mb = this.gitOrNull(this.d.repo, 'merge-base', pr.headSha, mainSha);
     if (!mb) return { hold: `can't find where this PR branched from ${baseRef}, so the combination can't be checked` };
     const mainChanged = mb === mainSha ? [] : changedFiles(this.d.repo, mb, mainSha);
-    const prFiles = this.git(this.d.repo, 'diff', '--name-only', mb, pr.headSha).split('\n').filter(Boolean);
+    const prFiles = this.git(this.d.repo, 'diff', '--name-only', '--no-renames', mb, pr.headSha).split('\n').filter(Boolean);
     const imports: Record<string, string[]> = {};
     if (mainChanged.length) {
       const tree = new Set(this.git(this.d.repo, 'ls-tree', '-r', '--name-only', pr.headSha).split('\n').filter(Boolean));
