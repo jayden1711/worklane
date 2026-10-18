@@ -614,9 +614,21 @@ trusted:
    text similarity, plus the agent's own judgement). Reports of the same bug go to one issue, which lists
    every report (by source and a short redacted excerpt, never a user id or handle). A new report on an
    existing issue adds a comment, not a new issue.
-7. **Reproduce bugs first.** For a bug, the agent tries to reproduce it on main within its read-only lane
-   (reading code, running the project's read-only checks when the lane allows) and attaches the result:
-   reproduced (with the steps), not reproduced, or already fixed on main (with the commit).
+7. **Reproduce bugs first.** For a bug, the agent works out from the code, in its read-only lane (no shell), whether
+   it reproduces on main, and attaches the result: reproduced (with the steps), not reproduced, or already fixed on
+   main (with the commit). Nothing a report says is run at intake: a report is untrusted text, read and never
+   run. The one process intake starts besides the agent is the read-only git check of a fixing commit below.
+   - A bug's draft, from a report or from a conversation (2.1.2), gets `- repro: true` added to its done_when in
+     code (`fileableDraft` in `src/intake/decide.ts`), replacing any `repro:` item the agent wrote. So once a
+     writer has chosen the issue, the task first has a separate evaluator write a test that fails on the unfixed
+     code, frozen so the worker can't edit it (the reproduction step in `src/coordinator.ts`). A bug whose
+     done_when can't take the item is refused like any invalid draft (step 8), or asked about in a conversation.
+     Not yet for a GitHub-sourced report (2.4): its draft goes on the reporter's issue as a comment, and the task
+     reads the contract from the issue's body.
+   - Not reproduced: the issue (or the Inbox draft) is labelled `couldnt-reproduce`.
+   - Already fixed on main: no issue; the sender is told it looks fixed. The reply names the fixing commit only
+     when the agent gave one and the coordinator's own `git merge-base --is-ancestor` on its checkout confirms it
+     is on the default branch (as last fetched); otherwise it names none.
 8. **Draft.** The issue body has the five parts every issue the harness drafts itself has: **Outcome** (one
    sentence), **Sources** (where to look, nowhere else), **Constraints** (what to leave alone), **Deliverable** (a
    closed ```` ```done_when ```` block, commands as YAML block scalars) and **Review point** (the expected review

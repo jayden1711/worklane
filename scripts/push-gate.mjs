@@ -106,6 +106,23 @@ function withoutOwnSignOffs(msg, emails) {
     .join('\n');
 }
 
+// Commit message shape (#603). The longest well-formed subject in the last 300 commits on main was 176 characters
+// (11 were over 150), so 180 refuses none of them and still refuses a paragraph.
+const SUBJECT_MAX = 180;
+
+/**
+ * Why a commit's message is malformed, or nothing: line 2 must be blank (otherwise git reads the whole first
+ * paragraph as the subject) and line 1 at most SUBJECT_MAX characters. A one-line message passes; so does GitHub's
+ * merge commit, whose title follows a blank line. Only the pushed commits are judged, never what's already on main.
+ */
+function messageShape(sha) {
+  const lines = git('log', '-1', '--format=%B', sha).split(/\r?\n/);
+  const why = [];
+  if (lines.length > 1 && lines[1].trim() !== '') why.push('line 2 is not blank, so git reads the whole first paragraph as the subject');
+  if (lines[0].length > SUBJECT_MAX) why.push(`the subject is ${lines[0].length} characters, over ${SUBJECT_MAX}`);
+  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
+}
+
 function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
@@ -141,6 +158,8 @@ try {
   const all = targets(process.argv.slice(2));
   const hits = [];
   const commits = [...new Set(all.flatMap((t) => t.commits))];
+  const shape = commits.flatMap(messageShape);
+  if (shape.length) fail(`a commit message's subject is not one short line:\n${shape.map((s) => `  ${s}`).join('\n')}\nPut the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body. Reword it before pushing (git commit --amend for the last commit, a rebase's reword for an older one); once pushed, a reword needs the owner's OK to force-push.`);
   const owner = repoOwner();
   for (const sha of commits) hits.push(...scanCommit(rules, sha, owner));
   for (const t of all) hits.push(...scanTree(rules, t.tip));

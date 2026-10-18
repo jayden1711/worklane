@@ -375,13 +375,22 @@ export function addedLines(diff: string): Map<string, Set<number>> {
   return out;
 }
 
-const git = (cwd: string, args: string[]) => spawnSync('git', ['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-// INVARIANT: the hook and CI parse the same output whatever the user's git config (diff.noprefix, diff.mnemonicPrefix).
-const DIFF = ['-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', 'diff', '--no-ext-diff', '--no-color', '--relative', '--find-renames', '-U0', '--src-prefix=a/', '--dst-prefix=b/'];
+// INVARIANT: no command a checkout's or user's git config names runs here (#330): fsmonitor off, no textconv or external diff.
+const git = (cwd: string, args: string[], timeoutMs?: number) =>
+  spawnSync('git', ['-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...(timeoutMs ? { timeout: timeoutMs } : {}) });
+// INVARIANT: the hook and CI read the same new lines whatever the user's git config (prefixes, algorithm, context).
+const DIFF = [
+  ...['-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.suppressBlankEmpty=false'],
+  ...['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--relative', '--find-renames', '-U0', '--src-prefix=a/', '--dst-prefix=b/'],
+  ...['--diff-algorithm=myers', '--indent-heuristic'],
+];
+/** The hook's git calls give up after this long: a slow git becomes "could not check", never a lost report (#330). */
+export const WORKING_GIT_TIMEOUT_MS = 5000;
 
-function gitOut(cwd: string, args: string[]): string {
-  const r = git(cwd, args);
+function gitOut(cwd: string, args: string[], timeoutMs?: number): string {
+  const r = git(cwd, args, timeoutMs);
   if (r.error) throw r.error;
+  if (r.signal) throw new Error(`git ${args.join(' ')}: stopped (${r.signal})`);
   if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${(r.stderr ?? '').trim().split('\n')[0]}`);
   return r.stdout;
 }
@@ -399,15 +408,26 @@ export function checkRange(root: string, base: string, head: string, policy: Com
   return out;
 }
 
-/** The hook's check: one working-tree file against HEAD (an untracked file, or a repo with no commit, is all new). */
-export function checkWorkingFile(root: string, file: string, policy: CommentPolicy): CommentFinding[] {
+/** INVARIANT: exit 0 is yes and exit 1 no; anything else (no git, no repo, a refusal, a timeout) throws (#330). */
+function gitYes(cwd: string, args: string[], timeoutMs: number): boolean {
+  const r = git(cwd, args, timeoutMs);
+  if (r.error) throw r.error;
+  if (r.status === 0 || r.status === 1) return r.status === 0;
+  throw new Error(`git ${args.join(' ')}: ${r.signal ? `stopped (${r.signal})` : (r.stderr ?? '').trim().split('\n')[0]}`);
+}
+
+/**
+ * INVARIANT: a git that can't answer throws, so old lines are never reported as new (the hook says it couldn't check).
+ * The hook's check: one working-tree file against HEAD (an untracked file, or a repo with no commit, is all new).
+ */
+export function checkWorkingFile(root: string, file: string, policy: CommentPolicy, timeoutMs = WORKING_GIT_TIMEOUT_MS): CommentFinding[] {
   if (!languageOf(file)) return [];
   const path = join(root, file);
   if (!existsSync(path)) return [];
   const src = readFileSync(path, 'utf8');
-  const tracked = git(root, ['ls-files', '--error-unmatch', '--', file]).status === 0;
-  const hasHead = git(root, ['rev-parse', '-q', '--verify', 'HEAD']).status === 0;
-  const added = tracked && hasHead ? (addedLines(gitOut(root, [...DIFF, 'HEAD', '--', file])).get(file) ?? new Set<number>()) : new Set(src.split('\n').map((_, k) => k + 1));
+  const hasHead = gitYes(root, ['rev-parse', '-q', '--verify', 'HEAD'], timeoutMs);
+  const tracked = gitYes(root, ['ls-files', '--error-unmatch', '--', file], timeoutMs);
+  const added = tracked && hasHead ? (addedLines(gitOut(root, [...DIFF, 'HEAD', '--', file], timeoutMs)).get(file) ?? new Set<number>()) : new Set(src.split('\n').map((_, k) => k + 1));
   return checkComments(file, src, added, policy);
 }
 

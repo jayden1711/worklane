@@ -12,7 +12,7 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { checkDraftedIssue } from './backlog/types.js';
+import { checkDraftedIssue, DRAFT_FORMAT } from './backlog/types.js';
 import { writeBundle } from './bundle.js';
 import type { Config } from './config/load.js';
 import { redact, redactString } from './events/redact.js';
@@ -21,7 +21,7 @@ import { groupOnlyDir } from './os/index.js';
 import { acceptSummary, EMPTY_SUMMARY, readSummary, renderSummary, writeSummary } from './chat-summary.js';
 import { CHAT_SCHEMA, rolePrompt } from './roles.js';
 import { readRun, RUNS_DIR, type RunSummary } from './run-record.js';
-import type { AgentRunner } from './runner.js';
+import type { AgentRunner, RunResult } from './runner.js';
 import { SETTING_KEYS } from './settings.js';
 import { ATTACHMENT_ID, attachmentPrompt, MAX_ATTACHMENTS } from './chat-attachments.js';
 import { CHAT_EFFORTS, type ChatEffort, type ChatPick } from './chat-pick.js';
@@ -165,6 +165,28 @@ export function validateDraft(title: string, body: string): IssueDraft {
   return c.ok ? { ok: true, title: title.trim(), body, labels: ['ready'] } : { ok: false, title, body, why: c.why };
 }
 
+/** What a chat run returns (CHAT_SCHEMA), as read before any of it is checked. */
+type ChatStructured = { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[]; summary?: unknown };
+
+const CHAT_MAX_TURNS = 30;
+/** Below this much of the answer's cap left after the first try, a refused draft is shown as it is, not asked for again. */
+const RETRY_MIN_USD = 0.05;
+const RETRY_DRAFT_CHARS = 20_000;
+
+/**
+ * The one retry's prompt for a refused draft: the same question and context, then the reason and the refused draft
+ * (as a JSON string, so its own fences can't end anything), asking for the whole answer again.
+ */
+function draftRetryPrompt(prompt: string, refused: { title: string; body: string; why: string }): string {
+  return [
+    prompt,
+    '',
+    `Your last answer's issue draft can't be filed as it is: ${refused.why}`,
+    `The draft you returned (title, then body, as JSON strings): ${JSON.stringify(refused.title.slice(0, 200))} ${JSON.stringify(refused.body.slice(0, RETRY_DRAFT_CHARS))}`,
+    `Return your whole answer again, with the issue draft fixed: ${DRAFT_FORMAT} It is still a draft for the owner to review and file; never say it is filed.`,
+  ].join('\n');
+}
+
 function validateAction(a: Record<string, unknown>, decisions: OpenDecision[]): ActionRef | string {
   const why = typeof a.why === 'string' ? { why: a.why.slice(0, 300) } : {};
   if (a.kind === 'settings') {
@@ -265,35 +287,59 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
   const dropCopies = () => {
     for (const f of Object.keys(attached.binary)) rmSync(join(dir, f), { force: true });
   };
-  const r = await o.runner.run({
-    role: 'chat',
-    stateDir: o.stateDir,
-    prompt: [
-      `Context files for instance ${o.context.instance}: ${dir} (start with README.md). The repository is the current directory.`,
-      '',
-      ...(o.conversation !== undefined ? [o.conversation] : ['Conversation summary so far (your memory of it, not a source; return it updated):', renderSummary(previous)]),
-      '',
-      readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
-      '',
-      `Question: ${o.question}`,
-      ...(attached.text ? ['', attached.text] : []),
-    ].join('\n'),
-    appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
-    cwd: o.repo,
-    model,
-    ...(o.run?.effort ? { effort: o.run.effort } : {}),
-    allowedTools: CHAT_TOOLS,
-    disallowedTools: NOT_ALLOWED,
-    maxTurns: 30,
-    // WHY: chatRunOptions' cap is already the least of the role's, the conversation's and the day's: no floor over it.
-    maxBudgetUsd: o.run ? o.run.maxBudgetUsd : Math.max(0.05, Math.min(role?.budget_usd ?? 1, o.remainingUsd)),
-    jsonSchema: CHAT_SCHEMA,
-    stallMs: 10 * 60_000,
-    timeoutMs: 20 * 60_000,
-    ...(o.onRun ? { onControl: (c: { runId: string | null }) => void (c.runId && o.onRun!(c.runId)) } : {}),
-  }).finally(dropCopies);
-  o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
-  const s = (r.reason === 'succeeded' ? r.structured : undefined) as { answer?: string; citations?: { kind?: string; id?: string }[]; issue_draft?: { title?: string; body?: string }; actions?: Record<string, unknown>[]; summary?: unknown } | undefined;
+  const prompt = [
+    `Context files for instance ${o.context.instance}: ${dir} (start with README.md). The repository is the current directory.`,
+    '',
+    ...(o.conversation !== undefined ? [o.conversation] : ['Conversation summary so far (your memory of it, not a source; return it updated):', renderSummary(previous)]),
+    '',
+    readOnly ? `Asked by @${o.by || 'unknown'}, who is not the owner: answer only; no issue drafts and no proposed actions.` : `Asked by the owner, @${owner}.`,
+    '',
+    `Question: ${o.question}`,
+    ...(attached.text ? ['', attached.text] : []),
+  ].join('\n');
+  // The answer's caps (cost and turns) cover the retry below too: it gets only what the first try left.
+  // WHY: chatRunOptions' cap is already the least of the role's, the conversation's and the day's: no floor over it.
+  const capUsd = o.run ? o.run.maxBudgetUsd : Math.max(0.05, Math.min(role?.budget_usd ?? 1, o.remainingUsd));
+  const ask = async (p: string, maxBudgetUsd: number, maxTurns: number) => {
+    const r = await o.runner.run({
+      role: 'chat',
+      stateDir: o.stateDir,
+      prompt: p,
+      appendSystemPrompt: rolePrompt(o.cfg, 'chief_of_staff'),
+      cwd: o.repo,
+      model,
+      ...(o.run?.effort ? { effort: o.run.effort } : {}),
+      allowedTools: CHAT_TOOLS,
+      disallowedTools: NOT_ALLOWED,
+      maxTurns,
+      maxBudgetUsd,
+      jsonSchema: CHAT_SCHEMA,
+      stallMs: 10 * 60_000,
+      timeoutMs: 20 * 60_000,
+      ...(o.onRun ? { onControl: (c: { runId: string | null }) => void (c.runId && o.onRun!(c.runId)) } : {}),
+    });
+    o.onCost?.({ costUsd: r.costUsd, model: r.model, turns: r.turns });
+    return { r, s: (r.reason === 'succeeded' ? r.structured : undefined) as ChatStructured | undefined };
+  };
+  let r: RunResult;
+  let s: ChatStructured | undefined;
+  let costUsd: number;
+  try {
+    ({ r, s } = await ask(prompt, capUsd, CHAT_MAX_TURNS));
+    costUsd = r.costUsd;
+    // A draft the contract parser refuses is asked for once more, with the reason (#187), within what the first try
+    // left of the caps. The retry's answer is kept when it brings a draft back; a second refusal is shown as it is.
+    const refused = !readOnly && s?.issue_draft ? validateDraft(String(s.issue_draft.title ?? ''), String(s.issue_draft.body ?? '')) : null;
+    const leftUsd = capUsd - r.costUsd;
+    const leftTurns = CHAT_MAX_TURNS - r.turns;
+    if (refused && !refused.ok && leftUsd >= RETRY_MIN_USD && leftTurns > 0) {
+      const again = await ask(draftRetryPrompt(prompt, refused), leftUsd, leftTurns);
+      costUsd += again.r.costUsd;
+      if (again.s?.issue_draft) ({ r, s } = again);
+    }
+  } finally {
+    dropCopies();
+  }
   const answer = s?.answer ? redactString(s.answer) : `The chat run ended without an answer (${r.reason}).`;
   const { kept, unknown } = citationsOf(s?.citations ?? [], o.context);
   const acts = readOnly ? [] : (s?.actions ?? []).map((a) => validateAction(a, o.context.decisions));
@@ -307,7 +353,7 @@ export async function chatTurn(o: ChatTurnOptions): Promise<ChatAnswer> {
     actions: acts.filter((a): a is ActionRef => typeof a !== 'string'),
     refusedActions: acts.filter((a): a is string => typeof a === 'string'),
     readOnly,
-    costUsd: r.costUsd,
+    costUsd,
     model: r.model || model,
     ...(o.run?.effort ? { effort: o.run.effort } : {}),
   };
