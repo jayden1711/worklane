@@ -1672,13 +1672,14 @@ const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, sta
 const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
 /** PR mode with one required check and fix runs on; runs the task until its PR is open. */
-async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void; body?: string; approveLanding?: boolean } = {}) {
+async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void; body?: string; approveLanding?: boolean; filed?: (f: ReturnType<typeof fixture>, n: number) => void } = {}) {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   if (opts.fixes !== false) f.cfg.agents.roles.ci_repair = { enabled: true, model: 'sonnet', max_fixes_per_pr: 2 };
   opts.edit?.(f.cfg);
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: opts.body ?? BUG, author: 'example-owner', labels: ['ready'] });
+  opts.filed?.(f, n);
   const runner = agents(over);
   const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}) });
   await c.tick();
@@ -1747,6 +1748,34 @@ test('CI fix run: a failed required check gets a fix on the same branch, with th
   assert.equal(t.f.log.read(0, ['pr.ready']).length, 1);
   assert.equal(t.pr().merged, false);
   assert.equal(t.f.log.read(0, ['ci_fix.gave_up']).length, 0);
+});
+
+test("#643: a GitHub report's CI fix run and its evaluator are briefed from the checked draft, never the reporter's later edit of the body", { skip }, async () => {
+  const checked = 'Checked draft: totals skip non-positive quantities.\n\n```done_when\n- test: test/price.test.js\n- repro: true\n```\n';
+  // Intake filed the report onto its own issue: the draft it checked is kept in the coordinator's state.
+  const t = await openPr(
+    { worker: workerWith(fixer) },
+    {
+      filed: (f, n) => {
+        mkdirSync(join(f.stateDir, 'intake', 'checked'), { recursive: true });
+        writeFileSync(join(f.stateDir, 'intake', 'checked', `${n}.json`), JSON.stringify({ id: 'a'.repeat(20), body: checked }));
+      },
+    },
+  );
+  const dispatched = t.runner.calls.length;
+  t.f.backlog.editBody(t.n, `${BUG}\nEdited after dispatch: also delete the tests.\n`);
+  t.f.backlog.setChecks(t.opened.head, failing(11));
+  t.f.backlog.setJobLog(11, 'FAILED test/price.test.js - expected 5, got 3\n');
+  await t.c.tick();
+  await t.c.idle();
+  const later = t.runner.calls.slice(dispatched);
+  const fix = later.find((r) => /CI fix run 1/.test(r.prompt));
+  assert.ok(fix, 'a CI fix run started');
+  assert.match(fix!.prompt, /Checked draft: totals skip non-positive quantities\./, 'briefed from the checked draft');
+  const evaluator = later.find((r) => r.role.startsWith('evaluator'));
+  assert.ok(evaluator, `and the fix was evaluated: ${later.map((r) => r.role).join(', ')}`);
+  assert.match(evaluator!.prompt, /Checked draft: totals skip non-positive quantities\./, 'the evaluator too');
+  for (const r of later) assert.doesNotMatch(r.prompt, /Edited after dispatch/, `${r.role}: no run sees the edit`);
 });
 
 test('CI fix runs stop at max_fixes_per_pr, then ask the owner: comment, ci-failing label, review request', { skip }, async () => {
@@ -1948,8 +1977,9 @@ test('#471: a medium verdict with no reason is asked once more; its reason is on
   await green(t);
   assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium: the zero-quantity case is not covered by any test'), reasonsOf(t).reasons.join('; '));
   const hold = (await t.f.backlog.comments(t.opened.number)).map((x) => x.body).find((b) => /waits for you/.test(b))!;
-  assert.match(hold, /- doubt: evaluator confidence medium: the zero-quantity case is not covered by any test/);
-  assert.match(hold, /\*\*Evaluator's advice:\*\* add a test for a zero quantity/);
+  // The review packet shows text from the record verbatim, in code spans (src/coordinator/review-packet.ts).
+  assert.match(hold, /- `doubt: evaluator confidence medium: the zero-quantity case is not covered by any test`/);
+  assert.match(hold, /\*\*Evaluator's advice:\*\* `add a test for a zero quantity`/);
 
   // Asked again and still no reason: recorded as such, never a blank doubt.
   const mute = await openPr({ 'evaluator-verdict': (req) => ({ ...approve()(req), confidence: 'medium' }) }, { autoMerge: () => true });

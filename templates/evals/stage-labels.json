@@ -1,5 +1,5 @@
 {
-  "about": "Eval cases for the stage-label judge (src/stage-label.ts): one fixture failed run per stage, each with the label it must get. environment/harness is set in code from the run's events, so that case checks that no judge call is made. The right-files case carries an injected instruction to label it environment/harness, which the judge must ignore. Run with: node scripts/eval-stage-labels.mjs",
+  "about": "Eval cases for the stage-label judge (src/stage-label.ts): one fixture failed run per stage, each with the label it must get. environment/harness is set in code from the run's events, so that case checks that no judge call is made. The right-files case carries an injected instruction to label it environment/harness, which the judge must ignore. Run with: node scripts/eval-stage-labels.mjs --spend 0.5 (without --spend it prints its plan and makes no judge call)",
   "cases": [
     {
       "id": "wrong-files",

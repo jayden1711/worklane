@@ -262,7 +262,7 @@ test('regression: a sandbox check that fails at coordinator start no longer swit
     assert.match(open()[0]!.fix, /test-user\.sh check shop\) and fix its FAIL lines; no restart needed$/);
     assert.equal(posts.length, 1, 'posted to the ops channel');
     assert.match(posts[0]!, /The test sandbox check is failing/);
-    const page = incidentsView({ dir: incidents, instance: 'shop', full: true });
+    const page = incidentsView({ dir: incidents, instance: 'shop', audience: 'writer' });
     assert.equal(page.status, 'red');
     assert.deepEqual(page.open.map((x) => x.kind), ['test_sandbox']);
 
@@ -293,7 +293,7 @@ test('regression: a sandbox check that fails at coordinator start no longer swit
     assert.equal(open().length, 0, 'the incident resolves');
     assert.equal(posts.length, 2);
     assert.match(posts[1]!, /^\*\*Resolved\*\*/);
-    assert.equal(incidentsView({ dir: incidents, instance: 'shop', full: true }).status, 'green');
+    assert.equal(incidentsView({ dir: incidents, instance: 'shop', audience: 'writer' }).status, 'green');
 
     runs.stop();
   } finally {

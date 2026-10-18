@@ -3,7 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { mayAnswer } from '../backlog/types.js';
+import { mayAnswer, type Issue } from '../backlog/types.js';
+import { INTAKE_LABEL } from '../intake/github.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { loadMoneyPaths } from '../review.js';
@@ -12,7 +13,7 @@ import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '..
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, purgeRaw, purgeSeen, rawIds, readRaw, reportId, seen, storeRaw } from '../intake/store.js';
 import { candidates as intakeCandidates } from '../intake/dedupe.js';
-import { acceptTriage } from '../intake/triage.js';
+import { acceptTriage, type Triage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
@@ -31,7 +32,9 @@ const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Coul
 // WHY: a github report is never taken twice (the seen ledger), so asking for it again would go nowhere.
 const GITHUB_INTERRUPTED_REPLY = "Sorry, we couldn't finish triaging this issue; it stays here for a maintainer.";
 const GITHUB_AWAITING_REPLY = 'Thanks. A maintainer approves this before it is taken on as work; until then it stays in triage.';
-const GITHUB_REJECTED_REPLY = 'A maintainer decided not to take this on as work for now; it stays in triage.';
+// WHY (#643): a GitHub report is worked from the draft intake checked, so "edit" can't mean editing it on GitHub.
+const GITHUB_EDIT_RECEIPT ="reported as a GitHub issue: it is worked from this checked draft whatever is edited on GitHub (its body or the draft's comment); to work it differently, a writer opens a new issue";
+const GITHUB_REJECTED_REPLY ='A maintainer decided not to take this on as work for now; it stays in triage.';
 const ownIssue = (r: Pick<IncomingReport, 'source' | 'sourceId'> | null): number | null => (r?.source === 'github' && /^\d+$/.test(r.sourceId) ? Number(r.sourceId) : null);
 
 export abstract class Intake extends QuickReplies {
@@ -204,11 +207,61 @@ export abstract class Intake extends QuickReplies {
     const got = acceptTriage(run.structured);
     if (!got.ok) return drop(`triage not accepted: ${got.why}`);
     const trusted = isTrusted(r.sender, cfg);
-    const action = intakeDecide({ report: r, redacted, triage: got.triage, trusted, shown, moneyPaths: this.intakeMoneyPaths() });
+    const action = intakeDecide({ report: r, redacted, triage: this.confirmedFix(got.triage), trusted, shown, moneyPaths: this.intakeMoneyPaths() });
     // A refused draft makes it needs_info, whatever kind the agent chose (decide.ts).
     const refused = action.action === 'reply' ? action.refused : undefined;
     this.emit('intake.triaged', { id, kind: refused ? 'needs_info' : got.triage.kind, reproduction: got.triage.reproduction?.result ?? null, ignored: got.dropped, ...(refused ? { draft_refused: refused.slice(0, 500) } : {}) });
     await this.intakeAct(r, id, trusted, action);
+  }
+
+  /**
+   * #333: the agent's fixing commit for a report it found fixed on main, kept (so the reply names it) only when it is
+   * on the default branch as this checkout last fetched it. One read-only git call on the trusted checkout, given
+   * an id acceptTriage allows only as 7 to 40 hex characters; anything else, or no answer in 10 s, drops the id.
+   */
+  private confirmedFix(t: Triage): Triage {
+    const rep = t.reproduction;
+    if (rep?.result !== 'fixed_on_main' || !rep.commit) return t;
+    const { commit, ...rest } = rep;
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', commit, `refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 10_000 });
+      return t;
+    } catch {
+      return { ...t, reproduction: rest };
+    }
+  }
+
+  /**
+   * #643: the body an issue is worked from: its contract and its brief. A report filed onto its own GitHub issue is
+   * worked from the draft intake checked (kept when it was filed: intakeLabelOnce), `- repro: true` and all, never from
+   * the issue's body or comments. An outsider's issue carrying the intake label with no such draft is not worked: its
+   * only contract would be the reporter's. Any other issue: its body, as before.
+   */
+  protected intakeWorkedBody(issue: Pick<Issue, 'number' | 'body' | 'labels' | 'author'>): { ok: true; body: string } | { ok: false; why: string } {
+    const file = this.intakeCheckedFile(issue.number);
+    if (existsSync(file)) {
+      let body: unknown;
+      try {
+        body = (JSON.parse(readFileSync(file, 'utf8')) as { body?: unknown }).body;
+      } catch {
+        body = undefined;
+      }
+      return typeof body === 'string' ? { ok: true, body } : { ok: false, why: 'the draft intake checked for it can no longer be read' };
+    }
+    const writer = this.d.cfg.project.owners.writers.some((w) => w.toLowerCase() === issue.author.toLowerCase());
+    if (issue.labels.includes(INTAKE_LABEL.name) && !writer) return { ok: false, why: `it came in through intake (${INTAKE_LABEL.name}) and intake hasn't checked a draft for it, so its only contract is the reporter's own` };
+    return { ok: true, body: issue.body };
+  }
+
+  /**
+   * #643: issue `n` as a later run on its task (a CI, review or conflict fix, and their evaluator) is briefed: its body
+   * is intakeWorkedBody's, read again now, so a reporter's edit after dispatch never reaches an agent. Without one, the
+   * body is left out and the brief says why.
+   */
+  protected async intakeWorkedIssue(n: number): Promise<Issue> {
+    const issue = await this.d.backlog.get(n);
+    const worked = this.intakeWorkedBody(issue);
+    return { ...issue, body: worked.ok ? worked.body : `(The issue's body is left out: ${worked.why}.)` };
   }
 
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
@@ -236,7 +289,7 @@ export abstract class Intake extends QuickReplies {
         // WHY: the issue number is kept with the draft: the raw report may be purged before anyone answers.
         const own = ownIssue(r);
         writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: a.labels, ...(own !== null ? { issue: own } : {}) }));
-        const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it']);
+        const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it', ...(own !== null ? [GITHUB_EDIT_RECEIPT] : [])]);
         this.emit('intake.awaiting', { id, decision });
         if (own !== null) await this.intakeReply(id, r, 'awaiting', GITHUB_AWAITING_REPLY);
         return;
