@@ -1,6 +1,6 @@
 # Product architecture: deployment modes, execution isolation and guard guarantees
 
-Status: **proposal for the owner's review** (2026-10-18). Nothing here is built. It is the gate before the product epic's item 3 (container isolation) and item 4 (deployment). Baseline: `origin/main` at `40b7b2bc`.
+Status: **proposal for the owner's review** (2026-10-18). Nothing here is built. It is item 0 (#699) of the product epic #709, and the gate before #702 (per-task isolation) and #703 (deployment). The epic's other items: #700 auth, #701 runner, #704 governance mode, #705 docs and proof, #706 first-time polish, #707 adversarial suite, #708 value report. Baseline: `origin/main` at `40b7b2bc`.
 
 **Labels.** Every claim about today's code or the world carries one:
 - **measured**: read in the code at the cited `file:line`, or the output of the cited command, on the baseline;
@@ -113,7 +113,7 @@ The event log is one SQLite file with one writer, and the engine's design says o
 
 **A test run** gets a pod with the tiers' container and, when `database: true`, Postgres as a sidecar reached on a Unix socket in a shared `emptyDir`, with no network at all (today: `--network none` and a socket, measured: docs/test-runs.md:34). The `fetch` step runs in a separate pod with egress to the package registries only, and the tiers run without network, as now (measured: docs/test-runs.md:11-13).
 
-**Claude Code's command sandbox inside a pod.** The engine sets `failIfUnavailable: true` and `allowUnsandboxedCommands: false` (measured: `src/sandbox.ts:33-35`). So if bubblewrap can't create a user namespace in the pod, the run refuses to start; it never runs unsandboxed (inferred). Whether bubblewrap works under a `restricted` pod with the runtime's default seccomp profile is a guess until measured; it may need Kubernetes user namespaces (`hostUsers: false`) or a seccomp profile that allows `unshare(CLONE_NEWUSER)` (guess). This is the first thing item 3 must measure.
+**Claude Code's command sandbox inside a pod.** The engine sets `failIfUnavailable: true` and `allowUnsandboxedCommands: false` (measured: `src/sandbox.ts:33-35`). So if bubblewrap can't create a user namespace in the pod, the run refuses to start; it never runs unsandboxed (inferred). Whether bubblewrap works under a `restricted` pod with the runtime's default seccomp profile is a guess until measured; it may need Kubernetes user namespaces (`hostUsers: false`) or a seccomp profile that allows `unshare(CLONE_NEWUSER)` (guess). This is the first thing #702 must measure.
 
 ### 4.2 Stronger options
 
@@ -140,7 +140,7 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 | Deterministic merge | `mergeDecision` (measured: `src/merge-policy.ts:219-252`) | Same; direct land refused (§1) | Same; direct land refused | No |
 | Rename resistance | Not on main: a rename prints `{old => new}` and matches no glob (measured: `src/coordinator/base.ts:533-543`; #683 open, PR #688 open). `-diff` attributes hiding content: #693, open (measured: `gh issue view 693`). | Same code | Same | No; but the gap is open in every mode until #688 and #693 land. |
 | Settings-file refusal and the applied-settings check | `projectSettingsRefusal` refuses a project's `.claude/settings.json` beyond hooks and permissions (measured: `src/agent-settings.ts:134-164`, `src/runner.ts:635`). #626 / PR #649: the run stops unless `claude`'s init echoes a fresh value from `--settings` (measured: `src/agent-settings.ts:203-228`, `src/runner.ts:693-694`, `:783-785`). | Same: the check reads the pod's stdout | Same | No |
-| Tool guard (PreToolUse hook) | `--settings` hooks that fail closed with `exit 2`; `disableAllHooks` pinned false (measured: `src/agent-settings.ts:37`, `:62-91`; `src/hook.ts:77-156`). The hook runs as the agent user from a root-owned engine install (inferred). | The hook runs in the pod from the image's read-only root filesystem | Same, in the container | No, provided the root filesystem is read-only and the image digest is pinned (Proposal; a test checks the pod spec). Still Claude-dependent, as item 2 records. |
+| Tool guard (PreToolUse hook) | `--settings` hooks that fail closed with `exit 2`; `disableAllHooks` pinned false (measured: `src/agent-settings.ts:37`, `:62-91`; `src/hook.ts:77-156`). The hook runs as the agent user from a root-owned engine install (inferred). | The hook runs in the pod from the image's read-only root filesystem | Same, in the container | No, provided the root filesystem is read-only and the image digest is pinned (Proposal; a test checks the pod spec). Still Claude-dependent, as #701 records. |
 | Agent command sandbox (files) | bubblewrap `denyRead` of credential stores and the coordinator's paths, fail closed (measured: `src/sandbox.ts:28-48`) | The pod has none of those files; bubblewrap still applies if it can start (§4.1) | Same | **Can weaken**: if bubblewrap can't run in a pod, the run refuses (no silent loss), but enabling it may need user namespaces. Replaced by: nothing secret is mounted in an agent pod (§6). |
 | Egress control | Agents: the Claude sandbox proxy and the WebFetch allowlist (measured: `src/sandbox.ts:36`, `src/hook.ts:133-139`). Experiment and scorer users: nftables by uid; test users only with `--with-test-users` (measured: `scripts/setup/egress-firewall.sh:4-5`, `:25`, `:39`, `:51`). #543 open, PR #686 open, #545 open (measured: `gh`). | **Stronger**: a default-deny NetworkPolicy per pod, which agents don't have today | Default-deny network plus an egress proxy; the runtime under its own uid (§3.2) | Not in pods. In compose, the #686 route (same uid as the runtime) must be impossible: the compose launcher refuses it. On single machine, PR #686 stays gated on #545 (owner's decision). |
 | Push gate, denylist, gitleaks | `scripts/push-gate.mjs` in the pre-push hook and in CI; `check:denylist`; gitleaks pinned and checksum-checked (measured: `scripts/push-gate.mjs:1-18`, `.github/workflows/ci.yml:180-223`, `.github/workflows/gitleaks.yml`). The coordinator's pushes go through `checkedPush` (measured: `src/coordinator/fix-runs.ts:324`). The hook scans each agent commit with gitleaks (measured: `src/hook.ts:143-151`). | Same; the engine image includes gitleaks (the trial image already does, measured: `.github/workflows/ci-slow.yml:101`) | Same | No |
@@ -148,7 +148,7 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 | Main watch | In the coordinator; polls; stops auto-merge and opens a revert PR on an unaccounted commit (measured: `src/main-watch.ts:1-31`, `src/coordinator/merge-flow.ts:940-960`) | Same | Same | No |
 | Real-state isolation of tests | `test/isolate.ts` moves HOME, state, slots and system paths into a throwaway machine for every test (measured: `test/isolate.ts:1-60`, `src/os/system-paths.ts:29-62`) | New chart tests run against a throwaway cluster in CI only (Proposal) | Same | No; new tests must use the same isolation and never a real kubeconfig or cloud credential (Proposal: a test fails if one is visible). |
 | Account and credential visibility | Viewers learn only that an account is set; ops posts carry no login (measured: #663 and #682 merged; `src/claude-account.ts:226`, `src/claude-auth-failure.ts:76-156`) | Same code; plus cloud IAM decides who reads the secret store | Same | No, inside the engine. A cloud admin sees everything, as root does today (§9). |
-| Separate users | Coordinator and agent users; the coordinator may run anything as its agent user (measured: `scripts/setup/instance.sh:40`) | Separate pods and ServiceAccounts; the coordinator can create agent pods (equivalent power) | Separate uids | No |
+| Separate users | Coordinator and agent users. The coordinator may run anything as its agent user (measured: `scripts/setup/instance.sh:40`), so it can read the agent's key files: docs/auth.md:22 says otherwise, a current weakness (#711) | Separate pods and ServiceAccounts; the coordinator can create agent pods (equivalent power) but has no read on the gateway's secret (Proposal) | Separate uids | No; pod mode can make #711's doc claim true |
 | Root's consent files (providers, network, plugins, signers) | Root-owned files the coordinator can't write (measured: docs/separate-users.md:33-37) | Helm values in a namespace the coordinator's ServiceAccount can't write (RBAC) | Root-owned files on the VM | No, if RBAC is tested: a test asserts the coordinator role has no write on its own config (Proposal). |
 | Emergency stop and slots | A `STOP` file and lock files in the machine-wide slot directory (measured: `src/slots.ts:123-128`; docs/slots.md) | A cluster object every coordinator watches, writable by admins only (Proposal) | The host directory, as today | No, once moved; until then cloud mode can't start (Proposal). |
 | Secrets out of argv | Env through `sudo ... env -i K=V`, so a secret in a cross-user run's env is on argv (measured: `src/os/index.ts:597-602`, `test/testrun-env-argv.test.ts:1-4`) | No sudo; secrets only as mounted files, never env (a pod's env is readable by anyone who can read the pod) | Same | No |
@@ -162,27 +162,41 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 4. **A dashboard reachable from a network** instead of a tailnet. Replacement: private ingress, OIDC, and opt-in for anything wider. Migrated installs keep what they had.
 5. **"Create pod" permission** for the coordinator. Replacement: an admission policy that admits only the engine's pod shape.
 
+**Current weaknesses on the single machine. These are not guarantees, and no mode may count them as one:**
+- **#710.** Re-running a setup script without its earlier flags loosens what the earlier run set. Example: the egress rule loses the test users (measured in #710: `scripts/setup/egress-firewall.sh:93`). Until #710 lands, a re-run is not a safe upgrade step (§7).
+- **#711.** The coordinator can read the agents' key files through its sudo rule, and the dashboard's token paste stores a token briefly. docs/auth.md:22 and :31 say otherwise (measured in #711).
+
 ## 6. Secrets
 
 | Secret | Today | Cloud account | Servers (VM) |
 |---|---|---|---|
 | GitHub App private key | 0400 file for the coordinator (measured: `scripts/setup/credentials.sh:123-127`) | Phase 1: in the cloud secret manager (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault), mounted as a file at the same path through the Secrets Store CSI driver. Phase 2: an asymmetric KMS key that signs the App's JWT, so the private key never leaves KMS (inferred: all three KMSes sign RS256; GitHub App JWTs are RS256). | A file for the coordinator's uid; or the cloud's manager on a cloud VM |
 | GitHub installation tokens | Hour-long, cached 0600, never given to agents (measured: `src/github-app.ts:54-71`) | Same, in the coordinator's volume | Same |
-| Model access | Claude login or API key file in the agent's home, read through `apiKeyHelper` (measured: `src/runner.ts:210-216`) | **Proposal:** a model gateway in the instance's namespace holds the cloud identity (workload identity to Bedrock or Vertex, or an API key from the secret manager). Each agent pod gets a token that is valid for that run only and capped at its budget. The pod holds no model credential. | The same gateway as a container, or item 1's credential files mounted read-only |
+| Model access | Claude login or API key file in the agent's home, read through `apiKeyHelper` (measured: `src/runner.ts:210-216`) | **Proposal:** a model gateway in the instance's namespace holds the cloud identity (workload identity to Bedrock or Vertex, or an API key from the secret manager). Each agent pod gets a token that is valid for that run only and capped at its budget. The pod holds no model credential. | The same gateway as a container, or #700's credential files mounted read-only |
 | Dashboard sign-in and break-glass keys | Files for `wl-dash` (measured: `src/dashboard.ts:983`) | OIDC client secret in the secret manager; break-glass through `kubectl port-forward` only | Files |
 | MCP server secrets | 0400 per server for the broker user (measured: docs/separate-users.md:34) | The broker as its own pod with its own ServiceAccount | Its own container |
 
 **Short-lived credentials for workers.** Agent and test pods get no cloud identity at all. An agent pod has two run-scoped tokens: one for the git mirror and one for the model gateway. Both expire when the run ends (Proposal).
 
-**Keeping secrets out of argv, events and logs:** files, never environment variables or arguments; redaction on write stays as the last layer (measured: `src/events/log.ts:97`, `src/run-record.ts:217`, `src/run-feed.ts:136`); item 1's planted-canary leak test runs in every mode, including the pod spec and the cluster's audit log (Proposal).
+**Keeping secrets out of argv, events and logs:** files, never environment variables or arguments; redaction on write stays as the last layer (measured: `src/events/log.ts:97`, `src/run-record.ts:217`, `src/run-feed.ts:136`); #700's planted-canary leak test runs in every mode, including the pod spec and the cluster's audit log (Proposal).
 
-**A conflict with epic item 1.** Item 1's draft says the runner never sets a `*_BASE_URL` or `CLAUDE_CODE_SKIP_*_AUTH`. A model gateway needs `claude` pointed at it, which is the same kind of setting as a provider endpoint set after `outboundEnv` (measured: `src/runner.ts:584-587`). That is an owner decision (decision 4).
+**A conflict with #700.** #700 says the runner never sets a `*_BASE_URL` or `CLAUDE_CODE_SKIP_*_AUTH`. A model gateway needs `claude` pointed at it, which is the same kind of setting as a provider endpoint set after `outboundEnv` (measured: `src/runner.ts:584-587`). That is an owner decision (decision 4).
+
+**Current weakness, not a guarantee (#711).** docs/auth.md:22 says the coordinator can't read the agent's key file. But the coordinator's sudo rule lets it run anything as the agent user (measured: `scripts/setup/instance.sh:40`), so it can read the file (inferred). The dashboard's token paste also stores a token briefly, 0400, for the coordinator user, until root installs and deletes it (measured: `src/claude-account.ts:14-16`). On the single machine this stays as it is until #711 is decided. In pod mode the gateway's secret is readable by the gateway's ServiceAccount alone, and the coordinator's role has no read on it. The claim would then hold there, enforced by RBAC, and a test should check that RBAC (Proposal).
 
 ## 7. Migration for existing single-host installs
 
 **What stays:** the scripts, OS users, sudoers, root files, the updater, Tailscale, the CI jobs and the docs. The default for every existing install is `execution: os-user`, and nothing changes without an admin acting at a root shell.
 
-**What changes:** the executor seam (§2.4) is extracted with a golden test: today's instance configs produce byte-identical argv, `--settings`, environment and denied reads before and after (Proposal; the same method as item 2 slice 3).
+**What changes:** the executor seam (§2.4) is extracted with a golden test: today's instance configs produce byte-identical argv, `--settings`, environment and denied reads before and after (Proposal; the same method as #701's golden test).
+
+**Re-runs and upgrades never loosen (#710).** Today a plain re-run of some setup scripts drops what an earlier run set. `egress-firewall.sh apply` without `--with-test-users` takes the test users out of the rule (measured in #710: `scripts/setup/egress-firewall.sh:93`). `service.sh` resets resource limits to their defaults (measured in #710: `scripts/setup/service.sh:35`). `gpu-devices.sh` may do the same (inferred in #710). That is a current weakness, not a guarantee. A migration that re-runs setup has to fix it first. #710 makes each script read its own root-owned record and treat it as a floor.
+
+A Helm upgrade has the same trap: `helm upgrade` without the earlier values resets them to the chart's defaults (inferred). **Proposal:**
+- the chart's defaults are its strictest settings;
+- the chart records the floor it applied in an object the coordinator can't write;
+- an upgrade that would loosen it fails unless an explicit loosening value is set;
+- a chart test proves this.
 
 **Container mode on one machine** is opt-in and refused unless the runtime runs under its own uid and no workload shares it, so it can't reopen the #686 route (Proposal).
 
@@ -243,7 +257,7 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 ### 10.3 Air-gapped installs
 
 An air-gapped install needs, each inside the boundary (inferred):
-- **Model access:** a model inside the network. Bedrock or Vertex through private endpoints still leaves the network for the provider's service; a self-hosted open model needs item 2's capability gate (docs/providers.md).
+- **Model access:** a model inside the network. Bedrock or Vertex through private endpoints still leaves the network for the provider's service; a self-hosted open model needs #701's capability gate (docs/providers.md).
 - **The code host:** GitHub Enterprise Server inside the network (GitLab later). The engine's GitHub host override would point there.
 - **Package mirrors:** npm, pip and container registries for the `fetch` step and image builds.
 - **Updates:** signed release bundles carried in by hand. They're verified against the customer's signer list with key-based signing; keyless signing needs online transparency services (inferred).
@@ -296,13 +310,15 @@ An air-gapped install needs, each inside the boundary (inferred):
 
 Sizes: **S** less than a day or under 300 lines; **M** one or two PRs; **L** several. Every step keeps the single-machine CI jobs (ci-slow real users, real systemd) green and required, and its docs current. No step changes a single-machine install's behaviour without the golden test in §7.
 
-**Before anything in item 3 or 4 (guard gaps that hold in every mode):**
+**Before anything in #702 or #703 (guard gaps that hold in every mode):**
 1. Land #691 (#665, tool-guard import tree) and #688 (#683, renames), then #693 (attribute-hidden content). S each, already in review.
 2. Money paths from the default branch (§1 item 2). S.
 3. One approval gate on every surface (§1 item 4). S.
 4. Direct land refused outside single-machine mode (§1 item 1). S.
 
-**Item 3: container isolation (L overall):**
+Also first: #710 (re-runs never loosen) and a decision on #711 (who can read the agents' credentials), before any migration step re-runs setup. S to M.
+
+**#702: per-task isolation (L overall):**
 
 5. The executor seam with the golden no-change test (§2.4, §7). M.
 6. Measure Claude Code's sandbox in a restricted pod and in a container (§4.1), and record the result in the doc. S.
@@ -311,7 +327,7 @@ Sizes: **S** less than a day or under 300 lines; **M** one or two PRs; **L** sev
 9. The pod executor for test runs: database sidecar, caches, the fetch pod, GPU through the device plugin. M.
 10. Compose launcher for one VM, with the separate-runtime-uid refusal (§3.2). M.
 
-**Item 4: deployment (L overall):**
+**#703: deployment (L overall):**
 
 11. Cluster state: SQLite on a volume; slots and `STOP` as a cluster object. M.
 12. Secrets phase 1 (CSI mount at today's paths), then the model gateway with run-scoped tokens. S, then L.
@@ -323,23 +339,25 @@ Sizes: **S** less than a day or under 300 lines; **M** one or two PRs; **L** sev
 18. The interface gaps in §11.3, one issue each. S each.
 
 **Epic items this changes:**
-- **Item 3 (containers)** becomes steps 5 to 10.
-- **Item 4 (deployment)** becomes steps 11 to 17, and adds this mode table to its acceptance.
-- **Item 1 (auth):** in pod mode the model credential sits behind the gateway, not in the pod. Item 1's "never set a base URL" constraint needs an exception for the gateway (decision 4). The leak test runs in every mode.
-- **Item 2 (runner):** "provided by the run environment" includes a pod's NetworkPolicy as the egress capability, which makes `cli:codex` and `cli:gemini` routes guardable in pod mode (inferred).
-- **Item 7 (polish)** and **item 9 (value report):** no change. The value report is the first aggregate a control plane (§8) would read.
+- **#702 (per-task isolation)** becomes steps 5 to 10.
+- **#703 (deployment)** becomes steps 11 to 17, adds this mode table to its acceptance, and depends on #710.
+- **#700 (auth):** in pod mode the model credential sits behind the gateway, not in the pod. #700's "never set a base URL" constraint needs an exception for the gateway (decision 4). The leak test runs in every mode. #711 is decided alongside it.
+- **#701 (runner):** "provided by the run environment" includes a pod's NetworkPolicy as the egress capability, which makes `cli:codex` and `cli:gemini` routes guardable in pod mode (inferred).
+- **#707 (adversarial suite):** gains the pod-mode and VM-mode routes in §5 and §9: the #686-class same-uid route, a pod spec the admission policy must refuse, and RBAC on the gateway's secret.
+- **#705 (docs and proof):** gains this doc's per-mode guarantee table as something to prove per mode, with single-machine docs kept current.
+- **#704 (governance mode), #706 (first-time polish) and #708 (value report):** no change from this doc. The value report is the first aggregate a control plane (§8) would read.
 
 ## 13. Decisions for the owner
 
 1. **Modes and order.** Cloud account first in build order; servers second; the single machine stays first-class with its own CI and docs. Recommended: yes.
 2. **Direct land outside the single machine.** Refuse `land_mode: direct` in cloud and servers modes, so every merge there goes through `mergeDecision`. Recommended: yes.
 3. **State store.** SQLite on a persistent volume, one coordinator replica per instance; no Postgres, because Postgres needs a new dependency. Recommended: yes.
-4. **Model credentials in pod mode.** A model gateway with run-scoped tokens, which needs an exception to item 1's "never set a base URL" rule; or item 1's credential files mounted into each agent pod. Recommended: the gateway for pods, files for the single machine and VM.
+4. **Model credentials in pod mode.** A model gateway with run-scoped tokens, which needs an exception to #700's "never set a base URL" rule; or #700's credential files mounted into each agent pod. Recommended: the gateway for pods, files for the single machine and VM.
 5. **Isolation runtime.** Plain pods by default, gVisor recommended where the cloud offers it, Kata and microVMs documented only. Recommended: yes, after step 6 measures the sandbox in a pod.
 6. **Moving code to and from runs.** A read-only git mirror in, a git bundle out, and no volume shared with the coordinator. Recommended: yes.
 7. **Dashboard sign-in in cloud mode.** OIDC to the customer's identity provider, mapped to the existing three roles; private ingress, with public ingress opt-in only. Recommended: yes.
 8. **GitHub webhooks.** Keep polling as the default, so no inbound route is needed; webhooks are opt-in. Recommended: yes.
 9. **Image signing keys.** A key held by the owner (works air-gapped), or keyless signing through CI's identity (needs online services). Recommended: key-based, with the signer list from the customer's side.
-10. **Gate fixes first.** Money paths from main and one approval gate on every surface, as S issues before item 3. Recommended: yes.
+10. **Gate fixes first.** Money paths from main and one approval gate on every surface, as S issues before #702; #710 before any migration step. Recommended: yes.
 11. **BYOC control plane.** Not now; record the boundary rules in §8 only. Recommended: yes.
 12. **Siri and the desktop app** ship in single-machine mode only. Recommended: yes.
