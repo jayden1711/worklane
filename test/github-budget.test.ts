@@ -176,9 +176,9 @@ test('a state no real limit could produce never stops calls: each is taken as "n
     const dir = fresh();
     const key = credentialKey('token-h');
     writeFileSync(join(dir, `github-budget-${key}.json`), JSON.stringify(state));
-    const t0 = Date.now();
+    const t0 = performance.now();
     await new GitHubBudget(key, dir, { maxWaitMs: 0 }).take('x').catch((e: Error) => assert.fail(`${what}: ${e.message}`));
-    assert.ok(Date.now() - t0 < 1000, `${what}: no spin`);
+    assert.ok(performance.now() - t0 < 1000, `${what}: no spin`);
   }
   // A real pause still counts.
   const dir = fresh();
@@ -204,26 +204,32 @@ test('a held budget lock never blocks the event loop; one stuck past a few secon
   const lock = join(dir, `github-budget-${key}.lock`);
   // Held now by a live process (this one's pid: alive everywhere): observe and pause give up at once.
   writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'held', acquiredAt: new Date().toISOString() }));
-  let t0 = Date.now();
+  // Elapsed times on the monotonic clock: a wall-clock step can't make them pass or fail.
+  const since = (t: number) => Math.round(performance.now() - t);
+  let t0 = performance.now();
   b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(inAnHour()) });
   b.pause('secondary_rate_limited', 60);
-  assert.ok(Date.now() - t0 < 100, `observe and pause took ${Date.now() - t0} ms synchronously`);
-  t0 = Date.now();
+  let took = since(t0);
+  assert.ok(took < 100, `observe and pause took ${took} ms synchronously`);
+  t0 = performance.now();
   await b.take('x'); // waits LOCK_WAIT_MS at most, then lets the call go
-  assert.ok(Date.now() - t0 < 2000, `take waited ${Date.now() - t0} ms`);
+  took = since(t0);
+  assert.ok(took < 2000, `take waited ${took} ms`);
   // Held for a minute by a "live" pid: stuck or planted. It is broken, and the budget works again.
   writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'stuck', acquiredAt: new Date(Date.now() - 60_000).toISOString() }));
   seed(b, 10);
   assert.equal(b.read().resources.core?.remaining, 10);
-  t0 = Date.now();
+  t0 = performance.now();
   await b.take('x');
-  assert.ok(Date.now() - t0 < 200, `took ${Date.now() - t0} ms`);
+  took = since(t0);
+  assert.ok(took < 200, `took ${took} ms`);
   assert.equal(b.read().resources.core?.remaining, 9);
   // Dated in the future: no real holder writes that, so it is broken too (else it would hold for good).
   writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'planted', acquiredAt: '3000-01-01T00:00:00.000Z' }));
-  t0 = Date.now();
+  t0 = performance.now();
   await b.take('x');
-  assert.ok(Date.now() - t0 < 200, `a future-dated lock cost ${Date.now() - t0} ms`);
+  took = since(t0);
+  assert.ok(took < 200, `a future-dated lock cost ${took} ms`);
   assert.equal(b.read().resources.core?.remaining, 8);
   assert.equal(existsSync(lock), false, 'the planted lock is gone');
 });
