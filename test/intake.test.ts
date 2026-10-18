@@ -8,7 +8,7 @@ import { BugStoreIntake, pullBugReports, readCursor, withCursor } from '../src/i
 import { candidates, similarity } from '../src/intake/dedupe.js';
 import { LABELS, parseContract } from '../src/backlog/types.js';
 import { decide, statusReply, NEEDS_INFO_REPLY, type IntakeAction } from '../src/intake/decide.js';
-import { DiscordIntake, fitPost, INTENTS, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
+import { DiscordIntake, fitPost, INERT_TICK, INTENTS, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
 import { luhn, redactPii } from '../src/intake/redact.js';
 import { IntakeConfig, intakeWarnings, isAllowed, isTrusted, type IncomingReport, type Source } from '../src/intake/report.js';
 import { IntakeMeter, purgeRaw, readRaw, reportId, storeRaw } from '../src/intake/store.js';
@@ -230,7 +230,7 @@ test('regression: the cut to 500 characters never leaves a code span open, a bac
   assert.equal(fitPost('`a` b `cd` e', 10), '`a` b `cd`');
   // Never in the middle of a run (``` cut to ` would pair with an earlier one).
   assert.equal(fitPost('a ``b`` ```code```', 10), 'a ``b`` ');
-  assert.equal(fitPost('x ` y ```', 7), 'x ');
+  assert.equal(fitPost('x ` y ```', 7), 'x ˋ y ', 'a backtick nothing closes is made inert, not cut at');
   // Never half an emoji, and the count stays even through one.
   assert.equal(fitPost('ab😀cd', 3), 'ab');
   assert.equal(fitPost('`😀` x', 2), '');
@@ -246,6 +246,30 @@ test('regression: the cut to 500 characters never leaves a code span open, a bac
   const path = `\`${'p'.repeat(200)} **bold** <#123456789012345678>\``;
   await d.reply('111111', `${'x'.repeat(400)} ${path}`);
   assert.equal((JSON.parse(String(posts[0]!.init.body)) as { content: string }).content, `${'x'.repeat(400)} `, 'the reply is cut by fitPost');
+});
+
+test('regression: a long post with a stray backtick or a fence open at the cut keeps close to 500 characters, with that run made inert', () => {
+  const ticks = (s: string) => (s.match(/`/g) ?? []).length;
+  // One stray backtick early in a 615-character post: it used to cost all but the first 8 characters.
+  const stray = `Run it: \` then ${'x'.repeat(600)}`;
+  assert.equal(stray.length, 615);
+  const a = fitPost(stray, REPLY_CHARS);
+  assert.equal(a.length, 500);
+  assert.equal(a, `Run it: ${INERT_TICK} then ${'x'.repeat(485)}`);
+  // A fenced block the cut goes through, in a 621-character post: it used to cost all but the first 7.
+  const fence = `intro \n\`\`\`ts\n${'code '.repeat(120)}\n\`\`\` end`;
+  assert.equal(fence.length, 621);
+  const b = fitPost(fence, REPLY_CHARS);
+  assert.equal(b.length, 500);
+  assert.equal(b, `intro \n${INERT_TICK.repeat(3)}ts\n${'code '.repeat(120)}`.slice(0, 500));
+  // Only the run nothing closes is touched: spans before it stay code, and a span the cut goes through is still dropped whole.
+  const mixed = `\`a\` \`\`b\`\` \`\`\` ${'y'.repeat(480)} \`lit span\` z`;
+  const c = fitPost(mixed, REPLY_CHARS);
+  assert.equal(c, `\`a\` \`\`b\`\` ${INERT_TICK.repeat(3)} ${'y'.repeat(480)} `);
+  // A closed span holding an odd number of backticks has those made inert, so the count stays even.
+  const d = fitPost(`\`\`a\`b\`\` ${'x'.repeat(600)}`, REPLY_CHARS);
+  assert.equal(d, `\`\`a${INERT_TICK}b\`\` ${'x'.repeat(492)}`);
+  for (const t of [a, b, c, d]) assert.equal(ticks(t) % 2, 0, t);
 });
 
 test('in-product reports: the fixed query with only a validated cursor filled in; the cursor advances privately, only past what is recorded', { skip: !posix && 'POSIX modes' }, async () => {

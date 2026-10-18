@@ -23,10 +23,24 @@ export const REPLY_CHARS = 500;
 
 const TICK = 96;
 /**
- * `text` cut to at most `max` characters for a post. The cut never splits an emoji (a surrogate pair) or a run of
- * backticks, and what it keeps has an even number of backticks: while that is odd, the cut moves back to before the
- * last run. So a code span (a pair of single backticks with none inside, as `lit` in review-packet.ts builds) is kept
- * whole or dropped whole, never left open for the rest of the post to render as markdown. Text that fits is unchanged.
+ * What `fitPost` puts in place of each backtick of a run that nothing closes: U+02CB, a grave-accent lookalike that
+ * Discord's markdown doesn't parse, so it can't open a span. It is one UTF-16 unit, like the backtick, so the post
+ * keeps its length.
+ */
+export const INERT_TICK = 'ˋ';
+
+/**
+ * `text` cut to at most `max` characters for a post. Text that fits is unchanged. A longer text is cut at `max`, never
+ * through an emoji (a surrogate pair) or a run of backticks. Then the runs of backticks in what is kept are paired the
+ * way markdown pairs them: from the left, each run is closed by the next run of the same length, and everything
+ * between is the span. A run that nothing closes is handled in one of two ways:
+ * - a single backtick that a single backtick after the cut would have closed opens a code span the cut went through
+ *   (as `lit` in review-packet.ts builds): the cut moves back to before it, so the span is dropped whole;
+ * - any other (a stray backtick, a fence or a double-backtick span the cut went through) has each backtick replaced
+ *   by INERT_TICK, so it can't open a span and the rest of the post is kept.
+ * A closed span holding an odd number of backticks (``a`b``) has those made inert too, so what is sent has an even
+ * number of backticks, whichever way they are counted, and every run of them is paired. A `lit` span is kept whole or
+ * dropped whole, never left open for the rest of the post to render as markdown.
  */
 export function fitPost(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -35,13 +49,58 @@ export function fitPost(text: string, max: number): string {
   while (end > 0 && tick(end - 1) && tick(end)) end--;
   const last = text.charCodeAt(end - 1);
   if (end > 0 && last >= 0xd800 && last <= 0xdbff) end--;
-  let ticks = 0;
-  for (let i = 0; i < end; i++) if (tick(i)) ticks++;
-  while (ticks % 2) {
-    while (!tick(end - 1)) end--;
-    while (end > 0 && tick(end - 1)) (end--, ticks--);
+  const runs: { at: number; len: number }[] = [];
+  for (let i = 0; i < end; i++) {
+    if (!tick(i)) continue;
+    const at = i;
+    while (i + 1 < end && tick(i + 1)) i++;
+    runs.push({ at, len: i + 1 - at });
   }
-  return text.slice(0, end);
+  // next[i]: the index of the next run as long as run i, or -1 (one pass from the right, so pairing is linear).
+  const next = new Array<number>(runs.length).fill(-1);
+  const seen = new Map<number, number>();
+  for (let i = runs.length - 1; i >= 0; i--) {
+    next[i] = seen.get(runs[i]!.len) ?? -1;
+    seen.set(runs[i]!.len, i);
+  }
+  const inert: { at: number; len: number }[] = [];
+  let single: { at: number; len: number } | undefined;
+  for (let i = 0; i < runs.length; i++) {
+    const j = next[i]!;
+    if (j < 0) {
+      inert.push(runs[i]!);
+      // At most one single backtick is left open (any later one would close it).
+      if (runs[i]!.len === 1) single = runs[i];
+      continue;
+    }
+    const inside = runs.slice(i + 1, j);
+    if (inside.reduce((n, r) => n + r.len, 0) % 2) inert.push(...inside);
+    i = j;
+  }
+  // If the text after the cut has a single backtick, that one closes the open one: the cut is inside its span.
+  if (single && closesAfter(text, end)) {
+    end = single.at;
+    inert.splice(inert.indexOf(single));
+  }
+  let out = '';
+  let from = 0;
+  for (const r of inert) {
+    out += text.slice(from, r.at) + INERT_TICK.repeat(r.len);
+    from = r.at + r.len;
+  }
+  return out + text.slice(from, end);
+}
+
+/** Whether `text` from `at` on has a run of exactly one backtick. */
+function closesAfter(text: string, at: number): boolean {
+  for (let i = at; i < text.length; i++) {
+    if (text.charCodeAt(i) !== TICK) continue;
+    let j = i;
+    while (j + 1 < text.length && text.charCodeAt(j + 1) === TICK) j++;
+    if (j === i) return true;
+    i = j;
+  }
+  return false;
 }
 
 /** The part of WebSocket the adapter uses, so tests can pass a fake. */
