@@ -152,6 +152,7 @@ export const LABELS = [
   { name: 'review:L1', color: 'ededed', description: 'Lands after the evaluator approves' },
   { name: 'review:L2', color: 'ededed', description: 'Lands after the evaluator approves; owner notified' },
   { name: 'review:L3', color: 'ededed', description: 'Owner must approve before landing' },
+  { name: 'couldnt-reproduce', color: 'e4e669', description: "Intake couldn't reproduce this bug from the code; the task's failing test decides" },
 ] as const;
 
 export type DoneWhenList = z.infer<typeof DoneWhen>;
