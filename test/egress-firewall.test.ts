@@ -344,6 +344,35 @@ test('the record: once a rule covers test users with no exception for their Dock
   assert.equal(decide(255, false, '# docker: exempt\n# docker: dropped\n').state, 'mode=dropped with_tests=1 nftset=');
 });
 
+/** --print and test-user.sh --print on systemd 255 with a record made by `make`: test users covered, Docker dropped. */
+function assertDroppedWith(make: (rec: string) => void, why: string) {
+  const m = machine(255);
+  try {
+    make(join(m.dir, 'egress.users'));
+    const r = m.run(script, ['--print']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /egress_ok|cgroupv2/, `no set and no exception: ${why}`);
+    assert.match(r.stdout, /meta skuid \{ 1001, 1002, 1003, 1004 \} oifname != "lo" counter drop/, `test users still covered: ${why}`);
+    const t = m.run(join(setup, 'test-user.sh'), ['--print', 'install', 'shop']);
+    assert.equal(t.status, 0, t.stderr);
+    assert.doesNotMatch(t.stdout, /^NFTSet=/m, `no NFTSet= on the Docker unit: ${why}`);
+  } finally {
+    m.done();
+  }
+}
+
+// Option (b) fails closed: a record that exists but can't be read might be one that says dropped, so it counts as one.
+test('the record: one that is a directory counts as dropped (no set, no exception, no NFTSet=)', { skip: !posix && 'bash' }, () => {
+  assertDroppedWith((rec) => mkdirSync(rec), 'the record is a directory');
+});
+
+test('the record: one with no read permission counts as dropped, whatever it says', { skip: (!posix && 'bash') || (process.getuid?.() === 0 && 'root reads a mode-000 file') }, () => {
+  assertDroppedWith((rec) => {
+    writeFileSync(rec, '# docker: exempt\n1001\n1002\n1003\n1004\n');
+    chmodSync(rec, 0o000);
+  }, 'the record is mode 000');
+});
+
 test('egress-firewall.sh refuses bad arguments', { skip: !posix && 'bash' }, () => {
   const m = machine(255);
   try {
