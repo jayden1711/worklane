@@ -265,8 +265,20 @@ async function main() {
       return 0;
     };
     const click = (testid) => async () => evaluate(`(() => { const t = performance.now(); document.querySelector('[data-testid="${testid}"]').click(); return t; })()`);
-    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview.
-    const pages = [['board', 'nav-board'], ['prs', 'nav-prs'], ['health', 'nav-health'], ['overview', 'nav-overview']];
+    // In the page, as a sidebar row or tab does (web/src/App.tsx navigate): a new address, no new document.
+    const go = (path) => async () => evaluate(`(() => { const t = performance.now(); history.pushState(null, '', ${JSON.stringify(path)}); dispatchEvent(new PopStateEvent('popstate')); return t; })()`);
+    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview, each one person's step from the
+    // page before: the Work row (it opens the Board), the Pull requests tab, the Health tab's address (no one click
+    // reaches it from a Work page) and the Overview row. Each page is measured until its root shows.
+    // WHY: test/perf-dashboard-ids.test.ts holds every id and address here to docs/feature-map.md (#625: the sidebar's
+    // ids changed under this script and nothing noticed).
+    const pages = [
+      { page: 'board', root: 'page-board', click: 'nav-work' },
+      { page: 'prs', root: 'page-prs', click: 'tab-prs' },
+      { page: 'health', root: 'page-health', path: '/machine/health' },
+      { page: 'overview', root: 'page-overview', click: 'nav-overview' },
+    ];
+    const pageSwitch = (p) => (p.click ? click(p.click) : go(p.path));
 
     // Bundle evaluation: from a trace of the cold load.
     let bundle = null;
@@ -303,14 +315,14 @@ async function main() {
       };
       await step(`instance switch -> ${names[1]} (${sizes[1]} events)`, 'hub', switchTo(names[1]), 'page-overview');
       await step(`instance switch -> ${names[0]} (${sizes[0]} events)`, 'hub', switchTo(names[0]), 'page-overview');
-      for (const [page, nav] of pages) await step(`page switch -> ${page}`, 'hub', click(nav), `page-${page}`);
+      for (const p of pages) await step(`page switch -> ${p.page}`, 'hub', pageSwitch(p), p.root);
 
       // Straight to the busy instance's own dashboard (its break-glass key), for the hub's own cost.
       const direct = instances[0];
       await cdp.send('Page.navigate', { url: `${direct.url}/` });
       await evaluate(`sessionStorage.setItem('dash-token', ${JSON.stringify(direct.token)})`);
       await step(n ? 'reload (warm cache)' : 'first load (cold cache)', 'direct', () => navigate(`${direct.url}/overview`), 'page-overview');
-      for (const [page, nav] of pages) await step(`page switch -> ${page}`, 'direct', click(nav), `page-${page}`);
+      for (const p of pages) await step(`page switch -> ${p.page}`, 'direct', pageSwitch(p), p.root);
       await cdp.send('Page.navigate', { url: `${hubBase}/overview` });
       await sleep(500);
     }
