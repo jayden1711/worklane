@@ -49,43 +49,18 @@ const viewer = { role: 'viewer', setupMode: false };
 
 /** Every page as the sidebar listed it before #585: its address, its name, its `g` key, and whether a viewer had it. */
 const BEFORE: [string, string, string, boolean][] = [
-  ['/', 'Board', 'b', true],
-  ['/overview', 'Overview', 'o', true],
-  ['/inbox', 'Inbox', 'i', true],
-  ['/waiting', 'Waiting on you', 'w', true],
-  ['/decisions', 'Decisions', 'd', true],
-  ['/setup', 'Setup console', 'u', true],
-  ['/issues', 'Issues', 's', true],
-  ['/intake', 'Intake', 'n', true],
-  ['/land', 'Land queue', 'l', true],
-  ['/prs', 'Pull requests', 'p', true],
-  ['/agents', 'Agents', 'a', true],
-  ['/extend', 'Extend', 'x', false],
-  ['/experiments', 'Experiments', 't', false],
-  ['/activity', 'Activity', 'e', true],
-  ['/deploys', 'Deploys', 'y', true],
-  ['/reports', 'Reports', 'r', true],
-  ['/logs', 'Logs', 'j', true],
-  ['/health', 'Health', 'h', true],
-  ['/machine', 'Machine', 'm', true],
-  ['/settings', 'Settings', ',', true],
+  ['/', 'Board', 'b', true], ['/overview', 'Overview', 'o', true], ['/inbox', 'Inbox', 'i', true], ['/waiting', 'Waiting on you', 'w', true],
+  ['/decisions', 'Decisions', 'd', true], ['/setup', 'Setup console', 'u', true], ['/issues', 'Issues', 's', true], ['/intake', 'Intake', 'n', true],
+  ['/land', 'Land queue', 'l', true], ['/prs', 'Pull requests', 'p', true], ['/agents', 'Agents', 'a', true], ['/extend', 'Extend', 'x', false],
+  ['/experiments', 'Experiments', 't', false], ['/activity', 'Activity', 'e', true], ['/deploys', 'Deploys', 'y', true], ['/reports', 'Reports', 'r', true],
+  ['/logs', 'Logs', 'j', true], ['/health', 'Health', 'h', true], ['/machine', 'Machine', 'm', true], ['/settings', 'Settings', ',', true],
 ];
 
 /** The old addresses the issue lists, and where each page lives now. */
 const MOVED: Record<string, string> = {
-  '/inbox': '/needs-you/inbox',
-  '/waiting': '/needs-you/waiting',
-  '/decisions': '/needs-you/decisions',
-  '/issues': '/work/issues',
-  '/intake': '/work/intake',
-  '/prs': '/work/prs',
-  '/land': '/shipping/land',
-  '/deploys': '/shipping/deploys',
-  '/activity': '/agents/activity',
-  '/health': '/machine/health',
-  '/logs': '/machine/logs',
-  '/reports': '/machine/reports',
-  '/setup': '/settings/setup',
+  '/inbox': '/needs-you/inbox', '/waiting': '/needs-you/waiting', '/decisions': '/needs-you/decisions',
+  '/issues': '/work/issues', '/intake': '/work/intake', '/prs': '/work/prs', '/land': '/shipping/land', '/deploys': '/shipping/deploys',
+  '/activity': '/agents/activity', '/health': '/machine/health', '/logs': '/machine/logs', '/reports': '/machine/reports', '/setup': '/settings/setup',
 };
 
 test('the sidebar groups', () => {
