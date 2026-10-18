@@ -1051,6 +1051,11 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  // No revert PR: the banner says why, when the alert carries it (main_watch.unaccounted no_revert).
+  const why = "opening the revert PR failed: git revert of cccccccc on main's tip dddddddd conflicts with later commits: CONFLICT (content): Merge conflict in a.txt";
+  const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
+  assert.match(none, /data-testid="main-watch-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
+  assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
 });
 
 test('a dead required check on the Machine page: named, since when, and why merges keep tripping; nothing when there is none', () => {

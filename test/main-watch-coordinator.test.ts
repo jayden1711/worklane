@@ -437,7 +437,90 @@ test('main watch caps: at most 3 revert PRs a day on an instance, across a resta
   assert.equal(reverts(w.f).length, 4);
 });
 
-test('main watch dead check: a required check with no run for dead_check_days is posted to the ops channel once and shown on the dashboard, and cleared when it runs again', async () => {
+/** A commit in the person's clone that writes `text` to `file`. */
+const edit = (w: ReturnType<typeof world>, file: string, text: string) => {
+  writeFileSync(join(w.person, file), text);
+  git(w.person, 'add', '-A');
+  git(w.person, ...ident, 'commit', '-q', '-m', `${file}: ${text.trim()}`);
+  return git(w.person, 'rev-parse', 'HEAD');
+};
+
+/** PR #n rebased onto main as `shas` (oldest first), merged by an owner with its required check never run. */
+const rebaseMerged = (w: ReturnType<typeof world>, n: number, shas: string[]) => {
+  const at = new Date(w.clock.t).toISOString();
+  const last = shas.at(-1)!;
+  const pr: MergedPull = { number: n, url: `https://github.com/x/y/pull/${n}`, mergedAt: at, mergeCommit: last, mergedBy: 'example-owner', mergedByBot: false, head: 'e'.repeat(40), base: 'main', commits: shas.length };
+  for (const c of shas) w.gh.pulls.set(c, [pr]);
+  w.gh.mergedAt.set(last, at);
+  shas.forEach((c, i) => c !== last && w.gh.compares.set(`${c}...${last}`, { status: 'ahead', aheadBy: shas.length - 1 - i, behindBy: 0 }));
+  w.gh.roles.set('example-owner', 'owner');
+};
+
+test('main watch revert: a rebased PR whose commits edit one file trips as one trip and gets one revert PR of its whole range (a revert of its first commit alone conflicts); the others\' alerts say that PR reverts them too', async () => {
+  const w = world();
+  await w.watch(2);
+  const c1 = edit(w, 'a.txt', 'one\n');
+  const c2 = edit(w, 'a.txt', 'two\n');
+  const c3 = edit(w, 'a.txt', 'three\n');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  rebaseMerged(w, 43, [c1, c2, c3]);
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, c2, c3], 'every commit judged, each with its own alert');
+  const opened = reverts(w.f);
+  const branch = `${BRAND.cli}/revert-${c1.slice(0, 12)}`;
+  assert.deepEqual(opened.map((p) => p.head), [branch], 'one revert PR, opened at the trip\'s first commit');
+  assert.equal(alerts[0]!.revert, opened[0]!.url);
+  assert.equal(alerts[0]!.revert_through, c3, 'it reverts the PR\'s commits through its last');
+  assert.equal(alerts[0]!.no_revert, null);
+  // One commit on the tip that puts the tree back as it was before the PR.
+  assert.equal(git(w.f.remote, 'rev-parse', `${branch}^`), c3);
+  assert.equal(git(w.f.remote, 'rev-parse', `${branch}^{tree}`), git(w.f.remote, 'rev-parse', `${c1}^^{tree}`));
+  assert.match(opened[0]!.title, new RegExp(`^Revert ${c1.slice(0, 8)}\\.\\.${c3.slice(0, 8)} \\(#43, 3 commits, unaccounted on main\\)$`));
+  for (const a of alerts.slice(1)) {
+    assert.equal(a.revert, null);
+    assert.match(a.no_revert ?? '', new RegExp(`^the per-trip cap is reached \\(main_watch\\.revert_prs_per_trip: 1\\): this trip's revert PR ${opened[0]!.url} reverts this commit too \\(${c1.slice(0, 8)}\\.\\.${c3.slice(0, 8)}\\); `));
+  }
+  // Fail closed: each still stops auto-merge.
+  assert.equal(of(w.f, 'merge.stopped').length, 3);
+  assert.notEqual(w.c.autoMergeStopped(), null);
+});
+
+test('main watch revert: when a revert PR can\'t be opened (a conflict with a later commit, a push the push checks refuse), the alert and the asks-channel notice say why, and each commit still stops auto-merge', async () => {
+  const w = world();
+  w.f.cfg.guardrails.push.refuse_paths = ['secret.txt'];
+  await w.watch(2);
+  // PR #44 rebased onto main as two commits editing a.txt; then a direct push edits a.txt again, and another adds a
+  // path the push checks refuse.
+  const c1 = edit(w, 'a.txt', 'one\n');
+  const c2 = edit(w, 'a.txt', 'two\n');
+  const later = edit(w, 'a.txt', 'three\n');
+  const secret = edit(w, 'secret.txt', 'x\n');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  rebaseMerged(w, 44, [c1, c2]);
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, c2, later, secret], 'every commit judged, each with its own alert');
+  const tip = secret.slice(0, 8);
+  // The PR's trip: its revert conflicts with the later edit, so no PR; the next commit of the trip tries again, and says why too.
+  assert.equal(alerts[0]!.revert, null);
+  assert.match(alerts[0]!.no_revert ?? '', new RegExp(`^opening the revert PR failed: git revert of ${c1.slice(0, 8)}\\.\\.${c2.slice(0, 8)} on main's tip ${tip} conflicts with later commits: CONFLICT \\(content\\): Merge conflict in a\\.txt`));
+  assert.equal(alerts[1]!.revert, null);
+  assert.match(alerts[1]!.no_revert ?? '', new RegExp(`^opening the revert PR failed: git revert of ${c2.slice(0, 8)} on main's tip ${tip} conflicts with later commits: CONFLICT \\(content\\): Merge conflict in a\\.txt`));
+  assert.match(mainWatchPost(alerts[0]!, { dashboardUrl: 'https://dashboard.example.test' }).text, /No revert PR was opened: opening the revert PR failed: git revert of .* conflicts with later commits/, 'the asks channel says why');
+  // The later edit reverts cleanly (nothing after it touches a.txt).
+  assert.equal(alerts[2]!.revert, reverts(w.f).find((p) => p.head.endsWith(later.slice(0, 12)))!.url);
+  assert.equal(alerts[2]!.no_revert, null);
+  // The refused path: the push checks say no, and the alert says so.
+  assert.equal(alerts[3]!.revert, null);
+  assert.match(alerts[3]!.no_revert ?? '', /^opening the revert PR failed: the push checks refused the revert branch: .*secret\.txt/);
+  assert.equal(reverts(w.f).length, 1);
+  // Fail closed: a revert that failed never suppresses the stop or the alert.
+  assert.equal(of(w.f, 'merge.stopped').length, 4);
+  assert.notEqual(w.c.autoMergeStopped(), null);
+});
+
+test('main watch dead check:a required check with no run for dead_check_days is posted to the ops channel once and shown on the dashboard, and cleared when it runs again', async () => {
   const chat = fakeChat();
   const w = world({ chat });
   await w.watch(2);

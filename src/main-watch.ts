@@ -8,7 +8,8 @@
 // Anything else is unaccounted: a direct push, a PR merged with failing, missing or pending checks, an unknown actor
 // or a bot, a rewritten history. The coordinator then stops auto-merge (the stop file), alerts, and opens a revert PR
 // for a human (coordinator/merge-flow.ts), within its caps: per trip (one pass's unaccounted commits with one reason)
-// and per day; a capped commit still stops and alerts. A required check with no run for days is warned of once.
+// and per day; a capped commit still stops and alerts. A rebase-merged PR's commit is reverted with the PR's later
+// commits, in one revert; when there is no revert PR, the alert says why. A required check with no run for days is warned of once.
 // A commit that landed without a PR at all (GitHub's commit-to-PR link has
 // no merged PR for it, or a force-push rewrote the branch) is also posted to the ops channel at once, mentioning the
 // Discord owners (src/direct-push-alert.ts; config.yaml main_watch.direct_push_alert, on by default). The last checked commit is kept in a state file, so a restart neither
@@ -434,8 +435,10 @@ export interface MainWatchDeps {
    * `push`: it landed without a PR, pushed directly (GitHub confirms no merged PR has it) or by a rewrite (a
    * force-push), with `alert` whether that is posted to the ops channel (directPushAlertAt); null otherwise.
    * `trip`: the trip it belongs to and its caps on revert PRs (null for a rewrite, which has no revert PR).
+   * `through`: a commit of a rebase-merged PR, the PR's last commit (GitHub's merge_commit_sha): its revert PR reverts
+   * the PR's commits from it through that one, so the PR's later commits to the same files can't make it conflict.
    */
-  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null }): Promise<void>;
+  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null; through?: string | null }): Promise<void>;
   /** How long a required check may have no run before it is a dead check (config.yaml main_watch.dead_check_days). */
   deadCheckMs?: () => number;
   /** A dead check is raised (once per check, until it clears), or cleared: a run of it appeared, or it isn't required now. */
@@ -600,7 +603,10 @@ export class MainWatch {
       // Every unaccounted commit trips (stop, alert); its trip only caps how many revert PRs open.
       const pass = s.pass ?? { from: s.last ?? p.sha, tip: p.sha };
       const trip = { id: tripOf(pass, v.reason + note), ...revertCapsAt(this.d.git, pass.from) };
-      await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null, trip });
+      // One of a rebase-merged PR's commits (judged by its PR, whose merge commit is a later one): revert through it.
+      const m = v.number !== null && p.facts.pr?.number === v.number ? p.facts.pr.mergeCommit : null;
+      const through = m && m !== p.sha && this.d.git.isAncestor(p.sha, m) ? m : null;
+      await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null, trip, through });
     }
     this.seenChecks(s, judgedBy, p.facts);
     this.deadChecks(s, required);

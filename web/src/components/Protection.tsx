@@ -167,6 +167,9 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
   const [error, setError] = useState<string | null>(null);
   const a = protection?.alert;
   if (!a) return null;
+  // Why no revert PR was opened (main_watch.unaccounted no_revert): a cap, a failed revert (a conflict, the push checks'
+  // refusal), a rewrite. Shown once the dashboard's alert carries it (src/dashboard.ts protectionState, web/src/api.ts).
+  const noRevert = (a as { no_revert?: string | null }).no_revert;
   const clear = async () => {
     setBusy(true);
     setError(null);
@@ -197,6 +200,8 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
             </a>
             .
           </>
+        ) : noRevert ? (
+          <span data-testid="main-watch-no-revert">No revert PR was opened: {noRevert}.</span>
         ) : (
           'No revert PR was opened.'
         )}
