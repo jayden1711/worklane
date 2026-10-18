@@ -532,7 +532,7 @@ export function policyAt(root: string, rev: string): CommentPolicy | null {
 }
 
 export interface CheckRun {
-  /** 0: off, or every new comment passes; 1: findings; 2: it couldn't check. */
+  /** INVARIANT: 0 is off or every new comment passes, 1 findings, 2 couldn't check: CI's exit code (#330). */
   code: 0 | 1 | 2;
   stdout: string;
   stderr: string;
