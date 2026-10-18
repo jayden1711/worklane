@@ -3,10 +3,10 @@
 // ~/.claude). Checked: profile-add installs the token in each agent user's own profile dir and proves it with a real
 // call there, and keeps nothing when the API refuses it; use proves the profile with one real call per agent user
 // before profiles.json names it active, and changes nothing when a call is refused; remove is refused while a profile
-// is active; the token is in no output, file or command line.
+// is active; the token is in no output, file or command line. Never a credential from a dashboard (issue #711).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -114,38 +114,32 @@ process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.a
   const claudeCalls = () => read(join(T, 'claude-calls')).trim().split('\n').filter(Boolean);
   /** The ops alerts: the machine change log's profile lines. */
   const changes = () => read(join(T, 'changes.jsonl')).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as { by: string; what: string; from: string; to: string });
-  /** A dashboard's pasted token, where the helper's --token-from reads it: the instance coordinator's secrets dir. */
-  const pasted = (inst: string, token = TOKEN) => {
+  /** Where an earlier dashboard stored a pasted token or sign-in code: the instance coordinator's secrets dir. */
+  const pasted = (inst: string, name = 'claude-profile-token', value = TOKEN) => {
     const d = join(T, 'homes', `wl-${inst}`, '.config', `${inst}-secrets`);
     mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, 'claude-profile-token'), token, { mode: 0o400 });
-    return join(d, 'claude-profile-token');
+    writeFileSync(join(d, name), value, { mode: 0o400 });
+    return join(d, name);
   };
-  /** claude-account.sh login, in the background: the dashboard's half is the test's (reading the link, pasting the code). */
-  const login = (args: string[]) => {
-    const c = spawn('bash', [join(s, 'claude-account.sh'), 'login', ...args], { env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } });
-    let stdout = '';
-    let stderr = '';
-    c.stdout.on('data', (d) => (stdout += d));
-    c.stderr.on('data', (d) => (stderr += d));
-    const done = new Promise<{ status: number | null; stdout: string; stderr: string }>((res) => c.on('close', (status) => res({ status, stdout, stderr })));
-    return { done };
-  };
-  const until = async (f: () => boolean, ms = 15_000) => {
-    const end = Date.now() + ms;
-    while (!f()) {
-      if (Date.now() > end) throw new Error('timed out waiting');
-      await new Promise((r) => setTimeout(r, 50));
+  /**
+   * A profile an earlier version staged for one instance (added from its dashboard): added by root here, then made
+   * what that left behind: that instance's agent user only, staged, its instance named.
+   */
+  const staged = (profile: string, inst = 'alpha') => {
+    assert.equal(run(['profile-add', profile, '--json'], `${TOKEN}\n`).status, 0);
+    const f = join(T, 'var', 'profiles.json');
+    const p = JSON.parse(readFileSync(f, 'utf8')) as { profiles: Record<string, { staged: boolean; instance?: string; users: Record<string, { instance: string }> }> };
+    const e = p.profiles[profile]!;
+    e.staged = true;
+    e.instance = inst;
+    for (const [u, rec] of Object.entries(e.users)) {
+      if (rec.instance === inst) continue;
+      delete e.users[u];
+      rmSync(pdir(u, profile), { recursive: true, force: true });
     }
+    writeFileSync(f, JSON.stringify(p));
   };
-  /** The code, pasted where the dashboard stores it for the asking coordinator. */
-  const pasteCode = (inst: string, code = CODE) => {
-    const d = join(T, 'homes', `wl-${inst}`, '.config', `${inst}-secrets`);
-    mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, 'claude-login-code'), code, { mode: 0o400 });
-    return join(d, 'claude-login-code');
-  };
-  return { T, run, pdir, outputs, claudeCalls, changes, pasted, login, until, pasteCode, read };
+  return { T, run, pdir, outputs, claudeCalls, changes, pasted, staged, read };
 }
 
 test('profile-add: the token in each agent user own profile dir (0700/0600), proven by a real call there; the eval user and ~/.claude untouched', { skip: !posix }, () => {
@@ -234,14 +228,22 @@ test('from a dashboard (--for, --token-from: what the helper passes from SUDO_US
   assert.ok(own.lines.every((l) => (l as { for?: string }).for === 'alpha'));
 });
 
-test('profile-add from a dashboard: its own agent user only, STAGED; nothing may use it until a root admin confirms it, seeing the account and typing the name', { skip: !posix }, () => {
+test('issue #711: profile-add never takes its token from a dashboard: --token-from and --for are refused before anything runs; the file is never read', { skip: !posix }, () => {
   const m = machine();
-  const file = m.pasted('alpha');
-  const add = m.run(['profile-add', 'work', '--json', '--token-from', 'alpha']);
-  assert.equal(add.status, 0, add.stderr + add.stdout);
-  assert.ok(!existsSync(file), 'the pasted token file is read once and deleted');
-  assert.ok(existsSync(m.pdir('wl-alpha-agent', 'work')));
-  assert.ok(!existsSync(m.pdir('wl-beta-agent', 'work')), "never in another instance's agent user");
+  m.pasted('alpha');
+  for (const args of [['profile-add', 'work', '--json', '--token-from', 'alpha'], ['profile-add', 'work', '--json', '--for', 'alpha']]) {
+    const r = m.run(args, `${TOKEN}\n`);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.ok(!leaked(m.outputs(r)));
+  }
+  assert.deepEqual(m.claudeCalls(), [], 'no call made');
+  assert.ok(!existsSync(m.pdir('wl-alpha-agent', 'work')) && !existsSync(m.pdir('wl-beta-agent', 'work')), 'nothing installed');
+  assert.deepEqual(readProfiles(join(m.T, 'var')).profiles, {});
+});
+
+test('a profile an earlier version staged (added from a dashboard) stays unusable until a root admin confirms it, seeing the account and typing the name', { skip: !posix }, () => {
+  const m = machine();
+  m.staged('work');
   let p = readProfiles(join(m.T, 'var'));
   assert.deepEqual([p.profiles.work!.staged, p.profiles.work!.instance, Object.keys(p.profiles.work!.users)], [true, 'alpha', ['wl-alpha-agent']]);
   // Unusable: from its dashboard, and at a root shell too.
@@ -266,14 +268,14 @@ test('profile-add from a dashboard: its own agent user only, STAGED; nothing may
   assert.equal(m.run(['use', 'work', '--json', '--for', 'alpha']).status, 0);
   assert.equal(readProfiles(join(m.T, 'var')).active.alpha?.profile, 'work');
   // Confirmed once: there is nothing more to confirm.
-  assert.equal(m.run(['confirm-profile', 'work'], 'work\n').status, 1);
-  assert.ok(!leaked(m.outputs(add)), 'the token is in no output, file, alert or command line');
+  const again = m.run(['confirm-profile', 'work'], 'work\n');
+  assert.equal(again.status, 1);
+  assert.ok(!leaked(m.outputs(again)), 'the token is in no output, file, alert or command line');
 });
 
 test('a profile the API refuses is never confirmed', { skip: !posix }, () => {
   const m = machine();
-  m.pasted('alpha');
-  assert.equal(m.run(['profile-add', 'work', '--json', '--token-from', 'alpha']).status, 0);
+  m.staged('work');
   writeFileSync(join(m.T, 'refuse-wl-alpha-agent'), '');
   const r = m.run(['confirm-profile', 'work'], 'work\n');
   assert.equal(r.status, 1);
@@ -286,8 +288,7 @@ test('remove from a dashboard: only its own agent user\'s copy, of a profile it 
   // A root admin's, for every agent user, and in use by beta.
   assert.equal(m.run(['profile-add', 'shared', '--json'], `${TOKEN}\n`).status, 0);
   assert.equal(m.run(['use', 'shared', 'beta', '--json']).status, 0);
-  m.pasted('alpha');
-  assert.equal(m.run(['profile-add', 'mine', '--json', '--token-from', 'alpha']).status, 0);
+  m.staged('mine');
   const inUse = m.run(['remove', 'shared', '--json', '--for', 'alpha']);
   assert.equal(inUse.status, 1);
   assert.match(inUse.lines.at(-1)!.detail, /refused: beta use profile shared/);
@@ -309,8 +310,7 @@ test('remove from a dashboard: only its own agent user\'s copy, of a profile it 
 
 test('every add, confirm, use and remove is an ops alert line (machine change log): names and who asked, the account only after confirm, never the token', { skip: !posix }, () => {
   const m = machine();
-  m.pasted('alpha');
-  m.run(['profile-add', 'work', '--json', '--token-from', 'alpha']);
+  m.staged('work');
   m.run(['confirm-profile', 'work'], 'work\n');
   m.run(['use', 'work', '--json', '--for', 'alpha']);
   m.run(['use', 'default', '--json', '--for', 'alpha']);
@@ -319,7 +319,7 @@ test('every add, confirm, use and remove is an ops alert line (machine change lo
   const c = m.changes();
   assert.ok(c.every((x) => x.what === 'claude_account.profile'));
   assert.deepEqual(c.map((x) => [x.by, x.to]), [
-    ['wl-alpha', 'staged work for alpha'],
+    ['root', 'added work'],
     ['root', 'confirmed work as new@example.com'],
     ['wl-alpha', 'use work for alpha'],
     ['wl-alpha', 'use default for alpha'],
@@ -357,65 +357,21 @@ test('names are checked before anything runs', { skip: !posix }, () => {
   assert.ok(!existsSync(join(m.T, 'var', 'profile-ops.jsonl')));
 });
 
-test('login (the relayed sign-in): the link for the asking dashboard only, the code read once and given to claude on stdin, the account staged; nothing of either kept', { skip: !posix }, async () => {
+test('issue #711: login (a sign-in relayed through a dashboard) is no command: refused before anything runs, claude auth login never started, a code an earlier dashboard stored removed unread', { skip: !posix }, () => {
   const m = machine();
-  const l = m.login(['work', '--json', '--for', 'alpha']);
-  const urlFile = join(m.T, 'var', 'login-url');
-  await m.until(() => existsSync(urlFile));
-  assert.equal(statSync(urlFile).mode & 0o777, 0o400, "the link is the asking coordinator user's alone");
-  assert.match(readFileSync(urlFile, 'utf8'), /^https:\/\/claude\.ai\/oauth\/authorize\?.*redirect_uri=https%3A%2F%2Fplatform\.claude\.com%2Foauth%2Fcode%2Fcallback/);
-  const codeFile = m.pasteCode('alpha');
-  const r = await l.done;
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.ok(!existsSync(codeFile), 'the code is read once and deleted');
-  assert.ok(!existsSync(urlFile), 'the link is gone');
-  assert.equal(m.read(join(m.T, 'login-codes')), 'right\n', 'claude got the code once, on stdin');
-  const p = readProfiles(join(m.T, 'var'));
-  assert.deepEqual([p.profiles.work!.kind, p.profiles.work!.staged, p.profiles.work!.instance, Object.keys(p.profiles.work!.users)], ['login', true, 'alpha', ['wl-alpha-agent']]);
-  assert.ok(!existsSync(m.pdir('wl-beta-agent', 'work')), "never another instance's agent user");
-  // Staged: unusable until a root admin confirms it.
-  assert.equal(m.run(['use', 'work', '--json', '--for', 'alpha']).status, 1);
-  assert.ok(m.changes().some((c) => c.by === 'wl-alpha' && c.to === 'staged work for alpha (signed in from the dashboard)'), 'an ops alert on the add');
-  // The code and the link: in no output, progress line, profile, alert, or command line.
-  const all = m.outputs(r) + m.read(join(m.T, 'calls'));
-  assert.ok(!codeLeaked(all), 'the code is nowhere');
-  assert.ok(!all.includes('st4te'), 'the link is nowhere');
-  assert.equal(m.run(['confirm-profile', 'work'], 'work\n').status, 0);
-  assert.equal(m.run(['use', 'work', '--json', '--for', 'alpha']).status, 0);
-});
-
-test('login: a code claude refuses, or none in time, signs nothing in, keeps nothing, and the next sign-in starts over (the code is single-use)', { skip: !posix }, async () => {
-  const m = machine();
-  const urlFile = join(m.T, 'var', 'login-url');
-  const bad = m.login(['work', '--json', '--for', 'alpha']);
-  await m.until(() => existsSync(urlFile));
-  m.pasteCode('alpha', 'not-the-right-code1#abcdefghij');
-  const r = await bad.done;
-  assert.equal(r.status, 1);
-  assert.match(r.stdout, /didn't finish .*the code is single-use, so start again/);
-  assert.ok(!existsSync(m.pdir('wl-alpha-agent', 'work')), 'the half-made dir is removed');
-  assert.equal(readProfiles(join(m.T, 'var')).profiles.work, undefined);
-  // None in time (1 "minute" here).
-  const late = m.login(['late', '--json', '--for', 'alpha', '--token-timeout', '1']);
-  const rl = await late.done;
-  assert.equal(rl.status, 1);
-  assert.match(rl.stdout, /no code came/);
-  assert.ok(!existsSync(urlFile) && !existsSync(m.pdir('wl-alpha-agent', 'late')));
-  // A code left over from before is never taken: the step clears it before it starts.
-  m.pasteCode('alpha');
-  const again = m.login(['work', '--json', '--for', 'alpha', '--token-timeout', '1']);
-  const ra = await again.done;
-  assert.equal(ra.status, 1, 'an old code is not this sign-in\'s');
-  assert.ok(!m.read(join(m.T, 'login-codes')).includes('right'), 'claude never got it');
-});
-
-test('login is a dashboard\'s only, for its own instance; never default, never a name that exists', { skip: !posix }, () => {
-  const m = machine();
-  assert.equal(m.run(['login', 'work', '--json']).status, 1, 'at a root shell: add a setup token instead');
-  assert.equal(m.run(['login', 'work', 'beta', '--for', 'alpha']).status, 2);
-  assert.equal(m.run(['login', 'default', '--for', 'alpha']).status, 2);
-  assert.equal(m.run(['profile-add', 'work', '--json'], `${TOKEN}\n`).status, 0);
-  assert.equal(m.run(['login', 'work', '--json', '--for', 'alpha']).status, 1);
+  const code = m.pasted('alpha', 'claude-login-code', CODE);
+  writeFileSync(join(m.T, 'var', 'login-url'), 'https://claude.ai/oauth/authorize?state=st4te\n');
+  for (const args of [['login', 'work', '--json', '--for', 'alpha'], ['login', 'work', '--json'], ['login', 'work', '--for', 'alpha', '--token-timeout', '1']]) {
+    const r = m.run(args, `${CODE}\n`);
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.ok(!codeLeaked(m.outputs(r)));
+  }
+  assert.deepEqual(m.claudeCalls(), [], 'claude auth login never ran');
+  assert.ok(!existsSync(m.pdir('wl-alpha-agent', 'work')));
+  // The next run of any command removes what the earlier dashboard left, unread.
+  m.run(['use', 'default', '--json']);
+  assert.ok(!existsSync(code) && !existsSync(join(m.T, 'var', 'login-url')));
+  assert.ok(!m.read(join(m.T, 'login-codes')).length, 'claude never got the code');
 });
 
 test('failover: the order and move-back written to profiles.json, machine-wide or for one instance; a profile never added is refused', { skip: !posix }, () => {
@@ -436,9 +392,8 @@ test('failover: the order and move-back written to profiles.json, machine-wide o
   assert.equal(raw(['failover', 'default+work', 'stay', '--for', 'alpha']).status, 0);
   const q = readProfiles(join(m.T, 'var'));
   assert.deepEqual([q.failover.instances.alpha, q.failover.machine], [{ order: ['default', 'work'], back: false }, { order: ['default', 'work'], back: true }]);
-  // A staged account can't be in an order.
-  m.pasted('alpha');
-  assert.equal(m.run(['profile-add', 'mine', '--json', '--token-from', 'alpha']).status, 0);
+  // A staged account (an earlier version's) can't be in an order.
+  m.staged('mine');
   const staged = raw(['failover', 'default+mine', 'back']);
   assert.equal(staged.status, 1);
   assert.match(staged.stderr, /mine is staged, not confirmed/);

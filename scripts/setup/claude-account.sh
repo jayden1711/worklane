@@ -8,14 +8,17 @@
 #   sudo bash scripts/setup/claude-account.sh use <profile> [<instance>] [--json]
 #   sudo bash scripts/setup/claude-account.sh remove <profile> [--json]
 #   sudo bash scripts/setup/claude-account.sh confirm-profile <profile>
-#   claude-account.sh login <profile> --for <instance>       (the machine helper's, for a dashboard)
 #   sudo bash scripts/setup/claude-account.sh failover <profile+profile+...|off> back|stay [<instance>]
+#
+# A Claude credential comes in only here, at a root shell on this machine (the hidden prompt, or stdin): never from a
+# dashboard (issue #711). No command takes one through the machine helper, and each run removes, unread, any file an
+# earlier version had a dashboard store for this script (a switch's token, a profile's token, a sign-in's code,
+# add-project's token) from every instance's secrets dir, as that instance's coordinator user.
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
 #            going finish, then it exits). An instance that wasn't running is left as it is, and left stopped after.
-#   token    the token `claude setup-token` prints, pasted once (not shown) or on stdin. From the dashboard, a machine
-#            owner pastes it in the asking instance's dashboard instead (--token-from, which the machine helper passes).
+#   token    the token `claude setup-token` prints, pasted once here (not shown) or on stdin.
 #   wait     until each paused instance's runs have finished, or --timeout (30 minutes): then it is stopped, and the
 #            runs still going are requeued when it starts again.
 #   install  the token, for every agent user of every instance (its agent user, and its eval user if it has one;
@@ -45,17 +48,11 @@
 # it when each run starts, so a switch needs no pause and a run already going finishes on the login it started on.
 #   profile-add  a token from `claude setup-token`, installed as each agent user in that profile's dir, then one
 #                minimal real call as each user on it. If the API refuses it for any user, nothing is kept: every
-#                user's new profile dir is removed. At a root shell (stdin): every agent user, usable at once. From a
-#                dashboard (the machine helper's --token-from <its instance>): that instance's agent user only, and
-#                STAGED: nothing may use it until a root admin confirms it with confirm-profile.
-#   login        a dashboard's (--for <its instance>), the owner's approved exception (docs/auth.md): `claude auth
-#                login` as that instance's agent user on the new profile's dir. Claude's sign-in link goes to a file
-#                only that instance's coordinator user reads (its dashboard shows it to a machine owner); the code the
-#                owner pastes back comes in that user's 0400 file, read once, deleted, written to claude's stdin. Then
-#                one real call on it, and the profile is STAGED, like any account added from a dashboard.
-#   confirm-profile  a root admin's, on the machine, never through the helper: one real call as each user the profile
-#                was added for, showing the account email, org and plan Claude reports, then the profile's name typed
-#                back. Only then may anything use it (the same pattern as updates.sh --confirm-signer).
+#                user's new profile dir is removed. A root admin's only, at a root shell (the hidden prompt, or stdin):
+#                every agent user, usable at once. Never from a dashboard (--for is refused).
+#   confirm-profile  a root admin's, on the machine, never through the helper: for a profile an earlier version staged
+#                (added from a dashboard), one real call as each user it was added for, showing the account email,
+#                org and plan Claude reports, then the profile's name typed back. Only then may anything use it.
 #   use          one minimal real call as each agent user (of the instance named, or every instance) on that profile;
 #                only when every one is answered does profiles.json name it active for them. Otherwise nothing
 #                changes: the previous profile stays active. `use default` goes back to the login each user had. A
@@ -79,39 +76,43 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--token-from <instance>] [--json] | login <profile> --for <instance> | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json] | failover <profile+profile+...|off> back|stay [<instance>] [--for <instance>]"
+usage="usage: claude-account.sh switch [--timeout <minutes>] [--json] [<instance>...] | status [--json] [<instance>...] | profile-add <profile> [--json] | confirm-profile <profile> | use <profile> [<instance>] [--for <instance>] [--json] | remove <profile> [--for <instance>] [--json] | failover <profile+profile+...|off> back|stay [<instance>] [--for <instance>]"
 # Root's tools wherever this is started from (sudo, a systemd unit): sbin included.
 PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 : "${MINUTE:=60}" "${SWITCH_POLL:=5}"
 
 cmd="${1:-}"
 [ "$#" -ge 1 ] && shift
-timeout=30 token_timeout=30 token_from="" for_inst="" json="" names=()
+timeout=30 for_inst="" json="" names=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --timeout) timeout="${2:-}"; shift 2 ;;
-    --token-timeout) token_timeout="${2:-}"; shift 2 ;;
-    --token-from) token_from="${2:-}"; shift 2 ;;
     --for) for_inst="${2:-}"; shift 2 ;;
     --json) json=1; shift ;;
+    # --token-from (a credential a dashboard stored) is no option: refused here as any unknown one is (issue #711).
     -*) echo "$usage" >&2; exit 2 ;;
     *) names+=("$1"); shift ;;
   esac
 done
-case "$cmd" in switch | status | profile-add | login | use | remove | confirm-profile | failover) ;; *) echo "$usage" >&2; exit 2 ;; esac
+# login (a sign-in relayed through a dashboard) is no command any more (issue #711): refused as any unknown one is.
+case "$cmd" in switch | status | profile-add | use | remove | confirm-profile | failover) ;; *) echo "$usage" >&2; exit 2 ;; esac
 [ -z "$for_inst" ] || instance_name_ok "$for_inst" || { echo "--for: an instance name" >&2; exit 2; }
+# A credential is a root admin's to give, at a root shell: never asked for from a dashboard (--for is the helper's).
+if [ -n "$for_inst" ] && [[ "$cmd" == switch || "$cmd" == profile-add ]]; then
+  echo "$cmd is a root admin's, at a root shell on this machine: a Claude credential is never taken from a dashboard" >&2
+  exit 2
+fi
 # A profile's name: lowercase letters, digits and dashes (default: the login each agent user had, never added or removed).
 profile="" asker=""
-if [[ "$cmd" == profile-add || "$cmd" == login || "$cmd" == use || "$cmd" == remove || "$cmd" == confirm-profile ]]; then
+if [[ "$cmd" == profile-add || "$cmd" == use || "$cmd" == remove || "$cmd" == confirm-profile ]]; then
   profile="${names[0]:-}"
   names=(${names[@]+"${names[@]:1}"})
   [[ "$profile" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "a profile's name: lowercase letters, digits and dashes, starting with a letter, at most 21" >&2; exit 2; }
   if [ "$cmd" != use ] && [ "$profile" = default ]; then echo "default is the login each agent user already has: it can't be added, confirmed or removed" >&2; exit 2; fi
   if [ "$cmd" = use ]; then [ "${#names[@]}" -le 1 ] || { echo "$usage" >&2; exit 2; }; else [ "${#names[@]}" -eq 0 ] || { echo "$usage" >&2; exit 2; }; fi
-  # Asked from an instance's dashboard (the machine helper passes --for or --token-from, from sudo's own SUDO_USER):
-  # that instance's own agent user only. Every instance, or another one, is a root admin's, here, with neither.
-  if [ -n "$for_inst" ] && [ -n "$token_from" ] && [ "$for_inst" != "$token_from" ]; then echo "--for and --token-from name two instances" >&2; exit 2; fi
-  asker="${for_inst:-$token_from}"
+  # Asked from an instance's dashboard (the machine helper passes --for, from sudo's own SUDO_USER): use or remove,
+  # for that instance's own agent user only. Every instance, or another one, is a root admin's, here, without it.
+  asker="$for_inst"
   if [ -n "$asker" ]; then
     [ "$cmd" != confirm-profile ] || { echo "confirm-profile is a root admin's, on this machine: never asked for from a dashboard" >&2; exit 2; }
     [ "${#names[@]}" -eq 0 ] || [ "${names[0]}" = "$asker" ] || { echo "asked from $asker's dashboard: only $asker's own agent user, never ${names[0]}" >&2; exit 2; }
@@ -120,6 +121,27 @@ if [[ "$cmd" == profile-add || "$cmd" == login || "$cmd" == use || "$cmd" == rem
   # A coordinator user never confirms, even through sudo of its own.
   if [ "$cmd" = confirm-profile ] && [[ "${SUDO_USER:-}" =~ ^wl- ]]; then echo "confirm-profile is a root admin's: not $SUDO_USER's" >&2; exit 2; fi
 fi
+
+# Issue #711: what an earlier version had a dashboard store for this script to read once (a switch's token, a new
+# profile's token, a relayed sign-in's code, add-project's token) is removed, unread, from every instance's secrets
+# dir on every run: a step that stopped before reading one left it there. As that instance's coordinator user (the dir
+# is its own: root never follows a path it could have changed), and the sign-in link root kept for it.
+drop_pasted_credentials() {
+  local n d f
+  { helper_instances; hub_instances; } 2>/dev/null | sort -u | while read -r n; do
+    instance_name_ok "$n" && user_exists "wl-$n" || continue
+    d="$(home_of "wl-$n")/.config/$n-secrets"
+    for f in "$CLAUDE_ACCOUNT_CREDENTIAL" "$CLAUDE_PROFILE_CREDENTIAL" "$CLAUDE_LOGIN_CREDENTIAL" claude-token; do
+      if [ -e "$d/$f" ] || [ -L "$d/$f" ]; then
+        if (cd / && sudo -H -u "wl-$n" rm -f -- "$d/$f"); then echo "removed $d/$f, unread: a dashboard no longer takes a Claude credential" >&2; fi
+      fi
+    done
+  done
+  rm -f -- "$CLAUDE_ACCOUNT_DIR/login-url"
+  return 0
+}
+drop_pasted_credentials
+
 if [ "$cmd" = failover ]; then
   order="${names[0]:-}" back="${names[1]:-}" inst="${names[2]:-}"
   [ "${#names[@]}" -le 3 ] && [[ "$back" == back || "$back" == stay ]] || { echo "$usage" >&2; exit 2; }
@@ -164,8 +186,6 @@ console.log(list.length ? `failover ${inst ? `for ${inst}` : "machine-wide"}: ${
   exit 0
 fi
 [[ "$timeout" =~ ^[0-9]{1,3}$ ]] || { echo "--timeout: minutes, 0 to 999" >&2; exit 2; }
-[[ "$token_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || { echo "--token-timeout: minutes, 1 to 999" >&2; exit 2; }
-[ -z "$token_from" ] || instance_name_ok "$token_from" || { echo "--token-from: an instance name" >&2; exit 2; }
 for n in ${names[@]+"${names[@]}"}; do instance_name_ok "$n" || { echo "instance name $n: lowercase letters, digits and dashes" >&2; exit 2; }; done
 
 # --- the instances and their agent users
@@ -578,105 +598,11 @@ process.stdout.write(JSON.stringify({ instance, user, account: s(a.email), org: 
   pemit "$cmd" started "" "" "profile $profile, ${#rows[@]} agent user(s)${asker:+, asked from the dashboard of $asker (its own agent user only)}"
   [ "${#rows[@]}" -gt 0 ] || { pemit "$cmd" failed "" "" "no agent users found (no instances on this machine, or none of those named)"; exit 1; }
 
-  if [ "$cmd" = login ]; then
-    # A sign-in relayed from a dashboard (the owner's approved exception, docs/auth.md): `claude auth login` as the
-    # asking instance's agent user, on this profile's dir. Claude's sign-in link (the one that ends in a code to paste)
-    # goes to a file only that instance's coordinator user reads, for its dashboard to show a machine owner; the code
-    # the owner pastes there comes back in that user's 0400 file, is read once, deleted, and written to claude's stdin.
-    # The link and the code are never in a log line, an argument, an event or a progress line. The login is STAGED,
-    # like any account added from a dashboard: nothing may use it until a root admin confirms it on the machine.
-    [ -n "$asker" ] || { pemit login failed "" "" "login is a dashboard's (--for <its instance>); at a root shell add an account with profile-add and a setup token"; exit 1; }
-    if pedit has; then pemit login failed "" "" "there is a profile $profile already: remove it first, or sign in under another name"; exit 1; fi
-    read -r n user cfg <<< "${rows[0]}"
-    d="$(pdir "$user" "$cfg")"
-    if (cd / && sudo -H -u "$user" test -e "$d"); then pemit login failed "$n" "$user" "$d is there already: nothing done"; exit 1; fi
-    codefile="$(home_of "wl-$asker")/.config/$asker-secrets/$CLAUDE_LOGIN_CREDENTIAL"
-    urlfile="$CLAUDE_ACCOUNT_DIR/login-url"
-    rm -f "$urlfile" "$codefile"
-    work="$(mktemp -d)"
-    chmod 0700 "$work"
-    mkfifo -m 0600 "$work/in"
-    : > "$work/out"
-    chmod 0600 "$work/out"
-    (cd / && sudo -H -u "$user" mkdir -p -m 0700 "$(dirname "$d")" "$d" && sudo -H -u "$user" chmod 0700 "$(dirname "$d")" "$d")
-    # claude's own output goes to a root-only file, read here for the link and never shown; BROWSER opens nothing.
-    (cd / && exec sudo -H -u "$user" env "CLAUDE_CONFIG_DIR=$d" BROWSER=/bin/true claude auth login < "$work/in" > "$work/out" 2>&1) &
-    child=$!
-    exec 7> "$work/in"
-    finish() { # <state> <detail>: claude stopped, the link and any code gone, a failed sign-in's dir removed
-      exec 7>&- 2>/dev/null || true
-      kill "$child" 2>/dev/null || true
-      wait "$child" 2>/dev/null || true
-      rm -rf "$work" "$urlfile" "$codefile"
-      if [ "$1" = failed ]; then (cd / && sudo -H -u "$user" rm -rf -- "$d") || true; fi
-      pemit login "$1" "$n" "$user" "$2"
-    }
-    # The link: Anthropic's sign-in page whose redirect is its own code page (the code to paste), and nothing else.
-    url=""
-    until_t=$((SECONDS + 60))
-    while [ "$SECONDS" -lt "$until_t" ] && [ -z "$url" ]; do
-      url="$("$(command -v node)" -e '
-const t = require("node:fs").readFileSync(process.argv[1], "utf8");
-for (const m of t.matchAll(/https:\/\/[^\s"<>]+/g)) {
-  let u;
-  try { u = new URL(m[0]); } catch { continue; }
-  if (!["claude.ai", "claude.com", "platform.claude.com", "console.anthropic.com"].includes(u.hostname) || u.port || u.username || u.password) continue;
-  if (!/\/oauth\/authorize$/.test(u.pathname) || u.searchParams.get("redirect_uri") !== "https://platform.claude.com/oauth/code/callback") continue;
-  process.stdout.write(u.toString());
-  break;
-}
-' "$work/out" 2>/dev/null || true)"
-      [ -n "$url" ] || { kill -0 "$child" 2>/dev/null || break; sleep "$SWITCH_POLL"; }
-    done
-    if [ -z "$url" ]; then finish failed "claude auth login gave no sign-in link to relay: nothing signed in"; exit 1; fi
-    printf '%s\n' "$url" | put_file "wl-$asker" root 0400 "$urlfile"
-    url=""
-    pemit link ask "$n" "$user" "the sign-in link is in $asker's dashboard (a machine owner's, there only); paste the code Anthropic shows there, within $token_timeout min"
-    # The code: read once, deleted, written to claude's stdin. Never anywhere else.
-    code=""
-    until_t=$((SECONDS + token_timeout * MINUTE))
-    while [ "$SECONDS" -lt "$until_t" ] && ! [ -e "$codefile" ]; do kill -0 "$child" 2>/dev/null || break; sleep "$SWITCH_POLL"; done
-    if [ -e "$codefile" ]; then
-      if file_owned_by "$codefile" "wl-$asker"; then IFS= read -r code < "$codefile" || true; fi
-      rm -f "$codefile"
-    fi
-    rm -f "$urlfile"
-    code="$(printf '%s' "$code" | tr -d '[:space:]')"
-    if ! [[ "${#code}" -le 512 && "$code" =~ ^[A-Za-z0-9_-]{8,}(#[A-Za-z0-9_-]{8,})?$ ]]; then
-      code=""
-      finish failed "no code came (or not one of Anthropic's): nothing signed in"
-      exit 1
-    fi
-    printf '%s\n' "$code" >&7
-    code=""
-    exec 7>&-
-    pemit code done "$n" "$user" "received once and passed to claude auth login; kept nowhere"
-    until_t=$((SECONDS + 120))
-    while [ "$SECONDS" -lt "$until_t" ] && kill -0 "$child" 2>/dev/null; do sleep "$SWITCH_POLL"; done
-    rc=0
-    if kill -0 "$child" 2>/dev/null; then rc=124; else wait "$child" || rc=$?; fi
-    if [ "$rc" != 0 ]; then finish failed "claude auth login didn't finish (exit $rc): nothing signed in; the code is single-use, so start again"; exit 1; fi
-    rec="$(pcheck "$n" "$user" "$d")"
-    if ! printf '%s' "$rec" | grep -q '"api_ok":true'; then finish failed "signed in, but the API refused it: $(field "$rec" api_error); nothing kept"; exit 1; fi
-    pemit check done "$n" "$user" "the API answered a minimal call on this profile"
-    pedit add login "[$rec]" 1 "$asker"
-    rm -rf "$work"
-    pemit login done "$n" "$user" "profile $profile signed in and staged for $asker: nothing may use it until an admin confirms it on this machine with sudo bash $here/claude-account.sh confirm-profile $profile"
-    mlog "staged $profile for $asker (signed in from the dashboard)"
-    exit 0
-  fi
-
   if [ "$cmd" = profile-add ]; then
     if pedit has; then pemit profile-add failed "" "" "there is a profile $profile already: remove it first, or add this one under another name"; exit 1; fi
-    # The token: on stdin, or from the asking instance's dashboard, which stored it before it asked (read once, deleted).
+    # The token: a root admin's, at the hidden prompt or on stdin. Never from a dashboard (issue #711).
     token=""
-    if [ -n "$token_from" ]; then
-      f="$(home_of "wl-$token_from")/.config/$token_from-secrets/$CLAUDE_PROFILE_CREDENTIAL"
-      if [ -e "$f" ]; then
-        if file_owned_by "$f" "wl-$token_from"; then IFS= read -r token < "$f" || true; fi
-        rm -f "$f"
-      fi
-    elif [ -t 0 ]; then
+    if [ -t 0 ]; then
       read -rsp "Paste the token from claude setup-token for profile $profile, then Enter (it is not shown): " token || true
       echo >&2
     else
@@ -730,16 +656,9 @@ for (const m of t.matchAll(/https:\/\/[^\s"<>]+/g)) {
       pemit profile-add failed "" "" "refused: $bad. Nothing was added; every agent user is on the login it had"
       exit 1
     fi
-    if [ -n "$asker" ]; then
-      # From a dashboard (through a coordinator): staged, usable by nothing until a root admin confirms it here.
-      pedit add setup-token "[$recs]" 1 "$asker"
-      pemit profile-add done "" "" "profile $profile staged for $asker: nothing may use it until an admin confirms it on this machine with sudo bash $here/claude-account.sh confirm-profile $profile"
-      mlog "staged $profile for $asker"
-    else
-      pedit add setup-token "[$recs]" 0 ""
-      pemit profile-add done "" "" "profile $profile added for ${#rows[@]} agent user(s); no instance uses it until it is chosen"
-      mlog "added $profile"
-    fi
+    pedit add setup-token "[$recs]" 0 ""
+    pemit profile-add done "" "" "profile $profile added for ${#rows[@]} agent user(s); no instance uses it until it is chosen"
+    mlog "added $profile"
     exit 0
   fi
 
@@ -820,7 +739,7 @@ touch "$paused_file"
 chmod 0644 "$paused_file"
 all=()
 while read -r n; do all+=("$n"); done < <(instances)
-emit switch started "" "${#all[@]} instance(s): ${all[*]:-none}; the token from ${token_from:+the dashboard of }${token_from:-this terminal}"
+emit switch started "" "${#all[@]} instance(s): ${all[*]:-none}; the token from this terminal"
 [ "${#all[@]}" -gt 0 ] || { emit switch failed "" "no instances on this machine (or none of those named): nothing to switch"; exit 1; }
 
 # 1. Pause: every running instance, recorded before anything else so a rerun after a crash knows them as its own.
@@ -844,25 +763,14 @@ for n in "${all[@]}"; do
   fi
 done
 
-# 2. The token: pasted here (not shown), on stdin, or from the asking instance's dashboard.
+# 2. The token: pasted here (not shown), or on stdin. Never from a dashboard (issue #711).
 token=""
-if [ -n "$token_from" ]; then
-  f="$(home_of "wl-$token_from")/.config/$token_from-secrets/$CLAUDE_ACCOUNT_CREDENTIAL"
-  emit token ask "" "paste the token claude setup-token prints in $token_from's dashboard (Machine, Claude account); waiting up to $token_timeout min"
-  until_t=$((SECONDS + token_timeout * MINUTE))
-  while [ "$SECONDS" -lt "$until_t" ] && ! [ -e "$f" ]; do sleep "$SWITCH_POLL"; done
-  if [ -e "$f" ]; then
-    if file_owned_by "$f" "wl-$token_from"; then IFS= read -r token < "$f" || true; fi
-    rm -f "$f"
-  fi
+emit token ask "" "paste the token claude setup-token prints (on a machine signed in to the new account)"
+if [ -t 0 ]; then
+  read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
+  echo >&2
 else
-  emit token ask "" "paste the token claude setup-token prints (on a machine signed in to the new account)"
-  if [ -t 0 ]; then
-    read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
-    echo >&2
-  else
-    IFS= read -r token || true
-  fi
+  IFS= read -r token || true
 fi
 token="$(printf '%s' "$token" | tr -d '[:space:]')"
 have_token=""

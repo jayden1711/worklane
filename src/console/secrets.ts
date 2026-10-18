@@ -9,10 +9,18 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { EventLog } from '../events/log.js';
+import { CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { installOwnerOnlySecret } from '../os/index.js';
 import { AskError, recordAnswer, type Ask, type Role } from './asks.js';
 
 export const MAX_SECRET = 16_384;
+
+/**
+ * The files earlier versions had the dashboard store a Claude credential in (issue #711): add-project's token, a
+ * switch's token, a new profile's token, a relayed sign-in's code. No paste box writes one any more; claude-account.sh
+ * removes any left behind.
+ */
+export const CLAUDE_CREDENTIAL_NAMES: ReadonlySet<string> = new Set(['claude-token', 'claude-account-token', 'claude-profile-token', 'claude-login-code']);
 
 /** Where an instance's pasted credentials go: in the coordinator user's home, beside the intake secrets. */
 export const secretsDir = (instance: string, home = homedir()) => join(home, '.config', `${instance}-secrets`);
@@ -38,6 +46,8 @@ export async function readSecretBody(req: IncomingMessage): Promise<string> {
     for (const c of chunks) c.fill(0);
   }
   if (typeof value !== 'string') throw new AskError('the body must be JSON: {"value": "<the secret>"}');
+  // INVARIANT (issue #711): no paste box takes a Claude credential, whichever ask it answers.
+  if (holdsClaudeCredential(value)) throw new AskError(CREDENTIAL_REFUSED);
   return value;
 }
 
@@ -62,8 +72,11 @@ export function storeSecret(log: EventLog, id: string, a: { by: string; role: Ro
   if (!value) throw new AskError('the secret is empty');
   if (value.length > MAX_SECRET) throw new AskError(`the secret is longer than ${MAX_SECRET} bytes`);
   if (/[\0]/.test(value)) throw new AskError('the secret has a NUL byte');
+  if (holdsClaudeCredential(value)) throw new AskError(CREDENTIAL_REFUSED);
   return recordAnswer(log, id, { by: a.by, role: a.role, answer: 'stored' }, (ask) => {
     if (ask.kind !== 'paste_secret') throw new AskError(`ask ${id} isn't a paste_secret ask`);
+    // An ask an earlier version opened for a Claude credential (add-project's claude-token) is never answered here.
+    if (CLAUDE_CREDENTIAL_NAMES.has(ask.credential)) throw new AskError(CREDENTIAL_REFUSED);
     const rule = a.rules && Object.hasOwn(a.rules, ask.credential) ? a.rules[ask.credential] : undefined;
     // INVARIANT: a refusal is the rule's fixed text, never the value.
     if (rule?.shape && !rule.shape.re.test(value)) throw new AskError(rule.shape.what);

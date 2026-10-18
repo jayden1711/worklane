@@ -527,9 +527,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: "Run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints: in Add project's paste box, or at credentials.sh <name> claude's hidden prompt (as root).",
-    fix: { kind: 'signin', label: 'Paste the token' },
-    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step)',
+    // Issue #711: never through the dashboard, which never takes a Claude credential; root installs it on the machine.
+    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login). The dashboard never takes the token.",
+    fix: { kind: 'signin', label: 'Show how' },
+    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)',
     detect: (k) => {
       const i = k.inst();
       // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;

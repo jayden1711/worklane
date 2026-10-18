@@ -10,9 +10,10 @@
 #     exactly `set-slots <1..16>`, `set-updates on|off` and `set-test-slots <1..8>`, writes atomically, and logs each
 #     change to /var/lib/worklane/machine-changes.jsonl and the journal. And `add-project <name> <owner/repo>`,
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
-#     And `claude-account status|switch`, the Claude account switch (claude-account.sh): status runs it; switch starts
-#     it as its own unit, taking the token from the asking instance's dashboard. And the account profiles (issue #464):
-#     `claude-account profile-add|remove|use <profile>`, each its own unit, for the asking coordinator's instance alone.
+#     And `claude-account status` (claude-account.sh status), and the account profiles (issue #464): `claude-account
+#     remove|use <profile>`, each its own unit, for the asking coordinator's instance alone. Nothing through the helper
+#     takes a Claude credential (issue #711): the sudoers rule below still lists `claude-account switch`, `profile-add`
+#     and `login` (lib.sh's machine_sudoers), and the helper refuses each of them, as claude-account.sh does.
 #     And the engine updater's setup: `install-updater` (the installed engine's updates.sh, no arguments),
 #     `set-update-channel release` (updates.json's channel, nothing else; following main is updates.sh --channel main,
 #     at a root shell) and `stage-update-signer <principal> ssh-ed25519 <public key>`, which records a release signer
