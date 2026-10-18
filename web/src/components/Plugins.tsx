@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { getPlugins, pluginAction, type PluginEntry, type PluginPreview, type PluginReview, type PluginsView, type PluginUpdate, type State } from '../api';
 import { ago, Badge, Button, Card, cx } from './ui';
 
-const field = 'h-8 rounded-control bg-surface px-2 text-[13px] text-ink shadow-btn outline-none focus:ring-2 focus:ring-blue/40';
+const field = 'h-8 rounded-control bg-surface px-2 text-[13px] text-ink shadow-btn outline-none focus:ring-2 focus:ring-ring dark:focus:ring-ring/40';
 
 /** A copyable command, as the updater-signer card shows one. */
 function CommandLine({ command }: { command: string }) {

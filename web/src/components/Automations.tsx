@@ -6,7 +6,7 @@ import { changeAutomation, useView, type AutomationAction, type AutomationDef, t
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx, usd } from './ui';
 
-const field = 'h-8 w-full rounded-control bg-field px-2.5 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+const field = 'h-8 w-full rounded-control bg-field px-2.5 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
 const fieldAuto = field.replace('w-full', 'w-auto max-w-full');
 const label = 'block space-y-1 text-[12px] text-ink-3';
 
