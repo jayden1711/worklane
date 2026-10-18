@@ -1062,6 +1062,28 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
 });
 
+test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
+  const sha = 'd'.repeat(40);
+  const base = { mode: 'main_watch' as const, detail: '', lastChecked: null, stopped: 'main watch: x', canClear: false };
+  const alert = { at: new Date().toISOString(), sha, url: `https://github.com/o/r/commit/${sha}`, reason: '#42 was merged into main with required checks not green on eeeeeeee at merge time: ci missing', number: 42, revert: null };
+  const trip = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: 'https://github.com/o/r/pull/9', no_revert: "the per-trip cap is reached (main_watch.revert_prs_per_trip: 1): this trip's revert PR https://github.com/o/r/pull/9; the trip's commits so far: aaaaaaaa, dddddddd" } });
+  assert.match(trip, /No revert PR of its own; its trip&#x27;s revert PR waits for a human: <a[^>]*data-testid="main-watch-alert-revert"[^>]*>https:\/\/github.com\/o\/r\/pull\/9</);
+  assert.match(trip, /data-testid="main-watch-alert-no-revert"[^>]*> Why: the per-trip cap is reached[\s\S]*aaaaaaaa, dddddddd/);
+  assert.doesNotMatch(trip, /No revert PR was opened/, 'the trip has one');
+  const day = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: null, no_revert: 'the per-day cap is reached (main_watch.revert_prs_per_day: 3): the main watch opened 3 revert PRs in the last 24 hours' } });
+  assert.match(day, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: the per-day cap is reached/);
+  assert.doesNotMatch(day, /main-watch-alert-revert/);
+  assert.match(r.renderMainWatchAlert({ ...base, alert }), /No revert PR was opened\.</, 'an older alert, with neither: as before');
+});
+
+test('a dead required check on the Machine page: named, since when, and why merges keep tripping; nothing when there is none', () => {
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: null, alert: null, stopped: null, canClear: false };
+  assert.doesNotMatch(r.renderProtection({ ...watch, deadChecks: [] }, BRAND.name), /main-watch-dead-check/);
+  const html = r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since: new Date(Date.now() - 8 * 86_400_000).toISOString() }] }, BRAND.name);
+  assert.match(html, /data-testid="main-watch-dead-check"[\s\S]*Required check [\s\S]*ci[\s\S]*has had no run on any commit checked since[\s\S]*Merges keep tripping the watch until it posts/);
+  assert.doesNotMatch(r.renderProtection({ mode: 'github', deadChecks: [{ check: 'ci', since: new Date().toISOString() }] }, BRAND.name), /main-watch-dead-check/, 'only while the watch guards the branch');
+});
+
 test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
   const a = 'a'.repeat(40);
   const b = 'b'.repeat(40);
