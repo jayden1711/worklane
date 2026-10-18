@@ -289,6 +289,12 @@ export interface DashboardOptions {
   discordListing?: DiscordListingStandIn;
   /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
   avatars?: AvatarOptions;
+  /**
+   * WHY (#582): the clock this page's caches age by, in ms; monotonic (performance.now) when unset, so a wall-clock step
+   * (an NTP correction) can neither keep a cache past its window nor cut one short. Elapsed time only: anything shown to
+   * a person keeps wall time. Tests advance it instead of sleeping.
+   */
+  now?: () => number;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -1036,6 +1042,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
   const eventCache = new EventCache(opts.eventsDb);
   let lastId = eventCache.lastId();
+  // INVARIANT (#582): the in-memory caches below (prBodies, the config PRs' refresh, the open-issues list, Tailscale's
+  // status, the bot's and the Slack and Linear views, Re-check's floor) age by this clock, never by Date.now (which an
+  // NTP step moves). Two still age by wall time: avatars, whose `at` is saved to disk and read after a restart (wall
+  // time is right there), and setupCache, whose checks run in a worker thread (performance.now has another origin
+  // there) and whose stamps are shown as "checked at". The sign-in role cache (cachedRoles, built in dashboardSite)
+  // is wall time too.
+  const clock = opts.now ?? (() => performance.now());
   // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
   const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
 
@@ -1054,7 +1067,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
   /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
   const setupCache: DetectCache = new Map();
-  let lastFresh = 0;
+  // Never yet: the clock may start near 0 (performance.now counts from this process's start).
+  let lastFresh = -Infinity;
   const actionDeps = (): ActionDeps => ({ ...systemActionDeps(), ...opts.setupActions });
   /**
    * The config the first-run page acts on: a checkout's as its working tree has it now (a merged config PR comes in by
@@ -1089,13 +1103,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const b = r.status === 0 ? r.stdout.trim() : '';
     return /^[A-Za-z0-9._/-]{1,200}$/.test(b) ? b : liveCfg().project.project.default_branch;
   };
-  let prsAt = 0;
+  let prsAt = -Infinity;
   const configPrsNow = (who: Who, fresh: boolean): ConfigPrRecord[] => {
     if (opts.instance) return [];
     // INVARIANT (#468, the owner): only the PRs this page opened itself (its own record), never found by branch name.
     const prs = readConfigPrs(opts.stateDir);
-    if (!prs.some((p) => !(p.state === 'merged' && p.synced) && p.state !== 'closed') || (!fresh && Date.now() - prsAt < 15_000)) return prs;
-    prsAt = Date.now();
+    if (!prs.some((p) => !(p.state === 'merged' && p.synced) && p.state !== 'closed') || (!fresh && clock() - prsAt < 15_000)) return prs;
+    prsAt = clock();
     return prs.map((p) => (p.state === 'closed' ? p : settle(who, p, refreshConfigPr(p, { repo: repoNow(), gh: ghNow(), git: checkoutGit() }))));
   };
   /** A config PR's newer state kept; once merged and in this checkout, the checks read the new config, and it's audited. */
@@ -1144,18 +1158,20 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
    * WHY (#468): the Issues page's "not picked up" list: ONE read of the open issues (Backlog.openIssues), kept two
    * minutes for everyone (GitHub's rate limit is shared with the coordinator), with the reasons from the events.
    */
-  let ignoredCache: { at: number; issues: IgnoredIssue[]; error: string | null } | null = null;
-  const ignoredNow = async (): Promise<{ at: number; issues: IgnoredIssue[]; error: string | null }> => {
-    if (ignoredCache && Date.now() - ignoredCache.at < 120_000) return ignoredCache;
+  type IgnoredListing = { at: number; issues: IgnoredIssue[]; error: string | null };
+  // `v.at` is the wall time it was read (the page's, as before); `t` the cache clock's, for its age (#582).
+  let ignoredCache: { t: number; v: IgnoredListing } | null = null;
+  const ignoredNow = async (): Promise<IgnoredListing> => {
+    if (ignoredCache && clock() - ignoredCache.t < 120_000) return ignoredCache.v;
+    const keep = (r: Omit<IgnoredListing, 'at'>): IgnoredListing => (ignoredCache = { t: clock(), v: { at: Date.now(), ...r } }).v;
     const b = opts.backlog?.();
-    if (!b?.openIssues) return (ignoredCache = { at: Date.now(), issues: [], error: 'this dashboard has no backlog to list issues from' });
+    if (!b?.openIssues) return keep({ issues: [], error: 'this dashboard has no backlog to list issues from' });
     try {
       const open = await b.openIssues();
-      ignoredCache = { at: Date.now(), issues: ignoredIssues(open, eventCache.all(), { repo }), error: null };
+      return keep({ issues: ignoredIssues(open, eventCache.all(), { repo }), error: null });
     } catch (e) {
-      ignoredCache = { at: Date.now(), issues: ignoredCache?.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` };
+      return keep({ issues: ignoredCache?.v.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` });
     }
-    return ignoredCache;
   };
   /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
   const testFiles = (): string[] => {
@@ -1187,9 +1203,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   let tailscaleCache: { at: number; stamp: string; status: TailscaleStatus | null } | null = null;
   const tailscaleNow = async (fresh = false) => {
     const stamp = stepsStamp(opts.tailscaleDir ?? TAILSCALE_DIR);
-    if (!fresh && tailscaleCache && tailscaleCache.stamp === stamp && Date.now() - tailscaleCache.at < 3_000) return tailscaleCache.status;
+    if (!fresh && tailscaleCache && tailscaleCache.stamp === stamp && clock() - tailscaleCache.at < 3_000) return tailscaleCache.status;
     const status = await (opts.tailscaleStatus ?? tailscaleStatus)();
-    tailscaleCache = { at: Date.now(), stamp, status };
+    tailscaleCache = { at: clock(), stamp, status };
     return status;
   };
   // The first-run page's Discord step (src/intake/discord-setup.ts), a server instance's only. The bot's own view
@@ -1201,9 +1217,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   let bot: { at: number; view: BotView } | null = null;
   let botLoading: Promise<BotView> | null = null;
   const botNow = (fresh: boolean): Promise<BotView> => {
-    if (bot && Date.now() - bot.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(bot.view);
+    if (bot && clock() - bot.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(bot.view);
     botLoading ??= botView(opts.instance!, discordCli)
-      .then((view) => ((bot = { at: Date.now(), view }), view))
+      .then((view) => ((bot = { at: clock(), view }), view))
       .finally(() => (botLoading = null));
     return botLoading;
   };
@@ -1212,11 +1228,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const viewLoading = new Map<SourceKind, Promise<SourceView & { at: string }>>();
   const viewNow = (kind: SourceKind, fresh: boolean): Promise<SourceView & { at: string }> => {
     const v = views.get(kind);
-    if (v && Date.now() - v.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(v.view);
+    if (v && clock() - v.at < (fresh ? 5_000 : 60_000)) return Promise.resolve(v.view);
     let p = viewLoading.get(kind);
     if (!p) {
       p = sourceView(kind, opts.instance!, discordCli)
-        .then((view) => (views.set(kind, { at: Date.now(), view }), view))
+        .then((view) => (views.set(kind, { at: clock(), view }), view))
         .finally(() => viewLoading.delete(kind));
       viewLoading.set(kind, p);
     }
@@ -1937,8 +1953,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!pr) return json(res, 200, { pr: null, failWithout: null, never: null, why: 'no PR' });
           if (!opts.backlog) return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: 'this dashboard has no backlog to read the PR from' });
           const kept = prBodies.get(pr.number);
-          const body = kept && Date.now() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
-          if (body !== kept?.body) prBodies.set(pr.number, { at: Date.now(), body });
+          const body = kept && clock() - kept.at < 60_000 ? kept.body : opts.backlog().pullRequest(pr.number).then((p) => p.body ?? null);
+          if (body !== kept?.body) prBodies.set(pr.number, { at: clock(), body });
           try {
             return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
           } catch (e) {
@@ -2005,8 +2021,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // at most every 3 s.
         if (url.pathname === '/api/first-run' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
-          const fresh = url.searchParams.get('fresh') === '1' && Date.now() - lastFresh > 3_000;
-          if (fresh) lastFresh = Date.now();
+          const fresh = url.searchParams.get('fresh') === '1' && clock() - lastFresh > 3_000;
+          if (fresh) lastFresh = clock();
           const live = { ...(opts.setupProbe ? { probe: opts.setupProbe } : {}), stateDir: opts.stateDir, policyFile: opts.policyFile ?? null, cache: setupCache, fresh, localMs: 10_000, netMs: 120_000, context: { ...opts.setupContext, skipped: readSkips() } };
           // A server instance's record is the machine's (src/init.ts serverInitFile), readable by its coordinator group.
           const view = await firstRunLiveView(opts.instance ? serverInitFile(opts.instance) : join(opts.stateDir, INIT_FILE), { root: opts.root, repo: opts.setupMode ? (gitRemoteRepo(opts.root) ?? '') : opts.cfg.project.project.repo, instance: opts.instance ?? null, live });
