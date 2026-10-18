@@ -403,13 +403,35 @@ export function revertCapsAt(git: WatchGit, rev: string): { perTrip: number; per
   return { perTrip: mw.revert_prs_per_trip, perDay: mw.revert_prs_per_day };
 }
 
+/** A workflow file larger than this (characters) isn't parsed for its jobs: nothing is said of it. */
+export const WORKFLOW_FILE_MAX = 256 * 1024;
+
+/**
+ * Whether `check` is `parts` with at least one character in place of each gap between them: GitHub's expansion of a
+ * job name whose `${{ … }}` were cut out. Literal parts found leftmost, in order (indexOf): linear in the check's
+ * length, never a backtracking pattern.
+ */
+function globMatch(parts: string[], check: string): boolean {
+  const first = parts[0] ?? '';
+  const last = parts.at(-1) ?? '';
+  if (!check.startsWith(first)) return false;
+  let at = first.length;
+  for (const p of parts.slice(1, -1)) {
+    const i = check.indexOf(p, at + 1);
+    if (i < 0) return false;
+    at = i + p.length;
+  }
+  return check.length - last.length >= at + 1 && check.endsWith(last);
+}
+
 /**
  * The check names a workflow file's jobs post, as matchers: a job's `name` (or its id when it has none), or that name
  * followed by GitHub's matrix suffix " (…)" or a called workflow's " / …"; a name with `${{ … }}` in it matches any
- * text in each of their places. None when the file can't be read or parsed.
+ * text in each of their places, and one with no literal text besides them matches nothing (it could be any check).
+ * None when the file can't be read, is over WORKFLOW_FILE_MAX, or doesn't parse.
  */
 function jobChecks(text: string | null): ((check: string) => boolean)[] {
-  if (text === null) return [];
+  if (text === null || text.length > WORKFLOW_FILE_MAX) return [];
   try {
     const doc = parseDocument(text);
     const raw: unknown = doc.errors.length ? null : doc.toJS();
@@ -417,32 +439,47 @@ function jobChecks(text: string | null): ((check: string) => boolean)[] {
     if (!jobs || typeof jobs !== 'object') return [];
     return Object.entries(jobs as Record<string, unknown>).map(([id, job]) => {
       const n = job && typeof job === 'object' && typeof (job as Record<string, unknown>).name === 'string' ? ((job as Record<string, unknown>).name as string) : id;
-      if (!n.includes('${{')) return (c: string) => c === n || c.startsWith(`${n} (`) || c.startsWith(`${n} / `);
-      // A pattern from the file: kept short, so matching it stays cheap whatever was committed.
-      if (n.length > 200 || n.split('${{').length > 6) return () => false;
-      const re = new RegExp(`^${n.split(/\$\{\{.*?\}\}/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.+')}$`);
-      return (c: string) => re.test(c);
+      const parts = n.split(/\$\{\{.*?\}\}/);
+      if (parts.length === 1) return (c: string) => c === n || c.startsWith(`${n} (`) || c.startsWith(`${n} / `);
+      if (!parts.join('').trim()) return () => false;
+      return (c: string) => globMatch(parts, c);
     });
   } catch {
     return [];
   }
 }
 
+/** A workflow's name or path as the dashboard shows it: no control, C1 or bidi characters, at most 200 characters. */
+const clipText = (x: string) => x.replace(/[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]+/g, ' ').slice(0, 200);
+
 /**
- * The disabled workflow (state disabled_*) that would post `check`, from the Actions workflows' list: one named as
- * the check, whose file is named so, or whose file (read with `show`, as committed) has a job that posts it. Null:
- * none of them, which says nothing (an active one, or none found). Its fields are clipped for the dashboard.
+ * For one read of the Actions workflows' list: the disabled workflow (state disabled_*) that would post a check, when
+ * no active one would. A workflow posts a check when it is named as the check, its file is named so, or its file
+ * (read with `show`, as committed) has a job that posts it. Null says nothing: none found, or an active workflow posts
+ * the check too (it may only not have run). Each file is read and parsed at most once per read, and only once a
+ * disabled workflow is listed. The fields are clipped for the dashboard (clipText).
  */
-export function disabledWorkflowFor(check: string, list: WorkflowAt[], show: (path: string) => string | null): WorkflowAt | null {
-  for (const w of list) {
-    if (!/^disabled_[a-z_]{1,40}$/.test(w.state)) continue;
+export function disabledWorkflowsOf(list: WorkflowAt[], show: (path: string) => string | null): (check: string) => WorkflowAt | null {
+  const parsed = new Map<string, ((check: string) => boolean)[]>();
+  const posts = (w: WorkflowAt, check: string) => {
     const file = (w.path.split('/').pop() ?? '').replace(/\.ya?ml$/, '');
-    if (w.name === check || file === check || jobChecks(show(w.path)).some((m) => m(check))) {
-      const clip = (x: string) => x.replace(/[\u0000-\u001f\u007f]+/g, ' ').slice(0, 200);
-      return { name: clip(w.name), path: clip(w.path), state: w.state };
-    }
-  }
-  return null;
+    if (w.name === check || file === check) return true;
+    let jobs = parsed.get(w.path);
+    if (!jobs) parsed.set(w.path, (jobs = jobChecks(show(w.path))));
+    return jobs.some((m) => m(check));
+  };
+  const disabled = list.filter((w) => /^disabled_[a-z_]{1,40}$/.test(w.state));
+  const active = list.filter((w) => w.state === 'active');
+  return (check) => {
+    const w = disabled.find((x) => posts(x, check));
+    if (!w || active.some((x) => posts(x, check))) return null;
+    return { name: clipText(w.name), path: clipText(w.path), state: w.state };
+  };
+}
+
+/** disabledWorkflowsOf for one check. */
+export function disabledWorkflowFor(check: string, list: WorkflowAt[], show: (path: string) => string | null): WorkflowAt | null {
+  return disabledWorkflowsOf(list, show)(check);
 }
 
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
@@ -616,9 +653,11 @@ export class MainWatch {
       list = null;
     }
     const last = s.last;
+    // One matcher for every check due: each workflow file read and parsed once.
+    const of = Array.isArray(list) ? disabledWorkflowsOf(list, (path) => (last ? this.d.git.show(last, path) : null)) : null;
     for (const [name, d] of due) {
       d.workflowAt = this.now;
-      const w = Array.isArray(list) ? disabledWorkflowFor(name, list, (path) => (last ? this.d.git.show(last, path) : null)) : null;
+      const w = of ? of(name) : null;
       if (w) d.workflow = w;
       else delete d.workflow;
     }

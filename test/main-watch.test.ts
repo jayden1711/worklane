@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -567,11 +567,72 @@ test('disabledWorkflowFor: a disabled workflow named as the check, a file named 
   assert.equal(at('lint', [ciYml]), null, 'no job posts it');
   assert.equal(at('desktop', [{ ...ciYml, state: 'active' }]), null, 'active: nothing to say');
   assert.equal(at('lint', [wf('Broken', '.github/workflows/broken.yml')]), null, "a file that doesn't parse");
-  files['.github/workflows/long.yml'] = `jobs:\n  a:\n    name: ${'${{ x }}a'.repeat(30)}\n`;
-  assert.equal(at('a'.repeat(30), [wf('Long', '.github/workflows/long.yml')]), null, 'a long pattern from a file is not matched');
   const clipped = disabledWorkflowFor('CI', [wf('CI', `.github/workflows/a\n${'x'.repeat(300)}.yml`)], show);
   assert.equal(clipped?.path.length, 200);
   assert.doesNotMatch(clipped?.path ?? '\n', /\n/);
+});
+
+const disabled = (name: string, path: string): WorkflowAt => ({ name, path, state: 'disabled_manually' });
+
+test('regression: a disabled workflow whose job name is only expressions is blamed for no check', () => {
+  const files: Record<string, string> = {
+    '.github/workflows/nightly.yml': 'jobs:\n  targets:\n    name: ${{ matrix.target }}\n',
+    '.github/workflows/release.yml': 'jobs:\n  pair:\n    name: ${{ inputs.a }} ${{ inputs.b }}\n',
+  };
+  const show = (p: string) => files[p] ?? null;
+  for (const check of ['ci', 'lint', 'unit tests']) {
+    assert.equal(disabledWorkflowFor(check, [disabled('Nightly', '.github/workflows/nightly.yml'), disabled('Release', '.github/workflows/release.yml')], show), null, check);
+  }
+  // Nor does it hide the disabled workflow that does post it, further down the list.
+  files['.github/workflows/ci.yml'] = 'jobs:\n  ci:\n    runs-on: x\n';
+  assert.equal(disabledWorkflowFor('ci', [disabled('Nightly', '.github/workflows/nightly.yml'), disabled('CI', '.github/workflows/ci.yml')], show)?.name, 'CI');
+});
+
+test('regression: nothing is said when an active workflow would post the check too', () => {
+  const files: Record<string, string> = {
+    '.github/workflows/ci.yml': 'name: CI\non: pull_request\njobs:\n  build:\n    runs-on: x\n',
+    '.github/workflows/nightly-build.yml': 'name: Nightly build\non: schedule\njobs:\n  build:\n    runs-on: x\n',
+  };
+  const show = (p: string) => files[p] ?? null;
+  const nightly = disabled('Nightly build', '.github/workflows/nightly-build.yml');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }, nightly], show), null, 'ci.yml (active) posts build');
+  assert.equal(disabledWorkflowFor('build', [nightly, { name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }], show), null, 'whatever the order');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'disabled_inactivity' }, nightly], show)?.name, 'CI', 'both disabled: the first is named');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'Docs', path: '.github/workflows/docs.yml', state: 'active' }, nightly], show)?.name, 'Nightly build', 'an active one that posts something else');
+});
+
+test('regression: a workflow file over the size cap is not parsed', () => {
+  const big = `jobs:\n  big:\n    runs-on: x\n${'# padding\n'.repeat(30_000)}`;
+  assert.ok(big.length > 256 * 1024);
+  assert.equal(disabledWorkflowFor('big', [disabled('Huge', '.github/workflows/huge.yml')], () => big), null);
+  assert.equal(disabledWorkflowFor('big', [disabled('Huge', '.github/workflows/huge.yml')], () => big.slice(0, 1000))?.name, 'Huge', 'the same file, small');
+});
+
+test('regression: a job name with many expressions matches in linear time, not by backtracking', () => {
+  const file = 'jobs:\n  j:\n    name: "${{ a }}${{ a }}${{ a }}${{ a }}${{ a }}X"\n';
+  const list = [disabled('W', '.github/workflows/w.yml')];
+  const t = performance.now();
+  assert.equal(disabledWorkflowFor('a'.repeat(180), list, () => file), null);
+  assert.ok(performance.now() - t < 150, `took ${Math.round(performance.now() - t)} ms`);
+  assert.equal(disabledWorkflowFor(`${'a'.repeat(180)}X`, list, () => file)?.name, 'W', 'and still matches its expansion');
+});
+
+test('disabledWorkflowsOf: one read parses each workflow file once, and none when no workflow is disabled', () => {
+  const shown: string[] = [];
+  const files: Record<string, string> = { '.github/workflows/ci.yml': 'jobs:\n  ci:\n    runs-on: x\n', '.github/workflows/nightly.yml': 'jobs:\n  lint:\n    runs-on: x\n' };
+  const show = (p: string) => (shown.push(p), files[p] ?? null);
+  const active = [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }, { name: 'Nightly', path: '.github/workflows/nightly.yml', state: 'active' }];
+  const none = disabledWorkflowsOf(active, show);
+  assert.deepEqual([none('ci'), none('lint'), none('scan')], [null, null, null]);
+  assert.deepEqual(shown, [], 'no disabled workflow: no file is read');
+  const some = disabledWorkflowsOf([active[0]!, disabled('Nightly', '.github/workflows/nightly.yml')], show);
+  assert.deepEqual([some('ci'), some('lint')?.name, some('scan'), some('lint')?.name], [null, 'Nightly', null, 'Nightly']);
+  assert.deepEqual([...shown].sort(), ['.github/workflows/ci.yml', '.github/workflows/nightly.yml'], 'each file once');
+});
+
+test('regression: a disabled workflow\'s name and path lose C1 and bidi controls', () => {
+  const w = disabledWorkflowFor('C\u0085I‮', [{ name: 'C\u0085I\u202e', path: '.github/workflows/\u2066ci\u2069.yml\u200f', state: 'disabled_manually' }], () => null);
+  assert.deepEqual(w, { name: 'C I ', path: '.github/workflows/ ci .yml ', state: 'disabled_manually' });
 });
 
 test('main watch: GitHub enforcing the protection leaves it to GitHub; a rewritten main is unaccounted, with no revert', async () => {
