@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
@@ -209,6 +210,19 @@ test('a fetch that never answers is cut off at the timeout', { skip: skip || (pr
   const start = Date.now();
   const p = w.range({ GIT_SSH_COMMAND: 'sleep 60;:', PUSH_GATE_FETCH_TIMEOUT: '1' });
   assert.ok(Date.now() - start < 30_000, `the hook waited ${Date.now() - start} ms on a dead fetch`);
+  assert.equal(p.status, 0, p.stderr);
+  assert.match(p.stderr, /could not fetch origin\/main \(no answer within 1s\)/);
+});
+
+test('a fetch cut off at the timeout says "no answer" even when the wall clock reads under it (ETIMEDOUT, a clock stepped back)', { skip: skip || (process.platform === 'win32' && 'the hanging transport is a POSIX sleep') }, () => {
+  const w = world();
+  w.work.git('remote', 'set-url', 'origin', 'ssh://example.invalid/repo.git');
+  w.work.commit('ok.md', 'fine\n');
+  // The hook's own Date.now() never moves: its elapsed time reads 0 s, as after a step back, while spawnSync's timeout
+  // (a monotonic timer) still fires: the error is ETIMEDOUT with the clock under the limit.
+  const frozen = join(w.base, 'frozen-clock.mjs');
+  writeFileSync(frozen, 'Date.now = () => 1_700_000_000_000;\n');
+  const p = w.range({ GIT_SSH_COMMAND: 'sleep 60;:', PUSH_GATE_FETCH_TIMEOUT: '1', NODE_OPTIONS: `--import ${pathToFileURL(frozen).href}` });
   assert.equal(p.status, 0, p.stderr);
   assert.match(p.stderr, /could not fetch origin\/main \(no answer within 1s\)/);
 });
