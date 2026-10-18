@@ -1,5 +1,5 @@
-// Every test process gets a machine of its own: a temporary home, state dir and agent-slot directory, and none of
-// the machine's own engine settings (issue #312). Every way the suite runs preloads it (TEST_PRELOAD below: npm test,
+// Every test process gets a machine of its own: a temporary home, state dir, agent-slot directory and temporary
+// directory, and none of the machine's own engine settings (issues #312, #604). It is removed when the process exits. Every way the suite runs preloads it (TEST_PRELOAD below: npm test,
 // the CI shards, the touched-tests check; test/isolate.test.ts checks each), so a test file gets it without importing
 // anything, before any of its modules reads the environment. A test file's process without it stops at once
 // (test/helpers.ts).
@@ -24,9 +24,21 @@ for (const k of Object.keys(process.env)) {
   if ((k.startsWith(`${BRAND.envPrefix}_`) && !KEEP.has(k)) || k.startsWith('AGENT_SLOTS_')) delete process.env[k];
 }
 
-/** This test process's machine: everything below is inside it. */
-export const testMachine = mkdtempSync(join(tmpdir(), 'test-machine-'));
+/**
+ * This test process's machine: everything below is inside it, the temporary directory too. A test process a test
+ * starts (a preloaded runner, a CLI) makes its own inside this one's temporary directory, so its parent's exit
+ * removes it even when it was killed.
+ *
+ * INVARIANT: the name stays short. Each nested level adds `/tm-XXXXXX/t` (12 bytes) to every path under tmpdir(),
+ * and a Unix socket's path is at most 107 bytes: Chrome binds one 45 bytes under TMPDIR (test/isolate.test.ts
+ * measures both levels).
+ */
+export const testMachine = mkdtempSync(join(tmpdir(), 'tm-'));
 const home = join(testMachine, 'home');
+// WHY: a test's own temporary directories (mkdtempSync(join(tmpdir(), …)), in some 300 files) went to the system's,
+// and nothing removed them: thousands piled up in /tmp (#604). os.tmpdir() reads these on every call; TMP and TEMP
+// are what Windows reads, and what some tools read instead.
+const tmp = join(testMachine, 't');
 
 /**
  * Whether HOME itself moves. Not on macOS: headless Chrome there never answers a navigation with a fresh home
@@ -46,6 +58,9 @@ export const isolatedEnv: Readonly<Record<string, string>> = Object.freeze({
   [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(testMachine, 'machine-init'),
   AGENT_SLOTS_DIR: join(testMachine, 'agent-slots'),
   [SYSTEM_ROOT_VAR]: join(testMachine, 'root'),
+  TMPDIR: tmp,
+  TMP: tmp,
+  TEMP: tmp,
 });
 for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });
