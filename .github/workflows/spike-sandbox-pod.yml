@@ -1,0 +1,66 @@
+name: spike sandbox pod
+# SPIKE (do not merge), #698 decision 5: can Claude Code's command sandbox (bubblewrap, through Anthropic's
+# sandbox-runtime) start inside a locked-down Kubernetes pod? Measures the sandbox itself on a kind cluster; no model
+# call, no secrets. Runs only for the spike-sandbox-pod branch: on its PR (a paths filter, so it is never one of the
+# checks a merge or the engine updater requires, test/update-checks.test.ts) or by hand. The PR is never merged.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/spike-sandbox-pod.yml
+      - scripts/ci/spike-sandbox-pod/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: spike-sandbox-pod-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  probe:
+    name: spike sandbox in a restricted pod (#698 decision 5)
+    if: github.head_ref == 'spike-sandbox-pod' || github.ref == 'refs/heads/spike-sandbox-pod'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: bash
+    env:
+      OUT: ${{ runner.temp }}/spike-sandbox-pod
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: the runner (kernel, AppArmor userns sysctl, docker, containerd, runc)
+        run: |
+          mkdir -p "$OUT"
+          bash scripts/ci/spike-sandbox-pod/run.sh host | tee "$OUT/host.txt"
+      - name: a kind cluster, the probe image, the namespaces and the Localhost seccomp profile
+        run: bash scripts/ci/spike-sandbox-pod/run.sh cluster
+      - name: gVisor as a RuntimeClass (best effort; skipped on failure)
+        continue-on-error: true
+        run: bash scripts/ci/spike-sandbox-pod/run.sh gvisor
+      - name: probe every profile, with the runner's AppArmor userns sysctl as it is
+        run: |
+          v="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2> /dev/null || echo none)"
+          bash scripts/ci/spike-sandbox-pod/run.sh probe "aa-restrict-$v"
+      - name: probe every profile again with the sysctl flipped (a node OS with the other default)
+        run: |
+          v="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2> /dev/null || echo none)"
+          if [ "$v" = none ]; then echo "no such sysctl on this kernel: one pass only"; exit 0; fi
+          n=$((1 - v))
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$n"
+          bash scripts/ci/spike-sandbox-pod/run.sh probe "aa-restrict-$n"
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$v"
+      - name: results
+        if: always()
+        run: bash scripts/ci/spike-sandbox-pod/run.sh table
+      - name: keep the logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: spike-sandbox-pod
+          path: |
+            ${{ runner.temp }}/spike-sandbox-pod/aa-*
+            ${{ runner.temp }}/spike-sandbox-pod/host.txt
+            ${{ runner.temp }}/spike-sandbox-pod/spike-ns.json
+          if-no-files-found: warn
