@@ -54,6 +54,7 @@ interface Render {
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderRepoConfigForm(c: unknown, o?: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
+  checksSeenSlot(answer: { checks: string[]; sha?: string; error?: string }, starterBelow: boolean): { seen: string[]; note: string | null };
   renderStarterCi(v: StarterCiView, inForm?: boolean): string;
   renderCiNote(ci: { kind: 'github' | 'none'; means: string | null } | undefined): string;
   renderConfigPrs(prs: unknown[], o?: { canAct?: boolean; plan?: { command: string; then: string } }): string;
@@ -3282,6 +3283,37 @@ test("the Repo config form: no input moves when GitHub's checks answer arrives a
   // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
   assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
   assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
+});
+
+test('#569 the Repo config form\'s checks note names the short sha of the tip with no checks yet; a re-read that finds checks on a new tip replaces it, the old sha gone', () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const old = '0123456789abcdef0123456789abcdef01234567';
+  const tip = 'fedcba9876543210fedcba9876543210fedcba98';
+  const status = (html: string) => /data-testid="repo-config-checks-status"[^>]*>([^<]*)</.exec(html)?.[1]?.replaceAll('&#x27;', "'");
+  const form = (slot: { seen: string[]; note: string | null }) => r.renderRepoConfigForm(c, { seenLoaded: true, seen: slot.seen, ...(slot.note === null ? {} : { seenNote: slot.note }) });
+  // The first read: GitHub ran nothing on the tip, named by its first 7 characters.
+  const empty = r.checksSeenSlot({ checks: [], sha: old }, false);
+  assert.deepEqual(empty, { seen: [], note: 'no checks yet on 0123456' });
+  const before = form(empty);
+  assert.equal(status(before), 'no checks yet on 0123456');
+  // With no required check chosen yet, the starter CI below is pointed to, after the same words.
+  assert.equal(r.checksSeenSlot({ checks: [], sha: old }, true).note, 'no checks yet on 0123456: add a starter CI below');
+  // The re-read after a refresh or a merge: a new tip, with a check. The note is replaced and the old sha is gone.
+  const ran = r.checksSeenSlot({ checks: ['test', 'lint'], sha: tip }, false);
+  assert.deepEqual(ran, { seen: ['test', 'lint'], note: null });
+  const after = form(ran);
+  assert.equal(status(after), "the checks GitHub ran on main's tip are offered below");
+  assert.doesNotMatch(after, /0123456/, 'the old tip is named nowhere');
+  assert.match(after, /data-check="lint"/);
+  // The endpoint's own errors are shown as they are (it sends no sha with them).
+  assert.deepEqual(r.checksSeenSlot({ checks: [], error: "origin/main isn't fetched here" }, true), { seen: [], note: "origin/main isn't fetched here" });
+  assert.deepEqual(r.checksSeenSlot({ checks: [], error: "GitHub didn't answer: HTTP 502" }, false), { seen: [], note: "GitHub didn't answer: HTTP 502" });
+  // The layout invariant holds for the new note: nothing above an input differs from the loading form but the slots' contents.
+  const loading = r.renderRepoConfigForm(c);
+  const inputs = [...loading.matchAll(/<input[^>]*data-testid="([a-z-]+)"/g)].map((m) => m[1]!);
+  const above = (html: string, id: string) => withoutReserved(html.slice(0, html.indexOf(`data-testid="${id}"`)));
+  for (const html of [before, after]) for (const id of inputs) assert.equal(above(html, id), above(loading, id), `${id} moves`);
+  assert.match(before, /class="block h-5 truncate[^"]*" data-reserved="status"/);
 });
 
 test("the Repo config form with no required check (#469): the starter CI, last in the form; its summary and file; Confirm is GitHub's new-file page with the file; once it ran on main, the step says its check is selected", () => {
