@@ -1,3 +1,4 @@
+# The label doesn't rerun ci.yml's fast suite until the next push; close and reopen the PR for that (docs/test-runs.md).
 name: ci slow full-ci
 # Adding the full-ci label to an open pull request runs every slow job on it: this calls ci-slow.yml (workflow_call),
 # whose scope job reads the label from the event and selects them all. Its own workflow, not a `labeled` type in
