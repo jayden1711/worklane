@@ -388,22 +388,33 @@ test('conflict fix: a file whose name isn\'t valid UTF-8 and that the merge brou
 const HELPER = 'src/coordinator/change-files.ts';
 
 /**
- * What lists changed paths or counts lines from git, or reads paths from a patch, however the call is written (split
- * over lines, flags in a constant, a comment beside it): each is searched for in the whole file text.
+ * What lists changed paths or counts lines from git, or reads paths from a patch: each word is searched for in the
+ * whole file text, so a call split over lines or a comment beside it doesn't hide it, nor does a distinctive flag
+ * (`--name-only`, `diff-files`, ...) kept in a constant. A word list, not a proof. Known gaps: a flag built by
+ * concatenation (`'--name' + '-only'`), a header regex that never spells the header, and a short or common flag
+ * (`status -s`, `diff --check`) kept in a constant away from its subcommand.
  */
 const READER_WORDS: Record<string, RegExp> = {
   'name-only': /name-only/g,
   'name-status': /name-status/g,
   numstat: /numstat/g,
   stat: /--stat\b|shortstat|dirstat|--(?:compact-)?summary\b/g,
-  // diff-tree and diff-index print the raw format (paths) with no flag at all.
-  raw: /--raw\b|diff-tree|diff-index/g,
+  // diff-tree, diff-index and diff-files print the raw format (paths) with no flag at all.
+  raw: /--raw\b|diff-tree|diff-index|diff-files/g,
   // ls-files lists the untracked, modified or deleted files of a worktree: what a run changed.
   'worktree changes': /--others\b|--modified\b|--deleted\b|--unmerged\b/g,
+  // Any ls-files at all: its short flags (-o -m -d -u) are too short to search for alone.
+  'ls-files': /ls-files/g,
   whatchanged: /whatchanged/g,
   porcelain: /porcelain/g,
+  // `status -s` / `--short`: the short format lists changed paths.
+  'short status': /\bstatus['"`]?\s*,?\s*['"`]?(?:-[a-z]*s[a-z]*|--short)\b/g,
+  // `stash show` prints a stat of the stash by default.
+  'stash show': /stash['"`]?\s*,?\s*['"`]?show\b/g,
+  // `diff --check` prints `path:line: ...` for each whitespace error.
+  'diff --check': /diff['"`]?\s*,?\s*['"`]?--check\b/g,
   'rename detection': /find-renames|find-copies|--follow\b|diff\.renames|['"`]-M\d*%?['"`]/g,
-  'patch headers': /\+\+\+|diff --git|rename (?:from|to) /g,
+  'patch headers': /\+\+\+|---\s?a\\?\/|\^---(?: |\\s)|diff --git|rename (?:from|to) /g,
 };
 
 /**
@@ -415,23 +426,30 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
   'src/checkout-sync.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the checkout clean (empty or not); no path is read' },
   'src/coordinator/landing.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the worktree clean; no path is read' },
   'src/worktree-pool.ts': { words: { porcelain: 2 }, why: '`status --porcelain`: is a pooled worktree clean; no path is read' },
-  'src/coordinator.ts': { words: { 'name-only': 1, porcelain: 2 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change (combined-state imports); `status --porcelain` twice: is the worktree clean' },
+  'src/coordinator.ts': {
+    words: { 'name-only': 1, 'ls-files': 1, porcelain: 2 },
+    why: '`ls-tree -r -z --name-only`: the files of a tree, not a change (combined-state imports); `ls-files`: every tracked file, for the file index; `status --porcelain` twice: is the worktree clean',
+  },
   'src/config/load.ts': { words: { 'name-only': 1 }, why: '`ls-tree --name-only`: the role files of a tree, not a change' },
   'src/harness-evals/replay.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change' },
-  'src/starter-ci.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r --name-only`: the files of a tree, not a change' },
+  'src/starter-ci.ts': { words: { 'name-only': 1, 'ls-files': 2 }, why: '`ls-tree -r --name-only`, or `ls-files` (and a comment naming it): the files of a tree, not a change' },
   'src/testrun/select.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change' },
   'src/claims.ts': { words: { porcelain: 1 }, why: '`push --porcelain`: the push result, no diff' },
-  'src/worktrees.ts': { words: { porcelain: 1 }, why: '`worktree list --porcelain`: the worktrees, no diff' },
+  'src/worktrees.ts': { words: { 'ls-files': 1, porcelain: 1 }, why: '`ls-files -- <path>`: is one path tracked; `worktree list --porcelain`: the worktrees, no diff' },
+  'src/auto-config.ts': { words: { 'ls-files': 1 }, why: '`ls-files`: the tracked files, to detect the project; not a change' },
+  'src/dashboard.ts': { words: { 'ls-files': 1 }, why: "`ls-files`: the tracked files that look like tests, for the first-task form's picker; not a change" },
+  'src/skill-lint.ts': { words: { 'ls-files': 1 }, why: '`ls-files -z -- *SKILL.md`: every tracked skill file; not a change' },
+  'src/testrun/affected.ts': { words: { 'ls-files': 3 }, why: 'two comments and a regex that recognises `ls-files` in a test command; runs no git' },
   'src/coordinator/loop-control.ts': { words: { stat: 1 }, why: 'prompt text naming `git diff --stat`; the text comes from diffStatText' },
   'src/experiments/proposal.ts': { words: { raw: 2 }, why: 'parseRawDiff, in comments: it parses what rawChanges returns' },
   'src/run-record.ts': { words: { 'name-only': 1, 'name-status': 1, numstat: 1, stat: 2 }, why: "a regex that recognises these flags in an agent's own commands; runs no git" },
   'src/instance-rename.ts': { words: { 'patch headers': 1 }, why: 'a commit message ("rename from <name>"), no diff' },
   'src/line-diff.ts': { words: { 'patch headers': 1 }, why: 'writes a diff header for display; reads none' },
-  'src/run-feed.ts': { words: { 'patch headers': 1 }, why: 'writes a diff header for display; reads none' },
+  'src/run-feed.ts': { words: { 'patch headers': 2 }, why: 'writes a diff header (`--- a/`, `+++ b/`) for display; reads none' },
   // src/: readers that stay outside the helper, each with why.
   'src/comment-policy.ts': {
-    words: { 'rename detection': 1, 'patch headers': 3 },
-    why: "the comment lint over added lines wants renames paired (a moved file's lines aren't new); it is in the agents' tool guard's import tree, which can't take a new import while #691 lists that tree",
+    words: { 'ls-files': 1, 'rename detection': 1, 'patch headers': 3 },
+    why: "`ls-files --error-unmatch`: is one file tracked. The comment lint over added lines wants renames paired (a moved file's lines aren't new); it is in the agents' tool guard's import tree, which can't take a new import while #691 lists that tree",
   },
   'src/push-check.ts': {
     words: { 'name-only': 1, numstat: 1 },
@@ -442,13 +460,15 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
   'scripts/pin-engine.mjs': { words: { 'name-only': 1 }, why: 'the release commit "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
   'scripts/machine/worklane-update.cjs': { words: { 'name-only': 1 }, why: 'the updater\'s "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
   'scripts/ci/affected.mjs': {
-    words: { 'name-only': 2, 'worktree changes': 2 },
+    words: { 'name-only': 2, 'worktree changes': 2, 'ls-files': 2 },
     why: 'CI test selection (and `ls-files -z --cached --others`: every file of the checkout)',
     must: [/'--name-only', '--no-renames', '-z'/, /'--name-only', '--no-renames', '--diff-filter=A', '-z'/, /'ls-files', '-z', '--cached', '--others'/],
   },
   'scripts/push-gate.mjs': { words: { 'name-only': 1, 'patch headers': 2 }, why: '`ls-tree --name-only`: a tree; `show --no-renames` added lines: the denylist scan of what is pushed (a follow-up: its `+++ ` header parse)' },
   'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },
   'scripts/release.mjs': { words: { porcelain: 1 }, why: '`status --porcelain`: is the tree clean before a release' },
+  'scripts/check-denylist.mjs': { words: { 'ls-files': 1 }, why: '`ls-files -co`: every file of the checkout, to scan; not a change' },
+  'scripts/rename.mjs': { words: { 'ls-files': 1 }, why: '`ls-files -co`: every file of the checkout, to rename the product in; not a change' },
 };
 
 test('one helper is the only way src/ lists changed names or counts; scripts/ only on this keyed list', () => {
