@@ -6,6 +6,7 @@
 //
 //   node instance-records.cjs items <name>              every item, one a line: <kind> <what> (exists or not)
 //   node instance-records.cjs engine-places x           the engine's own places a removal re-owns orphaned files in
+//   node instance-records.cjs rechown x <uids> <gids>   give the paths on stdin (NUL-separated) to root, one fd each
 //   node instance-records.cjs hold-slot x <pid> <name>   an agent slot held for <pid>: the updater waits (prints its path)
 //   node instance-records.cjs release-slot x <path> <pid>
 //   node instance-records.cjs plan <name>               the shared files' records <name> has, one a line (changes nothing)
@@ -162,6 +163,88 @@ const SHARED_FILES = [
 const ENGINE_OWNED = { trees: ['/var/lib/worklane', '/etc/worklane'], locks: { dir: '/run/lock', name: 'worklane-*.lock' } };
 
 const ARCHIVE_DIR = '/var/lib/worklane/removed';
+
+// What a removal does to each file its users left there (lib.sh rechown_orphans walks them, find -P -xdev -uid):
+// root's, on ONE fd opened without following a link (O_NOFOLLOW), so nothing renamed over the path mid-walk (the slot
+// directory is 2770 with no sticky bit: any agent-slots member can rename there) is ever followed out of it. The fd's
+// own fstat decides everything: still a removed uid's (else left as it is: another's now), its group (root when it was
+// the instance's, else kept), its mode (a regular file: setuid and setgid off, and in a shared engine group (kept, not
+// root) group write off too: the engine only puts a copy over its files there, never writes one in place). A link or
+// a socket (no fd to open without following): lchown, which never follows; whatever is at that name is changed in
+// place, never anything a link points at. Each listed, "<owner>:<group> <old mode> -> <new mode> <path>[ (g+w kept:
+// <why>)]", or "left <path>: <why>", or "FAILED <path>: <why>" (the step fails).
+function idNames(file) {
+  const m = new Map();
+  try {
+    for (const l of fs.readFileSync(file, 'utf8').split('\n')) {
+      const f = l.split(':');
+      if (f.length > 2 && /^\d+$/.test(f[2]) && !m.has(Number(f[2]))) m.set(Number(f[2]), f[0]);
+    }
+  } catch {
+    // unreadable: numbers
+  }
+  return m;
+}
+
+/** root's ids, or (a test, never as root) the ones INSTANCE_REMOVE_TEST_ROOT_IDS names, "<uid>:<gid>". */
+function rootIds() {
+  const t = process.env.INSTANCE_REMOVE_TEST_ROOT_IDS;
+  if (t && typeof process.getuid === 'function' && process.getuid() !== 0 && /^\d+:\d+$/.test(t)) return t.split(':').map(Number);
+  return [0, 0];
+}
+
+function rechownOne(p, uids, gids, [rootUid, rootGid], names) {
+  const O = fs.constants;
+  const owner = (st) => `${names.users.get(st.uid) ?? st.uid}:${names.groups.get(st.gid) ?? st.gid}`;
+  const oct = (m) => (m & 0o7777).toString(8);
+  let fd = null;
+  try {
+    try {
+      fd = fs.openSync(p, O.O_RDONLY | O.O_NOFOLLOW | O.O_NONBLOCK | O.O_NOCTTY);
+    } catch (e) {
+      if (e.code === 'ENOENT') return `left ${p}: gone since the walk`;
+      if (e.code !== 'ELOOP' && e.code !== 'ENXIO') throw e;
+      // A link (ELOOP) or a socket (ENXIO): the entry itself, by name, never followed.
+      const st = fs.lstatSync(p);
+      if (!uids.has(st.uid)) return `left ${p}: not a removed user's now`;
+      fs.lchownSync(p, rootUid, gids.has(st.gid) ? rootGid : st.gid);
+      return `${owner(fs.lstatSync(p))} ${oct(st.mode)} -> ${oct(fs.lstatSync(p).mode)} ${p}`;
+    }
+    const st = fs.fstatSync(fd);
+    if (!uids.has(st.uid)) return `left ${p}: not a removed user's now`;
+    const shared = !gids.has(st.gid) && st.gid !== 0;
+    fs.fchownSync(fd, rootUid, gids.has(st.gid) ? rootGid : st.gid);
+    let why = '';
+    if (st.isFile()) fs.fchmodSync(fd, st.mode & 0o7777 & ~0o6000 & (shared ? ~0o020 : 0o7777));
+    else if (st.isDirectory() && shared && st.mode & 0o020) why = ` (g+w kept: a directory: ${names.groups.get(st.gid) ?? st.gid}'s members add and replace the engine's files in it)`;
+    const now = fs.fstatSync(fd);
+    return `${owner(now)} ${oct(st.mode)} -> ${oct(now.mode)} ${p}${why}`;
+  } catch (e) {
+    return { failed: `FAILED ${p}: ${e.code || ''} ${e.message}`.replace(/\s+/g, ' ') };
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
+/** The paths (NUL-separated) given to root, as above: the listing's lines, and whether any failed. */
+function rechown(input, uidList, gidList, ids = rootIds()) {
+  const nums = (s) => new Set(String(s).split(',').filter((x) => /^\d+$/.test(x)).map(Number));
+  const uids = nums(uidList);
+  const gids = nums(gidList);
+  const names = { users: idNames('/etc/passwd'), groups: idNames('/etc/group') };
+  const lines = [];
+  let failed = false;
+  for (const p of input.split('\0')) {
+    if (!p) continue;
+    const r = rechownOne(p, uids, gids, ids, names);
+    if (typeof r === 'string') lines.push(r);
+    else {
+      lines.push(r.failed);
+      failed = true;
+    }
+  }
+  return { lines, failed };
+}
 
 // The engine updater waits while the machine isn't quiet: a live agent slot (agent-<n>.lock in the slot directory,
 // its pid alive) is busy to it (scripts/machine/worklane-update.cjs quiet()). instance-remove.sh holds one for its
@@ -780,6 +863,12 @@ function main(argv) {
     for (const t of ENGINE_OWNED.trees) process.stdout.write(`tree\t${t}\n`);
     process.stdout.write(`locks\t${ENGINE_OWNED.locks.dir}\t${ENGINE_OWNED.locks.name}\n`);
     return 0;
+  }
+  if (cmd === 'rechown') {
+    // The walk's paths on stdin, NUL-separated; argv: the removed uids and the instance's gids, comma-separated.
+    const r = rechown(fs.readFileSync(0, 'utf8'), argv[2] || '', argv[3] || '');
+    for (const l of r.lines) process.stdout.write(`${l}\n`);
+    return r.failed ? 1 : 0;
   }
   if (cmd === 'items') {
     for (const i of items(name)) process.stdout.write(`${i.kind}\t${i.what}\t${i.when ? i.when.join(' ') : '-'}\t${i.rename}\t${i.note || '-'}\n`);

@@ -2481,9 +2481,10 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            # The incident store's owner is whichever coordinator wrote it last: its group only (delta's last write
-            # loses group write in the removal, #555; the next coordinator's write, a copy renamed over it, is 0660).
-            sudo stat -c '%G %n' /var/lib/worklane/agent-slots/incidents.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
+            # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
+            # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json | sed -E 's/^(\S+) 6[46]0 /\1 6x0 /'
             sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
@@ -2638,9 +2639,10 @@ jobs:
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
             sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
-            # The incident store's owner is whichever coordinator wrote it last: its group only (delta's last write
-            # loses group write in the removal, #555; the next coordinator's write, a copy renamed over it, is 0660).
-            sudo stat -c '%G %n' /var/lib/worklane/agent-slots/incidents.json
+            # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
+            # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
+            # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
+            sudo stat -c '%G %a %n' /var/lib/worklane/agent-slots/incidents.json | sed -E 's/^(\S+) 6[46]0 /\1 6x0 /'
             sudo stat -c '%U:%G %a %n' /etc/worklane/testrun-gpu.json /var/lib/worklane/claude-account/profiles.json /etc/worklane/updates.json
             sudo stat -c '%U:%G %a %n' "$(getent passwd wl-ci | cut -d: -f6)" "$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci" /srv/worklane/ci
             id wl-ci; id wl-ci-agent; sudo cat /etc/sudoers.d/worklane-ci
