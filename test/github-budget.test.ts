@@ -217,6 +217,13 @@ test('a held budget lock never blocks the event loop; one stuck past a few secon
   await b.take('x');
   assert.ok(Date.now() - t0 < 200, `took ${Date.now() - t0} ms`);
   assert.equal(b.read().resources.core?.remaining, 9);
+  // Dated in the future: no real holder writes that, so it is broken too (else it would hold for good).
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'planted', acquiredAt: '3000-01-01T00:00:00.000Z' }));
+  t0 = Date.now();
+  await b.take('x');
+  assert.ok(Date.now() - t0 < 200, `a future-dated lock cost ${Date.now() - t0} ms`);
+  assert.equal(b.read().resources.core?.remaining, 8);
+  assert.equal(existsSync(lock), false, 'the planted lock is gone');
 });
 
 test('state files of tokens no longer used are removed (App tokens rotate hourly); live ones are kept', async () => {
