@@ -133,7 +133,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 |---|---|---|
 | **Tools** | both | Installs a missing gitleaks, Claude Code or gh, from pinned, checksummed downloads (on a server, the install command already did this) |
 | **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login |
-| **The agents' Claude login** | server | A paste box for the token `claude setup-token` prints, for the agent user only; it is never shown again |
+| **The agents' Claude login** | server | Whether the agent user is signed in, and the root commands that sign it in on the machine (`credentials.sh <name> claude`, or `claude auth login` as the agent user). The page never takes the token ([auth.md](auth.md)) |
 | **Connect GitHub** | local | Runs `gh auth login --web` and shows its one-time code with a link to GitHub's device page |
 | **GitHub origin, default branch** | local | Picks the repo's GitHub origin and sets the default branch, for a checkout that lacks them |
 | **The agents' GitHub App** | server | Opens the Setup console's **Add project** (below) |
