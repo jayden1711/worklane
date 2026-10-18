@@ -1193,7 +1193,7 @@ export interface IgnoredIssue {
 }
 export const getIgnored = () => api<{ at: number; issues: IgnoredIssue[]; error: string | null; canFix: boolean; local: boolean }>('/api/issues/ignored');
 export const addReady = (issue: number) => api<{ ok: boolean }>(`/api/issues/${issue}/ready`, { method: 'POST', body: '{}' });
-export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+export const getChecksSeen = () => api<{ checks: string[]; sha?: string; error?: string }>('/api/first-run/checks-seen');
 /** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
 export interface StarterCi {
   path: string;
