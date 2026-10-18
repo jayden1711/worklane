@@ -1,6 +1,6 @@
 # Auth and agent runtimes
 
-Reviewed 2026-10-18 against Anthropic's published docs and terms. Quotes are verbatim; re-check the linked pages before relying on them, since policies change.
+Reviewed 2026-10-18 against Anthropic's published docs and terms, each page fetched that day. Quotes are verbatim, apart from the links and markup noted; re-check the linked pages before relying on them, since policies change.
 
 ## The rule this follows
 
@@ -64,10 +64,10 @@ The helper is given only to runs as the instance's agent user. A lane that runs 
 
 The agents' Claude login (`~/.claude/.credentials.json`, and each profile's) and the API key file belong to the agent user, 0600 or 0400, in directories only it can open. Who can still reach them:
 
-- **The agent user**, which `claude` runs as. Its commands (Bash and the rest) are denied the files by the sandbox's read rules; `claude` itself reads them outside the sandbox, as it must.
+- **The agent user**, which `claude` runs as, and owns the files. With the sandbox on (`policy.yaml`'s default), its commands (Bash and the rest) are denied the files by the sandbox's read rules; `claude` itself reads them outside the sandbox, as it must. With the sandbox off, an agent's commands can read them.
 - **Root**, and any admin with sudo.
-- **The coordinator user (`wl-<name>`), and the agent code it launches.** Its sudo rule is `wl-<name> ALL=(wl-<name>-agent) NOPASSWD: ALL`, with the eval user added when there is one (`scripts/setup/instance.sh:40`): it may run any command as the agent user, and so read the agent's login and key file. Anything that gets code running as the coordinator user (the coordinator service, or a shell as that user) can do the same. The coordinator's own code never does; nothing enforces that, beyond the code. Narrowing the rule so the coordinator can run only what it needs is a later change (#711's option A).
-- **Not the instance's dashboard process**, which runs as the coordinator user but with `NoNewPrivileges=yes` (`scripts/setup/dashboards.sh`), so sudo can't raise it to the agent user. The dashboard takes no credential in any case (above).
+- **The coordinator user (`wl-<name>`), and the agent code it launches.** Its sudo rule is `wl-<name> ALL=(wl-<name>-agent) NOPASSWD: ALL`, with the eval user added when there is one (`scripts/setup/instance.sh:40`): it may run any command as the agent user, and so read the agent's login and key file. Anything that gets code running as the coordinator user (the coordinator service, or a shell as that user) can do the same. The coordinator's own code never does; nothing enforces that, beyond the code. Narrowing the rule so the coordinator can run only what it needs is a later change (#737).
+- **The instance's dashboard process, indirectly.** It runs as the coordinator user with `NoNewPrivileges=yes` (`scripts/setup/dashboards.sh`), so it can't use the sudo rule itself. It can still write the coordinator user's files, `policy.yaml` among them (#726), so code that took it over could change what the coordinator later runs as the agent user. Count it with the coordinator user. The dashboard takes no credential in any case (above).
 
 The root scripts handle the credential only while installing it: `credentials.sh`, `add-project.sh` and `claude-account.sh` take the token at a hidden prompt (or root's stdin) and pipe it into the agent user's own file, never as an argument and never to a log. `claude-account.sh status` reads the stored login as root to show which token it is (the first 8 hex digits of its sha256) and when it expires; it never shows or stores the token.
 
@@ -76,14 +76,14 @@ The root scripts handle the credential only while installing it: `credentials.sh
 ## What the docs say
 
 **Scripted use of the CLI with a subscription is documented.**
-- [Authentication](https://code.claude.com/docs/en/authentication.md): "For CI pipelines, scripts, or other environments where interactive browser login isn't available, generate a one-year OAuth token with `claude setup-token`." The same page: "This token authenticates with your Claude subscription and requires a Pro, Max, Team, or Enterprise plan."
-- [Headless](https://code.claude.com/docs/en/headless.md): "To run Claude Code in non-interactive mode, pass `-p` with your prompt and the CLI options you need."
+- [Authentication](https://code.claude.com/docs/en/authentication.md): "For CI pipelines, scripts, or other environments where interactive browser login isn't available, generate a one-year OAuth token with `claude setup-token`" (its colon left out). The same page: "This token authenticates with your Claude subscription and requires a Pro, Max, Team, or Enterprise plan."
+- [Headless](https://code.claude.com/docs/en/headless.md): "To run Claude Code in non-interactive mode, pass `-p` with your prompt and the CLI options you need" (its link and colon left out).
 
 **Collecting, storing or relaying a Claude credential is not allowed; signing in to the unmodified binary is.** Both quotes are at the top of this page. Worklane spawns the user's own unmodified `claude` on the user's own machine. The user signs it in there, through Anthropic's own flow (or a token installed by root), and the engine never takes the credential.
 
 **Products should use API keys.**
 - [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview.md): "Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK."
-- [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance.md): "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication."
+- [Legal and compliance](https://code.claude.com/docs/en/legal-and-compliance.md): "Developers building products or services that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication through Claude Console or a supported cloud provider." (links and bold left out)
 - This is why Worklane never offers a login: the API-key option is a key you bring, for your own agents.
 
 **Subscription limits assume ordinary individual use.**
@@ -96,10 +96,10 @@ The root scripts handle the credential only while installing it: `credentials.sh
 |---|---|
 | **Silent API billing.** In `-p` mode an `ANTHROPIC_API_KEY` in the environment takes precedence over a subscription login. | Before each run the runner checks `claude auth status` and refuses to start if the auth method doesn't match the billing configured (login or API key). The agent's environment never carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or cloud-provider credentials for an instance; an API key reaches `claude` only through `apiKeyHelper`. |
 | Heavy unattended use of a subscription | Conservative default concurrency (`agent_runtime.max_concurrency: 2`), optional `run_windows`, a daily budget, and stopping on rate-limit events rather than waiting for the reset. |
-| Credential handling | The engine takes no credential: no dashboard route or paste box accepts one, and none is stored or relayed by the coordinator. It passes only the key file's path and each profile's directory. The guardrails deny agents reading credential files (`secret_paths`), and the sandbox denies them the login and the key file. The coordinator user can still reach them through its sudo rule (above). |
+| Credential handling | The engine takes no Claude credential: no dashboard route or paste box accepts one, and none is stored or relayed by the coordinator. It passes only the key file's path and each profile's directory. The guardrails deny agents reading credential files (`secret_paths`), and the sandbox, while on, denies them the login and the key file. The coordinator user can still reach them through its sudo rule (above). |
 | Untrusted repos | Non-bare `-p` runs a project's hooks and MCP servers without a trust prompt. Only run Worklane on repositories you trust. |
 | Product naming | "Claude Code" may not be part of a product name. The product is "Worklane". |
 
 ## Your responsibility
 
-Worklane is for running agents on **your own machine, with your own login or key, on your own repositories**. You are responsible for complying with the terms of your Anthropic plan. Worklane does not take, share, host or relay credentials, and is not a way to provide agents to other people.
+Worklane is for running agents on **your own machine, with your own login or key, on your own repositories**. You are responsible for complying with the terms of your Anthropic plan. Worklane does not take, share, host or relay Claude credentials, and is not a way to provide agents to other people.

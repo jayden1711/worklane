@@ -190,7 +190,7 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 
 **Current weaknesses on the single machine. These are not guarantees, and no mode may count them as one:**
 - **#710.** Re-running a setup script without its earlier flags loosens what the earlier run set. Example: the egress rule loses the test users (measured in #710: `scripts/setup/egress-firewall.sh:93`). Until #710 lands, a re-run is not a safe upgrade step (§7).
-- **#711.** The coordinator can read the agents' key files through its sudo rule. docs/auth.md now says so ("Who can reach the agents' credentials"); narrowing the rule is #711's later option A. The dashboard's token paste is gone: no route takes a Claude credential (#711 part 2).
+- **#711.** The coordinator can read the agents' key files through its sudo rule. docs/auth.md now says so ("Who can reach the agents' credentials"); narrowing the rule is #737. The dashboard's token paste is gone: no route takes a Claude credential (#711 part 2).
 - **#726.** `policy.yaml`, which holds `sandbox` and `allow_same_user`, is the coordinator user's file, not root's (note above the table). Owner's decision (2026-10-18, §14 decision 1): on the single machine it becomes root-owned, changeable only through the root helper.
 - **#740.** The egress drop doesn't cover a test user's subordinate uid range (Egress control row).
 
@@ -210,7 +210,7 @@ OS-user mode is the single machine's mode, and the mode for GPU work there (meas
 
 **A conflict with #700.** #700 says the runner never sets a `*_BASE_URL` or `CLAUDE_CODE_SKIP_*_AUTH`. A model gateway needs `claude` pointed at it, which is the same kind of setting as a provider endpoint set after `outboundEnv` (measured: `src/runner.ts:584-587`). That is an owner decision (decision 4).
 
-**Current weakness, not a guarantee (#711).** The coordinator's sudo rule lets it run anything as the agent user (measured: `scripts/setup/instance.sh:40`), so it can read the agent's key file (inferred); docs/auth.md says so. The dashboard no longer takes or stores a Claude token at all (#711 part 2). On the single machine the sudo rule stays as it is until #711's option A narrows it. In pod mode the gateway's secret is readable by the gateway's ServiceAccount alone, and the coordinator's role has no read on it. The claim would then hold there, enforced by RBAC, and a test should check that RBAC (Proposal).
+**Current weakness, not a guarantee (#711).** The coordinator's sudo rule lets it run anything as the agent user (measured: `scripts/setup/instance.sh:40`), so it can read the agent's key file (inferred); docs/auth.md says so. The dashboard no longer takes or stores a Claude token at all (#711 part 2). On the single machine the sudo rule stays as it is until #737 narrows it. In pod mode the gateway's secret is readable by the gateway's ServiceAccount alone, and the coordinator's role has no read on it. The claim would then hold there, enforced by RBAC, and a test should check that RBAC (Proposal).
 
 ## 7. Migration for existing single-host installs
 
