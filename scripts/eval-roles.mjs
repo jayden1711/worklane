@@ -12,11 +12,19 @@
 // Exits 1 when a role's held-out score drops, is incomplete or is missing, or its visible score drops.
 // --cap is dollars per role, the TOTAL across its N runs (cost grows with --runs): once reached, the remaining
 // runs don't start and the role is incomplete, which fails it.
+// The judge must be a different model from --model: the same one is refused before anything runs.
+// --fix [n] (default 3 attempts): for a role whose head has a failing case, a fixer (--fixer, default opus) proposes
+// a revised prompt from the failing visible cases only (never a held-out case, score or outcome), the proposal is
+// rerun (visible and held-out, --runs runs) and this repeats up to n attempts or until every case passes. An attempt
+// whose held-out score drops is rejected. Each attempt's diff, scores and cost are printed, then the best attempt.
+// It only proposes: this script never edits src/roles.ts; apply the diff by hand and rerun. --fix-cap is dollars per
+// role for the loop (fixer calls and reruns), on top of --cap. The exit code is the head's verdict, as without --fix.
 // Needs a build first (npm run build).
 //   node scripts/eval-roles.mjs [--base origin/main] [--roles worker,evaluator-verdict] [--model sonnet]
 //                               [--judge opus] [--runs 3] [--samples 3] [--cap 10] [--write-held-out] [--score]
+//                               [--fix [3]] [--fixer opus] [--fix-cap 10]
 //   --write-held-out: write a held-out set for each role that has none (one case-writer run per role, from its
-//                     contract only); --score: score the current prompts once, no base (no --runs).
+//                     contract only); --score: score the current prompts once, no base (no --runs, no --fix).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -30,7 +38,7 @@ if (!existsSync(join(root, 'dist', 'src', 'skilleval.js'))) {
   process.exit(2);
 }
 const { cliAsk, compareInstructions, parseCases } = await load('skilleval.js');
-const { evalRoleRuns, evalRolesOptions, recordingAsk, roleReport, runsReport } = await load('eval-roles.js');
+const { evalRoleRuns, evalRolesOptions, fixLoop, fixReport, recordingAsk, roleReport, runsReport } = await load('eval-roles.js');
 const { heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } = await load('held-out.js');
 const { stateDir } = await load('os/index.js');
 const { EventLog } = await load('events/log.js');
@@ -105,20 +113,29 @@ for (const role of roles) {
     heldOut = readHeldOut(heldDir, role);
     console.log(`role ${role}: wrote ${heldOut?.length ?? 0} held-out case(s) (~$${costUsd.toFixed(2)})`);
   }
-  const compare = (capUsd) => compareInstructions({ target: `role ${role}`, baseText: o.scoreOnly ? null : before(role) || null, headText: after(role), cases: parseCases(readFileSync(file, 'utf8')), heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd, ask });
+  const cases = parseCases(readFileSync(file, 'utf8'));
+  const compareOf = (baseText, headText) => (capUsd) => compareInstructions({ target: `role ${role}`, baseText, headText, cases, heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd, ask });
   let r;
+  let loop = null;
   if (o.scoreOnly) {
-    const c = await compare(o.cap);
+    const c = await compareOf(null, after(role))(o.cap);
     total += c.costUsd;
     r = roleReport(c);
   } else {
-    const runs = await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd: o.cap, samples: o.samples, compare });
+    const runs = await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd: o.cap, samples: o.samples, compare: compareOf(before(role) || null, after(role)) });
     total += runs.costUsd;
     r = runsReport(runs);
+    if (o.fixAttempts) {
+      // The loop gets the visible cases only; the held-out ones stay inside `rerun`. Its proposal is printed, never written.
+      const rerun = (text, capUsd) => evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd, samples: o.samples, compare: compareOf(null, text) });
+      loop = await fixLoop({ role, prompt: after(role), start: runs, visible: cases, rerun, fixer: ask, fixerModel: o.fixer, maxAttempts: o.fixAttempts, capUsd: o.fixCap });
+      total += loop.costUsd;
+    }
   }
   for (const line of r.lines) console.log(line);
+  if (loop) for (const line of fixReport(loop)) console.log(line);
   if (!heldOut) console.log(`  no held-out cases for ${role} in ${heldDir}: run with --write-held-out`);
   if (r.fails) bad = true;
 }
-console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
+console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case${o.fixAttempts ? `, fix loop of up to ${o.fixAttempts} attempt(s) by ${o.fixer}` : ''}; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
 process.exit(bad ? 1 : 0);
