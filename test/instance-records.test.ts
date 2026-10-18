@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -453,7 +453,9 @@ test("orphaned files are given to root:root only in the engine's own places, a l
   assert.match(list, new RegExp(`^root:agent-slots 640 -> 640 ${join(root, 'engine/agent-slots/incidents.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
   assert.ok(list.includes(`root:root 6755 -> 755 ${join(root, 'engine/agent-slots/suid-tool')}`), 'setuid and setgid stripped, the old mode listed');
   const cm = readFileSync(chmods, 'utf8').trim().split('\n');
-  for (const c of cm) assert.match(c, /^u-s,g-s -- /, c);
+  for (const c of cm) assert.match(c, /^u-s,g-s(,g-w)? -- /, c);
+  assert.ok(cm.includes(`u-s,g-s,g-w -- ${join(root, 'engine/agent-slots/incidents.json')}`), 'in the shared group (agent-slots), group write off too');
+  assert.ok(cm.includes(`u-s,g-s -- ${join(root, 'engine/agent-slots/suid-tool')}`), "in the instance's own group (now root's), group write as it was");
   assert.ok(!cm.some((c) => c.includes('link-to')), 'never chmod through a link');
   assert.match(list, /^FAILED .*keep\.json: Operation not permitted$/m, 'a refused chown is listed, not hidden');
 
@@ -464,6 +466,50 @@ test("orphaned files are given to root:root only in the engine's own places, a l
   const listed = readFileSync(join(root, 'left'), 'utf8').trim().split('\n');
   assert.ok(listed.includes(join(root, 'outside/target.conf')), listed.join(' '));
   assert.ok(!listed.some((p) => p.startsWith(join(root, 'outside/dir'))), 'a skipped path is pruned');
+});
+
+test("in a shared engine group, a removed instance's regular file loses group write; a directory keeps it, listed with why; its own group's files and a link's target are left as they were", { skip: (!posix && 'bash, find, POSIX modes') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  // Real files, modes and stat; only chown stood in for (a test isn't root). This user's own group plays the shared
+  // engine group (agent-slots): it is not among the removed instance's gids (4242) and not root.
+  const root = mkdtempSync(join(tmpdir(), 'rechown-gw-'));
+  const slots = join(root, 'engine/agent-slots');
+  mkdirSync(join(slots, 'shared-dir'), { recursive: true });
+  mkdirSync(join(root, 'outside'), { recursive: true });
+  const mk = (p: string, mode: number) => {
+    writeFileSync(join(root, p), '{}');
+    chmodSync(join(root, p), mode);
+  };
+  mk('engine/agent-slots/agent-7.lock', 0o660);
+  mk('engine/agent-slots/incidents.json', 0o660);
+  mk('engine/agent-slots/read-only.json', 0o640);
+  mk('outside/target', 0o660);
+  chmodSync(join(slots, 'shared-dir'), 0o2770);
+  spawnSync('ln', ['-s', join(root, 'outside/target'), join(slots, 'link')]);
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  const lib = join(repoRoot, 'scripts', 'setup', 'lib.sh');
+  const run = (gids: string, list: string) =>
+    spawnSync('bash', ['-c', `source "$1"; chown() { :; }; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' "$5" ${uid}`, '_', lib, list, join(root, 'engine'), join(root, 'locks'), gids], { encoding: 'utf8' });
+  const mode = (p: string) => (statSync(join(root, p)).mode & 0o7777).toString(8);
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const r = run('4242', join(root, 'list'));
+  assert.equal(r.status, 0, r.stderr);
+  const list = readFileSync(join(root, 'list'), 'utf8');
+  for (const f of ['agent-7.lock', 'incidents.json']) {
+    assert.equal(mode(`engine/agent-slots/${f}`), '640', `${f}: group write off`);
+    assert.match(list, new RegExp(`^\\S+ 660 -> 640 ${esc(join(slots, f))}$`, 'm'), `${f}: listed with its old and new mode`);
+  }
+  assert.equal(mode('engine/agent-slots/read-only.json'), '640');
+  assert.equal(mode('engine/agent-slots/shared-dir'), '2770', 'a directory keeps group write: the group adds and replaces files in it');
+  assert.match(list, new RegExp(`^\\S+ 2770 -> 2770 ${esc(join(slots, 'shared-dir'))} \\(g\\+w kept: .+\\)$`, 'm'), 'a kept group write is listed with why');
+  assert.equal(mode('outside/target'), '660', "a link's target is never changed");
+
+  // The instance's own group (it goes to root): not a shared group, so its mode is kept as it was.
+  mk('engine/agent-slots/own.json', 0o660);
+  const own = run(`4242,${gid}`, join(root, 'list2'));
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(mode('engine/agent-slots/own.json'), '660');
 });
 
 // --- no process of the removed users left before userdel and the walk; the updater held off meanwhile

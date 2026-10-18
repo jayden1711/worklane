@@ -381,13 +381,17 @@ stop_uids() {
 # link is never followed, another mount never entered) and, in <lock dir>, only the files named <lock name>, directly
 # in it. Each is chowned with -h (a link itself, never its target): its owner becomes root, and its group root too when
 # it is one of the removed instance's <gids> (comma-separated); another group is kept (the slot directory's files are
-# group agent-slots, which every other instance's coordinator writes them through). A regular file also loses setuid
-# and setgid (chmod u-s,g-s), its other mode bits kept. Every one is listed in <listing>, "<owner>:<group> <old mode>
-# -> <new mode> <path>", or "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only
-# once no process of theirs is left (stop_uids): nothing can swap a file for a link between the check and the change.
+# group agent-slots, which every other instance's coordinator reads them through). A regular file also loses setuid
+# and setgid (chmod u-s,g-s), its other mode bits kept. In a shared engine group (one kept: not the instance's, not
+# root) a regular file loses group write too (g-w): the engine never writes one of its files there in place, it puts a
+# copy over it (renamed or linked: src/locks.ts, the incident store, the claims), which needs the directory's group
+# write only. A directory there keeps its group write, listed with why: the group's members add and replace the
+# engine's files in it. Every one is listed in <listing>, "<owner>:<group> <old mode> -> <new mode> <path>[ (g+w kept:
+# <why>)]", or "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only once no process
+# of theirs is left (stop_uids): nothing can swap a file for a link between the check and the change.
 #   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <gids, comma-separated> <uid>...
 rechown_orphans() {
-  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids=",$5," u f err old to fails=0 t
+  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids=",$5," u f err old to fails=0 t g strip why
   shift 5
   local -a tv=()
   IFS=: read -r -a tv <<<"$trees"
@@ -397,18 +401,26 @@ rechown_orphans() {
   for u in "$@"; do
     [[ "$u" =~ ^[0-9]+$ ]] || continue
     while IFS= read -r -d '' f; do
-      old="$(stat -c %a -- "$f")"
+      old="$(stat -c %a -- "$f")" g="$(stat -c %g -- "$f")"
       to=root
-      [[ "$gids" != *",$(stat -c %g -- "$f"),"* ]] || to=root:root
+      [[ "$gids" != *",$g,"* ]] || to=root:root
       if ! err="$(chown -h "$to" -- "$f" 2>&1)"; then
         printf 'FAILED %s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
       fi
       # A regular file (never a link, never a directory: a directory keeps its setgid, the group its files inherit)
-      # loses setuid and setgid, whatever chown already cleared.
-      if [ -f "$f" ] && [ ! -L "$f" ] && ! err="$(chmod u-s,g-s -- "$f" 2>&1)"; then
-        printf 'FAILED %s: chmod u-s,g-s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
+      # loses setuid and setgid, whatever chown already cleared; in a shared engine group, group write too.
+      strip=u-s,g-s why=""
+      if [ "$to" = root ] && [ "$g" != 0 ] && [ ! -L "$f" ]; then
+        if [ -f "$f" ]; then
+          strip=u-s,g-s,g-w
+        elif [ -d "$f" ] && [ "$((8#$old & 8#020))" -ne 0 ]; then
+          why=" (g+w kept: a directory: $(stat -c %G -- "$f")'s members add and replace the engine's files in it)"
+        fi
       fi
-      printf '%s %s -> %s %s\n' "$(stat -c %U:%G -- "$f")" "$old" "$(stat -c %a -- "$f")" "$f" >> "$list"
+      if [ -f "$f" ] && [ ! -L "$f" ] && ! err="$(chmod "$strip" -- "$f" 2>&1)"; then
+        printf 'FAILED %s: chmod %s: %s\n' "$f" "$strip" "$err" >> "$list"; fails=1; continue
+      fi
+      printf '%s %s -> %s %s%s\n' "$(stat -c %U:%G -- "$f")" "$old" "$(stat -c %a -- "$f")" "$f" "$why" >> "$list"
     done < <(
       [ "${#there[@]}" -eq 0 ] || find -P "${there[@]}" -xdev -uid "$u" -print0
       [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
