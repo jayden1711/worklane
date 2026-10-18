@@ -18,7 +18,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { startHub } from '../src/dashboard-hub.js';
 import { EventLog } from '../src/events/log.js';
-import { launchTestChrome, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip } from './browser-helpers.js';
+import { BOARD_CARDS, BOARD_SNAPSHOT, CURRENT_ROWS, ENTRANCE_ANIM, explainBoard, launchTestChrome, NOT_SHOWN_WHY, oneChromeAtATime, REAL_CHROME_TIMEOUT, realChromeTests, webUiSkip, type BoardSnapshot } from './browser-helpers.js';
 import { exampleProject, exampleRoles } from './helpers.js';
 import { writeSyntheticLog } from './synthetic-events.js';
 
@@ -115,31 +115,29 @@ async function firstInProgress(instance: string): Promise<number> {
 }
 
 /**
- * In the page: an animation that ends (an entrance: a fade, a pop), as opposed to one that loops (a spinner).
+ * In the page: whether an element is fully shown (owner-approved, option A; test/browser-helpers.ts NOT_SHOWN_WHY,
+ * which also says why not).
  */
-const ENTRANCE_ANIM = `((x) => x.effect && x.effect.getComputedTiming().iterations !== Infinity)`;
-/**
- * In the page: whether an element is fully shown (owner-approved, option A): a non-zero box inside the viewport, not
- * in a hidden or inert container, nothing up the tree display:none or visibility:hidden, its opacity and every
- * ancestor's at least 0.99, and no entrance animation still running on it or inside it.
- */
-const VISIBLE = `((el) => {
-  if (!el || !el.isConnected || el.closest('[hidden],[inert]')) return false;
-  const r = el.getBoundingClientRect();
-  if (!(r.width > 0 && r.height > 0) || r.bottom <= 0 || r.right <= 0 || r.top >= innerHeight || r.left >= innerWidth) return false;
-  for (let e = el; e; e = e.parentElement) {
-    const st = getComputedStyle(e);
-    if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse' || Number(st.opacity) < 0.99) return false;
-  }
-  return !el.getAnimations({ subtree: true }).some((x) => ${ENTRANCE_ANIM}(x) && x.playState !== 'finished');
-})`;
+const VISIBLE = `((el) => ${NOT_SHOWN_WHY}(el) === '')`;
 /** In the page: an entrance animation anywhere in the page's main area (a cached switch must show none). */
 const ENTERING = `[...(document.querySelector('main')?.getAnimations({ subtree: true }) ?? [])].some((x) => ${ENTRANCE_ANIM}(x) && x.playState !== 'finished')`;
 /** In the page: the switcher marks `instance` as the one shown (on a hub). */
-const selected = (instance: string) => `([...document.querySelectorAll('[data-testid="instance-row"][aria-current="true"]')].map((e) => e.textContent.trim()).join() === ${JSON.stringify(instance)})`;
+const selected = (instance: string) => `([...document.querySelectorAll(${JSON.stringify(CURRENT_ROWS)})].map((e) => e.textContent.trim()).join() === ${JSON.stringify(instance)})`;
 /** In the page: the Board shows `instance`'s own cards (each card's instance is the one its data names), no other's, at least one of them visible, with `instance` selected. */
 const boardOf = (instance: string) =>
-  `(() => { const cards = [...document.querySelectorAll('[data-testid="page-board"] [data-testid="board-card"]')]; return cards.length > 0 && cards.every((c) => c.dataset.cardInstance === ${JSON.stringify(instance)}) && cards.some((c) => ${VISIBLE}(c)) && ${selected(instance)}; })()`;
+  `(() => { const cards = [...document.querySelectorAll(${JSON.stringify(BOARD_CARDS)})]; return cards.length > 0 && cards.every((c) => c.dataset.cardInstance === ${JSON.stringify(instance)}) && cards.some((c) => ${VISIBLE}(c)) && ${selected(instance)}; })()`;
+/**
+ * boardOf(instance) and what the page showed, read in one go: a false check says which part failed (#639: a rare
+ * failure after the fresh answer, whose message named none). Never a retry: the check is read once, as before.
+ */
+async function boardCheck(cdp: Cdp, instance: string): Promise<{ ok: boolean; snap: BoardSnapshot }> {
+  return js(cdp, `({ ok: ${boardOf(instance)}, snap: ${BOARD_SNAPSHOT} })`);
+}
+/** Assert boardOf(instance) now; on a false one, the message says which part failed and what the page had. */
+async function assertBoard(cdp: Cdp, instance: string, what: string): Promise<void> {
+  const c = await boardCheck(cdp, instance);
+  if (!c.ok) assert.fail(explainBoard(what, instance, c));
+}
 /**
  * In the page: the PR page of `instance` (selected): the newest merged PR it has (a number only that instance has) is
  * in the page, and its first PR in progress, also its own, is visible.
@@ -274,7 +272,8 @@ async function switches(link: Link, cache: boolean): Promise<{ instance: number[
   try {
     const { cdp, quiet } = b;
     await cdp.send('Page.navigate', { url: `${s!.hub.breakGlassUrl}/` });
-    await until(`${OTHER}'s Board`, () => js<boolean>(cdp, boardOf(OTHER)), 240_000, 100);
+    // On a timeout, until() names the last read's failing part.
+    await until(`${OTHER}'s Board`, () => assertBoard(cdp, OTHER, 'the last read').then(() => true), 240_000, 100);
     if (cache) await until(`${BUSY}'s board prefetched`, () => js<boolean>(cdp, `performance.getEntriesByType('resource').some((e) => /\\/api\\/i\\/${BUSY}\\/board$/.test(e.name))`), 240_000, 200);
     await quiet();
     const instance: number[] = [];
@@ -284,14 +283,15 @@ async function switches(link: Link, cache: boolean): Promise<{ instance: number[
       const to = on === OTHER ? BUSY : OTHER;
       assert.equal(await js<boolean>(cdp, boardOf(to)), false, `${to}'s Board isn't shown before the switch to it`);
       const r: Timed = await js(cdp, timedSwitch(instanceRow(to), boardOf(to), otherCards(to)));
-      assert.ok(r.ms >= 0, `the switch to ${to} showed its own Board`);
+      const at = `instance switch ${i + 1} of ${SWITCHES} (i = ${i})`;
+      if (r.ms < 0) assert.fail(explainBoard(`the switch to ${to} didn't show its own Board within 60 s, ${at}; the Board read after it`, to, await boardCheck(cdp, to)));
       if (cache) assert.equal(r.entrance, false, `the switch to ${to} from cache showed no entrance animation`);
       assert.equal(r.wrong, false, `no card of another instance was on the page at any moment after the switch to ${to}`);
       instance.push(r.ms);
       on = to;
       await quiet();
       // Read again in the background meanwhile: still its own, and still shown.
-      assert.equal(await js<boolean>(cdp, boardOf(to)), true, `${to}'s Board after its fresh answer`);
+      await assertBoard(cdp, to, `${to}'s Board after its fresh answer, ${at}`);
     }
     const shownPrs = prsOf(on, await newestMerged(on), await firstInProgress(on));
     let onPrs = false;
@@ -299,13 +299,16 @@ async function switches(link: Link, cache: boolean): Promise<{ instance: number[
       const target: string = onPrs ? boardOf(on) : shownPrs;
       assert.equal(await js<boolean>(cdp, target), false, `the ${onPrs ? 'Board' : 'PR page'} isn't shown before the switch to it`);
       const r: Timed = await js(cdp, onPrs ? timedSwitch(navRow('tab-board'), target, otherCards(on)) : timedSwitch(navRow('tab-prs'), target, otherCards(on)));
-      assert.ok(r.ms >= 0, `the switch to the ${onPrs ? 'Board' : 'PR page'} showed ${on}'s own data`);
+      const at = `page switch ${i + 1} of ${SWITCHES} (i = ${i})`;
+      if (r.ms < 0 && onPrs) assert.fail(explainBoard(`the switch to the Board didn't show ${on}'s own data within 60 s, ${at}; the Board read after it`, on, await boardCheck(cdp, on)));
+      assert.ok(r.ms >= 0, `the switch to the ${onPrs ? 'Board' : 'PR page'} showed ${on}'s own data, ${at}`);
       if (cache) assert.equal(r.entrance, false, `the switch to the ${onPrs ? 'Board' : 'PR page'} from cache showed no entrance animation`);
       assert.equal(r.wrong, false, `no card of another instance on ${on}'s pages`);
       page.push(r.ms);
       onPrs = !onPrs;
       await quiet();
-      assert.equal(await js<boolean>(cdp, target), true, `the ${onPrs ? 'PR page' : 'Board'} after its fresh answer`);
+      if (onPrs) assert.equal(await js<boolean>(cdp, target), true, `the PR page after its fresh answer, ${at}`);
+      else await assertBoard(cdp, on, `the Board after its fresh answer, ${at}`);
     }
     return { instance, page };
   } finally {
@@ -405,7 +408,10 @@ test(`gated, ${GATED.name}: a PR opened while its page is shown fades in, in at 
   }
 });
 
-/** Measured on the relay's link and printed; never a failure (the owner's gate is the 10 Mbit/s link). */
+/**
+ * Measured on the relay's link and printed; never a failure (the owner's gate is the 10 Mbit/s link). A run that
+ * fails prints why in full: a Board check's message names its failing part and what the page had (explainBoard).
+ */
 async function measuredOnly(ctx: TestContext, what: string, run: () => Promise<string>) {
   try {
     ctx.diagnostic(`${RELAY.name} (measured, not gated): ${await run()}`);
