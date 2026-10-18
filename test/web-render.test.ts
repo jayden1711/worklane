@@ -71,7 +71,7 @@ interface Render {
   renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
-  renderClaudeAccount(data: unknown, now?: number): string;
+  renderClaudeAccount(data: unknown, now?: number, scope?: { current: string | null; all: boolean; instances: (string | null)[] } | null): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
   tailscaleBusy(d: unknown, now?: number): boolean;
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
@@ -129,6 +129,7 @@ interface Render {
   tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
   renderWhoAmI(state: { user: string; role?: string; via?: string }, o?: { hubPage?: boolean }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
+  renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
@@ -2233,6 +2234,61 @@ test("two instances on one machine: with one selected, no page shows any of the 
   } finally {
     for (const d of Object.values(servers)) await d.close();
   }
+});
+
+test('#562: after an instance and then All instances, the sidebar header and the Claude account panel say All instances; picking one instance again names it', () => {
+  const hub = { instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }] };
+  // What each instance's server answers: its own state (its project's name) and the machine's Claude account, from it.
+  const own = asOwner as State & { project: Record<string, unknown> };
+  const stateOf = (name: 'a' | 'b') => ({ ...own, project: { ...own.project, name: MARKS[name].project } }) as State;
+  const cell = (instance: string, active: boolean) => ({ instance, user: `wl-${instance}-agent`, active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
+  const accountOf = (name: 'a' | 'b') => ({
+    machineOwner: true,
+    machineOwners: ['example-owner'],
+    login: 'example-owner',
+    instance: name,
+    allowed: true,
+    why: null,
+    canSwitch: true,
+    busy: null,
+    canPasteToken: false,
+    status: null,
+    switch: null,
+    requests: [],
+    profiles: { instances: ['a', 'b'], active: { a: 'default', b: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell('a', true), cell('b', true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell('a', false), cell('b', false)] }] },
+    profileOps: [],
+    confirmScript: 'claude-account.sh',
+    signin: null,
+  });
+  // As the page sees it: every view reads scope.current's server (the state, and the account panel's data).
+  const view = (scope: ReturnType<Render['scopeOf']>) => ({
+    header: (/data-testid="sidebar-title"[^>]*>([^<]*)</.exec(r.renderSidebar(stateOf(scope.current as 'a' | 'b'), { hub, scope })) ?? [])[1],
+    account: r.renderClaudeAccount(accountOf(scope.current as 'a' | 'b'), undefined, scope),
+  });
+  const scopeLine = (html: string) => (/data-testid="claude-account-scope"[^>]*>([^]*?)<\/p>/.exec(html) ?? [])[1]?.replace(/<[^>]+>/g, '');
+
+  // b picked in the switcher, then All instances (selectAllInstances keeps scope.current: web/src/api.ts).
+  const b = r.scopeOf(hub, 'b', false);
+  assert.equal(view(b).header, 'beta-proj', 'b picked: the header names its project');
+  const all = r.scopeOf(hub, b.current, true);
+  const shown = view(all);
+  assert.equal(shown.header, 'All instances', 'All instances: the header says so, not b');
+  assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
+  assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
+  // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
+  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
+  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
+  assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
+  assert.match(shown.account, /data-testid="claude-account-switch"/, 'switching every instance is still offered');
+
+  // One instance again: its name in the header and in the panel.
+  const a = r.scopeOf(hub, 'a', false);
+  const back = view(a);
+  assert.equal(back.header, 'alpha-proj', 'a picked: the header names its project');
+  assert.match(scopeLine(back.account) ?? '', /^For a: /, "a picked: the panel's scope line names a");
+  assert.doesNotMatch(scopeLine(back.account) ?? '', /every instance on this machine \(/);
+  assert.match(back.account, /only a&#x27;s/, 'its accounts can be chosen for a from here');
+  for (const id of ['claude-profile-use-here', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
 });
 
 test('Claude account: a machine owner sees each agent user and the switch step by step, with the token box only where it is taken; anyone else nothing', () => {
