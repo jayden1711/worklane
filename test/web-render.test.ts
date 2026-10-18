@@ -132,6 +132,10 @@ interface Render {
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
+  navFor(state: unknown): { to: string; testId: string }[];
+  redirectFor(path: string): string | null;
+  landOn(loc: { pathname: string; search: string; hash: string }, history: { state: unknown; replaceState(data: unknown, unused: string, url: string): void }): string;
+  EXTEND_TABS: readonly { id: string; to: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
   renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
@@ -193,6 +197,8 @@ type VoiceMachine = { pending: unknown; hear(text: string, active: boolean): { d
 type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
 type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
+/** The render entry's bundle (file URL), for a test that loads it again as a browser would. */
+let bundle: string;
 let asOwner: State;
 let asOther: State;
 let asWriter: State;
@@ -223,7 +229,8 @@ before(async () => {
     ssr: { noExternal: true },
     build: { ssr: join(repoRoot, 'web', 'src', 'render-check.tsx'), outDir: out, emptyOutDir: true, rollupOptions: { output: { entryFileNames: 'render-check.mjs' } } },
   });
-  r = (await import(pathToFileURL(join(out, 'render-check.mjs')).href)) as Render;
+  bundle = pathToFileURL(join(out, 'render-check.mjs')).href;
+  r = (await import(bundle)) as Render;
 
   // The demo's coordinator keeps its state under the state dir: a temporary one, not the user's.
   const prev = process.env[`${BRAND.envPrefix}_STATE_DIR`];
@@ -487,7 +494,7 @@ test('narrow screens: the page header\'s menu button opens a drawer with every p
   const g = globalThis as Record<string, unknown>;
   const stub = g.window;
   delete g.window;
-  const drawerOf = (o?: Parameters<Render['renderNavDrawer']>[1]) => r.renderNavDrawer(asOwner as never, o);
+  const drawerOf = (o?: Parameters<Render['renderNavDrawer']>[1]) => r.renderNavDrawer({ ...asOwner, experiments: true } as never, o);
   let open: string, amber: string, hub: string, closed: string;
   try {
     open = drawerOf();
@@ -1702,7 +1709,7 @@ test('#468 setup mode: the sidebar offers First run alone (all pages once config
   let setupMode: string, configured: string;
   try {
     setupMode = r.renderNavDrawer({ ...asOwner, setupMode: true } as never);
-    configured = r.renderNavDrawer({ ...asOwner, setupMode: false } as never);
+    configured = r.renderNavDrawer({ ...asOwner, setupMode: false, experiments: true } as never);
   } finally {
     g.window = stub;
   }
@@ -1714,6 +1721,88 @@ test('#468 setup mode: the sidebar offers First run alone (all pages once config
   assert.match(hidden, /data-testid="setup-mode-hidden-why"[^>]*>Issues shows once this checkout has its config, and it has none yet\./);
   assert.match(hidden, /href="\/first-run"[^>]*data-testid="setup-mode-hidden-link"/);
   assert.match(r.renderSetupModeHidden('/nowhere'), /This page shows once/);
+});
+
+/** The test ids of the sidebar rows navFor gives a state. */
+const navIds = (state: unknown) => r.navFor(state).map((n) => n.testId);
+
+test('#581 nav shows Experiments for an owner or writer on an enabled instance', () => {
+  for (const who of [asOwner, asWriter]) {
+    const ids = navIds({ ...who, experiments: true });
+    assert.ok(ids.includes('nav-experiments'), `${(who as { role?: string }).role}: ${ids.join(' ')}`);
+    assert.equal(r.navFor({ ...who, experiments: true }).find((n) => n.testId === 'nav-experiments')!.to, '/experiments');
+  }
+  // Its own row in the sidebar, as a link to its route.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  try {
+    assert.match(r.renderNavDrawer({ ...asWriter, experiments: true } as never), /<a href="\/experiments"[^>]*data-testid="nav-experiments"/);
+  } finally {
+    g.window = stub;
+  }
+});
+
+test('#581 nav hides Experiments for a viewer and on a disabled instance', () => {
+  assert.equal((asOther as { role?: string }).role, 'viewer');
+  assert.ok(!('experiments' in asOther), 'the server sends a viewer no experiments key');
+  // A viewer: never, even with the flag forged in.
+  assert.ok(!navIds({ ...asOther, experiments: true }).includes('nav-experiments'));
+  // Off or unknown on this machine (false), or from a server that doesn't say (absent): hidden, fail closed.
+  for (const who of [asOwner, asWriter]) {
+    assert.ok(!navIds({ ...who, experiments: false }).includes('nav-experiments'));
+    const { experiments: _, ...without } = who as State & { experiments?: boolean };
+    assert.ok(!navIds(without).includes('nav-experiments'));
+  }
+  // Setup mode: First run alone.
+  assert.deepEqual(navIds({ ...asOwner, experiments: true, setupMode: true }), ['nav-first-run']);
+});
+
+test('#581 the old Extend route redirects', () => {
+  assert.equal(r.redirectFor('/extend/experiments'), '/experiments');
+  assert.equal(r.redirectFor('/extend/experiments/'), '/experiments/');
+  assert.equal(r.redirectFor('/extend/experiments/example-speed'), '/experiments/example-speed', 'the study id is kept');
+  for (const keep of ['/extend', '/extend/automations', '/extend/automations/nightly', '/extend/plugins', '/extend/experimentsx', '/experiments', '/']) assert.equal(r.redirectFor(keep), null, keep);
+  // Replaced, not pushed (Back doesn't land on the old address again), with the query and the hash kept.
+  const calls: string[] = [];
+  const history = { state: { k: 1 }, replaceState: (data: unknown, _: string, url: string) => void calls.push(`${JSON.stringify(data)} ${url}`) };
+  assert.equal(r.landOn({ pathname: '/extend/experiments/example-speed', search: '?x=1', hash: '#log' }, history), '/experiments/example-speed');
+  assert.deepEqual(calls, ['{"k":1} /experiments/example-speed?x=1#log']);
+  assert.equal(r.landOn({ pathname: '/extend/automations', search: '', hash: '' }, history), '/extend/automations');
+  assert.equal(calls.length, 1, 'a current address is left alone');
+  // Extend keeps Automations and Plugins, and opens on Automations.
+  assert.deepEqual(r.EXTEND_TABS.map((t) => t.id), ['automations', 'plugins']);
+  const extend = r.renderPage('extend', asOwner);
+  assert.doesNotMatch(extend, /extend-tab-experiments/);
+  assert.match(extend, /aria-current="page"[^>]*data-testid="extend-tab-automations"/);
+  // The new page renders at its own route.
+  assert.match(r.renderPage('experiments', asOwner), /data-testid="page-experiments"/);
+});
+
+test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {
+  // App.tsx's module body preloads the page for window.location when there is a window, through redirectFor. Loaded
+  // with a window (as a browser loads it), every module it uses must be ready by then: CI's real Chrome caught
+  // "is not iterable" there, the redirect list read before it was defined, and every page failed to load.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window as Record<string, unknown>;
+  // Whatever else a module reads from the browser while it loads: a no-op that answers anything (never a promise).
+  const anything: unknown = new Proxy(function () {}, { get: (_, k) => (k === 'then' ? undefined : k === Symbol.toPrimitive ? () => '' : anything), apply: () => anything, construct: () => anything as object });
+  const browser = (own: Record<string, unknown>) => new Proxy(own, { get: (o, k) => (k in o ? o[k as string] : k === 'then' ? undefined : anything) });
+  const hadDocument = 'document' in g;
+  g.window = browser({ ...stub, location: { pathname: '/extend/experiments/example-speed', search: '', hash: '' } });
+  g.document = anything;
+  try {
+    // App.tsx is in a chunk of its own (the pages are split); load that chunk again, so its body runs with a window.
+    const entry = readFileSync(new URL(bundle), 'utf8');
+    const chunk = entry.match(/import \{[^}]*\bas navFor\b[^}]*\} from "(\.\/[^"]+)"/)?.[1];
+    assert.ok(chunk, "the render entry imports navFor from App.tsx's chunk");
+    const url = new URL(chunk, bundle).href;
+    const again = (await import(`${url}?at=old-address`)) as Record<string, unknown>;
+    assert.ok(Object.keys(again).length > 0, 'the module loaded');
+  } finally {
+    g.window = stub;
+    if (!hadDocument) delete g.document;
+  }
 });
 
 test("the first-run page, Repo config: auto-config's open questions with every choice and how to answer, each command's run on main, the setup PR", () => {

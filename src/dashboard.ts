@@ -9,7 +9,7 @@
 // See dashboard-auth.ts.
 import { applyChange, ACTIONS as AUTOMATION_ACTIONS, AutomationsError, loadAutomations, mayDo, planChange, type AutomationAction, type ChangeRequest } from './automations/store.js';
 import { automationsView } from './automations/view.js';
-import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsView, mayDoExp, planExperiment, type ExpAction, type ExpSite } from './experiments/view.js';
+import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsOn, experimentsView, mayDoExp, noExperimentsHere, planExperiment, type ExpAction, type ExpSite } from './experiments/view.js';
 import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
@@ -240,7 +240,7 @@ export interface DashboardOptions {
   policyFile?: string | null;
   /** The instance's automations.yaml (in its home): Extend -> Automations reads and, through Review -> Confirm, writes it. None: a checkout (no automations). */
   automationsFile?: string;
-  /** Extend -> Experiments: the instance's checkout, default branch, name and pins file (server mode only). None: no experiments here. */
+  /** Experiments: the instance's checkout, default branch, name and pins file (an instance with separate users only). None: no experiments here. */
   experiments?: ExpSite;
   /** The machine and service stats for the health view; the OS adapter's machineStats when unset. */
   machineStats?: () => MachineStats | null;
@@ -421,13 +421,18 @@ export function docsUrl(page: string, repository: unknown = enginePackage().repo
 }
 const enginePackage = (): { repository?: unknown } => JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as { repository?: unknown };
 
+/** What dashboardSite builds for a checkout or an instance. */
+export interface DashboardSite { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string; automationsFile?: string; experiments?: ExpSite }
+
 /**
- * The options a site's own dashboard starts with (cli.ts `dashboard`): its log, state, policy, intake and automations
- * files, backlog and roles. INVARIANT: one list, so an instance's file reaches its dashboard's routes (#522: the
- * automations file did not, and Extend said "a checkout" on every instance).
+ * The options a site's own dashboard starts with (cli.ts `dashboard`, which passes cfg and its port itself).
+ * INVARIANT: every other field of the site, by construction, so a new one can't be dropped on the way to the
+ * dashboard's routes (#522: the automations file was; #563: the experiments site was, and every instance's
+ * Experiments said it served a checkout). The return type also refuses a site field DashboardOptions doesn't take.
  */
-export function siteOptions(site: ReturnType<typeof dashboardSite>) {
-  return { root: site.root, logs: site.logs, policyFile: site.policyFile, backlog: site.backlog, eventsDb: site.eventsDb, stateDir: site.stateDir, ...(site.roleOf ? { roleOf: site.roleOf } : {}), ...(site.intakeFile ? { intakeFile: site.intakeFile } : {}), ...(site.automationsFile ? { automationsFile: site.automationsFile } : {}) };
+export function siteOptions(site: DashboardSite): Pick<DashboardOptions, Exclude<keyof DashboardSite, 'cfg' | 'port'>> {
+  const { cfg: _cfg, port: _port, ...options } = site;
+  return options;
 }
 
 /**
@@ -435,7 +440,7 @@ export function siteOptions(site: ReturnType<typeof dashboardSite>) {
  * an instance, that instance's: run it as the instance's coordinator user,
  * the only user that can read (and, for answers, write) the instance's log.
  */
-export function dashboardSite(root: string, instance?: string, dir = instancesDir()): { root: string; cfg: Config; eventsDb: string; stateDir: string; port: number; logs: LogSource; policyFile: string | null; backlog: () => Backlog; roleOf?: RoleOf; intakeFile?: string; automationsFile?: string; experiments?: ExpSite } {
+export function dashboardSite(root: string, instance?: string, dir = instancesDir()): DashboardSite {
   const i = instance ? loadInstance(instance, dir) : null;
   const s = i ? siteForInstance(i) : siteForRoot(root);
   // An instance's service on Linux is the systemd unit the setup scripts install; elsewhere the coordinator writes its own log file.
@@ -1334,6 +1339,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // Whether this viewer may read the service log and the machine settings (the owners' and writers').
       canReadLogs: isWriter(who.role),
       canReadMachine: isWriter(who.role),
+      // Whether root's file turns experiments on for this instance, so the sidebar shows Experiments (#581). The
+      // owners' and writers' only: a viewer's state has no such key (and stateForViewer's allowlist drops it too).
+      ...(isWriter(who.role) ? { experiments: experimentsOn(opts.experiments) } : {}),
       // Every cost figure is Claude Code's own estimate of a run's cost, not money billed.
       costBasis: 'estimate' as const,
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
@@ -1814,12 +1822,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             throw e;
           }
         }
-        // Experiment studies (src/experiments/, Extend -> Experiments): the owners' and writers' to read; a viewer gets
+        // Experiment studies (src/experiments/, the Experiments page): the owners' and writers' to read; a viewer gets
         // nothing. A change is planned without confirm (nothing written) and carried out with it, against what the review
         // saw (its digest). Owners start, resume, approve, decline and archive; writers pause and stop a running job.
         if (url.pathname === '/api/experiments' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('experiments are', who) });
-          if (!opts.experiments) return json(res, 200, { unavailable: "experiments are a server instance's (separate users): this dashboard serves a checkout or a local instance" });
+          if (!opts.experiments) return json(res, 200, { unavailable: noExperimentsHere(opts.instance) });
           return json(res, 200, experimentsView({ site: opts.experiments, events: eventCache.all(), role: who.role, now: new Date() }));
         }
         if (url.pathname === '/api/experiments' && req.method === 'POST') {
@@ -1830,7 +1838,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             audit(who, 'experiment.refused_change', { action: action.slice(0, 20), study, why: error.slice(0, 300) });
             return json(res, status, { error });
           };
-          if (!opts.experiments) return refused(400, "experiments are a server instance's: this dashboard serves a checkout");
+          if (!opts.experiments) return refused(400, noExperimentsHere(opts.instance));
           if (!(EXP_ACTIONS as readonly string[]).includes(action)) return refused(400, `no action ${action.slice(0, 20)}`);
           if (!mayDoExp(action, who.role)) return refused(403, `only the instance's owners (admin on ${repo}) may ${action.replace('_', ' ')} a study${action === 'pause' || action === 'stop_job' ? '' : '; writers may pause one or stop its running job'}; @${who.login} is a ${who.role}`);
           try {
