@@ -75,8 +75,10 @@ function fetchDefault(branch) {
   } catch (e) {
     const err = String(e.stderr ?? '').trim();
     if (/couldn't find remote ref/i.test(err)) throw new NotOnOrigin(`${REMOTE} has no ${branch} branch, so there is no gate to load from it.`);
-    // WHY: by the clock, not the error: a git cut off at the timeout can still exit with a transport message of its own.
-    return Date.now() - start >= seconds * 1000 ? `no answer within ${seconds}s` : err.split('\n').slice(-2).join(' ') || e.message;
+    // WHY: spawnSync's own ETIMEDOUT, or the clock: a git cut off at the timeout can still exit with a transport message
+    // of its own (so the clock), and the wall clock can read under the timeout after a real one (a step back, a slew: so ETIMEDOUT).
+    const timedOut = e.code === 'ETIMEDOUT' || Date.now() - start >= seconds * 1000;
+    return timedOut ? `no answer within ${seconds}s` : err.split('\n').slice(-2).join(' ') || e.message;
   }
 }
 
