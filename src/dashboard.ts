@@ -1060,7 +1060,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // NTP step moves). Two still age by wall time: avatars, whose `at` is saved to disk and read after a restart (wall
   // time is right there), and setupCache, whose checks run in a worker thread (performance.now has another origin
   // there) and whose stamps are shown as "checked at". The sign-in role cache (cachedRoles, built in dashboardSite)
-  // is wall time too.
+  // ages by its own monotonic clock (#622).
   const clock = opts.now ?? (() => performance.now());
   // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
   const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();

@@ -89,7 +89,14 @@ export interface HubOptions {
    * gateway. whois, peerUid and selfNode: tests only.
    */
   hooks?: { port: number; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; selfNode?: () => string | null; lockout?: { fails: number; windowMs: number; forMs: number } };
+  /** Wall time, in ms: sessions (saved to sessions.json), sign-in states, avatars and the gateways. Tests set it. */
   now?: () => number;
+  /**
+   * WHY (#622): the clock the hub's copies of people's roles (and of whom each instance knows) age by, in ms; monotonic
+   * (performance.now) when unset, so a wall-clock step back (an NTP correction) can't keep a revoked role, the owner
+   * terminal's included, past ROLE_CACHE_MS, nor a step forward cut one short. Elapsed time only. Tests advance it.
+   */
+  clock?: () => number;
 }
 
 /** A person's picture through the hub: /api/i/<instance>/avatar/<login>, served by the hub itself (#462). */
@@ -303,6 +310,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   warmStatic(webDir);
   const now = opts.now ?? Date.now;
+  const clock = opts.clock ?? (() => performance.now());
   const byName = new Map(opts.instances.map((i) => [i.name, i]));
   const signIn = opts.signIn ?? null;
   const sessions = signIn ? new Sessions({ secret: signIn.sessionSecret, file: join(opts.stateDir, 'sessions.json'), now }) : null;
@@ -315,10 +323,10 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     if ((asker && who.toLowerCase() === asker.toLowerCase()) || (am.isMachineOwner ?? ((l: string) => isMachineOwner(l)))(who)) return true;
     const k = `${i.name}\n${asker ?? ''}\n${who.toLowerCase()}`;
     const c = knownCache.get(k);
-    if (c && now() < c.until) return c.known;
+    if (c && clock() < c.until) return c.known;
     const known = await instanceKnows(i, who, asker);
     if (knownCache.size >= 10_000) knownCache.clear();
-    knownCache.set(k, { known, until: now() + ROLE_CACHE_MS });
+    knownCache.set(k, { known, until: clock() + ROLE_CACHE_MS });
     return known;
   };
   const origin = signIn ? new URL(signIn.publicUrl).origin : null;
@@ -329,13 +337,13 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
   const flows = new ManifestFlows({ isMachineOwner: am.isMachineOwner ?? ((l) => isMachineOwner(l)), signIn: !!signIn, publicUrl: origin, now, ...(appApi ? { api: appApi } : {}), ...(appWeb ? { web: appWeb } : {}), ...(appFetch ? { fetch: appFetch } : {}) });
 
   // Each person's role per instance, as that instance just read it from the repo (fresh, not from its cache),
-  // kept no longer than the role cache allows.
+  // kept no longer than the role cache allows, by the monotonic clock.
   const roles = new Map<string, { role: Role | null; until: number }>();
   const roleKey = (instance: string, login: string) => `${instance}\n${login.toLowerCase()}`;
-  const learn = (instance: string, login: string, role: Role | null) => roles.set(roleKey(instance, login), { role, until: now() + ROLE_CACHE_MS });
+  const learn = (instance: string, login: string, role: Role | null) => roles.set(roleKey(instance, login), { role, until: clock() + ROLE_CACHE_MS });
   const knownRole = (instance: string, login: string) => {
     const r = roles.get(roleKey(instance, login));
-    return r && now() < r.until ? r : null;
+    return r && clock() < r.until ? r : null;
   };
   /** The person's role on an instance: the hub's fresh copy, else the instance asked again. */
   const roleOn = async (i: HubInstance, login: string) => {
