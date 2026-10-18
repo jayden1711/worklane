@@ -32,17 +32,29 @@ export function missingEngineWarning(enginePath: string): string {
   return `${BRAND.name} guardrails are off in this checkout: ${fix}.`;
 }
 
+/** The hook commands' entry: the guard's own (src/hook-main.ts), beside the engine's cli.js, the path install is given. */
+export const HOOK_ENTRY = 'hook-main.js';
+
+/** The guard's own entry beside an engine's cli.js (either separator, or $CLAUDE_PROJECT_DIR/...); anything else throws. */
+export function hookEntry(engineCli: string): string {
+  if (!/(^|[/\\])cli\.js$/.test(engineCli)) throw new Error(`the engine path for the hooks must be the engine's dist/src/cli.js, not ${engineCli}`);
+  return engineCli.slice(0, -'cli.js'.length) + HOOK_ENTRY;
+}
+
 /**
  * Hook command (POSIX sh; Claude Code runs hooks through bash on every OS).
  * A crashing engine always blocks (`|| exit 2`). A missing engine blocks
  * agent sessions; a human session gets a one-line warning at session start
  * and is otherwise unaffected.
  */
-export function hookCommand(enginePath: string, event: string): string {
+export function hookCommand(engineCli: string, event: string): string {
+  // WHY (#665): the guard's own entry, not the CLI: the process that decides a tool call loads only the guard's
+  // locked import tree. `E` is that file, so a check that the engine is present checks the file that runs.
+  const enginePath = hookEntry(engineCli);
   // The post-edit check only gives feedback: a missing engine or a crash must stay silent, never exit 2.
-  if (event === 'post-tool-use') return `E="${enginePath}"; if [ -f "$E" ]; then ${HOOK_MARKER} node "$E" hook post-tool-use || true; else :; fi`;
+  if (event === 'post-tool-use') return `E="${enginePath}"; if [ -f "$E" ]; then ${HOOK_MARKER} node "$E" post-tool-use || true; else :; fi`;
   const agentVar = `$${BRAND.envPrefix}_AGENT`;
-  const run = `${HOOK_MARKER} node "$E" hook ${event} || exit 2`;
+  const run = `${HOOK_MARKER} node "$E" ${event} || exit 2`;
   const human =
     event === 'session-start'
       ? `echo '{"systemMessage": "${missingEngineWarning(enginePath)}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${missingEngineWarning(enginePath)} Mention this to the user once."}}'`

@@ -20,7 +20,7 @@ import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
+import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
@@ -289,20 +289,9 @@ async function main(argv: string[]): Promise<number> {
       console.log(pkg.version);
       return 0;
 
-    case 'hook': {
-      const raw = await readStdin();
-      let input: HookInput = {};
-      try {
-        input = raw.trim() ? (JSON.parse(raw) as HookInput) : {};
-      } catch {
-        process.stderr.write(`[${BRAND.cli}] hook input is not JSON\n`);
-        return 2;
-      }
-      const out = await runHook(sub ?? '', input);
-      if (out.stdout) process.stdout.write(out.stdout);
-      if (out.stderr) process.stderr.write(out.stderr);
-      return out.exitCode;
-    }
+    case 'hook':
+      // Installs before #665: the hook commands install writes now run the guard's own entry (src/hook-main.ts).
+      return hookProcess(sub ?? '');
 
     case 'install': {
       // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { agentSettingsPath, guardrailSettings, HOOK_MARKER, projectSettingsRefusal, readAgentSettings, runSettings, type Settings } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
-import { install, invokedEngine } from '../src/install.js';
+import { hookEntry, install, invokedEngine } from '../src/install.js';
 import { childEnv } from '../src/os/index.js';
 import { CliRunner } from '../src/runner.js';
 import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
@@ -44,7 +44,8 @@ test("install --instance writes the hooks and rules to the instance's agent sett
   for (const event of ['PreToolUse', 'SessionStart', 'SessionEnd']) {
     const cmds = s.hooks![event]!.flatMap((e) => e.hooks).map((h) => h.command);
     assert.equal(cmds.length, 1, event);
-    assert.ok(cmds[0]!.includes(HOOK_MARKER) && cmds[0]!.includes(`E="${engineCli}"`), 'an absolute engine path, not one inside the agent-writable checkout');
+    // The guard's own entry beside the engine's cli.js (#665).
+    assert.ok(cmds[0]!.includes(HOOK_MARKER) && cmds[0]!.includes(`E="${hookEntry(engineCli)}"`), 'an absolute engine path, not one inside the agent-writable checkout');
   }
   assert.ok(s.permissions!.allow!.includes('Bash(npm test:*)'));
   assert.ok(s.permissions!.deny!.includes('Read(~/.ssh/**)'));

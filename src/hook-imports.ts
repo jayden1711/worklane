@@ -1,5 +1,5 @@
-// The agents' tool guard's import tree (#665): every module src/hook.ts reaches, directly or through other imports,
-// that no other self-modification glob locks already (src/review.ts). Each is locked as the guard, in the engine's repo.
+// The agents' tool guard's import tree (#665): every module src/hook.ts and its process entry src/hook-main.ts reach,
+// directly or through other imports, that no other self-modification glob locks already (src/review.ts). Each is locked as the guard, in the engine's repo.
 // WHY a list: the engine runs from its build, so the lock can't read the imports at run time. test/review.test.ts reads
 // them from the real source with TypeScript's own scan and fails, naming each module, on an import that isn't here or
 // an entry that is no longer imported. This file is the guard's own (src/hook*), so a change to it waits for the owner.
@@ -48,6 +48,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/optimize.ts',
   'src/os/index.ts',
   'src/os/system-paths.ts',
+  'src/os/system-root-guard.ts',
   'src/plugins/approval.ts',
   'src/plugins/run.ts',
   'src/plugins/tree.ts',
@@ -55,6 +56,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/project-env.ts',
   'src/provider-hosts.ts',
   'src/providers.ts',
+  'src/quiet-sqlite.ts',
   'src/research.ts',
   'src/routing.ts',
   'src/run-feed.ts',

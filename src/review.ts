@@ -50,7 +50,11 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // with every module it reaches, directly or through other imports (#655, #665): the deny lists, the read-only agents'
   // tools and refusals, the task file's frozen paths, the guardrail rules' loader, the secret check, and the rest.
   // src/hook-imports.ts holds that tree as the test reads it from the real imports (test/review.test.ts).
+  // Its process entry is src/hook-main.ts (under src/hook*), so the tree is read from there too (#665).
   { what: "the agents' tool guard", globs: ['src/hook*', ...HOOK_IMPORTS] },
+  // What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change
+  // there could point an agent's hooks at another entry, or at none (#665).
+  { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
   // Which repos root says are managed apps, where the engine's own source paths below aren't locked (#665).
   { what: 'where the self-modification locks apply', globs: ['src/managed-apps.ts'] },
   { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },

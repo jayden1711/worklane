@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import ts from 'typescript';
 import { BRAND } from '../src/brand.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
+import { hookCommand, hookEntry } from '../src/install.js';
 import { AGENT_INSTRUCTIONS, computeLevel, loadMoneyPaths, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, selfModificationPart, type ChangeFile } from '../src/review.js';
 // The scope's own functions (#665) through the namespace: on an engine without them, only the tests that use them fail.
 import * as review from '../src/review.js';
@@ -109,11 +110,11 @@ function relativeImports(text: string, from = 'src/hook.ts'): { modules: string[
   return { modules: [...new Set(modules)].sort(), unnamed: [...new Set(unnamed)] };
 }
 
-/** Every module `entry` reaches, directly or through other imports (itself included), and what can't be followed. */
-function importTree(entry: string): { modules: string[]; problems: string[] } {
+/** Every module the entries reach, directly or through other imports (themselves included), and what can't be followed. */
+function importTree(...entries: string[]): { modules: string[]; problems: string[] } {
   const seen = new Set<string>();
   const problems: string[] = [];
-  const queue = [entry];
+  const queue = [...entries];
   while (queue.length) {
     const file = queue.shift()!;
     if (seen.has(file)) continue;
@@ -151,8 +152,11 @@ test('the import reader sees every import form, and reports one it cannot name',
 // WHY (#665): locking only what src/hook.ts imports itself left 52 of the 77 modules it reaches unlocked, among them
 // the guardrail rules' loader (src/config/load.ts, schema.ts), the chat reply's secret check (src/events/redact.ts) and
 // the live environment the guardrails key on (src/adapters/railway.ts): each could change what the guard allows at L1.
+/** The guard's code (src/hook.ts) and its process entry (src/hook-main.ts, what the installed hook commands run). */
+const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
+
 test("regression: every module in the agents' tool guard's import tree is self-modification, L3, with a review.yaml that lists no src/**", () => {
-  const { modules, problems } = importTree('src/hook.ts');
+  const { modules, problems } = importTree(...GUARD_ENTRIES);
   assert.deepEqual(problems, [], 'the guard loads a module this test cannot follow: import it by a literal relative path');
   assert.ok(modules.length > 50, `read the tree: ${modules.length} modules`);
   const notL3 = modules.filter((path) => {
@@ -165,12 +169,39 @@ test("regression: every module in the agents' tool guard's import tree is self-m
 // No module the guard reaches is left unlocked: in the engine's repo `engine: src/**` holds them all at L3 already, so
 // the lock costs nothing there, and outside it (a managed app's repo) the engine's source globs don't apply at all.
 test("the guard's own list (src/hook-imports.ts) is exactly the tree's modules no other glob locks: none missing, none stale", () => {
-  const { modules } = importTree('src/hook.ts');
+  const { modules } = importTree(...GUARD_ENTRIES);
   const guard = SELF_MODIFICATION_PARTS.find((p) => p.what === "the agents' tool guard")!;
   const listed = guard.globs.filter((g) => !g.includes('*'));
   const others = SELF_MODIFICATION_PARTS.flatMap((p) => p.globs).filter((g) => !listed.includes(g)).map((g) => globToRegExp(g));
   const want = modules.filter((m) => !others.some((re) => re.test(m)));
   assert.deepEqual([...listed].sort(), want, `src/hook-imports.ts must list exactly these, from the real imports:\n${want.map((m) => `  '${m}',`).join('\n')}`);
+});
+
+// WHY (#665 review): the hooks ran `node <engine>/dist/src/cli.js hook <event>`, so the guard's process was the whole
+// CLI: src/cli.ts set its exit code, and some 400 modules, most outside the locked tree, loaded with it. The hook
+// commands now run the guard's own entry, and what writes those commands is locked too.
+test("regression: every hook command install writes runs the guard's own entry (src/hook-main.ts), never the CLI; its writers are locked", () => {
+  for (const event of ['pre-tool-use', 'session-start', 'session-end', 'post-tool-use']) {
+    const cmd = hookCommand('/opt/engine/current/dist/src/cli.js', event);
+    assert.ok(cmd.startsWith('E="/opt/engine/current/dist/src/hook-main.js"; '), cmd);
+    assert.ok(cmd.includes(` node "$E" ${event} ||`), cmd);
+    assert.doesNotMatch(cmd, /cli\.js|"\$E" hook /, cmd);
+  }
+  assert.equal(hookEntry('$CLAUDE_PROJECT_DIR/node_modules/x/dist/src/cli.js'), '$CLAUDE_PROJECT_DIR/node_modules/x/dist/src/hook-main.js');
+  assert.equal(hookEntry('C:\\e\\dist\\src\\cli.js'), 'C:\\e\\dist\\src\\hook-main.js');
+  assert.throws(() => hookCommand('/usr/local/bin/engine', 'pre-tool-use'), /must be the engine's dist\/src\/cli\.js/);
+  assert.ok(existsSync(join(repoDir, 'src', 'hook-main.ts')));
+  assert.equal(selfModificationPart('src/hook-main.ts'), "the agents' tool guard");
+  for (const path of ['src/install.ts', 'src/instance.ts']) {
+    const r = level([f(path, 1, 1)]);
+    assert.equal(r.level, 'L3', path);
+    assert.equal(selfModificationPart(path), "the agents' tool guard's hook commands", path);
+  }
+  // No engine source writes a hook command that runs the CLI's `hook` (src/cli.ts keeps it for older installs).
+  const viaCli = readdirSync(join(repoDir, 'src'), { recursive: true, encoding: 'utf8' })
+    .filter((p) => p.endsWith('.ts') && p !== 'cli.ts')
+    .filter((p) => /cli\.js[^\n]*\bhook (pre-tool-use|session-start|session-end|post-tool-use)\b|"\$E" hook /.test(readFileSync(join(repoDir, 'src', p), 'utf8')));
+  assert.deepEqual(viaCli, []);
 });
 
 // WHY (#665): the locked globs matched by path in every managed repo, so an app's own src/contract.ts, src/hooks.ts or
