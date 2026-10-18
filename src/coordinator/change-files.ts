@@ -69,6 +69,11 @@ export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptio
   return out instanceof Error ? null : names(out);
 }
 
+/** The untracked files of a worktree (`ls-files --others --exclude-standard -z`), each path as itself. */
+export function untrackedNames(cwd: string): string[] {
+  return names(must(run(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
+}
+
 /** Each path `git diff <args>` touches with its status letter (A, M, D, T, ...): a rename as a delete and an add. */
 export function changedStatuses(cwd: string, args: string[]): { status: string; path: string }[] {
   const parts = must(run(cwd, ['diff', '--name-status', '--no-renames', '-z', ...nameArgs(args)])).split('\0');

@@ -40,7 +40,7 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { TaskGraph } from './coordinator/task-graph.js';
 import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, readGoalSplit, splitComment } from './goal-split.js';
 import { changedFiles } from './merge-base.js';
-import { changedNames, diffStatText, rawChanges } from './coordinator/change-files.js';
+import { changedNames, diffStatText, rawChanges, untrackedNames } from './coordinator/change-files.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
@@ -1286,7 +1286,7 @@ export class Coordinator extends AutomationRuns {
       };
       if (r.reason !== 'succeeded' || !s) return unavailable(`evaluator run ${r.reason}`);
       if (s.not_reproducible || !s.test_path) return unavailable(s.not_reproducible ?? 'no test path');
-      const changed = changedNames(path, [base]).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
+      const changed = changedNames(path, [base]).concat(untrackedNames(path));
       if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${changed.join(', ')}`);
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;

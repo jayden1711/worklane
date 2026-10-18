@@ -19,7 +19,8 @@ import { isProtectedPath } from '../src/guardrails/engine.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 // A namespace import, so the file still loads against a merge-base.ts without the stray check's helpers (fail-without).
 import * as mergeBase from '../src/merge-base.js';
-import { sizeFiles, sizeVerdict } from '../src/pr-rules.js';
+import { mergeDecision } from '../src/merge-policy.js';
+import { riskClassOf, sizeFiles, sizeVerdict } from '../src/pr-rules.js';
 import { computeLevel, type ChangeFile } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
@@ -238,6 +239,9 @@ test('changedNames: each path as itself (non-ASCII, tab, quote, backslash, newli
   assert.deepEqual(changeFilesModule.changedNames(dir, ['-r', '-m', '--first-parent', '--no-commit-id', head], { tree: true }).sort(), want);
   assert.deepEqual(changeFilesModule.changedStatuses(dir, [`${base}..${head}`]).map((s) => `${s.status} ${s.path}`).sort(), want.map((p) => `${p === 'src/old.ts' ? 'D' : 'A'} ${p}`).sort());
   assert.equal(changeFilesModule.changedNamesOrNull(dir, ['no-such-commit']), null);
+  // The repro check's untracked files, the same way (coordinator.ts: "changed more than the test").
+  write(dir, { 'test/naïve repro.test.ts': '// new\n', 'test/new\nline.test.ts': '// new\n' });
+  assert.deepEqual(changeFilesModule.untrackedNames(dir).sort(), ['test/naïve repro.test.ts', 'test/new\nline.test.ts']);
 });
 
 test('changedNames refuses an option that would turn renames back on, change the format or write a file', () => {
@@ -267,6 +271,34 @@ test('a path with a newline stays under its `**` glob: protected, and L3 under t
   assert.ok(!globToRegExp('src/*.ts').test('src/a/b.ts'), 'a single * still stops at a slash');
 });
 
+test('a changed path with a control character is L3 "path with a control character" and never merges itself, whatever review.yaml lists', () => {
+  // A review.yaml with no L3 category these paths fall in: only the control character can make them L3.
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const };
+  const one = (p: string) => {
+    const lvl = computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, plain);
+    const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
+    return { path: p, level: lvl.level, reason: lvl.reasons.find((r) => r.startsWith('path with a control character')) ?? lvl.reasons.join('; '), cls: riskClassOf({ paths: [p], level: lvl, waitCategories: [] }).cls, auto: merge.auto, protected: isProtectedPath(p, { protected_paths: [] }) };
+  };
+  const odd = [...NEWLINE_PATHS, 'docs/a\nb.md', 'web/tab\there.ts', 'README\u001b[2J.md', 'src/del\u007f.ts', 'src/c1\u0085.ts'];
+  assert.deepEqual(
+    odd.map(one),
+    odd.map((p) => ({
+      path: p,
+      level: 'L3',
+      reason: `path with a control character: ${JSON.stringify(p)}`,
+      cls: 'protected',
+      auto: false,
+      // The built-in protected paths alone: only the one under .claude/ (the roles are the agents' own to edit).
+      protected: p === '.claude/skills/a\nb/SKILL.md',
+    })),
+  );
+  // The same paths without the control character: not L3 under this review.yaml (so the character is what decides).
+  assert.deepEqual(['docs/ab.md', 'web/tabhere.ts'].map((p) => one(p).level), ['L0', 'L1']);
+  // The evaluator's four, with a project's own list on top of the built-in one.
+  assert.deepEqual(NEWLINE_PATHS.map((p) => isProtectedPath(p, { protected_paths: ['src/guardrails/**', '.github/workflows/**'] })), [true, true, true, false]);
+});
+
 test('a newline path committed to a repo comes out of changeFiles as itself and is L3 / protected', async () => {
   const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
   const { dir, base } = repo({ 'README.md': '# x\n' });
@@ -292,7 +324,10 @@ const READER_WORDS: Record<string, RegExp> = {
   'name-status': /name-status/g,
   numstat: /numstat/g,
   stat: /--stat\b|shortstat|dirstat|--(?:compact-)?summary\b/g,
-  raw: /--raw\b/g,
+  // diff-tree and diff-index print the raw format (paths) with no flag at all.
+  raw: /--raw\b|diff-tree|diff-index/g,
+  // ls-files lists the untracked, modified or deleted files of a worktree: what a run changed.
+  'worktree changes': /--others\b|--modified\b|--deleted\b|--unmerged\b/g,
   whatchanged: /whatchanged/g,
   porcelain: /porcelain/g,
   'rename detection': /find-renames|find-copies|--follow\b|diff\.renames|['"`]-M\d*%?['"`]/g,
@@ -334,7 +369,11 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
   'scripts/ci/slow-jobs.sh': { words: { 'name-only': 1 }, why: 'CI slow-job selection', must: [/--name-only --no-renames -z/] },
   'scripts/pin-engine.mjs': { words: { 'name-only': 1 }, why: 'the release commit "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
   'scripts/machine/worklane-update.cjs': { words: { 'name-only': 1 }, why: 'the updater\'s "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
-  'scripts/ci/affected.mjs': { words: { 'name-only': 2 }, why: 'CI test selection', must: [/'--name-only', '--no-renames', '-z'/, /'--name-only', '--no-renames', '--diff-filter=A', '-z'/] },
+  'scripts/ci/affected.mjs': {
+    words: { 'name-only': 2, 'worktree changes': 2 },
+    why: 'CI test selection (and `ls-files -z --cached --others`: every file of the checkout)',
+    must: [/'--name-only', '--no-renames', '-z'/, /'--name-only', '--no-renames', '--diff-filter=A', '-z'/, /'ls-files', '-z', '--cached', '--others'/],
+  },
   'scripts/push-gate.mjs': { words: { 'name-only': 1, 'patch headers': 2 }, why: '`ls-tree --name-only`: a tree; `show --no-renames` added lines: the denylist scan of what is pushed (a follow-up: its `+++ ` header parse)' },
   'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },
   'scripts/release.mjs': { words: { porcelain: 1 }, why: '`status --porcelain`: is the tree clean before a release' },

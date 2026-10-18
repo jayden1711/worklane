@@ -19,6 +19,15 @@ const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
 export const AGENT_INSTRUCTIONS = 'agent-instructions';
 
 /**
+ * A changed path with a control character in it (a newline, a tab, an escape, ...). Nothing should have to read
+ * around one (a glob, a log line, the owner), so such a change is always L3 ("path with a control character") and
+ * never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
+ */
+export const CONTROL_CHARACTER_PATH = 'control-character-path';
+/** Whether a path holds a control character (Unicode Cc: U+0000 to U+001F and U+007F to U+009F). */
+export const hasControlCharacter = (path: string): boolean => /\p{Cc}/u.test(path);
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
  * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
@@ -158,6 +167,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     for (const [cat, list] of Object.entries(res)) if (list.some((re) => re.test(f.path))) add(cat, f.path);
     if (input.moneyPaths.some((re) => re.test(f.path))) add('money-path', f.path);
     if ((f.addedLines ?? []).some((l) => /\b(DROP\s+(TABLE|COLUMN|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/i.test(l))) add('deletes-data', f.path);
+    if (hasControlCharacter(f.path)) add(CONTROL_CHARACTER_PATH, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -188,6 +198,9 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
   for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
   if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) raise('L3', `${lines} lines (> ${L.L3_human.over_lines})`);
+  // Quoted (JSON) in the reason, so the control character itself never reaches a comment or a log line.
+  const odd = categories[CONTROL_CHARACTER_PATH] ?? [];
+  if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;
