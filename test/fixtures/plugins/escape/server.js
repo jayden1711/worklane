@@ -3,6 +3,14 @@
 // previews, /etc and /opt), and reports each try in its one tool's description: "denied" or "WROTE".
 // With "kernel" (the plugin's kernel server), it tries the kernel's tunables and the cgroup tree instead, and reports
 // how /proc/sys and /sys/fs/cgroup are mounted where it runs (#551).
+// INVARIANT (#608): the guard is its first statement. Outside the broker's sandbox, or as root in any mode, it exits
+// non-zero naming why, before it loads fs or tries anything (confined.js says what "inside" is).
+const { facts, refusal } = require('./confined.js');
+const why = refusal(facts());
+if (why) {
+  process.stderr.write(`escape fixture refuses to run: ${why}. It tries its writes only inside the MCP broker's sandbox (#608).\n`);
+  process.exit(3);
+}
 const fs = require('fs');
 const path = require('path');
 const tries = [];
@@ -66,18 +74,22 @@ function kernel() {
 }
 
 function places() {
+  // WHY (#608): under a stand-in root when a test gives one, so even a broken guard couldn't reach a real home there.
+  // The broker's units never set it (src/mcp/launch.ts gives a server PATH, HOME, TMPDIR, LANG and its own secrets).
+  const ROOT = process.env.ESCAPE_FIXTURE_ROOT || '/';
+  const at = (p) => path.join(ROOT, p);
   // The CI instance's broker user (ci), its caches, and every home this process can see (none, if homes are hidden).
-  const HOME = '/home';
+  const HOME = at('/home');
   const broker = path.join(HOME, ['wl', 'ci', 'mcp'].join('-'));
   for (const h of new Set([broker, path.join(broker, '.cache'), path.join(broker, '.npm'), path.join(broker, 'secrets'), ...dirs(HOME)])) attempt(path.join(h, 'escaped'));
   attempt(path.join(HOME, 'escaped'));
-  for (const s of dirs('/var/lib').filter((p) => /worklane-mcp-/.test(p))) attempt(path.join(s, 'escaped'));
-  attempt('/var/lib/worklane/plugins/store/escaped');
-  attempt('/var/lib/worklane/plugins/store/ci/escaped');
-  for (const d of dirs('/var/lib/worklane/plugins/store/ci')) attempt(path.join(d, 'escaped'));
-  attempt('/var/lib/worklane/plugins/previews/escaped');
-  attempt('/etc/worklane/escaped');
-  attempt('/opt/worklane/escaped');
+  for (const s of dirs(at('/var/lib')).filter((p) => /worklane-mcp-/.test(p))) attempt(path.join(s, 'escaped'));
+  attempt(at('/var/lib/worklane/plugins/store/escaped'));
+  attempt(at('/var/lib/worklane/plugins/store/ci/escaped'));
+  for (const d of dirs(at('/var/lib/worklane/plugins/store/ci'))) attempt(path.join(d, 'escaped'));
+  attempt(at('/var/lib/worklane/plugins/previews/escaped'));
+  attempt(at('/etc/worklane/escaped'));
+  attempt(at('/opt/worklane/escaped'));
 }
 
 let buf = '';

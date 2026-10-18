@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readAccountStatus, readSwitchLines, switchedOnto, switchView } from '../src/claude-account.js';
@@ -63,14 +63,16 @@ MINUTE=1 SWITCH_POLL=0.05
     writeFileSync(join(T, 'bin', name), body);
     chmodSync(join(T, 'bin', name), 0o755);
   };
-  // sudo -H -u <user> <command...>: the command, with that user's home; a leading `timeout <n>` dropped (macOS has none).
+  // sudo -H -u <user> <command...>: the command, with that user's home. A leading `timeout [-k <k>] <n>` is kept where
+  // this machine has timeout (a step that never returns is cut off, as on the real machine, #613), dropped where it
+  // has none (macOS).
   exe('sudo', `#!/usr/bin/env bash
 T=${JSON.stringify(T)}
 echo "sudo $*" >> "$T/calls"
 [ "$1" = -H ] && shift
 [ "$1" = -u ] || exit 64
 user="$2"; shift 2
-[ "$1" = timeout ] && shift 2
+if [ "$1" = timeout ] && ! command -v timeout >/dev/null; then shift; [ "$1" = -k ] && shift 2; shift; fi
 HOME="$T/homes/$user" USER="$user" exec "$@"
 `);
   // systemctl: a unit is active while units/<unit>.active exists. SIGTERM to its main process drains it: inactive after
@@ -129,8 +131,9 @@ process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.a
   writeFileSync(join(inst, 'instance.yaml'), `version: 1\nname: alpha\nrepos:\n  - path: /srv/worklane/alpha/a\n    repo: example/alpha\nrun_as:\n  agent_user: wl-alpha-agent\n  agent_home: ${T}/homes/wl-alpha-agent\n  eval_user: wl-alpha-eval\n`);
   writeFileSync(join(T, 'sudoers-machine'), 'Cmnd_Alias WORKLANE_MACHINE = x\nwl-alpha, wl-beta ALL=(root) NOPASSWD: WORKLANE_MACHINE\n');
   for (const u of ['worklane-alpha.service', 'worklane-beta.service']) writeFileSync(join(T, 'units', `${u}.active`), '');
-  const run = (args: string[], input = `${TOKEN}\n`) => {
-    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } });
+  // deadline (ms): the run is killed then (r.error set), so a step that hangs fails the test instead of hanging it.
+  const run = (args: string[], input = `${TOKEN}\n`, deadline?: number) => {
+    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T }, ...(deadline ? { timeout: deadline } : {}) });
     const lines = r.stdout.split('\n').filter(Boolean);
     return { ...r, lines, events: args.includes('--json') && args[0] === 'switch' ? lines.map((l) => JSON.parse(l) as Line) : [] };
   };
@@ -303,6 +306,141 @@ test('the wait has a timeout: an instance whose runs are still going is stopped 
   assert.deepEqual(sys, ['systemctl stop worklane-beta.service', 'systemctl start worklane-alpha.service', 'systemctl start worklane-beta.service'], 'only the one that timed out was stopped');
   assert.ok(m.active('beta'));
 });
+
+// The machine's timeout, which the sudo stand-in keeps (macOS has none: those tests are skipped there).
+const hasTimeout = posix && spawnSync('sh', ['-c', 'command -v timeout']).status === 0;
+
+test('issue #613: each token install runs as its user under timeout, as every other step a switch runs as an agent user', { skip: !posix }, () => {
+  const m = machine();
+  const r = m.run(['switch', '--json']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  // The install's sudo line (its script follows -e, on the next lines of the log); the token is on stdin, never here.
+  const installs = m.calls().filter((c) => c.startsWith('sudo ') && c.includes('--input-type=module'));
+  assert.equal(installs.length, AGENTS.length, installs.join('\n'));
+  for (const [i, u] of AGENTS.entries()) assert.match(installs[i]!, new RegExp(`^sudo -H -u ${u} timeout -k 5 30 \\S*node --input-type=module -e `), u);
+  assert.ok(!leaked(m.outputs(r)));
+});
+
+/**
+ * node as each user, for the token install and its rollback only: never returns while hang-install-<user> or
+ * hang-restore-<user> exists; when that file says "ignore TERM", SIGTERM is ignored first (as by node, which has a
+ * TERM handler, or a process blocked on a hung mount), so only the kill-after ends it. Everything else is node. The
+ * bounds, for this machine: 2 s, then SIGKILL 1 s later.
+ */
+function hangingHome(m: ReturnType<typeof machine>) {
+  writeFileSync(
+    join(m.T, 'bin', 'node'),
+    `#!/usr/bin/env bash
+T=${JSON.stringify(m.T)}
+hang() { [ "$(cat "$1")" != "ignore TERM" ] || trap '' TERM; exec sleep 120; }
+if [ "$1" = --input-type=module ] && [ -e "$T/hang-install-$USER" ]; then hang "$T/hang-install-$USER"; fi
+if [ "$1" = -e ] && [[ "$2" == *'const prev = readFileSync(0'* ]] && [ -e "$T/hang-restore-$USER" ]; then hang "$T/hang-restore-$USER"; fi
+exec ${JSON.stringify(process.execPath)} "$@"
+`,
+  );
+  chmodSync(join(m.T, 'bin', 'node'), 0o755);
+  appendFileSync(join(m.s, 'lib.sh'), 'CLAUDE_TOKEN_INSTALL_SECONDS=2 CLAUDE_LOGIN_SECONDS=2 CLAUDE_KILL_AFTER_SECONDS=1\n');
+}
+
+test('issue #613: a token install that ignores SIGTERM (blocked on a hung mount) is still cut off, by the kill-after: failed, named, and the switch finishes', { skip: !hasTimeout }, () => {
+  const m = machine();
+  hangingHome(m);
+  writeFileSync(join(m.T, 'hang-install-wl-beta-agent'), 'ignore TERM');
+  const t0 = performance.now();
+  const r = m.run(['switch', '--json'], `${TOKEN}\n`, 30_000);
+  assert.equal(r.error, undefined, `the switch hung (killed at the test's deadline): ${r.stdout}`);
+  assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound and its kill-after');
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  const mine = r.events.filter((e) => e.user === 'wl-beta-agent');
+  assert.deepEqual(mine.map((e) => `${e.step} ${e.state}`), ['install failed']);
+  assert.match(mine[0]!.detail, /^couldn't store the token in .*\/\.credentials\.json: cut off after 2 s \(its home didn't answer\)$/);
+  assert.deepEqual(r.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'failed']]);
+  assert.equal(readFileSync(join(m.T, 'var', 'paused'), 'utf8'), 'beta\n');
+  assert.ok(!leaked(m.outputs(r)));
+});
+
+test('issue #613: a rollback that never returns (the API refused the new login; TERM ignored) is cut off: that user named, the switch finishes refused, its instance left paused', { skip: !hasTimeout }, () => {
+  const m = machine();
+  hangingHome(m);
+  writeFileSync(join(m.T, 'refuse-new'), '');
+  writeFileSync(join(m.T, 'hang-restore-wl-beta-agent'), 'ignore TERM');
+  const t0 = performance.now();
+  const r = m.run(['switch', '--json'], `${TOKEN}\n`, 30_000);
+  assert.equal(r.error, undefined, `the switch hung (killed at the test's deadline): ${r.stdout}`);
+  assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound and its kill-after');
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  const mine = r.events.filter((e) => e.user === 'wl-beta-agent');
+  assert.deepEqual(mine.map((e) => `${e.step} ${e.state}`), ['install done', 'check failed', 'install failed']);
+  assert.match(mine.at(-1)!.detail, /^the API refused the new login, and putting the previous one back failed: cut off after 2 s \(its home didn't answer\): sign this user in again$/);
+  for (const u of ['wl-alpha-agent', 'wl-alpha-eval']) assert.match(r.events.filter((e) => e.user === u && e.step === 'install').at(-1)!.detail, /^rolled back: /, u);
+  // The rollback's sudo line carries the bound and its kill-after; the login it puts back is on stdin, never here.
+  assert.ok(m.calls().some((c) => /^sudo -H -u wl-beta-agent timeout -k 1 2 \S*node -e $/.test(c)), 'bounded');
+  assert.deepEqual(r.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'failed']]);
+  assert.ok(m.active('alpha') && !m.active('beta'));
+  assert.equal(readFileSync(join(m.T, 'var', 'paused'), 'utf8'), 'beta\n');
+  assert.match(r.events.at(-1)!.detail, /^refused: .*not resumed: beta\. /);
+  assert.ok(!leaked(m.outputs(r)) && !m.outputs(r).includes(OLD), 'neither login in any output');
+});
+
+test('issue #613: a token install that never returns (a home on a hung mount) is cut off: that user\'s install fails, named, the switch finishes, and its instance is left paused for the rerun', { skip: !hasTimeout }, () => {
+  const m = machine();
+  hangingHome(m);
+  writeFileSync(join(m.T, 'hang-install-wl-beta-agent'), '');
+  const before = readFileSync(m.cred('wl-beta-agent'), 'utf8');
+  const t0 = performance.now();
+  const r = m.run(['switch', '--json'], `${TOKEN}\n`, 30_000);
+  assert.equal(r.error, undefined, `the switch hung (killed at the test's deadline): ${r.stdout}`);
+  assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound');
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  const mine = r.events.filter((e) => e.user === 'wl-beta-agent');
+  assert.deepEqual(mine.map((e) => `${e.step} ${e.state}`), ['install failed'], 'no check on a login it could not store');
+  assert.match(mine[0]!.detail, /^couldn't store the token in .*\/\.credentials\.json: cut off after 2 s \(its home didn't answer\)$/);
+  assert.equal(readFileSync(m.cred('wl-beta-agent'), 'utf8'), before, 'its login as it was');
+  for (const u of ['wl-alpha-agent', 'wl-alpha-eval']) assert.deepEqual(r.events.filter((e) => e.user === u).map((e) => `${e.step} ${e.state}`), ['install done', 'check done'], u);
+  // The existing "not resumed" path: alpha runs again, beta stays paused and is remembered for the rerun.
+  assert.deepEqual(r.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'failed']]);
+  assert.match(r.events.at(-1)!.detail, /^not resumed: beta; fix what each says, then rerun: /);
+  assert.ok(m.active('alpha') && !m.active('beta'));
+  assert.equal(readFileSync(join(m.T, 'var', 'paused'), 'utf8'), 'beta\n');
+  assert.ok(!leaked(m.outputs(r)));
+
+  // The home answers again: the rerun installs it and resumes beta.
+  rmSync(join(m.T, 'hang-install-wl-beta-agent'));
+  const again = m.run(['switch', '--json'], `${TOKEN}\n`, 60_000);
+  assert.equal(again.status, 0, again.stderr + again.stdout);
+  assert.deepEqual(again.events.filter((e) => e.step === 'resume').map((e) => [e.instance, e.state]), [['alpha', 'done'], ['beta', 'done']]);
+  assert.equal((JSON.parse(readFileSync(m.cred('wl-beta-agent'), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, TOKEN);
+});
+
+/** claude_login_ok <user>, from the stood-in machine's lib.sh; killed at deadline (r.error set) rather than hanging. */
+const loginOk = (m: ReturnType<typeof machine>, user: string) =>
+  spawnSync('bash', ['-c', 'source "$1"; claude_login_ok "$2"', '_', join(m.s, 'lib.sh'), user], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: m.T }, timeout: 30_000 });
+
+test('issue #613: claude_login_ok asks claude auth status as that user under timeout 60, with a kill-after', { skip: !posix }, () => {
+  const m = machine();
+  const r = loginOk(m, 'wl-alpha-agent');
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(m.calls(), ['sudo -H -u wl-alpha-agent timeout -k 5 60 claude auth status --json']);
+  writeFileSync(join(m.T, 'fail-auth-wl-alpha-agent'), '');
+  assert.equal(loginOk(m, 'wl-alpha-agent').status, 1, 'signed out: no');
+});
+
+for (const [how, prelude] of [
+  ['dies on SIGTERM', ''],
+  ['ignores SIGTERM (blocked on a hung mount)', "trap '' TERM; "],
+] as const) {
+  test(`issue #613: claude_login_ok whose claude never answers and ${how} is cut off: no, with the reason named`, { skip: !hasTimeout }, () => {
+    const m = machine();
+    writeFileSync(join(m.T, 'bin', 'claude'), `#!/usr/bin/env bash\n${prelude}exec sleep 120\n`);
+    appendFileSync(join(m.s, 'lib.sh'), 'CLAUDE_LOGIN_SECONDS=2 CLAUDE_KILL_AFTER_SECONDS=1\n');
+    const t0 = performance.now();
+    const r = loginOk(m, 'wl-alpha-agent');
+    assert.equal(r.error, undefined, "claude_login_ok hung (killed at the test's deadline)");
+    assert.ok(performance.now() - t0 < 25_000, 'cut off at the bound and its kill-after');
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^claude auth status, as wl-alpha-agent, didn't answer within 2 s \(its home may be on a hung mount\)$/m);
+  });
+}
 
 test('an instance whose check fails is not resumed; the rerun resumes it once it passes', { skip: !posix }, () => {
   const m = machine();
