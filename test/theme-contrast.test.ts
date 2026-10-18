@@ -25,10 +25,6 @@ const RESTING = ['page', 'surface', 'canvas', 'inset', 'field'];
 const PALETTE: Record<string, string> = { page: '#faf9f5', surface: '#e8e6dc', ink: '#141413', line: '#b0aea5', blue: '#d97757' };
 /** Shadow tokens whose first ring draws a control's edge: buttons (shadow-btn), fields and pill toggles (shadow-hairline). */
 const CONTROL_EDGES = ['shadow-btn', 'shadow-hairline'];
-/** Text tokens known to fail, each with where and why; the test fails once one is no longer used or starts passing. */
-const OWED: Record<string, string> = {
-  blue: 'web/src/components/ClaudeProfiles.tsx: a link drawn in the accent (2.96:1 on the page); it should be text-blue-ink',
-};
 /** A see-through fill over a solid one, where the solid one is set on a parent: bg-surface/20 is only the number chip
  *  on the recommended option, which is the ink primary button (web/src/pages/Decisions.tsx). */
 const OVER: Record<string, string> = { 'surface/20': 'ink' };
@@ -178,11 +174,14 @@ function occurrences(): Occurrence[] {
 
 type Pair = { text: string; on: string; ratio: number; need: number; where?: string };
 
-function pairs(): { pairs: Pair[]; textTokens: Set<string> } {
+function pairs(): { pairs: Pair[]; textTokens: Set<string>; accentText: string[] } {
   const tokens = lightTokens();
   const colour = (name: string): Rgba => parseColour(BUILT_IN[name] ?? resolve(`var(--${name})`, tokens));
   const occ = occurrences();
   const textTokens = new Set(occ.map((o) => o.text.name));
+  // The accent is never a text colour, whatever it sits on (text-blue, or any name for the same colour).
+  const accent = hexOf(colour('blue'));
+  const accentText = occ.filter((o) => hexOf(colour(o.text.name)) === accent).map((o) => `${o.file}:${o.line}: ${o.text.variant}text-${o.text.name}`);
   const isBase = (u: Use) => BACKGROUNDS.includes(u.name) && u.alpha === undefined;
   const bgs = (o: Occurrence, list: Use[]) => list.filter((u) => u.kind === 'bg' && u.variant === o.text.variant);
   /** The fills (anything but a plain background) this text sits on: in its own string, else beside it on the line. */
@@ -213,7 +212,7 @@ function pairs(): { pairs: Pair[]; textTokens: Set<string> } {
   }
   // Text on an accent fill: no component puts text on bg-blue today; whatever does must be dark (primary text).
   add({ text: 'ink', on: 'blue', ratio: contrast(colour('ink'), colour('blue')), need: 4.5 });
-  return { pairs: out, textTokens };
+  return { pairs: out, textTokens, accentText };
 }
 
 const fmt = (p: Pair) => `text-${p.text} on ${p.on}: ${p.ratio.toFixed(2)}:1, needs ${p.need}:1${p.where ? ` (${p.where})` : ''}`;
@@ -226,19 +225,15 @@ test('the light tokens carry the warm light palette', () => {
 });
 
 test('every text colour used in web/src meets AA on every light background it can sit on', (t) => {
-  const { pairs: all, textTokens } = pairs();
+  const { pairs: all, textTokens, accentText } = pairs();
   assert.deepEqual(offPalette, [], 'a Tailwind palette colour is used instead of a theme token');
   for (const core of ['ink', 'ink-2', 'ink-3', 'blue-ink', 'red', 'green', 'orange', 'primary-foreground'])
     assert.ok(textTokens.has(core), `text-${core} is still found in web/src (else the scan is broken)`);
-  const failing = all.filter((p) => p.ratio < p.need);
-  for (const [name, why] of Object.entries(OWED)) {
-    assert.ok(textTokens.has(name), `text-${name} is no longer used: drop it from OWED (${why})`);
-    assert.ok(failing.some((p) => p.text === name), `text-${name} passes now: drop it from OWED (${why})`);
-  }
+  assert.deepEqual(accentText, [], 'text drawn in the accent (2.96:1 on the page): use text-blue-ink');
   const lowest = new Map<string, Pair>();
   for (const p of all) if (!lowest.has(p.text) || p.ratio < lowest.get(p.text)!.ratio) lowest.set(p.text, p);
   for (const p of lowest.values()) t.diagnostic(`lowest: ${fmt(p)}`);
-  const bad = failing.filter((p) => !(p.text in OWED));
+  const bad = all.filter((p) => p.ratio < p.need);
   assert.deepEqual(bad.map(fmt), [], `${bad.length} of ${all.length} text/background pairs are under AA`);
 });
 

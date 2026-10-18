@@ -171,7 +171,7 @@ function SignIn({ self, signin, disabled, onDone }: { self: string; signin: NonN
           <p className="text-[12px] text-ink-3">
             Open Anthropic's sign-in, sign in to the account {signin.profile} should be, then paste the code it shows here. The code works once.
           </p>
-          <a href={signin.url} target="_blank" rel="noreferrer noopener" className="text-[12.5px] text-blue underline" data-testid="claude-signin-link">
+          <a href={signin.url} target="_blank" rel="noreferrer noopener" className="text-[12.5px] text-blue-ink underline" data-testid="claude-signin-link">
             Open Anthropic's sign-in
           </a>
           <form
