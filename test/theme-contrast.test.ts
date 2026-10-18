@@ -53,6 +53,23 @@ function blockText(selector: string): string | undefined {
   return undefined;
 }
 
+/** The selector or at-rule of the block that holds that block (`@layer base`), or undefined at the top level. */
+function enclosing(selector: string): string | undefined {
+  const text = blockText(selector);
+  assert.ok(text, `styles.css has a ${selector} block`);
+  // Comments blanked to spaces, so a brace or `;` in one doesn't count and the offsets still line up.
+  const plain = css.replace(/\/\*[\s\S]*?\*\//g, (c) => ' '.repeat(c.length));
+  let depth = 0;
+  for (let i = css.indexOf(text) - 1; i >= 0; i--) {
+    if (plain[i] === '}') depth++;
+    else if (plain[i] === '{' && depth-- === 0) {
+      const head = plain.slice(0, i);
+      return head.slice(Math.max(head.lastIndexOf(';'), head.lastIndexOf('}'), head.lastIndexOf('{')) + 1).trim();
+    }
+  }
+  return undefined;
+}
+
 /** The declarations of that block. */
 function block(selector: string): Map<string, string> | undefined {
   const text = blockText(selector);
@@ -310,6 +327,8 @@ test('placeholder text is AA on every light background a field can have', () => 
   // AA for an ink or ink-2 field. Light mode sets its own placeholder colour in a light-only base rule instead.
   const tokens = lightTokens();
   const own = block(':root:not(.dark) ::placeholder')?.get('color');
+  // In the base layer, so a field's own placeholder: class (utilities layer) still wins; unlayered, it would beat it.
+  if (own) assert.equal(enclosing(':root:not(.dark) ::placeholder'), '@layer base', 'the light placeholder rule sits inside @layer base');
   const colours: [string, Rgba][] = own
     ? [[own, parseColour(resolve(own, tokens))]]
     : ['ink', 'ink-2'].map((n) => [`text-${n} at 50% (Tailwind's default)`, { ...parseColour(resolve(`var(--${n})`, tokens)), a: 0.5 }]);
