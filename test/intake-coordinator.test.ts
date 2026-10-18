@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { parseContract } from '../src/backlog/types.js';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
@@ -112,6 +114,76 @@ test('intake: a trusted sender\'s bug is filed ready and they are told; the run 
   assert.doesNotMatch(JSON.stringify(t.log.read()), /555 0134|Lovelace/, 'nor in the event log');
   assert.deepEqual(payloads(t.log, 'run.cost'), [{ issue: null, role: 'intake', model: req!.model, usd: 0.01, turns: 1 }]);
   assert.deepEqual(payloads(t.log, 'intake.filed').map((p) => [p.issue, p.ready]), [[issues[0]!.number, true]]);
+});
+
+/** Every child process started while `fn` runs (node:child_process patched, ESM bindings included), by function and file. */
+async function spawnsDuring(fn: () => Promise<void>): Promise<string[]> {
+  const cp = createRequire(import.meta.url)('node:child_process') as Record<string, (...a: unknown[]) => unknown>;
+  const names = ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork'];
+  const saved = new Map(names.map((n) => [n, cp[n]!]));
+  const seen: string[] = [];
+  for (const n of names) {
+    const orig = saved.get(n)!;
+    cp[n] = (...a: unknown[]) => {
+      seen.push([n, String(a[0]), ...(Array.isArray(a[1]) ? a[1].map(String) : [])].join(' '));
+      return orig(...a);
+    };
+  }
+  syncBuiltinESMExports();
+  try {
+    await fn();
+  } finally {
+    for (const n of names) cp[n] = saved.get(n)!;
+    syncBuiltinESMExports();
+  }
+  return seen;
+}
+
+test('intake (#333): a bug is filed with `- repro: true`, labelled when not reproduced, and no code runs for the report: only the read-only triage run', async () => {
+  const t = setup({ batches: [[report(), report({ from: STRANGER_ID, text: 'bug: the export button does nothing' })]], triage: () => ({ kind: 'bug', draft: DRAFT, reproduction: { result: 'not_reproduced', detail: 'the totals code applies discounts' } }) });
+  assert.deepEqual(await spawnsDuring(async () => void git(t.repo, 'status')), ['execFileSync git status'], 'the spy sees a spawn through an ESM import');
+  const spawned = await spawnsDuring(() => t.c.checkIntake());
+  assert.deepEqual(spawned, [], 'nothing is spawned at intake time: the report is read, never run');
+  assert.deepEqual(t.runner.calls.map((r) => r.role), ['intake', 'intake'], 'only the triage runs, no reproduction run');
+  for (const req of t.runner.calls) assert.ok(!req.allowedTools!.includes('Bash') && req.disallowedTools!.includes('Bash'), 'and they have no shell');
+  const [issue] = await t.backlog.list('ready');
+  assert.ok(issue, 'the trusted report is filed ready');
+  assert.deepEqual(issue!.labels, ['ready', 'bug', 'couldnt-reproduce']);
+  const c = parseContract(issue!.body);
+  assert.ok(c.ok && c.done_when.some((d) => 'repro' in d && d.repro === true), 'its contract asks for the failing test at task time');
+  // The untrusted report's draft waits for the owner; approving files what decide made, repro item and label kept.
+  const [q] = payloads(t.log, 'decision.asked');
+  t.log.append('decision.answered', { id: q!.id as string, by: 'example-owner', answer: 'approve' }, 'example-owner', 'human');
+  await t.c.checkIntake();
+  const filed = await t.backlog.list('couldnt-reproduce');
+  assert.equal(filed.length, 2);
+  assert.ok(filed.every((i) => /^- repro: true$/m.test(i.body)));
+});
+
+test('intake (#333): a bug already fixed on main is answered naming the fixing commit only when git confirms it is on main; nothing else runs; a feature is filed as drafted', async () => {
+  let onMain = '';
+  const t = setup({
+    batches: [[report(), report({ text: 'bug: the totals were wrong last week' }), report({ text: 'please add dark mode' })]],
+    triage: (req) => {
+      const text = readFileSync(join(req.cwd, 'report.md'), 'utf8');
+      if (/dark mode/.test(text)) return { kind: 'feature', draft: DRAFT };
+      return { kind: 'bug', draft: DRAFT, reproduction: { result: 'fixed_on_main', detail: 'fixed by the totals rewrite', commit: /last week/.test(text) ? '0a1b2c3d4e5f' : onMain } };
+    },
+  });
+  // The checkout's last fetch of the default branch: its one commit.
+  onMain = git(t.repo, 'rev-parse', 'HEAD');
+  git(t.repo, 'update-ref', 'refs/remotes/origin/main', onMain);
+  const spawned = await spawnsDuring(() => t.c.checkIntake());
+  const check = (id: string) => `execFileSync git merge-base --is-ancestor ${id} refs/remotes/origin/main`;
+  assert.deepEqual(spawned, [check(onMain), check('0a1b2c3d4e5f')], 'the only process: one read-only git check per fixing commit, on the trusted checkout');
+  assert.equal(t.discord.replies.length, 3);
+  assert.match(t.discord.replies[0]!.text, new RegExp(`already fixed.*\\b${onMain}\\b`), 'confirmed on main: named');
+  assert.match(t.discord.replies[1]!.text, /already fixed/);
+  assert.doesNotMatch(t.discord.replies[1]!.text, /0a1b2c3d4e5f|commit/, 'not on main: not named');
+  const issues = await t.backlog.list('ready');
+  assert.deepEqual(issues.map((i) => i.labels), [['ready', 'enhancement']], 'only the feature is filed');
+  assert.ok(issues[0]!.body.startsWith(DRAFT.body.trim()), 'with its body as drafted');
+  assert.doesNotMatch(issues[0]!.body, /repro/);
 });
 
 test('intake: with repo access on, the run reads the checkout and the bundle by its path', async () => {
