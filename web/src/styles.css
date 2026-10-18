@@ -54,6 +54,12 @@
   --shadow-hairline: 0 0 0 1px var(--line-strong);
   --ring: #b5543a;
 }
+/* Light mode only: placeholder text in tertiary ink (4.93:1 or more on every light background). Tailwind's default is
+   the field's own text colour at 50%, which is 3.20 to 3.44:1 for an ink field here. In the base layer, so a field's
+   own placeholder: class still wins. Dark mode keeps Tailwind's default. */
+@layer base {
+  :root:not(.dark) ::placeholder { color: var(--ink-3); }
+}
 .dark {
   --page: oklch(20.9% 0.004 264.477);
   --canvas: oklch(23.1% 0.004 264.487);

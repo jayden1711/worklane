@@ -264,6 +264,25 @@ test('the focus ring is 3:1 on every light background', () => {
   assert.deepEqual(failing, [], 'the focus ring is under WCAG 1.4.11');
 });
 
+test('placeholder text is AA on every light background a field can have', () => {
+  // Tailwind's preflight draws a placeholder in the field's own text colour at 50% (color-mix with transparent), under
+  // AA for an ink or ink-2 field. Light mode sets its own placeholder colour in a light-only base rule instead.
+  const tokens = lightTokens();
+  const own = block(':root:not(.dark) ::placeholder')?.get('color');
+  const colours: [string, Rgba][] = own
+    ? [[own, parseColour(resolve(own, tokens))]]
+    : ['ink', 'ink-2'].map((n) => [`text-${n} at 50% (Tailwind's default)`, { ...parseColour(resolve(`var(--${n})`, tokens)), a: 0.5 }]);
+  const failing: string[] = [];
+  for (const bg of BACKGROUNDS) {
+    const under = parseColour(resolve(`var(--${bg})`, tokens));
+    for (const [label, c] of colours) {
+      const r = contrast(over(c, under), under);
+      if (r < 4.5) failing.push(`placeholder ${label} on ${bg}: ${r.toFixed(2)}:1, needs 4.5:1`);
+    }
+  }
+  assert.deepEqual(failing, [], 'placeholder text is under AA');
+});
+
 /** Focus and selection rings that still draw the accent, in files other open PRs hold; each goes once that PR lands. */
 const RING_OWED: Record<string, string> = {
   'web/src/components/FirstTask.tsx:8': 'focus:shadow-[0_0_0_1px_var(--blue)]: after #664 / #633 merge',
