@@ -125,7 +125,7 @@ export function FirstTaskForm({ canEdit, initial = null, initialPreview = null, 
           <code className={code}>{preview.body}</code>
           <p className="text-[12px] text-ink-2">Filed with the label ready (created if the repo has none).</p>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" disabled={busy} onClick={() => void send(true)} data-testid="first-task-file">
+            <Button size="sm" starts disabled={busy} onClick={() => void send(true)} data-testid="first-task-file">
               {busy ? 'Filing…' : 'File it'}
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPreview(null)}>
@@ -191,7 +191,7 @@ export function IgnoredIssues({ initial = null }: { initial?: { issues: IgnoredI
                     <Badge tone={r.kind === 'held' || r.kind === 'waiting' ? 'neutral' : 'warn'}>{KIND_LABEL[r.kind]}</Badge>
                     <span className="min-w-0 break-words">{r.text}</span>
                     {v.canFix && r.fix === 'add-ready' && (
-                      <Button size="sm" variant="outline" disabled={busy === i.issue} onClick={() => {
+                      <Button size="sm" variant="outline" starts disabled={busy === i.issue} onClick={() => {
                         setBusy(i.issue);
                         addReady(i.issue)
                           .then(load)

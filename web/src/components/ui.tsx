@@ -1,6 +1,6 @@
 // Small component set: shadcn/ui's API shape (MIT), styled after Beautiful UI's atoms (MIT,
 // beautifului.dev). Both credited in THIRD_PARTY_NOTICES.md.
-import { useEffect, useId, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
 import { avatarSrc, type TaskStatus } from '../api';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
@@ -18,18 +18,32 @@ export function Why({ id, children }: { id: string; children: ReactNode }) {
 }
 
 /**
+ * What an action that starts or lands work says while the instance it acts on is paused on the Claude usage limit.
+ * The owner's decision on #587: nothing new is refused while paused (switching the Claude account is how a usage
+ * pause is fixed, so machine and account writes stay allowed); the action stays usable and says when it takes effect.
+ */
+export const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
+/** Whether the instance this page acts on is paused on the Claude usage limit (App provides it, from /api/usage). */
+export const InstancePaused = createContext(false);
+
+/**
  * Pill actions: a dark primary, a raised secondary (outline), a quiet ghost, a red danger.
  * `why`: the reason it can't be pressed now; set, the button is disabled and says so (its own line, or the `whyAt`
  * element's when one line already says it for a row of buttons). A bare `disabled` is silent: test/web-buttons.test.ts
  * holds every one to a list that only shrinks (#587).
+ * `starts`: the action starts or lands work. While the instance is paused it stays usable and says PAUSED_HINT
+ * beside it, as its description (a `why` that holds says that instead). An emergency stop is no pause here: it is
+ * shown on every page and halts the coordinator itself.
  */
-export function Button({ variant = 'default', size = 'md', className, why, whyAt, disabled, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md'; why?: string | null | false; whyAt?: string }) {
+export function Button({ variant = 'default', size = 'md', className, why, whyAt, starts, disabled, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md'; why?: string | null | false; whyAt?: string; starts?: boolean }) {
   const own = useId();
+  const paused = useContext(InstancePaused);
   const reason = why || null;
+  const hint = !reason && starts && paused ? PAUSED_HINT : null;
   const button = (
     <button
       disabled={disabled || !!reason}
-      aria-describedby={reason ? (whyAt ?? own) : undefined}
+      aria-describedby={reason ? (whyAt ?? own) : hint ? own : undefined}
       {...p}
       className={cx(
         'inline-flex items-center justify-center gap-1.5 rounded-full font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40',
@@ -42,6 +56,15 @@ export function Button({ variant = 'default', size = 'md', className, why, whyAt
       )}
     />
   );
+  if (hint)
+    return (
+      <>
+        {button}
+        <span id={own} className="text-[12px] text-ink-3 max-sm:basis-full" data-testid="button-paused">
+          {hint}
+        </span>
+      </>
+    );
   if (!reason || whyAt) return button;
   return (
     <>

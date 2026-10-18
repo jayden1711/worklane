@@ -123,7 +123,7 @@ export function AutomationsTab({ state, id }: { state: State; id: string | null 
   );
 }
 
-function AutomationDetail({ a, actions, digest, timezone }: { a: AutomationItem; actions: AutomationAction[]; digest: string; timezone: string }) {
+export function AutomationDetail({ a, actions, digest, timezone }: { a: AutomationItem; actions: AutomationAction[]; digest: string; timezone: string }) {
   const [editing, setEditing] = useState(false);
   if (editing) return <AutomationForm digest={digest} initial={a} onDone={() => setEditing(false)} />;
   const shown = actions.filter((x) => x !== 'create' && (x !== 'pause' || a.enabled) && (x !== 'resume' || !a.enabled) && (x !== 'run' || a.enabled) && ((x !== 'rotate' && x !== 'unbind') || !!a.webhook) && (x !== 'unbind' || !!a.webhook?.bound));
@@ -249,7 +249,7 @@ function ActionBar({ a, actions, digest, onEdit }: { a: AutomationItem; actions:
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2" data-testid="automation-actions">
         {actions.map((x) => (
-          <Button key={x} size="sm" variant={x === 'delete' ? 'danger' : 'outline'} disabled={busy} onClick={() => void review(x)} data-testid={`automation-${x}`}>
+          <Button key={x} size="sm" variant={x === 'delete' ? 'danger' : 'outline'} starts={x === 'run'} disabled={busy} onClick={() => void review(x)} data-testid={`automation-${x}`}>
             {ACTION_LABEL[x]}
           </Button>
         ))}
@@ -304,7 +304,7 @@ function Review({ plan, busy, onConfirm, onCancel }: { plan: AutomationPlan; bus
         <li className="text-ink-2">Logged in the audit as you.</li>
       </ul>
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" disabled={busy} onClick={onConfirm} data-testid="automation-confirm">
+        <Button size="sm" starts={plan.action === 'run'} disabled={busy} onClick={onConfirm} data-testid="automation-confirm">
           {busy ? 'Working…' : 'Confirm'}
         </Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel} data-testid="automation-cancel">

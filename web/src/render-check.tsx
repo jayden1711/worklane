@@ -83,7 +83,9 @@ export { accountBusy } from './components/ClaudeAccount';
 import { HealthPage, HealthView as IncidentsHealthView } from './pages/Health';
 import { DecisionDetailView, DETAIL_SECTIONS } from './pages/DecisionDetail';
 import type { DecisionDetail, DecisionDiff, DecisionPrBody } from './api';
-import { UsageBanner, UsageLines } from './components/Usage';
+import { PausedScope, UsageBanner, UsageLines } from './components/Usage';
+import { AutomationDetail } from './components/Automations';
+import { StudyPage } from './components/Experiments';
 import type { UsageInfo } from './api';
 
 export const pages = {
@@ -234,6 +236,20 @@ export const renderRunWhy = (detail?: string) => renderToStaticMarkup(<RunWhy de
 export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageLines usage={usage} now={now} />);
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
+/**
+ * #587: the actions that start or land work (Your first task's File it, Not picked up's Add ready, an automation's Run
+ * now, a study's Start) and the emergency stop's banner (when `state` is given), under a page's usage view.
+ */
+export const renderUnderUsage = (usage: UsageInfo[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: State }) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      {o.state && <StopBanner state={o.state} />}
+      <FirstTaskForm canEdit initial={o.first as never} initialPreview={{ title: 'T', body: 'B' }} onDone={() => {}} />
+      <IgnoredIssues initial={o.ignored as never} />
+      <AutomationDetail a={o.automation as never} actions={['run']} digest="d" timezone="UTC" />
+      <StudyPage s={o.study as never} actions={['start']} />
+    </PausedScope>,
+  );
 /** The page header with its menu button and the narrow-screen navigation drawer, open; on a hub, its instances with their dots. */
 export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo; status?: Record<string, DotStatus>; why?: Record<string, string> } = {}) => {
   const open = o.open ?? true;

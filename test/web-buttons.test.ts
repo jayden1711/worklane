@@ -20,6 +20,7 @@ interface Render {
   renderDecisionCard(d: unknown, sending?: string): string;
   renderMachine(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
+  renderUnderUsage(usage: unknown[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: unknown }): string;
 }
 let r: Render;
 
@@ -126,6 +127,51 @@ test('a button this person can never use is not drawn; one held by the device sa
   } finally {
     d.close();
   }
+});
+
+/** The owner's words (#587): an action that starts or lands work, while its instance is paused on the usage limit. */
+const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
+/** The actions that start or land work in renderUnderUsage: File it, Add ready, an automation's Run now, a study's Start. */
+const STARTS = ['first-task-file', 'issue-ignored-add-ready', 'automation-run', 'experiment-start'];
+const usageOf = (instance: string, paused: boolean) => ({ instance, paused: paused ? { since: '2026-10-18T09:00:00Z', resetAt: '2026-10-18T14:00:00Z', source: 'claude', kind: 'five_hour' } : null, today: { runs: 3, limitHits: paused ? 1 : 0 }, lastHit: null });
+const starters = {
+  first: { local: true, why: null, template: { label: 'ready', body: 'b' }, tests: [] },
+  ignored: { issues: [{ issue: 3, title: 'no label', url: 'https://github.com/o/r/issues/3', author: 'someone', labels: [], reasons: [{ kind: 'no-ready', text: 'no ready label', fix: 'add-ready' }] }], error: null, canFix: true, local: true },
+  automation: { id: 'nightly', name: 'Nightly', owner: 'example-owner', enabled: true, trigger: { kind: 'schedule', cron: '0 3 * * *' }, mode: 'task', template: { title: 't', outcome: 'o', done_when: [] }, budget: { per_run_usd: 1, per_day_usd: 2 }, limits: { runs_per_day: 1, cooldown_minutes: 0 }, when: 'daily at 03:00', summary: [], next: null, today: { runs: 0, spentUsd: 0 }, runs: [], refused: [], pausedBy: null, webhook: null, waiting: [] },
+  study: { id: 's1', goal: 'lower loss', kind: 'ml_train', screen: { margin: 0, seeds: 1 }, ladder: [], metric: { name: 'loss', direction: 'min', min_delta: 0 }, job: { max_minutes: 10, gpus: 1, output_gb: 1 }, budget: { gpu_hours_per_day: 1, agent_usd_per_day: 1, agent_usd_total: 1, max_jobs: 1 }, exploration: { share: 0.1, near_miss: 0 }, editable: ['train.py'], started: false, startRefused: null },
+};
+
+test('paused reason: a paused instance\'s start and land actions are not refused; each says it takes effect when the instance resumes', () => {
+  // The owner's decision on #587: no new refusals while paused; the action stays usable and says when it takes effect.
+  const html = r.renderUnderUsage([usageOf('example', true)], null, starters);
+  for (const id of STARTS) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.ok(b.id, `${id}'s aria-describedby names the hint: ${b.tag}`);
+    assert.equal(b.text, PAUSED_HINT, id);
+  }
+  assert.equal(html.split(PAUSED_HINT).length - 1, STARTS.length, 'only the actions that start or land work say it, once each');
+  // Running: nothing said, nothing held (as before).
+  const running = r.renderUnderUsage([usageOf('example', false)], null, starters);
+  for (const id of STARTS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+  assert.doesNotMatch(running, /takes effect when the instance resumes/);
+  // On a hub: the pause of the instance chosen, not of another one.
+  const hub = [usageOf('a', false), usageOf('b', true)];
+  assert.doesNotMatch(r.renderUnderUsage(hub, 'a', starters), /takes effect when the instance resumes/, 'a is running; b is paused');
+  assert.equal(described(r.renderUnderUsage(hub, 'b', starters), 'automation-run').text, PAUSED_HINT);
+});
+
+test('emergency stop is unchanged: its banner still says the coordinator halted and starts none, and it adds no pause hint or hold', () => {
+  const state = { brand: { cli: 'wl' }, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: { at: new Date().toISOString(), running: 2 }, lastStop: null, lastResume: null } };
+  const html = r.renderUnderUsage([usageOf('example', false)], null, { ...starters, state });
+  assert.match(html.replaceAll('<!-- -->', ''), /data-testid="emergency-stop"[\s\S]*?Emergency stop in force[\s\S]*?by ops: spend\.[\s\S]*?This coordinator halted 2 running agent\(s\) [^<]* and starts none\. Agents on this\s+machine stay stopped until it(&#x27;|')s lifted on the machine with <code[^>]*>wl resume-all</);
+  for (const id of STARTS) assert.deepEqual([described(html, id).disabled, described(html, id).id], [false, undefined], `${id}: as without the stop`);
+  assert.doesNotMatch(html, /takes effect when the instance resumes/, 'an emergency stop is not a usage pause');
+  // Paused on the usage limit as well: the stop's banner is the same banner.
+  const banner = (h: string) => /<div role="alert"[^>]*data-testid="emergency-stop">[\s\S]*?<\/div>/.exec(h)?.[0];
+  const both = r.renderUnderUsage([usageOf('example', true)], null, { ...starters, state });
+  assert.ok(banner(html));
+  assert.equal(banner(both), banner(html));
 });
 
 /**
