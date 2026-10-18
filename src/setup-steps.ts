@@ -158,7 +158,7 @@ export type Fix =
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
   | { kind: 'action'; action: string; label: string }
-  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
+  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server only shows what root runs on the machine. */
   | { kind: 'signin'; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }

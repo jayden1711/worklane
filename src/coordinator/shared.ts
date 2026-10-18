@@ -24,6 +24,7 @@ import type { DeployGate } from '../deploy-gate/gate.js';
 import type { JournalRead } from '../superfan/digest.js';
 import type { Previews } from '../preview/previews.js';
 import { DEFAULT_GENERATED } from '../config/schema.js';
+import type { LockScope } from '../review.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -94,6 +95,11 @@ export interface CoordinatorDeps {
   accountSwitched?: () => string | null;
   /** Open-model providers' key files, by credential name (credentials.yaml provider_keys): paths only, never keys. */
   providerKeys?: Record<string, string>;
+  /**
+   * Whose repo this instance works, for the self-modification locks (src/review.ts LockScope), asked on every review
+   * level: root's word only (src/managed-apps.ts readLockScope). Absent (a checkout's coordinator, tests): the engine's.
+   */
+  lockScope?: () => LockScope;
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */
@@ -287,6 +293,15 @@ export class UsagePaused extends Halted {
 export class AuthPaused extends Halted {
   constructor(readonly login: string, readonly detail: string) {
     super(`Claude sign-in failed on this machine (${login}): no new runs on that login until it works again`);
+  }
+}
+
+/** The lock scope these deps give now: the engine's when they give none, or asking fails (fails closed). */
+export function lockScopeOf(d: Pick<CoordinatorDeps, 'lockScope'>): LockScope {
+  try {
+    return d.lockScope?.() ?? 'engine';
+  } catch {
+    return 'engine';
   }
 }
 

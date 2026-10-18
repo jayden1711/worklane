@@ -70,7 +70,7 @@ function Failover({ table, self, confirmScript, disabled, onDone }: { table: Pro
         When the account in use hits its usage limit, move {self} to the next one in this order, after a real call on it as its agent user; a notice says which and when the limit resets. Never on a sign-in failure, and never to a staged account. Every instance's setting is a root admin's: <code>sudo bash {confirmScript} failover a+b back</code>.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
-        <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
+        <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
         <label className="flex items-center gap-1">
           <input type="checkbox" checked={back} onChange={(e) => setBack(e.target.checked)} data-testid="claude-failover-back" />
           move back after the reset
@@ -90,7 +90,7 @@ function Failover({ table, self, confirmScript, disabled, onDone }: { table: Pro
 
 /**
  * Adding an account, as a root admin does it on the machine: never through this page, which takes no Claude credential
- * (issue #711). Two ways, both through Anthropic's own flow or a token root installs.
+ * (issue #711): a token from `claude setup-token`, at the hidden prompt of `claude-account.sh profile-add`.
  */
 function AddHowTo({ self, confirmScript }: { self: string; confirmScript: string }) {
   return (

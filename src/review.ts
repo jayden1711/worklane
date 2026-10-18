@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
+import { HOOK_IMPORTS } from './hook-imports.js';
 
 export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
@@ -46,14 +47,16 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
   { what: 'the sandbox and test runs', globs: ['src/sandbox.ts', 'src/testrun/**'] },
   // The PreToolUse guard (which tool calls an agent may make, the config folder's guard among them) and the post-edit hook,
-  // with what it decides by (#655): the deny lists, the read-only agents' tools and refusals, the task file's frozen paths.
-  {
-    what: "the agents' tool guard",
-    globs: [
-      'src/hook*', 'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
-      'src/intake/run.ts', 'src/intake/chat.ts', 'src/research.ts', 'src/contract.ts',
-    ],
-  },
+  // with every module it reaches, directly or through other imports (#655, #665): the deny lists, the read-only agents'
+  // tools and refusals, the task file's frozen paths, the guardrail rules' loader, the secret check, and the rest.
+  // src/hook-imports.ts holds that tree as the test reads it from the real imports (test/review.test.ts).
+  // Its process entry is src/hook-main.ts (under src/hook*), so the tree is read from there too (#665).
+  { what: "the agents' tool guard", globs: ['src/hook*', ...HOOK_IMPORTS] },
+  // What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change
+  // there could point an agent's hooks at another entry, or at none (#665).
+  { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
+  // Which repos root says are managed apps, where the engine's own source paths below aren't locked (#665).
+  { what: 'where the self-modification locks apply', globs: ['src/managed-apps.ts'] },
   { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },
   // A tests-only change is L0 and merges itself: so the tests that hold the controls above are named here, one by one.
   {
@@ -62,6 +65,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/review.test.ts', 'test/merge-policy.test.ts', 'test/guardrails.test.ts',
       'test/push-check.test.ts', 'test/push-guard.test.ts', 'test/push-hook-guard.test.ts', 'test/push-gate.test.ts', 'test/push-gate-hook.test.ts',
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
+      // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
+      'test/managed-apps.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
@@ -76,12 +81,36 @@ export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
 };
 
+/**
+ * Whose repo a change is in, for the locks above (#665). 'engine': the engine's own, where every lock applies. The
+ * other value, a managed app's, comes only from root's word on this machine (src/managed-apps.ts readLockScope), never
+ * from anything in a repo; there the globs that name the engine's own source tree (ENGINE_TREE) stand aside, the push
+ * gate's and release-tag check's scripts under scripts/ among them, and the rest (the config folder's review.yaml,
+ * guardrails.yaml and experiments.yaml, CI workflows and release signers, the git hooks and secret-scan files:
+ * .githooks/**, .denylist* and .gitleaks*, and the agents' instructions) still hold: each changes the harness's rules
+ * for that repo.
+ * INVARIANT: absent, unknown or unreadable is 'engine' (fails closed).
+ */
+export type LockScope = 'engine' | 'managed-app';
+
+/** The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. */
+const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/'];
+/** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
+export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d));
+
+/** The locked categories in this scope: all of them in the engine's repo; in a managed app's, those that hold in every repo. */
+export function lockedCategories(scope: LockScope | undefined): Record<string, string[]> {
+  if (scope !== 'managed-app') return LOCKED_CATEGORIES;
+  return Object.fromEntries(Object.entries(LOCKED_CATEGORIES).map(([c, globs]) => [c, globs.filter((g) => !engineSourceGlob(g))]));
+}
+
 /** Locked categories that are always L3, whatever review.yaml's levels list. */
 const ALWAYS_L3 = [SELF_MODIFICATION];
 
-/** What a change to this path changes, in plain words (the self-modification part it falls in), or null. */
-export function selfModificationPart(path: string): string | null {
-  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))?.what ?? null;
+/** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
+export function selfModificationPart(path: string, scope?: LockScope): string | null {
+  const holds = (g: string) => scope !== 'managed-app' || !engineSourceGlob(g);
+  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && globToRegExp(g).test(path)))?.what ?? null;
 }
 
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
@@ -123,6 +152,11 @@ export interface LevelInput {
   verdict?: { patch_correct: boolean; test_correct: boolean; confidence: 'high' | 'medium' | 'low' };
   /** An agent may ask for more review, never less. */
   requested?: Level;
+  /**
+   * Whose repo this is, for the locked categories (LockScope); undefined: the engine's, every lock applies. A required
+   * key (#665): every caller says which scope it means, so a call site can't leave it out by accident.
+   */
+  scope: LockScope | undefined;
 }
 
 export interface LevelResult {
@@ -149,7 +183,7 @@ export function loadMoneyPaths(root: string, src: ReviewConfig['money_path_sourc
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
-  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...LOCKED_CATEGORIES };
+  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...lockedCategories(input.scope) };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);

@@ -20,13 +20,14 @@ import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
+import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
+import { runCommentCheck } from './comment-policy.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
@@ -105,6 +106,9 @@ usage: ${BRAND.cli} <command> [options]
   vacuity [files...]               flag tests that assert nothing or touch no app code
                                    (default: test files changed vs the default branch)
   scan transcripts [dir]           secret-scan Claude Code transcripts for this project
+  check-comments --base <rev> [--head <rev>]
+                                   the comment policy over base...head, with the policy committed at base
+                                   (config.yaml comment_policy; off: exits 0). Exit 1: findings
   baseline record --log <file> --sha <sha>
                                    record main's failing set from a full run's output
   baseline record --queue          queue a full run on the tip of main; records the baseline when done
@@ -297,20 +301,9 @@ async function main(argv: string[]): Promise<number> {
       console.log(pkg.version);
       return 0;
 
-    case 'hook': {
-      const raw = await readStdin();
-      let input: HookInput = {};
-      try {
-        input = raw.trim() ? (JSON.parse(raw) as HookInput) : {};
-      } catch {
-        process.stderr.write(`[${BRAND.cli}] hook input is not JSON\n`);
-        return 2;
-      }
-      const out = await runHook(sub ?? '', input);
-      if (out.stdout) process.stdout.write(out.stdout);
-      if (out.stderr) process.stderr.write(out.stderr);
-      return out.exitCode;
-    }
+    case 'hook':
+      // Installs before #665: the hook commands install writes now run the guard's own entry (src/hook-main.ts).
+      return hookProcess(sub ?? '');
 
     case 'install': {
       // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
@@ -581,6 +574,19 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log(`${files.length} transcript(s) scanned, ${leaks} finding(s)`);
       return leaks ? 1 : 0;
+    }
+
+    case 'check-comments': {
+      // WHY: a managed repo's CI has no scripts/ (not in the package), so it runs the PR check through the CLI (#330).
+      const base = option(args, '--base');
+      if (!base) {
+        console.error(`usage: ${BRAND.cli} check-comments --base <rev> [--head <rev>]`);
+        return 2;
+      }
+      const r = runCommentCheck(root, base, option(args, '--head') ?? 'HEAD');
+      process.stdout.write(r.stdout);
+      process.stderr.write(r.stderr);
+      return r.code;
     }
 
     case 'queue': {

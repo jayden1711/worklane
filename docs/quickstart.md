@@ -177,7 +177,7 @@ Some steps have no button, because they can't be one:
 
 To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
-**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only), and you paste the agents' Claude token into a password box. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
+**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only). The agents' Claude login is never taken by the dashboard: a root admin signs them in on the machine (`sudo bash scripts/setup/credentials.sh <name> claude`, or `sudo -u wl-<name>-agent -i claude auth login`; see [auth.md](auth.md)), and Add project waits for it. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
 
 To see everything work without a repo of your own, try the demo. It uses scripted agents and needs no login:
 
@@ -198,6 +198,20 @@ A PR is marked ready only once the checks named in `required_checks` pass, so an
 The step shows a summary, then the file. **Change** lets you edit it. **Confirm** opens GitHub's new-file page with the file in it, and you commit it and open its PR as yourself: the engine never writes a workflow. Once it has run on the default branch, its check is selected in the form, and you review and propose that change like any other.
 
 **No CI** is the other choice, where tests.yaml has `test_run` (a server's sandboxed test runs). Choosing it records `ci: none` with no required checks. A PR is then ready when this machine's test runs pass on its exact head and the evaluator approves it. The test runs' results are read only from the instance's own event log, which the agent user can't write; a GitHub check of the same name counts for nothing. GitHub runs nothing, so the main watch can't judge merges by checks. Instead, every tier runs on each merge commit on main, through the same sandbox, and main is judged by that run, read from the same log. Main is never recorded green with nothing checked. The Pull requests, Land queue and Settings pages say so. Without `test_run`, `ci: none` is refused, and the fix is to add the starter CI.
+
+## The comment policy in CI (optional)
+
+With `comment_policy: { enabled: true }` in config.yaml, agents are told after each edit about any new comment that doesn't start with `WHY:` or `INVARIANT:` or cite an issue or decision id. A PR check can enforce the same rule. Add the last step below to a pull-request job in your workflow, after a checkout with `fetch-depth: 2`:
+
+```yaml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - run: npx -y @worklane/cli@0.5.3 check-comments --base HEAD^1 --head HEAD
+```
+
+`check-comments` needs 0.5.3 or later: 0.5.2 and earlier print `unknown command: check-comments` and fail the step. Pin the version, as above, so the step runs the release you chose rather than whatever is newest. On a pull request, the checkout is GitHub's merge commit, so `HEAD^1` is the base. The step judges only the comment lines the PR adds, using the policy committed on the base, so a PR can't switch it off through config. While the policy is off it prints `comment policy: off …` and passes. It exits 1 with each finding as `file:line: reason`, and exits 2 if it can't check. The engine never writes this step for you: add it yourself, like the starter CI.
 
 ## Protect
 

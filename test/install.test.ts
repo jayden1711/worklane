@@ -119,13 +119,41 @@ test('installed PreToolUse hook: agents get full guardrails, humans only the dan
   assert.equal(decision(call('WebFetch', { url: 'https://unlisted.example/' }, false)), 'none', 'no domain allowlist for humans');
 });
 
+// WHY (#665): the hooks ran the whole CLI (`cli.js hook <event>`); they now run the guard's own entry. Settings an
+// older install wrote keep the CLI form until install runs again, so that form must still decide the same.
+test("installed hooks run the guard's own entry (hook-main.js), and an older install's `cli.js hook <event>` still decides the same", () => {
+  const { dir, stateDir } = exampleProject();
+  install({ root: dir, engineCli });
+  spawnSync(process.execPath, [engineCli, 'guardrails', 'refresh', '--root', dir], { env: { ...process.env, [`${BRAND.envPrefix}_STATE_DIR`]: stateDir } });
+  const cmd = hookCmd(dir, 'PreToolUse');
+  assert.match(cmd, /dist\/src\/hook-main\.js"; if \[ -f "\$E" \]; then \S+ node "\$E" pre-tool-use \|\| exit 2;/);
+  assert.doesNotMatch(cmd, /cli\.js/);
+  const old = cmd.replace('hook-main.js"', 'cli.js"').replace('node "$E" pre-tool-use', 'node "$E" hook pre-tool-use');
+  assert.match(old, /cli\.js"; if \[ -f "\$E" \]; then \S+ node "\$E" hook pre-tool-use \|\| exit 2;/);
+  const agent = { [`${BRAND.envPrefix}_AGENT`]: '1' };
+  const ask = (c: string, toolInput: object) => runHookCommand(c, dir, stateDir, { hook_event_name: 'PreToolUse', cwd: dir, tool_name: 'Edit', tool_input: toolInput }, agent);
+  for (const c of [cmd, old]) {
+    const denied = ask(c, { file_path: join(dir, '.worklane', 'guardrails.yaml') });
+    assert.equal(denied.status, 0, denied.stderr);
+    assert.equal((JSON.parse(denied.stdout) as { hookSpecificOutput: { permissionDecision: string } }).hookSpecificOutput.permissionDecision, 'deny', c);
+    const fine = ask(c, { file_path: join(dir, 'src', 'a.js') });
+    assert.equal(fine.status, 0, fine.stderr);
+    assert.equal(fine.stdout, '', c);
+  }
+  // Every event the guard's entry gets, as install writes it: it runs to its own end, never an unknown command.
+  for (const event of ['SessionStart', 'SessionEnd', 'PostToolUse']) {
+    const r = runHookCommand(hookCmd(dir, event), dir, stateDir, { hook_event_name: event, cwd: dir, tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'a.js') } }, agent);
+    assert.equal(r.status, 0, `${event}: ${r.stderr}`);
+  }
+});
+
 test('missing engine: agent sessions block; human sessions get a one-line warning and continue', () => {
   const { dir, stateDir } = exampleProject();
   install({ root: dir, engineCli: join(dir, 'node_modules', 'gone', 'cli.js') });
   const agent = { [`${BRAND.envPrefix}_AGENT`]: '1' };
   for (const event of ['PreToolUse', 'SessionStart']) {
     const cmd = hookCmd(dir, event);
-    assert.match(cmd, /\$CLAUDE_PROJECT_DIR\/node_modules\/gone\/cli\.js/);
+    assert.match(cmd, /\$CLAUDE_PROJECT_DIR\/node_modules\/gone\/hook-main\.js/);
     const input = { cwd: dir, tool_name: 'Bash', tool_input: { command: 'ls' } };
     assert.equal(runHookCommand(cmd, dir, stateDir, input, agent).status, 2, `${event} blocks agents`);
     const human = runHookCommand(cmd, dir, stateDir, input);
@@ -161,7 +189,7 @@ test('install references the project-local engine even when it is a symlink', { 
   symlinkSync(join(engineCli, '..', '..', '..'), join(dir, 'node_modules', '@worklane', 'cli'));
   install({ root: dir });
   const cmd = hookCmd(dir, 'PreToolUse');
-  assert.match(cmd, /"\$CLAUDE_PROJECT_DIR\/node_modules\/@worklane\/cli\/dist\/src\/cli\.js"/);
+  assert.match(cmd, /"\$CLAUDE_PROJECT_DIR\/node_modules\/@worklane\/cli\/dist\/src\/hook-main\.js"/);
 });
 
 test('install --engine points the hooks at a machine-wide engine path', () => {
@@ -176,7 +204,7 @@ test('install --engine points the hooks at a machine-wide engine path', () => {
   assert.equal(out.status, 0);
   assert.match((JSON.parse(out.stdout) as { systemMessage: string }).systemMessage, /install the \S+ engine on this machine/);
   assert.doesNotMatch(out.stdout, /npm install/);
-  assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+cli\.js/ : /\/opt\/engine\/current\/dist\/src\/cli\.js/);
+  assert.match(settings, process.platform === 'win32' ? /:(\\\\)+opt(\\\\)+engine(\\\\)+current(\\\\)+dist(\\\\)+src(\\\\)+hook-main\.js/ : /\/opt\/engine\/current\/dist\/src\/hook-main\.js/);
 });
 
 test('install --git-hooks-only adds the pre-commit secret scan and leaves committed settings alone', () => {

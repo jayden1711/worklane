@@ -222,7 +222,7 @@ export function Issues({ state }: { state: State }) {
             value={filters.text ?? ''}
             onChange={(e) => setFilters((f) => ({ ...f, text: e.target.value || undefined }))}
             placeholder="Filter…"
-            className="h-7 w-44 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]"
+            className="h-7 w-44 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--ring)]"
           />
           {owners.map((o) => (
             <Chip key={o} k="owner" value={o} label={`@${o}`} />

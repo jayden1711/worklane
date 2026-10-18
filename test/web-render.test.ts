@@ -137,7 +137,7 @@ interface Render {
   renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
-  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown): Record<string, number | undefined>;
   renderNeedsYou(state: State, waiting: unknown, now?: number, error?: string | null): string;
   NEEDS_YOU_ORDER: string;
   nextStep(f: unknown): { id: string } | null;
@@ -666,6 +666,31 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   ]);
   const cells = [...hubHtml.matchAll(/data-testid="health-instance-offsite">([\s\S]*?)<\/td>/g)].map((m) => m[1]!.replace(/<[^>]+>/g, ''));
   assert.deepEqual(cells, ['3 h ago', 'not set up', 'never verified']);
+});
+
+test("#392: the provider hosts on the health panel, read-only: root's hosts and their file, or that provider runs are off; a refused file and each provider outside the set in red", () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, offsiteBackup: null, suggestions: ['Nothing to suggest.'] };
+  const file = '/etc/x/providers.json';
+  const allowed = r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: ['api.provider.test', '127.0.0.1:8080'], error: null, refused: [] } });
+  assert.match(allowed, /data-testid="health-provider-hosts">Provider hosts: <code[^>]*>api\.provider\.test, 127\.0\.0\.1:8080<\/code> \(from <code[^>]*>\/etc\/x\/providers\.json<\/code>\)/);
+  assert.doesNotMatch(allowed, /health-provider-refused/, 'no provider refused: no list');
+  assert.doesNotMatch(allowed, /<(?:input|button|form|select|textarea)\b/i, 'nothing on the page changes it');
+  // A configured provider outside the set: named, with why, in red.
+  const outside = r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: 'open.example.com is not an allowed provider host (127.0.0.1:8080, from /etc/x/providers.json)' }] } });
+  assert.match(outside, /data-testid="health-provider-refused"[\s\S]*?<span class="[^"]*text-red[^"]*">Provider <code[^>]*>hosted:glm<\/code> refused:<\/span> <span[^>]*>open\.example\.com is not an allowed provider host \(127\.0\.0\.1:8080, from \/etc\/x\/providers\.json\)<\/span>; its runs take the role(&#x27;|')s normal model/);
+  // An empty list: provider runs are off.
+  assert.match(r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: [], error: null, refused: [] } }), /data-testid="health-provider-hosts">Provider hosts: none, so provider runs are off \(from <code/);
+  // No file: said plainly, with each configured provider it turns off.
+  const missing = r.renderHealth({ ...base, providerHosts: { file, state: 'missing', hosts: [], error: null, refused: [{ provider: 'local', reason: 'no provider host is allowed on this machine' }] } });
+  assert.match(missing, /data-testid="health-provider-hosts-none">No provider hosts: <code[^>]*>\/etc\/x\/providers\.json<\/code> doesn(&#x27;|')t exist, so provider runs are off/);
+  assert.match(missing, /data-testid="health-provider-refused"[\s\S]*?<code[^>]*>local<\/code> refused:[\s\S]*?no provider host is allowed on this machine/);
+  // A refused file: the refusal in red.
+  const refused = r.renderHealth({ ...base, providerHosts: { file, state: 'refused', hosts: [], error: "/etc/x/providers.json: isn't root's; no provider host is allowed", refused: [] } });
+  assert.match(refused, /role="alert"[^>]*data-testid="health-provider-hosts-refused"[\s\S]*?text-red[^>]*>Provider hosts refused:<\/span> <span[^>]*>\/etc\/x\/providers\.json: isn(&#x27;|')t root(&#x27;|')s; no provider host is allowed<\/span>\. Provider runs are off\./);
+  assert.doesNotMatch(refused, /data-testid="health-provider-hosts"/, 'no list of hosts beside a refused file');
+  // Nothing to show (no file and no provider), or a viewer (the server sends null): no line at all.
+  assert.doesNotMatch(r.renderHealth({ ...base, providerHosts: null }), /health-provider/);
+  assert.doesNotMatch(r.renderHealth(base), /health-provider/);
 });
 
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
@@ -1883,7 +1908,9 @@ test('#585 Needs you is one queue: what the three tabs list, each once, blocking
   // Blocking first; the hotspot hold is the oldest of all, but nothing waits on it but you, so it is last.
   assert.equal(rows.at(-1), 'hotspot_held no');
   assert.ok(rows.slice(0, -1).every((x) => x.endsWith(' yes')), rows.join(', '));
-  assert.equal(rows.length, r.navCounts(asOwner, w)['nav-needs-you'], 'the badge counts the queue');
+  // #633: the badge from the state alone, whose waiting keys are what /api/waiting lists.
+  const keyed = { ...asOwner, waiting: { count: w.items.length, keys: w.items.map((i) => ({ kind: i.kind, issue: i.issue, ...('decision' in i ? { decision: i.decision } : {}) })) } };
+  assert.equal(rows.length, r.navCounts(keyed)['nav-needs-you'], 'the badge counts the queue');
   // Every open decision is in it once, the one Waiting on you lists too among them.
   for (const d of open) assert.equal(html.split(`href="/needs-you/decisions/${d.id}"`).length - 1, 1, d.id);
   assert.match(html, /href="\/needs-you\/decisions\/pr-31"/);
