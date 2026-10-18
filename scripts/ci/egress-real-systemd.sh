@@ -7,6 +7,8 @@
 #   apply:     test users covered by default (systemd 255 here); Docker, started before the set existed, is put in it.
 #   refused:   a test-user process (a unit as wl-test-ci in worklane-test.slice, no PrivateNetwork) is dropped; its own
 #              loopback works.
+#   cgroup:    the same kind of unit can't move itself into Docker's cgroup: its write of its own pid to cgroup.procs of
+#              Docker's unit and of its daemon subgroup is refused (a plain permission check; the job fails if it isn't).
 #   pull:      a real rootless docker pull of the database image, with the rule on.
 #   reload:    the rule file loaded again (as the boot unit does, and apply) keeps Docker in the set; the pre-#543 way
 #              (delete the table, make it again) empties it (fail-without), and apply puts Docker back.
@@ -16,6 +18,10 @@
 #   join:      MEASURED, NOT ASSERTED: whether a test run (the real helper's exec, its real sandbox) can join the Docker
 #              daemon's user+net namespaces, and reach the stand-in from there (through Docker's exempt slirp4netns).
 #              The answer is printed and put in the job summary either way.
+#   upgrade:   an install that covered test users before #543 (the pre-#543 egress-firewall.sh, apply --with-test-users,
+#              and a Docker unit with no NFTSet=) keeps dropping their Docker after the new test-user.sh install and
+#              apply: no NFTSet=, no cgroup accept, the pull dropped, and the join probe, run before and after, reaches
+#              the stand-in from nowhere it didn't before (asserted: the job fails if any blocked attempt opens).
 # Usage: bash scripts/ci/egress-real-systemd.sh   (as the runner user, with sudo)
 set -euo pipefail
 : "${DB_IMAGE:?the pinned database image}"
@@ -24,6 +30,8 @@ U=wl-test-ci
 DU=worklane-test-ci-docker.service
 PUB=198.51.100.7
 EF=scripts/setup/egress-firewall.sh
+# main's commit before #543, whose egress-firewall.sh and lib.sh the upgrade step runs (the rule a machine had).
+PRE543=93fa37612bcdafe2f2cbe8426165ba1b29d99c63
 t="$(mktemp -d)"
 chmod 0755 "$t"
 cleanup() {
@@ -112,6 +120,28 @@ echo "  wl-test-ci unit -> $PUB: $got"
 [ "$(as_test lo)" = OK ] || fail "the test user's own loopback doesn't work under the rule"
 python3 "$t/probe.py" "$PUB" "$PORT" | grep -qx OK || fail "the rule blocked the runner user too"
 
+echo "== cgroup: a test-user unit can't move itself into Docker's cgroup (asserted)"
+# A plain permission check, nothing else: the unit writes its own pid to cgroup.procs of Docker's unit and of its daemon
+# subgroup (both the test user's, by Delegate=). cgroup v2 also wants write access to cgroup.procs of the common
+# ancestor, worklane-test.slice, which is root's. The job fails if either write succeeds.
+dcg="/sys/fs/cgroup$(systemctl show -p ControlGroup --value "$DU")"
+for f in "$dcg/cgroup.procs" "$dcg/daemon/cgroup.procs"; do
+  sudo test -e "$f" || fail "$f isn't there: this check can't tell"
+  echo "  $f: $(sudo stat -c '%U:%G %a' "$f")"
+done
+cat > "$t/cgmove.sh" <<'EOF'
+for f in "$@"; do
+  if err="$( (echo "$$" > "$f") 2>&1 )"; then echo "moved: $f"; else echo "refused: $f: ${err##*: }"; fi
+done
+EOF
+chmod 0644 "$t/cgmove.sh"
+sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=30 \
+  /bin/bash "$t/cgmove.sh" "$dcg/cgroup.procs" "$dcg/daemon/cgroup.procs" < /dev/null > "$t/cgmove.out" 2>&1 || true
+sed 's/^/  wl-test-ci unit: /' "$t/cgmove.out"
+[ "$(grep -c '^refused: ' "$t/cgmove.out")" -eq 2 ] || fail "a test-user unit's move into Docker's cgroup wasn't refused (or didn't run)"
+summary "### #543: a test-user unit's write of its own pid to Docker's cgroup.procs (asserted refused)"
+while IFS= read -r l; do summary "- $l"; done < "$t/cgmove.out"
+
 echo "== pull: a real rootless docker pull with the rule on"
 pull 300 || fail "Docker couldn't pull $DB_IMAGE with the rule on"
 dk image inspect "$DB_IMAGE" > /dev/null
@@ -154,27 +184,8 @@ grep -q '^== the host egress rule (egress-firewall.sh), now with wl-test-ci in i
 in_set || fail "after test-user.sh install Docker isn't in the set"
 pull 300 || fail "Docker couldn't pull after test-user.sh install"
 
-echo "== join (measured, not asserted): can a test run join the Docker daemon's user+net namespaces?"
-# Two targets. The daemon's own namespaces: its user namespace, and its network namespace (with rootlesskit's
-# detach-netns, the host's: it pulls from there, in its exempt cgroup). And the network namespace its containers get,
-# which its slirp4netns (in the exempt cgroup) gives a way out: a bind-mounted file under its runtime directory, and
-# any process of the test user's in a network namespace other than the host's.
-dpid="$(pgrep -u "$U" -x dockerd | head -n 1)"
-[ -n "$dpid" ] || fail "no dockerd of $U's"
-hostnet="$(sudo readlink /proc/1/ns/net)"
-echo "  host: net ns $hostnet; dockerd: pid $dpid, user ns $(sudo readlink "/proc/$dpid/ns/user"), net ns $(sudo readlink "/proc/$dpid/ns/net")"
-nsfile="$(sudo find /run/worklane-test-ci-docker -maxdepth 3 -name netns 2>/dev/null | head -n 1)"
-echo "  Docker's container netns file: ${nsfile:-none found} $([ -z "$nsfile" ] || sudo stat -c '(%U:%G %a)' "$nsfile")"
-npids=""
-for p in $(pgrep -u "$U"); do
-  n="$(sudo readlink "/proc/$p/ns/net" 2>/dev/null || true)"
-  if [ -n "$n" ] && [ "$n" != "$hostnet" ]; then npids="$npids $p"; echo "  $U's pid $p ($(ps -o comm= -p "$p")) is in net ns $n"; fi
-done
-# Control: root in that netns reaches the stand-in (so a process of the test user's that joins it would too).
-if [ -n "$nsfile" ]; then
-  echo "  control, root in Docker's container netns -> $PUB: $(sudo nsenter --net="$nsfile" python3 "$t/probe.py" "$PUB" "$PORT" 2>&1 || true)"
-fi
-# The attempts, the same from a plain test-user unit and from a run: <probe> <pub> <port> <dockerd pid> <netns file|-> <pid>...
+# The join probe's attempts, the same from a plain test-user unit and from a run: <probe> <pub> <port> <dockerd pid>
+# <netns file|-> <pid>...
 cat > "$t/join.sh" <<'EOF'
 p="$1" pub="$2" port="$3" d="$4" f="$5"; shift 5
 try() { local what="$1" out; shift; if out="$("$@" python3 "$p" "$pub" "$port" 2>&1)"; then echo "$what: joined; -> $pub: $out"; else echo "$what: refused: $out"; fi; }
@@ -188,39 +199,123 @@ fi
 for n in "$@"; do try "the containers' netns (pid $n)" nsenter --user="/proc/$d/ns/user" --net="/proc/$n/ns/net" --preserve-credentials; done
 EOF
 chmod 0644 "$t/join.sh"
-# Upper bound: a test-user process outside any run's sandbox (a plain unit, the host's /run and /proc).
-sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=60 \
-  /bin/bash "$t/join.sh" "$t/probe.py" "$PUB" "$PORT" "$dpid" "${nsfile:--}" $npids < /dev/null > "$t/join-plain.out" 2>&1 || true
-sed 's/^/  plain test-user unit: /' "$t/join-plain.out"
-# A run as the coordinator makes it (the real helper, its real sudoers rule and sandbox), its command the same attempts.
 as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
-r="$(mktemp -d)"
-id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
-git init -q "$r" && date +%s%N > "$r/f" && git -C "$r" add -A && git -C "$r" "${id_[@]}" commit -q -m probe
-for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/egress-join/$x" HEAD; done
-git -C "$r" bundle create --quiet "$r/b" refs/worklane/test-run/egress-join/head refs/worklane/test-run/egress-join/base
-as_ create egress-join main refs/worklane/test-run/egress-join/head refs/worklane/test-run/egress-join/base "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" > /dev/null
-rm -rf "$r"
-probe64="$(base64 -w0 < "$t/probe.py")"
-join64="$(base64 -w0 < "$t/join.sh")"
-# No ${...}: systemd would expand those.
-cmd="printf %s $probe64 | base64 -d > \"\$TMPDIR/p.py\"; printf %s $join64 | base64 -d > \"\$TMPDIR/j.sh\"; bash \"\$TMPDIR/j.sh\" \"\$TMPDIR/p.py\" $PUB $PORT $dpid ${nsfile:--}$npids"
-as_ exec egress-join 60 -- "$cmd" < /dev/null > "$t/join.out" 2> "$t/join.err" || true
-sed 's/^/  run: /' "$t/join.out"
-as_ wipe egress-join > /dev/null
-grep -q '^own netns: ' "$t/join.out" || { cat "$t/join.err" >&2; fail "the run's probe didn't run"; }
-[ "$(sed -n "s/^own netns: -> $PUB: //p" "$t/join.out")" != OK ] || fail "the run reached $PUB from its own namespace"
+
+# The join probe <tag> (measured): whether a process of the test user's can join Docker's namespaces and reach the
+# stand-in from there. From a plain test-user unit (outside any run's sandbox, the host's /run and /proc: the upper
+# bound) and from a run (as the coordinator makes it: the real helper, its real sudoers rule and sandbox). Each
+# attempt's line goes to $t/join-<tag>-plain.out and $t/join-<tag>-run.out; JOIN_INFO says what it found.
+# Two targets. The daemon's own namespaces: its user namespace, and its network namespace (with rootlesskit's
+# detach-netns, the host's: it pulls from there, in its exempt cgroup). And the network namespace its containers get,
+# which its slirp4netns (in the exempt cgroup) gives a way out: a bind-mounted file under its runtime directory, and
+# any process of the test user's in a network namespace other than the host's.
+join_probe() {
+  local tag="$1" id="egress-join-$1" dpid hostnet nsfile npids="" p n r probe64 join64 cmd
+  local id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+  dpid="$(pgrep -u "$U" -x dockerd | head -n 1)"
+  [ -n "$dpid" ] || fail "no dockerd of $U's"
+  hostnet="$(sudo readlink /proc/1/ns/net)"
+  echo "  host: net ns $hostnet; dockerd: pid $dpid, user ns $(sudo readlink "/proc/$dpid/ns/user"), net ns $(sudo readlink "/proc/$dpid/ns/net")"
+  nsfile="$(sudo find /run/worklane-test-ci-docker -maxdepth 3 -name netns 2>/dev/null | head -n 1)"
+  echo "  Docker's container netns file: ${nsfile:-none found} $([ -z "$nsfile" ] || sudo stat -c '(%U:%G %a)' "$nsfile")"
+  for p in $(pgrep -u "$U"); do
+    n="$(sudo readlink "/proc/$p/ns/net" 2>/dev/null || true)"
+    if [ -n "$n" ] && [ "$n" != "$hostnet" ]; then npids="$npids $p"; echo "  $U's pid $p ($(ps -o comm= -p "$p")) is in net ns $n"; fi
+  done
+  # Control: root in that netns reaches the stand-in (so a process of the test user's that joins it would too).
+  if [ -n "$nsfile" ]; then
+    echo "  control, root in Docker's container netns -> $PUB: $(sudo nsenter --net="$nsfile" python3 "$t/probe.py" "$PUB" "$PORT" 2>&1 || true)"
+  fi
+  sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=60 \
+    /bin/bash "$t/join.sh" "$t/probe.py" "$PUB" "$PORT" "$dpid" "${nsfile:--}" $npids < /dev/null > "$t/join-$tag-plain.out" 2>&1 || true
+  sed 's/^/  plain test-user unit: /' "$t/join-$tag-plain.out"
+  r="$(mktemp -d)"
+  git init -q "$r" && date +%s%N > "$r/f" && git -C "$r" add -A && git -C "$r" "${id_[@]}" commit -q -m probe
+  for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$id/$x" HEAD; done
+  git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
+  as_ create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" > /dev/null
+  rm -rf "$r"
+  probe64="$(base64 -w0 < "$t/probe.py")"
+  join64="$(base64 -w0 < "$t/join.sh")"
+  # No ${...}: systemd would expand those.
+  cmd="printf %s $probe64 | base64 -d > \"\$TMPDIR/p.py\"; printf %s $join64 | base64 -d > \"\$TMPDIR/j.sh\"; bash \"\$TMPDIR/j.sh\" \"\$TMPDIR/p.py\" $PUB $PORT $dpid ${nsfile:--}$npids"
+  as_ exec "$id" 60 -- "$cmd" < /dev/null > "$t/join-$tag-run.out" 2> "$t/join-$tag-run.err" || true
+  sed 's/^/  run: /' "$t/join-$tag-run.out"
+  as_ wipe "$id" > /dev/null
+  grep -q '^own netns: ' "$t/join-$tag-run.out" || { cat "$t/join-$tag-run.err" >&2; fail "the run's probe didn't run"; }
+  [ "$(sed -n "s/^own netns: -> $PUB: //p" "$t/join-$tag-run.out")" != OK ] || fail "the run reached $PUB from its own namespace"
+  JOIN_INFO="Host net ns $hostnet; dockerd pid $dpid in net ns $(sudo readlink "/proc/$dpid/ns/net"); containers' netns file: ${nsfile:-none}; other test-user pids in a non-host netns:${npids:- none}."
+}
+# The attempts in join probe output $1 that reached the stand-in, by what was tried (a pid's number left out: it
+# changes when Docker restarts), sorted.
+opened() { { grep -- "-> $PUB: OK\$" "$1" || true; } | sed -E 's/ \(pid [0-9]+\)/ (pid)/; s/: .*//' | sort -u; }
+
+echo "== join (measured, not asserted): can a test run join the Docker daemon's user+net namespaces?"
+join_probe default
 summary "### #543: can a test run join the Docker daemon's namespaces? (measured on this runner)"
-summary "Host net ns $hostnet; dockerd pid $dpid in net ns $(sudo readlink "/proc/$dpid/ns/net"); containers' netns file: ${nsfile:-none}; other test-user pids in a non-host netns:${npids:- none}."
-while IFS= read -r l; do summary "- from a run (the helper's real exec sandbox): $l"; done < "$t/join.out"
-while IFS= read -r l; do summary "- from a plain test-user unit (no run sandbox): $l"; done < "$t/join-plain.out"
-if grep -q ": joined; -> $PUB: OK$" "$t/join.out"; then
-  summary "ANSWER: a test run CAN get out through Docker's namespaces: $(grep ": joined; -> $PUB: OK$" "$t/join.out" | head -n 1)."
+summary "$JOIN_INFO"
+while IFS= read -r l; do summary "- from a run (the helper's real exec sandbox): $l"; done < "$t/join-default-run.out"
+while IFS= read -r l; do summary "- from a plain test-user unit (no run sandbox): $l"; done < "$t/join-default-plain.out"
+if grep -q ": joined; -> $PUB: OK$" "$t/join-default-run.out"; then
+  summary "ANSWER: a test run CAN get out through Docker's namespaces: $(grep ": joined; -> $PUB: OK$" "$t/join-default-run.out" | head -n 1)."
 else
   summary "ANSWER: a test run can NOT get out through Docker's namespaces here (each attempt above was refused or reached nothing)."
 fi
 
-echo "== check, at the end"
+echo "== check (the default: test users covered, their Docker the one exception)"
 sudo bash "$EF" check | tee "$t/check.log"
-tail -n 1 "$t/check.log" | grep -qx OK || fail "check fails at the end"
-echo "OK: test users covered by default on real systemd; Docker's pull the one exception, kept across reloads and restarts"
+tail -n 1 "$t/check.log" | grep -qx OK || fail "check fails with the default rule"
+
+echo "== upgrade: an install whose rule covered test users before #543 keeps dropping their Docker (asserted)"
+docker_up() { for _ in $(seq 60); do [ -S /run/worklane-test-ci-docker/docker.sock ] && dk info > /dev/null 2>&1 && return 0; sleep 1; done; fail "$DU didn't come back up"; }
+echo "  the pre-#543 opt-in: no rule, Docker's unit without NFTSet=, then $PRE543's egress-firewall.sh apply --with-test-users"
+sudo bash "$EF" revert
+sudo sed -i '/^NFTSet=/d' "/etc/systemd/system/$DU"
+sudo systemctl daemon-reload
+sudo systemctl restart "$DU"
+docker_up
+git fetch -q --depth=1 origin "$PRE543"
+mkdir "$t/pre543"
+git archive "$PRE543" scripts/setup | tar -x -C "$t/pre543"
+grep -q 'delete table inet' "$t/pre543/scripts/setup/egress-firewall.sh" || fail "$PRE543's egress-firewall.sh isn't the pre-#543 rule"
+sudo bash "$t/pre543/scripts/setup/egress-firewall.sh" apply --with-test-users > "$t/old-apply.log" 2>&1 || { cat "$t/old-apply.log"; fail "the pre-#543 apply --with-test-users failed"; }
+cat "$t/old-apply.log"
+grep -qx "PASS $U ($(id -u "$U")) is covered" "$t/old-apply.log" || fail "the pre-#543 apply --with-test-users didn't cover $U"
+grep -qx '# --with-test-users' /etc/worklane/egress.users || fail "the pre-#543 record has no --with-test-users"
+if grep -q '^# docker:' /etc/worklane/egress.users; then fail "the record has a '# docker:' line: not the pre-#543 record"; fi
+sudo nft list table inet worklane_egress | tee "$t/old-table"
+if grep -Eq 'socket cgroupv2|egress_ok' "$t/old-table"; then fail "the pre-#543 rule has a cgroup exception: this step can't tell"; fi
+if pull 90 2> /dev/null; then fail "Docker pulled under the pre-#543 opt-in: there was no closed route to keep closed"; fi
+echo "  before: Docker's pull was dropped"
+join_probe old
+echo "  the new test-user.sh install (it loads the rule again), then the new apply, with no flags"
+n="$(nproc)"
+sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G > "$t/upgrade-install.log" 2>&1 || { tail -n 40 "$t/upgrade-install.log"; fail "the new test-user.sh install failed on the pre-#543 opt-in"; }
+grep -q '^== the host egress rule (egress-firewall.sh), now with wl-test-ci in it' "$t/upgrade-install.log" || fail "test-user.sh install didn't load the egress rule again"
+docker_up
+sudo bash "$EF" apply > "$t/upgrade-apply.log" 2>&1 || { cat "$t/upgrade-apply.log"; fail "the new apply failed after the upgrade"; }
+cat "$t/upgrade-apply.log"
+grep -qx "PASS $U ($(id -u "$U")) is covered" "$t/upgrade-apply.log" || fail "after the upgrade $U isn't covered"
+grep -q '^PASS no exception: ' "$t/upgrade-apply.log" || fail "after the upgrade apply's check didn't say there's no exception"
+grep -qx '# docker: dropped' /etc/worklane/egress.users || fail "after the upgrade the record doesn't say '# docker: dropped'"
+# No grep -q here: an early exit could fail systemctl with SIGPIPE, and pipefail would hide the match.
+if systemctl cat "$DU" | grep '^NFTSet='; then fail "after the upgrade $DU has NFTSet= again"; fi
+grep -q '^# No NFTSet=: the host egress rule' "/etc/systemd/system/$DU" || fail "test-user.sh install didn't say why $DU has no NFTSet="
+sudo nft list table inet worklane_egress | tee "$t/new-table"
+if grep -Eq 'socket cgroupv2|egress_ok' "$t/new-table"; then fail "after the upgrade the rule has a cgroup exception"; fi
+if pull 90 2> /dev/null; then fail "after the upgrade Docker pulled: the route the pre-#543 opt-in had closed is open"; fi
+echo "  after: Docker's pull was dropped"
+join_probe new
+summary "### #543 upgrade: an install that covered test users before #543 keeps dropping their Docker (asserted)"
+summary "Before: $PRE543's apply --with-test-users, Docker's unit without NFTSet=. After: the new test-user.sh install and apply. Both: no cgroup exception, Docker's pull dropped. $JOIN_INFO"
+for w in run plain; do
+  while IFS= read -r l; do summary "- before, from a $w: $l"; done < "$t/join-old-$w.out"
+  while IFS= read -r l; do summary "- after, from a $w: $l"; done < "$t/join-new-$w.out"
+  newly="$(comm -13 <(opened "$t/join-old-$w.out") <(opened "$t/join-new-$w.out"))"
+  [ -z "$newly" ] || fail "upgrade: from a $w, what the pre-#543 opt-in blocked now reaches $PUB: $newly"
+  if grep -q -- "-> $PUB: OK\$" "$t/join-new-$w.out"; then fail "upgrade: from a $w, a join still reaches $PUB: $(opened "$t/join-new-$w.out")"; fi
+done
+grep -q "^the containers' netns (pid [0-9]*): joined; " "$t/join-new-run.out" || fail "after the upgrade the run couldn't join Docker's containers' netns at all: this probe can't tell whether that route is dropped"
+sudo bash "$EF" check > "$t/check-upgrade.log" || { cat "$t/check-upgrade.log"; fail "check fails after the upgrade"; }
+cat "$t/check-upgrade.log"
+echo "OK: test users covered by default on real systemd; Docker's pull the one exception, kept across reloads and restarts; an install that covered test users before #543 keeps dropping their Docker"

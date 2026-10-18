@@ -3307,8 +3307,10 @@ jobs:
     # The host egress rule (scripts/setup/egress-firewall.sh, #543) on real systemd and nft, with a test user's real
     # rootless Docker (test-user.sh install): test users covered by default; a test-user process dropped; Docker's
     # image pull the one exception (its unit's NFTSet=), kept across a reload and a restart; without NFTSet= the pull
-    # is dropped. And, measured and put in the job summary either way, whether a test run can join Docker's user+net
-    # namespaces. scripts/ci/egress-real-systemd.sh has the steps and assertions.
+    # is dropped; a test-user unit can't move itself into Docker's cgroup. Measured and put in the job summary either
+    # way, whether a test run can join Docker's user+net namespaces. And an install that covered test users before #543
+    # (the pre-#543 egress-firewall.sh's apply --with-test-users) keeps dropping their Docker after the new install and apply: no route the
+    # join probe found blocked before opens. scripts/ci/egress-real-systemd.sh has the steps and assertions.
     name: egress firewall (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' egress-real-systemd ') }}
@@ -3335,7 +3337,7 @@ jobs:
         run: |
           docker pull -q postgres:17-alpine
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
-      - name: "egress on real systemd: test users covered by default and dropped; a real rootless pull with the rule on; the set kept across a reload and a restart (the old delete-table reload emptied it); no pull without NFTSet=; whether a run can join Docker's namespaces (measured)"
+      - name: "egress on real systemd: test users covered by default and dropped; a real rootless pull with the rule on; the set kept across a reload and a restart (the old delete-table reload emptied it); no pull without NFTSet=; no move into Docker's cgroup; whether a run can join Docker's namespaces (measured); a pre-#543 --with-test-users install keeps Docker dropped"
         run: bash scripts/ci/egress-real-systemd.sh
       - name: the rule, Docker and its journal, on failure
         if: failure()
