@@ -1556,15 +1556,13 @@ test("the first-run page, Sign in to Claude: local relays claude auth login (the
   const done = r.renderClaudeSignin({ ...local, state: 'done', detail: 'signed in (claude.ai)', status: { loggedIn: true, method: 'claude.ai', cachedAccount: 'someone@example.com' } });
   assert.match(done, /data-testid="claude-signin-cached-account"[^>]*>Account: someone@example\.com \(cached by Claude Code; it may predate a later token change\)/);
 
-  const server = { mode: 'server', canAct: true, agentUser: 'wl-example-agent', ask: null, status: null, command: 'claude setup-token\nsudo bash /opt/engine/scripts/setup/credentials.sh example claude', script: 'sudo bash /opt/engine/scripts/setup/credentials.sh example claude' };
+  // Server mode (issue #711): root's two commands and the status; no paste box, no password field, ever.
+  const server = { mode: 'server', canAct: true, agentUser: 'wl-example-agent', status: null, command: 'claude setup-token\nsudo bash /opt/engine/scripts/setup/credentials.sh example claude', signinCommand: 'sudo -u wl-example-agent -i claude auth login', script: 'sudo bash /opt/engine/scripts/setup/credentials.sh example claude' } as const;
   const none = r.renderClaudeSignin(server);
-  assert.match(none, /data-testid="claude-signin" data-mode="server"[\s\S]*?wl-example-agent only \(0600\), never shown or logged[\s\S]*?data-testid="claude-signin-no-ask"[\s\S]*?data-testid="claude-signin-setup"[\s\S]*?data-testid="claude-signin-command"[^>]*>claude setup-token\nsudo bash \/opt\/engine\/scripts\/setup\/credentials\.sh example claude/);
-  assert.doesNotMatch(none, /\/login/, 'no /login session any more');
-  const ask = { id: 'a1', instance: 'example', title: "The Claude login for example's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-13T10:00:00.000Z', createdBy: 'add-project', status: 'open', answer: null, cancelled: null, kind: 'paste_secret', credential: 'claude-token', where: 'x' };
-  const box = r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: true }, status: { at: '2026-10-13T10:00:00.000Z', loggedIn: true, method: 'claude.ai', cachedAccount: 'previous@example.com', installedAt: '2026-10-13T11:00:00.000Z' } });
-  assert.match(box, /data-testid="claude-signin-ask"[\s\S]*?type="password"[^>]*data-testid="ask-secret"/);
-  assert.match(box, /data-testid="claude-signin-status"[\s\S]*?signed in \(claude\.ai\)[\s\S]*?data-testid="claude-signin-cached-account"[^>]*>Account: previous@example\.com \(cached/);
-  assert.match(r.renderClaudeSignin({ ...server, ask: { ...ask, canAnswer: false } }), /data-testid="claude-signin-refused"[^>]*>Only the instance(&#x27;|')s owners can paste it/);
+  assert.match(none, /data-testid="claude-signin" data-mode="server"[\s\S]*?data-testid="claude-signin-root"[^>]*>[^<]*never takes a Claude credential[\s\S]*?data-testid="claude-signin-login-command"[^>]*>sudo -u wl-example-agent -i claude auth login[\s\S]*?data-testid="claude-signin-command"[^>]*>claude setup-token\nsudo bash \/opt\/engine\/scripts\/setup\/credentials\.sh example claude/);
+  const signedIn = r.renderClaudeSignin({ ...server, status: { at: '2026-10-13T10:00:00.000Z', loggedIn: true, method: 'claude.ai', cachedAccount: 'previous@example.com', installedAt: '2026-10-13T11:00:00.000Z' } });
+  assert.match(signedIn, /data-testid="claude-signin-status"[\s\S]*?signed in \(claude\.ai\)[\s\S]*?data-testid="claude-signin-cached-account"[^>]*>Account: previous@example\.com \(cached/);
+  for (const html of [none, signedIn]) assert.doesNotMatch(html, /type="password"|data-testid="ask-secret"|claude-signin-ask/, 'nothing to paste into');
 });
 
 test("the first-run page, Policy form: each key with its bounds and why, the isolation keys read-only, Review then the change and Confirm; writers can't edit", () => {
@@ -2372,16 +2370,13 @@ test('#562: after an instance and then All instances, the sidebar header and the
     instance: name,
     allowed: true,
     why: null,
-    canSwitch: true,
     busy: null,
-    canPasteToken: false,
     status: null,
     switch: null,
     requests: [],
     profiles: { instances: ['a', 'b'], active: { a: 'default', b: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell('a', true), cell('b', true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell('a', false), cell('b', false)] }] },
     profileOps: [],
     confirmScript: 'claude-account.sh',
-    signin: null,
   });
   // As the page sees it: every view reads scope.current's server (the state, and the account panel's data).
   const view = (scope: ReturnType<Render['scopeOf']>) => ({
@@ -2399,10 +2394,10 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
   assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
   // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
-  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
+  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-profile-add-howto', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
   assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
   assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
-  assert.match(shown.account, /data-testid="claude-account-switch"/, 'switching every instance is still offered');
+  assert.match(shown.account, /data-testid="claude-account-switch-command">sudo bash claude-account\.sh switch/, 'switching every instance: the root command');
 
   // One instance again: its name in the header and in the panel.
   const a = r.scopeOf(hub, 'a', false);
@@ -2411,7 +2406,32 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.match(scopeLine(back.account) ?? '', /^For a: /, "a picked: the panel's scope line names a");
   assert.doesNotMatch(scopeLine(back.account) ?? '', /every instance on this machine \(/);
   assert.match(back.account, /only a&#x27;s/, 'its accounts can be chosen for a from here');
-  for (const id of ['claude-profile-use-here', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
+  for (const id of ['claude-profile-use-here', 'claude-profile-add-howto', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
+});
+
+test('#711: the Claude account panel takes no credential: no password field, no switch button, no add or sign-in form; the root commands instead', () => {
+  const cell = (active: boolean) => ({ instance: 'a', user: 'wl-a-agent', active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
+  const data = {
+    machineOwner: true,
+    machineOwners: ['example-owner'],
+    login: 'example-owner',
+    instance: 'a',
+    allowed: true,
+    why: null,
+    busy: null,
+    status: null,
+    switch: { startedAt: new Date().toISOString(), status: 'running' as const, detail: 'x', waitingForToken: true, token: { at: new Date().toISOString(), step: 'token' as const, state: 'ask' as const, instance: null, user: null, detail: 'paste the token' }, instances: [] },
+    requests: [],
+    profiles: { instances: ['a'], active: { a: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell(true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell(false)] }] },
+    profileOps: [],
+    confirmScript: '/opt/engine/scripts/setup/claude-account.sh',
+  };
+  const html = r.renderClaudeAccount(data, undefined, r.scopeOf({ instances: [{ name: 'a', up: true, error: null }] }, 'a', false));
+  assert.doesNotMatch(html, /type="password"/, 'no field a credential could be typed into');
+  for (const id of ['claude-switch-token', 'claude-switch-token-send', 'claude-account-switch', 'claude-account-switch-confirm', 'claude-profile-add', 'claude-profile-token', 'claude-signin', 'claude-signin-code']) assert.ok(!html.includes(`data-testid="${id}"`), id);
+  assert.match(html, /data-testid="claude-account-switch-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh switch</);
+  assert.match(html, /data-testid="claude-profile-add-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh profile-add &lt;name&gt;</);
+  assert.match(html, /data-testid="claude-switch-token-elsewhere">It is pasted in the terminal where the switch was started\. This page never takes it\./);
 });
 
 test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
@@ -3009,13 +3029,16 @@ test('Tailscale and Claude account: a request handed to its own unit keeps the c
   // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
-  // The Claude account switch is started the same way (its own unit): the panel used to stop looking entirely.
-  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', tokenFrom: 'alpha', waitingForToken: false, token: null, instances: [] });
-  const account = req({ args: ['claude-account', 'switch'] });
-  assert.ok(r.accountBusy({ switch: sw('2026-10-13T09:00:00Z'), requests: [account] }, now));
-  assert.ok(r.accountBusy({ switch: null, requests: [account] }, now));
-  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [account] }, now));
-  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [account] }, now));
+  // A Claude account profile step is started the same way (its own unit): the panel waits for its first line.
+  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', waitingForToken: false, token: null, instances: [] });
+  const op = (startedAt: string) => ({ id: 'op', op: 'use', profile: 'spare', for: 'alpha', status: 'done', startedAt, endedAt: startedAt, detail: '', steps: [] });
+  const use = req({ args: ['claude-account', 'use', 'spare'] });
+  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-13T09:00:00Z')] }, now));
+  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [] }, now));
+  assert.ok(!r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-14T12:00:21Z')] }, now));
+  // A switch a root admin runs: looked at while it runs.
+  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [] }, now));
+  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [] }, now));
   assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
 });
 

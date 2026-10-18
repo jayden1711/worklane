@@ -1362,10 +1362,11 @@ export type ClaudeSigninData =
       mode: 'server';
       canAct: boolean;
       agentUser: string;
-      /** add-project's open claude-token paste box for this instance, when one is waiting. */
-      ask: (Ask & { kind: 'paste_secret' }) | null;
       status: { at: string; loggedIn: boolean; method: string | null; cachedAccount: string | null; installedAt: string | null } | null;
+      /** As root: a token from claude setup-token at credentials.sh's hidden prompt. */
       command: string;
+      /** As root: claude auth login as the agent user, through Anthropic's own page. */
+      signinCommand: string;
       script: string;
     };
 export const getClaudeSignin = () => api<ClaudeSigninData>('/api/first-run/claude-signin');
@@ -1535,7 +1536,7 @@ export interface SwitchView {
   startedAt: string;
   status: 'running' | 'done' | 'failed' | 'stalled';
   detail: string;
-  tokenFrom: string | null;
+  /** Waiting for the token at the root shell where the switch was started (never this page: issue #711). */
   waitingForToken: boolean;
   token: SwitchLine | null;
   instances: SwitchInstance[];
@@ -1545,24 +1546,21 @@ export interface ClaudeAccountData {
   machineOwners: string[];
   login: string;
   instance: string;
-  /** Whether this person may refresh or switch (the server checks again). */
+  /** Whether this person may refresh, or choose or remove a profile (the server checks again). */
   allowed: boolean;
   why: string | null;
-  /** False when no device would help (this person's role here): Refresh and Switch aren't drawn; absent from older servers. */
+  /** False when no device would help (this person's role here): no buttons are drawn; absent from older servers. */
   everAllowed?: boolean;
-  canSwitch: boolean;
+  /** A switch a root admin runs on the machine, while it runs. */
   busy: string | null;
-  canPasteToken: boolean;
   status: { at: string; users: AccountUser[] } | null;
   switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
   /** The account profiles (src/claude-profiles.ts); absent from an older server. */
   profiles?: ProfilesTable;
   profileOps?: ProfileOp[];
-  /** The root script a staged profile is confirmed with, on the machine. */
+  /** The root script on the machine: a switch, an added account and a staged profile's confirmation are run with it. */
   confirmScript?: string;
-  /** This instance's relayed sign-in under way: the link only while it waits for the code. */
-  signin?: { profile: string; status: string; detail: string; waitingForCode: boolean; url: string | null } | null;
 }
 /** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
 export interface ProfileCell {
@@ -1601,17 +1599,14 @@ export interface ProfileOp {
   detail: string;
   steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
 }
-/** A new account profile from a setup token: the token in the body only, never the URL. */
-export const addClaudeProfile = (profile: string, value: string) => api<{ ok: boolean }>(`/api/claude-account/profile-add?profile=${encodeURIComponent(profile)}`, { method: 'POST', body: JSON.stringify({ value }) });
+// Issue #711: nothing here sends a Claude credential. Adding an account, signing one in and switching every agent are
+// a root admin's on the machine; the page only shows status and names those commands.
 /** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
 export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
 /** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
-/** The one-time code Anthropic's sign-in page showed, for this instance's relayed sign-in: in the body only. */
-export const pasteLoginCode = (value: string) => api<{ ok: boolean }>('/api/claude-account/login-code', { method: 'POST', body: JSON.stringify({ value }) });
-export const claudeProfileAction = (action: 'use' | 'remove' | 'login', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
+export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
-export const claudeAccountAction = (action: 'status' | 'switch') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
-export const pasteClaudeToken = (value: string) => api<{ ok: boolean }>('/api/claude-account/token', { method: 'POST', body: JSON.stringify({ value }) });
+export const claudeAccountAction = (action: 'status') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 
 /** Tailscale and HTTPS for the hub (src/tailscale-setup.ts), as GET /api/tailscale serves it to a machine owner. */
 export type TailscaleAction = 'install' | 'up' | 'serve' | 'public-url';

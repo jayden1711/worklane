@@ -140,7 +140,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
 const STEP_LABEL: Record<string, string> = {
   instance: 'Instance users and folders',
   app: 'GitHub App (create, then install)',
-  'claude-token': "The agent's Claude token",
+  'claude-token': "The agent's Claude login (root installs it on the machine)",
   checkout: 'Checkout of the repo',
   policy: 'Default policy',
   service: 'Coordinator service',
