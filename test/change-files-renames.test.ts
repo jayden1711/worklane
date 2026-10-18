@@ -64,7 +64,13 @@ const changeFiles = (dir: string, base: string, head: string): ChangeFile[] =>
 async function inspect(dir: string, base: string, head: string): Promise<{ rejected?: string }> {
   const c = Object.create(Coordinator.prototype) as object;
   Object.defineProperty(c, 'identity', { value: IDENTITY });
-  Object.defineProperty(c, 'd', { value: { cfg: { guardrails: { protected_paths: [] } } } });
+  // The push limits come right after the guard: reaching them means the guard let the change through.
+  const guardrails = Object.defineProperty({ protected_paths: [] }, 'push', {
+    get() {
+      throw new Error('inspect got past the protected-path guard');
+    },
+  });
+  Object.defineProperty(c, 'd', { value: { cfg: { guardrails } } });
   return (c as { inspect(n: number, path: string, base: string, head: string, repro: null): Promise<{ rejected?: string }> }).inspect(1, dir, base, head, null);
 }
 
@@ -167,12 +173,14 @@ test('size limit: an edit moved into a generated path still counts; a pure renam
 
 test('the inspect guard refuses a protected path with an odd byte in its name, read as itself (.claude/agents/naïve.md)', async () => {
   const odd = ['.claude/agents/naïve.md', '.claude/agents/tab\there.md', '.claude/agents/say "hi".md', '.claude/agents/back\\slash.md'];
+  const got: string[] = [];
   for (const p of odd) {
     const { dir, base } = repo({ 'README.md': '# x\n' });
     write(dir, { [p]: 'Be careful.\n' });
     const head = commit(dir, `add ${p}`);
-    assert.deepEqual(await inspect(dir, base, head), { rejected: `changes protected harness files: ${p}` }, p);
+    got.push(await inspect(dir, base, head).then((r) => r.rejected ?? JSON.stringify(r), (e: Error) => e.message));
   }
+  assert.deepEqual(got, odd.map((p) => `changes protected harness files: ${p}`));
 });
 
 test('conflict fix: a resolver\'s edit to lib/naïve.ts, which the merge brought in cleanly, is a stray', () => {
@@ -249,18 +257,14 @@ const NEWLINE_PATHS = ['.claude/skills/a\nb/SKILL.md', 'src/guardrails/a\nb.ts',
 
 test('a path with a newline stays under its `**` glob: protected, and L3 under the engine\'s own review.yaml', () => {
   const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
-  assert.ok(globToRegExp('.claude/**').test('.claude/skills/a\nb/SKILL.md'));
-  assert.ok(globToRegExp('src/**/*.ts').test('src/a\nb/c.ts'));
-  assert.ok(!globToRegExp('src/*.ts').test('src/a/b.ts'), 'a single * still stops at a slash');
   // The built-in protected paths, and a project's own list on top.
   const guard = { protected_paths: ['src/guardrails/**', '.github/workflows/**'] };
-  for (const p of NEWLINE_PATHS) {
-    const lvl = computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, engine);
-    assert.equal(lvl.level, 'L3', `${JSON.stringify(p)}: ${lvl.reasons.join('; ')}`);
-    // Protected exactly when the same path without the newline is (the agents' own roles are theirs to edit).
-    assert.equal(isProtectedPath(p, guard), isProtectedPath(p.replace('\n', ''), guard), JSON.stringify(p));
-  }
-  assert.deepEqual(NEWLINE_PATHS.map((p) => isProtectedPath(p, guard)), [true, true, true, false]);
+  const each = (p: string) => ({ path: p, level: computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, engine).level, protected: isProtectedPath(p, guard) });
+  // Each as its twin without the newline: L3, and protected unless it is the agents' own (roles are theirs to edit).
+  assert.deepEqual(NEWLINE_PATHS.map(each), NEWLINE_PATHS.map((p) => ({ ...each(p.replace('\n', '')), path: p })));
+  assert.deepEqual(NEWLINE_PATHS.map((p) => [each(p).level, each(p).protected]), [['L3', true], ['L3', true], ['L3', true], ['L3', false]]);
+  assert.ok(globToRegExp('src/**/*.ts').test('src/a\nb/c.ts'));
+  assert.ok(!globToRegExp('src/*.ts').test('src/a/b.ts'), 'a single * still stops at a slash');
 });
 
 test('a newline path committed to a repo comes out of changeFiles as itself and is L3 / protected', async () => {
