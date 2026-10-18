@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';
 import { type CommitCheck, type PullRequest } from '../backlog/types.js';
-import type { EventPayload } from '../events/types.js';
+import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import type { Episode } from '../fix-forward.js';
@@ -22,7 +22,7 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
-import { MainWatch, repoGit } from '../main-watch.js';
+import { MainWatch, repoGit, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
@@ -903,9 +903,12 @@ export abstract class MergeFlow extends FixRuns {
       checked: (sha, how, number) => this.emit('main_watch.checked', { sha, how, number }),
       accepted: (sha, number, a) => this.emit('main_watch.accepted', { sha, how: 'accepted', number, id: a.id, by: a.by, reason: a.reason.slice(0, 500) }),
       unaccounted: (o) => this.mainUnaccounted(o),
+      deadCheckMs: () => this.d.cfg.project.main_watch.dead_check_days * 24 * 3600_000,
+      deadCheck: (o) => this.emit('main_watch.dead_check', o),
     });
     // A direct push's alert that couldn't go yet (the ops posts' limit was reached): try again.
     await this.directPushOutbound();
+    await this.deadCheckOutbound();
     if (this.d.cfg.project.land_mode !== 'pr') return this.mainWatcher.off(`land_mode direct: the harness lands by pushing ${this.branch} itself`);
     if ((w.setting?.() ?? 'auto') === 'off') return this.mainWatcher.off('turned off in the instance policy (main_watch: off)');
     await this.mainWatcher.step();
@@ -914,10 +917,11 @@ export abstract class MergeFlow extends FixRuns {
   /**
    * A commit on the default branch nothing accounts for: stop auto-merge at once (the stop file, until an admin clears
    * it on the dashboard), then alert (main_watch.unaccounted: the dashboard; the asks channel posts it) and open a revert
-   * PR for a human. Once per commit, even across a restart.
+   * PR for a human, unless a cap on revert PRs says not to (revertCapped). Once per commit, even across a restart.
    */
-  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null }) {
-    if (this.d.log.read(0, ['main_watch.unaccounted']).some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
+  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null }) {
+    const before = this.d.log.read(0, ['main_watch.unaccounted']);
+    if (before.some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
     if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
@@ -925,7 +929,8 @@ export abstract class MergeFlow extends FixRuns {
     // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
     if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;
-    if (o.revert) {
+    const capped = o.revert && o.trip ? this.revertCapped(o.sha, o.trip, before) : null;
+    if (o.revert && !capped) {
       const body = `Reverts \`${o.sha.slice(0, 8)}\` on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
       try {
         revert = await this.openRevertOf(o.sha, o.sha.slice(0, 12), `Revert ${o.sha.slice(0, 8)} (unaccounted on ${this.branch})`, body);
@@ -937,7 +942,46 @@ export abstract class MergeFlow extends FixRuns {
         this.emit('coordinator.error', { instance: this.d.instance, where: `main watch revert ${o.sha.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
       }
     }
-    this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null });
+    this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null, ...(o.trip ? { trip: o.trip.id } : {}), no_revert: capped });
+  }
+
+  /**
+   * Why an unaccounted commit gets no revert PR of its own, when a cap says so (null: it gets one). Per trip: the
+   * trip has its revert PR(s) already; the alert names them and the trip's commits. Per day: this instance's main watch
+   * opened so many in the last 24 hours. Counted from the log (`before`), so both hold across a restart.
+   */
+  private revertCapped(sha: string, trip: Trip, before: StoredEvent[]): string | null {
+    const now = this.d.mainWatch?.now?.() ?? Date.now();
+    const all = before.map((e) => ({ ts: e.ts, p: e.payload as EventPayload<'main_watch.unaccounted'> }));
+    const mine = all.filter((x) => x.p.trip === trip.id).map((x) => x.p);
+    const prs = mine.flatMap((p) => (p.revert ? [p.revert] : []));
+    if (prs.length >= trip.perTrip) {
+      const list = [...mine.map((p) => p.sha), sha].map((x) => x.slice(0, 8));
+      const commits = `${list.slice(0, 20).join(', ')}${list.length > 20 ? ` and ${list.length - 20} more` : ''}`;
+      return `the per-trip cap is reached (main_watch.revert_prs_per_trip: ${trip.perTrip}): this trip's revert PR ${prs.join(', ')}; the trip's commits so far: ${commits}`;
+    }
+    const day = all.filter((x) => x.p.revert && now - Date.parse(x.ts) < 24 * 3600_000).length;
+    if (day >= trip.perDay) return `the per-day cap is reached (main_watch.revert_prs_per_day: ${trip.perDay}): the main watch opened ${day} revert PRs in the last 24 hours`;
+    return null;
+  }
+
+  /**
+   * Each dead check raised (main_watch.dead_check) and not cleared since: one ops post, once per check and since;
+   * one more when it clears. What is over the ops posts' limit waits for a later pass.
+   */
+  protected async deadCheckOutbound() {
+    const last = new Map<string, EventPayload<'main_watch.dead_check'>>();
+    for (const e of this.d.log.read(0, ['main_watch.dead_check'])) last.set((e.payload as EventPayload<'main_watch.dead_check'>).check, e.payload as EventPayload<'main_watch.dead_check'>);
+    for (const d of last.values()) {
+      const text =
+        d.state === 'raised'
+          ? `Main watch: the required check "${d.check}" has had no run on any commit judged since ${d.since}. Merges into ${this.branch} keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`
+          : `Main watch: the required check "${d.check}" has a run again, or is no longer required: its dead-check warning is cleared.`;
+      const key = (state: string) => `main-watch-dead-check:${state}:${d.check}:${d.since}`;
+      // Cleared before its warning went out: nothing to clear in the channel.
+      if (d.state === 'cleared' && !this.postedKeys().has(key('raised'))) continue;
+      if ((await this.opsPost(key(d.state), text)) === 'limited') return;
+    }
   }
 
   /**

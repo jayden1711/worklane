@@ -62,7 +62,8 @@ export function readRootFile(instance: string, file = rootFilePath(instance), ro
   try {
     st = lstatSync(file);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'off', why: `experiments are off for ${instance} on this machine (no root file)` };
+    // Missing setup, not a refusal (#563): say so, and how root sets it up.
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'off', why: `experiments are not set up yet for ${instance} on this machine (no root file): root sets them up with: ${rootCommands(instance).install}` };
     return { state: 'unknown', why: `${file} can't be read: ${(e as Error).message}` };
   }
   if (!st.isFile() || st.uid !== rootUid || (st.mode & 0o777) !== 0o644) return { state: 'off', why: `${file} is not root's regular 0644 file, so the helper runs nothing` };

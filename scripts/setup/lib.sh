@@ -379,42 +379,53 @@ stop_uids() {
 
 # Files the removed users <uid>... own in the engine's own places, given to root: in each <tree> (find -P, -xdev: a
 # link is never followed, another mount never entered) and, in <lock dir>, only the files named <lock name>, directly
-# in it. Each is chowned with -h (a link itself, never its target): its owner becomes root, and its group root too when
-# it is one of the removed instance's <gids> (comma-separated); another group is kept (the slot directory's files are
-# group agent-slots, which every other instance's coordinator writes them through). A regular file also loses setuid
-# and setgid (chmod u-s,g-s), its other mode bits kept. Every one is listed in <listing>, "<owner>:<group> <old mode>
-# -> <new mode> <path>", or "FAILED <path>: <why>" when chown or chmod refused it (never hidden); exit 1 then. Only
-# once no process of theirs is left (stop_uids): nothing can swap a file for a link between the check and the change.
+# in it. Each is changed by instance-records.cjs rechown, on ONE fd opened without following a link (O_NOFOLLOW): the
+# slot directory is 2770 with no sticky bit, so another instance's coordinator can rename a link over a path between
+# the walk and the change, and nothing a link points at is ever changed (a link itself: lchown, which never follows).
+# The fd's own fstat decides: a file no removed uid owns now is left as it is; the owner becomes root, and the group
+# root too when it is one of the removed instance's <gids> (comma-separated); another group is kept (the slot
+# directory's files are group agent-slots, which every other instance's coordinator reads them through). A regular
+# file also loses setuid and setgid, its other mode bits kept; in a shared engine group (one kept: not the instance's,
+# not root) group write too: the engine never writes one of its files there in place, it puts a copy over it (renamed
+# or linked: src/locks.ts, the incident store, the claims), which needs the directory's group write only. A directory
+# there keeps its group write, listed with why: the group's members add and replace the engine's files in it. Each is
+# listed in <listing>, "<owner>:<group> <old mode> -> <new mode> <path>[ (g+w kept: <why>)]", "left <path>: <why>", or
+# "FAILED <path>: <why>" when a change was refused (never hidden); exit 1 then. Paths are bytes throughout (find
+# -print0 to the fds), never decoded. Then the walk again: a file a removed uid still owns after the change (however
+# it was missed) is listed "FAILED <path>: still a removed user's after the change", exit 1. Only once no process of
+# theirs is left (stop_uids).
 #   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <gids, comma-separated> <uid>...
 rechown_orphans() {
-  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids=",$5," u f err old to fails=0 t
+  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids="$5" u t rc=0 node to_uid
   shift 5
-  local -a tv=()
+  local -a tv=() uids=()
   IFS=: read -r -a tv <<<"$trees"
-  local -a there=()
-  for t in "${tv[@]}"; do [ -d "$t" ] && [ ! -L "$t" ] && there+=("$t"); done
+  _rechown_there=()
+  for t in "${tv[@]}"; do [ -d "$t" ] && [ ! -L "$t" ] && _rechown_there+=("$t"); done
+  for u in "$@"; do [[ "$u" =~ ^[0-9]+$ ]] && uids+=("$u"); done
   : > "$list"
-  for u in "$@"; do
-    [[ "$u" =~ ^[0-9]+$ ]] || continue
-    while IFS= read -r -d '' f; do
-      old="$(stat -c %a -- "$f")"
-      to=root
-      [[ "$gids" != *",$(stat -c %g -- "$f"),"* ]] || to=root:root
-      if ! err="$(chown -h "$to" -- "$f" 2>&1)"; then
-        printf 'FAILED %s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
-      fi
-      # A regular file (never a link, never a directory: a directory keeps its setgid, the group its files inherit)
-      # loses setuid and setgid, whatever chown already cleared.
-      if [ -f "$f" ] && [ ! -L "$f" ] && ! err="$(chmod u-s,g-s -- "$f" 2>&1)"; then
-        printf 'FAILED %s: chmod u-s,g-s: %s\n' "$f" "$err" >> "$list"; fails=1; continue
-      fi
-      printf '%s %s -> %s %s\n' "$(stat -c %U:%G -- "$f")" "$old" "$(stat -c %a -- "$f")" "$f" >> "$list"
-    done < <(
-      [ "${#there[@]}" -eq 0 ] || find -P "${there[@]}" -xdev -uid "$u" -print0
-      [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
-    )
+  [ "${#uids[@]}" -gt 0 ] || return 0
+  node="${NODE:-$(command -v node)}"
+  local cjs; cjs="$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs"
+  { for u in "${uids[@]}"; do _rechown_walk "$lockdir" "$lockname" "$u"; done; true; } \
+    | "$node" "$cjs" rechown x "$(IFS=,; echo "${uids[*]}")" "$gids" > "$list" || rc=1
+  # The walk again, after the change: nothing of theirs may be left (a uid that is the one files are given to, a
+  # test's stand-in for root, is theirs by design).
+  to_uid="$("$node" "$cjs" root-ids x | cut -d: -f1)"
+  for u in "${uids[@]}"; do
+    [ "$u" != "$to_uid" ] || continue
+    while IFS= read -r -d '' t; do
+      printf "FAILED %s: still a removed user's after the change\n" "$t" >> "$list"; rc=1
+    done < <(_rechown_walk "$lockdir" "$lockname" "$u")
   done
-  return "$fails"
+  return "$rc"
+}
+# rechown_orphans's walk for one uid, NUL-separated: the trees in _rechown_there, and <lock dir>'s <lock name> files.
+_rechown_walk() {
+  local lockdir="$1" lockname="$2" u="$3"
+  [ "${#_rechown_there[@]}" -eq 0 ] || find -P "${_rechown_there[@]}" -xdev -uid "$u" -print0
+  [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
+  return 0
 }
 # Everything else the removed users <uid>... still own on <root>'s filesystem (the removal's: /; read-only: find -P
 # -xdev, /proc, /sys and each <skip> path pruned), one path a line, into <listing>: left as it is, for an admin.

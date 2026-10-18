@@ -4,6 +4,7 @@ import { AutomationsRepo } from '../automations/schema.js';
 import { loosenedProblems } from '../delegation.js';
 import { z } from 'zod';
 import { providerOf, providerRefusal } from '../providers.js';
+import { baseUrlProblem } from '../provider-hosts.js';
 import { CROSS_FAMILY_OFF, crossFamilyRefusal } from '../cross-eval.js';
 import type { RoutedRun } from '../model-routing.js';
 import { ROUTING_ALIASES, type Routing, type RoutingKey } from '../routing.js';
@@ -22,7 +23,14 @@ const effort = z.enum(EFFORTS);
 
 /** An open-model provider (src/providers.ts): an Anthropic-compatible endpoint, a credential by name, its model id. */
 const provider = z.strictObject({
-  base_url: z.string().url().refine((u) => /^https?:\/\//.test(u), 'an http(s) URL'),
+  /**
+   * https:// (http:// only to loopback), no user, password, query or fragment (src/provider-hosts.ts). Its host must
+   * also be one root allows in /etc/<cli>/providers.json, checked on this machine at start and before each run.
+   */
+  base_url: z.string().superRefine((u, ctx) => {
+    const why = baseUrlProblem(u);
+    if (why) ctx.addIssue({ code: 'custom', message: `base_url ${why}` });
+  }),
   /** The key's name in the instance's credentials.yaml provider_keys; the key itself is never in the repo. */
   credential: z.string().regex(/^[a-z][a-z0-9_-]{0,40}$/, 'a credential name (lowercase letters, digits, _ or -)'),
   model: z.string().min(1),
@@ -142,8 +150,18 @@ export const ProjectConfig = z.strictObject({
    * The main watch (src/main-watch.ts), where GitHub doesn't protect the default branch. `direct_push_alert`: a
    * commit that lands there without a PR (a direct push, a force-push) is posted to the Discord ops channel at once,
    * mentioning the Discord owners. On by default; read as committed just before the push, so a push can't turn it off.
+   * `revert_prs_per_trip`, `revert_prs_per_day`: at most so many revert PRs per trip (a pass's unaccounted commits
+   * with one reason) and per 24 hours on this instance; past a cap the commit still stops auto-merge and alerts.
+   * Read as committed before the pass. `dead_check_days`: a required check with no run that long is warned of once.
    */
-  main_watch: z.strictObject({ direct_push_alert: z.boolean().default(true) }).prefault({}),
+  main_watch: z
+    .strictObject({
+      direct_push_alert: z.boolean().default(true),
+      revert_prs_per_trip: z.number().int().min(1).max(100).default(1),
+      revert_prs_per_day: z.number().int().min(1).max(100).default(3),
+      dead_check_days: z.number().int().min(1).max(365).default(7),
+    })
+    .prefault({}),
   /**
    * Files two tasks running at once would both change and then conflict on (globs). Two tasks that would
    * touch the same one never run together; the second waits while other ready work takes the slot.
