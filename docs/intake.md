@@ -614,9 +614,16 @@ trusted:
    text similarity, plus the agent's own judgement). Reports of the same bug go to one issue, which lists
    every report (by source and a short redacted excerpt, never a user id or handle). A new report on an
    existing issue adds a comment, not a new issue.
-7. **Reproduce bugs first.** For a bug, the agent tries to reproduce it on main within its read-only lane
-   (reading code, running the project's read-only checks when the lane allows) and attaches the result:
-   reproduced (with the steps), not reproduced, or already fixed on main (with the commit).
+7. **Reproduce bugs first.** For a bug, the agent works out from the code, in its read-only lane (no shell), whether
+   it reproduces on main, and attaches the result: reproduced (with the steps), not reproduced, or already fixed on
+   main (with the commit). No code runs for a report at intake: a report is untrusted text, read and never run.
+   - Every bug's draft gets `- repro: true` added to its done_when in code (`src/intake/decide.ts`), replacing any
+     `repro:` item the agent wrote. So once a writer has chosen the issue, the task first has a separate evaluator
+     write a test that fails on the unfixed code, frozen so the worker can't edit it (the reproduction step in
+     `src/coordinator.ts`). A bug whose done_when can't take the item is refused like any invalid draft (step 8).
+   - Not reproduced: the issue (or the Inbox draft) is labelled `couldnt-reproduce`.
+   - Already fixed on main: no issue; the sender is told it looks fixed, naming the fixing commit when the agent
+     gave one.
 8. **Draft.** The issue body has the five parts every issue the harness drafts itself has: **Outcome** (one
    sentence), **Sources** (where to look, nowhere else), **Constraints** (what to leave alone), **Deliverable** (a
    closed ```` ```done_when ```` block, commands as YAML block scalars) and **Review point** (the expected review
