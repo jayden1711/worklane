@@ -93,6 +93,9 @@ echo "stand-in: $PUB:$PORT"
 # A test-user process outside any run's sandbox: a unit as wl-test-ci in worklane-test.slice, no PrivateNetwork.
 as_test() { sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p PrivateNetwork=no -p RuntimeMaxSec=30 /usr/bin/python3 "$t/probe.py" "$@" < /dev/null; }
 dk() { sudo -u "$U" env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock /opt/worklane-test/docker/docker "$@"; }
+# Docker answers on its socket again (after a restart), within 60 s, or the job fails. WHY sudo test: its runtime
+# directory is the test user's, 0700, so the runner user can't see the socket (a plain [ -S ] never passed).
+docker_up() { for _ in $(seq 60); do sudo test -S /run/worklane-test-ci-docker/docker.sock && dk info > /dev/null 2>&1 && return 0; sleep 1; done; fail "$DU didn't come back up"; }
 in_set() { sudo nft list set inet worklane_egress egress_ok | grep -qF "\"$(systemctl show -p ControlGroup --value "$DU" | sed 's#^/##')\""; }
 # The image pulled afresh (removed first), within <seconds>.
 pull() { dk rmi -f "$DB_IMAGE" > /dev/null 2>&1 || true; timeout "$1" sudo -u "$U" env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock /opt/worklane-test/docker/docker pull -q "$DB_IMAGE" > /dev/null; }
@@ -164,7 +167,7 @@ pull 300 || fail "Docker couldn't pull after apply put it back"
 echo "== restart: the set follows Docker, with no reload"
 old_cg_in="$(sudo nft list set inet worklane_egress egress_ok | tr -s ' \n\t' ' ')"
 sudo systemctl restart "$DU"
-for _ in $(seq 60); do [ -S /run/worklane-test-ci-docker/docker.sock ] && dk info > /dev/null 2>&1 && break; sleep 1; done
+docker_up
 in_set || fail "after a restart Docker's cgroup isn't in the set (set before: $old_cg_in)"
 pull 300 || fail "Docker couldn't pull after a restart"
 
@@ -172,7 +175,8 @@ echo "== no NFTSet=: Docker's unit without it can't pull, and check says why (fa
 sudo sed -i '/^NFTSet=/d' "/etc/systemd/system/$DU"
 sudo systemctl daemon-reload
 sudo systemctl restart "$DU"
-for _ in $(seq 60); do [ -S /run/worklane-test-ci-docker/docker.sock ] && dk info > /dev/null 2>&1 && break; sleep 1; done
+# Up first, so a dropped pull below is the rule's doing, not a daemon still starting.
+docker_up
 if in_set; then fail "Docker without NFTSet= is in the set"; fi
 if pull 90 2> /dev/null; then fail "Docker without NFTSet= pulled with the rule on"; fi
 if sudo bash "$EF" check > "$t/check-old.log"; then fail "check passed with Docker out of the set"; fi
@@ -267,7 +271,6 @@ sudo bash "$EF" check | tee "$t/check.log"
 tail -n 1 "$t/check.log" | grep -qx OK || fail "check fails with the default rule"
 
 echo "== upgrade: an install whose rule covered test users before #543 keeps dropping their Docker (asserted)"
-docker_up() { for _ in $(seq 60); do [ -S /run/worklane-test-ci-docker/docker.sock ] && dk info > /dev/null 2>&1 && return 0; sleep 1; done; fail "$DU didn't come back up"; }
 echo "  the pre-#543 opt-in: no rule, Docker's unit without NFTSet=, then $PRE543's egress-firewall.sh apply --with-test-users"
 sudo bash "$EF" revert
 sudo sed -i '/^NFTSet=/d' "/etc/systemd/system/$DU"
