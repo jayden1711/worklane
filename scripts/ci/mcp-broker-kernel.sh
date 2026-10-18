@@ -59,7 +59,16 @@ sudo -u "wl-$name" sudo -n "$HELPER" mcp-preview "$id" escape kernel && wait_sta
 d="$(digest)"
 sudo -u "wl-$name" sudo -n "$HELPER" mcp-stage "$id" "$d" builder none none
 confirm "$d" | grep -q "confirmed $id for $name"
-sudo -u "wl-$name" sudo -n "$HELPER" mcp-snapshot "$id" && wait_status "$id"
+sudo -u "wl-$name" sudo -n "$HELPER" mcp-snapshot "$id"
+# WHY: not wait_status. The status file still says "$id done" from the preview above until the snapshot's unit writes
+# "running", so wait_status would return at once. The snapshot's own mark is its preview's snapshotWithSecrets (set
+# with a snapshot or with the broker's error); a failure before that is "$id failed".
+for _ in $(seq 90); do
+  sudo jq -e '.snapshotWithSecrets == true' "$p" > /dev/null 2>&1 && break
+  [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$id failed" ] && break
+  sleep 2
+done
+sudo jq -c . "$st"
 if ! jq -e '.snapshotWithSecrets == true and .snapshot != null' "$p" > /dev/null; then
   jq -c '{snapshotError, snapshotWithSecrets}' "$p" >&2
   sudo journalctl -u "$unit" --no-pager | tail -n 30 >&2

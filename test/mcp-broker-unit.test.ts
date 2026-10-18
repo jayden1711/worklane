@@ -47,6 +47,9 @@ test('ci-slow proves it on real systemd: the probe runs after the MCP broker ste
     "'/proc/sys/kernel/domainname=denied\\(' '/proc/sys/vm/swappiness=denied\\(' '/sys/fs/cgroup/.*/escaped=denied\\(' '/sys/fs/cgroup/cgroup.procs=denied\\(' '/sys/fs/cgroup:mount=ro$'",
     "grep -q 'WROTE'",
   ]) assert.ok(sh.includes(s), `probe: ${s}`);
+  // The snapshot's wait is on its own result: the status file still says the same id is done from its preview.
+  assert.ok(!sh.includes('mcp-snapshot "$id" && wait_status'), "wait_status returns at once on the preview's done");
+  assert.ok(sh.includes(`sudo jq -e '.snapshotWithSecrets == true' "$p" > /dev/null 2>&1 && break`));
   // The broker's own start of a server prints its error and the broker's journal before the step's checks, and the job's
   // failure dump has the broker's journal: a failure carries bubblewrap's words.
   const step = job.slice(job.indexOf('mcp-snapshot kit-notes && wait_status kit-notes'));

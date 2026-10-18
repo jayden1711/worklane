@@ -2420,7 +2420,7 @@ jobs:
           sudo jq -e '."kit-notes".diff.changed == [{"name":"echo","fields":["description"]}]' /var/lib/worklane-mcp-ci/state/blocked.json
           sudo rm -f /etc/kit-rugpull
           sudo rm -rf "$cc" "$h"
-      - name: "MCP broker (#551): its unit runs with ProtectKernelTunables and ProtectControlGroups and still starts servers in their sandboxes; a server inside it can't write /proc/sys or the cgroup tree"
+      - name: "MCP broker (#551): its unit runs with ProtectControlGroups (the cgroup tree read-only, in the broker and in a server's sandbox) and still starts servers; a server inside it can't write /proc/sys or the cgroup tree; what bubblewrap says under ProtectKernelTunables"
         run: bash scripts/ci/mcp-broker-kernel.sh ci
       - name: "a full disk under ci's real coordinator unit: it stays up (same PID, no restart), raises disk_full, keeps its events and writes them in order once there is room"
         run: sudo bash scripts/ci/disk-full-coordinator.sh ci
