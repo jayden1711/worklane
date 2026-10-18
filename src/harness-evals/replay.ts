@@ -7,7 +7,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from '../brand.js';
 import { FileBacklog } from '../backlog/file.js';
@@ -136,15 +136,34 @@ export function readHarnessConfig(from: string): HarnessConfig {
   return { from, files };
 }
 
-/** Replace the task's own harness config with the snapshot's: the replay sees exactly the harness under test's (none if it has none). */
+/**
+ * Replace the task's own harness config with the snapshot's: the replay sees exactly the harness under test's (none if
+ * it has none). Every file must land inside one of HARNESS_CONFIG_PATHS: a path that resolves anywhere else (`../x`,
+ * `lessons/x`) refuses the whole overlay before anything is removed or written, whoever built the snapshot.
+ */
 export function overlayHarnessConfig(root: string, h: HarnessConfig): void {
-  const dir = join(root, BRAND.configDir);
+  const dir = resolve(root, BRAND.configDir);
+  const inside = (to: string) => HARNESS_CONFIG_PATHS.some((p) => to.startsWith(join(dir, p) + sep));
+  const targets = h.files.map((f) => {
+    const to = resolve(dir, f.path);
+    if (isAbsolute(f.path) || !inside(to)) throw new Error(`harness config file ${JSON.stringify(f.path)} is not inside ${HARNESS_CONFIG_PATHS.map((p) => `${BRAND.configDir}/${p}/`).join(', ')}: refused`);
+    return { to, content: f.content };
+  });
   for (const p of HARNESS_CONFIG_PATHS) rmSync(join(dir, p), { recursive: true, force: true });
-  for (const f of h.files) {
-    const to = join(dir, f.path);
-    mkdirSync(dirname(to), { recursive: true });
-    writeFileSync(to, f.content);
+  for (const f of targets) {
+    mkdirSync(dirname(f.to), { recursive: true });
+    writeFileSync(f.to, f.content);
   }
+}
+
+/**
+ * The scratch commit holds exactly the snapshot under HARNESS_CONFIG_PATHS: a task repo's .gitignore (or anything
+ * else) must not silently drop a principle the agents would then never see.
+ */
+function checkCommittedHarnessConfig(root: string, h: HarnessConfig): void {
+  const committed = git(root, 'ls-tree', '-r', '-z', '--name-only', 'HEAD', '--', ...HARNESS_CONFIG_PATHS.map((p) => `${BRAND.configDir}/${p}`)).split('\0').filter(Boolean).sort();
+  const want = h.files.map((f) => `${BRAND.configDir}/${f.path.split(sep).join('/')}`).sort();
+  if (committed.join('\n') !== want.join('\n')) throw new Error(`the scratch commit's harness config differs from the harness under test's (committed: ${committed.join(', ') || 'none'}; expected: ${want.join(', ') || 'none'})`);
 }
 
 export interface ReplayOptions {
@@ -201,7 +220,10 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
     scratchConfig(root, o.runner.budgetUsd);
     if (o.harness) overlayHarnessConfig(root, o.harness);
     git(root, 'add', '-A', '--', BRAND.configDir);
+    // Forced: the overlay replaced these folders whole, so nothing in them is the task's to ignore.
+    if (o.harness?.files.length) git(root, 'add', '-f', '--', ...o.harness.files.map((f) => `${BRAND.configDir}/${f.path.split(sep).join('/')}`));
     commit(root, `${BRAND.cli} harness eval: scratch instance config`);
+    if (o.harness) checkCommittedHarnessConfig(root, o.harness);
     // The remote takes it by fetching from the clone: the engine pushes only through checkedPush (push-check.ts).
     git(remote, 'fetch', '-q', root, `+refs/heads/${branch}:refs/heads/${branch}`);
     git(root, 'fetch', '-q', 'origin');

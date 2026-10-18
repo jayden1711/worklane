@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { FileBacklog } from '../src/backlog/file.js';
 import { loadConfig } from '../src/config/load.js';
@@ -12,7 +12,7 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload, EventType, StoredEvent } from '../src/events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
 import { BRAND } from '../src/brand.js';
-import { BudgetRunner, runSuite, scratchConfig, type SuiteOptions } from '../src/harness-evals/replay.js';
+import { BudgetRunner, overlayHarnessConfig, runSuite, scratchConfig, type SuiteOptions } from '../src/harness-evals/replay.js';
 import { harnessEvalDue } from '../src/harness-evals/schedule.js';
 import { baselineFor, commentMarkdown, evalRuns, scoreReplay } from '../src/harness-evals/score.js';
 import { engineRepo, HarnessTask, issueBody, loadSuite, PUBLIC_TASKS_DIR, readTasks, type LoadedTask } from '../src/harness-evals/tasks.js';
@@ -294,6 +294,41 @@ test('a harness under test without principles: the replay runs with none (base a
   assert.match(run2.error ?? '', /principles\/linked\.md .* not a regular file/);
   assert.equal(t2.of('harness_eval.task').length, 0, 'no replay');
   assert.equal(r2.calls.length, 0, 'no agent ran');
+});
+
+test('the overlay writes only inside the harness config folders: a snapshot path outside them refuses the whole overlay, whoever built it', () => {
+  const base = mkdtempSync(join(tmpdir(), 'overlay-'));
+  const root = join(base, 'a', 'repo');
+  const own = join(root, BRAND.configDir, 'principles', 'task-era.md');
+  mkdirSync(dirname(own), { recursive: true });
+  mkdirSync(join(root, BRAND.configDir, 'lessons'), { recursive: true });
+  writeFileSync(own, 'old\n');
+  const content = Buffer.from('x\n');
+  for (const path of ['../x', 'lessons/x', '../../escaped.txt', 'principles/../lessons/x', 'principles', join(base, 'abs.txt'), 'principles-evil/x']) {
+    assert.throws(() => overlayHarnessConfig(root, { from: 'hand-built', files: [{ path: 'principles/ok.md', content }, { path, content }] }), /not inside/, path);
+  }
+  assert.equal(existsSync(join(base, 'a', 'escaped.txt')), false, 'nothing written outside the clone');
+  assert.equal(existsSync(join(root, 'x')), false);
+  assert.equal(existsSync(join(root, BRAND.configDir, 'lessons', 'x')), false, 'nothing written into lessons/');
+  assert.equal(existsSync(join(root, BRAND.configDir, 'principles', 'ok.md')), false, 'refused before anything is written');
+  assert.equal(readFileSync(own, 'utf8'), 'old\n', "refused before the task's own principles are removed");
+  overlayHarnessConfig(root, { from: 'hand-built', files: [{ path: join('principles', 'nested', 'ok.md'), content }] });
+  assert.equal(readFileSync(join(root, BRAND.configDir, 'principles', 'nested', 'ok.md'), 'utf8'), 'x\n');
+  assert.equal(existsSync(own), false);
+});
+
+test("a task repo's .gitignore can't drop a principle from the replay: the commit the agents start from holds every one", async () => {
+  const s0 = withOwnPrinciples(seedRepo());
+  const gi = join(s0.seed, '.gitignore');
+  writeFileSync(gi, `${existsSync(gi) ? readFileSync(gi, 'utf8') : ''}\nfail-closed.md\nnested/\n`);
+  git(s0.seed, 'add', '-A');
+  git(s0.seed, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'ignore some names');
+  const s = { ...s0, task: { ...s0.task, base: git(s0.seed, 'rev-parse', 'HEAD') } };
+  let seen: string[] | null = null;
+  const t = suite(s, agents({ onWorker: (req) => void (seen = git(req.cwd, 'ls-tree', '-r', '--name-only', 'HEAD', '--', `${BRAND.configDir}/principles`).split('\n').filter(Boolean).sort()) }), { harnessConfig: harnessUnderTest() });
+  await t.run();
+  assert.equal(t.of('harness_eval.task')[0]?.success, true, t.of('harness_eval.task')[0]?.detail);
+  assert.deepEqual(seen, [`${BRAND.configDir}/principles/fail-closed.md`, `${BRAND.configDir}/principles/nested/index.md`]);
 });
 
 function coordinatorFixture(enabled: boolean, replay = false) {
