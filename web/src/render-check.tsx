@@ -241,6 +241,8 @@ export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.tes
 
 export const renderRepoConfigForm = (c: FirstRun['repoConfig'], o: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean } = {}) =>
   renderToStaticMarkup(<RepoConfigForm c={c as Extract<FirstRun['repoConfig'], { values: unknown }>} canEdit initialProposed={o.proposed ?? null} initialSeen={o.seen ?? []} initialSeenNote={o.seenNote ?? null} initialSeenLoaded={!!o.seenLoaded} initialStarter={o.starter ?? null} initialStarterOpen={!!o.starterOpen} />);
+/** #569: what the Repo config form's checks slot shows for one checks-seen answer. */
+export { checksSeenSlot } from './checks-seen';
 /** #468: the config PRs as the page follows them; one row with its merge plan shown. */
 export const renderConfigPrs = (prs: ConfigPr[], o: { canAct?: boolean; plan?: { command: string; then: string } } = {}) =>
   renderToStaticMarkup(o.plan ? <ul><ConfigPrRow pr={prs[0]!} canAct={o.canAct ?? true} initialPlan={o.plan} onDone={() => {}} /></ul> : <ConfigPrList prs={prs} canAct={o.canAct ?? true} onDone={() => {}} />);
