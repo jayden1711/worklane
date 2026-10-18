@@ -171,7 +171,8 @@ function categoriesNow(files: string[], o: { root: string; review: ReviewConfig 
   } catch (e) {
     note = `money paths not checked: ${(e as Error).message}`;
   }
-  return { categories: computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: money }, review).categories, note };
+  // The dashboard doesn't read root's managed-app file: the engine's scope, the stricter labels (#665).
+  return { categories: computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: money, scope: undefined }, review).categories, note };
 }
 
 const IMPACT: ImpactFlag['flag'][] = ['money-path', 'auth', 'secrets'];

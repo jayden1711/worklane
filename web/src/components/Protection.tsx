@@ -134,7 +134,7 @@ export function AcceptedMerges({ protection }: { protection: Protection }) {
       setBusy(false);
     }
   };
-  const field = 'h-7 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
+  const field = 'h-7 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]';
   return (
     <div className="rounded-card bg-surface px-3 py-2.5 text-[12.5px] text-ink-2 shadow-card" data-testid="main-watch-accepted">
       <div className="text-[12.5px] font-medium text-ink">Accepted bootstrap merges</div>

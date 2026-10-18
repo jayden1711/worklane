@@ -36,7 +36,7 @@ import { FixRuns } from './fix-runs.js';
 import { FlakyGate } from './flaky.js';
 import { FixForward } from './fix-forward.js';
 import { lit, reviewPacket, type PacketInput } from './review-packet.js';
-import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
+import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
 export abstract class MergeFlow extends FixRuns {
@@ -104,7 +104,7 @@ export abstract class MergeFlow extends FixRuns {
       tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
       categories: (files) => {
         const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-        return computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review).categories;
+        return computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review).categories;
       },
       revert: (o) => this.fixForwardRevert(o),
       giveUp: (o) => this.fixForwardGaveUp(o.ep, o.reason),
@@ -438,7 +438,7 @@ export abstract class MergeFlow extends FixRuns {
     const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
@@ -717,7 +717,7 @@ export abstract class MergeFlow extends FixRuns {
       const base = mergeInBase(this.mergeInsOf(), w.number, head) ?? last<EventPayload<'issue.claimed'>>('issue.claimed')!.base;
       const files = this.changeFiles(this.d.repo, base, head);
       const labels = last<{ labels?: string[] }>('issue.seen')?.labels ?? [];
-      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
       const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
       const cls = effectiveClass(computed.cls, this.claimedClass(n));
       risk = { cls, why: cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why] };
@@ -1184,7 +1184,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!claimed) return { checks: required, fast: false };
     const files = this.changeFiles(this.d.repo, claimed.base, head);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const cls = effectiveClass(riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, this.claimedClass(n));
     return checksFor({ cls, required, docsOnlyChecks: review.docs_only_checks });
   }

@@ -21,8 +21,11 @@ import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } fr
 import { CHAT_KEY_GLOBS, CHAT_LANE, CHAT_ROOT_ENV } from './intake/chat.js';
 import { fileURLToPath } from 'node:url';
 
-/** The engine's CLI, for hooks a lane adds itself (dist/src/cli.js beside this file). */
-const ENGINE_CLI = fileURLToPath(new URL('./cli.js', import.meta.url));
+/**
+ * The agents' tool guard's own entry, for hooks a lane adds itself (dist/src/hook-main.js beside this file): not the
+ * CLI, so the guard's process loads only its locked import tree (#665).
+ */
+const HOOK_MAIN = fileURLToPath(new URL('./hook-main.js', import.meta.url));
 
 // An instance's own users and units are never another's (src/instance-name.ts); an instance that runs as its owner's
 // user may keep a longer name than a machine's (INSTANCE_FILE_NAME_MAX).
@@ -441,7 +444,7 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
   const settingsFor = (denyRead: string[], hook: boolean): ResearchLaneSettings => {
     const s = sandboxSettings({ lane: { allowedDomains: [] }, denyRead });
     const deny = [...s.permissions.deny, ...denyRead.map((p) => `Glob(/${p.startsWith('/') ? p : `/${p}`}/**)`), ...denyRead.map((p) => `Grep(/${p.startsWith('/') ? p : `/${p}`}/**)`)];
-    const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(ENGINE_CLI)} hook pre-tool-use || exit 2`, timeout: 30 }] }] } } : {};
+    const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(HOOK_MAIN)} pre-tool-use || exit 2`, timeout: 30 }] }] } } : {};
     return { ...(i.policy.sandbox ? { sandbox: s.sandbox } : {}), permissions: { deny }, ...hooks };
   };
   // The chat channels' lane: the checkout read-only, like research-repo, under the instance's own guardrail hooks,

@@ -102,7 +102,7 @@ export function SiriDevicesCard({ view, made, error, busy, onCreate, onRevoke, o
             if (name.trim()) onCreate(name.trim());
           }}
         >
-          <input className="min-w-0 flex-1 rounded border border-line bg-surface px-2 py-1.5 text-[13px]" placeholder="This phone's name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} disabled={busy || !!view.createRefused} data-testid="siri-name" />
+          <input className="min-w-0 flex-1 rounded border border-line-strong dark:border-line bg-surface px-2 py-1.5 text-[13px]" placeholder="This phone's name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} disabled={busy || !!view.createRefused} data-testid="siri-name" />
           <Button type="submit" {...held(!name.trim() && "Name this phone first")} data-testid="siri-create">
             New token
           </Button>

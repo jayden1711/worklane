@@ -323,7 +323,7 @@ test('a change another vendor\'s CLI built stands only at L1 or below, off prote
   const review = loadConfig(exampleProject().dir).review!;
   const guardrails = { protected_paths: ['deploy/**'] };
   const f = (path: string, addedLines: string[] = ['x']) => ({ path, added: addedLines.length, removed: 0, addedLines });
-  const o = (files: ReturnType<typeof f>[], moneyPaths: RegExp[] = []) => cliChangeRefusal({ files, labels: [], moneyPaths: () => moneyPaths, review, guardrails });
+  const o = (files: ReturnType<typeof f>[], moneyPaths: RegExp[] = []) => cliChangeRefusal({ files, labels: [], moneyPaths: () => moneyPaths, review, guardrails, scope: undefined });
   assert.equal(o([f('src/price.js')]), null, 'an easy change stands');
   assert.equal(o([f('docs/rounding.md')]), null, 'L0 stands');
   assert.match(o([f('deploy/run.sh')])!, /protected path \(deploy\/run\.sh\)/);
@@ -335,7 +335,7 @@ test('a change another vendor\'s CLI built stands only at L1 or below, off prote
   assert.match(o([f(`${BRAND.configDir}/skills/triage/SKILL.md`)])!, /agent instructions/, 'an editable skill is still agent instructions');
   assert.match(o([f('db/migrate.sql', ['DROP TABLE orders;'])])!, /L3|money|protected/);
   // The build loop asks by the provider that built it.
-  const held = { files: [f('package.json')], labels: [], moneyPaths: () => [], review, guardrails };
+  const held = { files: [f('package.json')], labels: [], moneyPaths: () => [], review, guardrails, scope: undefined };
   assert.match(builtChangeRefusal('cli:codex', held)!, /L1 work only/);
   assert.equal(builtChangeRefusal('hosted:glm', held), null);
   assert.equal(builtChangeRefusal(undefined, held), null);

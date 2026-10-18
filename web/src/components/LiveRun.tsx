@@ -198,7 +198,7 @@ export function ConsolePanel({ data, run, onChange = () => {} }: { data: Console
           rows={3}
           maxLength={4000}
           placeholder="It's held until the agent's current turn ends, then given to it as your next message."
-          className="block w-full resize-y rounded-control bg-field px-2.5 py-2 text-[13px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]"
+          className="block w-full resize-y rounded-control bg-field px-2.5 py-2 text-[13px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--ring)]"
           data-testid="console-input"
         />
         {!!held.length && (

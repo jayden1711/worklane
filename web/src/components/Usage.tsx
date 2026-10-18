@@ -1,10 +1,10 @@
 // The Claude usage limit on the dashboard: while an instance is paused on it, a banner on every page counting down
 // to its reset; and on the Overview, a usage line per instance (today's runs, limit hits, running or paused). Read
 // from each instance's /api/usage (on a hub, every instance that answers; elsewhere, this page's own server).
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { api, hub, hubNow, instanceApi, scopeNowOrNull, viewUrl, type UsageInfo } from '../api';
 import { peek } from '../cache';
-import { ago, Button, Card, cx } from './ui';
+import { ago, Button, Card, cx, InstancePaused } from './ui';
 
 /** How long until `resetAt`, as "2 h 05 min 09 s" (or "now" once it has passed). */
 export function countdown(resetAt: string, now: number): string {
@@ -84,6 +84,20 @@ export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answ
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastId]);
   return { usage, answered };
+}
+
+/**
+ * Whether the instance this page acts on is paused on the usage limit: on a hub, the instance chosen (`current`);
+ * elsewhere, this page's own server, the only usage there is.
+ */
+export function pausedHere(usage: UsageInfo[], current: string | null): boolean {
+  const here = current ? usage.find((u) => u.instance === current) : usage.length === 1 ? usage[0] : undefined;
+  return !!here?.paused;
+}
+
+/** Its children's actions that start or land work say PAUSED_SAYS[work] while this page's instance is paused (#587). */
+export function PausedScope({ usage, current, children }: { usage: UsageInfo[]; current: string | null; children: ReactNode }) {
+  return <InstancePaused.Provider value={pausedHere(usage, current)}>{children}</InstancePaused.Provider>;
 }
 
 /** The owner's re-check of a refused login: the coordinator makes one tiny real call on its next tick. */
