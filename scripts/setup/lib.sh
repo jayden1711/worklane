@@ -9,6 +9,20 @@ as_root() {
 # A user's home directory, from the passwd database: never assumed to be /home/<user>.
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
+# The host's egress rule (egress-firewall.sh): its nftables table, and the set of cgroups exempt from it. A unit whose
+# NFTSet= names the set (test-user.sh's Docker unit) has its cgroup added by systemd while it runs. Named once here, so
+# the rule and the units that join it can't disagree.
+EGRESS_TABLE=worklane_egress
+EGRESS_SET=egress_ok
+# NFTSet= is in systemd 255 and later; on an older one nothing can fill the set, so test users stay opt-in there.
+EGRESS_NFTSET_SYSTEMD=255
+# systemd's major version (systemctl's first line, "systemd 255 (...)"); 0 when it can't be read.
+systemd_major() {
+  local v
+  v="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p' || true)"
+  echo "${v:-0}"
+}
+
 # A JSON string (for the scripts that print JSON lines): backslashes and quotes escaped, newlines as \n, other control characters dropped.
 json_str() {
   local s="$1"

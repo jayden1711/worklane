@@ -106,6 +106,17 @@ TasksMax=8192
 EOF
 }
 
+# The host's egress rule (egress-firewall.sh) covers the test user; this unit's cgroup is its one exception, so Docker
+# can pull a run's database image: systemd puts the cgroup in the rule's set while the unit runs (systemd 255 or later;
+# on an older one the rule covers test users only with --with-test-users, and then Docker can't pull).
+docker_egress() {
+  if [ "$(systemd_major)" -ge "$EGRESS_NFTSET_SYSTEMD" ]; then
+    printf '# Its image pulls get past the host egress rule for the test user (egress-firewall.sh): this cgroup only.\nNFTSet=cgroup:inet:%s:%s\n' "$EGRESS_TABLE" "$EGRESS_SET"
+  else
+    printf '# No NFTSet= (systemd %s; it needs %s): the host egress rule leaves the test user out unless --with-test-users.\n' "$(systemd_major)" "$EGRESS_NFTSET_SYSTEMD"
+  fi
+}
+
 docker_unit() {
   cat <<EOF
 [Unit]
@@ -133,6 +144,7 @@ UMask=0077
 # each container gets <this unit>/<id>, in this unit's delegated subtree, under worklane-test.slice's caps.
 Delegate=cpu io memory pids
 DelegateSubgroup=daemon
+$(docker_egress)
 # Published ports bind 127.0.0.1.
 ExecStart=$docker_dir/dockerd-rootless.sh --data-root $root/docker --ip 127.0.0.1 --exec-opt native.cgroupdriver=cgroupfs
 KillMode=mixed
@@ -386,6 +398,15 @@ install_cmd() {
   for _ in $(seq 60); do [ -S "/run/worklane-test-$name-docker/docker.sock" ] && break; sleep 1; done
   systemctl is-active -q "$docker_unit_name" || { echo "$docker_unit_name didn't start; see: journalctl -u $docker_unit_name -n 50" >&2; systemctl --no-pager status "$docker_unit_name" >&2 || true; exit 1; }
   echo "$docker_unit_name is active"
+
+  # The host egress rule names users by uid: where it is in use, load it again so it covers this test user too (with
+  # the flags it was applied with, as experiments.sh install does).
+  if [ -f /etc/worklane/egress.users ]; then
+    say "the host egress rule (egress-firewall.sh), now with $user in it"
+    egress_flags=""
+    if grep -qx '# --with-test-users' /etc/worklane/egress.users; then egress_flags=--with-test-users; fi
+    bash "$here/egress-firewall.sh" apply $egress_flags || { echo "the egress rule didn't load; fix that, then run install again" >&2; exit 1; }
+  fi
 
   say "sudoers: $coord may run $helper $name ..., nothing else"
   install_sudoers "worklane-test-$name" "$(sudoers_rule)"
