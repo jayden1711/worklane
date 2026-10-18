@@ -2078,7 +2078,8 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
   const body = 'Tighten one of the controls.\n\n```done_when\n- command: node --test\n```\n';
   for (const part of SELF_MODIFICATION_PARTS) {
     for (const glob of part.globs) {
-      const path = files.find((f) => globToRegExp(glob).test(f))!;
+      // A glob with no file yet (the owner's own, e.g. a study's definition) is an exact path: the change adds it.
+      const path = files.find((f) => globToRegExp(glob).test(f)) ?? (glob.includes('*') ? undefined : glob)!;
       let attempt = 0;
       const worker = (req: RunRequest) => {
         mkdirSync(dirname(join(req.cwd, path)), { recursive: true });
