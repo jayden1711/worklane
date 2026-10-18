@@ -66,10 +66,11 @@ UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-# /proc/sys, /sys and the cgroup tree read-only for the broker and every server it starts. bubblewrap (the servers'
-# sandbox) still mounts its fresh /proc under these: ci-slow's add-project job proves it on real systemd
-# (scripts/ci/mcp-broker-kernel.sh).
-ProtectKernelTunables=yes
+# The cgroup tree read-only for the broker and every server it starts; ci-slow's add-project job proves the broker
+# still starts servers under it (scripts/ci/mcp-broker-kernel.sh). Not ProtectKernelTunables (#551): with it the
+# broker's servers didn't start on ubuntu-24.04 (ci-slow run 39093672334; bubblewrap's fresh /proc refused, inferred,
+# its message not captured). /proc/sys stays unwritable to them by the kernel's permissions: a non-root user with every
+# capability dropped.
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 NoNewPrivileges=yes

@@ -1,7 +1,8 @@
 // A fixture MCP server for the real-host CI: never run by the inspector or the fetch. When its snapshot is taken it
 // tries to write into every place the broker reads or runs (every home, the broker state, the plugin store and
 // previews, /etc and /opt), and reports each try in its one tool's description: "denied" or "WROTE".
-// With "kernel" (the plugin's kernel server), it tries the kernel's tunables and the cgroup tree instead (#551).
+// With "kernel" (the plugin's kernel server), it tries the kernel's tunables and the cgroup tree instead, and reports
+// how /proc/sys and /sys/fs/cgroup are mounted where it runs (#551).
 const fs = require('fs');
 const path = require('path');
 const tries = [];
@@ -52,6 +53,16 @@ function kernel() {
     }
   }
   attempt('/sys/fs/cgroup/cgroup.procs', `${process.pid}\n`);
+  // How each is mounted where this server runs: the top mount's options (mountinfo lists stacked mounts bottom first),
+  // "none" where it isn't a mount of its own.
+  let info = [];
+  try {
+    info = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n').map((l) => l.split(' '));
+  } catch {}
+  for (const m of ['/proc/sys', '/sys/fs/cgroup']) {
+    const top = info.filter((f) => f[4] === m).pop();
+    tries.push(`${m}:mount=${top ? (top[5].split(',').includes('ro') ? 'ro' : 'rw') : 'none'}`);
+  }
 }
 
 function places() {
