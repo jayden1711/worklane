@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_PROFILE_CREDENTIAL, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
+import { accountSwitchedAt, CLAUDE_PROFILE_CREDENTIAL, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep, profileStepOk } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -225,6 +225,32 @@ test('#566: an unpaused instance has no limit on any cell: no pause, after usage
   } finally {
     log.close();
   }
+});
+
+test("#566: a whole-login switch (switch.jsonl) completed after the pause began ends the table's limit, as it ends the coordinator's pause; a failed or not-yet-resumed one doesn't", () => {
+  const now = Date.parse('2026-10-18T12:00:00Z');
+  const reset = '2026-10-18T14:00:00.000Z';
+  const pause = { since: '2026-10-18T11:00:00.000Z', resetAt: reset, source: 'claude' as const, kind: 'five_hour', issue: 7, role: 'worker', id: 1 };
+  // A claude-account switch for alpha at 11:30: the token, alpha's agent user installed and checked, alpha resumed.
+  const switchDir = (end: object[]) => {
+    const d = accountDir(twoProfiles());
+    writeFileSync(join(d, 'status.json'), JSON.stringify(STATUS_AB));
+    const lines = [{ step: 'switch', state: 'started', detail: '1 instance(s): alpha' }, { step: 'pause', state: 'done', instance: 'alpha', detail: 'starts no more runs' }, { step: 'token', state: 'done', detail: 'received' }, { step: 'install', state: 'done', instance: 'alpha', user: 'wl-alpha-agent', detail: 'stored' }, ...end];
+    writeFileSync(join(d, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at: '2026-10-18T11:30:00.000Z', ...l })).join('\n') + '\n');
+    return d;
+  };
+  const check = (state: string) => ({ step: 'check', state, instance: 'alpha', user: 'wl-alpha-agent', detail: state });
+  const done = switchDir([check('done'), { step: 'resume', state: 'done', instance: 'alpha', detail: 'running again' }, { step: 'switch', state: 'done', detail: 'done' }]);
+  const failed = switchDir([check('failed'), { step: 'resume', state: 'failed', instance: 'alpha', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: alpha' }]);
+  const running = switchDir([check('done')]);
+  const limits = (dir: string) => limitsIn(profilesTable({ dir, now, usage: { instance: 'alpha', pause } }));
+  assert.deepEqual(limits(done), [], 'completed after the pause began: the coordinator ends the pause, so no limit');
+  assert.deepEqual(limits(failed).map(([p, i]) => `${p}/${i}`), ['default/alpha'], 'its check failed: alpha stays on its old login, limit and all');
+  assert.deepEqual(limits(running).map(([p, i]) => `${p}/${i}`), ['default/alpha'], 'not resumed yet: still limited');
+  // The coordinator's switch time (src/service.ts accountSwitched) is this same helper.
+  assert.equal(accountSwitchedAt('alpha', done), '2026-10-18T11:30:00.000Z');
+  assert.equal(accountSwitchedAt('alpha', failed), null);
+  assert.equal(accountSwitchedAt('alpha', running), null);
 });
 
 test("#566: the dashboard's account view carries this instance's pause on its active account's cell; another instance's column is not read", { skip: !posix }, async () => {

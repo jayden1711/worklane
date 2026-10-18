@@ -19,7 +19,7 @@ import { installOwnerOnlySecret } from './os/index.js';
 import { secretsDir } from './console/secrets.js';
 import type { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, readAccountStatus, SETUP_TOKEN, ClaudeTokenError } from './claude-account.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, readAccountStatus, readSwitchLines, SETUP_TOKEN, ClaudeTokenError, switchedOnto } from './claude-account.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import type { MachineRequester } from './machine-owners.js';
 import type { RunAs } from './runner.js';
@@ -260,6 +260,16 @@ export function latestSwitch(a: string | null, b: string | null): string | null 
   return Date.parse(a) >= Date.parse(b) ? a : b;
 }
 
+/**
+ * When this instance last moved to another login: a whole-login switch that put it on the new login and resumed it
+ * (switch.jsonl, switchedOnto), or a profile switch (profiles.json), whichever is later; null: never. A usage-limit
+ * pause that began before it ends: the coordinator's accountSwitched (src/service.ts) and the accounts table both read
+ * this, so the table never shows a limit the coordinator no longer holds.
+ */
+export function accountSwitchedAt(instance: string, dir = CLAUDE_ACCOUNT_DIR): string | null {
+  return latestSwitch(switchedOnto(instance, readSwitchLines(dir)), profileSwitchedAt(instance, dir));
+}
+
 /** A usage limit on an account, as the accounts table shows it: when it resets, and that in words (resetWords). */
 export interface ProfileLimit {
   resetAt: string;
@@ -268,14 +278,15 @@ export interface ProfileLimit {
 
 /**
  * The usage-limit pause in force on an instance, as its coordinator holds it (src/coordinator/base.ts resumeIfDue):
- * from the log's usage.paused, until usage.resumed, its reset, or a profile switch since it began (each ends it at the
- * coordinator's next tick). null: none.
+ * from the log's usage.paused, until usage.resumed, its reset, or a switch since it began (accountSwitchedAt: a
+ * whole-login or a profile switch, the coordinator's own switch time). The last two end it at the coordinator's next
+ * tick; the table drops it at once. null: none.
  */
-function limitOf(usage: { instance: string; pause: UsagePause | null }, p: Profiles, now: number): ProfileLimit | null {
+function limitOf(usage: { instance: string; pause: UsagePause | null }, dir: string | undefined, now: number): ProfileLimit | null {
   const pause = usage.pause;
   if (!pause || !(Date.parse(pause.resetAt) > now)) return null;
-  const switched = p.switchedAt[usage.instance];
-  if (switched && Date.parse(switched) >= Date.parse(pause.since)) return null;
+  const switched = accountSwitchedAt(usage.instance, dir);
+  if (switched !== null && Date.parse(switched) >= Date.parse(pause.since)) return null;
   return { resetAt: pause.resetAt, resets: resetWords(pause.resetAt, now) };
 }
 
@@ -287,7 +298,7 @@ function limitOf(usage: { instance: string; pause: UsagePause | null }, p: Profi
 export function profilesTable(o: { dir?: string; instances?: string[]; usage?: { instance: string; pause: UsagePause | null }; now?: number }) {
   const failover = readProfiles(o.dir).failover;
   const p = readProfiles(o.dir);
-  const limit = o.usage ? limitOf(o.usage, p, o.now ?? Date.now()) : null;
+  const limit = o.usage ? limitOf(o.usage, o.dir, o.now ?? Date.now()) : null;
   const status = readAccountStatus(o.dir);
   // The instances: every one status.json has an agent user for, and every one with an active profile.
   const agents = new Map<string, string>();
