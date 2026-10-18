@@ -2169,6 +2169,13 @@ test("regression: a managed app's PR touching its own src/contract.ts is app cod
   assert.deepEqual((lastOf(app.f.log, 'change.proposed') as { files: string[] }).files, ['src/contract.ts']);
   assert.equal(levelOf(app).level, 'L1', levelOf(app).reasons.join('; '));
   assert.ok(!levelOf(app).reasons.some((r) => r.startsWith(SELF_MODIFICATION)), levelOf(app).reasons.join('; '));
+  // The review packet's risk class at the head reads the same scope (merge-flow.ts packetFacts): held here only by
+  // its size, the app's own change is logic, not "protected" as the engine's tool guard.
+  const held = await openPr({ worker, 'evaluator-verdict': approve() }, { body, lockScope: () => 'managed-app', autoMerge: () => true, edit: (cfg) => void (cfg.review!.merge.max_lines = 0) });
+  await green(held);
+  const packet = (await held.f.backlog.comments(held.opened.number)).map((x) => x.body).find((b) => /waits for you/.test(b));
+  assert.ok(packet, 'the review packet is posted');
+  assert.match(packet, /\*\*Risk class:\*\* logic\b/);
   for (const lockScope of [undefined, () => { throw new Error("root's file can't be read"); }]) {
     const t = await openPr({ worker, 'evaluator-verdict': approve() }, { body, ...(lockScope ? { lockScope } : {}), approveLanding: true });
     assert.equal(levelOf(t).level, 'L3', `${lockScope ? 'asking fails' : 'no lockScope'}: ${levelOf(t).reasons.join('; ')}`);

@@ -85,7 +85,7 @@ test("the coordinator's lock scope: the engine's when it is given none, or askin
   assert.equal(lockScopeOf({ lockScope: () => { throw new Error('EACCES'); } }), 'engine');
   // The evaluator's routing level follows it: the app's own src/contract.ts is app code there, the guard otherwise.
   const review = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: [] }, L1_evaluator: { when: ['app-non-money'] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
-  const routed = (s?: 'engine' | 'managed-app') => evalLevel({ files: [{ path: 'src/contract.ts', added: 1, removed: 0, addedLines: ['export const terms = 1;'], removedLines: [] }], labels: [], moneyPaths: () => [], review, tampered: [], ...(s ? { scope: s } : {}) });
+  const routed = (s?: 'engine' | 'managed-app') => evalLevel({ files: [{ path: 'src/contract.ts', added: 1, removed: 0, addedLines: ['export const terms = 1;'], removedLines: [] }], labels: [], moneyPaths: () => [], review, tampered: [], scope: s });
   assert.equal(routed('managed-app'), 'L1');
   assert.equal(routed('engine'), 'L3');
   assert.equal(routed(), 'L3');

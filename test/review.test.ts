@@ -23,7 +23,7 @@ const cfg = ReviewConfig.parse({
 });
 const money = [/^server\/(ledger|escrow)\//, /^shared\//];
 const f = (path: string, added = 10, removed = 0, addedLines?: string[]): ChangeFile => ({ path, added, removed, ...(addedLines ? { addedLines } : {}) });
-const level = (files: ChangeFile[], extra: Partial<Parameters<typeof computeLevel>[0]> = {}) => computeLevel({ files, labels: [], moneyPaths: money, ...extra }, cfg);
+const level = (files: ChangeFile[], extra: Partial<Parameters<typeof computeLevel>[0]> = {}) => computeLevel({ files, labels: [], moneyPaths: money, scope: undefined, ...extra }, cfg);
 
 test('docs and tests only, small: L0; large: L1', () => {
   assert.equal(level([f('docs/a.md'), f('test/a.test.js')]).level, 'L0');
@@ -249,7 +249,7 @@ test('review.yaml categories: a site can send all docs to the evaluator and name
       L3_human: { when: ['privacy-terms', 'pilot-form', 'harness-config'], over_lines: 800 },
     },
   });
-  const lvl = (...paths: string[]) => computeLevel({ files: paths.map((p) => f(p)), labels: [], moneyPaths: [] }, site);
+  const lvl = (...paths: string[]) => computeLevel({ files: paths.map((p) => f(p)), labels: [], moneyPaths: [], scope: undefined }, site);
   const docs = lvl('docs-src/quickstart.md');
   assert.equal(docs.level, 'L1', 'a one-line docs change still gets the evaluator');
   assert.ok(docs.reasons.includes('docs: docs-src/quickstart.md'), docs.reasons.join('; '));

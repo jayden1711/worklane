@@ -144,8 +144,11 @@ export interface LevelInput {
   verdict?: { patch_correct: boolean; test_correct: boolean; confidence: 'high' | 'medium' | 'low' };
   /** An agent may ask for more review, never less. */
   requested?: Level;
-  /** Whose repo this is, for the locked categories (LockScope); absent: the engine's, every lock applies. */
-  scope?: LockScope | undefined;
+  /**
+   * Whose repo this is, for the locked categories (LockScope); undefined: the engine's, every lock applies. A required
+   * key (#665): every caller says which scope it means, so a call site can't leave it out by accident.
+   */
+  scope: LockScope | undefined;
 }
 
 export interface LevelResult {

@@ -715,7 +715,7 @@ export abstract class MergeFlow extends FixRuns {
       const base = mergeInBase(this.mergeInsOf(), w.number, head) ?? last<EventPayload<'issue.claimed'>>('issue.claimed')!.base;
       const files = this.changeFiles(this.d.repo, base, head);
       const labels = last<{ labels?: string[] }>('issue.seen')?.labels ?? [];
-      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
       const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
       const cls = effectiveClass(computed.cls, this.claimedClass(n));
       risk = { cls, why: cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why] };

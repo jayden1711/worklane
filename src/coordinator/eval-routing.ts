@@ -16,7 +16,7 @@ export const ESCALATED_COST_ROLE = 'evaluator-escalated';
  * The level a change routes at, before any verdict: its review level from the files and labels (a comment-only
  * change routes as L0), raised to L2 by a tamper flag. A level that can't be computed routes to the strong model.
  */
-export function evalLevel(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; tampered: string[]; scope?: LockScope }): Level {
+export function evalLevel(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; tampered: string[]; scope: LockScope | undefined }): Level {
   let level: Level;
   try {
     level = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths(), scope: o.scope }, o.review).level;

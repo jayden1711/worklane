@@ -197,7 +197,7 @@ test('a provider run: its endpoint in ANTHROPIC_BASE_URL, its key file only thro
 test('a change a hosted model built may not stand when it is L3, a money path, or agent instructions', () => {
   const review = loadConfig(exampleProject().dir).review!;
   const f = (path: string, addedLines: string[] = ['x']) => ({ path, added: addedLines.length, removed: 0, addedLines });
-  const o = (files: ReturnType<typeof f>[], moneyPaths: RegExp[] = []) => hostedChangeRefusal({ files, labels: [], moneyPaths: () => moneyPaths, review });
+  const o = (files: ReturnType<typeof f>[], moneyPaths: RegExp[] = []) => hostedChangeRefusal({ files, labels: [], moneyPaths: () => moneyPaths, review, scope: undefined });
   assert.equal(o([f('src/price.js')]), null, 'an easy change stands');
   assert.match(o([f('AGENTS.md')])!, /agent instructions/);
   assert.match(o([f('.claude/skills/triage/SKILL.md')])!, /agent instructions/);

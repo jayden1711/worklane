@@ -202,7 +202,7 @@ export function objection(comments: { author: string; body: string }[], after: n
  * design-level checks, over the files the plan expects to change, plus its own design flag. Empty: post and
  * proceed. `existsAtBase` tells a new top-level module from an existing one.
  */
-export function planHoldReasons(plan: Plan, o: { review: ReviewConfig; moneyPaths: RegExp[]; existsAtBase: (path: string) => boolean; scope?: LockScope }): string[] {
+export function planHoldReasons(plan: Plan, o: { review: ReviewConfig; moneyPaths: RegExp[]; existsAtBase: (path: string) => boolean; scope: LockScope | undefined }): string[] {
   const files = plan.files.map((path) => ({ path: path.replace(/^\.\//, ''), added: 0, removed: 0 }));
   const level = computeLevel({ files, labels: [], moneyPaths: o.moneyPaths, scope: o.scope }, o.review);
   const tops = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))];
