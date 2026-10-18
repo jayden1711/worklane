@@ -22,6 +22,12 @@ function Cell({ c, profile, canAct, busy, onUse }: { c: ProfileCell; profile: st
       {c.account && <div className="break-words text-[11.5px] text-ink-2">{c.account}{c.subscription ? ` · ${c.subscription}` : ''}</div>}
       {c.checkedAt && <div className="text-[11px] text-ink-3">checked {ago(c.checkedAt)}</div>}
       {c.apiOk === false && c.apiError && <div className="break-words text-[11px] text-red">{c.apiError}</div>}
+      {c.limit && (
+        <div className="mt-0.5 space-y-0.5" data-testid="claude-profile-limit" data-reset-at={c.limit.resetAt}>
+          <Badge tone="warn">usage limit</Badge>
+          <div className="break-words text-[11px] text-ink-2">resets {c.limit.resets}</div>
+        </div>
+      )}
       {!c.active && canAct && (
         <Button size="sm" variant="ghost" disabled={busy} onClick={onUse} data-testid="claude-profile-use-here">
           Use here
@@ -262,6 +268,12 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null,
               {table.instances.map((i) => (
                 <th key={i} className="px-2 py-1.5 font-medium">
                   {i}
+                  {/* Usage limits come from each instance's own log: this server read only its own (#566). */}
+                  {table.limitsOf && i !== table.limitsOf && (
+                    <div className="text-[10.5px] font-normal text-ink-3" data-testid="claude-profile-limit-elsewhere" data-instance={i} title={`${i}'s usage limit is in its own log: its dashboard shows it`}>
+                      usage limit: not shown here
+                    </div>
+                  )}
                 </th>
               ))}
               <th className="px-2 py-1.5" />

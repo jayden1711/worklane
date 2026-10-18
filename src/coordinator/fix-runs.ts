@@ -272,7 +272,8 @@ export abstract class FixRuns extends Landing {
     const doneWhen = localDoneWhen((last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList, this.d.cfg.tests);
     const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
     const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
-    const issue = await this.d.backlog.get(n);
+    // #643: briefed from the body the task was worked from (a GitHub report's checked draft), never a live edit of it.
+    const issue = await this.intakeWorkedIssue(n);
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });
@@ -506,7 +507,8 @@ export abstract class FixRuns extends Landing {
     const doneWhen = localDoneWhen((last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList, this.d.cfg.tests);
     const frozen = last<EventPayload<'repro.frozen'>>('repro.frozen');
     const repro = frozen ? { path: frozen.path, hash: frozen.hash } : null;
-    const issue = await this.d.backlog.get(n);
+    // #643: as in fixRun, never the live body.
+    const issue = await this.intakeWorkedIssue(n);
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
     const lease: Lease = { instance: this.d.instance, run_id: randomBytes(4).toString('hex'), issue: n, expires_at: new Date(Date.now() + (this.d.leaseMs ?? 3 * 3600_000)).toISOString(), base: claimed.base };
     const won = claim(lease, { repo: this.d.repo, remote: this.remote });

@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { addressed } from '../src/intake/addressing.js';
 import { BugStoreIntake, pullBugReports, readCursor, withCursor } from '../src/intake/bug-store.js';
 import { candidates, similarity } from '../src/intake/dedupe.js';
-import { decide, statusReply, NEEDS_INFO_REPLY } from '../src/intake/decide.js';
+import { LABELS, parseContract } from '../src/backlog/types.js';
+import { decide, statusReply, NEEDS_INFO_REPLY, type IntakeAction } from '../src/intake/decide.js';
 import { DiscordIntake, INTENTS, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
 import { luhn, redactPii } from '../src/intake/redact.js';
 import { IntakeConfig, intakeWarnings, isAllowed, isTrusted, type IncomingReport, type Source } from '../src/intake/report.js';
@@ -297,6 +298,73 @@ test('a draft that fails checkDraft is needs_info, whatever kind the agent chose
         assert.equal((a as { text: string }).text, NEEDS_INFO_REPLY, 'the fixed request for details, no internal detail');
         assert.ok((a as { refused?: string }).refused, 'why is kept for the log');
       }
+});
+
+// ---------- reproduction (#333): the failing test is mandatory for a bug, and nothing runs at intake ----------
+
+const contractOf = (a: IntakeAction) => {
+  const c = parseContract((a as { body: string }).body);
+  assert.ok(c.ok, `the filed body's contract parses: ${(c as { why?: string }).why}`);
+  return c.done_when;
+};
+
+test('a bug draft is filed with `- repro: true` in its done_when, trusted or not, so the task-time failing test is required (#333)', () => {
+  const nested = { ...DRAFT, body: DRAFT.body.replace('```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```', '```done_when\n  - command: |\n      npm test -- --grep "discount: applied"\n      echo "- repro: false"\n  - repro: false\n```') };
+  for (const draft of [DRAFT, nested])
+    for (const trusted of [true, false]) {
+      const a = decide({ report: report(), redacted: 'checkout total is wrong', triage: triage({ kind: 'bug', draft }), trusted, shown: [] });
+      assert.equal(a.action, trusted ? 'file' : 'decision');
+      const dw = contractOf(a);
+      assert.deepEqual(dw.filter((d) => 'repro' in d), [{ repro: true }], 'exactly one repro item, and it is true: the agent cannot opt out');
+      assert.ok(dw.some((d) => 'command' in d && /npm test -- --grep "discount: applied"/.test(d.command)), "the draft's own items are kept");
+      assert.ok(checkDraft({ title: draft.title, body: (a as { body: string }).body }).ok, 'the filed body is still a valid draft');
+    }
+  const nestedFiled = decide({ report: report(), redacted: 'x', triage: triage({ kind: 'bug', draft: nested }), trusted: true, shown: [] });
+  const cmd = contractOf(nestedFiled).find((d) => 'command' in d) as { command: string };
+  assert.match(cmd.command, /echo "- repro: false"/, 'a line inside a command is not an item and is left alone');
+});
+
+test('a bug draft whose done_when cannot carry `- repro: true` is refused, never filed without it (#333)', () => {
+  const flow = { ...DRAFT, body: DRAFT.body.replace('```done_when\n- command: |\n    npm test -- --grep "discount: applied"\n```', '```done_when\n- command: |\n    npm test\n- {repro: false}\n```') };
+  assert.ok(checkDraft(flow).ok, 'the draft itself is valid');
+  for (const trusted of [true, false]) {
+    const a = decide({ report: report(), redacted: 'x', triage: triage({ kind: 'bug', draft: flow }), trusted, shown: [] });
+    assert.equal(a.action, 'reply');
+    assert.equal((a as { text: string }).text, NEEDS_INFO_REPLY);
+    assert.match(String((a as { refused?: string }).refused), /repro/);
+  }
+});
+
+test('a feature draft is filed exactly as drafted: no repro item, no reproduction label (#333)', () => {
+  for (const trusted of [true, false]) {
+    const a = decide({ report: report(), redacted: 'x', triage: triage({ kind: 'feature', draft: DRAFT, reproduction: { result: 'not_reproduced', detail: 'n/a' } }), trusted, shown: [] });
+    assert.ok((a as { body: string }).body.startsWith(DRAFT.body.trim()), 'the draft body is unchanged');
+    assert.deepEqual(contractOf(a).filter((d) => 'repro' in d), []);
+    assert.deepEqual((a as { labels: string[] }).labels, trusted ? ['ready', 'enhancement'] : ['enhancement']);
+  }
+});
+
+test("a bug the intake agent couldn't reproduce is labelled couldnt-reproduce; one it reproduced, or didn't try, is not (#333)", () => {
+  assert.ok(LABELS.some((l) => (l.name as string) === 'couldnt-reproduce'), 'the label is one the engine creates (LABELS)');
+  for (const trusted of [true, false]) {
+    const labels = (result: NonNullable<Triage['reproduction']>['result']) =>
+      (decide({ report: report(), redacted: 'x', triage: triage({ kind: 'bug', draft: DRAFT, reproduction: { result, detail: 'read the totals code' } }), trusted, shown: [] }) as { labels: string[] }).labels;
+    assert.deepEqual(labels('not_reproduced'), [...(trusted ? ['ready'] : []), 'bug', 'couldnt-reproduce']);
+    assert.deepEqual(labels('reproduced'), [...(trusted ? ['ready'] : []), 'bug']);
+    assert.deepEqual(labels('not_tried'), [...(trusted ? ['ready'] : []), 'bug']);
+  }
+});
+
+test('a bug already fixed on main gets a reply naming the fixing commit, and no issue (#333)', () => {
+  for (const trusted of [true, false]) {
+    const a = decide({ report: report(), redacted: 'x', triage: triage({ kind: 'bug', draft: DRAFT, reproduction: { result: 'fixed_on_main', detail: 'fixed by the totals rewrite', commit: 'abc1234def' } }), trusted, shown: [] });
+    assert.equal(a.action, 'reply');
+    assert.match((a as { text: string }).text, /already fixed/);
+    assert.match((a as { text: string }).text, /\babc1234def\b/, 'the reply names the commit');
+  }
+  const noCommit = decide({ report: report(), redacted: 'x', triage: triage({ kind: 'bug', reproduction: { result: 'fixed_on_main', detail: 'fixed' } }), trusted: true, shown: [] });
+  assert.equal(noCommit.action, 'reply');
+  assert.doesNotMatch((noCommit as { text: string }).text, /commit/, 'no commit to name: none is made up');
 });
 
 // ---------- report text is untrusted ----------

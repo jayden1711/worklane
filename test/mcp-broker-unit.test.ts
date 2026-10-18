@@ -2,11 +2,15 @@
 // server it starts see the cgroup tree read-only. Not ProtectKernelTunables: with it the broker's servers didn't start
 // on real systemd (ci-slow run 39093672334); /proc/sys stays unwritable to them by the kernel's permissions alone. The
 // proof is real systemd's (ci-slow.yml runs scripts/ci/mcp-broker-kernel.sh in the add-project job). These tests hold
-// the unit, that CI step and its checks; they read the fixture server it runs, and never run it.
+// the unit, that CI step and its checks; they read the fixture server it runs, and never run its tries. The one run of
+// it here is its refusal outside the broker's sandbox (#608), started only once its source shows the guard comes first.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 const read = (...p: string[]) => readFileSync(join(repoRoot, ...p), 'utf8');
@@ -105,4 +109,106 @@ test("the probe accepts the kernel server's real-systemd report, and refuses one
   for (const s of ["'/proc/sys/kernel/domainname', '/proc/sys/vm/swappiness'", "path.join('/sys/fs/cgroup', own, 'escaped')", "attempt('/sys/fs/cgroup/cgroup.procs'", "for (const m of ['/proc/sys', '/sys/fs/cgroup'])"]) {
     assert.ok(server.includes(s), `fixture: ${s}`);
   }
+});
+
+// #608: the fixture makes its tries only inside the broker's units (the throwaway snapshot unit, and the broker's own
+// unit with sandbox-runtime around the server); anywhere else, and as root in any mode, it refuses before it has an fs.
+const escape = join(repoRoot, 'test', 'fixtures', 'plugins', 'escape');
+type Facts = { uid: number | null; euid: number | null; status: string | null; cgroup: string | null; mountinfo: string | null };
+type Guard = { facts: () => Facts; refusal: (f: Facts) => string | null };
+
+/** server.js's first statements are its guard: no module but the guard's is loaded, and nothing runs, before it exits. */
+function assertGuardFirst(): void {
+  const code = readFileSync(join(escape, 'server.js'), 'utf8').split('\n').filter((l) => l.trim() && !l.trimStart().startsWith('//'));
+  assert.deepEqual(code.slice(0, 3), ["const { facts, refusal } = require('./confined.js');", 'const why = refusal(facts());', 'if (why) {'], "server.js's first statements: the guard");
+  assert.match(code[3]!, /^ {2}process\.stderr\.write\(`[^`]*\$\{why\}[^`]*`\);$/, 'the refusal names its reason');
+  assert.match(code[4]!, /^ {2}process\.exit\([1-9]\d*\);$/, 'and exits non-zero');
+  assert.equal(code[5], '}');
+}
+
+/**
+ * The plugin's files copied out of the repo, as the broker's store holds them: no package.json above, so CommonJS (in
+ * the repo, the root package.json's "type": "module" makes node load them as ES modules).
+ */
+function storeCopy(): string {
+  const dir = join(mkdtempSync(join(tmpdir(), 'escape-608-')), 'escape');
+  cpSync(escape, dir, { recursive: true });
+  return dir;
+}
+
+/** The guard module, loaded only once its source shows it reads /proc and nothing else (no write, no env, no child). */
+function guard(): Guard {
+  const src = readFileSync(join(escape, 'confined.js'), 'utf8');
+  assert.deepEqual([...src.matchAll(/require\(([^)]*)\)/g)].map((m) => m[1]), ["'fs'"]);
+  assert.deepEqual([...new Set([...src.matchAll(/\bfs\.(\w+)/g)].map((m) => m[1]))], ['readFileSync']);
+  assert.doesNotMatch(src, /process\.env|child_process|\beval\(|Function\(|import\(/, 'its facts are the kernel\'s, never an env var');
+  return createRequire(import.meta.url)(join(storeCopy(), 'confined.js')) as Guard;
+}
+
+// Inside: what the server sees in each unit, by the units' own properties (src/mcp/throwaway.ts's THROWAWAY_PROPERTIES,
+// scripts/setup/mcp-broker.sh's unit, sandbox-runtime's --ro-bind / / and --cap-drop ALL). The broker's cgroup is ci-slow
+// run 39097410636's (the kernel server's report above); the snapshot unit's is its name in src/plugins/cli.ts.
+const brokerCgroup = cgroup.slice('/sys/fs/cgroup'.length);
+const snapshotUnit = '/system.slice/worklane-mcp-snapshot-ci_escape-probe_4242.service';
+const status = (capEff = '0000000000000000', nnp = '1') => `Name:\tnode\nUid:\t61234\t61234\t61234\t61234\nCapEff:\t${capEff}\nNoNewPrivs:\t${nnp}\n`;
+// sandbox-runtime's root: bubblewrap's own tmpfs at / with the host's / bound read-only over it (the top one counts).
+const mounts = (top = 'ro,nosuid,nodev,relatime') => ['22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw', `410 22 8:1 / / ${top} - ext4 /dev/sda1 rw`, '411 410 0:5 / /dev rw,nosuid - tmpfs tmpfs rw'].join('\n');
+const inside = (unit: string, o: Partial<Facts> = {}): Facts => ({ uid: 61234, euid: 61234, status: status(), cgroup: `0::${unit}\n`, mountinfo: mounts(), ...o });
+
+test('the escape fixture checks it is inside the broker\'s sandbox before anything else: server.js loads no fs and runs nothing before its guard, and the guard only reads /proc (#608)', () => {
+  assertGuardFirst();
+  const g = guard();
+  assert.equal(typeof g.refusal, 'function');
+  // The places it tries, from the stand-in root a test gives it, '/' otherwise (the units never set it: launch.ts's env).
+  assert.ok(readFileSync(join(escape, 'server.js'), 'utf8').includes("const ROOT = process.env.ESCAPE_FIXTURE_ROOT || '/';"));
+});
+
+test('the guard lets the fixture run only in the broker\'s units with their sandbox on, and never as root (uid 0) in any mode (#608)', () => {
+  const g = guard();
+  assert.equal(g.refusal(inside(brokerCgroup)), null, 'the broker\'s unit, inside sandbox-runtime');
+  assert.equal(g.refusal(inside(snapshotUnit)), null, 'the throwaway snapshot unit');
+  for (const [why, f, says] of [
+    ['uid 0', inside(brokerCgroup, { uid: 0 }), /uid 0/],
+    ['euid 0', inside(brokerCgroup, { euid: 0 }), /uid 0/],
+    ['uid 0, everything else inside', inside(snapshotUnit, { uid: 0, euid: 0 }), /root/],
+    ['no uid (not Linux)', inside(brokerCgroup, { uid: null, euid: null }), /uid/],
+    ['capabilities', inside(brokerCgroup, { status: status('000001ffffffffff') }), /capabilit/],
+    ['no_new_privs off', inside(brokerCgroup, { status: status(undefined, '0') }), /NoNewPrivs/],
+    ['/ writable', inside(brokerCgroup, { mountinfo: mounts('rw,relatime') }), /\/ is mounted read-write/],
+    ['/ read-only under, writable on top', inside(brokerCgroup, { mountinfo: ['22 1 8:1 / / ro - ext4 /dev/sda1 rw', '410 22 8:1 / / rw - ext4 /dev/sda1 rw'].join('\n') }), /read-write/],
+    ['a login session', inside('/user.slice/user-1000.slice/session-3.scope'), /cgroup/],
+    ['WSL or a container', inside('/init.scope'), /cgroup/],
+    ['the cgroup root', inside('/'), /cgroup/],
+    ['another system service', inside('/system.slice/ssh.service'), /cgroup/],
+    ['a user manager\'s unit of the same name', inside('/user.slice/user-1000.slice/user@1000.service/app.slice/worklane-mcp@ci.service'), /cgroup/],
+    ['a cgroup below the broker\'s', inside(`${brokerCgroup}/x`), /cgroup/],
+    ['no /proc', { uid: 1000, euid: 1000, status: null, cgroup: null, mountinfo: null }, /\/proc/],
+  ] as [string, Facts, RegExp][]) {
+    const r = g.refusal(f);
+    assert.ok(r, `${why}: refused`);
+    assert.match(r, says, why);
+  }
+});
+
+test('run outside the broker\'s sandbox, with HOME and the places it tries in a stand-in, the fixture writes nothing and exits non-zero naming why (#608)', () => {
+  // WHY: main's fixture wrote $HOME/escaped into a real home when an agent ran it like this. It is started only after its
+  // source shows the guard comes first and the guard refuses this very process (the child inherits its uid, cgroup,
+  // mounts and no_new_privs).
+  assertGuardFirst();
+  const g = guard();
+  const here = g.refusal(g.facts());
+  assert.ok(here, 'this test process is outside the broker\'s units');
+  const plugin = storeCopy();
+  const base = dirname(plugin);
+  const home = join(base, 'home-of-the-run');
+  const root = join(base, 'root');
+  for (const d of [home, 'home/alice', 'home/wl-ci-mcp/.cache', 'home/wl-ci-mcp/.npm', 'home/wl-ci-mcp/secrets', 'var/lib/worklane-mcp-ci', 'var/lib/worklane/plugins/store/ci/kit', 'var/lib/worklane/plugins/previews', 'etc/worklane', 'opt/worklane']) {
+    mkdirSync(d === home ? d : join(root, d), { recursive: true });
+  }
+  const r = spawnSync(process.execPath, [join(plugin, 'server.js')], { cwd: plugin, encoding: 'utf8', input: '', timeout: 20_000, env: { PATH: process.env.PATH ?? '', HOME: home, ESCAPE_FIXTURE_ROOT: root } });
+  assert.ok(typeof r.status === 'number' && r.status !== 0, `exit ${r.status}`);
+  assert.match(r.stderr, /refuses to run/);
+  assert.ok(r.stderr.includes(here), `stderr names the reason: ${r.stderr}`);
+  assert.equal(r.stdout, '');
+  assert.deepEqual((readdirSync(base, { recursive: true, encoding: 'utf8' })).filter((p) => /escaped/.test(p)), [], 'nothing written');
 });

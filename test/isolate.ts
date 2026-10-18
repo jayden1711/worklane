@@ -1,5 +1,5 @@
-// Every test process gets a machine of its own: a temporary home, state dir and agent-slot directory, and none of
-// the machine's own engine settings (issue #312). Every way the suite runs preloads it (TEST_PRELOAD below: npm test,
+// Every test process gets a machine of its own: a temporary home, state dir, agent-slot directory and temporary
+// directory, and none of the machine's own engine settings (issues #312, #604). It is removed when the process exits. Every way the suite runs preloads it (TEST_PRELOAD below: npm test,
 // the CI shards, the touched-tests check; test/isolate.test.ts checks each), so a test file gets it without importing
 // anything, before any of its modules reads the environment. A test file's process without it stops at once
 // (test/helpers.ts).
@@ -24,9 +24,30 @@ for (const k of Object.keys(process.env)) {
   if ((k.startsWith(`${BRAND.envPrefix}_`) && !KEEP.has(k)) || k.startsWith('AGENT_SLOTS_')) delete process.env[k];
 }
 
-/** This test process's machine: everything below is inside it. */
-export const testMachine = mkdtempSync(join(tmpdir(), 'test-machine-'));
-const home = join(testMachine, 'home');
+/**
+ * This test process's machine: everything below is inside it, the temporary directory too. A test process a test
+ * starts (a preloaded runner, a CLI) makes its own inside this one's temporary directory, so its parent's exit
+ * removes it even when it was killed.
+ *
+ * INVARIANT: the name stays short. Each nested level adds `/tm-XXXXXX/t` (12 bytes) to every path under tmpdir(),
+ * and a Unix socket's path is at most 107 bytes: Chrome binds one 45 bytes under TMPDIR (test/isolate.test.ts
+ * measures both levels).
+ */
+export const testMachine = mkdtempSync(join(tmpdir(), 'tm-'));
+// WHY: a test's own temporary directories (mkdtempSync(join(tmpdir(), …)), in some 300 files) went to the system's,
+// and nothing removed them: thousands piled up in /tmp (#604). os.tmpdir() reads these on every call; TMP and TEMP
+// are what Windows reads, and what some tools read instead.
+const tmp = join(testMachine, 't');
+// Another user passes through to what a test makes there, as through /tmp (the separate-users tests have the agent
+// user read a task file under tmpdir()): the machine and its temporary directory are traverse-only for others.
+// INVARIANT: the home, state, slots and system root stay this user's alone, behind `own` (0700), as the whole
+// machine was before (test/isolate.test.ts checks both).
+chmodSync(testMachine, 0o711);
+mkdirSync(tmp);
+chmodSync(tmp, 0o711);
+const own = join(testMachine, 'u');
+mkdirSync(own, { mode: 0o700 });
+const home = join(own, 'home');
 
 /**
  * Whether HOME itself moves. Not on macOS: headless Chrome there never answers a navigation with a fresh home
@@ -42,10 +63,13 @@ export const isolatedEnv: Readonly<Record<string, string>> = Object.freeze({
   XDG_CONFIG_HOME: join(home, '.config'),
   XDG_STATE_HOME: join(home, '.local', 'state'),
   XDG_DATA_HOME: join(home, '.local', 'share'),
-  [`${BRAND.envPrefix}_STATE_DIR`]: join(testMachine, 'state'),
-  [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(testMachine, 'machine-init'),
-  AGENT_SLOTS_DIR: join(testMachine, 'agent-slots'),
-  [SYSTEM_ROOT_VAR]: join(testMachine, 'root'),
+  [`${BRAND.envPrefix}_STATE_DIR`]: join(own, 'state'),
+  [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(own, 'machine-init'),
+  AGENT_SLOTS_DIR: join(own, 'agent-slots'),
+  [SYSTEM_ROOT_VAR]: join(own, 'root'),
+  TMPDIR: tmp,
+  TMP: tmp,
+  TEMP: tmp,
 });
 for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });

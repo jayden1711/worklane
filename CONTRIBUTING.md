@@ -2,6 +2,10 @@
 
 Thanks for helping. A few rules keep this project safe to depend on.
 
+## Commit messages
+
+Line 1 is the subject, at most 180 characters, and line 2 is blank before any body: the push gate (pre-push hook and CI) refuses anything else, since rewording a pushed commit takes a force-push.
+
 ## Sign-off
 
 Every commit must carry a [Developer Certificate of Origin](https://developercertificate.org/) sign-off matching the commit author:
@@ -11,6 +15,8 @@ Signed-off-by: Your Name <you@example.com>
 ```
 
 `git commit -s` adds it. CI rejects pull requests with unsigned commits (`npm run check:dco -- origin/main` checks locally).
+
+The sign-off is the repo's only attribution. A commit message with a `Co-Authored-By` trailer (any address) or a coding tool's "Generated with" line is refused by the push gate, and a PR body with one fails the `new-deps` check. The harness's own agents run with attribution turned off.
 
 ## Licensing of borrowed code
 

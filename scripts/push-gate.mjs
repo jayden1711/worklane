@@ -5,7 +5,10 @@
 //
 //   pre-push hook:  node scripts/push-gate.mjs <remote> [<url>]   (refs on stdin)
 //   by hand / CI:   node scripts/push-gate.mjs --range <base>..<tip>
+//   a PR's body:    node scripts/push-gate.mjs --pr-body   (CI; the body from $GITHUB_EVENT_PATH)
 //
+// It refuses vendor attribution in a commit message or PR body (a Co-Authored-By trailer, a coding tool's
+// "Generated with" line): this repo's attribution is the DCO sign-off only (#576).
 // For the commits being pushed it scans the added lines and the message with
 // the denylist rules (personal names, internal hosts and addresses, home
 // paths, emails, ntfy topics; scripts/lib/denylist.mjs), the whole tree at
@@ -106,6 +109,23 @@ function withoutOwnSignOffs(msg, emails) {
     .join('\n');
 }
 
+// Commit message shape (#603). The longest well-formed subject in the last 300 commits on main was 176 characters
+// (11 were over 150), so 180 refuses none of them and still refuses a paragraph.
+const SUBJECT_MAX = 180;
+
+/**
+ * Why a commit's message is malformed, or nothing: line 2 must be blank (otherwise git reads the whole first
+ * paragraph as the subject) and line 1 at most SUBJECT_MAX characters. A one-line message passes; so does GitHub's
+ * merge commit, whose title follows a blank line. Only the pushed commits are judged, never what's already on main.
+ */
+function messageShape(sha) {
+  const lines = git('log', '-1', '--format=%B', sha).split(/\r?\n/);
+  const why = [];
+  if (lines.length > 1 && lines[1].trim() !== '') why.push('line 2 is not blank, so git reads the whole first paragraph as the subject');
+  if (lines[0].length > SUBJECT_MAX) why.push(`the subject is ${lines[0].length} characters, over ${SUBJECT_MAX}`);
+  return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
+}
+
 function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
@@ -117,6 +137,34 @@ function scanCommit(rules, sha, owner) {
   for (const id of [ae, ce, an, cn].filter(Boolean)) msg = msg.split(id).join('');
   hits.push(...scanText(rules, 'COMMIT_MSG', msg).map((h) => `${short} ${h}`));
   return hits;
+}
+
+// Vendor attribution (#576): this repo's attribution is the DCO sign-off only. A Co-Authored-By trailer with any
+// address (or none: the commit's own email is dropped from the scan above, so this is its own check), a coding tool's
+// "Generated with" line, or its session trailer. Whole lines only: naming them in prose is fine.
+const ATTRIBUTION = [
+  /^\s*Co-Authored-By\s*:/i,
+  /^[^\p{L}\p{N}]*Generated (?:with|by) \[?(?:Claude|Codex|Copilot|Cursor|Gemini|Aider)\b/iu,
+  /^\s*Claude-Session\s*:/i,
+];
+const ATTRIBUTION_FIX = "This repo's attribution is the DCO sign-off (git commit -s) only: remove those lines.";
+
+/** `<where>:<line>: vendor attribution (<line text>)` for each attribution line in `text`. */
+function attributionLines(where, text) {
+  return text.split(/\r?\n/).flatMap((line, i) => (ATTRIBUTION.some((re) => re.test(line)) ? [`${where}:${i + 1}: vendor attribution (${line.trim().slice(0, 120)})`] : []));
+}
+
+/**
+ * CI's check of a pull request's body (.github/workflows/new-deps.yml): the body comes from the event payload at
+ * $GITHUB_EVENT_PATH, a file, so it never passes through a shell line. Exits.
+ */
+function prBodyGate() {
+  const file = process.env.GITHUB_EVENT_PATH || fail('--pr-body reads the event payload at GITHUB_EVENT_PATH, which is not set');
+  const body = JSON.parse(readFileSync(file, 'utf8')).pull_request?.body ?? '';
+  const hits = attributionLines('PR_BODY', String(body));
+  if (hits.length) fail(`vendor attribution in the pull request body:\n${hits.map((h) => `  ${h}`).join('\n')}\n${ATTRIBUTION_FIX}`);
+  console.log('push gate: the pull request body carries no vendor attribution');
+  process.exit(0);
 }
 
 function scanTree(rules, tip) {
@@ -136,12 +184,24 @@ function gitleaks(commits) {
   if (r.status !== 0) fail(`gitleaks exited ${r.status}:\n${r.stderr.trim().slice(-1000)}`);
 }
 
+if (process.argv[2] === '--pr-body') {
+  try {
+    prBodyGate();
+  } catch (e) {
+    fail(`the PR body check itself failed: ${e.message}`);
+  }
+}
+
 try {
   const rules = loadRules('.');
   const all = targets(process.argv.slice(2));
   const hits = [];
   const commits = [...new Set(all.flatMap((t) => t.commits))];
+  const shape = commits.flatMap(messageShape);
+  if (shape.length) fail(`a commit message's subject is not one short line:\n${shape.map((s) => `  ${s}`).join('\n')}\nPut the subject alone on line 1 (at most ${SUBJECT_MAX} characters), then a blank line, then the body. Reword it before pushing (git commit --amend for the last commit, a rebase's reword for an older one); once pushed, a reword needs the owner's OK to force-push.`);
   const owner = repoOwner();
+  const attribution = commits.flatMap((sha) => attributionLines(`${sha.slice(0, 8)} COMMIT_MSG`, git('log', '-1', '--format=%B', sha)));
+  if (attribution.length) fail(`vendor attribution in a commit message:\n${attribution.map((h) => `  ${h}`).join('\n')}\n${ATTRIBUTION_FIX}`);
   for (const sha of commits) hits.push(...scanCommit(rules, sha, owner));
   for (const t of all) hits.push(...scanTree(rules, t.tip));
   if (hits.length) fail(`private details in what would be pushed:\n${[...new Set(hits)].map((h) => `  ${h}`).join('\n')}\nReword generically, or add an intentional mention to .denylist-allow.`);

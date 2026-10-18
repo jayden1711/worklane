@@ -32,7 +32,9 @@ import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
 import { latestBaseline, recordBaseline } from './baseline.js';
-import { runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus } from './skilleval.js';
+import { parseCases, runnerAsk, runSkillEval, SKILL_EVAL_DEFAULTS, skillStatus } from './skilleval.js';
+import { HELD_OUT_ENV } from './held-out-paths.js';
+import { ceilingAsk, SPEND_FLAG, spendFromArgs, spendRefusal, SPEND_REFUSED } from './spend-gate.js';
 import { lintSkills, SKILL_SECTIONS, skillLintReport, trackedSkills } from './skill-lint.js';
 import { CliRunner } from './runner.js';
 import { queueBaselineRun } from './nightly.js';
@@ -107,16 +109,22 @@ usage: ${BRAND.cli} <command> [options]
                                    record main's failing set from a full run's output
   baseline record --queue          queue a full run on the tip of main; records the baseline when done
   baseline show                    main's recorded failing set
-  skill eval <skill-dir> [--model m] [--judge m] [--samples k]
-                                   run a skill's evals (evals/cases.md); writes evals/results.json
+  skill eval <skill-dir> --spend usd [--model m] [--judge m] [--samples k]
+                                   run a skill's evals (evals/cases.md); writes evals/results.json.
+                                   --spend: the most it may spend (paid model calls); without it,
+                                   prints the plan and exits 2
   skill status                     each project skill: evaluated, failing, stale or draft
   skill lint                       every SKILL.md has When to use, Inputs and access, Steps, Validate,
                                    Return and Approval, none empty; exits 1 otherwise (for CI)
-  harness-eval run [--task id]... [--samples k] [--budget usd] [--work dir] [--keep] [--record]
-                                   replay the harness eval suite's past tasks (templates/evals/tasks and the
-                                   held-out store) through the real coordinator in scratch instances, with
-                                   real agents, within the budget (default harness_evals.budget_usd); prints
-                                   success, cost, wall-clock and human interventions. --record: into the log
+  harness-eval run --spend usd [--held-out-from-state] [--task id]... [--samples k] [--budget usd]
+                   [--work dir] [--keep] [--record]
+                                   replay the harness eval suite's past tasks (templates/evals/tasks, and the
+                                   held-out store when named) through the real coordinator in scratch
+                                   instances, with real agents, within the budget (default
+                                   harness_evals.budget_usd); prints success, cost, wall-clock and human
+                                   interventions. --record: into the log. --spend: the most it may spend
+                                   (it bounds the budget); without it, prints the plan and exits 2. Held-out
+                                   tasks only with ${HELD_OUT_ENV} set or --held-out-from-state
   harness-eval add-task <owner/repo> <pr> [--id id] [--public]
                                    a merged PR as a past task (read-only gh calls); kept in the held-out
                                    store, or with --public in templates/evals/tasks (the engine's own
@@ -602,20 +610,40 @@ async function main(argv: string[]): Promise<number> {
         else console.log(`skill lint: ${trackedSkills(root).length} SKILL.md file(s) pass (${SKILL_SECTIONS.join(', ')})`);
         return bad.length ? 1 : 0;
       }
+      let spend: number | null;
+      try {
+        spend = spendFromArgs(rest);
+      } catch (e) {
+        console.error((e as Error).message);
+        return 2;
+      }
+      option(rest, SPEND_FLAG);
       if (sub !== 'eval' || !rest[0]) {
-        console.error('usage: skill eval <skill-dir> [--model m] [--judge m] | skill status | skill lint');
+        console.error(`usage: skill eval <skill-dir> ${SPEND_FLAG} <usd> [--model m] [--judge m] | skill status | skill lint`);
         return 2;
       }
       const model = option(rest, '--model') ?? SKILL_EVAL_DEFAULTS.model;
       const judge = option(rest, '--judge') ?? SKILL_EVAL_DEFAULTS.judge;
       const samples = Number(option(rest, '--samples') ?? SKILL_EVAL_DEFAULTS.samples);
+      // The spend gate (#612): no model call and no log written without --spend.
+      if (spend === null) {
+        const dir = resolve(rest[0]);
+        let cases = '?';
+        try {
+          cases = String(parseCases(readFileSync(join(dir, 'evals', 'cases.md'), 'utf8')).length);
+        } catch {
+          // the eval itself reports a missing cases file
+        }
+        console.error(spendRefusal([`would run ${cases} case(s) of ${dir} (evals/cases.md): model ${model}, judge ${judge}, ${samples} sample(s) per case`, `  cost cap $${SKILL_EVAL_DEFAULTS.capUsd}`], SKILL_EVAL_DEFAULTS.capUsd));
+        return SPEND_REFUSED;
+      }
       // Through the runner like every run: one claude per login, the subscription CLI, each call's cost recorded.
       const cfg = loadConfig(root);
       const log = new EventLog(logPath(root));
-      const ask = runnerAsk(new CliRunner(cfg.project.agent_runtime.kind), (c) => log.append('run.cost', { issue: null, role: 'skill-eval', model: c.model, usd: c.costUsd, turns: c.turns }, instanceId()));
+      const bounded = ceilingAsk(runnerAsk(new CliRunner(cfg.project.agent_runtime.kind), (c) => log.append('run.cost', { issue: null, role: 'skill-eval', model: c.model, usd: c.costUsd, turns: c.turns }, instanceId())), spend);
       let r;
       try {
-        r = await runSkillEval(resolve(rest[0]), { model, judge, samples, ask });
+        r = await runSkillEval(resolve(rest[0]), { model, judge, samples, ask: bounded.ask, capUsd: Math.min(SKILL_EVAL_DEFAULTS.capUsd, spend) });
       } finally {
         log.close();
       }

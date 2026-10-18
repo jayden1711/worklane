@@ -324,13 +324,20 @@ archive_dirs() {
 #      broker, network helpers: worklane-*, User= checked first, so another instance's unit is never touched) and
 #      their user slices (user-<uid>.slice, user@<uid>.service) killed and stopped: the cgroup takes the whole tree;
 #   4. what is left outside those cgroups: pkill -KILL by uid (real and effective, never a name), pass after pass
-#      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart.
+#      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart;
+#   5. the last check, failing closed (#614): STOP_RECHECKS (5) listings, 0.2 s apart, as $PROC_DIR names them. Every
+#      pid any of them lists counts as left and refuses the removal, named with its command ("?" when it can't be
+#      read). One gone before its command is read (it ended, or a fork loop moved on to a new pid, its next one born
+#      after the scan) is named "(gone before its command could be read)", with a line saying a process was seen and
+#      to run the removal again once the instance is stopped. Only when no listing lists any pid does it go on: a
+#      single empty listing never passes by itself, since a scan can miss a process that forks and exits fast.
 # INSTANCE_REMOVE_TEST_NO_KILL=1 (CI's proof that a process left refuses the removal): steps 3 and 4 are skipped, so
 # the check only ever finds more; it never lets a removal go on.
 #   stop_uids <name> <user>...
 STOP_PASSES=20
+STOP_RECHECKS=5
 stop_uids() {
-  local name="$1" u uid uids=() names=() unit owner pass left pid
+  local name="$1" u uid uids=() names=() unit owner pass left pid cmd round gone
   shift
   for u in "$@"; do user_exists "$u" && { names+=("$u"); uids+=("$(id -u "$u")"); }; done
   [ "${#uids[@]}" -gt 0 ] || return 0
@@ -366,15 +373,33 @@ stop_uids() {
       sleep 0.5
     done
   fi
-  left=""
-  for uid in "${uids[@]}"; do
-    while read -r pid; do
-      [ -n "$pid" ] || continue
-      printf '%s %s %s\n' "$pid" "$uid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-200)"
-      left=1
-    done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
+  for ((round = 0; round < STOP_RECHECKS; round++)); do
+    [ "$round" -eq 0 ] || sleep 0.2
+    left="" gone=""
+    for uid in "${uids[@]}"; do
+      while read -r pid; do
+        [ -n "$pid" ] || continue
+        # Every pid listed counts as left, whatever its read finds (#614, failing closed). The read only names it:
+        # stderr is redirected before the input, so a vanished file's open says nothing, and no pipe hides the read's
+        # status. A failed read with the /proc dir still there: "?"; with it gone: the process was seen, then ended.
+        if ! cmd="$(tr '\0' ' ' 2>/dev/null < "$PROC_DIR/$pid/cmdline")"; then
+          if [ -d "$PROC_DIR/$pid" ]; then
+            cmd="?"
+          else
+            cmd="(gone before its command could be read)"
+            [[ " $gone " == *" $uid "* ]] || gone="${gone:+$gone }$uid"
+          fi
+        fi
+        printf '%s %s %s\n' "$pid" "$uid" "${cmd:0:200}"
+        left=1
+      done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
+    done
+    if [ -n "$left" ]; then
+      [ -z "$gone" ] || echo "uid $gone: a process was seen, then was gone before its command could be read (it ended, or a fork loop moved on to a new pid): it counts as still running; stop the instance, then run the removal again"
+      return 1
+    fi
   done
-  [ -z "$left" ]
+  return 0
 }
 
 # Files the removed users <uid>... own in the engine's own places, given to root: in each <tree> (find -P, -xdev: a
@@ -444,7 +469,7 @@ left_owned() {
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
-# run's directory. PROC_DIR is the process table it reads (a test's stand-in).
+# run's directory. PROC_DIR is the process table it (and stop_uids's last listing) reads (a test's stand-in).
 PROC_DIR=/proc
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm
@@ -554,13 +579,26 @@ repo_ok() {
   [[ "$1" == */* && "$rest" != */* ]] && github_login_ok "$owner" && [[ "${#rest}" -le 100 && "$rest" =~ ^[A-Za-z0-9_.-]+$ && "$rest" != . && "$rest" != .. ]]
 }
 
+# The bounds of the agent-user steps on a Claude login (#613): the token install and its rollback
+# (restore_claude_credentials), then the login check. timeout -k: SIGTERM at the bound, then SIGKILL
+# CLAUDE_KILL_AFTER_SECONDS later, since a process with a TERM handler (node has one) or blocked on a hung mount is
+# only ended by SIGKILL. Plain assignments: never read from the environment.
+CLAUDE_TOKEN_INSTALL_SECONDS=30
+CLAUDE_LOGIN_SECONDS=60
+CLAUDE_KILL_AFTER_SECONDS=5
+# Whether a step's status is timeout cutting it off: 124 (ended by SIGTERM) or 137 (SIGKILL, -k).
+cut_off_status() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 # The agent's Claude login, from `claude setup-token`'s token on stdin, written as that user's own Claude
 # credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude; or <dir>/.credentials.json when an instance
 # names its agent's claude_config_dir), keeping the file's other entries. The token goes from stdin to that file and
-# nowhere else: never an argument, an environment variable or a log line.
+# nowhere else: never an argument, an environment variable or a log line (timeout passes stdin through).
+# Bounded (#613): a home on a hung FUSE or network mount must not hold root's switch (every instance paused) for ever.
+# Cut off, it says so on stderr and fails (cut_off_status), which every caller reads as a failed install. A cut-off
+# between its write and its rename can leave <file>.tmp-<pid> in that user's own 0700 dir (#667).
 #   install_claude_token <user> [<claude config dir>]
 install_claude_token() {
-  (cd / && sudo -H -u "$1" "$(command -v node)" --input-type=module -e '
+  local rc=0
+  (cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" --input-type=module -e '
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -589,12 +627,21 @@ const tmp = `${file}.tmp-${process.pid}`;
 writeFileSync(tmp, `${JSON.stringify(c)}\n`, { mode: 0o600 });
 renameSync(tmp, file);
 console.log(`installed ${file} (0600, this user only)`);
-' "${2:-}")
+' "${2:-}") || rc=$?
+  if cut_off_status "$rc"; then echo "installing the Claude token as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2; fi
+  return "$rc"
 }
-# Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes).
+# Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes). Bounded
+# (#613, CLAUDE_LOGIN_SECONDS): no answer within the limit is a no, with why on stderr.
 claude_login_ok() {
   command -v claude >/dev/null 2>&1 || return 0
-  (cd / && sudo -H -u "$1" claude auth status --json) | grep -q '"loggedIn": *true'
+  local out rc=0
+  out="$(cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_LOGIN_SECONDS" claude auth status --json)" || rc=$?
+  if cut_off_status "$rc"; then
+    echo "claude auth status, as $1, didn't answer within $CLAUDE_LOGIN_SECONDS s (its home may be on a hung mount)" >&2
+    return 1
+  fi
+  [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"loggedIn": *true'
 }
 
 # The Claude account switch (claude-account.sh): what it last found for each agent user (status.json), the last
@@ -652,9 +699,11 @@ process.exit(1);
 }
 # One user's Claude credentials file put back as it was (a switch's rollback): the content on stdin, written as that
 # user, 0600, by a rename; empty stdin: there was none, so the file is removed. Never an argument or a log line.
+# Bounded like the install (#613: it runs while every instance is paused): cut off, it says so on stderr and fails.
 #   restore_claude_credentials <user> <claude config dir>
 restore_claude_credentials() {
-  (cd / && sudo -H -u "$1" "$(command -v node)" -e '
+  local rc=0
+  (cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" -e '
 const { existsSync, readFileSync, renameSync, rmSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const dir = process.argv[1];
@@ -668,7 +717,9 @@ if (!prev.trim()) {
 const tmp = `${file}.tmp-${process.pid}`;
 writeFileSync(tmp, prev, { mode: 0o600 });
 renameSync(tmp, file);
-' "$2")
+' "$2") || rc=$?
+  if cut_off_status "$rc"; then echo "putting the previous Claude login back as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2; fi
+  return "$rc"
 }
 # Whether a path is a plain file (not a link) that this user owns.
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -user "$2" 2>/dev/null)" ]; }
