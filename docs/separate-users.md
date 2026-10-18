@@ -50,9 +50,9 @@ What the sudoers rule says:
 Each user signs in to its own accounts. Worklane never creates, reads or copies credentials.
 
 - **Coordinator's GitHub identity: a GitHub App per instance.** Create an App in the repo's organization and install it on only this instance's repo. Give it these permissions, with no webhook:
-  - Contents: read and write: fetch, push task branches, push lease refs under `refs/worklane/claims/`
+  - Contents: read and write: fetch, push task branches (and, with `land_mode: direct`, the default branch itself, only while GitHub enforces its protection: `src/direct-land.ts`), push lease refs under `refs/worklane/claims/`
   - Issues: read and write: the backlog (issues, labels, assignees, comments, label history)
-  - Pull requests: read and write: open the PR for each change. Worklane never merges; a human does.
+  - Pull requests: read and write: open the PR for each change, and, with `land_mode: pr`, merge it when the merge policy allows (`src/merge-policy.ts`, `src/coordinator/merge-flow.ts`; docs/design.md, Auto-merge). The instance's `policy.yaml` `auto_merge` is off by default, and then every PR waits for a person. With it on (and `review.yaml` `merge.auto`, on by default), the coordinator merges only PRs it opened, with a merge commit pinned to the evaluated head, once their required checks are green and the evaluator approved; anything high-risk, design-level, big or in doubt waits for the owner (the `needs-owner` label, one comment, a review request), and so does everything under an emergency stop or after a red main stopped auto-merge. A waiting PR merges when a person merges it, or when an owner approves it from Discord (or, with PR batching, by an approving review) and the coordinator then merges it. It never merges a PR it didn't open, its own revert PRs, or checks proposed from feedback.
   - Checks: read: CI results on the PRs it opened
   - Metadata: read: required by GitHub
   - Actions: read (optional): CI fix runs read the failing job's log with it; without it they can't run

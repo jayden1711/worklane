@@ -45,7 +45,7 @@ This document describes the architecture. Each section notes the precedent it fo
 - **Config folder:** `.worklane/`, named after the tool following the `.github/`, `.claude/`, `.husky/` and `.pitboss/` precedent. `.harness/` was rejected because Harness.io already uses it, and projects often already call their test framework a "harness".
 - **Language:** TypeScript on Node ≥ 22.13 (`engines` in package.json), so it works in projects whose CI still pins Node 22. The event log uses the built-in `node:sqlite`, which needs no flag from 22.13. CI runs everything on Node 22 and 24. `doctor` fails below 22.13.
 - **Dependencies:** few and permissive.
-  - Runtime: `yaml` and `zod`, nothing else. Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`.
+  - Runtime: the four in package.json's `dependencies`, nothing else: `yaml` (ISC) and `zod` (MIT) for config and validation, `ws` (MIT) for the dashboard hub's owner terminal over a WebSocket (`src/console/terminal-server.ts`), and `@anthropic-ai/sandbox-runtime` (Apache-2.0) to run each approved MCP server in its own sandbox (`src/mcp/sandboxed.ts`). Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`.
   - Agents run through the locally installed Claude Code CLI (`claude -p`), which is not a dependency of the package and is never vendored.
 - **OS adapter layer** (`src/os/`). This is the only place OS-specific code may live, and a lint enforces that. The adapter is chosen by `os: auto | macos | linux | windows-wsl` (default `auto`).
 
@@ -576,7 +576,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
 
 - **Stack:** Vite + React + TypeScript + Tailwind + shadcn/ui (Radix) + cmdk + TanStack Router, Table and Query, plus react-resizable-panels and sonner. All MIT.
   - Plane (AGPL) is a design reference only.
-  - Served as static files by the coordinator on `127.0.0.1` with a per-install token.
+  - Served as static files, with its API and the SSE stream, by its own process, not the coordinator: `worklane dashboard` (`src/dashboard.ts`), on `127.0.0.1` only, with a per-install token. It reads the instance's event log and records answers in it. On a machine set up with separate users, each instance's dashboard is its own service (`worklane-dashboard-<name>.service`, as that instance's coordinator user `wl-<name>`), and a hub (`worklane-dashboard-hub.service`, as `wl-dash`) forwards to them, with GitHub sign-in (`scripts/setup/dashboards.sh`, docs/dashboard.md).
   - Live updates use **one SSE stream** that replays from `Last-Event-ID`. Actions are POSTs that become events.
   - Tauri v2 wraps it in step 6. v3 is in alpha, so we wait.
 - **Pages:**
