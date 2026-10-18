@@ -20,7 +20,8 @@
 #            runs still going are requeued when it starts again.
 #   install  the token, for every agent user of every instance (its agent user, and its eval user if it has one;
 #            channel chat runs as the agent user), in that user's own ~/.claude/.credentials.json, 0600. Never echoed,
-#            never an argument, never in a log.
+#            never an argument, never in a log. The account Claude Code cached for the previous login (oauthAccount in
+#            its .claude.json, which claude auth status names) is dropped, as that user, every other key kept (#341).
 #   check    `claude auth status`, as each of those users, and one minimal real call to the API as each of them (the
 #            cheapest model, a one-word answer, one turn, a hard budget cap: issue #463, where a login claude auth
 #            status called fine was refused by the API with a 401 on every run). If the API refuses the new login
@@ -239,6 +240,110 @@ if (api) {
 }
 process.stdout.write(JSON.stringify(r));
 ' "$@"
+}
+# Claude Code's cached account (#341). `claude auth status` names the account from the oauthAccount cached in Claude
+# Code's profile (.claude.json in $CLAUDE_CONFIG_DIR, else in the user's home), not from the token, so a new token
+# would go on being named as the previous login's account. Each token installed drops it (claude names the new
+# account, or none), and a rollback puts it back with the old login. As that user, by a rename in the same dir, every
+# other key kept; a file that is a link, not that user's own, not a plain file or not a JSON object is never followed,
+# read or written: it is left as it is and named, with why.
+#   cached_account drop <user> <file>...   prints the accounts dropped ({"<file>": <account>}), then a line of why not
+#   cached_account put <user> <file>...    those accounts (that object, on stdin) put back; prints a line of why not
+cached_account() {
+  local action="$1" user="$2"
+  shift 2
+  # Bounded, like claude_status_json and claude_api_check: a home on a hung FUSE or network mount must not hold root's
+  # switch (every instance paused) for ever. Cut off, it prints no full answer, which the callers read as "couldn't".
+  (cd / && sudo -H -u "$user" timeout 30 "$(command -v node)" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const [action, ...files] = process.argv.slice(1);
+const KEY = "oauthAccount";
+// The profile as it is, never through a link (O_NOFOLLOW), and never waiting on a fifo put in its place (O_NONBLOCK):
+// null when there is none.
+const read = (file) => {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new Error(e.code === "ELOOP" ? "a link" : `can not be read: ${e.code || "error"}`);
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isFile()) throw new Error("not a plain file");
+    if (st.uid !== process.getuid()) throw new Error("not owned by this user");
+    let o;
+    try { o = JSON.parse(fs.readFileSync(fd, "utf8")); } catch { throw new Error("not JSON"); }
+    if (!o || typeof o !== "object" || Array.isArray(o)) throw new Error("not a JSON object");
+    return { o, mode: st.mode & 0o777 };
+  } finally {
+    fs.closeSync(fd);
+  }
+};
+// A new file next to it (O_EXCL: never one already there, nor a link), its mode kept, then renamed over it.
+const write = (file, o, mode) => {
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.tmp-${process.pid}`);
+  const fd = fs.openSync(tmp, "wx", mode);
+  try {
+    fs.fchmodSync(fd, mode);
+    fs.writeFileSync(fd, `${JSON.stringify(o, null, 2)}\n`);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.closeSync(fd); } catch {}
+    fs.rmSync(tmp, { force: true });
+    throw e;
+  }
+};
+let was = {};
+if (action === "put") {
+  try { was = JSON.parse(fs.readFileSync(0, "utf8") || "{}") || {}; } catch {}
+}
+const done = {}, bad = [];
+for (const file of files) {
+  try {
+    const r = read(file);
+    if (!r) continue;
+    if (action === "drop") {
+      if (!Object.prototype.hasOwnProperty.call(r.o, KEY)) continue;
+      const account = r.o[KEY];
+      delete r.o[KEY];
+      write(file, r.o, r.mode);
+      done[file] = account;
+    } else if (action === "put" && Object.prototype.hasOwnProperty.call(was, file)) {
+      r.o[KEY] = was[file];
+      write(file, r.o, r.mode);
+    }
+  } catch (e) {
+    bad.push(`${file} (${String(e.message).slice(0, 100)})`);
+  }
+}
+if (action === "drop") process.stdout.write(`${JSON.stringify(done)}\n`);
+process.stdout.write(`${bad.join(", ")}\n`);
+' "$action" "$@")
+}
+# The profiles claude reads a login's account from: <dir>/.claude.json (CLAUDE_CONFIG_DIR=<dir>, as each run and a
+# profile's check ask claude), and for the default dir ~/.claude.json too (no CLAUDE_CONFIG_DIR, as status asks it).
+cache_files() { # <user> <claude config dir>
+  local h
+  h="$(home_of "$1")"
+  [ "$2" != "$h/.claude" ] || echo "$h/.claude.json"
+  echo "$2/.claude.json"
+}
+# Drops the account cached for a login dir's previous login, as that user: sets dropped (what was dropped, as
+# cached_account prints it; {} for nothing) and why (the files it couldn't drop it from, and why; empty when none).
+drop_cached() { # <user> <claude config dir>
+  local files out
+  mapfile -t files < <(cache_files "$1" "$2")
+  out="$(cached_account drop "$1" "${files[@]}" 2>/dev/null || true; printf x)"
+  if [[ "$out" == *$'\n'*$'\n'x ]]; then
+    dropped="${out%%$'\n'*}" why="${out#*$'\n'}"
+    why="${why%$'\n'x}"
+  else
+    dropped="{}" why="$2 (its Claude profile couldn't be checked)"
+  fi
 }
 # The real call as this user, as account_record takes it: ok, or Claude's message.
 api_result() { local said; if said="$(claude_api_check "$1" "${2:-}")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
@@ -585,7 +690,17 @@ for (const m of t.matchAll(/https:\/\/[^\s"<>]+/g)) {
       d="$(pdir "$user" "$cfg")"
       if printf '%s' "$token" | install_claude_token "$user" "$d" >/dev/null 2>&1; then
         added+=("$user $d")
-        pemit install done "$n" "$user" "stored in $d, 0600, that user's own"
+        # A dir left from an earlier profile of this name may still name its account (#341): the account each check
+        # (and confirm-profile, to an admin) names must be this token's, so one that can't be dropped refuses it.
+        drop_cached "$user" "$d"
+        if [ -n "$why" ]; then
+          pemit install failed "$n" "$user" "couldn't drop the account cached in $why: claude auth status would name another account"
+          bad="${bad:-a stale account cached for $user}"
+          continue
+        fi
+        note=""
+        [ "$dropped" = "{}" ] || note="; the account cached there for an earlier login dropped"
+        pemit install done "$n" "$user" "stored in $d, 0600, that user's own$note"
       else
         pemit install failed "$n" "$user" "couldn't store the token in $d"
         bad="${bad:-could not store the token for $user}"
@@ -770,7 +885,7 @@ for n in ${ours[@]+"${ours[@]}"}; do
 done
 
 # 4. Install the token for every agent user, then check each as that user: claude auth status, and one minimal real call.
-failed=" " refused="" installed=() previous=()
+failed=" " refused="" installed=() previous=() cached=()
 for n in "${all[@]}"; do
   found=""
   while read -r kind user cfg; do
@@ -785,7 +900,13 @@ for n in "${all[@]}"; do
         installed+=("$n $user $cfg")
         previous+=("$before")
         before=""
-        emit install done "$n" "stored in its own Claude login, 0600" "$user"
+        # The account cached for the old login goes (#341), kept in memory to put back on a rollback.
+        drop_cached "$user" "$cfg"
+        cached+=("$dropped")
+        note=""
+        [ "$dropped" = "{}" ] || note="; the account cached for the previous login dropped"
+        [ -z "$why" ] || note="$note; couldn't drop the account cached for the previous login in $why: claude auth status may still name the previous account"
+        emit install done "$n" "stored in its own Claude login, 0600$note" "$user"
       else
         emit install failed "$n" "couldn't store the token in $cfg/.credentials.json" "$user"
         failed="$failed$n "
@@ -824,13 +945,21 @@ if [ -n "$refused" ]; then
   for ((i = 0; i < ${#installed[@]}; i++)); do
     read -r n user cfg <<< "${installed[$i]}"
     if printf '%s' "${previous[$i]}" | restore_claude_credentials "$user" "$cfg" >/dev/null 2>&1; then
-      emit install failed "$n" "rolled back: the API refused the new login, so this user is on its previous login again" "$user"
+      # The old login's cached account back with it (#341).
+      note=""
+      if [ "${cached[$i]}" != "{}" ]; then
+        mapfile -t files < <(cache_files "$user" "$cfg")
+        why="$(printf '%s' "${cached[$i]}" | cached_account put "$user" "${files[@]}" 2>/dev/null || true; printf x)"
+        if [[ "$why" == *$'\n'x ]]; then why="${why%$'\n'x}"; else why="its Claude profile (it couldn't be checked)"; fi
+        [ -z "$why" ] || note="; the account cached for it couldn't be put back in $why: claude auth status may name no account"
+      fi
+      emit install failed "$n" "rolled back: the API refused the new login, so this user is on its previous login again$note" "$user"
     else
       emit install failed "$n" "the API refused the new login, and putting the previous one back failed: sign this user in again" "$user"
       left_broken="${left_broken:-} $n"
     fi
   done
-  previous=()
+  previous=() cached=()
   # Back on the old login: each instance resumes as it ran before, unless its rollback failed.
   failed=" ${left_broken:-} "
 fi

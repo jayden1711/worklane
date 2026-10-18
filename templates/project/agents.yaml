@@ -13,6 +13,10 @@ roles:
   # PR mode: when a required check fails on a PR the harness opened, a fix run on that branch
   # (with the failing job's log; needs the App's Actions: read). Off: the owner is asked instead.
   ci_repair: { enabled: false, model: sonnet, max_fixes_per_pr: 2 }
+# Effort: workers and evaluator take `effort: low | medium | high | xhigh | max`, passed to claude as --effort for the
+# worker's build, the evaluator's verdict (both eval tiers) and its repro run; the planner's (plan, plan review, goal
+# split) is routing.planner_effort. Unset (the default): no flag, so the CLI's own default effort. Any other value, or
+# effort on another role, is a config error. CI, review and conflict fix runs keep the CLI's default.
 # A change to the agents' own instructions (.claude/skills/**, AGENTS.md, roles/*.md here) is
 # evaluated before it lands: its eval cases (a skill's evals/cases.md; evals/AGENTS.md and
 # evals/roles/<role>.md in this folder) at the base and at the head, 3 samples per case. A role

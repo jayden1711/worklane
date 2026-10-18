@@ -132,8 +132,8 @@ export function noProxyProblem(raw: unknown): string | null {
   return null;
 }
 
-/** Why a file read by readRegularFile can't be trusted as root's, or null. */
-function ownedProblem(r: ReturnType<typeof readRegularFile>, owner: number, maxBytes: number): string | null {
+/** Why a file read by readRegularFile can't be trusted as root's, or null. Shared with src/provider-hosts.ts. */
+export function ownedProblem(r: ReturnType<typeof readRegularFile>, owner: number, maxBytes: number): string | null {
   switch (r.kind) {
     case 'missing':
       return "doesn't exist";

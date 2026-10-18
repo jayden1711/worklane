@@ -7,7 +7,9 @@
 //       it), with required_checks green on the PR's head at merge time.
 // Anything else is unaccounted: a direct push, a PR merged with failing, missing or pending checks, an unknown actor
 // or a bot, a rewritten history. The coordinator then stops auto-merge (the stop file), alerts, and opens a revert PR
-// for a human (coordinator/merge-flow.ts). A commit that landed without a PR at all (GitHub's commit-to-PR link has
+// for a human (coordinator/merge-flow.ts), within its caps: per trip (one pass's unaccounted commits with one reason)
+// and per day; a capped commit still stops and alerts. A required check with no run for days is warned of once.
+// A commit that landed without a PR at all (GitHub's commit-to-PR link has
 // no merged PR for it, or a force-push rewrote the branch) is also posted to the ops channel at once, mentioning the
 // Discord owners (src/direct-push-alert.ts; config.yaml main_watch.direct_push_alert, on by default). The last checked commit is kept in a state file, so a restart neither
 // checks a commit twice nor skips one; so is the time of the last call, so the limit holds across restarts too.
@@ -28,7 +30,7 @@
 // first parent, read with git. Not the config loaded at startup: the clone's working tree isn't updated as the default
 // branch moves, so a check dropped since would still be required of every later merge, and never report.
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -261,9 +263,37 @@ export interface WatchState {
   lastCallAt: number;
   /** The commit being checked, and what is known about it so far. */
   pending: { sha: string; facts: Facts } | null;
+  /**
+   * The pass the pending commit belongs to: the commits after `from` up to `tip`, the tip at one fetch. Unaccounted
+   * commits of one pass with the same reason are one trip (tripOf), which opens at most so many revert PRs.
+   */
+  pass?: { from: string; tip: string } | null;
+  /**
+   * Required checks with no run or status on the head of any commit judged since `since` (dead checks): `warned`
+   * once one has stayed so for main_watch.dead_check_days. Dropped when one appears, or the check isn't required.
+   */
+  dead?: Record<string, { since: string; warned: boolean }>;
+  /**
+   * The required_checks the last judged commit was judged by (requiredAt: as committed before it): what dead checks
+   * are raised and dropped against, never the config loaded at startup. Null until a commit is judged.
+   */
+  deadFor?: string[] | null;
 }
 
-const EMPTY: WatchState = { version: 1, mode: null, detail: '', protectionAt: 0, last: null, lastAt: null, lastCallAt: 0, pending: null };
+const EMPTY: WatchState = { version: 1, mode: null, detail: '', protectionAt: 0, last: null, lastAt: null, lastCallAt: 0, pending: null, pass: null, dead: {} };
+
+/** What caps the revert PRs of a trip, read as committed before its pass (revertCapsAt), so no commit in it changes its own. */
+export interface Trip {
+  /** The same for every unaccounted commit of one pass with the same reason. */
+  id: string;
+  perTrip: number;
+  perDay: number;
+}
+
+/** A trip's id: its pass and its reason. A direct push's reason names its own commit, so it is a trip of its own. */
+export function tripOf(pass: { from: string; tip: string }, reason: string): string {
+  return createHash('sha256').update(`${pass.from}..${pass.tip}\n${reason}`).digest('hex').slice(0, 16);
+}
 
 export function readWatchState(file: string): WatchState {
   if (!existsSync(file)) return { ...EMPTY };
@@ -343,6 +373,20 @@ export function directPushAlertAt(git: WatchGit, rev: string): boolean {
   return !(mw && typeof mw === 'object' && (mw as Record<string, unknown>).direct_push_alert === false);
 }
 
+/**
+ * The revert PR caps (config.yaml main_watch.revert_prs_per_trip and revert_prs_per_day) as committed at `rev`: the
+ * defaults when the config can't be read or isn't valid. A cap is at least 1, so no config turns revert PRs off.
+ */
+export function revertCapsAt(git: WatchGit, rev: string): { perTrip: number; perDay: number } {
+  const schema = ProjectConfig.shape.main_watch;
+  const text = git.show(rev, CONFIG_PATH);
+  const doc = text === null ? null : parseDocument(text, { uniqueKeys: true });
+  const raw: unknown = doc && !doc.errors.length ? doc.toJS() : null;
+  const r = schema.safeParse(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).main_watch : undefined);
+  const mw = r.success ? r.data : schema.parse(undefined);
+  return { perTrip: mw.revert_prs_per_trip, perDay: mw.revert_prs_per_day };
+}
+
 /** WatchGit over a clone: fetches `branch` from `remote` for the tip. */
 /** The PR number a merge subject names: "Merge #N: …" (this repo's merges) or GitHub's "Merge pull request #N from …". */
 export function subjectPrNumber(subject: string): number | null {
@@ -394,9 +438,17 @@ export interface MainWatchDeps {
    * Stop auto-merge, alert, open the revert PR (`revert`: whether one can be made: not for a rewritten history).
    * `push`: it landed without a PR, pushed directly (GitHub confirms no merged PR has it) or by a rewrite (a
    * force-push), with `alert` whether that is posted to the ops channel (directPushAlertAt); null otherwise.
+   * `trip`: the trip it belongs to and its caps on revert PRs (null for a rewrite, which has no revert PR).
    */
-  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null }): Promise<void>;
+  unaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null }): Promise<void>;
+  /** How long a required check may have no run before it is a dead check (config.yaml main_watch.dead_check_days). */
+  deadCheckMs?: () => number;
+  /** A dead check is raised (once per check, until it clears), or cleared: a run of it appeared, or it isn't required now. */
+  deadCheck?(o: { check: string; since: string; state: 'raised' | 'cleared' }): void;
 }
+
+/** The default for main_watch.dead_check_days, in ms. */
+export const DEAD_CHECK_MS = 7 * 24 * 3600_000;
 
 export class MainWatch {
   private listedAt = -Infinity;
@@ -418,6 +470,7 @@ export class MainWatch {
     if (mode === 'main_watch' && s.mode !== 'main_watch') {
       s.last = null;
       s.pending = null;
+      s.pass = null;
     }
     s.mode = mode;
     s.detail = detail;
@@ -440,6 +493,45 @@ export class MainWatch {
     return true;
   }
 
+  /**
+   * Which required checks a judged commit's head had no run or status of at all (whenever it came): such a check is
+   * dead from then (`since`) until one appears. Read from what judging asked anyway, so it costs no API call.
+   */
+  private seenChecks(s: WatchState, required: string[], f: Facts) {
+    if (!f.runs) return;
+    const dead = (s.dead ??= {});
+    for (const name of required) {
+      const seen = f.runs.some((r) => r.name === name) || !!f.statuses?.some((x) => x.context === name);
+      const was = dead[name];
+      if (seen) {
+        if (was?.warned) this.d.deadCheck?.({ check: name, since: was.since, state: 'cleared' });
+        delete dead[name];
+      } else if (f.statuses && !was) dead[name] = { since: new Date(this.now).toISOString(), warned: false };
+    }
+  }
+
+  /**
+   * Raise each dead check once it has stayed dead long enough; drop one the last judged commit's required_checks
+   * (s.deadFor) no longer list. Whether anything changed.
+   */
+  private deadChecks(s: WatchState): boolean {
+    const dead = (s.dead ??= {});
+    const after = this.d.deadCheckMs?.() ?? DEAD_CHECK_MS;
+    let changed = false;
+    for (const [name, d] of Object.entries(dead)) {
+      if (s.deadFor && !s.deadFor.includes(name)) {
+        if (d.warned) this.d.deadCheck?.({ check: name, since: d.since, state: 'cleared' });
+        delete dead[name];
+        changed = true;
+      } else if (!d.warned && this.now - Date.parse(d.since) >= after) {
+        d.warned = true;
+        this.d.deadCheck?.({ check: name, since: d.since, state: 'raised' });
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   /** One pass: at most one API call. */
   async step(): Promise<void> {
     const s = this.state();
@@ -457,6 +549,7 @@ export class MainWatch {
       return writeWatchState(this.d.stateFile, s);
     }
     if (s.mode !== 'main_watch') return;
+    if (this.deadChecks(s)) writeWatchState(this.d.stateFile, s);
     if (!s.pending) {
       // A fetch (git, not the API) at most as often as a call, too.
       if (this.now - this.listedAt < MAIN_WATCH_CALL_MS) return;
@@ -470,13 +563,16 @@ export class MainWatch {
       }
       if (!this.d.git.isAncestor(s.last, tip)) {
         const was = s.last;
-        await this.d.unaccounted({ sha: tip, reason: `${this.d.branch} was rewritten: ${was.slice(0, 8)}, checked before, is no longer in its history (a force-push)`, number: null, revert: false, push: { kind: 'rewrite', alert: directPushAlertAt(this.d.git, was) } });
+        await this.d.unaccounted({ sha: tip, reason: `${this.d.branch} was rewritten: ${was.slice(0, 8)}, checked before, is no longer in its history (a force-push)`, number: null, revert: false, push: { kind: 'rewrite', alert: directPushAlertAt(this.d.git, was) }, trip: null });
         s.last = tip;
         s.lastAt = new Date(this.now).toISOString();
+        s.pass = null;
         return writeWatchState(this.d.stateFile, s);
       }
       const next = this.d.git.firstParents(s.last, tip)[0];
       if (!next) return;
+      // One pass: the commits up to the tip at this fetch. A commit past its tip starts the next pass.
+      if (!s.pass || !this.d.git.isAncestor(next, s.pass.tip)) s.pass = { from: s.last, tip };
       s.pending = { sha: next, facts: { harness: this.d.harnessMerge(next), subjectPr: this.d.git.mergeSubjectPr?.(next) ?? null } };
       writeWatchState(this.d.stateFile, s);
     }
@@ -508,7 +604,16 @@ export class MainWatch {
     }
     if (v.accounted && v.how === 'accepted') this.d.accepted(p.sha, v.number, v.acceptance);
     else if (v.accounted) this.d.checked(p.sha, v.how, v.number);
-    else await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null });
+    else {
+      // Every unaccounted commit trips (stop, alert); its trip only caps how many revert PRs open.
+      const pass = s.pass ?? { from: s.last ?? p.sha, tip: p.sha };
+      const trip = { id: tripOf(pass, v.reason + note), ...revertCapsAt(this.d.git, pass.from) };
+      await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null, trip });
+    }
+    // Dead checks follow what this commit was judged by: the required_checks committed before it.
+    s.deadFor = judgedBy;
+    this.seenChecks(s, judgedBy, p.facts);
+    this.deadChecks(s);
     this.judgedBy = null;
     s.last = p.sha;
     s.lastAt = new Date(this.now).toISOString();
@@ -525,6 +630,10 @@ export function protectionView(file: string, repo: string) {
     detail: s.detail,
     lastChecked: s.last ? { sha: s.last, url: `https://github.com/${repo}/commit/${s.last}`, at: s.lastAt } : null,
     accepted: readAccepted(acceptedFileFor(file)),
+    /** Required checks raised as dead (no run on any commit judged since `since`): merges keep tripping until one posts. */
+    deadChecks: Object.entries(s.dead ?? {})
+      .filter(([, d]) => d.warned)
+      .map(([check, d]) => ({ check, since: d.since })),
   };
 }
 

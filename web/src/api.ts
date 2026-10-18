@@ -360,7 +360,8 @@ export interface Protection {
   mode: 'github' | 'main_watch' | 'off' | 'unknown';
   detail?: string;
   lastChecked?: { sha: string; url: string; at: string | null } | null;
-  alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null } | null;
+  /** `no_revert`: why this commit has no revert PR of its own (a cap); `trip_revert`: its trip's revert PR, if any. */
+  alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null; no_revert?: string | null; trip_revert?: string | null } | null;
   stopped?: string | null;
   canClear?: boolean;
   /** Commits admins accepted as bootstrap merges (owners and writers); `appliedTo`: the commit the watch accounted with it. */
@@ -1193,7 +1194,7 @@ export interface IgnoredIssue {
 }
 export const getIgnored = () => api<{ at: number; issues: IgnoredIssue[]; error: string | null; canFix: boolean; local: boolean }>('/api/issues/ignored');
 export const addReady = (issue: number) => api<{ ok: boolean }>(`/api/issues/${issue}/ready`, { method: 'POST', body: '{}' });
-export const getChecksSeen = () => api<{ checks: string[]; error?: string }>('/api/first-run/checks-seen');
+export const getChecksSeen = () => api<{ checks: string[]; sha?: string; error?: string }>('/api/first-run/checks-seen');
 /** The starter CI (src/starter-ci.ts): a drafted workflow, GitHub's new-file page for it, and its first run on the default branch. */
 export interface StarterCi {
   path: string;

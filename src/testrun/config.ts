@@ -8,7 +8,7 @@
 import { z } from 'zod';
 import { projectEnvProblem } from '../project-env.js';
 import { selectMode } from './select.js';
-import { NPM_CACHE_ENV } from './fetch.js';
+import { FETCH_CACHE_ENV, fetchSpec, MAX_REQUIREMENTS, requirementsFileProblem } from './fetch.js';
 import { SETUP_TIER } from './network.js';
 
 const tierName = z.string().regex(/^[a-z][a-z0-9_-]{0,39}$/, 'lowercase letters, digits, _ or - (at most 40)');
@@ -127,8 +127,30 @@ export const TestRunConfig = z
     /**
      * Downloads before the setup steps, with network, running none of the repo's code (./fetch.ts): `npm` fills the
      * named cache (its env must be npm_config_cache) with what package-lock.json pins, so `npm ci --offline` installs.
+     * `pip` fills it (its env must be PIP_FIND_LINKS) with the wheels of what `requirements` pin (name==version) and
+     * the repo's build requirements, so `pip install --no-index -r <file>` installs, building the repo (-e .) there.
      */
-    fetch: z.array(z.strictObject({ npm: tierName })).max(4).default([]),
+    fetch: z
+      .array(
+        z.union([
+          z.strictObject({ npm: tierName }),
+          z.strictObject({
+            pip: tierName,
+            requirements: z
+              .array(
+                z.string().superRefine((p, ctx) => {
+                  const why = requirementsFileProblem(p);
+                  if (why) ctx.addIssue({ code: 'custom', message: why });
+                }),
+              )
+              .min(1)
+              .max(MAX_REQUIREMENTS)
+              .default(['requirements.txt']),
+          }),
+        ]),
+      )
+      .max(4)
+      .default([]),
     /**
      * The setup steps ask for the network, as the tier "setup": granted only when root's own testrun-network.json
      * lists "setup" for this instance. For an install that can't be split into fetch and an offline step.
@@ -179,9 +201,11 @@ export const TestRunConfig = z
       checkKind.set(n, t.kind);
     }
     c.fetch.forEach((f, i) => {
-      const cache = c.caches.find((x) => x.name === f.npm);
-      if (!cache) ctx.addIssue({ code: 'custom', path: ['fetch', i, 'npm'], message: `no cache named ${f.npm} in test_run.caches` });
-      else if (cache.env !== NPM_CACHE_ENV) ctx.addIssue({ code: 'custom', path: ['fetch', i, 'npm'], message: `the cache ${f.npm} is given in ${cache.env}; npm's fetch needs ${NPM_CACHE_ENV}, so the offline install reads it` });
+      const { fetcher, cache: name } = fetchSpec(f);
+      const cache = c.caches.find((x) => x.name === name);
+      const env = FETCH_CACHE_ENV[fetcher];
+      if (!cache) ctx.addIssue({ code: 'custom', path: ['fetch', i, fetcher], message: `no cache named ${name} in test_run.caches` });
+      else if (cache.env !== env) ctx.addIssue({ code: 'custom', path: ['fetch', i, fetcher], message: `the cache ${name} is given in ${cache.env}; ${fetcher}'s fetch needs ${env}, so the offline install reads it` });
     });
     const vars = new Set(Object.keys(c.env));
     for (const [list, what] of [[c.caches, 'caches'], [c.shared, 'shared']] as const) {

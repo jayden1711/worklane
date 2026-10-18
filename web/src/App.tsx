@@ -623,7 +623,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/overview') page = <Overview state={state} pulse={pulse} usage={usage} now={now} />;
   else page = <BoardPage state={state} pulse={pulse} />;
 
-  const sidebar = { state, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} why={health?.why} live={health?.hub} /> };
+  const sidebar = { state, all: !!scope?.all, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} why={health?.why} live={health?.hub} /> };
   return (
     <NavMenu.Provider value={{ open: nav, setOpen: setNav }}>
       <div className="flex h-full">
@@ -659,15 +659,17 @@ type Health = { hub: HubInfo | null; status: Record<string, DotStatus>; why?: Re
 /**
  * The sidebar's contents: the project and its status dot (off a hub), the instance list (on a hub), Search, the pages,
  * who is signed in, the live indicator and the theme toggle. The desktop sidebar and the narrow-screen drawer show the
- * same one.
+ * same one. `all`: "All instances" is chosen on a hub, so the header says that, not the instance whose state this is (#562).
  */
-export function SidebarBody({ state, path, counts, health, live, theme, toggleTheme, openSearch, switcher }: { state: State | null; path: string; counts: Counts; health: Health | null; live: boolean; theme: string; toggleTheme: () => void; openSearch: () => void; switcher: ReactNode }) {
+export function SidebarBody({ state, all = false, path, counts, health, live, theme, toggleTheme, openSearch, switcher }: { state: State | null; all?: boolean; path: string; counts: Counts; health: Health | null; live: boolean; theme: string; toggleTheme: () => void; openSearch: () => void; switcher: ReactNode }) {
   return (
     <>
       <div className="flex h-12 items-center gap-2 px-4">
         <div className="flex size-6 shrink-0 items-center justify-center rounded-[7px] bg-ink text-[11px] font-semibold text-surface">{state?.brand.name[0] ?? '·'}</div>
         <div className="min-w-0">
-          <div className="truncate text-[13.5px] font-medium leading-4 text-ink">{state?.project.name ?? '…'}</div>
+          <div className="truncate text-[13.5px] font-medium leading-4 text-ink" data-testid="sidebar-title">
+            {all ? 'All instances' : (state?.project.name ?? '…')}
+          </div>
           <div className="truncate text-[11px] leading-4 text-ink-3">{state?.brand.name}</div>
         </div>
         {/* Off a hub, this instance's status dot (on a hub, each instance's row has its own). */}

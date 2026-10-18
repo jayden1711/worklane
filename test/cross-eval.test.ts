@@ -14,9 +14,12 @@ import { route, ROUTING } from '../src/routing.js';
 import { chatModels } from '../src/chat-pick.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { commitAll, coordinator, fixture, lastOf, readAll, skip } from './repro-state-graph/harness.js';
+import { allowProviderHosts } from './helpers.js';
 
 const base = { daily_budget_usd: 10, roles: { workers: { enabled: true, model: 'sonnet' }, evaluator: { enabled: true, model: 'opus' } } };
 const GLM = { base_url: 'https://open.example.com/anthropic', credential: 'glm', model: 'glm-x', tier: 'sonnet', usd_per_mtok_in: 1, usd_per_mtok_out: 2 };
+// Root allows the provider's host (src/provider-hosts.ts).
+allowProviderHosts('open.example.com');
 
 test('cross-family evaluator: off by default; routing may name only a configured hosted provider; off is never a chat model', () => {
   assert.equal(ROUTING.eval_cross_family.default, 'off');

@@ -54,6 +54,7 @@ interface Render {
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderRepoConfigForm(c: unknown, o?: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
+  checksSeenSlot(answer: { checks: string[]; sha?: string; error?: string }, starterBelow: boolean): { seen: string[]; note: string | null };
   renderStarterCi(v: StarterCiView, inForm?: boolean): string;
   renderCiNote(ci: { kind: 'github' | 'none'; means: string | null } | undefined): string;
   renderConfigPrs(prs: unknown[], o?: { canAct?: boolean; plan?: { command: string; then: string } }): string;
@@ -70,7 +71,7 @@ interface Render {
   renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
-  renderClaudeAccount(data: unknown, now?: number): string;
+  renderClaudeAccount(data: unknown, now?: number, scope?: { current: string | null; all: boolean; instances: (string | null)[] } | null): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
   tailscaleBusy(d: unknown, now?: number): boolean;
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
@@ -128,6 +129,7 @@ interface Render {
   tryKey(given: string, o: { hub: boolean; get?: (url: string, init?: { headers?: Record<string, string> }) => Promise<{ ok: boolean; json(): Promise<unknown> }>; store?: { setItem(k: string, v: string): void } }): Promise<boolean>;
   renderWhoAmI(state: { user: string; role?: string; via?: string }, o?: { hubPage?: boolean }): string;
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
+  renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
   navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
@@ -1062,6 +1064,28 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+});
+
+test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
+  const sha = 'd'.repeat(40);
+  const base = { mode: 'main_watch' as const, detail: '', lastChecked: null, stopped: 'main watch: x', canClear: false };
+  const alert = { at: new Date().toISOString(), sha, url: `https://github.com/o/r/commit/${sha}`, reason: '#42 was merged into main with required checks not green on eeeeeeee at merge time: ci missing', number: 42, revert: null };
+  const trip = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: 'https://github.com/o/r/pull/9', no_revert: "the per-trip cap is reached (main_watch.revert_prs_per_trip: 1): this trip's revert PR https://github.com/o/r/pull/9; the trip's commits so far: aaaaaaaa, dddddddd" } });
+  assert.match(trip, /No revert PR of its own; its trip&#x27;s revert PR waits for a human: <a[^>]*data-testid="main-watch-alert-revert"[^>]*>https:\/\/github.com\/o\/r\/pull\/9</);
+  assert.match(trip, /data-testid="main-watch-alert-no-revert"[^>]*> Why: the per-trip cap is reached[\s\S]*aaaaaaaa, dddddddd/);
+  assert.doesNotMatch(trip, /No revert PR was opened/, 'the trip has one');
+  const day = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: null, no_revert: 'the per-day cap is reached (main_watch.revert_prs_per_day: 3): the main watch opened 3 revert PRs in the last 24 hours' } });
+  assert.match(day, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: the per-day cap is reached/);
+  assert.doesNotMatch(day, /main-watch-alert-revert/);
+  assert.match(r.renderMainWatchAlert({ ...base, alert }), /No revert PR was opened\.</, 'an older alert, with neither: as before');
+});
+
+test('a dead required check on the Machine page: named, since when, and why merges keep tripping; nothing when there is none', () => {
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: null, alert: null, stopped: null, canClear: false };
+  assert.doesNotMatch(r.renderProtection({ ...watch, deadChecks: [] }, BRAND.name), /main-watch-dead-check/);
+  const html = r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since: new Date(Date.now() - 8 * 86_400_000).toISOString() }] }, BRAND.name);
+  assert.match(html, /data-testid="main-watch-dead-check"[\s\S]*Required check [\s\S]*ci[\s\S]*has had no run on any commit checked since[\s\S]*Merges keep tripping the watch until it posts/);
+  assert.doesNotMatch(r.renderProtection({ mode: 'github', deadChecks: [{ check: 'ci', since: new Date().toISOString() }] }, BRAND.name), /main-watch-dead-check/, 'only while the watch guards the branch');
 });
 
 test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
@@ -2306,6 +2330,61 @@ test("two instances on one machine: with one selected, no page shows any of the 
   }
 });
 
+test('#562: after an instance and then All instances, the sidebar header and the Claude account panel say All instances; picking one instance again names it', () => {
+  const hub = { instances: [{ name: 'a', up: true, error: null }, { name: 'b', up: true, error: null }] };
+  // What each instance's server answers: its own state (its project's name) and the machine's Claude account, from it.
+  const own = asOwner as State & { project: Record<string, unknown> };
+  const stateOf = (name: 'a' | 'b') => ({ ...own, project: { ...own.project, name: MARKS[name].project } }) as State;
+  const cell = (instance: string, active: boolean) => ({ instance, user: `wl-${instance}-agent`, active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
+  const accountOf = (name: 'a' | 'b') => ({
+    machineOwner: true,
+    machineOwners: ['example-owner'],
+    login: 'example-owner',
+    instance: name,
+    allowed: true,
+    why: null,
+    canSwitch: true,
+    busy: null,
+    canPasteToken: false,
+    status: null,
+    switch: null,
+    requests: [],
+    profiles: { instances: ['a', 'b'], active: { a: 'default', b: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell('a', true), cell('b', true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell('a', false), cell('b', false)] }] },
+    profileOps: [],
+    confirmScript: 'claude-account.sh',
+    signin: null,
+  });
+  // As the page sees it: every view reads scope.current's server (the state, and the account panel's data).
+  const view = (scope: ReturnType<Render['scopeOf']>) => ({
+    header: (/data-testid="sidebar-title"[^>]*>([^<]*)</.exec(r.renderSidebar(stateOf(scope.current as 'a' | 'b'), { hub, scope })) ?? [])[1],
+    account: r.renderClaudeAccount(accountOf(scope.current as 'a' | 'b'), undefined, scope),
+  });
+  const scopeLine = (html: string) => (/data-testid="claude-account-scope"[^>]*>([^]*?)<\/p>/.exec(html) ?? [])[1]?.replace(/<[^>]+>/g, '');
+
+  // b picked in the switcher, then All instances (selectAllInstances keeps scope.current: web/src/api.ts).
+  const b = r.scopeOf(hub, 'b', false);
+  assert.equal(view(b).header, 'beta-proj', 'b picked: the header names its project');
+  const all = r.scopeOf(hub, b.current, true);
+  const shown = view(all);
+  assert.equal(shown.header, 'All instances', 'All instances: the header says so, not b');
+  assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
+  assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
+  // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
+  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
+  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
+  assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
+  assert.match(shown.account, /data-testid="claude-account-switch"/, 'switching every instance is still offered');
+
+  // One instance again: its name in the header and in the panel.
+  const a = r.scopeOf(hub, 'a', false);
+  const back = view(a);
+  assert.equal(back.header, 'alpha-proj', 'a picked: the header names its project');
+  assert.match(scopeLine(back.account) ?? '', /^For a: /, "a picked: the panel's scope line names a");
+  assert.doesNotMatch(scopeLine(back.account) ?? '', /every instance on this machine \(/);
+  assert.match(back.account, /only a&#x27;s/, 'its accounts can be chosen for a from here');
+  for (const id of ['claude-profile-use-here', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
+});
+
 test('Claude account: a machine owner sees each agent user and the switch step by step, with the token box only where it is taken; anyone else nothing', () => {
   const ownersFile = machineOwnersFile('ada');
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
@@ -3443,6 +3522,37 @@ test("the Repo config form: no input moves when GitHub's checks answer arrives a
   // And the slots are of a fixed size: one truncated line, and a list that scrolls in its own height.
   assert.match(loading, /class="block h-5 truncate[^"]*" data-reserved="status"/);
   assert.match(loading, /class="h-\[4\.75rem\] overflow-y-auto[^"]*" data-reserved="checks"/);
+});
+
+test('#569 the Repo config form\'s checks note names the short sha of the tip with no checks yet; a re-read that finds checks on a new tip replaces it, the old sha gone', () => {
+  const c = { values: { writers: ['example-owner'], required_checks: ['test'], daily_budget_usd: 40, workers_count: 1, workers_model: 'sonnet' }, owner: 'example-owner', branch: 'main', repo: 'example-org/example-shop' };
+  const old = '0123456789abcdef0123456789abcdef01234567';
+  const tip = 'fedcba9876543210fedcba9876543210fedcba98';
+  const status = (html: string) => /data-testid="repo-config-checks-status"[^>]*>([^<]*)</.exec(html)?.[1]?.replaceAll('&#x27;', "'");
+  const form = (slot: { seen: string[]; note: string | null }) => r.renderRepoConfigForm(c, { seenLoaded: true, seen: slot.seen, ...(slot.note === null ? {} : { seenNote: slot.note }) });
+  // The first read: GitHub ran nothing on the tip, named by its first 7 characters.
+  const empty = r.checksSeenSlot({ checks: [], sha: old }, false);
+  assert.deepEqual(empty, { seen: [], note: 'no checks yet on 0123456' });
+  const before = form(empty);
+  assert.equal(status(before), 'no checks yet on 0123456');
+  // With no required check chosen yet, the starter CI below is pointed to, after the same words.
+  assert.equal(r.checksSeenSlot({ checks: [], sha: old }, true).note, 'no checks yet on 0123456: add a starter CI below');
+  // The re-read after a refresh or a merge: a new tip, with a check. The note is replaced and the old sha is gone.
+  const ran = r.checksSeenSlot({ checks: ['test', 'lint'], sha: tip }, false);
+  assert.deepEqual(ran, { seen: ['test', 'lint'], note: null });
+  const after = form(ran);
+  assert.equal(status(after), "the checks GitHub ran on main's tip are offered below");
+  assert.doesNotMatch(after, /0123456/, 'the old tip is named nowhere');
+  assert.match(after, /data-check="lint"/);
+  // The endpoint's own errors are shown as they are (it sends no sha with them).
+  assert.deepEqual(r.checksSeenSlot({ checks: [], error: "origin/main isn't fetched here" }, true), { seen: [], note: "origin/main isn't fetched here" });
+  assert.deepEqual(r.checksSeenSlot({ checks: [], error: "GitHub didn't answer: HTTP 502" }, false), { seen: [], note: "GitHub didn't answer: HTTP 502" });
+  // The layout invariant holds for the new note: nothing above an input differs from the loading form but the slots' contents.
+  const loading = r.renderRepoConfigForm(c);
+  const inputs = [...loading.matchAll(/<input[^>]*data-testid="([a-z-]+)"/g)].map((m) => m[1]!);
+  const above = (html: string, id: string) => withoutReserved(html.slice(0, html.indexOf(`data-testid="${id}"`)));
+  for (const html of [before, after]) for (const id of inputs) assert.equal(above(html, id), above(loading, id), `${id} moves`);
+  assert.match(before, /class="block h-5 truncate[^"]*" data-reserved="status"/);
 });
 
 test("the Repo config form with no required check (#469): the starter CI, last in the form; its summary and file; Confirm is GitHub's new-file page with the file; once it ran on main, the step says its check is selected", () => {
