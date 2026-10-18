@@ -2,7 +2,7 @@
 
 Worklane runs on your machine, against a repo you have checked out, with the Claude Code CLI you sign in to yourself. You install it from npm and run one command in your repo. That command prints one URL, and every setup step after that happens on the page it opens: the dashboard's first-run wizard.
 
-What it guarantees: plain code decides which agent changes merge, by rules read from your default branch that no agent can loosen, and a model's verdict can only hold a merge, never approve one alone. The [README](../README.md#what-its-for) says how, and what falls outside it.
+What it guarantees: code decides what may merge unattended, by rules read from your default branch that no agent can loosen; tests, fail-without tests, CI and the evaluator decide whether it's right, and the evaluator's verdict can only hold a merge, never approve one alone. The rules limit scope, not correctness. The [README](../README.md#what-its-for) says how, what a backtest of the rules measured, and what falls outside it.
 
 You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
