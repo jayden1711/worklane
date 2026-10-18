@@ -1,5 +1,6 @@
 // A decision's detail (GET /api/decisions/:id and its page, src/decision-detail.ts, web/src/pages/DecisionDetail.tsx):
-// every kind renders every section from a real dashboard's answer; a viewer never gets the context, a writer never
+// every kind renders its sections from a real dashboard's answer (one with nothing recorded is left out); a viewer
+// never gets the context, a writer never
 // the owner-only parts; the PR body's fail-without and never sections are read whole; nothing picked means it waits.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -47,22 +48,25 @@ after(() => f?.d.close());
 /** Each section's state on a rendered page: data-section -> data-section-state. */
 const sections = (html: string) => Object.fromEntries([...html.matchAll(/data-section="([a-z-]+)" data-section-state="([a-z-]+)"/g)].map((m) => [m[1]!, m[2]!]));
 
-test('every kind of decision renders every section, from a real dashboard\'s answer, for the owner', async () => {
+test('every kind of decision renders, from a real dashboard\'s answer, for the owner: its sections in page order, none of them empty', async () => {
   for (const kind of KINDS) {
     const { status, body: d } = await get(`/api/decisions/${f.ids[kind]}`, 'example-owner');
     assert.equal(status, 200, `${kind}: ${JSON.stringify(d)}`);
     const pr = d.prBody ? (await get(`/api/decisions/${f.ids[kind]}/pr`, 'example-owner')).body : undefined;
     const html = r.renderDecisionDetail(d, pr ?? undefined);
     const s = sections(html);
-    assert.deepEqual(Object.keys(s), [...r.DETAIL_SECTIONS], `${kind}: every section, in page order`);
+    assert.deepEqual(Object.keys(s), r.DETAIL_SECTIONS.filter((x) => x in s), `${kind}: in page order`);
+    for (const always of ['summary', 'asked', 'if-nothing', 'links']) assert.ok(always in s, `${kind}: the ${always} section`);
+    assert.ok(Object.values(s).every((x) => ['shown', 'not-applicable', 'withheld'].includes(x)), `${kind}: a section with nothing recorded isn't drawn: ${JSON.stringify(s)}`);
     assert.match(html, new RegExp(`data-testid="decision-detail" data-kind="${kind === 'investigation' ? 'question' : kind}"`));
     assert.match(html, /data-testid="decision-if-nothing-text">No timeout: it waits\./, `${kind}: what happens if nothing is picked`);
     assert.match(html, /data-testid="decision-happened">[^<]{20,}/, `${kind}: a plain summary`);
-    for (const flag of ['money-path', 'auth', 'secrets']) assert.match(html, new RegExp(`data-flag="${flag}"`), `${kind}: the ${flag} flag`);
+    // The impact flags where the change's files are known: each of the three.
+    if (kind === 'land' || kind === 'pr') for (const flag of ['money-path', 'auth', 'secrets']) assert.match(html, new RegExp(`data-flag="${flag}"`), `${kind}: the ${flag} flag`);
   }
 });
 
-test('each section shows its data where the log has it, and "not recorded" where it doesn\'t', async () => {
+test('each section shows its data where the log has it, and is left out where it hasn\'t', async () => {
   const one = async (kind: (typeof KINDS)[number]) => {
     const d = (await get(`/api/decisions/${f.ids[kind]}`, 'example-owner')).body;
     const pr = d.prBody ? (await get(`/api/decisions/${f.ids[kind]}/pr`, 'example-owner')).body : undefined;
@@ -70,7 +74,8 @@ test('each section shows its data where the log has it, and "not recorded" where
     return { d, html, s: sections(html) };
   };
   const land = await one('land');
-  assert.deepEqual(land.s, { summary: 'shown', options: 'shown', impact: 'shown', 'if-nothing': 'shown', findings: 'not-applicable', change: 'shown', verdict: 'shown', tests: 'shown', ci: 'not-recorded', runs: 'shown', links: 'shown', diff: 'shown', 'pr-body': 'not-recorded' });
+  // No PR yet: no CI and no PR body section (11 of the 13; test/decision-detail-chrome.test.ts counts them in Chrome).
+  assert.deepEqual(land.s, { summary: 'shown', asked: 'shown', impact: 'shown', 'if-nothing': 'shown', findings: 'not-applicable', change: 'shown', verdict: 'shown', tests: 'shown', runs: 'shown', links: 'shown', diff: 'shown' });
   assert.match(land.html, /data-flag="money-path" data-touches="yes"[\s\S]*?src\/billing\/refund\.js/);
   assert.match(land.html, /data-flag="auth" data-touches="yes"/);
   assert.match(land.html, /data-flag="secrets" data-touches="no"/);
@@ -86,19 +91,22 @@ test('each section shows its data where the log has it, and "not recorded" where
 
   const inv = await one('investigation');
   assert.equal(inv.s.findings, 'shown');
-  assert.match(inv.html, /WRITERSONLY-CLAIM[\s\S]*?src\/reconcile\.js:472[\s\S]*?severity not recorded[\s\S]*?confidence not recorded/, 'file:line read from the evidence; severity and confidence say not recorded');
-  assert.match(inv.html, /Why: <\/span>Free it in the first sweep\./, 'the recommendation with its reasoning');
+  assert.match(inv.html, /WRITERSONLY-CLAIM[\s\S]*?data-testid="decision-finding-at"[\s\S]*?src\/reconcile\.js:472/, 'file:line read from the evidence');
+  const finding = /data-testid="decision-finding"[\s\S]*?<\/li>/.exec(inv.html)![0];
+  assert.doesNotMatch(finding, /severity|confidence/, "a finding's severity and confidence aren't recorded: no badge for them");
+  assert.match(inv.html, /Why:<\/span> (<!-- -->)?Free it in the first sweep\./, 'the recommendation with its reasoning');
   assert.match(inv.html, /never writes code by itself/);
 
   const q = await one('question');
   assert.match(q.html, /data-testid="decision-agent-summary"[\s\S]*?Need the threshold before the refund rule\./);
-  assert.match(q.html, /Why: <\/span>The fixtures decide it\./);
+  assert.match(q.html, /Recommended:<\/span> (<!-- -->)?The fixtures decide it\./, 'a recommendation that is no option, in its words');
   assert.equal(q.s.verdict, 'not-applicable');
 
   const pr = await one('pr');
   assert.deepEqual([pr.s.ci, pr.s.change, pr.s.verdict, pr.s.tests, pr.s['pr-body'], pr.s.diff], ['shown', 'shown', 'shown', 'shown', 'shown', 'shown']);
   assert.match(pr.html, /data-testid="decision-ci-checks"[\s\S]*?test: pass[\s\S]*?lint: fail/, 'CI per required check');
-  assert.match(pr.html, /data-testid="decision-confidence-reason">[\s\S]*?no reason recorded/, 'a verdict before #471: no reason recorded');
+  assert.doesNotMatch(pr.html, /data-testid="decision-confidence-reason"/, 'a verdict before #471 gave no reason: no line for it');
+  assert.equal(Object.keys(pr.s).length, 13, "a held PR's page has every section (test/decision-detail-chrome.test.ts counts them in Chrome)");
   assert.match(pr.html, /data-testid="decision-fail-without"[\s\S]*?fails: 1 of 3/);
   assert.match(pr.html, /data-testid="decision-never"[\s\S]*?It never refunds twice\./);
   assert.match(pr.html, /data-flag="money-path" data-touches="yes"/, "a held PR's impact, from its files, now");
@@ -106,8 +114,9 @@ test('each section shows its data where the log has it, and "not recorded" where
   assert.doesNotMatch(pr.html, /data-testid="decision-detail-option"/, 'a PR is answered on GitHub');
 
   const domain = await one('domain');
-  assert.deepEqual([domain.s.change, domain.s.findings, domain.s.ci, domain.s['pr-body']], ['not-recorded', 'not-applicable', 'not-recorded', 'not-recorded']);
-  assert.match(domain.html, /data-flag="money-path" data-touches="unknown"[\s\S]*?not recorded/);
+  assert.deepEqual([domain.s.change, domain.s.findings, domain.s.ci, domain.s['pr-body']], [undefined, 'not-applicable', undefined, undefined]);
+  assert.equal(domain.s.impact, undefined, 'no change, so no files to say the impact of: no impact section');
+  assert.doesNotMatch(domain.html, /data-flag=/);
 });
 
 test('role gating: a viewer never gets the context; a writer never the owner-only parts; the diff is the owners\'', async () => {
@@ -130,7 +139,7 @@ test('role gating: a viewer never gets the context; a writer never the owner-onl
     assert.equal('context' in v || 'findings' in v || 'change' in v || 'runs' in v, false, `${id}: no context for a viewer`);
   }
   const vhtml = r.renderDecisionDetail(viewer);
-  assert.deepEqual(Object.keys(sections(vhtml)), ['options', 'if-nothing', 'links'], "a viewer's page: the question, the wait and the links");
+  assert.deepEqual(Object.keys(sections(vhtml)), ['summary', 'if-nothing', 'links'], "a viewer's page: the question and its options, the wait and the links");
   assert.match(vhtml, /data-testid="decision-withheld"/);
 
   assert.equal((await get(`/api/decisions/${f.ids.land}/diff`, 'example-collaborator')).status, 403);

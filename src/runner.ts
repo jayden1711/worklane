@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
+import { agentSettingsFileOf, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -688,7 +688,14 @@ export class CliRunner implements AgentRunner {
         : pinned;
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
-    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    const locked = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
+    // reports it before any line but a system one, and never succeeds without it: claude drops a whole --settings
+    // over one invalid value, silently. The check key is spread last, so nothing above can replace it.
+    const check = locked ? settingsCheckValue() : null;
+    const settings = locked && check ? { ...locked, [SETTINGS_CHECK_KEY]: check } : undefined;
+    const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
+    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${laneSettings ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
@@ -710,6 +717,8 @@ export class CliRunner implements AgentRunner {
       let ended: TerminalReason | null = null;
       /** Set when the session's init event shows something loaded that this run didn't pass. */
       let loadProblem: string | null = null;
+      /** The run's --settings: confirmed by the init event, or why the run stopped. Pending until then. */
+      let settingsState: 'pending' | 'applied' | { problem: string } = check ? 'pending' : 'applied';
       let buf = '';
       let stderr = '';
       let inputOpen = true;
@@ -764,6 +773,21 @@ export class CliRunner implements AgentRunner {
           } catch {
             continue;
           }
+          // Before anything else reads the line: settings not confirmed by the first init event, or any line but a
+          // system one before it (a turn, a tool result, a result), stop the run, and the line goes nowhere.
+          if (settingsState === 'pending' && check) {
+            const problem =
+              j.type === 'system' && j.subtype === 'init'
+                ? settingsAppliedProblem(j as { output_style?: unknown }, check, settingsName)
+                : j.type !== 'system'
+                  ? `claude sent ${j.type === 'assistant' || j.type === 'user' || j.type === 'result' ? `a ${j.type} line` : 'a line'} before its init event confirmed the --settings this run passed (${settingsName}), so its deny rules and hooks may be off`
+                  : undefined;
+            if (problem) {
+              settingsState = { problem };
+              kill('failed');
+            } else if (problem === null) settingsState = 'applied';
+          }
+          if (typeof settingsState === 'object') continue;
           record?.line(j);
           feed?.line(j);
           req.onStreamLine?.(j);
@@ -829,6 +853,7 @@ export class CliRunner implements AgentRunner {
           const v = stuck.stopped;
           return done({ reason: 'stuck', detail: `stopped as stuck: the same ${v.tool} call failed ${v.failures} times in a row: ${v.input.slice(0, 200)}`, ...base });
         }
+        if (typeof settingsState === 'object') return done({ reason: 'failed', detail: `${settingsState.problem}; stopped`, ...base });
         if (loadProblem) return done({ reason: 'failed', detail: `${loadProblem}; stopped`, ...base });
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
         // The subscription's usage limit (or a provider's rate limit): claude's rate_limit_event, a 429 it gave up on,
@@ -844,6 +869,9 @@ export class CliRunner implements AgentRunner {
         if ((!r || r.is_error || r.subtype !== 'success') && isAuthFailure({ apiErrorStatus: r?.api_error_status ?? null, assistantError, text: refusedText })) {
           return done({ reason: 'auth_failed', detail: authFailedDetail({ apiErrorStatus: r?.api_error_status ?? null, text: refusedText }), login: { key: this.loginOf(req), account: status.account ?? null }, ...base });
         }
+        // INVARIANT (#626): never a success with the --settings unconfirmed. Only its stderr is kept (a startup error
+        // there may be transient): nothing it sent before an init event was read.
+        if (settingsState === 'pending') return done({ reason: 'failed', detail: `claude exited ${code} before its init event confirmed the --settings this run passed (${settingsName}): ${stderrTail(stderr)}`, ...base });
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
         // An error result often carries no text of its own; claude's stderr then says what went wrong.

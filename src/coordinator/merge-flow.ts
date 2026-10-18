@@ -8,7 +8,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';
-import { type CommitCheck, type PullRequest } from '../backlog/types.js';
+import { type CommitCheck, type DoneWhenList, type PullRequest } from '../backlog/types.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
@@ -34,6 +34,7 @@ import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from '
 import { FixRuns } from './fix-runs.js';
 import { FlakyGate } from './flaky.js';
 import { FixForward } from './fix-forward.js';
+import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
@@ -672,19 +673,61 @@ export abstract class MergeFlow extends FixRuns {
     return last?.state === 'APPROVED' && Date.parse(last.at) >= Date.parse(queued.ts);
   }
 
-  /** A PR that waits for the owner: the needs-owner label, one comment with every reason, a review request. */
+  /**
+   * A PR that waits for the owner: the needs-owner label, one comment (the review packet, src/coordinator/
+   * review-packet.ts: every reason, the risk class, the evaluator, the eval scores and the receipts, sized for a
+   * phone), a review request. Called once per head and decision (mergeOrWait); it changes nothing about either.
+   */
   private async waitForOwner(w: EventPayload<'pr.opened'>, head: string, reasons: string[], advice?: string) {
     const owner = this.ownerOf(w.issue);
     await this.d.backlog.addLabels(w.number, ['needs-owner']);
     const ask = this.prBatching()
       ? `waits for your review: approve it and ${BRAND.name} merges it onto exactly the ${this.branch} its full run tested (testing it again first if ${this.branch} moved). Merging it by hand skips that`
       : 'waits for you to review and merge';
-    await this.d.backlog.comment(w.number, `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${r}`).join('\n')}${advice ? `\n\n**Evaluator's advice:** ${advice.slice(0, 1500)}` : ''}`);
+    // The packet never costs the owner the comment or the review request: if building it throws, the plain comment
+    // (every reason and the advice, still literal text), and the error is recorded.
+    let body: string;
+    try {
+      body = reviewPacket({ owner, ask, head, reasons, advice, ...this.packetFacts(w, head) });
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review packet #${w.number}`, kind: 'error', message: String((e as Error)?.message ?? e).slice(0, 500) });
+      body = `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${lit(r)}`).join('\n')}${advice ? `\n\n**Evaluator's advice:** ${lit(advice, 1500)}` : ''}`;
+    }
+    await this.d.backlog.comment(w.number, body);
     try {
       await this.d.backlog.requestReview(w.number, [owner]);
     } catch (e) {
       this.emit('coordinator.error', { instance: this.d.instance, where: `review request #${w.number}`, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
     }
+  }
+
+  /**
+   * What the review packet reports beside the wait reasons, read from the record (nothing here decides anything):
+   * the risk class at this head (from its paths, as the PR body has it, raised never lowered by the worker's claim),
+   * the latest verdict, the instruction evals and the latest check receipts. A fact it can't read is left out, never
+   * a reason not to post.
+   */
+  private packetFacts(w: EventPayload<'pr.opened'>, head: string): Pick<PacketInput, 'risk' | 'verdict' | 'evals' | 'receipts'> {
+    const n = w.issue;
+    const last = <T>(type: string) => this.events(n).filter((e) => e.type === type).at(-1)?.payload as T | undefined;
+    let risk: PacketInput['risk'] = null;
+    try {
+      const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+      const base = mergeInBase(this.mergeInsOf(), w.number, head) ?? last<EventPayload<'issue.claimed'>>('issue.claimed')!.base;
+      const files = this.changeFiles(this.d.repo, base, head);
+      const labels = last<{ labels?: string[] }>('issue.seen')?.labels ?? [];
+      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+      const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
+      const cls = effectiveClass(computed.cls, this.claimedClass(n));
+      risk = { cls, why: cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why] };
+    } catch {
+      // unknown: the packet says so
+    }
+    const verdict = last<EventPayload<'eval.verdict'>>('eval.verdict');
+    const checks = last<EventPayload<'check.result'>>('check.result');
+    const doneWhen = (last<EventPayload<'contract.agreed'>>('contract.agreed')?.done_when ?? []) as DoneWhenList;
+    const receipts = checks ? { checks: checks.checks, doneWhen, unverified: verdict?.unverified_claims ?? [], head: checks.head } : null;
+    return { risk, verdict, evals: this.instructionResults(n), receipts };
   }
 
   /**

@@ -13,7 +13,7 @@ import { checkNamesFor, postChecks, startTestRun, type TestRunResult } from '../
 import type { IncidentSink } from '../usage-limit.js';
 import { DEPLOY_GATE_CHECK, HOST_TOKEN_CREDENTIAL, type PostDeployConfig } from './config.js';
 import { DeployGate, refUpdateBody, type DeployRefs, type GateGit, type RefResult } from './gate.js';
-import { PostDeploy } from './post-deploy.js';
+import { PostDeploy, type FollowUpTracker } from './post-deploy.js';
 import { githubDeployments, railwayHost, RAILWAY_API } from './railway.js';
 
 type Fetch = typeof fetch;
@@ -115,7 +115,7 @@ export function readHostToken(file: string | null): string | null {
  * The post-deploy check, for a gate with deploy_gate.post_deploy. Without a stored token it still smoke-tests and
  * alerts, and asks the owner once (a paste_secret ask in the setup console) for the token a rollback needs.
  */
-export function postDeployFor(config: PostDeployConfig, branch: string, s: DeployGateSetup, d: { log: EventLog; actor: string; stateDir: string; incidents?: IncidentSink }, markFailed: (sha: string, reason: string) => void): PostDeploy {
+export function postDeployFor(config: PostDeployConfig, branch: string, s: DeployGateSetup, d: { log: EventLog; actor: string; stateDir: string; incidents?: IncidentSink; backlog?: FollowUpTracker }, markFailed: (sha: string, reason: string) => void): PostDeploy {
   const file = s.instance ? hostTokenFile(s.instance, s.secretsHome) : null;
   const token = () => readHostToken(file);
   if (s.instance && !token()) {
@@ -138,6 +138,8 @@ export function postDeployFor(config: PostDeployConfig, branch: string, s: Deplo
     hasToken: () => token() !== null,
     github: s.github ?? githubDeployments(s.repo, s.token, config.github_environment, fetch, s.api),
     markFailed,
+    // A failed check's follow-up issue goes to the coordinator's own tracker, never labelled ready.
+    ...(d.backlog ? { followUp: { backlog: d.backlog, repo: s.repo } } : {}),
     log: d.log,
     actor: d.actor,
     stateDir: d.stateDir,
@@ -153,7 +155,7 @@ export function postDeployFor(config: PostDeployConfig, branch: string, s: Deplo
  * The gate, when tests.yaml has deploy_gate with `enabled: true` and the test runs are set up; else undefined (and,
  * when it is on but can't start, why, in the log). Off: nothing is built, so nothing runs, moves, checks or asks.
  */
-export function setupDeployGate(cfg: Config, s: DeployGateSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string; testRunsReady: boolean; incidents?: IncidentSink }): DeployGate | undefined {
+export function setupDeployGate(cfg: Config, s: DeployGateSetup, d: { log: EventLog; actor: string; root: string; stateDir: string; remote?: string; testRunsReady: boolean; incidents?: IncidentSink; backlog?: FollowUpTracker }): DeployGate | undefined {
   const config = cfg.tests.deploy_gate;
   const testRun = cfg.tests.test_run;
   if (!config || !config.enabled || !testRun) return undefined;

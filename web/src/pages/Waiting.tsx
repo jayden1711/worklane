@@ -7,6 +7,7 @@ import { api, type MergedItem, type State, type WaitItem, type WaitKind, type Wa
 import { navigate } from '../App';
 import { Badge, Card, Empty } from '../components/ui';
 import { Header } from '../components/Header';
+import { LEVEL_MEANING } from './Decisions';
 
 /** The kinds in the digest's order, with its headings (src/digest.ts). */
 export const KINDS: [WaitKind, string][] = [
@@ -103,12 +104,17 @@ export function MergedSince({ merged, since }: { merged: MergedItem[]; since: st
                   #{m.issue}
                 </button>
                 <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{m.title}</span>
-                <span data-testid="merged-level">
-                  <Badge>{m.level ?? 'level not recorded'}</Badge>
-                </span>
-                <span data-testid="merged-confidence">
-                  <Badge tone={m.confidence ? CONFIDENCE_TONE[m.confidence] ?? 'neutral' : 'neutral'}>{m.confidence ? `evaluator confidence ${m.confidence}` : 'confidence not recorded'}</Badge>
-                </span>
+                {/* What isn't recorded isn't drawn; a level says what it means. */}
+                {m.level && (
+                  <span data-testid="merged-level">
+                    <Badge>{LEVEL_MEANING[m.level] ? `${m.level}: ${LEVEL_MEANING[m.level]}` : m.level}</Badge>
+                  </span>
+                )}
+                {m.confidence && (
+                  <span data-testid="merged-confidence">
+                    <Badge tone={CONFIDENCE_TONE[m.confidence] ?? 'neutral'}>evaluator confidence {m.confidence}</Badge>
+                  </span>
+                )}
               </li>
             ))}
           </ul>

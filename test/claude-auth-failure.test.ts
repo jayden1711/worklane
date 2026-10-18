@@ -17,6 +17,10 @@ import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { coordinator, easyIssue, fixture, readAll, realFix, skip } from './repro-state-graph/harness.js';
 import { STDIN_LINE } from './helpers.js';
 import { askChat } from '../src/chat.js';
+import * as holds from '../src/governor-holds.js';
+
+// A namespace import: on an engine without #567 the hold's test fails on its assertion, not the file on the export.
+const { SIGN_IN_HOLD_REASON } = holds;
 
 const posixOnly = process.platform === 'win32' && 'POSIX shell stand-in';
 const TOKEN = 'sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789';
@@ -188,7 +192,10 @@ test('a refused login holds the instance: the task requeued (no attempt), no new
   assert.ok((await f.backlog.comments(issue)).some((m) => /Claude sign-in failed on this machine .* requeued/.test(m.body)));
   const holdReasons = f.log.read(0, ['governor.hold']).map((e) => (e.payload as { reason: string }).reason).filter((r) => /Claude sign-in failed/.test(r));
   assert.equal(holdReasons.length, 1, 'the dashboard hold reason, once');
-  assert.match(holdReasons[0]!, /agents@example\.com/);
+  // #567: the reason reaches every viewer's state and the report posted on the repo, so it names no account; the
+  // owners and writers see the login on the sign-in banner and the incident.
+  assert.doesNotMatch(holdReasons[0]!, /agents@example\.com/);
+  assert.equal(holdReasons[0], SIGN_IN_HOLD_REASON);
   const notices = chat.posts.filter((p) => p.where === ASKS && /Claude sign-in failed/.test(p.text));
   assert.equal(notices.length, 1, 'one ops notice');
   assert.match(notices[0]!.text, /agents@example\.com.*Invalid API key/s);

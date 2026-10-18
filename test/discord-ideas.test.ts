@@ -8,6 +8,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { parseContract } from '../src/backlog/types.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
@@ -208,6 +209,30 @@ test("ideas: an admin's yes files a writer's idea; a viewer or an unmapped perso
   await t.pass(msg(OWNER_ID, 'no', t.chat.threads[1]!.id));
   assert.equal((await ready(t.backlog)).length, 1, 'the second idea is dropped, not filed');
   assert.equal(ideaStages(t.log).at(-1), 'dropped');
+});
+
+test('ideas (#333): a bug drafted in conversation is shown and filed with `- repro: true`, and labelled when not reproduced; one that cannot carry it is asked about, never drafted; a feature is filed as drafted', async () => {
+  const flow = { ...DRAFT, body: DRAFT.body.replace('```done_when\n- command: |\n    npm test -- --grep "cart discount before tax"\n```', '```done_when\n- command: |\n    npm test\n- {repro: false}\n```') };
+  const t = setup([{ kind: 'bug', draft: DRAFT, reproduction: { result: 'not_reproduced', detail: 'the cart code applies discounts' } }, { kind: 'bug', draft: flow, reply: 'What should the check be?' }, { kind: 'feature', draft: DRAFT }]);
+  await t.pass(msg(OWNER_ID, 'bug: the totals ignore my discount code'));
+  const thread = t.chat.threads[0]!.id;
+  assert.match(inThread(t, thread).join('\n'), /^- repro: true$/m, 'the draft shown carries the item');
+  await t.pass(msg(OWNER_ID, 'yes', thread));
+  const [bug] = await ready(t.backlog);
+  assert.deepEqual(bug!.labels, ['ready', 'bug', 'couldnt-reproduce']);
+  const c = parseContract(bug!.body);
+  assert.ok(c.ok && c.done_when.filter((d) => 'repro' in d).length === 1 && c.done_when.some((d) => 'repro' in d && d.repro === true), 'the filed contract asks for the failing test');
+
+  await t.pass(msg(OWNER_ID, 'bug: the export button does nothing'));
+  const second = t.chat.threads[1]!.id;
+  assert.deepEqual(inThread(t, second), ['What should the check be?'], 'asked, not drafted');
+  assert.equal(ideaStages(t.log).at(-1), 'asked');
+
+  await t.pass(msg(OWNER_ID, 'please add dark mode'));
+  await t.pass(msg(OWNER_ID, 'yes', t.chat.threads[2]!.id));
+  const feature = (await ready(t.backlog)).find((i) => i.labels.includes('enhancement'));
+  assert.ok(feature!.body.startsWith(DRAFT.body.trim()), 'the feature as drafted');
+  assert.doesNotMatch(feature!.body, /repro/);
 });
 
 test('ideas: the confirm reading and the filing rule', () => {
