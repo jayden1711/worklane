@@ -66,10 +66,14 @@ UMask=0077
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
+# The cgroup tree read-only for the broker and every server it starts; ci-slow's add-project job proves the broker
+# still starts servers under it (scripts/ci/mcp-broker-kernel.sh). Not ProtectKernelTunables (#551): under it
+# bubblewrap, started as sandbox-runtime starts it, says "Can't mount proc on /newroot/proc: Operation not permitted"
+# (ubuntu-24.04, ci-slow run 39096175819), so no server starts. /proc/sys stays unwritable to them by the kernel's
+# permissions: a non-root user with every capability dropped.
 ProtectKernelModules=yes
+ProtectControlGroups=yes
 NoNewPrivileges=yes
-# Not ProtectKernelTunables or ProtectControlGroups: their read-only mounts over /proc/sys and /sys/fs/cgroup stop
-# bubblewrap (the servers' sandbox) mounting a fresh /proc inside its own namespace.
 Restart=on-failure
 RestartSec=5
 

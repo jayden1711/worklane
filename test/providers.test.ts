@@ -18,9 +18,11 @@ import { FileBacklog } from '../src/backlog/file.js';
 import { Coordinator } from '../src/coordinator.js';
 import { EventLog } from '../src/events/log.js';
 import { throughput, throughputMarkdown } from '../src/throughput.js';
-import { exampleProject } from './helpers.js';
+import { allowProviderHosts, exampleProject } from './helpers.js';
 
 const posix = process.platform !== 'win32';
+// Root allows these providers' hosts (src/provider-hosts.ts; test/provider-hosts.test.ts covers a refused one).
+allowProviderHosts('127.0.0.1:8080', 'open.example.com');
 const hasPerl = spawnSync('perl', ['-e', '1']).status === 0;
 
 test('a model names a provider as `local` or `hosted:<name>`; anything else is an Anthropic model', () => {
@@ -243,6 +245,7 @@ test('wired: a provider run falls back with an event when it may not run, goes t
     const { dir, stateDir } = exampleProject();
     const cfg = loadConfig(dir);
     cfg.agents = AgentsConfig.parse({ ...base, providers: { local: { ...PROVIDERS.local, base_url: `http://127.0.0.1:${port}` } }, model_routing: { intake_replier: 'local' } });
+    allowProviderHosts('127.0.0.1:8080', 'open.example.com', `127.0.0.1:${port}`);
     const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'prov-log-')), 'events.db'));
     const runner = new FakeRunner((req) => ({ costUsd: 0.4, ...(req.provider ? { provider: req.provider.name, tokens: { in: 800, out: 120 }, durationMs: 2500 } : {}) }));
     const slotsDir = mkdtempSync(join(tmpdir(), 'prov-slots-'));

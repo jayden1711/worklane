@@ -1,7 +1,8 @@
 # Outbound network: where credentials go, and whom children trust
 
 Worklane's children (the `claude` agent runs, `gh`, `git`, project checks and tests) send credentials to the hosts
-those tools name themselves: Anthropic's API (or a provider's `base_url` from `agents.yaml`) and GitHub. They verify
+those tools name themselves: Anthropic's API (or a provider's `base_url` from `agents.yaml`, on a host root allows in
+`/etc/worklane/providers.json`: [providers.md](providers.md)) and GitHub. They verify
 those hosts against their own trust stores. Nothing in the environment Worklane was started with can point them
 anywhere else, add a CA they trust, or loosen how they verify.
 
@@ -18,7 +19,7 @@ these, in any letter case, whatever set them (the inherited environment, an inst
 | --- | --- | --- |
 | `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, `FTP_PROXY` (and lowercase) | curl/git, gh (Go), Node, claude | A proxy sees every request and, for plain HTTP or a trusted interceptor, its credentials. |
 | `GIT_PROXY_COMMAND`, `GIT_HTTP_PROXY_AUTHMETHOD` | git | A command that carries git's connections; how git authenticates to a proxy. |
-| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_URL` | claude | Sends prompts and the key elsewhere. A provider run's own endpoint is set after the strip, from `agents.yaml`. |
+| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_URL` | claude | Sends prompts and the key elsewhere. A provider run's own endpoint is set after the strip, from `agents.yaml`, and only to a host root allows in `/etc/worklane/providers.json`. |
 | `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_BEDROCK_MANTLE_BASE_URL`, `ANTHROPIC_AWS_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_RESOURCE` | claude | Other providers' endpoints. |
 | `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX`, `_FOUNDRY`, `_MANTLE`, `_ANTHROPIC_AWS`, `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST` | claude | Switch where prompts go. |
 | `CLAUDE_CODE_PROXY_RESOLVES_HOSTS`, `CLAUDE_CODE_IDE_HOST_OVERRIDE` | claude | Proxy DNS and the IDE host. |

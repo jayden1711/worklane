@@ -216,14 +216,15 @@ function LastOp({ op }: { op: ProfileOp }) {
 /** The profiles section; `canAct`: the person may change accounts now (a machine owner here, nothing else running). */
 /**
  * `self`: this dashboard's instance. Every step from here is for it alone (the server and the machine helper hold to
- * that): another instance, or every one, is a root admin's on the machine, with `confirmScript`.
+ * that): another instance, or every one, is a root admin's on the machine, with `confirmScript`. null: "All instances"
+ * is chosen on a hub, so the table is shown for every instance and no step for one instance is offered (#562).
  */
-export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string; confirmScript: string; signin?: ClaudeAccountData['signin']; canAct: boolean; onChanged?: () => void }) {
+export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string | null; confirmScript: string; signin?: ClaudeAccountData['signin']; canAct: boolean; onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const running = ops.some((o) => o.status === 'running');
-  const may = canAct && !running && !busy;
+  const may = canAct && self !== null && !running && !busy;
   const act = async (action: 'use' | 'remove', profile: string) => {
     setBusy(true);
     setErr(null);
@@ -242,7 +243,15 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null,
       <div>
         <div className="text-[13px] font-medium text-ink">Accounts</div>
         <p className="text-[12px] text-ink-3">
-          Accounts sit side by side for each agent user. From here, only {self}'s: choosing one first makes one minimal real call as its agent user on it (the cheapest model, a one-word answer); if it is refused, nothing changes. Runs already going finish on the account they started on. Another instance, or every one, is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt; [&lt;instance&gt;]</code>.
+          {self === null ? (
+            <>
+              Accounts sit side by side for each agent user, every instance's here. To choose, add or remove one for an instance from here, pick that instance in the sidebar. Every instance at once is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt;</code>.
+            </>
+          ) : (
+            <>
+              Accounts sit side by side for each agent user. From here, only {self}'s: choosing one first makes one minimal real call as its agent user on it (the cheapest model, a one-word answer); if it is refused, nothing changes. Runs already going finish on the account they started on. Another instance, or every one, is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt; [&lt;instance&gt;]</code>.
+            </>
+          )}
         </p>
       </div>
       <div className="overflow-x-auto rounded-card bg-surface shadow-card">
@@ -303,12 +312,16 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null,
           </tbody>
         </table>
       </div>
-      <p className="text-[12px] text-ink-3">
-        Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
-      </p>
-      <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-      <SignIn self={self} signin={signin ?? null} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-      {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
+      {self !== null && (
+        <>
+          <p className="text-[12px] text-ink-3">
+            Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
+          </p>
+          <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
+          <SignIn self={self} signin={signin ?? null} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
+          {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
+        </>
+      )}
       {err && (
         <p className="text-[12.5px] text-red" data-testid="claude-profile-error">
           {err}
