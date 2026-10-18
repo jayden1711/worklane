@@ -21,9 +21,10 @@
   --ink-2: #4d4c48;
   /* Tertiary text has to pass on the darkest hover too, so it sits close to secondary. */
   --ink-3: #5b5a55;
-  /* Dividers. A control's edge (a button, a field, a toggle) is --line-strong, which reaches 3:1. */
+  /* Dividers. A control's edge (a button, a field, a toggle) is --line-strong, which reaches 3:1 on every light
+     background, hover ones included (3.20:1 on --hover-2). */
   --line: #b0aea5;
-  --line-strong: #807e76;
+  --line-strong: #79776f;
   /* The accent: fills and large marks only (2.96:1 on the page, under 3:1, so never text, and light mode's focus ring,
      progress bars and chart marks are the darker --ring set below). Text in the accent's
      colour is --blue-ink; text on an accent fill is dark (--ink, 5.90:1; white is 3.12:1). */

@@ -6,7 +6,7 @@
 // is checked on that tint laid over every light background, hover ones included (the active sidebar row is hover-2,
 // and a tool row hovers to it); one only ever used on a fill (text-surface on bg-ink,
 // text-white on bg-green) is checked on that fill. No text is drawn in the accent, and placeholder text passes too.
-// A control's edge reaches 3:1 (WCAG 1.4.11) on the resting backgrounds, and no field or button draws its own edge
+// A control's edge reaches 3:1 (WCAG 1.4.11) on every light background, and no field or button draws its own edge
 // with the divider colour; dividers don't need 3:1. The focus ring reaches 3:1 on every light background, and no
 // focus or selection style draws the accent instead of the ring. A progress bar's fill reaches 3:1 on its track.
 // Every colour class names a theme colour (a typo'd one draws nothing). Dark mode's block is pinned byte for byte.
@@ -22,8 +22,6 @@ const css = readFileSync(join(webSrc, 'styles.css'), 'utf8');
 
 /** Every background a text token can sit on in light mode (the issue's list). */
 const BACKGROUNDS = ['page', 'surface', 'canvas', 'inset', 'field', 'hover', 'hover-2'];
-/** The backgrounds an element rests on (not a hover state): a tint or a control's edge is checked on these. */
-const RESTING = ['page', 'surface', 'canvas', 'inset', 'field'];
 /** The palette's own colours (the owner's, 2026-10-18), as the light tokens must carry them. */
 const PALETTE: Record<string, string> = { page: '#faf9f5', surface: '#e8e6dc', ink: '#141413', line: '#b0aea5', blue: '#d97757' };
 /** Shadow tokens whose first ring draws a control's edge: buttons (shadow-btn), fields and pill toggles (shadow-hairline). */
@@ -282,13 +280,14 @@ test('every text colour used in web/src meets AA on every light background it ca
   assert.deepEqual(bad.map(fmt), [], `${bad.length} of ${all.length} text/background pairs are under AA`);
 });
 
-test("a control's edge is 3:1 on every resting light background", () => {
+test("a control's edge is 3:1 on every light background", () => {
+  // A control can sit on a hovered or active row (the owner's decision on #690), so hover backgrounds count too.
   const tokens = lightTokens();
   const failing: string[] = [];
   for (const shadow of CONTROL_EDGES) {
     const edge = /^0 0 0 1px (#[0-9a-f]+|\w+\([^)]*\)|\w+)/i.exec(resolve(`var(--${shadow})`, tokens))?.[1];
     assert.ok(edge, `--${shadow} starts with a 1px ring`);
-    for (const bg of RESTING) {
+    for (const bg of BACKGROUNDS) {
       const r = contrast(parseColour(edge), parseColour(resolve(`var(--${bg})`, tokens)));
       if (r < 3) failing.push(`--${shadow} (${edge}) on ${bg}: ${r.toFixed(2)}:1, needs 3:1`);
     }
