@@ -116,10 +116,15 @@ function withFunctions(fns: string[], units: Record<string, { nftset?: string; c
       assert.ok(from >= 0, `${f} is defined`);
       return sh.slice(from, sh.indexOf('\n}\n', from) + 3);
     });
-    // systemctl show -p <prop> --value <unit>: the unit's NFTSet or ControlGroup; list-units [... <pattern>]: the units
-    // matching the pattern (all of them without one), one a line as --plain --no-legend prints them.
+    // systemctl show -p ControlGroup --value <unit>: its cgroup; show -p NFTSet: "[unprintable]", as systemd 255 prints
+    // it (measured on ubuntu-latest, #543); cat <unit>: its unit file, with its NFTSet= line; list-units [... <pattern>]:
+    // the units matching the pattern (all of them without one), one a line as --plain --no-legend prints them.
     const show = Object.entries(units)
-      .flatMap(([u, p]) => [`'NFTSet ${u}') echo '${p.nftset ?? ''}' ;;`, `'ControlGroup ${u}') echo '${p.cg ?? ''}' ;;`])
+      .flatMap(([u, p]) => [
+        `'NFTSet ${u}') echo '[unprintable]' ;;`,
+        `'ControlGroup ${u}') echo '${p.cg ?? ''}' ;;`,
+        `'cat ${u}') printf '%s\\n' '# /etc/systemd/system/${u}' '[Service]' 'Type=simple' ${p.nftset ? `'NFTSet=${p.nftset}'` : ''} 'Restart=on-failure' ;;`,
+      ])
       .join('\n      ');
     const prog = `set -euo pipefail
 TABLE=worklane_egress SET=egress_ok
@@ -129,8 +134,9 @@ systemctl() {
     list-units)
       for a in "$@"; do case "$a" in list-units | -*) ;; *) pat="$a" ;; esac; done
       for u in ${Object.keys(units).join(' ')}; do case "$u" in $pat) echo "$u loaded active running x" ;; esac; done ;;
-    show)
-      case "$3 $5" in
+    show | cat)
+      if [ "$1" = cat ]; then a="cat $2"; else a="$3 $5"; fi
+      case "$a" in
       ${show}
       esac ;;
   esac
@@ -159,11 +165,21 @@ test('apply puts each running unit whose NFTSet= names the set in it, as systemd
   const r = withFunctions(['in_set_by_unit', 'exempt_units', 'join_running'], {
     'worklane-test-shop-docker.service': { nftset: OURS, cg: dockerCg('shop') },
     'other-set.service': { nftset: 'cgroup:inet:other_table:egress_ok', cg: '/system.slice/other-set.service' },
+    'longer-name.service': { nftset: 'cgroup:inet:worklane_egress:egress_ok_too', cg: '/system.slice/longer-name.service' },
+    'two-sets.service': { nftset: 'cgroup:inet:other_table:x cgroup:inet:worklane_egress:egress_ok', cg: '/worklane.slice/worklane-test.slice/two-sets.service' },
     'plain.service': { cg: '/system.slice/plain.service' },
   }, 'join_running');
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.nft, 'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/worklane-test-shop-docker.service" }\n');
-  assert.equal(r.stdout, `exempt: worklane-test-shop-docker.service (NFTSet=): its cgroup ${dockerCg('shop')} may send out\n`);
+  assert.equal(r.nft, [
+    'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/worklane-test-shop-docker.service" }',
+    'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/two-sets.service" }',
+    '',
+  ].join('\n'));
+  assert.equal(r.stdout, [
+    `exempt: worklane-test-shop-docker.service (NFTSet=): its cgroup ${dockerCg('shop')} may send out`,
+    'exempt: two-sets.service (NFTSet=): its cgroup /worklane.slice/worklane-test.slice/two-sets.service may send out',
+    '',
+  ].join('\n'));
 });
 
 test('check: each test user\'s running Docker must have NFTSet= and be in the set, or it says how to fix it', { skip: !posix && 'bash' }, () => {

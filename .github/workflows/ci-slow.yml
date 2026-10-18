@@ -3341,5 +3341,6 @@ jobs:
         if: failure()
         run: |
           sudo nft list ruleset || true
-          systemctl show -p NFTSet -p ControlGroup worklane-test-ci-docker.service || true
+          systemctl cat worklane-test-ci-docker.service || true
+          systemctl show -p ControlGroup worklane-test-ci-docker.service || true
           sudo journalctl --no-pager -n 80 -u worklane-test-ci-docker.service || true

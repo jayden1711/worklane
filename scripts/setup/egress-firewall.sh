@@ -109,10 +109,13 @@ as_root "${all_args[@]}"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 command -v nft >/dev/null 2>&1 || { echo "no nft on this machine: apt-get install -y nftables, then run this again" >&2; exit 1; }
 
-# Whether unit $1's NFTSet= names the set.
+# Whether unit $1's NFTSet= names the set (one of the space-separated entries of any NFTSet= line in its unit file,
+# drop-ins or transient file). WHY systemctl cat, not show: systemd 255's `systemctl show -p NFTSet` prints
+# "[unprintable]" (measured on ubuntu-latest).
 in_set_by_unit() {
-  case "$(systemctl show -p NFTSet --value "$1" 2>/dev/null || true)" in *"$TABLE:$SET"*) return 0 ;; esac
-  return 1
+  local sets
+  sets="$(systemctl cat "$1" 2>/dev/null | sed -n 's/^NFTSet=//p' | tr ' ' '\n' || true)"
+  grep -qxF "cgroup:inet:$TABLE:$SET" <<<"$sets"
 }
 
 # The running units whose NFTSet= names the set, one a line.

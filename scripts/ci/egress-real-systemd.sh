@@ -92,7 +92,7 @@ pull() { dk rmi -f "$DB_IMAGE" > /dev/null 2>&1 || true; timeout "$1" sudo -u "$
 echo "== before: no egress rule; a test-user unit reaches the stand-in"
 sudo nft list table inet worklane_egress > /dev/null 2>&1 && fail "an egress table is loaded already"
 [ "$(as_test "$PUB" "$PORT")" = OK ] || fail "with no rule, the test-user unit can't reach $PUB: this probe can't tell"
-systemctl show -p NFTSet "$DU"
+systemctl cat "$DU" | grep '^NFTSet=' || fail "$DU has no NFTSet="
 sudo journalctl --no-pager -o cat -u "$DU" | grep -i nft || echo "(the Docker unit's journal says nothing of nft)"
 
 echo "== apply: test users covered by default; Docker, started before the set existed, put in it"
