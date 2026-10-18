@@ -10,6 +10,8 @@ const COLS = [
   ['unshare_fresh_proc', 'unshare fresh /proc'],
   ['bwrap_srt_flags', 'bwrap, srt flags (--proc)'],
   ['bwrap_weaker_proc', 'bwrap, weaker (--bind /proc)'],
+  ['bwrap_no_netns', 'diag: bwrap without netns'],
+  ['bwrap_no_netns_weaker', 'diag: bwrap without netns (weaker)'],
   ['net_outside', 'net from pod'],
   ['net_isolated_bwrap_fresh', 'net blocked in bwrap'],
   ['net_isolated_bwrap_weaker', 'net blocked in bwrap (weaker)'],
@@ -17,10 +19,12 @@ const COLS = [
   ['srt_net_blocked', 'srt net blocked'],
   ['srt_deny_read', 'srt denyRead holds'],
   ['srt_pod_procs_hidden', 'srt hides pod procs'],
+  ['srt_pod_environ_hidden', 'srt hides pod env'],
   ['srt_weaker', 'srt weaker (enableWeakerNestedSandbox)'],
   ['srt_net_blocked_weaker', 'weaker: net blocked'],
   ['srt_deny_read_weaker', 'weaker: denyRead holds'],
   ['srt_pod_procs_hidden_weaker', 'weaker: hides pod procs'],
+  ['srt_pod_environ_hidden_weaker', 'weaker: hides pod env'],
   ['fail_closed', 'fail-closed'],
 ];
 

@@ -49,6 +49,11 @@ run unshare_fresh_proc unshare -Ur -p -f --mount-proc true
 BW=(bwrap --new-session --die-with-parent --unshare-net --ro-bind / / --bind "$W" "$W" --dev /dev --unshare-pid --unshare-user --cap-drop ALL)
 run bwrap_srt_flags "${BW[@]}" --proc /proc -- /bin/bash -c true
 run bwrap_weaker_proc "${BW[@]}" --bind /proc /proc -- /bin/bash -c true
+# Diagnostic only (srt always passes --unshare-net when it restricts the network): the same without a network
+# namespace, to tell a network-namespace failure (gVisor: "loopback: Failed RTM_NEWADDR") from the rest.
+BW_NO_NET=(bwrap --new-session --die-with-parent --ro-bind / / --bind "$W" "$W" --dev /dev --unshare-pid --unshare-user --cap-drop ALL)
+run bwrap_no_netns "${BW_NO_NET[@]}" --proc /proc -- /bin/bash -c true
+run bwrap_no_netns_weaker "${BW_NO_NET[@]}" --bind /proc /proc -- /bin/bash -c true
 
 # 3. Network isolation: the API server's service address answers from the pod, and not from inside the sandbox.
 TCP='exec 3<>"/dev/tcp/$0/$1" && echo connected'
@@ -125,6 +130,14 @@ enforce() { # <suffix> <settings>
     *probe.sh*) res "srt_pod_procs_hidden$1" no "the sandbox sees the pod's PID 1: $out" ;;
     *sandbox-started*) res "srt_pod_procs_hidden$1" yes "$out" ;;
     *) res "srt_pod_procs_hidden$1" n/a "sandbox did not start: $out" ;;
+  esac
+  # The pod's PID 1 environment holds SPIKE_FAKE_TOKEN (pods.mjs), standing in for the agent's API credentials. srt
+  # runs without it, so only another process's environment can show it.
+  out="$(timeout 60 env -u SPIKE_FAKE_TOKEN "$SRT" --settings "$2" -c 'echo sandbox-started; tr "\0" "\n" < /proc/1/environ | grep SPIKE_FAKE' 2>&1)"
+  case "$out" in
+    *spike-env-marker*) res "srt_pod_environ_hidden$1" NO-READ-IT "the sandbox read the pod's PID 1 environment" ;;
+    *sandbox-started*) res "srt_pod_environ_hidden$1" yes "$out" ;;
+    *) res "srt_pod_environ_hidden$1" n/a "sandbox did not start: $out" ;;
   esac
 }
 enforce '' "$W/srt.json"

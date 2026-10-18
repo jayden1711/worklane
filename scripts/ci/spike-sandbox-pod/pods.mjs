@@ -50,6 +50,22 @@ const PROFILES = {
     spec: { hostUsers: false },
     apparmor: true,
   },
+  // hostUsers: false with the mount-allowing AppArmor profile but the runtime's own seccomp (RuntimeDefault): does a
+  // user namespace alone, without the custom seccomp profile, let bubblewrap start?
+  'restricted+aa-bwrap+userns': {
+    ns: ['restricted'],
+    pod: { ...restrictedPod, appArmorProfile: aaBwrap },
+    ctr: restrictedCtr,
+    spec: { hostUsers: false },
+    apparmor: true,
+  },
+  'aa-bwrap+userns+unmasked-proc': {
+    ns: ['restricted', 'baseline', 'privileged'],
+    pod: { ...restrictedPod, appArmorProfile: aaBwrap },
+    ctr: { ...restrictedCtr, procMount: 'Unmasked' },
+    spec: { hostUsers: false },
+    apparmor: true,
+  },
 };
 
 const [cmd, profile, ns, name] = process.argv.slice(2);
@@ -76,6 +92,8 @@ if (cmd === 'list') {
           image: 'spike-probe:1',
           imagePullPolicy: 'Never',
           securityContext: p.ctr,
+          // Stands in for the agent's credentials in its environment: probe.sh checks a sandboxed command can't read it.
+          env: [{ name: 'SPIKE_FAKE_TOKEN', value: 'spike-env-marker-1f2e' }],
           volumeMounts: [{ name: 'tmp', mountPath: '/tmp' }],
         },
       ],
