@@ -2031,8 +2031,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, docs: { backups: docsUrl('backups') } });
         }
         // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
-        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
-        if (url.pathname === '/api/health/incidents' && req.method === 'GET') return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
+        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix). An
+        // incident's detail that names a Claude account (#680) is the machine owners': the same check as the Machine
+        // page's account card (mayViewClaudeAccount, #567); an instance owner who isn't one reads it as a writer does.
+        if (url.pathname === '/api/health/incidents' && req.method === 'GET') {
+          const audience = !isWriter(who.role) ? 'viewer' : mayViewClaudeAccount({ login: who.login, breakGlass: who.via === 'break-glass' }, opts.machineOwnersFile) ? 'owner' : 'writer';
+          return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, audience }));
+        }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {

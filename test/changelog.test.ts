@@ -2,6 +2,7 @@
 // separate "Guardrail changes" section listing every PR that changed a guardrail file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
@@ -90,6 +91,21 @@ test('groups: guardrail files or words go to security, fixes by label or title, 
   assert.equal(c.groupOf({ number: 3, title: 'Queue: wait for the job', labels: ['bug'] }), 'fixes');
   assert.equal(c.groupOf({ number: 4, title: 'Prod reads: one role', files: ['src/guardrails/rules.ts'] }), 'security', 'a guardrail file');
   assert.equal(c.groupOf({ number: 5, title: 'Sandbox: deny reads of the task files', files: ['src/instance.ts'] }), 'security');
+});
+
+test("every section of the repo's CHANGELOG.md keeps its hand-written text when the release regenerates it", () => {
+  // The release keeps only what sits above a generated heading (#671): notes in a section with none are dropped.
+  const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  const generated = /^### (?:Features|Fixes|Security and guardrails|Reverted in this release|Guardrail changes)[ \t]*$/;
+  const versions = [...text.matchAll(/^## v(\d+\.\d+\.\d+) /gm)].map((m) => m[1]!);
+  assert.ok(versions.length > 0, 'CHANGELOG.md has sections');
+  for (const v of versions) {
+    const lines = c.sectionFor(text, v)!.split('\n').slice(1);
+    const end = lines.findIndex((l) => generated.test(l));
+    const byHand = (end < 0 ? lines : lines.slice(0, end)).filter((l) => l.trim());
+    const after = c.sectionFor(c.withSection(text, v, c.changelogSection(v, '2026-12-31', [])), v)!;
+    for (const l of byHand) assert.ok(after.includes(l), `v${v}: the release would drop ${JSON.stringify(l.slice(0, 80))}; end the hand-written notes with a generated heading such as "### Guardrail changes"`);
+  }
 });
 
 test('a release section: each group, then guardrail changes with their files; written first in CHANGELOG.md, replacing a section of the same version', () => {

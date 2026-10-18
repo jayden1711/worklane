@@ -166,8 +166,20 @@ export function projectSettingsRefusal(cwd: string, ours: Settings): string | nu
 const union = (...lists: (string[] | undefined)[]) => [...new Set(lists.flatMap((l) => l ?? []))];
 
 /**
+ * Commit and PR attribution off (#576): the repo's attribution is the DCO sign-off only, so an agent adds no
+ * Co-Authored-By trailer, no "Generated with" line and no session link. Claude Code's own setting names (its settings
+ * schema in the pinned CLI, 2.1.296: src/tool-install.ts): `attribution.commit` and `attribution.pr`, an empty string
+ * hiding each; `attribution.sessionUrl: false`, no Claude-Session trailer or PR-body link; and `includeCoAuthoredBy`,
+ * the deprecated form older versions read. The object form, not `attribution: false`, which older versions reject.
+ * WHY a key here must be valid for the pinned CLI: 2.1.296 drops a whole --settings with one invalid value, hooks and
+ * deny rules included, silently (measured on the #619 review: a run probe with --debug).
+ */
+export const NO_ATTRIBUTION = { attribution: { commit: '', pr: '', sessionUrl: false }, includeCoAuthoredBy: false } as const;
+
+/**
  * The settings one agent run gets with --settings: the instance's guardrails, the lane's own (its sandbox and deny
- * rules) and the run's harness variables, pinned so no project file can change them. disableAllHooks stays false.
+ * rules) and the run's harness variables, pinned so no project file can change them. disableAllHooks stays false,
+ * and attribution stays off whatever the instance's or the lane's settings say.
  */
 export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv: Record<string, string>): Settings {
   const l = (lane ?? {}) as Settings;
@@ -184,6 +196,7 @@ export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv:
     permissions: { ...perm('allow'), ...perm('deny'), ...perm('ask') },
     env: { ...(ours.env ?? {}), ...(l.env ?? {}), ...pinnedEnv },
     disableAllHooks: false,
+    ...NO_ATTRIBUTION,
   };
 }
 
