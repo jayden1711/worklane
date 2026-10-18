@@ -14,12 +14,20 @@ const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /
 
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+/**
+ * A word that ends in one of these is a credential word too: a name written as one word, with nothing to split on
+ * (`csrftoken`, `clientsecret`, `adminpassword`, `secretaccesskey`). Only the end counts, so `tokenizer` and
+ * `secretary` are not; `pass` and `pwd` count only whole (`compass`, `bypass`).
+ */
+const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
 const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 
 /**
  * A JSON key that names a credential, by rule rather than a list: split into words (`_`, `-`, camelCase), it holds a
- * credential word, ends in `auth`, or is `key` on its own or after a qualifier (`apikey` written as one word too).
+ * credential word (or a word ending in one), ends in `auth`, or is `key` on its own or after a qualifier (`apikey`
+ * written as one word too).
  */
 function credentialKey(k: string): boolean {
   const words = k
@@ -29,7 +37,7 @@ function credentialKey(k: string): boolean {
     .split(/[ _-]+/)
     .filter(Boolean);
   const last = words.at(-1) ?? '';
-  if (words.some((w) => CREDENTIAL_WORDS.has(w)) || last === 'auth') return true;
+  if (words.some(credentialWord) || last === 'auth') return true;
   if (last === 'key') return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2)!);
   return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
 }

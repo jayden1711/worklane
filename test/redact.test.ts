@@ -137,6 +137,9 @@ test('a credential key is found by what its name says, not by a list: each famil
     ['token', ['private_token', 'slack_bot_token', 'authToken', 'X-Auth-Token', 'refresh_token', 'jwt', 'bearer']],
     ['api or access key', ['x-api-key', 'openai_api_key', 'OPENAI_API_KEY', 'apiKey', 'ApiKey', 'APIKey', 'apikey', 'access_key', 'privateKey', 'signing-key', 'key']],
     ['authorization and credentials', ['authorization', 'Authorization', 'credentials', 'db_credential', 'auth', 'proxy_auth']],
+    // Written as one word, with no separator to split on: the word ends in the credential word (Django's `csrftoken`).
+    ['one-word token', ['accesstoken', 'refreshtoken', 'idtoken', 'authtoken', 'csrftoken', 'githubtoken', 'sessiontoken', 'apitoken', 'npmtoken', 'slacktoken', 'ACCESSTOKEN']],
+    ['one-word secret or key', ['clientsecret', 'webhooksecret', 'appsecret', 'signingsecret', 'secretaccesskey', 'CLIENTSECRET', 'adminpassword', 'DBPASSWORD', 'rootpasswd']],
   ];
   const missed = FAMILIES.flatMap(([family, keys]) =>
     keys.flatMap((k) =>
@@ -145,8 +148,12 @@ test('a credential key is found by what its name says, not by a list: each famil
   );
   assert.deepEqual(missed, []);
   // Names that hold no credential keep their value, however random it looks: no credential word, and a key qualified
-  // by a word that names no secret.
-  const PLAIN = ['cacheKey', 'cache_key', 'sortKey', 'sort_key', 'primaryKey', 'primary_key', 'idempotency_key', 'partition-key', 'publicKey', 'keyId', 'key_id', 'oauth', 'tokenizer', 'author', 'passive', 'bypass_reason'];
+  // by a word that names no secret. A one-word name counts only when it ends in the credential word, so a word that
+  // starts with one (`tokenizer`, `secretary`) or holds one in the middle (`passwordless`) keeps its value.
+  const PLAIN = [
+    ...['cacheKey', 'cache_key', 'sortKey', 'sort_key', 'primaryKey', 'primary_key', 'idempotency_key', 'partition-key', 'publicKey', 'keyId', 'key_id'],
+    ...['oauth', 'tokenizer', 'Tokenizer', 'TOKENIZER', 'tokenized', 'detokenize', 'secretary', 'secretariat', 'secretion', 'passwordless', 'author', 'passive', 'bypass_reason', 'compass', 'passport', 'passthrough'],
+  ];
   assert.deepEqual(PLAIN.filter((k) => redactString(json(k)) !== json(k)), []);
 });
 
