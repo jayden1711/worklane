@@ -10,11 +10,12 @@
 // Only for that instance, working exactly that repo (its instance.yaml, outside the repo), do the locks on the engine's
 // own source paths stand aside (review.ts LockScope), the push gate's scripts under scripts/ among them; the config
 // folder's, CI's, and the git hooks' and secret scan's files (.githooks/**, .denylist*, .gitleaks*) still hold. Nor is
-// the engine's own repo ever an app (engineRepos), whatever the file says.
+// the engine's own repo ever an app (engineRepos), whatever the file says; and with no root updates.json to say which
+// repo the engine updates from, no repo is.
 //
 // INVARIANT: fails closed. No file; one that isn't root's regular file alone (a symlink, another owner, writable by its
-// group or others, too big, unreadable); one not in exactly the script's form; or one that doesn't name this instance
-// with this repo: the engine's scope, and every lock applies.
+// group or others, too big, unreadable); one not in exactly the script's form; one that doesn't name this instance
+// with this repo; or no telling which repo is the engine (engineRepos): the engine's scope, and every lock applies.
 import { existsSync, readFileSync } from 'node:fs';
 import { instanceNameOk } from './instance-name.js';
 import { readRegularFile } from './os/index.js';
@@ -60,10 +61,12 @@ const ENGINE_PACKAGE = new URL('../../package.json', import.meta.url);
 const UPDATES_FILE = () => etcPath('updates.json');
 
 /**
- * The repos that are the engine on this machine: the installed package.json's repository.url, and the repo_url of
- * updates.json when there is one. Each read can only add a repo held as the engine (more locks, never fewer), so
- * when either can't be told (no repository URL, or an updates.json that isn't JSON or doesn't name a GitHub repo)
- * `problem` says so and the caller holds every lock.
+ * The repos that are the engine on this machine: the installed package.json's repository.url, and root's
+ * updates.json's repo_url. Each read can only add a repo held as the engine (more locks, never fewer), so when either
+ * can't be told (no repository URL; no updates.json, or one that isn't JSON or doesn't name a GitHub repo) `problem`
+ * says so and the caller holds every lock.
+ * WHY (#665, owner decision 2026-10-18): a missing updates.json is "can't tell", not "package.json alone tells": the
+ * package field is inside the engine's repo, so alone it let the engine's code under another repo name be an app.
  */
 export function engineRepos(): { repos: string[]; problem: string | null } {
   let pkg: unknown;
@@ -77,7 +80,7 @@ export function engineRepos(): { repos: string[]; problem: string | null } {
   const own = githubRepoOf(url);
   if (!own) return { repos: [], problem: `the engine's package.json names no GitHub repository (${JSON.stringify(url)})` };
   const updates = UPDATES_FILE();
-  if (!existsSync(updates)) return { repos: [own], problem: null };
+  if (!existsSync(updates)) return { repos: [own], problem: `${updates} doesn't exist, so the repo the engine updates from can't be told` };
   let u: unknown;
   try {
     u = JSON.parse(readFileSync(updates, 'utf8'));

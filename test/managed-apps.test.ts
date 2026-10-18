@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -25,6 +25,19 @@ const rootFile = (body: string, mode = 0o644) => {
   return f;
 };
 const scope = (file: string, instance = 'shop', repo = 'example-org/shop') => readLockScope(instance, repo, { file, rootUid: me });
+/** Root's updates.json as scripts/setup/updates.sh writes it: the repo the engine on this machine updates from. */
+const ENGINE_UPDATES = `${JSON.stringify({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', branch: 'main' })}\n`;
+/** Runs `fn` with `body` as root's updates.json (under the isolate's etc root), then takes it away again. */
+function withUpdates<T>(body: string, fn: () => T): T {
+  const updates = etcPath('updates.json');
+  mkdirSync(dirname(updates), { recursive: true });
+  writeFileSync(updates, body);
+  try {
+    return fn();
+  } finally {
+    unlinkSync(updates);
+  }
+}
 
 test("root's managed apps file is the engine's /etc path, and the setup scripts write that one", () => {
   assert.equal(onRealMachine(MANAGED_APPS_FILE()), `/etc/${BRAND.cli}/managed-apps.json`);
@@ -35,9 +48,12 @@ test("root's managed apps file is the engine's /etc path, and the setup scripts 
 test("a managed app only where root's file names the instance with exactly its repo; anything else is the engine's (every lock)", { skip: !posix && 'owners and modes' }, () => {
   const good = rootFile('{"version":1,"apps":{"shop":"example-org/shop","docs-site":"example-org/site"}}\n');
   assert.deepEqual(readManagedApps(good, me), { apps: { shop: 'example-org/shop', 'docs-site': 'example-org/site' }, problem: null });
-  assert.equal(scope(good).scope, 'managed-app');
-  assert.equal(scope(good, 'shop', 'Example-Org/Shop').scope, 'managed-app', 'GitHub names compare without case');
-  assert.match(scope(good).why, /is a managed app, not the engine/);
+  // Root's updates.json says which repo is the engine; only then is any repo an app.
+  withUpdates(ENGINE_UPDATES, () => {
+    assert.equal(scope(good).scope, 'managed-app');
+    assert.equal(scope(good, 'shop', 'Example-Org/Shop').scope, 'managed-app', 'GitHub names compare without case');
+    assert.match(scope(good).why, /is a managed app, not the engine/);
+  });
   // Not this instance, or not this repo: the engine's.
   assert.equal(scope(good, 'blog').scope, 'engine');
   assert.match(scope(good, 'shop', 'example-org/engine').why, /names instance shop for example-org\/shop, not example-org\/engine/);
@@ -80,21 +96,23 @@ test("a managed apps file root can't vouch for, or not in the script's form, nam
   if (me !== 0) assert.equal(readLockScope('shop', 'example-org/shop', { file: rootFile(body), rootUid: 0 }).scope, 'engine');
 });
 
-// WHY (#665 review): root marking the engine's own repo as an app (a slip at add, a hand edit, a machine with no
-// updates.json) turned the in-code engine-source locks off for it. The reader itself refuses that repo.
+// WHY (#665 review): root marking the engine's own repo as an app (a slip at add, a hand edit) turned the in-code
+// engine-source locks off for it. The reader itself refuses that repo, and every app when it can't tell which it is.
 test("the engine's own repo is never a managed app, whatever root's file says: the installed package.json's repository, and updates.json's repo_url", { skip: !posix && 'owners and modes' }, () => {
   const naming = (inst: string, repo: string) => rootFile(`${JSON.stringify({ version: 1, apps: { [inst]: repo } })}\n`);
   const pkgUrl = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { repository: { url: string } }).repository.url;
   const own = githubRepoOf(pkgUrl);
   assert.ok(own, `the engine's package.json names its GitHub repo: ${pkgUrl}`);
   for (const repo of [own, own.toUpperCase()]) {
-    const s = readLockScope('engine', repo, { file: naming('engine', repo), rootUid: me });
+    const s = withUpdates(ENGINE_UPDATES, () => readLockScope('engine', repo, { file: naming('engine', repo), rootUid: me }));
     assert.equal(s.scope, 'engine', repo);
     assert.match(s.why, /is the engine's own repo/, repo);
   }
-  // No updates.json: the package.json alone tells, and an app is still an app.
-  assert.equal(engineRepos().problem, null);
-  assert.equal(scope(naming('shop', 'example-org/shop')).scope, 'managed-app');
+  // No updates.json: which repo the engine updates from can't be told, so no repo is an app (every lock applies).
+  assert.match(engineRepos().problem ?? '', /updates\.json doesn't exist/);
+  const noUpdates = scope(naming('shop', 'example-org/shop'));
+  assert.equal(noUpdates.scope, 'engine');
+  assert.match(noUpdates.why, /which repo is the engine can't be told: .*updates\.json doesn't exist/);
   const updates = etcPath('updates.json');
   mkdirSync(dirname(updates), { recursive: true });
   try {
@@ -118,6 +136,20 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
   for (const [url, repo] of [['https://github.com/a-b/c.d.git', 'a-b/c.d'], ['git+https://github.com/a/b/', 'a/b'], ['ssh://github.com/a/b', 'a/b'], ['github.com:a/b', 'a/b'], ['https://example.org/a/b', null], ['https://github.com/a/b/c', null], ['', null]] as const) {
     assert.equal(githubRepoOf(url), repo, url);
   }
+});
+
+// WHY (#665, owner decision 2026-10-18): with no updates.json, the engine's own package.json was all that said which
+// repo is the engine. That is a field inside the engine's repo, so the engine's code under any other repo name (a
+// fork, a rename) that root's file named got the managed-app scope, though managed-apps.sh add refuses every add
+// without updates.json. A missing updates.json is "can't tell": every lock applies.
+test("no updates.json: the engine's code under another repo name is never a managed app, every lock applies", { skip: !posix && 'owners and modes' }, () => {
+  assert.equal(existsSync(etcPath('updates.json')), false, 'root has no updates.json here');
+  const fork = rootFile(`${JSON.stringify({ version: 1, apps: { fork: 'someone/engine-fork' } })}\n`);
+  const s = readLockScope('fork', 'someone/engine-fork', { file: fork, rootUid: me });
+  assert.equal(s.scope, 'engine', s.why);
+  assert.match(s.why, /^every self-modification lock applies: which repo is the engine can't be told: .*updates\.json doesn't exist/);
+  // The same root file, once root's updates.json names the engine's repo: an app. Only the missing file held the locks.
+  withUpdates(ENGINE_UPDATES, () => assert.equal(readLockScope('fork', 'someone/engine-fork', { file: fork, rootUid: me }).scope, 'managed-app'));
 });
 
 test("readLockScope never throws: a read that fails is the engine's scope, so the coordinator's start-up line can't crash", { skip: process.platform !== 'linux' && '/proc/self/mem' }, () => {
@@ -169,7 +201,8 @@ test('managed-apps.sh writes root:root 0644 in exactly the form the engine reads
   assert.equal(readFileSync(s.file, 'utf8'), '{"version":1,"apps":{"docs-site":"example-org/site","shop":"example-org/shop"}}\n');
   assert.equal((statSync(s.file).mode & 0o777).toString(8), '644', 'set, not inherited from umask 000');
   assert.deepEqual([...new Set(readFileSync(s.chownLog, 'utf8').trim().split('\n'))], [`root:root ${join(dirname(s.file), '.managed-apps.json.tmp')}`], 'root:root, on the temp file before it is moved into place');
-  assert.equal(readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }).scope, 'managed-app', 'the engine reads what the script wrote');
+  // The engine reads root's updates.json at its /etc path (here the isolate's), not the script's stand-in.
+  assert.equal(withUpdates(readFileSync(s.updates, 'utf8'), () => readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }).scope), 'managed-app', 'the engine reads what the script wrote');
   const before = readFileSync(s.file, 'utf8');
   // The engine's own repo (updates.json's), in any case or URL form: never a managed app.
   for (const repo of ['example-org/engine', 'Example-Org/Engine']) {
@@ -216,7 +249,9 @@ test('managed-apps.sh writes root:root 0644 in exactly the form the engine reads
   // remove takes one back (and again is nothing to do).
   for (let i = 0; i < 2; i++) assert.equal(s.run('remove', 'shop').status, 0);
   assert.equal(readFileSync(s.file, 'utf8'), '{"version":1,"apps":{"docs-site":"example-org/site"}}\n');
-  assert.equal(readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }).scope, 'engine');
+  const removed = withUpdates(readFileSync(s.updates, 'utf8'), () => readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }));
+  assert.equal(removed.scope, 'engine');
+  assert.match(removed.why, /doesn't name instance shop/, 'engine because it was removed, not for want of updates.json');
   // A file not in its form: it stops, changing nothing.
   writeFileSync(s.file, '{"version":1,"apps":{"shop":"example-org/shop"},"note":"x"}\n');
   const bad = s.add('blog', 'example-org/blog');

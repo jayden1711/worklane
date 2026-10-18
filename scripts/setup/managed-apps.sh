@@ -16,9 +16,12 @@
 # Only at a root shell: no sudoers rule or machine helper command runs it, the dashboard has no button for it, and it
 # refuses a coordinator's sudo (SUDO_USER=wl-*). It refuses to add the engine's own repo: the repository.url of the
 # package.json two folders up (the engine it ships with) and the repo /etc/worklane/updates.json's repo_url names.
-# When either can't be told (no updates.json, or no GitHub repo named), it refuses to add anything. The engine checks
-# the same two again each time it reads the file. Writes /etc/worklane/managed-apps.json whole, root:root 0644. No
-# file, or an instance it doesn't name: every lock applies. A running coordinator reads it before each review level.
+# When either can't be told (no updates.json, or no GitHub repo named), it refuses to add anything. Each time the engine
+# reads the file for an instance it names, it reads the same two again: that repo is no app when it is either one, and
+# no repo is an app when either can't be told (no updates.json, one that can't be read as JSON or names no GitHub repo,
+# or a package.json that can't be read or names no GitHub repository). Writes /etc/worklane/managed-apps.json whole,
+# root:root 0644. No file, or an instance it doesn't name: every lock applies. A running coordinator reads it before
+# each review level.
 source "$(dirname "$0")/lib.sh"
 usage() { sed -n '4,6p' "$0" | sed 's/^#   //' >&2; exit 2; }
 cmd="${1:-}"
