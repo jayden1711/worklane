@@ -1098,6 +1098,16 @@ test('a dead required check on the Machine page: named, since when, and why merg
   assert.doesNotMatch(r.renderProtection({ mode: 'github', deadChecks: [{ check: 'ci', since: new Date().toISOString() }] }, BRAND.name), /main-watch-dead-check/, 'only while the watch guards the branch');
 });
 
+test('a dead required check whose workflow is disabled says so on the Machine page: which workflow, and why it is off', () => {
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: null, alert: null, stopped: null, canClear: false };
+  const since = new Date(Date.now() - 8 * 86_400_000).toISOString();
+  const workflow = { name: 'Tests', path: '.github/workflows/tests.yml', state: 'disabled_manually' };
+  const html = r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since, workflow }] }, BRAND.name);
+  assert.match(html, /data-testid="main-watch-dead-check-workflow"[\s\S]*Its workflow [\s\S]*Tests[\s\S]*\.github\/workflows\/tests\.yml[\s\S]*is disabled on GitHub \([\s\S]*disabled_manually[\s\S]*: [\s\S]*turned off by hand[\s\S]*\), so it can&#x27;t post the check until someone enables it again/);
+  assert.match(r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since, workflow: { ...workflow, state: 'disabled_inactivity' } }] }, BRAND.name), /disabled_inactivity[\s\S]*: [\s\S]*turned off by GitHub for inactivity/);
+  assert.doesNotMatch(r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since }] }, BRAND.name), /main-watch-dead-check-workflow/, 'no note without a disabled workflow');
+});
+
 test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
   const a = 'a'.repeat(40);
   const b = 'b'.repeat(40);

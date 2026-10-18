@@ -371,7 +371,7 @@ test("the engine's own review.yaml already holds every self-modification file, w
   assert.deepEqual(unheld, [], 'files the code locks that this repo\'s review.yaml leaves to auto-merge: list them in a category under L3_human and merge.wait_categories');
 });
 
-test("regression: a tests-only change to the tests' own machine, the slot-write check or a tool-guard denial test waits for the owner in the engine's own review.yaml (engine-guards)", () => {
+test("regression: a tests-only change to the tests' own machine, the slot-write check or a tool-guard denial test, or a docs-only change to an architecture doc, waits for the owner in the engine's own review.yaml (engine-guards)", () => {
   const own = loadConfig(repoRoot).review!;
   for (const path of [
     'test/isolate.ts',
@@ -383,6 +383,8 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     'test/experiments-coordinator.test.ts',
     'test/intake-coordinator.test.ts',
     'test/domain-runner.test.ts',
+    // The architecture docs (docs/design/**): the owner asked that they always wait for the owner (#698).
+    'docs/design/product-architecture.md',
   ]) {
     // Every entry is a real file, so a rename can't leave a dead entry.
     assert.ok(engineFiles.includes(path), `${path} is a real file`);
