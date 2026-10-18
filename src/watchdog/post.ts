@@ -30,8 +30,14 @@ const span = (ms: number) => {
   return m < 60 ? `${m} min` : m < 48 * 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${Math.floor(m / 1440)} days`;
 };
 
+/**
+ * An incident as a post may read it: never the machine owners' detail (Incident.ownerDetail), which can name a Claude
+ * account (#680). A post's readers are whoever is in the ops channel, not a role on the instance.
+ */
+export type PostedIncident = Omit<Incident, 'ownerDetail'>;
+
 /** The post for an incident that opened, or was resolved. */
-export function postText(x: Incident, what: 'raised' | 'resolved', o: { dashboardUrl?: string | null; secrets?: string[] } = {}): string {
+export function postText(x: PostedIncident, what: 'raised' | 'resolved', o: { dashboardUrl?: string | null; secrets?: string[] } = {}): string {
   const where = x.instance ? `instance ${x.instance}` : 'the machine';
   const link = incidentLink(o.dashboardUrl, x.id);
   const lines =

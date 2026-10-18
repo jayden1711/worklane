@@ -23,7 +23,11 @@ const fs = require('node:fs'), path = require('node:path');
 if (process.argv[2] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
 fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'got.json'), JSON.stringify({ argv: process.argv.slice(2), allow: process.env.${ALLOW} ?? null }));
 const say = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+// As claude does with a --settings it applied (#626): the init event reports its outputStyle.
+const at = process.argv.indexOf('--settings');
+const outputStyle = (at >= 0 && JSON.parse(process.argv[at + 1]).outputStyle) || 'default';
 process.stdin.once('data', () => {
+  say({ type: 'system', subtype: 'init', output_style: outputStyle });
   say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'WebFetch', input: { url: 'https://new.example.org/rates' } }] } });
   say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: [{ type: 'text', text: '[${BRAND.cli}] new.example.org is not on the network allowlist; request approval to add it' }] }] } });
   say({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 1, total_cost_usd: 0.01 });

@@ -62,7 +62,7 @@ import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
 import { pauseOf, usageView } from './usage-limit.js';
-import { authHoldsOf } from './claude-auth-failure.js';
+import { authHoldsOf, signinFailedView } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
 import { readFeed, type FeedItem } from './run-feed.js';
@@ -119,7 +119,7 @@ import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSet
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
-import { profilesView } from './claude-profiles.js';
+import { accountSet, profilesView } from './claude-profiles.js';
 import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
@@ -1060,7 +1060,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   // NTP step moves). Two still age by wall time: avatars, whose `at` is saved to disk and read after a restart (wall
   // time is right there), and setupCache, whose checks run in a worker thread (performance.now has another origin
   // there) and whose stamps are shown as "checked at". The sign-in role cache (cachedRoles, built in dashboardSite)
-  // is wall time too.
+  // ages by its own monotonic clock (#622).
   const clock = opts.now ?? (() => performance.now());
   // A held PR's body as GitHub had it, for a decision's fail-without and never sections: asked at most once a minute per PR.
   const prBodies = new Map<number, { at: number; body: Promise<string | null> }>();
@@ -1358,6 +1358,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       prCounts: prCounts(eventCache.memo('prsView', prsView).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
+      // Whether the agents' Claude account is set, for everyone: the accounts themselves are the machine owners' only
+      // (GET /api/claude-account), so this is all a viewer or a writer learns of them (#567). A checkout has no agent
+      // users: null.
+      claudeAccount: opts.instance || opts.claudeAccountDir ? { set: accountSet(opts.instance ?? opts.cfg.project.project.name, opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR) } : null,
       // The pre-deploy gate (tests.yaml deploy_gate): where the deploy branch is, the last held commit and why; and
       // whether it is on, with what turning it on would do while it is off.
       ...(opts.cfg.tests.deploy_gate
@@ -1999,9 +2003,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // limit hits, for the Overview's usage line. Everyone with a role reads it: no costs, no run detail.
         if (url.pathname === '/api/usage' && req.method === 'GET') {
           const v = usageView(eventCache.all());
-          // Logins the API refused (src/claude-auth-failure.ts): the account as Claude names it and Claude's message
-          // (redacted), never a token; the owner may ask for a re-check.
-          const signin = authHoldsOf(eventCache.all()).map((h) => ({ login: h.login, detail: h.detail, since: h.since, lastCheck: h.lastCheck }));
+          // Logins the API refused (src/claude-auth-failure.ts): for the owners and writers, the account as Claude names
+          // it and Claude's message (redacted), never a token; for a viewer, only that one was refused (#567). The
+          // owner may ask for a re-check.
+          const signin = authHoldsOf(eventCache.all()).map((h) => signinFailedView(h, isWriter(who.role)));
           return json(res, 200, { instance: opts.instance ?? opts.cfg.project.project.name, ...v, paused: v.paused ? { since: v.paused.since, resetAt: v.paused.resetAt, source: v.paused.source, kind: v.paused.kind } : null, signinFailed: signin, canRecheckSignin: isOwnerHere });
         }
         // The owner's re-check of a refused Claude login: recorded for the coordinator (which runs the one tiny call as
@@ -2026,8 +2031,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, docs: { backups: docsUrl('backups') } });
         }
         // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
-        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).
-        if (url.pathname === '/api/health/incidents' && req.method === 'GET') return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, full: isWriter(who.role) }));
+        // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix). An
+        // incident's detail that names a Claude account (#680) is the machine owners': the same check as the Machine
+        // page's account card (mayViewClaudeAccount, #567); an instance owner who isn't one reads it as a writer does.
+        if (url.pathname === '/api/health/incidents' && req.method === 'GET') {
+          const audience = !isWriter(who.role) ? 'viewer' : mayViewClaudeAccount({ login: who.login, breakGlass: who.via === 'break-glass' }, opts.machineOwnersFile) ? 'owner' : 'writer';
+          return json(res, 200, incidentsView({ ...(opts.slotsDir ? { dir: opts.slotsDir } : {}), instance: opts.instance ?? null, audience }));
+        }
         // The instance's own settings (policy.yaml): what's in effect, the bounds, and, for the owner, a change.
         if (url.pathname === '/api/instance-settings' && req.method === 'GET') return json(res, 200, instanceSettingsView({ ...opts, user: who.login, role: who.role }));
         if (url.pathname === '/api/instance-settings' && req.method === 'POST') {
