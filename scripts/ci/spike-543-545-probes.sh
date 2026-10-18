@@ -237,7 +237,7 @@ exec sleep 600
 SH
 chmod 0755 "$work/run-ns.sh"
 chmod 0777 "$work"   # the test user's run writes its pid file here
-journal() { journalctl --no-pager -o cat -n 6 -u "$1" 2>/dev/null | sed 's/^/    /'; }
+journal() { journalctl --no-pager -o cat -n 6 -u "$1" 2>/dev/null | sed 's/^/    /'; tail -n 3 "$work/run.err" 2>/dev/null | sed 's/^/    systemd-run: /'; }
 
 # start_run <unshare binary>: the run as the test user in its own unit, sandboxed as a real run is on the points that
 # bear on this (PrivateNetwork=yes, NoNewPrivileges=yes), unsharing a user+net namespace of its own. Sets runpid.
@@ -296,6 +296,7 @@ else
   if [ "$restricted" = 1 ] && command -v apparmor_parser >/dev/null 2>&1; then
     # #545 memo: the allowance the pinned rootlesskit has, for one fixed wrapper instead: a root-owned copy of unshare
     # with a profile granting `userns,`, loaded for real (-r; -Q only parses). The system's own unshare is untouched.
+    install -d -o root -g root -m 0755 /usr/local/libexec
     install -o root -g root -m 0755 /usr/bin/unshare /usr/local/libexec/worklane-spike-unshare
     cat > "$work/aa.profile" <<AA
 abi <abi/4.0>,
