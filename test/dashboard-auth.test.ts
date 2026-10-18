@@ -5,7 +5,7 @@
 // loopback-only listeners. No real network.
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer, request, type Server } from 'node:http';
+import { createServer, request, type IncomingMessage, type Server } from 'node:http';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -128,7 +128,7 @@ const ask = (id: string, kind: 'question' | 'plan' | 'land') => ({ id, kind, iss
  * `machine`: as on a real machine, both instances share one slots dir, and each is seeded with items on every page
  * (MARKS), its coordinator holding an agent slot and a test slot there (b also the full-run lock).
  */
-async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string }; terminal?: { consoleUser: string; hubUser: string; spawnPty: SpawnPty; exec: () => string; audit: { record: (e: AuditEntry) => void } }; claudeAccountDir?: string; secretsHome?: string } = {}) {
+async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string }; terminal?: { consoleUser: string; hubUser: string; spawnPty: SpawnPty; exec: () => string; audit: { record: (e: AuditEntry) => void } }; claudeAccountDir?: string; secretsHome?: string; hubDefaultClocks?: boolean } = {}) {
   const gh = await fakeGitHub();
   const ownersFile = o.machineOwners ? machineOwnersFile(...o.machineOwners) : undefined;
   const clock = { t: Date.parse('2026-10-12T12:00:00Z') };
@@ -165,7 +165,9 @@ async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?:
     { name: 'b', port: b.port, tokenFile: join(b.dir, 'dashboard-token') },
   ];
   const hubState = mkdtempSync(join(tmpdir(), 'auth-hub-'));
-  const h = await startHub({ instances, stateDir: hubState, webDir: web, now, signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0, ...(o.terminal ?? {}) } } : {}) });
+  // The hub's wall clock (sessions) and the clock its role copies age by: both the mocked one, unless the test wants
+  // the hub's own defaults (Date.now and performance.now, which it then stubs).
+  const h = await startHub({ instances, stateDir: hubState, webDir: web, ...(o.hubDefaultClocks ? {} : { now, clock: now }), signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0, ...(o.terminal ?? {}) } } : {}) });
   const base = h.url.replace(/\/$/, '');
   const glass = h.breakGlassUrl.split('/?')[0]!;
 
@@ -313,7 +315,8 @@ test('someone removed from the repo keeps access only until the 5-minute cache r
 });
 
 /**
- * The role cache as every caller builds it (dashboardSite, the hub, intake): no clock given. Both clocks are stood in
+ * The role cache as every caller builds it (dashboardSite, the instance coordinator's in src/service.ts, intake): no
+ * clock given. Both clocks are stood in
  * for: the wall clock (Date.now), which an NTP correction steps, and the monotonic one (performance.now), which counts
  * the time that really passed. `revoke` takes the person's permission away after the first lookup.
  */
@@ -356,6 +359,42 @@ test('#622: a wall-clock step forward ends no cached role early (the cache still
   c.clocks.mono += 2000;
   assert.equal(await c.roleOf('wes'), null, 'read again at 5:01');
   assert.equal(c.asked(), 2);
+});
+
+/**
+ * The hub's own copy of a person's role, as production starts the hub (src/cli.ts: no clocks given): the owner
+ * terminal checks only this copy. Ada, an owner on a, signs in and the hub learns her role; then she is removed from
+ * the repo, and the wall clock steps by `wallStep` while 4:59 and then 5:01 really pass. The hub's session role at each.
+ */
+async function hubRoleAcrossStep(t: TestContext, wallStep: number) {
+  const s = await setup({ hubDefaultClocks: true });
+  try {
+    s.gh.perms.set('example/a:ada', 'admin');
+    const p = await s.signIn('ada');
+    assert.equal(await status(p.get('/api/i/a/state')), 200, 'the hub asks a for her role');
+    const req = { headers: { cookie: p.cookie } } as IncomingMessage;
+    const before = s.h.session(req, 'a')?.role ?? null;
+    s.gh.perms.delete('example/a:ada');
+    const clocks = { wall: Date.now() + wallStep, mono: performance.now() + ROLE_CACHE_MS - 1000 };
+    t.mock.method(Date, 'now', () => clocks.wall);
+    t.mock.method(performance, 'now', () => clocks.mono);
+    const at459 = s.h.session(req, 'a')?.role ?? null;
+    clocks.mono += 2000;
+    const at501 = s.h.session(req, 'a')?.role ?? null;
+    t.mock.restoreAll();
+    return { before, at459, at501 };
+  } finally {
+    t.mock.restoreAll();
+    await s.close();
+  }
+}
+
+test("#622: on the hub, a wall-clock step back keeps no revoked owner past 5 minutes (the owner terminal's role ages by the monotonic clock)", async (t) => {
+  assert.deepEqual(await hubRoleAcrossStep(t, -10 * 60_000), { before: 'owner', at459: 'owner', at501: null });
+});
+
+test("#622: on the hub, a wall-clock step forward ends no one's role early", async (t) => {
+  assert.deepEqual(await hubRoleAcrossStep(t, 10 * 60_000), { before: 'owner', at459: 'owner', at501: null });
 });
 
 test('a person sees only the instances they have a role on; any other instance is refused, even with a valid session', async () => {
