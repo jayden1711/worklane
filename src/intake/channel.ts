@@ -43,9 +43,10 @@ export function usagePausePost(p: Pick<UsagePause, 'resetAt' | 'source' | 'issue
  * The main watch's alert: a notice, no thread (nothing in chat resumes auto-merge; an admin does on the dashboard).
  * The commit's link, why it is unaccounted (redacted), and the revert PR's link: no secrets, nobody's credentials.
  */
-export function mainWatchPost(u: Pick<EventPayload<'main_watch.unaccounted'>, 'sha' | 'url' | 'reason' | 'revert'>, o: { dashboardUrl: string }): ChannelPost {
+export function mainWatchPost(u: Pick<EventPayload<'main_watch.unaccounted'>, 'sha' | 'url' | 'reason' | 'revert' | 'no_revert'>, o: { dashboardUrl: string }): ChannelPost {
   const head = `Main watch: an unaccounted commit on the default branch, ${u.url}: `;
-  const tail = `\nAuto-merge is stopped until an admin clears it on the dashboard: ${base(o.dashboardUrl)}/prs${u.revert ? `\nRevert PR, for a human to approve: ${u.revert}` : '\nNo revert PR was opened.'}`;
+  const none = u.no_revert ? `\nNo revert PR was opened: ${oneLine(u.no_revert)}.` : '\nNo revert PR was opened.';
+  const tail = `\nAuto-merge is stopped until an admin clears it on the dashboard: ${base(o.dashboardUrl)}/prs${u.revert ? `\nRevert PR, for a human to approve: ${u.revert}` : none}`;
   return { kind: 'notice', text: fit(head, oneLine(redactString(u.reason)), tail) };
 }
 

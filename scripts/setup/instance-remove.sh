@@ -299,8 +299,9 @@ systemctl daemon-reload
 
 # What its users last wrote in the engine's own places (the incident store, a slot's lock, the engine's lock files):
 # root:root now, mode kept, links never followed, so nothing there is owned by a uid no user has (a later user given
-# the same uid would own it). Each listed, and kept in the archive. What they own anywhere else is left as it is, and
-# listed for an admin.
+# the same uid would own it); in a shared engine group (agent-slots) a file loses group write, a directory keeps it
+# (lib.sh rechown_orphans says why). Each listed, and kept in the archive. What they own anywhere else is left as it
+# is, and listed for an admin.
 if [ -n "$my_uids" ]; then
   say "what $name's users left in the engine's own places, and anywhere else"
   trees="$(records engine-places x | awk -F'\t' '$1 == "tree" { print $2 }' | paste -sd: -)"
@@ -309,7 +310,7 @@ if [ -n "$my_uids" ]; then
   # shellcheck disable=SC2086 # one uid a word
   rechown_ok=1; rechown_orphans "$rechowned" "$trees" "$lockdir" "$lockname" "$(paste -sd, "$gids_file" 2>/dev/null || true)" $my_uids || rechown_ok=""
   chmod 0600 "$rechowned"
-  if [ -s "$rechowned" ]; then echo "given to root (and to group root when the group was $name's), setuid and setgid off, in $rechowned:"; sed 's/^/  /' "$rechowned"; fi
+  if [ -s "$rechowned" ]; then echo "given to root (and to group root when the group was $name's), setuid and setgid off, and group write off in a shared group (a directory's kept, with why), in $rechowned:"; sed 's/^/  /' "$rechowned"; fi
   # shellcheck disable=SC2086
   left_owned "$left" / "$(printf '%s:' $removed_homes)" $my_uids
   chmod 0600 "$left"

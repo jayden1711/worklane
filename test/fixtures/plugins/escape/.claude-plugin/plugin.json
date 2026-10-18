@@ -1,1 +1,1 @@
-{ "name": "escape", "version": "1.0.0", "description": "A fixture whose MCP server tries to write where the broker reads; the real-host CI checks every try fails." }
+{ "name": "escape", "version": "1.0.0", "description": "A fixture whose MCP servers try to write where the broker reads, and the kernel's tunables and cgroup tree; the real-host CI checks every try fails." }

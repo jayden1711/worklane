@@ -1,5 +1,6 @@
 {
   "mcpServers": {
-    "probe": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"] }
+    "probe": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js"] },
+    "kernel": { "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/server.js", "kernel"] }
   }
 }

@@ -1,6 +1,7 @@
-// WHY: Extend -> Experiments (docs/experiments.md). The server sends this view to owners and writers only, with the
-// actions this person may use (`actions`): the page shows those buttons and no others. Every action is reviewed first
-// (the server says exactly what changes; nothing is written) and confirmed against what that review saw.
+// WHY: the Experiments page's body (docs/experiments.md; pages/Experiments.tsx). The server sends this view to owners
+// and writers only, with the actions this person may use (`actions`): the page shows those buttons and no others. Every
+// action is reviewed first (the server says exactly what changes; nothing is written) and confirmed against what that
+// review saw.
 import { useState } from 'react';
 import { changeExperiment, useView, type ExpAction, type ExpLogRow, type ExpPlan, type ExperimentsView, type ExpStudy, type State } from '../api';
 import { navigate } from '../App';
@@ -41,7 +42,7 @@ function CopyButton({ text, label, ...p }: { text: string; label: string; 'data-
   );
 }
 
-export function ExperimentsTab({ state, id }: { state: State; id: string | null }) {
+export function ExperimentsPanel({ state, id }: { state: State; id: string | null }) {
   const { data, error } = useView<ExperimentsView>('/api/experiments', state.lastId);
   if (error) return <p className="text-[12.5px] text-red" data-testid="experiments-error">{error}</p>;
   if (!data) return <p className="text-[12.5px] text-ink-3">Loading…</p>;
@@ -88,13 +89,13 @@ export function ExperimentsTab({ state, id }: { state: State; id: string | null 
       {data.error && <p className="text-[12.5px] text-red" data-testid="experiments-file-error">{data.error}</p>}
       {data.setup.state !== 'on' && (
         <p className="rounded-lg bg-orange-tint p-3 text-[12.5px] text-ink" data-testid="experiments-setup-off">
-          {data.setup.why} {owner ? <span className="font-mono text-[11.5px]">{data.setup.commands.install}</span> : 'An owner of this machine sets experiments up.'}
+          {data.setup.why} {owner ? (data.setup.why?.includes(data.setup.commands.install) ? null : <span className="font-mono text-[11.5px]">{data.setup.commands.install}</span>) : 'An owner of this machine sets experiments up.'}
         </p>
       )}
       <ul className="grid gap-2 sm:grid-cols-2" data-testid="experiments-list">
         {data.studies.map((s) => (
           <li key={s.id}>
-            <button type="button" onClick={() => navigate(`/extend/experiments/${s.id}`)} className="w-full rounded-lg bg-surface p-3 text-left shadow-hairline hover:bg-hover" data-testid="experiment-row" data-id={s.id}>
+            <button type="button" onClick={() => navigate(`/experiments/${s.id}`)} className="w-full rounded-lg bg-surface p-3 text-left shadow-hairline hover:bg-hover" data-testid="experiment-row" data-id={s.id}>
               <div className="flex items-center gap-2 text-[13px] font-medium text-ink">
                 <span className={cx('size-2 shrink-0 rounded-full', !s.started ? 'bg-ink-3' : s.paused || s.broken ? 'bg-orange' : 'bg-green')} />
                 <span className="truncate">{s.id}</span>
@@ -150,7 +151,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
   return (
     <div className="min-w-0 space-y-4" data-testid="experiment-detail" data-id={s.id}>
       <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="w-full text-left text-[12px] text-ink-3 hover:text-ink" onClick={() => navigate('/extend/experiments')} data-testid="experiment-back">
+        <button type="button" className="w-full text-left text-[12px] text-ink-3 hover:text-ink" onClick={() => navigate('/experiments')} data-testid="experiment-back">
           ← All studies
         </button>
         <h2 className="text-[15px] font-semibold text-ink">{s.id}</h2>

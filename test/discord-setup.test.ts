@@ -455,7 +455,9 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
   const secretsHome = join(state, 'home');
   let listings = 0;
   const cli = cliAgainst(d.api, i.dir);
-  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (listings++, cli(args))) });
+  // The dashboard's cache clock, in the test's hand (#582): advanced, never slept on, so a wall-clock step can't fail it.
+  let clock = 0;
+  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (listings++, cli(args))), now: () => clock });
   const base = dash.url.split('/?')[0]!;
   const bodies: string[] = [];
   const call = async (path: string, login: string, body?: unknown) => {
@@ -535,7 +537,7 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
     assert.equal(listings, 1);
     // A request can't say where the listing asks: the child's arguments are fixed (the stand-in asserts them), whatever
     // the query, a header or a body carries.
-    await new Promise((r) => setTimeout(r, 5_100));
+    clock += 5_100;
     const steered = await fetch(`${base}/api/first-run/discord/channels?fresh=1&api=http://discord.example&base=http://discord.example`, { headers: { authorization: `Bearer ${dash.token}`, 'x-discord-api': 'http://discord.example', ...asPerson(owner) } });
     assert.equal(steered.status, 200);
     assert.equal(listings, 2);

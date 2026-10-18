@@ -3,7 +3,7 @@
 // (pause, paste the token, each instance's check, resume), each instance's result as it happens. Everyone else gets
 // nothing here: the server refuses them, and the view renders nothing for them.
 import { useEffect, useRef, useState } from 'react';
-import { claudeAccountAction, getClaudeAccount, pasteClaudeToken, type ClaudeAccountData, type SwitchLine, type SwitchView } from '../api';
+import { claudeAccountAction, getClaudeAccount, pasteClaudeToken, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
 import { ago, Badge, Button, Card, cx } from './ui';
 import { ClaudeProfiles } from './ClaudeProfiles';
@@ -159,8 +159,13 @@ const expiry = (at: string | null, now: number) => {
   return { text: `expires ${at.slice(0, 10)} (${days} day${days === 1 ? '' : 's'})`, tone: days < 14 ? ('warn' as const) : ('neutral' as const) };
 };
 
-/** The panel from its data (also what the render checks render); nothing at all for anyone but a machine owner. */
-export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data: ClaudeAccountData; onChanged?: () => void; now?: number }) {
+/**
+ * The panel from its data (also what the render checks render); nothing at all for anyone but a machine owner.
+ * `scope`: on a hub, the instances the page shows. With "All instances" chosen the panel says it covers every one and
+ * offers no step for one instance alone (those would go to the instance picked before, which the page no longer names:
+ * #562); with one instance picked, its steps are for that one.
+ */
+export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.now() }: { data: ClaudeAccountData; scope?: InstanceScope | null; onChanged?: () => void; now?: number }) {
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -180,11 +185,25 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
   };
   const users = data.status?.users ?? [];
   const open = data.requests.filter((r) => r.status === 'pending' || r.status === 'running');
+  const all = scope?.all ? scope.instances.filter((i): i is string => !!i) : null;
   return (
     <Card className="space-y-3 p-4" data-testid="claude-account">
       <div>
         <div className="text-[14px] font-medium text-ink">Claude account</div>
         <p className="text-[12px] text-ink-3">The Claude login every agent on this machine uses: each instance's agent user (channel chat runs as it too) and eval user. For the machine's owners.</p>
+        {scope?.current && (
+          <p className="mt-1 text-[12px] text-ink-2" data-testid="claude-account-scope" data-scope={all ? 'all' : data.instance}>
+            {all ? (
+              <>
+                For every instance on this machine ({all.join(', ')}): Refresh and Switch account cover them all. To choose, add or sign in an account for one instance from here, pick it in the sidebar.
+              </>
+            ) : (
+              <>
+                For {data.instance}: the account steps below are for it alone; Refresh and Switch account cover every instance.
+              </>
+            )}
+          </p>
+        )}
       </div>
       {data.status ? (
         <ul className="divide-y divide-line rounded-card bg-surface shadow-card" data-testid="claude-account-users">
@@ -211,7 +230,7 @@ export function ClaudeAccountView({ data, onChanged, now = Date.now() }: { data:
         </p>
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
-      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} signin={data.signin ?? null} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
+      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={all ? null : data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} signin={data.signin ?? null} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" variant="outline" disabled={!data.allowed || !!busy || open.some((r) => r.args[1] === 'status')} onClick={() => void act('status')} data-testid="claude-account-refresh">
           {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
@@ -284,6 +303,7 @@ export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | '
  * refusal; a look that fails otherwise keeps the last good data, and a token being pasted, on screen (web/src/refresh.tsx).
  */
 export function ClaudeAccountPanel({ onLoaded }: { onLoaded?: () => void }) {
+  const scope = useScope();
   const [loaded, setLoaded] = useState<Loaded<ClaudeAccountData>>(NOTHING_YET);
   const data = loaded.data;
   const load = () =>
@@ -305,7 +325,7 @@ export function ClaudeAccountPanel({ onLoaded }: { onLoaded?: () => void }) {
   return (
     <div className="space-y-1">
       <StaleNote stale={loaded.stale} />
-      <ClaudeAccountView data={data} onChanged={() => void load()} />
+      <ClaudeAccountView data={data} scope={scope} onChanged={() => void load()} />
     </div>
   );
 }
