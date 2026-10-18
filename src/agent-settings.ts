@@ -191,7 +191,8 @@ export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv:
  * Proof that claude applied a run's --settings (#626). The pinned Claude Code (2.1.296, src/tool-install.ts) drops
  * the whole --settings when one value in it is invalid, deny rules and hooks included, and says nothing; the run
  * goes on without its guardrails. So every --settings carries a check value, new for each run, and the run stops
- * unless claude's init event reports that value back before the agent's first turn (settingsAppliedProblem).
+ * unless claude's init event reports that value back before any line but a system one (settingsAppliedProblem); a
+ * session that ends with it unconfirmed fails.
  *
  * The value rides in outputStyle, read in the 2.1.296 package: its settings schema takes any string there; the init
  * event's output_style is the merged settings' outputStyle as given; and a name no style has resolves to no style,

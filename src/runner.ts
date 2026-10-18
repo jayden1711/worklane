@@ -690,7 +690,8 @@ export class CliRunner implements AgentRunner {
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
     const locked = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
     // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
-    // reports it before the agent's first turn: claude drops a whole --settings over one invalid value, silently.
+    // reports it before any line but a system one, and never succeeds without it: claude drops a whole --settings
+    // over one invalid value, silently. The check key is spread last, so nothing above can replace it.
     const check = locked ? settingsCheckValue() : null;
     const settings = locked && check ? { ...locked, [SETTINGS_CHECK_KEY]: check } : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
@@ -772,14 +773,14 @@ export class CliRunner implements AgentRunner {
           } catch {
             continue;
           }
-          // Before anything else reads the line: settings not confirmed by the first init event, or an agent turn
-          // before any init, stop the run.
+          // Before anything else reads the line: settings not confirmed by the first init event, or any line but a
+          // system one before it (a turn, a tool result, a result), stop the run, and the line goes nowhere.
           if (settingsState === 'pending' && check) {
             const problem =
               j.type === 'system' && j.subtype === 'init'
                 ? settingsAppliedProblem(j as { output_style?: unknown }, check, settingsName)
-                : j.type === 'assistant'
-                  ? `claude started the agent's turn before its init event confirmed the --settings this run passed (${settingsName}), so its deny rules and hooks may be off`
+                : j.type !== 'system'
+                  ? `claude sent ${j.type === 'assistant' || j.type === 'user' || j.type === 'result' ? `a ${j.type} line` : 'a line'} before its init event confirmed the --settings this run passed (${settingsName}), so its deny rules and hooks may be off`
                   : undefined;
             if (problem) {
               settingsState = { problem };
@@ -868,6 +869,9 @@ export class CliRunner implements AgentRunner {
         if ((!r || r.is_error || r.subtype !== 'success') && isAuthFailure({ apiErrorStatus: r?.api_error_status ?? null, assistantError, text: refusedText })) {
           return done({ reason: 'auth_failed', detail: authFailedDetail({ apiErrorStatus: r?.api_error_status ?? null, text: refusedText }), login: { key: this.loginOf(req), account: status.account ?? null }, ...base });
         }
+        // INVARIANT (#626): never a success with the --settings unconfirmed. Only its stderr is kept (a startup error
+        // there may be transient): nothing it sent before an init event was read.
+        if (settingsState === 'pending') return done({ reason: 'failed', detail: `claude exited ${code} before its init event confirmed the --settings this run passed (${settingsName}): ${stderrTail(stderr)}`, ...base });
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
         // An error result often carries no text of its own; claude's stderr then says what went wrong.

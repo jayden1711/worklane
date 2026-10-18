@@ -17,10 +17,11 @@ const isWindows = process.platform === 'win32';
 /**
  * A stand-in claude. `applied`: its init event reports the --settings' outputStyle, as claude does with a file it
  * accepted. `dropped`: it reports the default style, as claude does after dropping the file. `no-init`: it starts
- * the agent's turn without an init event. Then, like a model's answer arriving, it does the agent's work (a file
+ * the agent's turn without an init event. `tool-result-first`: a tool result comes before an init that would pass.
+ * `result-only`: it does the work and prints a successful result with structured output, and nothing else. Then, like a model's answer arriving, it does the agent's work (a file
  * written, standing for a tool call) and ends with a result.
  */
-function fakeClaude(mode: 'applied' | 'dropped' | 'no-init') {
+function fakeClaude(mode: 'applied' | 'dropped' | 'no-init' | 'result-only' | 'tool-result-first') {
   const dir = mkdtempSync(join(tmpdir(), 'fake-claude-settings-'));
   const work = join(dir, 'agent-work');
   const log = join(dir, 'log.json');
@@ -37,7 +38,13 @@ const settings = at >= 0 ? JSON.parse(args[at + 1]) : null;
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ settings }));
 const mode = ${JSON.stringify(mode)};
 const say = (o) => console.log(JSON.stringify(o));
-if (mode !== 'no-init') say({ type: 'system', subtype: 'init', session_id: 's', tools: ['Bash', 'Read'], mcp_servers: [], plugins: [], output_style: mode === 'applied' ? (settings && settings.outputStyle) || 'default' : 'default' });
+if (mode === 'result-only') {
+  fs.writeFileSync(${JSON.stringify(work)}, 'done');
+  say({ type: 'result', subtype: 'success', result: 'finished the task', structured_output: { verdict: 'pass' }, total_cost_usd: 0.01, num_turns: 1 });
+  process.exit(0);
+}
+if (mode === 'tool-result-first') say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't0', content: 'early' }] } });
+if (mode !== 'no-init') say({ type: 'system', subtype: 'init', session_id: 's', tools: ['Bash', 'Read'], mcp_servers: [], plugins: [], output_style: mode === 'applied' || mode === 'tool-result-first' ? (settings && settings.outputStyle) || 'default' : 'default' });
 else say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'true' } }] } });
 setTimeout(() => {
   fs.writeFileSync(${JSON.stringify(work)}, 'done');
@@ -116,6 +123,33 @@ test('an agent turn before any init event confirmed the --settings stops the run
   const r = await new CliRunner('cli', childEnv(), c.bin, undefined, undefined, undefined, {}, guardrails).run(req(cwd));
   assert.equal(r.reason, 'failed', r.detail);
   assert.ok(r.detail.includes(agentSettingsPath(home)), r.detail);
+  await settle();
+  assert.equal(c.worked(), false);
+});
+
+test('a session that never sends an init event fails: its result and structured output are not taken', { skip }, async () => {
+  const { home, cwd, guardrails } = instance();
+  const c = fakeClaude('result-only');
+  const r = await new CliRunner('cli', childEnv(), c.bin, undefined, undefined, undefined, {}, guardrails).run(req(cwd));
+  assert.equal(r.reason, 'failed', r.detail);
+  assert.equal(r.structured, undefined, 'its structured output is never accepted');
+  assert.ok(r.detail.includes(agentSettingsPath(home)), r.detail);
+  assert.match(r.detail, /before its init event confirmed the --settings/);
+});
+
+test('a tool result before the init event stops the run, and the line reaches nothing that reads the stream', { skip }, async () => {
+  const { home, cwd, guardrails } = instance();
+  const c = fakeClaude('tool-result-first');
+  const seen: string[] = [];
+  const r = await new CliRunner('cli', childEnv(), c.bin, undefined, undefined, undefined, {}, guardrails).run({
+    ...req(cwd),
+    onStreamLine: (l) => seen.push(String((l as { type?: unknown }).type)),
+    onLine: (l) => seen.push(`line:${String((l as { type?: unknown }).type)}`),
+  });
+  assert.equal(r.reason, 'failed', r.detail);
+  assert.ok(r.detail.includes(agentSettingsPath(home)), r.detail);
+  assert.match(r.detail, /a user line before its init event/);
+  assert.deepEqual(seen, [], 'nothing forwarded');
   await settle();
   assert.equal(c.worked(), false);
 });
