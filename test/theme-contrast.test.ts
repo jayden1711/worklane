@@ -5,8 +5,10 @@
 // own beside it) can sit on any light background, so it must reach 4.5:1 on all of them; a text token beside a tint
 // is checked on that tint laid over every light background, hover ones included (the active sidebar row is hover-2,
 // and a tool row hovers to it); one only ever used on a fill (text-surface on bg-ink,
-// text-white on bg-green) is checked on that fill. A control's edge reaches 3:1 (WCAG 1.4.11) on the resting
-// backgrounds; dividers don't need to. Dark mode's block is pinned byte for byte.
+// text-white on bg-green) is checked on that fill. No text is drawn in the accent, and placeholder text passes too.
+// A control's edge reaches 3:1 (WCAG 1.4.11) on the resting backgrounds, and no field or button draws its own edge
+// with the divider colour; dividers don't need 3:1. The focus ring reaches 3:1 on every light background, and no
+// focus or selection style draws the accent instead of the ring. Dark mode's block is pinned byte for byte.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';

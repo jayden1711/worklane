@@ -24,7 +24,8 @@
   /* Dividers. A control's edge (a button, a field, a toggle) is --line-strong, which reaches 3:1. */
   --line: #b0aea5;
   --line-strong: #807e76;
-  /* The accent: fills, rings and large marks only (2.96:1 on the page, under 3:1, so never text). Text in the accent's
+  /* The accent: fills and large marks only (2.96:1 on the page, under 3:1, so never text, and light mode's focus ring
+     is the darker --ring set below). Text in the accent's
      colour is --blue-ink; text on an accent fill is dark (--ink, 5.90:1; white is 3.12:1). */
   --blue: #d97757;
   --blue-ink: #8a412a;
