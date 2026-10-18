@@ -115,7 +115,7 @@ test('plan review gets the cited entries in full and the decisions index; what i
   assert.deepEqual(readPlanReview(contradiction, argued, index), []);
   assert.equal(readPlanReview({ summary: 'fine' }, PLAN, index), null, 'no verdict is no pass');
   const review = loadConfig(exampleProject().dir).review!;
-  assert.deepEqual(planHoldReasons({ ...argued, files: ['src/price.js'] }, { review, moneyPaths: [], existsAtBase: () => true }), ['decisions: the plan goes against decisions.md § D-2: Totals reject negative quantities']);
+  assert.deepEqual(planHoldReasons({ ...argued, files: ['src/price.js'] }, { review, moneyPaths: [], existsAtBase: () => true, scope: undefined }), ['decisions: the plan goes against decisions.md § D-2: Totals reject negative quantities']);
 });
 
 test('the config folder and the exact file name count: a decisions file is found only by its real name', () => {

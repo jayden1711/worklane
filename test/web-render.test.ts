@@ -137,7 +137,7 @@ interface Render {
   renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
-  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown): Record<string, number | undefined>;
   renderNeedsYou(state: State, waiting: unknown, now?: number, error?: string | null): string;
   NEEDS_YOU_ORDER: string;
   nextStep(f: unknown): { id: string } | null;
@@ -1098,6 +1098,16 @@ test('a dead required check on the Machine page: named, since when, and why merg
   assert.doesNotMatch(r.renderProtection({ mode: 'github', deadChecks: [{ check: 'ci', since: new Date().toISOString() }] }, BRAND.name), /main-watch-dead-check/, 'only while the watch guards the branch');
 });
 
+test('a dead required check whose workflow is disabled says so on the Machine page: which workflow, and why it is off', () => {
+  const watch = { mode: 'main_watch' as const, detail: "GitHub doesn't protect main", lastChecked: null, alert: null, stopped: null, canClear: false };
+  const since = new Date(Date.now() - 8 * 86_400_000).toISOString();
+  const workflow = { name: 'Tests', path: '.github/workflows/tests.yml', state: 'disabled_manually' };
+  const html = r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since, workflow }] }, BRAND.name);
+  assert.match(html, /data-testid="main-watch-dead-check-workflow"[\s\S]*Its workflow [\s\S]*Tests[\s\S]*\.github\/workflows\/tests\.yml[\s\S]*is disabled on GitHub \([\s\S]*disabled_manually[\s\S]*: [\s\S]*turned off by hand[\s\S]*\), so it can&#x27;t post the check until someone enables it again/);
+  assert.match(r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since, workflow: { ...workflow, state: 'disabled_inactivity' } }] }, BRAND.name), /disabled_inactivity[\s\S]*: [\s\S]*turned off by GitHub for inactivity/);
+  assert.doesNotMatch(r.renderProtection({ ...watch, deadChecks: [{ check: 'ci', since }] }, BRAND.name), /main-watch-dead-check-workflow/, 'no note without a disabled workflow');
+});
+
 test('the pre-deploy gate on the Machine page: the deployed sha, the last held sha and why, a refusal', () => {
   const a = 'a'.repeat(40);
   const b = 'b'.repeat(40);
@@ -1875,7 +1885,9 @@ test('#585 Needs you is one queue: what the three tabs list, each once, blocking
   // Blocking first; the hotspot hold is the oldest of all, but nothing waits on it but you, so it is last.
   assert.equal(rows.at(-1), 'hotspot_held no');
   assert.ok(rows.slice(0, -1).every((x) => x.endsWith(' yes')), rows.join(', '));
-  assert.equal(rows.length, r.navCounts(asOwner, w)['nav-needs-you'], 'the badge counts the queue');
+  // #633: the badge from the state alone, whose waiting keys are what /api/waiting lists.
+  const keyed = { ...asOwner, waiting: { count: w.items.length, keys: w.items.map((i) => ({ kind: i.kind, issue: i.issue, ...('decision' in i ? { decision: i.decision } : {}) })) } };
+  assert.equal(rows.length, r.navCounts(keyed)['nav-needs-you'], 'the badge counts the queue');
   // Every open decision is in it once, the one Waiting on you lists too among them.
   for (const d of open) assert.equal(html.split(`href="/needs-you/decisions/${d.id}"`).length - 1, 1, d.id);
   assert.match(html, /href="\/needs-you\/decisions\/pr-31"/);

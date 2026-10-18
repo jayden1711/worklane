@@ -52,8 +52,18 @@ export function ProtectionStatus({ protection, brand }: { protection: Protection
   );
 }
 
-/** A required check raised as dead by the main watch (src/main-watch.ts protectionView): no run on any commit judged since. */
-type DeadCheck = { check: string; since: string };
+/**
+ * A required check raised as dead by the main watch (src/main-watch.ts protectionView): no run on any commit judged
+ * since. `workflow`: the Actions workflow that would post it is disabled (its state as GitHub reports it).
+ */
+type DeadCheck = { check: string; since: string; workflow?: { name: string; path: string; state: string } };
+
+/** Why a disabled workflow is off, from GitHub's state for it. */
+export function workflowOff(state: string): string {
+  if (state === 'disabled_manually') return 'turned off by hand';
+  if (state === 'disabled_inactivity') return 'turned off by GitHub for inactivity';
+  return 'turned off';
+}
 
 /** Each dead required check, until a run of it appears: why every merge keeps tripping the watch. */
 export function DeadChecks({ protection }: { protection: Protection & { deadChecks?: DeadCheck[] } }) {
@@ -64,6 +74,11 @@ export function DeadChecks({ protection }: { protection: Protection & { deadChec
       {list.map((d) => (
         <div key={d.check} data-testid="main-watch-dead-check">
           <Badge tone="warn">No runs</Badge> Required check <span className="font-mono text-ink">{d.check}</span> has had no run on any commit checked since {ago(d.since)}. Merges keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.
+          {d.workflow && (
+            <div className="mt-1 text-ink-3" data-testid="main-watch-dead-check-workflow">
+              Its workflow <span className="text-ink">{d.workflow.name}</span> (<span className="font-mono">{d.workflow.path}</span>) is disabled on GitHub ({d.workflow.state}: {workflowOff(d.workflow.state)}), so it can't post the check until someone enables it again.
+            </div>
+          )}
         </div>
       ))}
     </div>

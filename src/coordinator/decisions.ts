@@ -15,7 +15,7 @@ import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest
 import { decisionsMade, objection, PLAN_DISALLOWED, PLAN_REVIEW_SCHEMA, PLAN_SCHEMA, PLAN_SEND_BACKS, PLAN_TOOLS, planAnswer, planComment, planDecision, planExtra, gateReasons, planHoldReasons, planReviewExtra, readPlan, readPlanReview, sendBackNote, type Plan, type PlanAnswer } from '../plan-mode.js';
 import { decisionIndex, type DecisionEntry } from '../plan-decisions.js';
 import { Recovery } from './recovery.js';
-import { laneOf, DEFAULT_REVIEW } from './shared.js';
+import { laneOf, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { routeRun } from './model-routing.js';
 
 export abstract class Decisions extends Recovery {
@@ -65,7 +65,7 @@ export abstract class Decisions extends Recovery {
     }
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     // The plan gate: always (the default) holds every plan for the owner; risky only one the merge policy's checks hold.
-    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
+    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
     await this.d.backlog.comment(n, planComment(plan, owner, reasons));
     const commentsAt = (await this.d.backlog.comments(n)).length;
     if (reasons.length) {
