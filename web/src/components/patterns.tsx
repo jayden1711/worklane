@@ -3,7 +3,7 @@
 // insight cards, the loading state. Their demo timelines are left out: these show
 // real state as it is, with no staged animation beyond a row's entrance.
 import { createContext, useContext, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { cx } from './ui';
+import { CHIP, cx } from './ui';
 
 /** The longest a row's entrance runs (owner's rule: a short fade, only for data that is new on the page). */
 export const ENTRANCE_MS = 150;
@@ -175,7 +175,11 @@ export function FileChip({ file }: { file: string }) {
 
 /** A value called out inline (a recommendation, an amount). */
 export function ValuePill({ children, tone }: { children: ReactNode; tone?: 'green' }) {
-  return <span className={cx('inline-flex h-5.5 items-center rounded-chip px-1.5 text-[12.5px] font-medium', tone === 'green' ? 'bg-green-tint text-green' : 'bg-inset text-ink shadow-hairline')}>{children}</span>;
+  return (
+    <span className={cx(CHIP, 'px-1 text-[12.5px]', tone === 'green' ? 'bg-green-tint text-green' : 'bg-inset text-ink')} data-role="chip">
+      {children}
+    </span>
+  );
 }
 
 /** A three-bar confidence meter. */

@@ -38,7 +38,10 @@ import { LearningsView } from './components/LearningsPanel';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
-import { Decisions } from './pages/Decisions';
+import { DecisionCard, Decisions } from './pages/Decisions';
+import type { Decision } from './api';
+import { Badge, Button } from './components/ui';
+import { ValuePill } from './components/patterns';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
@@ -121,6 +124,12 @@ export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => 
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+/** A display chip alone (test/web-buttons.test.ts): a ValuePill or a Badge, in a tone. */
+export const renderChip = (kind: 'value' | 'badge', tone?: string) =>
+  renderToStaticMarkup(kind === 'value' ? <ValuePill {...(tone === 'green' ? { tone } : {})}>approve</ValuePill> : <Badge {...(tone ? { tone: tone as 'ok' } : {})}>landed</Badge>);
+export const renderButton = (variant?: 'default' | 'outline' | 'ghost' | 'danger') => renderToStaticMarkup(<Button {...(variant ? { variant } : {})}>Go</Button>);
+/** One decision card; `sending`: the answer on its way as it draws. */
+export const renderDecisionCard = (d: Decision, sending?: string) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} />);
 /** The Updater setup steps alone; `review` opens one step's review as the server answered it. */
 export const renderUpdaterSetup = (data: MachineData, review: Parameters<typeof UpdaterSetupView>[0]['initialReview'] = null) => renderToStaticMarkup(<UpdaterSetupView data={data} initialReview={review} />);
 export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
