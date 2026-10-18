@@ -82,8 +82,10 @@ export type EntryRefusal = (typeof ENTRY_REFUSALS)[number];
  * What a refusal of entry `at` (its position in "hosts", from 1) says.
  *
  * INVARIANT (#392): it is given the position, the kind and at most a host WHATWG URL parsed from the entry, never the
- * entry; so it can't quote any part of what root wrote. A parsed host can't hold a user, password, query or fragment
- * (URL refuses a host that decodes to one: `%40`, a fullwidth `＠`). The refusal reaches the start-up log and writers
+ * entry as written. That host is only letters, digits, dots and hyphens, or a bracketed address (providerHostEntry
+ * refuses the rest), so it can't hold a user, password, query, fragment or `key=value` pair, however the entry encoded
+ * them (`%40`, a fullwidth `＠`, `%26`, `＝`). It can still be a word root wrote as a host name, such as
+ * `secret.example.com`: a refusal shows that host, lower-cased. The refusal reaches the start-up log and writers
  * on the Health page, and a mistyped entry (`user:secret@host`, `host?key=secret`, `user%3Asecret%40host`) may hold a
  * credential. As src/network.ts does for the proxy.
  */
@@ -116,6 +118,11 @@ export function providerHostEntry(raw: unknown): { host: string; port: string | 
   } catch {
     return no('not-a-host');
   }
+  // WHY: URL keeps punctuation such as `! $ & ; = , _ ~` in a host, decoding `%26`, `＆` and the like into it, so a
+  // host it parsed can still be `key=secret`. Only a letters-digits-dots-hyphens name or a bracketed address goes on.
+  // No `_`: no host name has one (RFC 1123), a public CA may not certify one (and a name is https only), but tokens
+  // do (`ghp_…`, `sk_live_…`), and the not-normalised refusal would show one lower-cased.
+  if (!/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)$/.test(canonical)) return no('not-a-host');
   // WHY: matched exactly against what WHATWG URL makes of a base_url, so the entry must already be in that form.
   if (canonical !== host) return no('not-normalised', canonical);
   if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return no('bad-port', canonical);

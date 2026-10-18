@@ -297,8 +297,11 @@ test("the health view carries the line, read from root's file now against the in
 
 /**
  * Entries root might mistype with a credential in them: each must refuse the file without the credential in the refusal.
- * The last five pass the host[:port] shape and are refused only when WHATWG URL decodes them to a user, query or a
- * forbidden code point: percent-encoded, fullwidth (U+FF1A, U+FF20), small (U+FE6B) and a NUL (round 3 of #675).
+ * From the eighth on, they pass the host[:port] shape. Five are refused only when WHATWG URL decodes them to a user,
+ * query or a forbidden code point: percent-encoded, fullwidth (U+FF1A, U+FF20), small (U+FE6B) and a NUL (round 3 of
+ * #675). Then three are a key=value pair that URL keeps in a host (`&` and `=` aren't forbidden in one), plainly,
+ * percent-encoded or fullwidth (U+FF06, U+FF1D), then two tokens with `_`, which URL also keeps: all five are refused
+ * as not a host name or address, showing nothing (round 4).
  */
 const SECRET_ENTRIES = [
   'alice:s3cret@api.example.com',
@@ -313,6 +316,11 @@ const SECRET_ENTRIES = [
   'alice：s3cret＠api.example.com',
   'alice﹫s3cret.example.com',
   'api.example.com\u0000s3cret',
+  'api.example.com%26key%3Ds3cret',
+  'api.example.com＆key＝s3cret',
+  'api.example.com&key=s3cret',
+  'ghp_S3cretT0ken',
+  'sk_live_s3cret',
 ];
 
 test('a refused entry is named by its position, never quoted while it could hold a credential: not in the refusal, nor at start', { skip: !posix && 'root-owned files are POSIX' }, () => {
@@ -338,7 +346,7 @@ const BY_REFUSAL: Record<EntryRefusal, unknown[]> = {
   'too-long': [`s3cret${'a'.repeat(300)}`, `alice:s3cret@${'a'.repeat(250)}`],
   wildcard: ['*.h?token=s3cret', 'alice:s3cret@*.example.com'],
   'not-host-port': ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', '[alice:s3cret@::1]', 'api.example.com:8080@s3cret', 'api.example.com\u0000@s3cret'],
-  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret'],
+  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret', 'api.example.com%26key%3Ds3cret', 'api.example.com＆key＝s3cret', 'api.example.com&key=s3cret', 'ghp_S3cretT0ken', 'sk_live_s3cret'],
   'not-normalised': ['S3CRET.example.com', 'ｓ３ｃｒｅｔ.example.com', '%73%33cret.example.com', 'API.Example.COM:8443', '127.1'],
   'bad-port': ['s3cret.example.com:0', 's3cret.example.com:080', 'api.example.com:99999', '[::1]:65536'],
 };
