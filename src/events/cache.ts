@@ -1,7 +1,8 @@
 // The event log as one dashboard process keeps it in memory: read whole once, then only what was appended since
 // (`id > last`), so a request costs a query for nothing new rather than reading and parsing the whole log again.
 // Views that are a fold over the events alone are kept per snapshot (memo), so an unchanged log costs nothing; a
-// fold that can go on from where it was (fold) steps through only what was appended.
+// fold that can go on from where it was (fold) steps through only what was appended. An answer made of several views
+// takes them from one snapshot (snapshot), so an event appended between two of them can't be in one and not the other.
 //
 // The log is append-only (triggers refuse UPDATE and DELETE, src/events/log.ts); only a migration (a new
 // user_version) or a different file at the path (a restore, a move) changes what was read, and either reads it whole
@@ -24,6 +25,28 @@ const deepFreeze = <T>(v: T): T => {
 
 /** An events database opened read-only, waiting out another connection's lock (src/events/read-only.ts). */
 export type OpenRead = (path: string) => DatabaseSync;
+
+/**
+ * The log as one read of it found it, and the views kept of exactly those events (EventCache.snapshot). However many
+ * events another process appends meanwhile, a snapshot's views are all of the same events.
+ */
+export interface EventSnapshot {
+  /** Its events, oldest first, frozen as EventCache.all's are. */
+  all(): StoredEvent[];
+  /** Its last event's id (0 for none). */
+  lastId(): number;
+  /** EventCache.memo, of these events. */
+  memo<T>(key: string, fn: (events: StoredEvent[]) => T): T;
+  /** EventCache.fold, stepped through these events and no further. */
+  fold<S>(key: string, init: () => S, step: (s: S, e: StoredEvent) => void): S;
+  /** Itself: an answer that takes its snapshot from what it is handed reads this one, never a later one. */
+  snapshot(): EventSnapshot;
+}
+
+/** Where an answer takes its one snapshot from: the cache (the log as it is now), or a snapshot already taken. */
+export interface Snapshots {
+  snapshot(): EventSnapshot;
+}
 
 export class EventCache {
   private snap: readonly StoredEvent[] = Object.freeze([]);
@@ -71,15 +94,29 @@ export class EventCache {
   }
 
   /**
+   * The log as it is now, read once: every view of it (all, memo, fold) is of these events, however many are appended
+   * meanwhile. An answer made of more than one view reads them all from one snapshot.
+   */
+  snapshot(): EventSnapshot {
+    this.refresh();
+    const events = this.snap as StoredEvent[];
+    const last = this.last;
+    const s: EventSnapshot = {
+      all: () => events,
+      lastId: () => last,
+      memo: <T>(key: string, fn: (events: StoredEvent[]) => T): T => this.memoOf(events, key, fn),
+      fold: <S>(key: string, init: () => S, step: (s: S, e: StoredEvent) => void): S => this.foldOf(events, key, init, step),
+      snapshot: () => s,
+    };
+    return s;
+  }
+
+  /**
    * `fn` of the events as they are now, computed once per snapshot and kept until the log changes. Only for a pure fold
    * of the events (`key` names it and anything else it depends on, such as the day). The value is frozen like the events.
    */
   memo<T>(key: string, fn: (events: StoredEvent[]) => T): T {
-    const events = this.all();
-    if (this.memos.has(key)) return this.memos.get(key) as T;
-    const v = deepFreeze(fn(events));
-    this.memos.set(key, v);
-    return v;
+    return this.snapshot().memo(key, fn);
   }
 
   /**
@@ -89,7 +126,25 @@ export class EventCache {
    * read starts it again rather than going on from a half-applied event.
    */
   fold<S>(key: string, init: () => S, step: (s: S, e: StoredEvent) => void): S {
-    const events = this.all();
+    return this.snapshot().fold(key, init, step);
+  }
+
+  private memoOf<T>(events: StoredEvent[], key: string, fn: (events: StoredEvent[]) => T): T {
+    // WHY: only the newest snapshot's views are kept; one taken before the cache read more is computed and not kept.
+    const kept = events === this.snap;
+    if (kept && this.memos.has(key)) return this.memos.get(key) as T;
+    const v = deepFreeze(fn(events));
+    if (kept) this.memos.set(key, v);
+    return v;
+  }
+
+  private foldOf<S>(events: StoredEvent[], key: string, init: () => S, step: (s: S, e: StoredEvent) => void): S {
+    // WHY: the kept fold may be past an older snapshot's last event, or of another file (a reset): that one folds its own.
+    if (events !== this.snap) {
+      const s = init();
+      for (const e of events) step(s, e);
+      return s;
+    }
     let f = this.folds.get(key) as { s: S; n: number } | undefined;
     if (!f) {
       f = { s: init(), n: 0 };

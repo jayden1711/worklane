@@ -10,7 +10,7 @@
 import { project, type Task } from './projection.js';
 import { heldUpdate, RELEASE_HOLD, updateLog, type UpdateEntry } from './updates.js';
 import { batchSummaries, type BatchSummary } from './coordinator/pr-batch.js';
-import type { EventCache } from './events/cache.js';
+import type { EventSnapshot, Snapshots } from './events/cache.js';
 import type { StoredEvent } from './events/types.js';
 import { localDay } from './local-day.js';
 
@@ -403,23 +403,28 @@ export function waitingOnYou(events: Ev[], now = new Date(), o: DigestOptions = 
 }
 
 /**
- * The fold of the log as the dashboard's event cache holds it, stepped through only what was appended since the last
- * read, and the projection's tasks, the same fold its state keeps under this key (src/dashboard.ts). Null when the
- * fold can't stand for the log at `now`: the whole log is read instead (waitingOnYou).
+ * The fold of one snapshot of the log as the dashboard's event cache keeps it, stepped through only what was appended
+ * since the last read, and that snapshot's projection tasks, the same fold its state keeps under this key
+ * (src/dashboard.ts). Both are of the one snapshot, so an event appended meanwhile is in both or in neither. Null when
+ * the fold can't stand for the log at `now`: that snapshot is read whole instead (waitingOnYou).
  */
-function folded(cache: EventCache, now: Date): { f: WaitFold; tasks: readonly Task[] } | null {
-  const f = cache.fold('waitingOnYou', waitFold, waitStep);
+function folded(s: EventSnapshot, now: Date): { f: WaitFold; tasks: readonly Task[] } | null {
+  const f = s.fold('waitingOnYou', waitFold, waitStep);
   // WHY: a read at `now` leaves out an event stamped after it (another clock ahead of this one) or with no readable
   // time, and the fold has every event; so it stands for that read only when it has none such.
   if (!(f.latest <= now.getTime())) return null;
   const day = localDay(now);
-  return { f, tasks: cache.memo(`project ${day}`, (ev) => project(ev, day)).tasks };
+  return { f, tasks: s.memo(`project ${day}`, (ev) => project(ev, day)).tasks };
 }
 
-/** waitingOnYou for the log an event cache holds, from the fold it keeps (#633): the same answer, without reading the whole log. */
-export function waitingCached(cache: EventCache, now = new Date(), o: DigestOptions = {}): Digest {
-  const k = folded(cache, now);
-  return k ? digestOf(k.f, k.tasks, now, o) : waitingOnYou(cache.all(), now, o);
+/**
+ * waitingOnYou for the log an event cache holds, from the fold it keeps (#633): the same answer, without reading the
+ * whole log. Of one snapshot: the one handed in, or the cache's as it is now.
+ */
+export function waitingCached(src: Snapshots, now = new Date(), o: DigestOptions = {}): Digest {
+  const s = src.snapshot();
+  const k = folded(s, now);
+  return k ? digestOf(k.f, k.tasks, now, o) : waitingOnYou(s.all(), now, o);
 }
 
 /** What the dashboard's state carries of Waiting on you (#633): how many things wait, and what the Needs you queue keys each by. */
@@ -429,9 +434,10 @@ export interface WaitingCount {
 }
 
 /** waitingCached's list as the state carries it (without the merged PRs and batches the digest reads beside it). */
-export function waitingCount(cache: EventCache, now = new Date(), o: Pick<DigestOptions, 'updates'> = {}): WaitingCount {
-  const k = folded(cache, now);
-  const items = k ? itemsOf(k.f, k.tasks, now, o.updates) : waitingOnYou(cache.all(), now, o).items;
+export function waitingCount(src: Snapshots, now = new Date(), o: Pick<DigestOptions, 'updates'> = {}): WaitingCount {
+  const s = src.snapshot();
+  const k = folded(s, now);
+  const items = k ? itemsOf(k.f, k.tasks, now, o.updates) : waitingOnYou(s.all(), now, o).items;
   return { count: items.length, keys: items.map((i) => ({ kind: i.kind, issue: i.issue, ...(i.decision !== undefined ? { decision: i.decision } : {}) })) };
 }
 

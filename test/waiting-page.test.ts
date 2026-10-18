@@ -2,13 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { isDeepStrictEqual } from 'node:util';
 import { loadConfig } from '../src/config/load.js';
 import { mayReadDigest, startDashboard } from '../src/dashboard.js';
 import { WAIT_KINDS, waitingCached, waitingCount, waitingOnYou, type Digest, type WaitKind } from '../src/digest.js';
 import { EventCache } from '../src/events/cache.js';
 import { EventLog } from '../src/events/log.js';
+import { openReadOnly } from '../src/events/read-only.js';
 import { EventSchemas, type EventType } from '../src/events/types.js';
 import type { UpdateEntry } from '../src/updates.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
@@ -123,6 +125,30 @@ test('the event cache steps a fold through each event once, as it is appended; a
   assert.throws(flaky, /a bad event/);
   fail = false;
   assert.equal(flaky().n, 3, 'the half-folded state was dropped and the fold read the log again from its first event');
+  log.close();
+});
+
+test("#633: a snapshot's views are of its own events, after the cache has read more", () => {
+  const db = join(mkdtempSync(join(tmpdir(), 'snapshot-')), 'events.db');
+  const log = new EventLog(db);
+  const seen = (issue: number) => log.append('issue.seen', { issue, title: `#${issue}`, labels: [], author: 'o', owner: null, actionable: false, why: '' }, 'coordinator');
+  const issues = (ev: { payload: unknown }[]) => ev.map((e) => (e.payload as { issue: number }).issue);
+  const fold = (s: ReturnType<EventCache['snapshot']>) => s.fold('issues', () => [] as number[], (acc, e) => void acc.push((e.payload as { issue: number }).issue));
+  seen(1);
+  const cache = new EventCache(db);
+  const first = cache.snapshot();
+  seen(2);
+  assert.deepEqual(issues(first.all()), [1], 'appended after it: not in it');
+  const second = cache.snapshot();
+  assert.deepEqual(fold(second), [1, 2]);
+  assert.deepEqual(second.memo('issues', issues), [1, 2]);
+  // The cache has kept the second snapshot's fold and memo; the first is answered from its own events, and keeps nothing.
+  assert.deepEqual(fold(first), [1], "the first snapshot's fold stops at its own last event");
+  assert.deepEqual(first.memo('issues', issues), [1], "the first snapshot's memo is of its own events");
+  assert.equal(first.lastId(), 1);
+  assert.deepEqual(cache.memo('issues', issues), [1, 2], "the cache's kept memo is still the newest snapshot's");
+  assert.deepEqual(cache.fold('issues', () => [] as number[], () => assert.fail('nothing new to step')), [1, 2]);
+  assert.equal(second.snapshot(), second, 'a snapshot handed on is itself, never a later read');
   log.close();
 });
 
@@ -248,4 +274,90 @@ test('#633: the cached, incremental Waiting on you answers what reading the whol
   assert.ok(viaFold > wholeRead && wholeRead > 0, `from the fold ${viaFold} times, from the whole log ${wholeRead}`);
   assert.deepEqual([...kinds].sort(), [...WAIT_KINDS].sort(), 'every kind of wait was listed at some point');
   for (const k of ['awaiting_decision', 'plan_held', 'blocked', 'landing_failed', 'needs_owner', 'check_held', 'hotspot_held', 'emergency_halt', 'merge_stopped', 'deploy_failed']) assert.ok(ended.get(k), `some ${k} ended (answered, unblocked, resumed, merged, released...)`);
+});
+
+// --- One snapshot of the log per answer -----------------------------------------------------------------------------
+
+/** A log with tasks 4 to 9 seen and claimed: a red landing for one of them makes it a failed landing, not a block. */
+function claimedLog(): { db: string; log: EventLog } {
+  const db = join(mkdtempSync(join(tmpdir(), 'waiting-snap-')), 'events.db');
+  const log = new EventLog(db);
+  for (let issue = 4; issue <= 9; issue++) {
+    log.append('issue.seen', { issue, title: `Task ${issue}`, labels: ['ready'], author: 'o', owner: 'example-owner', actionable: true, why: '' }, 'coordinator');
+    log.append('issue.claimed', { issue, instance: 'x', lease: 'a'.repeat(40), base: 'a'.repeat(40), owner: 'example-owner' }, 'coordinator');
+  }
+  return { db, log };
+}
+const landedRed = (log: EventLog, issue: number) => log.append('land.result', { issue, outcome: 'red', landed: null, detail: 'checks red' }, 'coordinator');
+
+test('#633: one answer reads one snapshot of the log: an event another process appends mid-read is in all of it or in none of it', () => {
+  const updates: UpdateEntry[] = [];
+  const later = () => new Date(Date.now() + 60_000);
+  const reads: [string, (c: EventCache, now: Date) => unknown, (d: Digest) => unknown][] = [
+    ['waitingCached', (c, now) => asJson(waitingCached(c, now, { updates })).items, (d) => asJson(d).items],
+    ['waitingCount', (c, now) => waitingCount(c, now, { updates }), (d) => keysOf(d.items)],
+  ];
+  let sawIt = 0;
+  for (const [name, read, shape] of reads) {
+    for (let k = 1; k <= 4; k++) {
+      const { db, log } = claimedLog();
+      let opens = 0;
+      let armAt = 0;
+      // Another process appends a red landing for task 4 just before this cache's k-th read of the file from here on.
+      const cache = new EventCache(db, (p) => {
+        if (++opens === armAt) landedRed(log, 4);
+        return openReadOnly(p);
+      });
+      read(cache, later());
+      const before = [...cache.all()];
+      armAt = opens + k;
+      const now = later();
+      const got = read(cache, now);
+      const after = new EventCache(db).all();
+      const whole = [before, after].map((evs) => shape(waitingOnYou(evs, now, { updates })));
+      assert.ok(
+        whole.some((w) => isDeepStrictEqual(w, got)),
+        `${name}, the append at read ${k}: ${JSON.stringify(got)} is the whole-log answer of the log before the append (${JSON.stringify(whole[0])}) or after it (${JSON.stringify(whole[1])})`,
+      );
+      if (isDeepStrictEqual(whole[1], got) && !isDeepStrictEqual(whole[0], got)) sawIt++;
+      log.close();
+    }
+  }
+  assert.ok(sawIt > 0, 'some answer was read after the append (the landing is in it)');
+});
+
+test("#633: /api/state's waiting is read from the same snapshot of the log as the rest of the state", async () => {
+  const { db, log } = claimedLog();
+  const dir = dirname(db);
+  let opens = 0;
+  let armAt = 0;
+  let issue = 4;
+  const { dir: root } = exampleProject();
+  const d = await startDashboard({
+    root,
+    cfg: loadConfig(root),
+    eventsDb: db,
+    stateDir: dir,
+    user: 'example-owner',
+    roleOf: exampleRoles,
+    slotsDir: join(dir, 'slots'),
+    // Another process appends a red landing just before the dashboard's k-th read of the file from here on.
+    openEvents: (p) => {
+      if (++opens === armAt) landedRed(log, issue);
+      return openReadOnly(p);
+    },
+  });
+  const base = d.url.split('/?')[0]!;
+  try {
+    for (let k = 1; k <= 6; k++, issue++) {
+      armAt = opens + k;
+      const state = (await (await fetch(`${base}/api/state`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } })).json()) as { lastId: number; waiting: { count: number; keys: Keys } };
+      // The log as the state's lastId says it was read: its waiting is what a whole-log read of exactly that answers.
+      const evs = new EventCache(db).all().filter((e) => e.id <= state.lastId);
+      assert.deepEqual(state.waiting, keysOf(waitingOnYou(evs).items), `the append at read ${k}: the state's waiting is from its own snapshot (lastId ${state.lastId})`);
+    }
+  } finally {
+    log.close();
+    await d.close();
+  }
 });

@@ -31,7 +31,7 @@ import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.j
 import { loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
-import { EventCache } from './events/cache.js';
+import { EventCache, type OpenRead } from './events/cache.js';
 import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
 import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
 import { localDay } from './local-day.js';
@@ -296,6 +296,8 @@ export interface DashboardOptions {
    * a person keeps wall time. Tests advance it instead of sleeping.
    */
   now?: () => number;
+  /** WHY: tests stand in for another process writing to the log between this one's reads of it; openReadOnly when unset. */
+  openEvents?: OpenRead;
 }
 
 /** What the first-run page's Start does, shown before it does it (GET /api/first-run's start). */
@@ -1053,7 +1055,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
    */
   const clients = new Map<ServerResponse, { role: Role; login: string | null }>();
   // The log as this process keeps it: read whole once, then only what was appended (src/events/cache.ts).
-  const eventCache = new EventCache(opts.eventsDb);
+  const eventCache = new EventCache(opts.eventsDb, opts.openEvents);
   let lastId = eventCache.lastId();
   // INVARIANT (#582): the in-memory caches below (prBodies, the config PRs' refresh, the open-issues list, Tailscale's
   // status, the bot's and the Slack and Linear views, Re-check's floor) age by this clock, never by Date.now (which an
@@ -1310,11 +1312,14 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   };
 
   const state = (who: Who) => {
-    const events = eventCache.all();
+    // INVARIANT (#633): every part of the state is of one read of the log, so an event another process appends while
+    // it is put together is in all of it (the projection, its lastId, the waiting count) or in none.
+    const snap = eventCache.snapshot();
+    const events = snap.all();
     // Folds of the events alone, kept until the log changes (the projection's "today" is part of its key).
     const today = localDay();
-    const p = eventCache.memo(`project ${today}`, (ev) => project(ev, today));
-    const posted = eventCache.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
+    const p = snap.memo(`project ${today}`, (ev) => project(ev, today));
+    const posted = snap.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
     const slots = slotStatus(opts.slotsDir);
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
@@ -1328,7 +1333,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       slots: { cap: slots.cap, running: slots.agents.length, agents: slots.agents.map(holder), fullRun: slots.fullRun ? holder(slots.fullRun) : null },
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
-      activity: isWriter(who.role) ? p.activity : eventCache.memo('viewerActivity', viewerActivity),
+      activity: isWriter(who.role) ? p.activity : snap.memo('viewerActivity', viewerActivity),
       // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
       decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
@@ -1342,9 +1347,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // Whether this viewer may read what waits on the owner, so the page asks only when it will get it.
       canReadDigest: mayReadDigest(who.role),
       // How many things /api/waiting lists, and what the Needs you queue keys each by, so the shell's badge is exact
-      // without reading /api/waiting (#633). From the event cache's fold, as /api/waiting is. Only for those who may
-      // read /api/waiting: a viewer's state has no such key (and stateForViewer's allowlist drops it too).
-      ...(mayReadDigest(who.role) ? { waiting: waitingCount(eventCache) } : {}),
+      // without reading /api/waiting (#633). From the event cache's fold, as /api/waiting is, of this state's snapshot.
+      // Only for those who may read /api/waiting: a viewer's state has no such key (and stateForViewer's allowlist drops
+      // it too).
+      ...(mayReadDigest(who.role) ? { waiting: waitingCount(snap) } : {}),
       // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
       canWrite: isWriter(who.role),
       canReadAudit: isOwner(who.role),
@@ -1359,7 +1365,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       emergency: stopStatus(emergencyStop(opts.slotsDir), p.emergency),
       inbox: inbox(p, who.login),
       // For the sidebar: open PRs, and how many wait for a person or gave up on CI.
-      prCounts: prCounts(eventCache.memo('prsView', prsView).prs),
+      prCounts: prCounts(snap.memo('prsView', prsView).prs),
       // How the default branch is guarded, and an unaccounted commit's alert (a viewer gets the mode only).
       protection: protectionState({ stateDir: opts.stateDir, repo, events, role: who.role }),
       // Whether the agents' Claude account is set, for everyone: the accounts themselves are the machine owners' only
