@@ -23,8 +23,8 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      OUT: ${{ runner.temp }}/spike-sandbox-pod
+    # WHY: no job-level env for the output dir: a job's env can't read the runner context, and GitHub rejected the
+    # whole file for it (the first push's run failed with no jobs). run.sh defaults OUT to $RUNNER_TEMP/spike-sandbox-pod.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -32,8 +32,8 @@ jobs:
           node-version: '24'
       - name: the runner (kernel, AppArmor userns sysctl, docker, containerd, runc)
         run: |
-          mkdir -p "$OUT"
-          bash scripts/ci/spike-sandbox-pod/run.sh host | tee "$OUT/host.txt"
+          mkdir -p "$RUNNER_TEMP/spike-sandbox-pod"
+          bash scripts/ci/spike-sandbox-pod/run.sh host | tee "$RUNNER_TEMP/spike-sandbox-pod/host.txt"
       - name: a kind cluster, the probe image, the namespaces and the Localhost seccomp profile
         run: bash scripts/ci/spike-sandbox-pod/run.sh cluster
       - name: gVisor as a RuntimeClass (best effort; skipped on failure)
