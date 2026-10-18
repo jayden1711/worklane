@@ -1,33 +1,41 @@
-/* Theme tokens: Beautiful UI's palette, radii, shadows and motion (MIT, beautifului.dev),
-   with the shadcn/ui-style token names the pages use mapped onto it (MIT). Both are
-   credited in THIRD_PARTY_NOTICES.md. */
+/* Theme tokens: the warm light palette; Beautiful UI's dark palette, radii, shadows and motion
+   (MIT, beautifului.dev), with the shadcn/ui-style token names the pages use mapped onto it
+   (MIT). Both are credited in THIRD_PARTY_NOTICES.md. */
 @import "tailwindcss";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* Beautiful UI */
-  --page: oklch(98.5% 0.001 286.376);
-  --canvas: oklch(96.1% 0.002 247.84);
-  --surface: oklch(100% 0 0);
-  --inset: oklch(97.9% 0.002 247.839);
-  --hover: oklch(97% 0.002 247.839);
-  --hover-2: oklch(93.3% 0.003 247.86);
-  --field: oklch(96.1% 0.001 286.375);
-  --ink: oklch(24.7% 0.006 258.361);
-  --ink-2: oklch(50.6% 0.01 264.477);
-  --ink-3: oklch(69.5% 0.009 264.505);
-  --line: oklch(94.6% 0.003 264.542);
-  --line-strong: oklch(91.2% 0.005 258.326);
-  --blue: oklch(62.6% 0.205 254.947);
-  --blue-ink: oklch(55.6% 0.187 255.617);
-  --blue-tint: oklch(62.6% 0.205 254.947 / 0.12);
-  --green: oklch(60.3% 0.155 150.883);
-  --green-tint: oklch(60.3% 0.155 150.883 / 0.12);
-  --orange: oklch(68.9% 0.179 49.902);
-  --orange-tint: oklch(68.9% 0.179 49.902 / 0.12);
-  --red: oklch(62.1% 0.192 23.042);
-  --red-tint: oklch(62.1% 0.192 23.042 / 0.1);
+  /* The warm light palette. Every text colour here reaches 4.5:1 (WCAG AA) on every light background below, tints
+     included, and a control's edge 3:1: test/theme-contrast.test.ts. */
+  --page: #faf9f5;
+  /* Cards, the sidebar and panels; the other backgrounds are steps from it: toward the page for wells and fields,
+     toward the text for hover. */
+  --canvas: #e8e6dc;
+  --surface: #e8e6dc;
+  --inset: #f1f0e9;
+  --hover: #e2e0d6;
+  --hover-2: #dcdacf;
+  --field: #f5f4ef;
+  --ink: #141413;
+  --ink-2: #4d4c48;
+  /* Tertiary text has to pass on the darkest hover too, so it sits close to secondary. */
+  --ink-3: #5b5a55;
+  /* Dividers. A control's edge (a button, a field, a toggle) is --line-strong, which reaches 3:1. */
+  --line: #b0aea5;
+  --line-strong: #807e76;
+  /* The accent: fills, rings and large marks only (2.96:1 on the page, under 3:1, so never text). Text in the accent's
+     colour is --blue-ink; text on an accent fill is dark (--ink, 5.90:1; white is 3.12:1). */
+  --blue: #d97757;
+  --blue-ink: #8a412a;
+  --blue-tint: rgb(217 119 87 / 0.12);
+  /* Status colours, dark enough to be text on every light background. */
+  --green: #2d6235;
+  --green-tint: rgb(45 98 53 / 0.12);
+  --orange: #8a4600;
+  --orange-tint: rgb(138 70 0 / 0.12);
+  --red: #a12f24;
+  --red-tint: rgb(161 47 36 / 0.1);
   --shadow-xs: 0 0 4px 0 #0000000a;
   --shadow-sm: 0 18px 47px 0 #00000008, 0 7.5px 19px 0 #00000005, 0 4px 10.5px 0 #00000005, 0 2.3px 5.8px 0 #00000003, 0 1.2px 3.1px 0 #00000003, 0 0.5px 1.3px 0 #00000003;
   --shadow-md: 0 17.54px 23.39px 0 #0000000a, 0 9.4px 12.5px 0 #00000008, 0 5.25px 7px 0 #00000005, 0 2.79px 3.72px -2px #00000003, 0 1.16px 1.5px 0 #00000003;
@@ -36,6 +44,11 @@
   --shadow-card: 0 0 0 1px var(--line), var(--shadow-sm);
   --shadow-raised: 0 0 0 1px var(--line), var(--shadow-md);
   --shadow-overlay: 0 0 0 1px var(--line), 0 25px 50px 0 #0000000d, 0 12px 24px 0 #0000000a, 0 6px 12px 0 #00000008;
+}
+/* Light mode only: the hairline draws the edge of fields and toggles, so it takes the control-edge colour. Here
+   rather than in :root, which dark mode also reads (it sets no hairline of its own), so dark mode is unchanged. */
+:root:not(.dark) {
+  --shadow-hairline: 0 0 0 1px var(--line-strong);
 }
 .dark {
   --page: oklch(20.9% 0.004 264.477);

@@ -769,7 +769,7 @@ The sidebar counts the PRs that need you. Through the hub, this is per instance.
 
 ## Look and feel
 
-The pages use [Beautiful UI](https://www.beautifului.dev/)'s palette and patterns (MIT; see `THIRD_PARTY_NOTICES.md`), adapted to the dashboard's data:
+Light mode uses the warm light palette: every text colour in it reaches WCAG AA (4.5:1) on every light background it can sit on, and a control's edge reaches 3:1 (`test/theme-contrast.test.ts`, which reads the text colours the pages use). Dark mode uses [Beautiful UI](https://www.beautifului.dev/)'s palette. The pages use Beautiful UI's patterns (MIT; see `THIRD_PARTY_NOTICES.md`), adapted to the dashboard's data:
 - decisions are approval cards
 - agent runs are task rows, and a run's steps are tool chips
 - checks are records tables
