@@ -50,6 +50,10 @@ export interface Decision {
   canAnswer?: boolean;
   /** An owner's only: why it can never be approved by voice (src/voice.ts), or null when it can. */
   voiceRefused?: string | null;
+  /** While it is open, for the owners and writers: what happened, in one plain sentence (src/decision-effects.ts). */
+  happened?: string;
+  /** While it is open, for the owners and writers: what each option does, in the options' order. */
+  effects?: { option: string; does: string }[];
 }
 
 /** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */

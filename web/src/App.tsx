@@ -2,7 +2,7 @@ import { createContext, createElement, lazy, Suspense, useContext, useEffect, us
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command } from 'cmdk';
 import { Activity, Menu, X, Bot, FlaskConical, Gauge, LogOut, Inbox as InboxIcon, Layers, ListChecks, Moon, Rocket, Search, Server, Puzzle, Settings as SettingsIcon, SquareKanban, Sun, Vote } from 'lucide-react';
-import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, type DotStatus, type HubInfo, type Role, type State } from './api';
+import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsSignIn, onLoopback, prefetchView, scopeKey, viewUrl, selectAllInstances, selectInstance, signOut, useLiveState, useScope, useView, type DotStatus, type HubInfo, type Role, type State, type Waiting } from './api';
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
@@ -18,6 +18,9 @@ import { logsRefusal, runsRefusal } from './refusals';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { background, idle } from './prefetch';
 import { landOn, redirectFor } from './redirects';
+import { needsYou } from './needs-you';
+// The Needs you queue's rules, beside the nav they count for (test/web-nav.test.ts reads them here).
+export { KIND, needsYou, ORDER } from './needs-you';
 
 /**
  * A page as its own chunk (code split): the first load ships the shell and the page shown. Once its module is in
@@ -42,6 +45,7 @@ function lazyPage<P extends object>(load: () => Promise<ComponentType<P>>): Comp
 const Overview = lazyPage(() => import('./pages/Overview').then((m) => m.Overview));
 const BoardPage = lazyPage(() => import('./pages/Board').then((m) => m.BoardPage));
 const MachinePage = lazyPage(() => import('./pages/Machine').then((m) => m.MachinePage));
+const NeedsYouPage = lazyPage(() => import('./pages/NeedsYou').then((m) => m.NeedsYouPage));
 const InboxPage = lazyPage(() => import('./pages/Inbox').then((m) => m.InboxPage));
 const SetupPage = lazyPage(() => import('./pages/Setup').then((m) => m.SetupPage));
 const WaitingPage = lazyPage(() => import('./pages/Waiting').then((m) => m.WaitingPage));
@@ -70,6 +74,7 @@ const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
   [/^\/overview/, Overview],
   [/^\/work\/prs/, PullRequests],
   [/^\/machine\/health/, HealthPage],
+  [/^\/needs-you$/, NeedsYouPage],
   [/^\/needs-you\/inbox/, InboxPage],
   [/^\/needs-you\/waiting/, WaitingPage],
   [/^\/needs-you\/decisions\/./, DecisionDetailPage],
@@ -176,8 +181,10 @@ export interface NavTab {
 export type NavState = Pick<State, 'setupMode' | 'role' | 'experiments'>;
 
 // WHY (#585): nineteen sidebar rows became a handful of groups (the owner's list); every page kept its key, and its old
-// address redirects (redirects.ts). The Setup console lives under Settings.
+// address redirects (redirects.ts). The Setup console lives under Settings. Needs you opens on its one queue (the three
+// lists below it merged, urgency-sorted: needs-you.ts), a page of its own on a key of its own.
 const NEEDS_YOU_TABS: readonly NavTab[] = [
+  { to: '/needs-you', label: 'Needs you', chord: 'q', testId: 'tab-needs-you' },
   { to: '/needs-you/inbox', label: 'Inbox', chord: 'i', testId: 'tab-inbox' },
   { to: '/needs-you/waiting', label: 'Waiting on you', chord: 'w', testId: 'tab-waiting' },
   { to: '/needs-you/decisions', label: 'Decisions', chord: 'd', testId: 'tab-decisions' },
@@ -208,7 +215,7 @@ const SETTINGS_TABS: readonly NavTab[] = [
 ];
 
 export const NAV: NavItem[] = [
-  { to: '/needs-you/inbox', label: 'Needs you', icon: InboxIcon, chord: 'i', testId: 'nav-needs-you', tabs: NEEDS_YOU_TABS },
+  { to: '/needs-you', label: 'Needs you', icon: InboxIcon, chord: 'q', testId: 'nav-needs-you', tabs: NEEDS_YOU_TABS },
   { to: '/', label: 'Work', icon: SquareKanban, chord: 'b', testId: 'nav-work', tabs: WORK_TABS },
   { to: '/overview', label: 'Overview', icon: Gauge, chord: 'o', testId: 'nav-overview' },
   { to: '/shipping/land', label: 'Shipping', icon: Rocket, chord: 'l', testId: 'nav-shipping', tabs: SHIPPING_TABS },
@@ -255,12 +262,14 @@ export function placeOf(path: string): { row: NavItem; tab: NavTab | null } | nu
 }
 
 /**
- * The sidebar's badges, by row (its test id), and each tab's, by address. Needs you: each open decision once (the
- * Inbox's are among them) and each of your blocked tasks; Work: the PRs waiting for you, as the Pull requests row had.
+ * The sidebar's badges, by row (its test id), and each tab's, by address. Needs you: its queue's length (needs-you.ts:
+ * what Waiting on you lists, each open decision and each of your blocked tasks, each once; `waiting` null: not read,
+ * so the decisions and your blocked tasks); Work: the PRs waiting for you, as the Pull requests row had.
  */
-export function navCounts(state: Pick<State, 'decisions' | 'inbox' | 'tasks' | 'landQueue' | 'prCounts' | 'runs'> | null): Counts {
+export function navCounts(state: Pick<State, 'decisions' | 'inbox' | 'tasks' | 'landQueue' | 'prCounts' | 'runs'> | null, waiting: Pick<Waiting, 'items'> | null = null): Counts {
   const open = state?.decisions.filter((d) => !d.answer) ?? [];
   const tabs = {
+    '/needs-you': state ? needsYou(state, waiting).length : 0,
     '/needs-you/inbox': state ? state.inbox.decisions.length + state.inbox.blocked.length : 0,
     '/needs-you/decisions': open.length,
     '/work/issues': state?.tasks.filter((t) => !['done', 'released', 'triage'].includes(t.status)).length ?? 0,
@@ -268,12 +277,11 @@ export function navCounts(state: Pick<State, 'decisions' | 'inbox' | 'tasks' | '
     '/work/prs': state?.prCounts?.needYou ?? 0,
     '/agents': state?.runs?.active.length ?? 0,
   };
-  const needsYou = state ? new Set([...open, ...state.inbox.decisions].map((d) => d.id)).size + state.inbox.blocked.length : 0;
-  return { ...tabs, 'nav-needs-you': needsYou, 'nav-work': tabs['/work/prs'], 'nav-shipping': tabs['/shipping/land'], 'nav-agents': tabs['/agents'] };
+  return { ...tabs, 'nav-needs-you': tabs['/needs-you'], 'nav-work': tabs['/work/prs'], 'nav-shipping': tabs['/shipping/land'], 'nav-agents': tabs['/agents'] };
 }
 
 /** Badges that ask for the person: amber. */
-const WARN = new Set(['nav-needs-you', 'nav-work', '/needs-you/inbox', '/needs-you/decisions', '/work/prs']);
+const WARN = new Set(['nav-needs-you', 'nav-work', '/needs-you', '/needs-you/inbox', '/needs-you/decisions', '/work/prs']);
 
 /** The tab row the page header draws: the group the page is in, its tabs, the one shown, and their badges. */
 export const GroupTabs = createContext<{ label: string; tabs: readonly NavTab[]; active: string; counts: Counts } | null>(null);
@@ -516,6 +524,39 @@ function usePrefetch(ready: boolean, current: string | null) {
   }, [ready, current]);
 }
 
+/** Off the Needs you queue, the shell reads Waiting on you's list at most this often, for the badge. */
+export const WAITING_EVERY_MS = 60_000;
+
+/** How long until the shell reads Waiting on you again: now on the queue or with nothing kept; else when what was kept is WAITING_EVERY_MS old. */
+export const waitingDelay = (keptAt: number | undefined, live: boolean, now: number) => (live || keptAt === undefined ? 0 : Math.max(0, keptAt + WAITING_EVERY_MS - now));
+
+/**
+ * Waiting on you's list (/api/waiting), for the Needs you badge and queue. WHY (#585): the server computes it from the
+ * whole log on every read (measured: about 350 ms on a 200 000-event log), so reading it on every change of every page
+ * and on every instance switch loaded a busy instance's dashboard on each. On the queue (`live`) it is read on every
+ * change, as Waiting on you reads it; elsewhere at most once a minute, after a change, and an instance switch shows what
+ * was kept for that instance (web/src/cache.ts) without asking again. Each read waits for the browser to be idle, so
+ * it follows the page's own reads. What the kept answer lists that the live state shows has ended (a decision
+ * answered, a task unblocked) isn't counted (needs-you.ts). The guard on the wiring is CI's real-Chrome
+ * test/dashboard-switch-speed.test.ts (it failed with a read on every switch); web-nav pins only waitingDelay.
+ */
+function useWaiting(on: boolean, live: boolean, lastId: number | undefined): { data: Waiting | null; error: string | null } {
+  const url = on ? viewUrl('/api/waiting') : null;
+  const [read, setRead] = useState(0);
+  useEffect(() => {
+    if (url === null) return;
+    const wait = waitingDelay(peek<Waiting>(url)?.at, live, Date.now());
+    let stopIdle = () => {};
+    const t = window.setTimeout(() => (stopIdle = idle(() => setRead((n) => n + 1), 1000)), wait);
+    return () => {
+      window.clearTimeout(t);
+      stopIdle();
+    };
+  }, [url, live, lastId]);
+  const v = useView<Waiting>(url !== null && read > 0 ? '/api/waiting' : null, read);
+  return { data: v.data ?? (url === null ? null : (peek<Waiting>(url)?.data ?? null)), error: v.error };
+}
+
 /** The small "updating…" mark while a view is shown from what was kept and its fresh answer is on its way. */
 function UpdatingMark() {
   const updating = useUpdating();
@@ -572,7 +613,10 @@ function InstanceDashboard({ health }: { health: Health | null }) {
     if (state) document.title = `${state.project.name} · ${state.brand.name}`;
   }, [state]);
 
-  const counts = useMemo(() => navCounts(state), [state]);
+  // What waits on the owner (Waiting on you's list), for the Needs you queue and its badge; never asked where the state
+  // says it would be refused (a viewer) or in setup mode.
+  const waiting = useWaiting(!!state && !state.setupMode && state.canReadDigest !== false, path === '/needs-you', state?.lastId);
+  const counts = useMemo(() => navCounts(state, waiting.data), [state, waiting.data]);
 
   const issueMatch = path.match(/^\/work\/issues\/(\d+)/);
   const runMatch = path.match(/^\/runs\/([A-Za-z0-9_-]+)$/);
@@ -586,6 +630,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (!usageAnswered) page = <Loading />;
   // WHY: setup mode (no config yet) serves the first-run page alone; any other page's address says what it needs (#468).
   else if (state.setupMode) page = path === '/' || path === '/first-run' ? <FirstRunPage state={state} /> : <SetupModeHidden path={path} />;
+  else if (path === '/needs-you') page = <NeedsYouPage state={state} waiting={waiting} />;
   else if (path === '/needs-you/inbox') page = <InboxPage state={state} />;
   else if (path === '/needs-you/waiting') page = <WaitingPage state={state} />;
   else if (path === '/needs-you/decisions') page = <Decisions state={state} />;

@@ -2,6 +2,7 @@
 // Nothing here is stored; delete it and replay the log and you get the same.
 import type { StoredEvent } from './events/types.js';
 import { batchSummaries } from './coordinator/pr-batch.js';
+import { happened, isInvestigation, optionEffects, type DetailKind } from './decision-effects.js';
 import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
 import { DIRECT_LAND_REFUSED } from './direct-land.js';
 import { localDay } from './local-day.js';
@@ -70,6 +71,12 @@ export interface Decision {
   receipts: string[];
   askedAt: string;
   answer: { by: string; answer: string; at: string } | null;
+  /**
+   * While it is open (gone once answered, so the state doesn't grow with every answered one): what happened, in one
+   * plain sentence, and what each option does, in the options' order (src/decision-effects.ts, as the detail says it).
+   */
+  happened?: string;
+  effects?: { option: string; does: string }[];
 }
 
 export interface Projection {
@@ -396,6 +403,9 @@ export function project(events: StoredEvent[], today = localDay()): Projection {
       }
       case 'decision.asked': {
         const d: Decision = { id: String(p.id), kind: String(p.kind ?? 'question'), issue: n, owner: String(p.owner), question: String(p.question), options: p.options as string[], recommendation: String(p.recommendation), receipts: p.receipts as string[], askedAt: e.ts, answer: null };
+        const kind = d.kind as DetailKind;
+        d.happened = happened(kind, d.issue, d.question, { investigation: isInvestigation(kind, d.options) });
+        d.effects = optionEffects(kind, d.options).map(({ option, does }) => ({ option, does }));
         decisions.set(d.id, d);
         if (t) {
           t.openDecision = d.id;
@@ -407,6 +417,8 @@ export function project(events: StoredEvent[], today = localDay()): Projection {
         const d = decisions.get(String(p.id));
         if (d) {
           d.answer = { by: String(p.by), answer: String(p.answer), at: e.ts };
+          delete d.happened;
+          delete d.effects;
           if (d.issue !== null) {
             const dt = task(d.issue, e.ts);
             if (dt.openDecision === d.id) dt.openDecision = null;

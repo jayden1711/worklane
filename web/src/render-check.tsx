@@ -46,6 +46,7 @@ import { Badge, Button } from './components/ui';
 import { ValuePill } from './components/patterns';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
+import { NeedsYouPage } from './pages/NeedsYou';
 import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
@@ -88,6 +89,7 @@ import type { UsageInfo } from './api';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
+  'needs-you': (s: State) => <NeedsYouPage state={s} waiting={{ data: null, error: null }} />,
   inbox: (s: State) => <InboxPage state={s} />,
   decisions: (s: State) => <Decisions state={s} />,
   issues: (s: State) => <Issues state={s} />,
@@ -130,8 +132,9 @@ export const renderMachine = (data: MachineData) => renderToStaticMarkup(<Machin
 export const renderChip = (kind: 'value' | 'badge', tone?: string) =>
   renderToStaticMarkup(kind === 'value' ? <ValuePill {...(tone === 'green' ? { tone } : {})}>approve</ValuePill> : <Badge {...(tone ? { tone: tone as 'ok' } : {})}>landed</Badge>);
 export const renderButton = (variant?: 'default' | 'outline' | 'ghost' | 'danger') => renderToStaticMarkup(<Button {...(variant ? { variant } : {})}>Go</Button>);
-/** One decision card; `sending`: the answer on its way as it draws. */
-export const renderDecisionCard = (d: Decision, sending?: string) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} />);
+/** One decision card; `sending`: the answer on its way as it draws; `evidence`: its detail as read when Details opens. */
+export const renderDecisionCard = (d: Decision, sending?: string, evidence?: DecisionDetail) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} {...(evidence ? { evidence } : {})} />);
+export { plainTerms, termMeaning } from './pages/Decisions';
 /** The Updater setup steps alone; `review` opens one step's review as the server answered it. */
 export const renderUpdaterSetup = (data: MachineData, review: Parameters<typeof UpdaterSetupView>[0]['initialReview'] = null) => renderToStaticMarkup(<UpdaterSetupView data={data} initialReview={review} />);
 export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
@@ -265,6 +268,9 @@ export { navFor } from './App';
 /** #585: a page's header at a path, as the dashboard draws it there: with its sidebar group's tabs and their counts. */
 export const renderAt = (path: string, state: State, title = 'Page') => renderToStaticMarkup(<GroupTabs.Provider value={tabsAt(path, state, navCounts(state))}><Header title={title} /></GroupTabs.Provider>);
 export { navCounts } from './App';
+/** #585: the Needs you queue, from the state and what /api/waiting answered (null: not yet, or refused). */
+export const renderNeedsYou = (state: State, waiting: Waiting | null, now?: number, error: string | null = null) => renderToStaticMarkup(<NeedsYouPage state={state} waiting={{ data: waiting, error }} {...(now !== undefined ? { now } : {})} />);
+export { ORDER as NEEDS_YOU_ORDER } from './needs-you';
 export { landOn, redirectFor } from './redirects';
 export { EXTEND_TABS } from './pages/Extend';
 
