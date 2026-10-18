@@ -273,6 +273,11 @@ export interface WatchState {
    * once one has stayed so for main_watch.dead_check_days. Dropped when one appears, or the check isn't required.
    */
   dead?: Record<string, { since: string; warned: boolean }>;
+  /**
+   * The required_checks the last judged commit was judged by (requiredAt: as committed before it): what dead checks
+   * are raised and dropped against, never the config loaded at startup. Null until a commit is judged.
+   */
+  deadFor?: string[] | null;
 }
 
 const EMPTY: WatchState = { version: 1, mode: null, detail: '', protectionAt: 0, last: null, lastAt: null, lastCallAt: 0, pending: null, pass: null, dead: {} };
@@ -505,13 +510,16 @@ export class MainWatch {
     }
   }
 
-  /** Raise each dead check once it has stayed dead long enough; drop one no longer required. Whether anything changed. */
-  private deadChecks(s: WatchState, required: string[]): boolean {
+  /**
+   * Raise each dead check once it has stayed dead long enough; drop one the last judged commit's required_checks
+   * (s.deadFor) no longer list. Whether anything changed.
+   */
+  private deadChecks(s: WatchState): boolean {
     const dead = (s.dead ??= {});
     const after = this.d.deadCheckMs?.() ?? DEAD_CHECK_MS;
     let changed = false;
     for (const [name, d] of Object.entries(dead)) {
-      if (!required.includes(name)) {
+      if (s.deadFor && !s.deadFor.includes(name)) {
         if (d.warned) this.d.deadCheck?.({ check: name, since: d.since, state: 'cleared' });
         delete dead[name];
         changed = true;
@@ -541,7 +549,7 @@ export class MainWatch {
       return writeWatchState(this.d.stateFile, s);
     }
     if (s.mode !== 'main_watch') return;
-    if (this.deadChecks(s, required)) writeWatchState(this.d.stateFile, s);
+    if (this.deadChecks(s)) writeWatchState(this.d.stateFile, s);
     if (!s.pending) {
       // A fetch (git, not the API) at most as often as a call, too.
       if (this.now - this.listedAt < MAIN_WATCH_CALL_MS) return;
@@ -602,8 +610,10 @@ export class MainWatch {
       const trip = { id: tripOf(pass, v.reason + note), ...revertCapsAt(this.d.git, pass.from) };
       await this.d.unaccounted({ sha: p.sha, reason: v.reason + note, number: v.number, revert: true, push: v.direct ? { kind: 'direct', alert: directPushAlertAt(this.d.git, `${p.sha}^1`) } : null, trip });
     }
+    // Dead checks follow what this commit was judged by: the required_checks committed before it.
+    s.deadFor = judgedBy;
     this.seenChecks(s, judgedBy, p.facts);
-    this.deadChecks(s, required);
+    this.deadChecks(s);
     this.judgedBy = null;
     s.last = p.sha;
     s.lastAt = new Date(this.now).toISOString();

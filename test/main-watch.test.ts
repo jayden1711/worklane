@@ -91,12 +91,12 @@ const T = Date.parse('2026-10-12T10:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
-function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] | (() => string[]) } = {}) {
+function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] } = {}) {
   const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string }[] };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
-    required: () => (typeof o.required === 'function' ? o.required() : (o.required ?? ['ci'])),
+    required: () => o.required ?? ['ci'],
     deadCheck: (d) => void out.dead.push(d),
     api: gh.api,
     git: repoGit(w.coord, 'origin', 'main'),
@@ -119,7 +119,7 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] | (() => string[]); config?: string } = {}) {
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string } = {}) {
   const w = world(o.config === undefined ? {} : { config: o.config });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
@@ -402,15 +402,26 @@ test('revertCapsAt: the config at a commit, or the defaults when it is missing, 
   assert.deepEqual(at('main_watch:\n  revert_prs_per_trip: 0\n'), { perTrip: 1, perDay: 3 }, 'a cap of 0 is not valid');
 });
 
-test('main watch dead check: a required check with no run on any commit judged for dead_check_days is raised once, shown, and cleared when a run appears or it is no longer required', async () => {
-  let required = ['ci'];
-  const s = await started({ required: () => required });
-  const merged = (n: number, runs: CheckRunAt[]) => {
-    const m = s.w.mergedPr();
-    s.gh.pr(n, m.merge, m.head, iso(T), 'example-owner');
-    s.gh.runs.set(m.head, runs);
-  };
+/** A PR merged by an admin whose head has `runs`. */
+function mergeWith(s: Awaited<ReturnType<typeof started>>, n: number, runs: CheckRunAt[]) {
+  const m = s.w.mergedPr();
+  s.gh.pr(n, m.merge, m.head, iso(T), 'example-owner');
   s.gh.roles.set('example-owner', 'owner');
+  s.gh.runs.set(m.head, runs);
+}
+
+/** config.yaml committed on main with `text` (a direct push). */
+function commitConfig(s: Awaited<ReturnType<typeof started>>, text: string) {
+  const person = join(s.w.base, 'person');
+  writeFileSync(join(person, CONFIG_PATH), text);
+  git(person, 'add', CONFIG_PATH);
+  git(person, ...ident, 'commit', '-q', '-m', 'config');
+  git(person, 'push', '-q', 'origin', 'main');
+}
+
+test('main watch dead check: a required check with no run on any commit judged for dead_check_days is raised once, shown, and cleared when a run appears', async () => {
+  const s = await started();
+  const merged = (n: number, runs: CheckRunAt[]) => mergeWith(s, n, runs);
   merged(8, []);
   await run(s.gh, s.watch, 7);
   assert.equal(s.unaccounted.length, 1);
@@ -428,16 +439,36 @@ test('main watch dead check: a required check with no run on any commit judged f
   assert.equal(s.unaccounted.length, 3);
   assert.deepEqual(s.dead.map((d) => d.state), ['raised', 'cleared']);
   assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks, []);
-  // Dead again, then dropped from required_checks: cleared too.
-  merged(11, []);
+});
+
+test('regression: a dead check dropped from the committed required_checks is cleared, though the startup config still lists it', async () => {
+  const s = await started({ required: ['ci'], config: 'required_checks: [ci]\n' });
+  mergeWith(s, 8, []);
   await run(s.gh, s.watch, 7);
   s.gh.g.now += DEAD_CHECK_MS;
   await run(s.gh, s.watch, 1);
-  assert.deepEqual(s.dead.map((d) => d.state), ['raised', 'cleared', 'raised']);
-  required = ['lint'];
-  await run(s.gh, s.watch, 1);
-  assert.deepEqual(s.dead.map((d) => [d.check, d.state]).at(-1), ['ci', 'cleared']);
+  assert.deepEqual(s.dead.map((d) => [d.check, d.state]), [['ci', 'raised']]);
+  // main drops ci (and requires lint): the next merge is judged by that, and so are the dead checks.
+  commitConfig(s, 'required_checks: [lint]\n');
+  await run(s.gh, s.watch, 5);
+  mergeWith(s, 9, [ci({ name: 'lint' })]);
+  await run(s.gh, s.watch, 7);
+  assert.deepEqual(s.checked.map((c) => c.number), [9], 'judged by the committed lint');
+  assert.deepEqual(s.dead.map((d) => [d.check, d.state]), [['ci', 'raised'], ['ci', 'cleared']]);
+  assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks, []);
   assert.deepEqual(readWatchState(s.w.stateFile).dead, {});
+});
+
+test('regression: a check only the committed required_checks list, that never posts, is raised as dead', async () => {
+  // The startup config doesn't know lint; main's config.yaml requires it, so every merge trips on it.
+  const s = await started({ required: ['ci'], config: 'required_checks: [ci, lint]\n' });
+  mergeWith(s, 8, [ci()]);
+  await run(s.gh, s.watch, 7);
+  assert.match(s.unaccounted[0]?.reason ?? '', /lint missing/);
+  s.gh.g.now += DEAD_CHECK_MS;
+  await run(s.gh, s.watch, 1);
+  assert.deepEqual(s.dead.map((d) => [d.check, d.state]), [['lint', 'raised']]);
+  assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks.map((d) => d.check), ['lint']);
 });
 
 test('main watch: GitHub enforcing the protection leaves it to GitHub; a rewritten main is unaccounted, with no revert', async () => {
