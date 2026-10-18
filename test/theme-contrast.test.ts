@@ -140,6 +140,19 @@ const BUILT_IN: Record<string, string> = { white: '#fff', black: '#000' };
 const THEME = new Set([...(block('@theme inline') ?? new Map()).keys()].filter((k) => k.startsWith('--color-')).map((k) => k.slice('--color-'.length)));
 const TAILWIND_PALETTE = /^(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}$/;
 
+/** Light mode's tokens and the theme's `--color-*` names on them. */
+const COLOUR_TOKENS = new Map([...lightTokens(), ...(block('@theme inline') ?? [])]);
+/** A value's opaque light colour as hex (`var(--blue)`, `#d97757`), or undefined if it isn't one or is see-through. */
+function opaqueHex(value: string): string | undefined {
+  try {
+    const c = parseColour(resolve(value, COLOUR_TOKENS));
+    return c.a >= 1 ? hexOf(c) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+const ACCENT = opaqueHex('var(--blue)');
+
 /** A class split into its variants (`dark:focus:`) and its utility, with `:` inside `[...]` or `(...)` not a split. */
 function splitClass(tok: string): [string, string] {
   let depth = 0;
@@ -151,6 +164,19 @@ function splitClass(tok: string): [string, string] {
     else if (c === ':' && depth === 0) cut = i;
   }
   return [tok.slice(0, cut + 1), tok.slice(cut + 1).replace(/^!/, '')];
+}
+
+/** Whether a utility draws the accent's colour: a theme colour that is the accent (`ring-blue`, `ring-info`,
+ *  `ring-blue/40`), or an arbitrary value holding it (`ring-[var(--blue)]`, `shadow-[0_0_0_1px_var(--blue)]`,
+ *  `ring-[#d97757]`, `ring-(--blue)`). */
+function drawsAccent(utility: string): boolean {
+  const arbitrary = /\[(.*)\]|\((--[\w-]+)\)/.exec(utility);
+  if (arbitrary) {
+    const inside = arbitrary[1] ?? `var(${arbitrary[2]})`;
+    return [...inside.matchAll(/var\(--[\w-]+\)|#[0-9a-f]{3,8}(?![\w-])/gi)].some((m) => opaqueHex(m[0]) === ACCENT);
+  }
+  const parts = utility.replace(/\/\d+$/, '').split('-');
+  return parts.some((_, k) => k > 0 && THEME.has(parts.slice(k).join('-')) && opaqueHex(`var(--color-${parts.slice(k).join('-')})`) === ACCENT);
 }
 
 type Use = { kind: 'text' | 'bg'; variant: string; name: string; alpha: number | undefined };
@@ -299,36 +325,37 @@ test('placeholder text is AA on every light background a field can have', () => 
   assert.deepEqual(failing, [], 'placeholder text is under AA');
 });
 
-/** Focus and selection rings that still draw the accent, in files other open PRs hold; each goes once that PR lands. */
+/** Focus and selection rings that still draw the accent, in files other open PRs hold; each goes once that PR lands.
+ *  Keyed by place and by the exact class there, so a fixed line that something else moves onto doesn't stay excused. */
 const RING_OWED: Record<string, string> = {
-  'web/src/components/FirstTask.tsx:8': 'focus:shadow-[0_0_0_1px_var(--blue)]: after #664 / #633 merge',
-  'web/src/pages/Board.tsx:268': 'focus:shadow-[0_0_0_1px_var(--blue)]: after #664 / #633 merge',
-  'web/src/pages/Decisions.tsx:304': 'ring-blue (the selected decision): switched in #664',
+  'web/src/components/FirstTask.tsx:8: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
+  'web/src/pages/Board.tsx:268: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
+  'web/src/pages/Decisions.tsx:304: ring-blue': 'the selected decision: switched in #664',
 };
 
 test('focus and selection rings use the ring token, not the accent', () => {
   // The accent is 2.96:1 on the page and 2.50:1 on a card; --ring is the light-mode ring that reaches 3:1. In dark mode
-  // --ring is the accent, so a switch to it changes nothing there.
-  const accent = /(?:^|-)blue(?:\/\d+)?$|var\(--blue\)/;
-  const found = new Map<string, string>();
+  // --ring is the accent, so a switch to it changes nothing there. "The accent" is its colour, whatever the name:
+  // ring-blue, ring-info, ring-[var(--blue)] and ring-[#d97757] all draw it.
+  const found = new Set<string>();
   for (const file of files(webSrc)) {
     const rel = file.slice(repoRoot.length);
     readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
       for (const tok of line.match(/[^\s"'`]+/g) ?? []) {
-        const [, variants = '', utility = ''] = /^((?:[\w-]+:)*)(.*)$/.exec(tok) ?? [];
+        const [variants, utility] = splitClass(tok);
         const focus = /focus/.test(variants);
-        const ring = /^ring-blue(?:\/\d+)?$/.test(utility);
-        if ((focus && accent.test(utility)) || ring) found.set(`${rel}:${i + 1}`, tok);
+        const ringish = /^-?(ring|outline|shadow)-/.test(utility);
+        if ((focus || ringish) && drawsAccent(utility)) found.add(`${rel}:${i + 1}: ${tok}`);
       }
     });
   }
   for (const m of css.matchAll(/([^{}]*)\{([^{}]*)\}/g))
-    if (/focus/.test(m[1] ?? '') && /var\(--blue\)/.test(m[2] ?? '')) found.set(`web/src/styles.css: ${(m[1] ?? '').trim()}`, 'var(--blue)');
-  for (const [where, why] of Object.entries(RING_OWED)) {
-    assert.ok(found.has(where), `${where} no longer draws the accent: drop it from RING_OWED (${why})`);
-    found.delete(where);
+    if (/focus/.test(m[1] ?? '') && /var\(--blue\)/.test(m[2] ?? '')) found.add(`web/src/styles.css: ${(m[1] ?? '').trim()}: var(--blue)`);
+  for (const [owed, why] of Object.entries(RING_OWED)) {
+    assert.ok(found.has(owed), `${owed} is no longer there: drop it from RING_OWED (${why})`);
+    found.delete(owed);
   }
-  assert.deepEqual([...found].map(([where, tok]) => `${where}: ${tok}`), [], 'a focus or selection ring draws the accent: use var(--ring) / ring-ring');
+  assert.deepEqual([...found], [], 'a focus or selection ring draws the accent: use var(--ring) / ring-ring');
 });
 
 /** Each native control's opening tag in web/src (`<input`, `<select`, `<textarea`, `<button` up to its `>`), with the
