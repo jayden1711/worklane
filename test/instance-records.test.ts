@@ -503,6 +503,43 @@ test("a link renamed over a removed user's file mid-walk (by another agent-slots
   for (const f of ['outside-a', 'outside-b']) assert.equal((statSync(join(root, 'outside', f)).mode & 0o7777).toString(8), '6770', `${f}: never changed through the link (${r.stdout}${r.stderr})`);
 });
 
+test("a removed user's file whose name is not UTF-8 (or inside such a directory) is re-owned like any other, listed by its own bytes", { skip: (!posix && 'bash, find, POSIX modes') || (process.platform === 'darwin' && 'APFS refuses non-UTF-8 names') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-bytes-'));
+  const slots = Buffer.from(join(root, 'engine/agent-slots'));
+  const bad = Buffer.concat([slots, Buffer.from('/bad'), Buffer.from([0xff]), Buffer.from('.lock')]);
+  const badDir = Buffer.concat([slots, Buffer.from('/dir'), Buffer.from([0xff])]);
+  const inner = Buffer.concat([badDir, Buffer.from('/inner.json')]);
+  mkdirSync(badDir, { recursive: true });
+  for (const p of [bad, inner]) {
+    writeFileSync(p, '{}');
+    chmodSync(p, 0o660);
+  }
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  const r = spawnSync('bash', ['-c', `source "$1"; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242 ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), join(root, 'engine'), join(root, 'locks')], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  assert.equal(r.status, 0, r.stderr);
+  const list = readFileSync(join(root, 'list'));
+  for (const p of [bad, inner]) {
+    assert.equal((statSync(p).mode & 0o7777).toString(8), '640', `${p.toString('latin1')}: changed, not skipped`);
+    assert.ok(list.includes(Buffer.concat([Buffer.from(' 660 -> 640 '), p, Buffer.from('\n')])), `${p.toString('latin1')}: listed by its own bytes: ${list.toString('latin1')}`);
+  }
+});
+
+test("a file a removed user still owns after the walk fails the step, listed", { skip: (!posix && 'bash, find') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-after-'));
+  mkdirSync(join(root, 'engine/agent-slots'), { recursive: true });
+  writeFileSync(join(root, 'engine/agent-slots/ok.json'), '{}');
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  // uid 4244 stands for a removed user the change missed: the second walk (after the change) still finds its file.
+  const left = join(root, 'engine/agent-slots/missed.json');
+  const n = join(root, 'n');
+  const stub = `find() { command find "$@"; case "$*" in *"-uid 4244"*) echo x >> "${n}"; [ "$(wc -l < "${n}")" -lt 2 ] || printf '%s\\0' "${left}" ;; esac; }`;
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stub}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242 ${uid} 4244`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), join(root, 'engine'), join(root, 'locks')], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  assert.equal(r.status, 1, 'a file still theirs fails the step');
+  assert.match(readFileSync(join(root, 'list'), 'utf8'), new RegExp(`^FAILED ${left.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: still a removed user's after the change$`, 'm'));
+});
+
 test("in a shared engine group, a removed instance's regular file loses group write; a directory keeps it, listed with why; its own group's files and a link's target are left as they were", { skip: (!posix && 'bash, find, POSIX modes') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
   // Real files, modes and stat; only chown stood in for (a test isn't root). This user's own group plays the shared
   // engine group (agent-slots): it is not among the removed instance's gids (4242) and not root.

@@ -390,25 +390,42 @@ stop_uids() {
 # or linked: src/locks.ts, the incident store, the claims), which needs the directory's group write only. A directory
 # there keeps its group write, listed with why: the group's members add and replace the engine's files in it. Each is
 # listed in <listing>, "<owner>:<group> <old mode> -> <new mode> <path>[ (g+w kept: <why>)]", "left <path>: <why>", or
-# "FAILED <path>: <why>" when a change was refused (never hidden); exit 1 then. Only once no process of theirs is left
-# (stop_uids).
+# "FAILED <path>: <why>" when a change was refused (never hidden); exit 1 then. Paths are bytes throughout (find
+# -print0 to the fds), never decoded. Then the walk again: a file a removed uid still owns after the change (however
+# it was missed) is listed "FAILED <path>: still a removed user's after the change", exit 1. Only once no process of
+# theirs is left (stop_uids).
 #   rechown_orphans <listing> <trees, colon-separated> <lock dir> <lock name> <gids, comma-separated> <uid>...
 rechown_orphans() {
-  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids="$5" u t
+  local list="$1" trees="$2" lockdir="$3" lockname="$4" gids="$5" u t rc=0 node to_uid
   shift 5
-  local -a tv=() there=() uids=()
+  local -a tv=() uids=()
   IFS=: read -r -a tv <<<"$trees"
-  for t in "${tv[@]}"; do [ -d "$t" ] && [ ! -L "$t" ] && there+=("$t"); done
+  _rechown_there=()
+  for t in "${tv[@]}"; do [ -d "$t" ] && [ ! -L "$t" ] && _rechown_there+=("$t"); done
   for u in "$@"; do [[ "$u" =~ ^[0-9]+$ ]] && uids+=("$u"); done
   : > "$list"
   [ "${#uids[@]}" -gt 0 ] || return 0
-  {
-    for u in "${uids[@]}"; do
-      [ "${#there[@]}" -eq 0 ] || find -P "${there[@]}" -xdev -uid "$u" -print0
-      [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
-    done
-    true
-  } | "${NODE:-$(command -v node)}" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" rechown x "$(IFS=,; echo "${uids[*]}")" "$gids" > "$list"
+  node="${NODE:-$(command -v node)}"
+  local cjs; cjs="$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs"
+  { for u in "${uids[@]}"; do _rechown_walk "$lockdir" "$lockname" "$u"; done; true; } \
+    | "$node" "$cjs" rechown x "$(IFS=,; echo "${uids[*]}")" "$gids" > "$list" || rc=1
+  # The walk again, after the change: nothing of theirs may be left (a uid that is the one files are given to, a
+  # test's stand-in for root, is theirs by design).
+  to_uid="$("$node" "$cjs" root-ids x | cut -d: -f1)"
+  for u in "${uids[@]}"; do
+    [ "$u" != "$to_uid" ] || continue
+    while IFS= read -r -d '' t; do
+      printf "FAILED %s: still a removed user's after the change\n" "$t" >> "$list"; rc=1
+    done < <(_rechown_walk "$lockdir" "$lockname" "$u")
+  done
+  return "$rc"
+}
+# rechown_orphans's walk for one uid, NUL-separated: the trees in _rechown_there, and <lock dir>'s <lock name> files.
+_rechown_walk() {
+  local lockdir="$1" lockname="$2" u="$3"
+  [ "${#_rechown_there[@]}" -eq 0 ] || find -P "${_rechown_there[@]}" -xdev -uid "$u" -print0
+  [ ! -d "$lockdir" ] || [ -L "$lockdir" ] || find -P "$lockdir" -xdev -maxdepth 1 -name "$lockname" -uid "$u" -print0
+  return 0
 }
 # Everything else the removed users <uid>... still own on <root>'s filesystem (the removal's: /; read-only: find -P
 # -xdev, /proc, /sys and each <skip> path pruned), one path a line, into <listing>: left as it is, for an admin.

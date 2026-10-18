@@ -7,6 +7,7 @@
 //   node instance-records.cjs items <name>              every item, one a line: <kind> <what> (exists or not)
 //   node instance-records.cjs engine-places x           the engine's own places a removal re-owns orphaned files in
 //   node instance-records.cjs rechown x <uids> <gids>   give the paths on stdin (NUL-separated) to root, one fd each
+//   node instance-records.cjs root-ids x                the ids rechown gives files to, "<uid>:<gid>" (root's: 0:0)
 //   node instance-records.cjs hold-slot x <pid> <name>   an agent slot held for <pid>: the updater waits (prints its path)
 //   node instance-records.cjs release-slot x <path> <pid>
 //   node instance-records.cjs plan <name>               the shared files' records <name> has, one a line (changes nothing)
@@ -193,6 +194,8 @@ function rootIds() {
   return [0, 0];
 }
 
+// A path is bytes, never text: a name that isn't UTF-8 is opened, changed and listed by its own bytes (decoded, it
+// would name another path, or none). <p> is a Buffer; the result is the listing line around it: [before, after].
 function rechownOne(p, uids, gids, [rootUid, rootGid], names) {
   const O = fs.constants;
   const owner = (st) => `${names.users.get(st.uid) ?? st.uid}:${names.groups.get(st.gid) ?? st.gid}`;
@@ -202,48 +205,51 @@ function rechownOne(p, uids, gids, [rootUid, rootGid], names) {
     try {
       fd = fs.openSync(p, O.O_RDONLY | O.O_NOFOLLOW | O.O_NONBLOCK | O.O_NOCTTY);
     } catch (e) {
-      if (e.code === 'ENOENT') return `left ${p}: gone since the walk`;
+      if (e.code === 'ENOENT') return { line: ['left ', ': gone since the walk'] };
       if (e.code !== 'ELOOP' && e.code !== 'ENXIO') throw e;
       // A link (ELOOP) or a socket (ENXIO): the entry itself, by name, never followed.
       const st = fs.lstatSync(p);
-      if (!uids.has(st.uid)) return `left ${p}: not a removed user's now`;
+      if (!uids.has(st.uid)) return { line: ['left ', ": not a removed user's now"] };
       fs.lchownSync(p, rootUid, gids.has(st.gid) ? rootGid : st.gid);
-      return `${owner(fs.lstatSync(p))} ${oct(st.mode)} -> ${oct(fs.lstatSync(p).mode)} ${p}`;
+      const now = fs.lstatSync(p);
+      return { line: [`${owner(now)} ${oct(st.mode)} -> ${oct(now.mode)} `, ''] };
     }
     const st = fs.fstatSync(fd);
-    if (!uids.has(st.uid)) return `left ${p}: not a removed user's now`;
+    if (!uids.has(st.uid)) return { line: ['left ', ": not a removed user's now"] };
     const shared = !gids.has(st.gid) && st.gid !== 0;
     fs.fchownSync(fd, rootUid, gids.has(st.gid) ? rootGid : st.gid);
     let why = '';
     if (st.isFile()) fs.fchmodSync(fd, st.mode & 0o7777 & ~0o6000 & (shared ? ~0o020 : 0o7777));
     else if (st.isDirectory() && shared && st.mode & 0o020) why = ` (g+w kept: a directory: ${names.groups.get(st.gid) ?? st.gid}'s members add and replace the engine's files in it)`;
     const now = fs.fstatSync(fd);
-    return `${owner(now)} ${oct(st.mode)} -> ${oct(now.mode)} ${p}${why}`;
+    return { line: [`${owner(now)} ${oct(st.mode)} -> ${oct(now.mode)} `, why] };
   } catch (e) {
-    return { failed: `FAILED ${p}: ${e.code || ''} ${e.message}`.replace(/\s+/g, ' ') };
+    // The code and the call only: the message names the path decoded, which may not be it.
+    return { failed: true, line: ['FAILED ', `: ${e.code || 'error'} ${e.syscall || ''}`.trimEnd()] };
   } finally {
     if (fd !== null) fs.closeSync(fd);
   }
 }
 
-/** The paths (NUL-separated) given to root, as above: the listing's lines, and whether any failed. */
+/** The paths (a Buffer, NUL-separated) given to root, as above: the listing (bytes), and whether any failed. */
 function rechown(input, uidList, gidList, ids = rootIds()) {
   const nums = (s) => new Set(String(s).split(',').filter((x) => /^\d+$/.test(x)).map(Number));
   const uids = nums(uidList);
   const gids = nums(gidList);
   const names = { users: idNames('/etc/passwd'), groups: idNames('/etc/group') };
-  const lines = [];
+  const out = [];
   let failed = false;
-  for (const p of input.split('\0')) {
-    if (!p) continue;
+  for (let at = 0; at < input.length; ) {
+    let end = input.indexOf(0, at);
+    if (end < 0) end = input.length;
+    const p = input.subarray(at, end);
+    at = end + 1;
+    if (!p.length) continue;
     const r = rechownOne(p, uids, gids, ids, names);
-    if (typeof r === 'string') lines.push(r);
-    else {
-      lines.push(r.failed);
-      failed = true;
-    }
+    if (r.failed) failed = true;
+    out.push(Buffer.from(r.line[0]), p, Buffer.from(`${r.line[1]}\n`));
   }
-  return { lines, failed };
+  return { out: Buffer.concat(out), failed };
 }
 
 // The engine updater waits while the machine isn't quiet: a live agent slot (agent-<n>.lock in the slot directory,
@@ -866,9 +872,13 @@ function main(argv) {
   }
   if (cmd === 'rechown') {
     // The walk's paths on stdin, NUL-separated; argv: the removed uids and the instance's gids, comma-separated.
-    const r = rechown(fs.readFileSync(0, 'utf8'), argv[2] || '', argv[3] || '');
-    for (const l of r.lines) process.stdout.write(`${l}\n`);
+    const r = rechown(fs.readFileSync(0), argv[2] || '', argv[3] || '');
+    for (let o = 0; o < r.out.length; ) o += fs.writeSync(1, r.out, o);
     return r.failed ? 1 : 0;
+  }
+  if (cmd === 'root-ids') {
+    process.stdout.write(`${rootIds().join(':')}\n`);
+    return 0;
   }
   if (cmd === 'items') {
     for (const i of items(name)) process.stdout.write(`${i.kind}\t${i.what}\t${i.when ? i.when.join(' ') : '-'}\t${i.rename}\t${i.note || '-'}\n`);
