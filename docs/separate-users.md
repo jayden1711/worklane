@@ -57,7 +57,7 @@ Each user signs in to its own accounts. Worklane never creates, reads or copies 
   - Metadata: read: required by GitHub
   - Actions: read (optional): CI fix runs read the failing job's log with it; without it they can't run
 
-  **Workflows is deliberately excluded.** GitHub refuses a push that changes `.github/workflows` without it, so such a change can't go out through the coordinator. Leave out Administration too, and keep Actions at read: the harness never reruns or cancels jobs.
+  **Workflows is deliberately excluded.** GitHub refuses a push that changes `.github/workflows` without it, so such a change can't go out through the coordinator. Leave out Administration too, and keep Actions at read. With Actions at read the coordinator can't re-run or cancel jobs. The flaky gate and fix-forward do ask GitHub to re-run failed jobs (`rerunFailedJobs`, `src/backlog/github.ts`), and GitHub refuses. The flaky gate then treats the failure as real (`src/coordinator/flaky.ts`), and fix-forward's search for the culprit skips that commit (`src/coordinator/fix-forward.ts`). A person re-runs jobs.
 
   Then run `bash scripts/setup/credentials.sh <name> github-app <app-id> <installation-id> <key.pem> <owner/repo>`. It:
   - installs the private key for `wl-<name>` only, mode 0400;
