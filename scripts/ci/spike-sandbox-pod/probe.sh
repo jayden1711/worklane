@@ -100,21 +100,34 @@ if [ -e "$W/marker-true" ]; then
 else
   res fail_closed held "srt refused and the command never ran"
 fi
-# Enforcement, where srt runs: a direct connection fails, and the denied file can't be read. n/a when the sandbox
-# never started (the command printed nothing).
-out="$(timeout 60 "$SRT" --settings "$W/srt.json" -c "echo sandbox-started; timeout 10 bash -c '$TCP' $H $P" 2>&1)"
-code=$?
-case "$out" in
-  *connected*) res srt_net_blocked NO-REACHED-NETWORK "$out" ;;
-  *sandbox-started*) res srt_net_blocked "$([ "$code" != 0 ] && echo yes || echo no)" "exit $code: $out" ;;
-  *) res srt_net_blocked n/a "sandbox did not start: exit $code: $out" ;;
-esac
-out="$(timeout 60 "$SRT" --settings "$W/srt.json" -c "echo sandbox-started; cat $W/secret.txt" 2>&1)"
-code=$?
-case "$out" in
-  *s3cret*) res srt_deny_read NO-READ-IT "$out" ;;
-  *sandbox-started*) res srt_deny_read "$([ "$code" != 0 ] && echo yes || echo no)" "exit $code: $out" ;;
-  *) res srt_deny_read n/a "sandbox did not start: exit $code: $out" ;;
-esac
+# Enforcement, where srt runs: a direct connection fails, the denied file can't be read, and the command can't see the
+# pod's processes (only with a fresh /proc; under enableWeakerNestedSandbox the pod's /proc is bound in). n/a when the
+# sandbox never started (the command printed nothing).
+enforce() { # <suffix> <settings>
+  local out code
+  out="$(timeout 60 "$SRT" --settings "$2" -c "echo sandbox-started; timeout 10 bash -c '$TCP' $H $P" 2>&1)"
+  code=$?
+  case "$out" in
+    *connected*) res "srt_net_blocked$1" NO-REACHED-NETWORK "$out" ;;
+    *sandbox-started*) res "srt_net_blocked$1" "$([ "$code" != 0 ] && echo yes || echo no)" "exit $code: $out" ;;
+    *) res "srt_net_blocked$1" n/a "sandbox did not start: exit $code: $out" ;;
+  esac
+  out="$(timeout 60 "$SRT" --settings "$2" -c "echo sandbox-started; cat $W/secret.txt" 2>&1)"
+  code=$?
+  case "$out" in
+    *s3cret*) res "srt_deny_read$1" NO-READ-IT "$out" ;;
+    *sandbox-started*) res "srt_deny_read$1" "$([ "$code" != 0 ] && echo yes || echo no)" "exit $code: $out" ;;
+    *) res "srt_deny_read$1" n/a "sandbox did not start: exit $code: $out" ;;
+  esac
+  # PID 1 of the pod is probe.sh's bash; a sandbox with its own /proc sees its own PID 1 instead.
+  out="$(timeout 60 "$SRT" --settings "$2" -c 'echo sandbox-started; tr "\0" " " < /proc/1/cmdline' 2>&1)"
+  case "$out" in
+    *probe.sh*) res "srt_pod_procs_hidden$1" no "the sandbox sees the pod's PID 1: $out" ;;
+    *sandbox-started*) res "srt_pod_procs_hidden$1" yes "$out" ;;
+    *) res "srt_pod_procs_hidden$1" n/a "sandbox did not start: $out" ;;
+  esac
+}
+enforce '' "$W/srt.json"
 srt_marker srt_weaker "$W/srt-weaker.json" "$W/marker-weaker"
+enforce _weaker "$W/srt-weaker.json"
 echo "PROBE-DONE"

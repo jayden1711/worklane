@@ -1,0 +1,17 @@
+# SPIKE (do not merge), #698 decision 5: k3s straight on the CI runner (run.sh, CLUSTER=k3s). One node, nothing
+# but what the probe pods need: no ingress, no load balancer, no metrics, no storage provisioner.
+[Unit]
+Description=k3s for the sandbox-in-a-pod spike
+After=network-online.target
+
+[Service]
+Type=notify
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/k3s server --write-kubeconfig-mode=644 --disable=traefik --disable=servicelb --disable=metrics-server --disable=local-storage
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s

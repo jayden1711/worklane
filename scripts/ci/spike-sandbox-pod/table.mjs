@@ -16,7 +16,11 @@ const COLS = [
   ['srt_true', 'srt trivial cmd'],
   ['srt_net_blocked', 'srt net blocked'],
   ['srt_deny_read', 'srt denyRead holds'],
-  ['srt_weaker', 'srt, enableWeakerNestedSandbox'],
+  ['srt_pod_procs_hidden', 'srt hides pod procs'],
+  ['srt_weaker', 'srt weaker (enableWeakerNestedSandbox)'],
+  ['srt_net_blocked_weaker', 'weaker: net blocked'],
+  ['srt_deny_read_weaker', 'weaker: denyRead holds'],
+  ['srt_pod_procs_hidden_weaker', 'weaker: hides pod procs'],
   ['fail_closed', 'fail-closed'],
 ];
 
@@ -38,7 +42,8 @@ const passes = readdirSync(out).filter((d) => statSync(join(out, d)).isDirectory
 for (const pass of passes) {
   const dir = join(out, pass);
   const files = readdirSync(dir).filter((f) => f.endsWith('.log')).sort((a, b) => parseInt(a) - parseInt(b));
-  md += `\n### Pass: ${pass}\n\n`;
+  const cluster = /INFO\|cluster\|(\S+)/.exec(files.length ? readFileSync(join(dir, files[0]), 'utf8') : '')?.[1] ?? '?';
+  md += `\n### Cluster: ${cluster}, pass: ${pass}\n\n`;
   md += `| profile | admitted under | seccomp | AppArmor | userns | ${COLS.map(([, h]) => h).join(' | ')} |\n`;
   md += `|${'---|'.repeat(COLS.length + 5)}\n`;
   const notes = [];
@@ -49,7 +54,7 @@ for (const pass of passes) {
     md += `| ${info.profile} | ${info.admitted ?? '?'} | ${ran ? seccompOf(info.status) : '-'} | ${ran ? (info.apparmor ?? '?').trim() : '-'} | ${ran ? usernsOf(info.uid_map) : '-'} | ${cells.join(' | ')} |\n`;
     if (info.admitted === 'none' || (info.denied ?? '').trim()) notes.push(`- ${info.profile}: refused by admission: ${(info.denied ?? '').slice(0, 400)}`);
     if (info.admitted !== 'none' && !ran) notes.push(`- ${info.profile}: pod didn't run the probe (phase ${info.phase || 'none'}): ${(info.why ?? '').slice(0, 400)}`);
-    for (const k of ['bwrap_srt_flags', 'srt_true', 'unshare_user', 'unshare_fresh_proc']) {
+    for (const k of ['unshare_user', 'unshare_user_mount', 'unshare_fresh_proc', 'bwrap_srt_flags', 'bwrap_weaker_proc', 'srt_true', 'srt_weaker']) {
       if (ran && res[k] && res[k].v !== 'yes') notes.push(`- ${info.profile} / ${k}: ${res[k].d.slice(0, 300)}`);
     }
   }

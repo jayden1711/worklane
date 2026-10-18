@@ -1,6 +1,6 @@
 name: spike sandbox pod
 # SPIKE (do not merge), #698 decision 5: can Claude Code's command sandbox (bubblewrap, through Anthropic's
-# sandbox-runtime) start inside a locked-down Kubernetes pod? Measures the sandbox itself on a kind cluster; no model
+# sandbox-runtime) start inside a locked-down Kubernetes pod? Measures the sandbox itself on a kind cluster and on k3s; no model
 # call, no secrets. Runs only for the spike-sandbox-pod branch: on its PR (a paths filter, so it is never one of the
 # checks a merge or the engine updater requires, test/update-checks.test.ts) or by hand. The PR is never merged.
 on:
@@ -16,13 +16,20 @@ concurrency:
   cancel-in-progress: true
 jobs:
   probe:
-    name: spike sandbox in a restricted pod (#698 decision 5)
+    name: spike sandbox in a restricted pod (#698 decision 5, ${{ matrix.cluster }})
     if: github.head_ref == 'spike-sandbox-pod' || github.ref == 'refs/heads/spike-sandbox-pod'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    # kind: the node is a docker container. k3s: straight on the runner, a real node (host AppArmor, no nesting).
+    strategy:
+      fail-fast: false
+      matrix:
+        cluster: [kind, k3s]
     defaults:
       run:
         shell: bash
+    env:
+      CLUSTER: ${{ matrix.cluster }}
     # WHY: no job-level env for the output dir: a job's env can't read the runner context, and GitHub rejected the
     # whole file for it (the first push's run failed with no jobs). run.sh defaults OUT to $RUNNER_TEMP/spike-sandbox-pod.
     steps:
@@ -34,7 +41,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/spike-sandbox-pod"
           bash scripts/ci/spike-sandbox-pod/run.sh host | tee "$RUNNER_TEMP/spike-sandbox-pod/host.txt"
-      - name: a kind cluster, the probe image, the namespaces and the Localhost seccomp profile
+      - name: the cluster, the probe image, the namespaces and the Localhost seccomp profile
         run: bash scripts/ci/spike-sandbox-pod/run.sh cluster
       - name: gVisor as a RuntimeClass (best effort; skipped on failure)
         continue-on-error: true
@@ -58,7 +65,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: spike-sandbox-pod
+          name: spike-sandbox-pod-${{ matrix.cluster }}
           path: |
             ${{ runner.temp }}/spike-sandbox-pod/aa-*
             ${{ runner.temp }}/spike-sandbox-pod/host.txt
