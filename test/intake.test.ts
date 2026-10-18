@@ -272,6 +272,37 @@ test('regression: a long post with a stray backtick or a fence open at the cut k
   for (const t of [a, b, c, d]) assert.equal(ticks(t) % 2, 0, t);
 });
 
+test('regression: the post a thread opens on and a direct message are cut by fitPost, never by a plain slice', async () => {
+  const posts: { url: string; body: { content?: string } }[] = [];
+  let ids = 700000;
+  const d = new DiscordIntake({
+    token: 'tok',
+    guild: '555555',
+    channels: ['111111'],
+    allowedSenders: ['222222'],
+    prefixes: ['bug:'],
+    connect: () => new FakeSocket(),
+    fetch: (async (url: string, init: RequestInit) => {
+      posts.push({ url, body: JSON.parse(String(init.body)) as { content?: string } });
+      return { ok: true, json: async () => ({ id: String(ids++) }) };
+    }) as unknown as typeof fetch,
+    setInterval: () => 1,
+    clearInterval: () => {},
+  });
+  // A code span across the 500 mark: a plain slice would leave it open, with `**bold**` and the rest rendering.
+  const text = `${'x'.repeat(480)} \`${'p'.repeat(30)} **bold** <#123456789012345678>\` end`;
+  const kept = `${'x'.repeat(480)} `;
+  assert.equal(fitPost(text, REPLY_CHARS), kept);
+  assert.ok(await d.openThread('111111', text, 'a thread'));
+  const opening = posts.find((p) => /\/channels\/111111\/messages$/.test(p.url));
+  assert.equal(opening?.body.content, kept, 'the post the thread opens on');
+  posts.length = 0;
+  assert.equal(await d.dm('222222', text), true);
+  const dm = posts.find((p) => typeof p.body.content === 'string');
+  assert.match(dm?.url ?? '', /\/channels\/700002\/messages$/);
+  assert.equal(dm?.body.content, kept, 'the direct message');
+});
+
 test('in-product reports: the fixed query with only a validated cursor filled in; the cursor advances privately, only past what is recorded', { skip: !posix && 'POSIX modes' }, async () => {
   const dir = state();
   const q = "SELECT id, reporter, text, created_at FROM bug_reports_v WHERE id > :after ORDER BY id LIMIT 50";
