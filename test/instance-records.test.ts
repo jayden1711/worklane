@@ -610,14 +610,20 @@ function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: b
 }
 
 /**
- * stop_uids's last listing alone (INSTANCE_REMOVE_TEST_NO_KILL=1: nothing killed) over a stand-in process table
- * (PROC_DIR), pgrep finding <live> and <gone> as uid 1001's. A live pid with a command has its cmdline; one with null
- * has its /proc dir but no cmdline that can be read. Each <gone> pid exits, its /proc dir reaped, right after pgrep
- * lists it: before the listing reads its command (a fork loop's short-lived child, #614).
+ * stop_uids's last listing alone (INSTANCE_REMOVE_TEST_NO_KILL=1, and every kill and wait stood in for besides, so
+ * nothing real is ever killed) over a stand-in process table (PROC_DIR), pgrep finding <live> and <gone> as uid 1001's.
+ * A live pid with a command has its cmdline; one with null has its /proc dir but no cmdline that can be read. Each
+ * <gone> pid is listed once, then exits, its /proc dir reaped, before the listing reads its command (a fork loop's
+ * short-lived child, #614). <hop>: every pgrep lists a fresh pid that has exited the same way (a process that forks
+ * and exits over and over, its next pid born after each listing). Returns the run, how many times pgrep listed uid
+ * 1001, and the log of any kill or wait.
  */
-function listRun(o: { live?: Record<string, string | null>; gone?: string[] }) {
+function listRun(o: { live?: Record<string, string | null>; gone?: string[]; hop?: boolean }) {
   const root = mkdtempSync(join(tmpdir(), 'stop-list-'));
   const proc = join(root, 'proc');
+  const log = join(root, 'log');
+  const calls = join(root, 'calls');
+  writeFileSync(calls, '0');
   const live = o.live ?? {};
   const gone = o.gone ?? [];
   for (const [pid, cmd] of Object.entries(live)) {
@@ -628,14 +634,24 @@ function listRun(o: { live?: Record<string, string | null>; gone?: string[] }) {
     mkdirSync(join(proc, pid), { recursive: true });
     writeFileSync(join(proc, pid, 'cmdline'), 'brief\0');
   }
-  const pids = [...Object.keys(live), ...gone].join(' ');
   const stubs = [
     `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
     `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
     `usermod() { :; }; systemctl() { return 1; }`,
-    `pgrep() { [ "\${2:-}" = 1001 ] || return 1; printf '%s\\n' ${pids}; for p in ${gone.join(' ')}; do rm -rf -- "$PROC_DIR/$p"; done; }`,
+    `pkill() { echo "pkill $*" >> "${log}"; }; loginctl() { echo "loginctl $*" >> "${log}"; }; sleep() { echo "sleep $*" >> "${log}"; }`,
+    [
+      `pgrep() {`,
+      `  [ "\${2:-}" = 1001 ] || return 1`,
+      `  local n p; n=$(($(cat "${calls}") + 1)); echo "$n" > "${calls}"`,
+      `  for p in ${Object.keys(live).join(' ')}; do echo "$p"; done`,
+      `  for p in ${gone.join(' ')}; do if [ -d "$PROC_DIR/$p" ]; then echo "$p"; rm -rf -- "$PROC_DIR/$p"; fi; done`,
+      o.hop ? `  p=$((5000 + n)); mkdir -p "$PROC_DIR/$p"; printf 'hop\\0' > "$PROC_DIR/$p/cmdline"; echo "$p"; rm -rf -- "$PROC_DIR/$p"` : '',
+      `  :`,
+      `}`,
+    ].join('\n'),
   ].join('\n');
-  return spawnSync('bash', ['-c', `source "$1"; ${stubs}; PROC_DIR="$2"; stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_NO_KILL: '1' } });
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}\nPROC_DIR="$2"; stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_NO_KILL: '1' } });
+  return { ...r, listings: Number(readFileSync(calls, 'utf8')), ran: existsSync(log) ? readFileSync(log, 'utf8') : '' };
 }
 
 test('issue #614: a process that exits between pgrep and the read of its command is not left: not listed, nothing on stderr, and alone it refuses nothing', { skip: !posix && 'bash' }, () => {
@@ -643,6 +659,7 @@ test('issue #614: a process that exits between pgrep and the read of its command
   assert.equal(r.stderr, '', 'no "No such file or directory" for its cmdline');
   assert.equal(r.stdout, '');
   assert.equal(r.status, 0, 'nothing left');
+  assert.doesNotMatch(r.ran, /pkill|loginctl/, 'nothing killed');
   // With one still there: only that one is named, with its command from the process table.
   const both = listRun({ live: { '4242': 'busy\0--loop\0' }, gone: ['4243'] });
   assert.equal(both.stderr, '');
@@ -654,6 +671,22 @@ test('issue #614: a process still there whose command cannot be read is named al
   const r = listRun({ live: { '4245': null } });
   assert.match(r.stdout, /^4245 1001\b/m, 'never skipped while its /proc dir is there');
   assert.equal(r.status, 1);
+});
+
+test('issue #614: a vanished pid never passes the check by itself: the listing runs again, and a process that keeps changing pid (every listed pid gone) refuses the removal, named', { skip: !posix && 'bash' }, () => {
+  // A hopper: each listing's pid has exited before its read, and its successor was born after the listing.
+  const r = listRun({ hop: true });
+  assert.equal(r.status, 1, 'refused: a removal never goes on while pids keep vanishing');
+  assert.equal(r.stderr, '');
+  assert.match(r.stdout, /^uid 1001: its processes keep changing pid \(each pid listed was gone before its command could be read, in 5 listings\)/);
+  // 2 pgrep calls a listing (-U, -u).
+  assert.equal(r.listings, 10, 'STOP_RECHECKS (5) listings, then it stops');
+  assert.equal((r.ran.match(/^sleep 0\.2$/gm) ?? []).length, 4, 'a short wait between listings');
+  assert.doesNotMatch(r.ran, /pkill|loginctl/, 'nothing killed');
+  // One short-lived child: the next listing finds nothing, so the removal goes on.
+  const once = listRun({ gone: ['4243'] });
+  assert.equal(once.status, 0);
+  assert.equal(once.listings, 4, 'listed again once, and that listing found none');
 });
 
 test("before userdel: the accounts are locked, the users' engine units (User= checked) and slices stopped, then pkill by uid pass after pass until none is left", { skip: !posix && 'bash' }, () => {
