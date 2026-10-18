@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ReviewConfig } from '../src/config/schema.js';
 import { computeLevel, loadMoneyPaths, SELF_MODIFICATION, selfModificationPart, type ChangeFile } from '../src/review.js';
 
@@ -59,6 +60,39 @@ test("regression: a change to the agents' tool guard (src/hook.ts) is self-modif
   assert.deepEqual(r.categories[SELF_MODIFICATION], ['src/hook.ts']);
   assert.ok(r.reasons.includes(`${SELF_MODIFICATION}: src/hook.ts`), r.reasons.join('; '));
   assert.equal(selfModificationPart('src/hook.ts'), "the agents' tool guard");
+});
+
+// WHY (#655): the guard's deny lists, the read-only agents' tool lists and refusals, and the task file's frozen and
+// hidden paths live beside src/hook.ts. Unlocked, a change to any of them widened what the guard allows at L1.
+const GUARD_MODULES = [
+  'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
+  'src/intake/run.ts', 'src/intake/chat.ts', 'src/research.ts', 'src/contract.ts',
+];
+
+test("regression: a change to each module the agents' tool guard decides with is self-modification, L3, with a review.yaml that lists no src/**", () => {
+  const notL3 = GUARD_MODULES.filter((path) => {
+    const r = level([f(path, 1, 1)]);
+    return r.level !== 'L3' || r.categories[SELF_MODIFICATION]?.[0] !== path || selfModificationPart(path) !== "the agents' tool guard";
+  });
+  assert.deepEqual(notL3, [], `not locked as the agents' tool guard: ${notL3.map((p) => `${p} (${level([f(p, 1, 1)]).level})`).join(', ')}`);
+});
+
+// The modules src/hook.ts imports that decide no allow or deny, each with why. Any other import (a new deny list, or the
+// hook split into src/hook/) must be locked, or named here: both changes wait for the owner (this file is locked too).
+const HOOK_IMPORTS_NOT_LOCKED: Record<string, string> = {
+  'src/os/index.ts': 'the OS adapter: the child env and the post-edit check\'s shell',
+  'src/brand.ts': 'names only',
+  'src/config/load.ts': 'reads the project config; the rules are guardrails.yaml and src/guardrails/**, both locked',
+  'src/comment-policy.ts': 'the post-edit comment check: it never denies a tool call and fails open by design (#330); CI holds the policy',
+};
+
+test("every module src/hook.ts imports is locked, or named as one that decides no allow or deny", () => {
+  const src = readFileSync(join(fileURLToPath(new URL('../../', import.meta.url)), 'src', 'hook.ts'), 'utf8');
+  const imports = [...src.matchAll(/(?:from|import\()\s*'\.\/([^']+)\.js'/g)].map((m) => `src/${m[1]}.ts`);
+  assert.ok(imports.length > 5, `parsed the imports: ${imports.join(', ')}`);
+  const unaccounted = imports.filter((p) => !selfModificationPart(p) && !(p in HOOK_IMPORTS_NOT_LOCKED));
+  assert.deepEqual(unaccounted, [], 'lock these with the agents\' tool guard (src/review.ts), or name them in HOOK_IMPORTS_NOT_LOCKED with why');
+  for (const p of Object.keys(HOOK_IMPORTS_NOT_LOCKED)) assert.ok(imports.includes(p), `${p}: src/hook.ts no longer imports it; take it out of the list`);
 });
 
 test('a failed or low-confidence verdict bumps one level; an agent can raise but not lower', () => {
