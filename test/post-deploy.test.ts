@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -19,7 +19,7 @@ import { asks } from '../src/console/asks.js';
 import { Coordinator } from '../src/coordinator.js';
 import { DeployGateConfig, HOST_TOKEN_CREDENTIAL, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT, PostDeployConfig } from '../src/deploy-gate/config.js';
 import { DeployGate, refUpdateBody, type DeployRefs, type RefResult } from '../src/deploy-gate/gate.js';
-import { snippet } from '../src/deploy-gate/post-deploy.js';
+import { followUpIssue, followUpMarker, snippet } from '../src/deploy-gate/post-deploy.js';
 import { RAILWAY_QUERIES } from '../src/deploy-gate/railway.js';
 import { gateGit, hostTokenFile, postDeployFor, setupDeployGate } from '../src/deploy-gate/wire.js';
 import { EventLog } from '../src/events/log.js';
@@ -140,6 +140,12 @@ const config = (origin: string, o: Partial<{ wait: number }> = {}) =>
 
 const dep = (id: string, commit: string, status: string, at: string, canRollback = true): Dep => ({ id, status, createdAt: at, canRollback, meta: { commitHash: commit } });
 
+/**
+ * Secret-shaped text the redactor doesn't know (a JWT, a live payment key, a cloud API key, a JSON key value, a host).
+ * Built from pieces, so the repo's own secret scan doesn't take these fakes for real ones.
+ */
+const UNREDACTED = `{"jwt":"${['eyJhbGciOiJIUzI1NiJ9', 'eyJzdWIiOiIxIn0', 'c2lnbmF0dXJlLXZhbHVl'].join('.')}","key":"${'sk_' + 'live_' + '51HxExampleExampleExample0000'}","g":"${'AI' + 'za' + 'SyExampleExampleExampleExample1234567'}"} db-primary.prod.internal:5432`;
+
 const OPS = '222222';
 const INTAKE = IntakeConfig.parse({
   version: 1,
@@ -170,7 +176,7 @@ async function setup(o: { token: boolean; deployed: boolean; prodOk: boolean; wa
   const prod = await fakeProd({
     '/api/health': { status: 200, body: 'ok' },
     '/sign-in': { status: 200, body: '<h1>Sign in</h1>' },
-    '/api/status': o.prodOk ? { status: 200, body: '{"up":true}' } : { status: 502, body: 'Bad gateway session=abc123secret token: zzz-very-secret Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123' },
+    '/api/status': o.prodOk ? { status: 200, body: '{"up":true}' } : { status: 502, body: `Bad gateway session=abc123secret token: zzz-very-secret Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123 ${UNREDACTED}` },
   });
   const incidents: { op: 'raise' | 'resolve'; kind: string; key: string; detail?: string }[] = [];
   const sink = { raiseIncident: (kind: string, key: string, detail: string) => void incidents.push({ op: 'raise', kind, key, detail }), resolveIncident: (kind: string, key: string) => void incidents.push({ op: 'resolve', kind, key }) };
@@ -338,12 +344,15 @@ test('post-deploy: a failed check files one follow-up issue, never ready, with t
     assert.equal(i.state, 'open');
     assert.match(i.title, new RegExp(`post-deploy check on ${t.c2.slice(0, 8)}: status-api`));
     assert.ok(i.body.includes(`https://github.com/example/repo/commit/${t.c2}`), 'links the commit');
-    assert.match(i.body, /`status-api` \(api\): expected 200, got 502 \(status 502\)/, 'the failed check');
-    assert.match(i.body, /Bad gateway/, 'with its redacted snippet');
+    assert.match(i.body, /`status-api` \(api\): `expected 200, got 502` \(status 502\)/, 'the failed check: name, kind, error and status');
     assert.match(i.body, /\*\*Rollback:\*\* every service back on `[0-9a-f]{8}`/, 'the rollback outcome');
-    assert.match(i.body, /- web: rollback ok/);
-    assert.match(i.body, /- worker: redeploy ok/);
+    assert.match(i.body, /- web: rollback ok `rolled back to web-old/);
+    assert.match(i.body, /- worker: redeploy ok `redeployed worker-old/);
+    // No response text at all (the issue may be public): not even what the redactor misses. The ops post keeps it.
+    assert.doesNotMatch(i.body, /Bad gateway|eyJhbGci|sk_live_|AIzaSy|db-primary|"jwt"|"key"/, 'no response text reaches the issue');
     assert.doesNotMatch(i.body, new RegExp(`${TOKEN}|abc123secret|zzz-very-secret|abcdefghijklmnopqrstuvwxyz0123|prod-session-cookie-value`), 'no secret reaches the tracker');
+    await t.c.checkIntake();
+    assert.match(t.posts.find((p) => p.where === OPS && /Post-deploy check failed/.test(p.text))?.text ?? '', /Bad gateway/, 'the snippet stays in the ops post');
     assert.doesNotMatch(i.body, /```done_when/, 'no contract: it cannot be built until a person writes one');
     // The rollback is what it was before issues were filed: the same two host mutations, the same incident.
     const mutations = () => t.host.calls.filter((c) => c.query !== RAILWAY_QUERIES.LIST).map((c) => c.variables.id);
@@ -379,6 +388,51 @@ test('post-deploy: a failed check files one follow-up issue, never ready, with t
   }
 });
 
+test('post-deploy: a lost record and an open issue carrying only one failed check: the other check is filed, once', async () => {
+  const t = await setup({ token: true, deployed: true, prodOk: false });
+  try {
+    t.prod.routes['/api/health'] = { status: 500, body: 'down' };
+    await t.pass();
+    await t.pass();
+    const [first] = t.filed();
+    assert.equal(t.filed().length, 1, 'one issue for both checks');
+    assert.match(first!.title, /: health, status-api$/);
+    // The issue now carries only status-api's marker, and the state file lost its record.
+    t.backlog.editBody(first!.number, first!.body.replace(followUpMarker(t.c2, 'health'), ''));
+    const file = join(t.stateDir, 'post-deploy.json');
+    writeFileSync(file, JSON.stringify({ ...(JSON.parse(readFileSync(file, 'utf8')) as object), issues: [] }));
+    t.pd.start(t.c2, t.c1);
+    await t.pass();
+    const after = t.filed();
+    assert.equal(after.length, 2, 'health, which no open issue carries, is filed');
+    assert.match(after[1]!.title, /: health$/);
+    assert.ok(after[1]!.body.includes(followUpMarker(t.c2, 'health')));
+    assert.ok(!after[1]!.body.includes(followUpMarker(t.c2, 'status-api')), 'status-api is the first issue');
+    t.pd.start(t.c2, t.c1);
+    await t.pass();
+    assert.equal(t.filed().length, 2, 'once');
+  } finally {
+    t.done();
+  }
+});
+
+test('post-deploy follow-up issue: the host and request text sits in code spans: no link, image, URL, reference or mention renders', () => {
+  const evil = 'see [click](https://evil.example/login) ![i](https://evil.example/i.png?x=1) https://evil.example/raw other-owner/other-repo#1 @someone `x` <b>y</b>\n# heading';
+  const { body } = followUpIssue({
+    repo: 'example/repo',
+    branch: 'deploy',
+    sha: 'a'.repeat(40),
+    prev: 'b'.repeat(40),
+    checks: [{ name: 'api', kind: 'api', error: `request failed: ${evil}`, status: null }],
+    rollback: { attempted: true, ok: false, detail: `not every service rolled back: web ${evil}`, services: [{ service: 'web', to: 'd1', via: null, ok: false, detail: evil }] },
+  });
+  const outside = body.replace(/`[^`\n]*`/g, '');
+  assert.doesNotMatch(outside, /evil\.example|other-owner|@someone|\]\(|<b>|^# heading/m, 'none of it outside a code span');
+  assert.equal((body.match(/evil\.example\/login/g) ?? []).length, 3, 'all three places kept it, in code spans');
+  const unattempted = followUpIssue({ repo: 'example/repo', branch: 'deploy', sha: 'a'.repeat(40), prev: null, checks: [{ name: 'api', kind: 'api', error: null, status: 500 }], rollback: { attempted: false, ok: false, detail: evil, services: [] } }).body;
+  assert.doesNotMatch(unattempted.replace(/`[^`\n]*`/g, ''), /evil\.example|other-owner|@someone|\]\(/);
+});
+
 test("post-deploy: the tracker refuses the follow-up issue: the rollback and the incident still happen, and it's filed on a later pass, once", async () => {
   let refusals = 1;
   const t = await setup({
@@ -402,8 +456,15 @@ test("post-deploy: the tracker refuses the follow-up issue: the rollback and the
     assert.deepEqual(t.incidents.filter((x) => x.op === 'raise').map((x) => x.kind), [POST_DEPLOY_INCIDENT]);
     assert.equal(t.filed().length, 0, 'refused');
     assert.ok(t.of('coordinator.error').some((x) => x.where === 'post-deploy follow-up issue' && /GitHub answered 502/.test(String(x.message))), 'the refusal is logged');
+    assert.ok(t.of('coordinator.error').some((x) => /tried again in 1 min/.test(String(x.message))), 'and when it is tried again');
     await t.pass();
-    assert.equal(t.filed().length, 1, 'filed on the next pass');
+    await t.pass();
+    assert.equal(t.filed().length, 0, 'not before the wait is over');
+    assert.equal(refusals, 0, 'not even asked again');
+    t.tick(61_000);
+    await t.pass();
+    assert.equal(t.filed().length, 1, 'filed once the wait is over');
+    t.tick(61_000);
     await t.pass();
     assert.equal(t.filed().length, 1, 'once');
   } finally {
@@ -423,17 +484,22 @@ test('post-deploy: not configured: nothing is watched, smoke-tested, rolled back
     },
   });
   const log = new EventLog(join(checkout, 'events.db'));
-  const wire = (deployGate: unknown) => {
-    cfg.tests.deploy_gate = DeployGateConfig.parse(deployGate);
-    return setupDeployGate(cfg, { repo: 'example/repo', token: async () => 'gh-token' }, { log, actor: 'coordinator', root: checkout, stateDir: checkout, testRunsReady: true, backlog: untouchable });
-  };
-  const off = wire({ enabled: true, branch: 'deploy', tiers: ['suite'] }) as unknown as { d: { postDeploy?: unknown } };
-  assert.ok(off, 'the gate itself is on');
-  assert.equal(off.d.postDeploy, undefined, 'no post-deploy check');
-  // Configured: its follow-up issues go to the coordinator's own tracker.
-  const on = wire({ enabled: true, branch: 'deploy', tiers: ['suite'], post_deploy: config('https://app.example.com') }) as unknown as { d: { postDeploy?: { d: { followUp?: { backlog: unknown; repo: string } } } } };
-  assert.equal(on.d.postDeploy?.d.followUp?.backlog, untouchable);
-  assert.equal(on.d.postDeploy?.d.followUp?.repo, 'example/repo');
+  try {
+    const wire = (deployGate: unknown) => {
+      cfg.tests.deploy_gate = DeployGateConfig.parse(deployGate);
+      return setupDeployGate(cfg, { repo: 'example/repo', token: async () => 'gh-token' }, { log, actor: 'coordinator', root: checkout, stateDir: checkout, testRunsReady: true, backlog: untouchable });
+    };
+    const off = wire({ enabled: true, branch: 'deploy', tiers: ['suite'] }) as unknown as { d: { postDeploy?: unknown } };
+    assert.ok(off, 'the gate itself is on');
+    assert.equal(off.d.postDeploy, undefined, 'no post-deploy check');
+    // Configured: its follow-up issues go to the coordinator's own tracker.
+    const on = wire({ enabled: true, branch: 'deploy', tiers: ['suite'], post_deploy: config('https://app.example.com') }) as unknown as { d: { postDeploy?: { d: { followUp?: { backlog: unknown; repo: string } } } } };
+    assert.equal(on.d.postDeploy?.d.followUp?.backlog, untouchable);
+    assert.equal(on.d.postDeploy?.d.followUp?.repo, 'example/repo');
+  } finally {
+    log.close();
+    rmSync(checkout, { recursive: true, force: true });
+  }
 
   // And a gate without one, moving deploy to a commit production would fail: nothing runs after the move.
   const t = await setup({ token: true, deployed: true, prodOk: false, postDeploy: false });

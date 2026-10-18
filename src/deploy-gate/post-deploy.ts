@@ -11,10 +11,11 @@
 //      the commit is marked so the gate never moves to it again. A red incident, and an ops post with the failing
 //      check, its status and a redacted snippet, and the rollback's result. No token: the same, without a rollback,
 //      and the post says the rollback needs the token.
-//   4. And a follow-up issue in the tracker (#202): the commit, each failed check and the rollback's result. Never
-//      `ready`, so nothing builds it on its own. One per commit and failing check, ever: recorded in the state file
-//      before it is filed, and marked in its body so a restart between the two finds it rather than filing another.
-//      The tracker refusing it holds up nothing (the rollback is done): it is filed again on a later pass.
+//   4. And a follow-up issue in the tracker (#202): the commit, each failed check (never the response's body: the
+//      issue may be public) and the rollback's result. Never `ready`, so nothing builds it on its own. One per commit
+//      and failing check, ever: recorded in the state file before it is filed, and marked per check in its body so a
+//      restart between the two finds it rather than filing another. Filed beside the check, not inside it: a slow or
+//      refusing tracker holds up no rollback, and a refusal is tried again later, backing off.
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Backlog } from '../backlog/types.js';
@@ -67,13 +68,25 @@ interface PostDeployFile {
   issues: FollowUp[];
 }
 
+/** What a follow-up issue says of a failed check: never the response's body (the issue may be public). */
+interface FollowUpCheck {
+  name: string;
+  kind: string | null;
+  error: string | null;
+  status: number | null;
+}
+
 interface FollowUp {
   sha: string;
-  checks: string[];
+  prev: string | null;
+  checks: FollowUpCheck[];
+  rollback: Rollback | null;
   issue: number | null;
-  title: string;
-  body: string;
 }
+
+/** The first wait after the tracker refused a follow-up issue, doubling each time up to the last. */
+const REFUSED_WAIT_MS = 60_000;
+const REFUSED_WAIT_MAX_MS = 30 * 60_000;
 
 /** What the post-deploy check needs of the tracker. */
 export type FollowUpTracker = Pick<Backlog, 'createIssue' | 'list' | 'ensureLabels'>;
@@ -93,6 +106,11 @@ const short = (sha: string | null) => (sha ? sha.slice(0, 8) : 'nothing');
 export class PostDeploy {
   private lastPoll = -Infinity;
   private running: Promise<void> | null = null;
+  /** Filing the follow-up issues: beside the check, never inside it, so a slow tracker never delays a rollback. */
+  private filing: Promise<void> | null = null;
+  /** After the tracker refused: no new try before this, and how many refusals in a row. */
+  private fileAfter = -Infinity;
+  private refusals = 0;
   private readonly stopped = new AbortController();
 
   constructor(private d: PostDeployDeps) {}
@@ -106,7 +124,8 @@ export class PostDeploy {
     if (!existsSync(this.file)) return empty;
     try {
       const j = JSON.parse(readFileSync(this.file, 'utf8')) as Partial<PostDeployFile>;
-      return { pending: j.pending ?? null, lastGood: j.lastGood ?? null, failed: Array.isArray(j.failed) ? j.failed : [], issues: Array.isArray(j.issues) ? j.issues : [] };
+      const issues = Array.isArray(j.issues) ? j.issues.filter((x) => x && typeof x.sha === 'string' && Array.isArray(x.checks) && x.checks.every((c) => c && typeof c.name === 'string')) : [];
+      return { pending: j.pending ?? null, lastGood: j.lastGood ?? null, failed: Array.isArray(j.failed) ? j.failed : [], issues };
     } catch {
       return empty;
     }
@@ -143,31 +162,37 @@ export class PostDeploy {
     return this.d.followUp ? f.issues.filter((x) => x.issue === null) : [];
   }
 
-  /** One pass at most every pollMs while a commit is pending or a follow-up issue waits to be filed; not waited for. */
+  /**
+   * One pass at most every pollMs while a commit is pending, and the follow-up issues waiting to be filed (at once
+   * after a failed check, later after a refusal); neither is waited for.
+   */
   step(): void {
-    if (this.stopped.signal.aborted || this.running) return;
-    const f = this.read();
-    if (!f.pending && !this.unfiled(f).length) return;
+    if (this.stopped.signal.aborted) return;
+    this.fileSoon();
+    if (this.running || !this.read().pending) return;
     const now = this.now();
     if (now - this.lastPoll < (this.d.pollMs ?? 30_000)) return;
     this.lastPoll = now;
-    this.running = (async () => {
-      try {
-        await this.pass();
-      } finally {
-        await this.fileFollowUps();
-      }
-    })()
+    this.running = this.pass()
       .catch((e: unknown) => {
         this.d.log.append('coordinator.error', { instance: this.d.actor, where: 'post-deploy check', kind: 'error', message: redactString(String((e as Error).message)).slice(0, 500) }, this.d.actor);
       })
       .finally(() => {
         this.running = null;
+        this.fileSoon();
       });
   }
 
+  /** Start filing the follow-up issues, unless it is running, waiting out a refusal, or there are none. */
+  private fileSoon(): void {
+    if (this.stopped.signal.aborted || this.filing || this.now() < this.fileAfter || !this.unfiled(this.read()).length) return;
+    this.filing = this.fileFollowUps().finally(() => {
+      this.filing = null;
+    });
+  }
+
   async idle(): Promise<void> {
-    while (this.running) await this.running;
+    while (this.running || this.filing) await Promise.all([this.running, this.filing]);
   }
 
   stop(): void {
@@ -303,7 +328,15 @@ export class PostDeploy {
     const still = f.pending?.sha === p.sha;
     const failed = outcome === 'failed' ? [...f.failed.filter((x) => x !== p.sha), p.sha] : f.failed;
     // Recorded with the outcome, before the tracker is asked: a failed check of this commit is filed once, ever.
-    const issues = outcome === 'failed' && this.d.followUp ? [...f.issues, ...this.followUp(f.issues, p, checks, rollback)] : f.issues;
+    // Nothing in it can keep the outcome, the mark or the incident below from being written.
+    let issues = f.issues;
+    if (outcome === 'failed' && this.d.followUp) {
+      try {
+        issues = [...f.issues, ...this.followUp(f.issues, p, checks, rollback)];
+      } catch (e) {
+        this.d.log.append('coordinator.error', { instance: this.d.actor, where: 'post-deploy follow-up issue', kind: 'error', message: redactString(String((e as Error).message)).slice(0, 500) }, this.d.actor);
+      }
+    }
     this.write({ pending: still ? null : f.pending, lastGood: outcome === 'passed' ? p.sha : f.lastGood, failed, issues });
     const token = this.d.hasToken();
     this.d.log.append('deploy_gate.post_deploy', { sha: p.sha, prev: p.prev, outcome, detail: redactString(detail).slice(0, 2000), checks, rollback, github, token }, this.d.actor);
@@ -331,55 +364,73 @@ export class PostDeploy {
 
   /** The follow-up issue for this commit's failed checks that no earlier one covers (none when every one is covered). */
   private followUp(have: FollowUp[], p: NonNullable<PostDeployFile['pending']>, checks: CheckResult[], rollback: Rollback | null): FollowUp[] {
-    const covered = new Set(have.filter((x) => x.sha === p.sha).flatMap((x) => x.checks));
+    const covered = new Set(have.filter((x) => x.sha === p.sha).flatMap((x) => x.checks.map((c) => c.name)));
     const bad = checks.filter((c) => !c.ok && !covered.has(c.name));
     if (!bad.length) return [];
     const kinds = new Map(this.d.config.checks.map((c) => [c.name, c.kind]));
-    const { title, body } = followUpIssue({ repo: this.d.followUp!.repo, branch: this.d.branch, sha: p.sha, prev: p.prev, checks: bad.map((c) => ({ ...c, kind: kinds.get(c.name) ?? null })), rollback });
-    return [{ sha: p.sha, checks: bad.map((c) => c.name), issue: null, title, body }];
+    return [{ sha: p.sha, prev: p.prev, checks: bad.map((c) => ({ name: c.name, kind: kinds.get(c.name) ?? null, error: c.error, status: c.status })), rollback, issue: null }];
   }
 
   /**
-   * Each follow-up issue the tracker hasn't taken: found by its marker if a restart came between filing it and
-   * recording it, else filed. The tracker refusing stops here; the next pass tries again.
+   * Each follow-up issue the tracker hasn't taken. A check whose marker is already on an open issue (a restart came
+   * between filing it and recording it) is that issue's; only the checks no open issue carries are filed. A refusal
+   * stops here, and the next try waits: 1 min, doubling up to 30 min, back to none once the tracker takes one.
    */
   private async fileFollowUps(): Promise<void> {
     const todo = this.unfiled(this.read());
     if (!todo.length) return;
-    const { backlog } = this.d.followUp!;
+    const { backlog, repo } = this.d.followUp!;
     try {
       const open = await backlog.list(POST_DEPLOY_LABEL.name);
       for (const x of todo) {
-        let n = open.find((i) => x.checks.some((c) => i.body.includes(followUpMarker(x.sha, c))))?.number;
-        if (n === undefined) {
+        const found = (c: FollowUpCheck) => open.find((i) => i.body.includes(followUpMarker(x.sha, c.name)))?.number;
+        const missing = x.checks.filter((c) => found(c) === undefined);
+        let n = found(x.checks[0]!);
+        if (missing.length) {
           await backlog.ensureLabels([POST_DEPLOY_LABEL]);
-          n = await backlog.createIssue(x.title, x.body, [POST_DEPLOY_LABEL.name]);
+          const { title, body } = followUpIssue({ repo, branch: this.d.branch, sha: x.sha, prev: x.prev, checks: missing, rollback: x.rollback });
+          n = await backlog.createIssue(title, body, [POST_DEPLOY_LABEL.name]);
         }
         const f = this.read();
-        this.write({ ...f, issues: f.issues.map((y) => (y.sha === x.sha && y.checks.join() === x.checks.join() ? { ...y, issue: n } : y)) });
+        const same = (y: FollowUp) => y.sha === x.sha && y.checks.map((c) => c.name).join() === x.checks.map((c) => c.name).join();
+        this.write({ ...f, issues: f.issues.map((y) => (same(y) ? { ...y, issue: n ?? null } : y)) });
       }
+      this.refusals = 0;
+      this.fileAfter = -Infinity;
     } catch (e) {
-      this.d.log.append('coordinator.error', { instance: this.d.actor, where: 'post-deploy follow-up issue', kind: 'error', message: redactString(String((e as Error).message)).slice(0, 500) }, this.d.actor);
+      this.refusals++;
+      const wait = Math.min(REFUSED_WAIT_MS * 2 ** (this.refusals - 1), REFUSED_WAIT_MAX_MS);
+      this.fileAfter = this.now() + wait;
+      this.d.log.append('coordinator.error', { instance: this.d.actor, where: 'post-deploy follow-up issue', kind: 'error', message: `${redactString(String((e as Error).message)).slice(0, 400)} (tried again in ${Math.round(wait / 60_000)} min)` }, this.d.actor);
     }
   }
 }
 
-/** Text from outside (a response, a host's error) made inert in Markdown: no code span break-out, no HTML comment, no @mention. */
-const inert = (s: string) => redactString(s).replace(/[\r\n]+/g, ' ').replace(/[`<>]/g, "'").replace(/@/g, '@​');
+/**
+ * Text from outside (a host's error, a request's failure) as a Markdown code span: no break-out (no backtick), no
+ * HTML or comment, no line break; inside it no link, image, URL, #n reference or @mention renders.
+ */
+const code = (s: string) => {
+  const t = redactString(s).replace(/[\r\n]+/g, ' ').replace(/[`<>]/g, "'").trim();
+  return t ? `\`${t}\`` : '';
+};
 
-/** The follow-up issue for a commit's failed checks: the commit, each failed check, and what the rollback did. */
-export function followUpIssue(o: { repo: string; branch: string; sha: string; prev: string | null; checks: (CheckResult & { kind: string | null })[]; rollback: Rollback | null }): { title: string; body: string } {
+/**
+ * The follow-up issue for a commit's failed checks: the commit, each failed check (name, kind, error, status) and
+ * what the rollback did. Never the response's body: the issue may be public; the body is only in the ops post.
+ */
+export function followUpIssue(o: { repo: string; branch: string; sha: string; prev: string | null; checks: FollowUpCheck[]; rollback: Rollback | null }): { title: string; body: string } {
   const link = `https://github.com/${o.repo}/commit/${o.sha}`;
   const title = `Production failed its post-deploy check on ${short(o.sha)}: ${o.checks.map((c) => c.name).join(', ')}`.slice(0, 200);
-  const checks = o.checks.map((c) => `- \`${c.name}\`${c.kind ? ` (${c.kind})` : ''}: ${inert(c.error ?? 'failed')}${c.status !== null ? ` (status ${c.status})` : ''}${c.snippet ? `. Body: \`${inert(c.snippet)}\`` : ''}`);
+  const checks = o.checks.map((c) => `- \`${c.name}\`${c.kind ? ` (${c.kind})` : ''}: ${code(c.error ?? 'failed')}${c.status !== null ? ` (status ${c.status})` : ''}`);
   const rb = o.rollback;
   const rollback = !rb
     ? ['**Rollback:** none.']
     : !rb.attempted
-      ? [`**Rollback:** not rolled back: ${inert(rb.detail)}. Production may still be on this commit: check it, and roll it back on the host by hand (docs/deploy-gate.md, "Post-deploy check").`]
+      ? [`**Rollback:** not rolled back: ${code(rb.detail)}. Production may still be on this commit: check it, and roll it back on the host by hand (docs/deploy-gate.md, "Post-deploy check").`]
       : [
-          rb.ok ? `**Rollback:** every service back on \`${short(o.prev)}\`.` : `**Rollback:** incomplete, production may still be on this commit: ${inert(rb.detail)}.`,
-          ...rb.services.map((s) => `- ${s.service}: ${s.ok ? `${s.via} ok` : 'failed'} (${inert(s.detail)})`),
+          rb.ok ? `**Rollback:** every service back on \`${short(o.prev)}\`.` : `**Rollback:** incomplete, production may still be on this commit: ${code(rb.detail)}.`,
+          ...rb.services.map((s) => `- ${s.service}: ${s.ok ? `${s.via} ok` : 'failed'}${s.detail ? ` ${code(s.detail)}` : ''}`),
         ];
   const body = [
     `Production failed its post-deploy check after \`${o.branch}\` moved to \`${short(o.sha)}\`.`,
