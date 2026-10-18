@@ -12,7 +12,7 @@ import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '..
 import { redactPii } from '../intake/redact.js';
 import { IntakeMeter, purgeRaw, purgeSeen, rawIds, readRaw, reportId, seen, storeRaw } from '../intake/store.js';
 import { candidates as intakeCandidates } from '../intake/dedupe.js';
-import { acceptTriage } from '../intake/triage.js';
+import { acceptTriage, type Triage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
@@ -204,11 +204,28 @@ export abstract class Intake extends QuickReplies {
     const got = acceptTriage(run.structured);
     if (!got.ok) return drop(`triage not accepted: ${got.why}`);
     const trusted = isTrusted(r.sender, cfg);
-    const action = intakeDecide({ report: r, redacted, triage: got.triage, trusted, shown, moneyPaths: this.intakeMoneyPaths() });
+    const action = intakeDecide({ report: r, redacted, triage: this.confirmedFix(got.triage), trusted, shown, moneyPaths: this.intakeMoneyPaths() });
     // A refused draft makes it needs_info, whatever kind the agent chose (decide.ts).
     const refused = action.action === 'reply' ? action.refused : undefined;
     this.emit('intake.triaged', { id, kind: refused ? 'needs_info' : got.triage.kind, reproduction: got.triage.reproduction?.result ?? null, ignored: got.dropped, ...(refused ? { draft_refused: refused.slice(0, 500) } : {}) });
     await this.intakeAct(r, id, trusted, action);
+  }
+
+  /**
+   * #333: the agent's fixing commit for a report it found fixed on main, kept (so the reply names it) only when it is
+   * on the default branch as this checkout last fetched it. One read-only git call on the trusted checkout, given
+   * an id acceptTriage allows only as 7 to 40 hex characters; anything else, or no answer in 10 s, drops the id.
+   */
+  private confirmedFix(t: Triage): Triage {
+    const rep = t.reproduction;
+    if (rep?.result !== 'fixed_on_main' || !rep.commit) return t;
+    const { commit, ...rest } = rep;
+    try {
+      execFileSync('git', ['merge-base', '--is-ancestor', commit, `refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 10_000 });
+      return t;
+    } catch {
+      return { ...t, reproduction: rest };
+    }
   }
 
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */

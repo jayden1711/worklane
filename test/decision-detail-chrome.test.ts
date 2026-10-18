@@ -1,5 +1,6 @@
-// A decision's detail page in a real Chrome, against a real dashboard (test/decision-fixture.ts): Details on a
-// Decisions card opens it with every section; on a held PR's page, the PR body (the one part read after the rest)
+// A decision in a real Chrome, against a real dashboard (test/decision-fixture.ts): a Decisions card's Details toggle
+// reads the evidence (findings, confidence, impact, review level) only once opened (#586); Open on the card opens the
+// detail page with every section it has; on a held PR's page, the PR body (the one part read after the rest)
 // answering last moves no control or section already on screen; and the owner's Show the diff shows it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -29,7 +30,7 @@ const NOTE = `(() => {
 })()`;
 const MOVED = `window.__noted.filter((n) => { if (!n.e.isConnected) return true; const r = n.e.getBoundingClientRect(); return Math.abs(r.x + scrollX - n.x) > ${STEADY_PX} || Math.abs(r.y + scrollY - n.y) > ${STEADY_PX}; }).map((n) => n.name)`;
 
-test('in a real Chrome: Details opens every section; the PR body answering last moves nothing; the owner sees the diff', { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) }, async (ctx) => {
+test("in a real Chrome: a card's Details reads the evidence when opened; Open shows every section; the PR body answering last moves nothing; the owner sees the diff", { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) }, async (ctx) => {
   await oneChromeAtATime(ctx);
   const f = await decisionFixture();
   const b = await launchTestChrome(chrome!, { width: 1280, height: 900 });
@@ -43,9 +44,18 @@ test('in a real Chrome: Details opens every section; the PR body answering last 
     // From a Decisions card.
     await cdp.send('Page.navigate', { url: `${f.base_url}/decisions` });
     await until('the landing decision card', () => js<boolean>(cdp, `!!${q('[data-decision="d-land"] [data-testid="decision-details"]')}`), 20_000);
-    await pressSteady(cdp, q('[data-decision="d-land"] [data-testid="decision-details"]'), 'Details');
-    await until('the detail page', () => js<boolean>(cdp, `location.pathname === '/decisions/d-land' && !!${q('[data-testid="decision-detail"]')}`), 20_000);
-    assert.equal((await js<string[]>(cdp, SECTIONS)).length, 13, 'every section');
+    // Its Details toggle: closed, with no evidence read yet; opened, it reads the decision's detail and shows it.
+    const evidence = q('[data-decision="d-land"] [data-testid="decision-evidence"]');
+    assert.equal(await js<boolean>(cdp, `!!${evidence}`), false, 'no evidence before Details is opened');
+    await pressSteady(cdp, q('[data-decision="d-land"] [data-testid="decision-card-details-toggle"]'), 'the Details toggle');
+    await until('the evidence, read once Details opened', () => js<boolean>(cdp, `!!${evidence}`), 20_000);
+    const shown = await js<string>(cdp, `${evidence}.innerText`);
+    assert.match(shown, /L3: waits for you/, 'the review level, with what it means');
+    assert.match(shown, /Money path: touches it/, 'the impact');
+    await pressSteady(cdp, q('[data-decision="d-land"] [data-testid="decision-details"]'), 'Open');
+    await until('the detail page', () => js<boolean>(cdp, `location.pathname === '/needs-you/decisions/d-land' && !!${q('[data-testid="decision-detail"]')}`), 20_000);
+    // Every section the landing has: no PR yet, so no CI and no PR body (test/decision-detail.test.ts lists them).
+    assert.equal((await js<string[]>(cdp, SECTIONS)).length, 11, 'every section it has');
     assert.match(await js<string>(cdp, `${q('[data-section="if-nothing"]')}.innerText`), /No timeout: it waits/);
 
     // The owner's diff, on a click.
@@ -68,7 +78,7 @@ test('in a real Chrome: Details opens every section; the PR body answering last 
     assert.deepEqual(await js<string[]>(cdp, MOVED), [], 'the PR body answering last moved what was on the page');
     assert.match(await js<string>(cdp, `${q('[data-testid="decision-never"]')}.innerText`), /It never refunds twice/);
     // In page order, the PR body last: nothing is below the one part that answers late.
-    assert.deepEqual(await js<string[]>(cdp, SECTIONS), ['summary', 'options', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body']);
+    assert.deepEqual(await js<string[]>(cdp, SECTIONS), ['summary', 'asked', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body']);
   } finally {
     await b.close();
     await f.d.close();

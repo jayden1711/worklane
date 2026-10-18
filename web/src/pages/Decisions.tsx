@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { decide, type Decision, type State } from '../api';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
+import { api, decide, type Decision, type DecisionDetail, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
-import { useEntrance, ValuePill } from '../components/patterns';
-import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
+import { useEntrance } from '../components/patterns';
+import { ago, Avatar, Badge, Button, cx, Empty, Kbd, Why } from '../components/ui';
 import { Header } from '../components/Header';
 import { useArrivalOrder } from '../arrival-order';
 
@@ -11,6 +11,36 @@ export const RECOMMENDATION_PREFIX = 'Recommendation: ';
 
 /** Past about this many characters a recommendation fills four lines of a card: it starts clamped (then measured). */
 const CLAMP_FROM = 280;
+
+/** What each review level means for the owner (docs/design.md, review levels), said wherever a level is shown. */
+export const LEVEL_MEANING: Record<string, string> = { L0: 'lands once its checks pass', L1: 'lands once the evaluator agrees', L2: 'lands, and you are told', L3: 'waits for you' };
+
+/** The plain meaning of a term an owner may not know: a review level, done_when, a question number. Null for any other. */
+export function termMeaning(term: string): string | null {
+  if (LEVEL_MEANING[term]) return LEVEL_MEANING[term]!;
+  if (term === 'done_when') return 'the checks that decide it is done';
+  const q = /^Q(\d+)$/.exec(term);
+  return q ? `question ${q[1]}` : null;
+}
+
+const TERM = /\b(?:L[0-3]|done_when|Q\d+)\b/g;
+
+/**
+ * Text with each such term followed by its plain meaning ("(L3)" becomes "(L3: waits for you)", "done_when" becomes
+ * "done_when (the checks that decide it is done)"), unless the text already says it there. A card's lines go through
+ * it; Details keeps the exact words.
+ */
+export function plainTerms(text: string): string {
+  return text.replace(TERM, (term: string, at: number, all: string) => {
+    const meaning = termMeaning(term)!;
+    const after = all.slice(at + term.length);
+    if (after.startsWith(`: ${meaning}`) || after.startsWith(` (${meaning})`)) return term;
+    return after.startsWith(')') ? `${term}: ${meaning}` : `${term} (${meaning})`;
+  });
+}
+
+/** The impact flags' names. */
+export const FLAG_LABEL = { 'money-path': 'Money path', auth: 'Auth', secrets: 'Secrets' } as const;
 
 /**
  * A recommendation that is prose, not an option: wrapped, whole, clamped to four lines by CSS (never cut in the
@@ -45,20 +75,16 @@ export function RecommendationText({ label, text }: { label: string; text: strin
   );
 }
 
-/**
- * A decision as an approval card (Beautiful UI's approval and recommendation cards):
- * the question is the heading, the recommendation is called out, the receipts sit in
- * an inset list, and each option is a row; picking one answers it. Only the
- * decision's owner or a writer gets the rows (canAnswer); everyone else sees whom it waits on.
- */
-export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decision; selected: boolean; onAnswered?: () => void; proposed?: string | null }) {
-  const [busy, setBusy] = useState<string | null>(null);
+/** Answering a decision: the option on its way (`sending`: one already on its way when it draws), and an error. */
+export function useAnswer(id: string, onAnswered?: () => void, sending: string | null = null) {
+  const [busy, setBusy] = useState<string | null>(sending);
   const [err, setErr] = useState<string | null>(null);
-  const answer = async (a: string) => {
-    setBusy(a);
+  const savingId = useId();
+  const answer = async (o: string) => {
+    setBusy(o);
     setErr(null);
     try {
-      await decide(d.id, a);
+      await decide(id, o);
       onAnswered?.();
     } catch (e) {
       setErr((e as Error).message);
@@ -66,18 +92,218 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
       setBusy(null);
     }
   };
-  // Only the option the recommendation names; a free-text recommendation (shown as prose above) marks none.
-  const recommended = (o: string) => o === d.recommendation;
-  const isOption = d.options.includes(d.recommendation);
+  return { busy, err, savingId, answer };
+}
+
+/** A decision's prose: a free-text recommendation (an older event's), then the reasoning its detail lines carry. */
+export const proseOf = (recommendation: string, options: readonly string[], receipts: readonly string[]): string[] => [
+  ...(!options.includes(recommendation) && recommendation.trim() ? [recommendation.trim()] : []),
+  ...receipts.filter((r) => r.startsWith(RECOMMENDATION_PREFIX)).map((r) => r.slice(RECOMMENDATION_PREFIX.length)),
+];
+
+/**
+ * A decision's three lines, in this order, then its reasoning: (1) what happened; (2) the recommended option, by
+ * name (or the recommendation in words, when it isn't an option); (3) each option once, with what it does: a button
+ * where this person may answer (the recommended one the dark primary), its name otherwise. The decision card and the
+ * detail page both draw it; `testId` is the option buttons'.
+ */
+export function DecisionLines({ happened, recommendation, prose, options, answerable, ans, proposed = null, keys = false, testId }: {
+  happened: string;
+  recommendation: string;
+  prose: string[];
+  options: { option: string; does?: string | undefined; cannot?: string | undefined }[];
+  answerable: boolean;
+  ans: { busy: string | null; savingId: string; answer: (o: string) => Promise<void> };
+  proposed?: string | null;
+  keys?: boolean;
+  testId: string;
+}) {
+  const named = options.some((o) => o.option === recommendation) ? recommendation : null;
+  // Line 2 is the named option, else the first prose; the rest of the prose is the Why, after the options.
+  const line2 = named ? null : (prose[0] ?? null);
+  const why = named ? prose : prose.slice(1);
+  const { busy, savingId } = ans;
+  return (
+    <>
+      <p className="mt-2 text-[14px] font-medium leading-snug text-ink" data-line="happened" data-testid="decision-happened">
+        {plainTerms(happened)}
+      </p>
+      <div data-line="recommended">
+        {named ? (
+          <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="decision-recommended">
+            Recommended: <strong className="font-semibold text-ink">{named}</strong>
+          </p>
+        ) : line2 ? (
+          <RecommendationText label="Recommended:" text={plainTerms(line2)} />
+        ) : (
+          <p className="mt-1.5 text-[13px] text-ink-2">No option is recommended: pick the one that fits.</p>
+        )}
+      </div>
+      <ul className="mt-2.5 space-y-1.5" data-line="effects" data-testid="decision-effects" role={answerable ? 'group' : undefined} aria-label={answerable ? 'Answer' : 'Options'}>
+        {options.map((o, i) => {
+          const rec = o.option === named;
+          return (
+            <li key={o.option} className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1" data-choice={o.option} data-recommended={rec ? 'true' : undefined}>
+              {answerable ? (
+                // Each option is an action: one click answers. Destructive ones (reject, close, deny) are red, the rest raised.
+                <Button type="button" size="sm" className="shrink-0" data-option={o.option} data-testid={testId} variant={rec ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} why={!!busy && 'Saving…'} whyAt={savingId} onClick={() => void ans.answer(o.option)} title={rec ? 'recommended' : undefined}>
+                  {busy === o.option ? `${o.option}…` : o.option}
+                  {proposed === o.option && (
+                    <span className="rounded-full bg-blue-tint px-1.5 text-[10.5px] font-medium text-blue-ink" data-testid="decision-proposed">
+                      chat proposed
+                    </span>
+                  )}
+                  {keys && <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', rec ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>}
+                </Button>
+              ) : (
+                <span className={cx('shrink-0 text-[13px]', rec ? 'font-semibold text-ink' : 'font-medium text-ink-2')}>
+                  {o.option}
+                  {rec && <span className="font-normal text-ink-3"> (recommended)</span>}
+                </span>
+              )}
+              {o.does && (
+                <span className="min-w-0 flex-1 basis-60 text-[12.5px] leading-relaxed text-ink-2">
+                  {plainTerms(o.does)}
+                  {o.cannot && <span className="text-ink-3"> {plainTerms(o.cannot)}</span>}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {busy && <Why id={savingId}>Saving…</Why>}
+      {why.map((t, i) => (
+        <RecommendationText key={i} label="Why:" text={plainTerms(t)} />
+      ))}
+    </>
+  );
+}
+
+/** The evidence a decision's detail holds, short: findings, confidence, impact, the review level and the categories. */
+function Evidence({ d }: { d: DecisionDetail }) {
+  if (d.withheld) return <p data-testid="decision-card-withheld">{d.withheld.replace(/^a decision/, 'A decision')}.</p>;
+  const f = d.findings;
+  const v = d.verdict;
+  const c = d.change;
+  const flags = (d.impact?.flags ?? []).filter((x) => x.files !== null);
+  const categories = [...(d.pr?.why ?? []).map((y) => y.category), ...(d.impact?.others ?? [])];
+  const Part = ({ title, testId, children }: { title: string; testId: string; children: ReactNode }) => (
+    <div data-testid={testId}>
+      <div className="font-medium text-ink">{title}</div>
+      <div className="mt-0.5">{children}</div>
+    </div>
+  );
+  return (
+    <div className="space-y-2" data-testid="decision-evidence">
+      {f && (
+        <Part title={`Findings (${f.list.length})`} testId="decision-card-findings">
+          <ul className="space-y-1">
+            {f.list.map((x, i) => (
+              <li key={i} className="break-words">
+                {x.claim}
+                {x.file && <code className="ml-1.5 font-mono text-[11.5px] text-ink-3">{`${x.file}:${x.line ?? '?'}`}</code>}
+              </li>
+            ))}
+          </ul>
+        </Part>
+      )}
+      {(f?.confidence || v) && (
+        <Part title="Confidence" testId="decision-card-confidence">
+          <span className="flex flex-wrap items-center gap-1.5">
+            {f?.confidence && <Badge>the findings: confidence {f.confidence}</Badge>}
+            {v && <Badge>the evaluator: confidence {v.confidence}</Badge>}
+            {v?.confidenceReason && <span className="break-words">{v.confidenceReason}</span>}
+          </span>
+        </Part>
+      )}
+      {!!flags.length && (
+        <Part title="Impact" testId="decision-card-impact">
+          <ul className="space-y-0.5">
+            {flags.map((x) => (
+              <li key={x.flag} className="break-words" data-flag={x.flag}>
+                {FLAG_LABEL[x.flag]}: {x.files!.length ? <>touches it ({x.files!.join(', ')})</> : "doesn't touch it"}
+              </li>
+            ))}
+          </ul>
+        </Part>
+      )}
+      {(c?.level || !!categories.length) && (
+        <Part title="Review level and categories" testId="decision-card-level">
+          <span className="flex flex-wrap items-center gap-1.5">
+            {c?.level && (
+              <Badge tone={c.level === 'L3' ? 'danger' : c.level === 'L2' ? 'warn' : 'neutral'}>{LEVEL_MEANING[c.level] ? `${c.level}: ${LEVEL_MEANING[c.level]}` : c.level}</Badge>
+            )}
+            {categories.map((x) => (
+              <Badge key={x} tone="warn">
+                {x}
+              </Badge>
+            ))}
+          </span>
+          {!!c?.levelReasons.length && <div className="mt-0.5 break-words">{c.levelReasons.join('; ')}</div>}
+        </Part>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A card's Details, closed until opened: the question as asked, the receipts, and (read from the decision's detail
+ * when first opened) the findings, confidence, impact, review level and categories. `evidence`: that detail as
+ * already read (the render checks).
+ */
+function CardDetails({ d, receipts, evidence }: { d: Decision; receipts: string[]; evidence?: DecisionDetail | undefined }) {
+  const [ev, setEv] = useState<DecisionDetail | { error: string } | 'loading' | null>(evidence ?? null);
+  const onToggle = (e: SyntheticEvent<HTMLDetailsElement>) => {
+    if (!e.currentTarget.open || ev !== null) return;
+    setEv('loading');
+    api<DecisionDetail>(`/api/decisions/${encodeURIComponent(d.id)}`)
+      .then(setEv)
+      .catch((x: Error) => setEv({ error: x.message }));
+  };
+  const to = `/decisions/${d.id}`;
+  return (
+    <details className="mt-3 rounded-control bg-inset text-[12px] text-ink-2 shadow-hairline" data-testid="decision-card-details" onToggle={onToggle}>
+      <summary className="cursor-pointer select-none px-2.5 py-1.5 font-medium text-ink-2 hover:text-ink" data-testid="decision-card-details-toggle">
+        Details
+      </summary>
+      <div className="space-y-2 border-t border-line px-2.5 py-2">
+        <p className="whitespace-pre-line break-words">
+          <span className="font-medium text-ink">Asked:</span> {d.question}
+        </p>
+        {!!receipts.length && (
+          <ul className="space-y-1" data-testid="decision-card-receipts">
+            {receipts.map((r, i) => (
+              <li key={i} className="break-words">
+                {r}
+              </li>
+            ))}
+          </ul>
+        )}
+        {ev === 'loading' ? <p className="text-ink-3">Reading the evidence…</p> : ev && 'error' in ev ? <p className="text-red">Can't load the evidence: {ev.error}</p> : ev ? <Evidence d={ev} /> : null}
+        <a href={to} onClick={(e) => (e.preventDefault(), navigate(to))} className="inline-block font-medium text-blue-ink hover:underline" data-testid="decision-card-open">
+          Everything about this decision
+        </a>
+      </div>
+    </details>
+  );
+}
+
+/**
+ * A decision as an approval card: three plain lines first (what happened, what is recommended, what each option
+ * does, each option once and a button where this person may answer), then the evidence behind Details. Only the
+ * decision's owner or a writer gets the buttons (canAnswer); everyone else sees whom it waits on.
+ * `evidence`: its detail as already read (the render checks).
+ */
+export function DecisionCard({ d, selected, onAnswered, proposed, sending = null, evidence }: { d: Decision; selected: boolean; onAnswered?: () => void; proposed?: string | null; sending?: string | null; evidence?: DecisionDetail }) {
+  const ans = useAnswer(d.id, onAnswered, sending);
   const detail = (d.receipts ?? []).filter(Boolean);
-  // Prose: an older event's free-text recommendation, and the reasoning the detail carries (src/decision-ask.ts).
-  const prose = [...(!isOption && d.recommendation.trim() ? [d.recommendation.trim()] : []), ...detail.filter((r) => r.startsWith(RECOMMENDATION_PREFIX)).map((r) => r.slice(RECOMMENDATION_PREFIX.length))];
   const receipts = detail.filter((r) => !r.startsWith(RECOMMENDATION_PREFIX));
+  const options = d.options.map((option) => ({ option, does: d.effects?.find((e) => e.option === option)?.does }));
   const entrance = useEntrance();
   return (
     <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={entrance}>
-      <div className="primitive-card-pad">
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
+      <div className="primitive-card-pad" data-testid="decision-body">
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3" data-testid="decision-meta">
           <Avatar login={d.owner} size={18} />
           {d.issue !== null && (
             <button className="font-mono text-blue-ink hover:underline" onClick={() => navigate(`/issues/${d.issue}`)}>
@@ -87,45 +313,12 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
           <Badge tone={d.kind === 'land' ? 'danger' : 'warn'}>{d.kind === 'land' ? 'Approve landing' : 'Question'}</Badge>
           <span>for @{d.owner}</span>
           <span>· asked {ago(d.askedAt)}</span>
-          <a href={`/decisions/${d.id}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/${d.id}`))} className="ml-auto font-medium text-blue-ink hover:underline" data-testid="decision-details">
-            Details
+          <a href={`/decisions/${d.id}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/${d.id}`))} className="ml-auto font-medium text-blue-ink hover:underline" title="This decision's own page, with everything about it" data-testid="decision-details">
+            Open
           </a>
         </div>
-        <div className="mt-2 text-[14px] font-medium text-ink">{d.question}</div>
-        {isOption && (
-          <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="decision-recommended">
-            Recommended: <ValuePill>{d.recommendation}</ValuePill>
-          </p>
-        )}
-        {prose.map((t, i) => (
-          <RecommendationText key={i} label={isOption ? 'Why:' : 'Recommended:'} text={t} />
-        ))}
-        {!!receipts.length && (
-          <ul className="mt-2.5 space-y-1 rounded-control bg-inset px-2.5 py-2 text-[12px] text-ink-2 shadow-hairline">
-            {receipts.map((r, i) => (
-              <li key={i} className="truncate" title={r}>
-                {r}
-              </li>
-            ))}
-          </ul>
-        )}
-        {!d.answer && d.canAnswer !== false && (
-          // Each option is an action: one click answers. The recommended one is the dark primary pill,
-          // destructive ones (reject, close) are red, the rest raised; each carries its key.
-          <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
-            {d.options.map((o, i) => (
-              <Button key={o} type="button" size="sm" data-option={o} data-testid="decision-option" variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
-                {busy === o ? `${o}…` : o}
-                {proposed === o && (
-                  <span className="rounded-full bg-blue-tint px-1.5 text-[10.5px] font-medium text-blue-ink" data-testid="decision-proposed">
-                    chat proposed
-                  </span>
-                )}
-                <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
-              </Button>
-            ))}
-          </div>
-        )}
+        <DecisionLines happened={d.happened ?? d.question} recommendation={d.recommendation} prose={proseOf(d.recommendation, d.options, detail)} options={options} answerable={!d.answer && d.canAnswer !== false} ans={ans} proposed={proposed ?? null} keys testId="decision-option" />
+        <CardDetails d={d} receipts={receipts} evidence={evidence} />
       </div>
       <div className="primitive-card-footer flex min-h-10 items-center gap-2 border-t border-line text-[12px]">
         {d.answer ? (
@@ -142,7 +335,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
         ) : (
           <span className="text-ink-3">Click an option to answer; the coordinator acts on its next tick.</span>
         )}
-        {err && <span className="ml-auto text-red">{err}</span>}
+        {ans.err && <span className="ml-auto text-red">{ans.err}</span>}
       </div>
     </div>
   );

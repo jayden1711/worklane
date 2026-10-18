@@ -435,8 +435,21 @@ export const EventSchemas = {
   'learning.promote_requested': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string() }),
   /** WHY: `pr` null: nothing was filed, and `detail` says why (the owner may promote again). */
   'learning.promoted': z.strictObject({ fingerprint: z.string(), line: z.string(), by: z.string(), pr: z.string().nullable(), number: z.number().int().positive().nullable(), detail: z.string() }),
-  /** Gradual delegation: a harness PR merged; its review categories and whether it merged as proposed (no writer correction on it, no one else's push). */
-  'delegation.observed': z.strictObject({ pr: z.number().int().positive(), issue, categories: z.array(z.string()), unchanged: z.boolean() }),
+  /**
+   * Gradual delegation: a harness PR merged; its review categories and whether it merged as proposed (no writer
+   * correction on it, no one else's push). `held`: it waited for a person; `approved_by` / `approver_role`: who
+   * approved it (null: not known); `wait_ms`: from when it started waiting to that approval. Older events have none.
+   */
+  'delegation.observed': z.strictObject({
+    pr: z.number().int().positive(),
+    issue,
+    categories: z.array(z.string()),
+    unchanged: z.boolean(),
+    held: z.boolean().optional(),
+    approved_by: z.string().nullable().optional(),
+    approver_role: z.enum(['owner', 'writer']).nullable().optional(),
+    wait_ms: z.number().int().nonnegative().nullable().optional(),
+  }),
   /** A category put to the owner: loosen (a clean record) or tighten (loosened, then a revert, red main or later fix). */
   'delegation.suggested': z.strictObject({ category: z.string(), direction: z.enum(['loosen', 'tighten']), decision: z.string(), receipts: z.array(z.string()) }),
   /** The owner's answer; loosen or tighten files the review.yaml change as an issue (built into a PR they review). */
@@ -658,9 +671,11 @@ export const EventSchemas = {
   /**
    * A commit on the default branch nothing accounts for (a direct push, a merge with checks not green, an unknown
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
-   * `trip`: its trip (src/main-watch.ts tripOf); `no_revert`: why no revert PR was opened, when a cap says so.
+   * `trip`: its trip (src/main-watch.ts tripOf); `no_revert`: why no revert PR was opened (a cap, a later commit of
+   * the trip that one reverts already, or why opening it failed: a conflict, the push checks' refusal). `revert_through`:
+   * the revert PR reverts the commits from `sha` through this one (a rebase-merged PR's), not `sha` alone.
    */
-  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional() }),
+  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional(), revert_through: sha.optional() }),
   /** A required check with no run on any commit the main watch judged since `since`: raised once, cleared when one appears. */
   'main_watch.dead_check': z.strictObject({ check: z.string(), since: z.string(), state: z.enum(['raised', 'cleared']) }),
   /**
@@ -1008,6 +1023,8 @@ export const EventSchemas = {
     cost_usd: z.number().nonnegative(),
     wall_ms: z.number().int().nonnegative(),
     interventions: z.number().int().nonnegative(),
+    /** The turns its agents reported (their run.cost events); absent on replays recorded before turns were counted. */
+    turns: z.number().int().nonnegative().optional(),
     detail: z.string(),
   }),
   /**
@@ -1110,6 +1127,8 @@ export const EventSchemas = {
     cost_usd: z.number().nonnegative(),
     wall_ms: z.number().int().nonnegative(),
     interventions: z.number().int().nonnegative(),
+    /** Every replay's turns; absent on runs recorded before turns were counted. */
+    turns: z.number().int().nonnegative().optional(),
     budget_usd: z.number().positive(),
     stopped: z.enum(['budget']).nullable(),
     error: z.string().optional(),

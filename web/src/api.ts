@@ -50,6 +50,10 @@ export interface Decision {
   canAnswer?: boolean;
   /** An owner's only: why it can never be approved by voice (src/voice.ts), or null when it can. */
   voiceRefused?: string | null;
+  /** While it is open, for the owners and writers: what happened, in one plain sentence (src/decision-effects.ts). */
+  happened?: string;
+  /** While it is open, for the owners and writers: what each option does, in the options' order. */
+  effects?: { option: string; does: string }[];
 }
 
 /** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
@@ -339,6 +343,11 @@ export interface State {
   protection?: Protection;
   /** The pre-deploy gate, when tests.yaml has one (owners and writers only). */
   deployGate?: DeployGate;
+  /**
+   * Whether the agents' Claude account is set (null: nothing on the machine says yet), for everyone; the accounts are
+   * the machine owners' only. null on a checkout; absent from an older server.
+   */
+  claudeAccount?: { set: boolean | null } | null;
 }
 
 /** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
@@ -618,8 +627,11 @@ export interface UsageInfo {
   paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
   today: { runs: number; limitHits: number };
   lastHit: string | null;
-  /** Claude logins the API refused (no new runs on them until a call succeeds): the account and Claude's words, never a token. */
-  signinFailed?: { login: string; detail: string; since: string; lastCheck: { at: string; ok: boolean; detail: string } | null }[];
+  /**
+   * Claude logins the API refused (no new runs on them until a call succeeds): for the owners and writers the account
+   * and Claude's words, never a token; a viewer gets neither, only that one was refused and since when.
+   */
+  signinFailed?: { login?: string; detail?: string; since: string; lastCheck: { at: string; ok: boolean; detail?: string } | null }[];
   /** This viewer may ask the coordinator to re-check a refused login now. */
   canRecheckSignin?: boolean;
 }
@@ -1536,6 +1548,8 @@ export interface ClaudeAccountData {
   /** Whether this person may refresh or switch (the server checks again). */
   allowed: boolean;
   why: string | null;
+  /** False when no device would help (this person's role here): Refresh and Switch aren't drawn; absent from older servers. */
+  everAllowed?: boolean;
   canSwitch: boolean;
   busy: string | null;
   canPasteToken: boolean;
@@ -1560,11 +1574,15 @@ export interface ProfileCell {
   apiOk: boolean | null;
   apiError: string | null;
   checkedAt: string | null;
+  /** The usage limit on it (the instance's pause, on its active account): when it resets, and that in words. Absent from an older server. */
+  limit?: { resetAt: string; resets: string } | null;
 }
 export interface ProfilesTable {
   instances: string[];
   profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
   active: Record<string, string>;
+  /** The instance whose usage-limit pause the server read (its own); every other column's limit is not shown here. Absent from an older server. */
+  limitsOf?: string | null;
   /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
   failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
 }
@@ -1951,6 +1969,38 @@ export interface Learnings {
   minSightings: number;
   groups: LearningGroup[];
   canPromote: boolean;
+}
+/** Mirrors DelegationView in src/delegation.ts, with the instance's settings (GET /api/delegation, owners and writers). */
+export interface DelegationApprover {
+  by: string;
+  role: 'owner' | 'writer' | null;
+  approvals: number;
+  unchanged: number;
+  bad: number;
+  medianWaitMs: number | null;
+}
+export interface DelegationCategory {
+  category: string;
+  waits: boolean;
+  loosened: boolean;
+  protected: boolean;
+  prs: number[];
+  clean: number;
+  changed: number;
+  reverted: number;
+  mainRed: number;
+  laterFix: number;
+  held: number;
+  wait: { medianMs: number; fastestMs: number; slowestMs: number; count: number } | null;
+  approvers: DelegationApprover[];
+  evidence: string[];
+}
+export interface Delegation {
+  enabled: boolean;
+  minClean: number | null;
+  categories: DelegationCategory[];
+  approvers: (DelegationApprover & { categories: string[] })[];
+  suggestions: { category: string; direction: 'loosen' | 'tighten'; at: string; decision: string; receipts: string[]; answer: string | null; by: string | null; issue: number | null }[];
 }
 export const promoteLearning = (fingerprint: string, line: string) => api<{ ok: boolean }>('/api/learnings/promote', { method: 'POST', body: JSON.stringify({ fingerprint, line }) });
 

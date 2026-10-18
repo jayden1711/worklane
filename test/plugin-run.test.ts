@@ -94,7 +94,9 @@ ${STDIN_LINE};
 const i = args.indexOf('--settings');
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ args, settings: i >= 0 ? JSON.parse(args[i + 1]) : null, pluginRoot: process.env.CLAUDE_CODE_PLUGIN_CACHE_DIR ?? null }));
 const loaded = (${loaded.toString()})(args);
-console.log(JSON.stringify({ type: 'system', subtype: 'init', plugins: loaded, mcp_servers: [] }));
+// As claude does with a --settings it applied (#626): the init event reports its outputStyle.
+const outputStyle = (i >= 0 && JSON.parse(args[i + 1]).outputStyle) || 'default';
+console.log(JSON.stringify({ type: 'system', subtype: 'init', plugins: loaded, mcp_servers: [], output_style: outputStyle }));
 setTimeout(() => console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 })), 300);
 `,
   );
@@ -154,7 +156,7 @@ ${STDIN_LINE};
 const s = args.indexOf('--settings'), m = args.indexOf('--mcp-config'), t = args.indexOf('--allowedTools');
 const config = m >= 0 ? JSON.parse(fs.readFileSync(args[m + 1], 'utf8')) : null;
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ settings: JSON.parse(args[s + 1]), config, tools: t >= 0 ? args.slice(t + 1, args.findIndex((a, i) => i > t && a.startsWith('--'))) : [] }));
-console.log(JSON.stringify({ type: 'system', subtype: 'init', plugins: [], mcp_servers: Object.keys(config ? config.mcpServers : {}).map((name) => ({ name, status: 'connected' })) }));
+console.log(JSON.stringify({ type: 'system', subtype: 'init', plugins: [], mcp_servers: Object.keys(config ? config.mcpServers : {}).map((name) => ({ name, status: 'connected' })), output_style: JSON.parse(args[s + 1]).outputStyle || 'default' }));
 setTimeout(() => console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 })), 200);
 `,
   );

@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer, type Server } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT } from '../src/dashboard-hub.js';
@@ -161,6 +161,57 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
   for (const [what, p] of derived) assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);
   const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE` && k !== TEST_TOKEN_VAR);
   assert.deepEqual(leaked, [], 'no engine setting from the shell');
+});
+
+/** Where headless Chrome binds its SingletonSocket under TMPDIR, and the longest Unix socket path (sun_path, its NUL included). */
+const CHROME_SOCKET = '/org.chromium.Chromium.XXXXXX/SingletonSocket';
+const SUN_PATH_MAX = 108;
+
+test('in a test process, the temporary directory is inside the test machine: os.tmpdir(), TMPDIR, TMP, TEMP and a child\'s (#604)', () => {
+  const made = mkdtempSync(join(tmpdir(), 'made-'));
+  const seen: [string, string | undefined][] = [['tmpdir()', tmpdir()], ['TMPDIR', process.env.TMPDIR], ['TMP', process.env.TMP], ['TEMP', process.env.TEMP], ["a child's TMPDIR", childEnv().TMPDIR], ['a mkdtemp under tmpdir()', made]];
+  for (const [what, p] of seen) assert.ok(p !== undefined && inside(p), `${what} is ${p}, outside ${testMachine}`);
+  // Short enough for a Unix socket under it: Chrome's, the deepest one a test binds there.
+  assert.ok(Buffer.byteLength(tmpdir() + CHROME_SOCKET) < SUN_PATH_MAX, `${tmpdir()}${CHROME_SOCKET} is ${Buffer.byteLength(tmpdir() + CHROME_SOCKET)} bytes`);
+});
+
+test("another user reaches what a test makes under tmpdir(), as under /tmp, but never this test's home, state, slots or system root (#604)", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  // The separate-users tests (test/frozen-guard.test.ts) have the agent user read a task file a test made under
+  // tmpdir(): every directory from the test machine down to tmpdir() lets others through (o+x).
+  const others = (p: string) => (statSync(p).mode & 0o001) !== 0;
+  const toTmp: string[] = [];
+  for (let d = tmpdir(); d !== dirname(testMachine); d = dirname(d)) toTmp.push(d);
+  assert.deepEqual(toTmp.filter((d) => !others(d)), [], `others can pass through each of ${toTmp.join(', ')}`);
+  // What the whole machine kept to this user before (mkdtemp's 0700), a directory inside it still does.
+  const closed = (p: string) => {
+    for (let d = p; d !== testMachine; d = dirname(d)) if (!others(d)) return true;
+    return false;
+  };
+  const open = Object.entries(isolatedEnv).filter(([k, p]) => !['TMPDIR', 'TMP', 'TEMP'].includes(k) && !closed(p));
+  assert.deepEqual(open, [], 'each is behind a directory of this user\'s alone');
+});
+
+test("a test run a test starts (a preloaded runner and its file, two levels down) gets its temporary directory inside this test's, still short enough for a socket (#604)", async () => {
+  const file = fixtureTest('where.test.js', ["import { test } from 'node:test';", "import { tmpdir } from 'node:os';", "test('where', () => { console.log(`TMPDIR_IS=${tmpdir()}`); });"].join('\n'));
+  const r = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], childEnv());
+  assert.equal(r.code, 0, r.out);
+  const theirs = /TMPDIR_IS=(\S+)/.exec(r.out)?.[1] ?? '';
+  assert.ok(theirs && inside(theirs), `the nested file's tmpdir() is ${theirs}, outside ${testMachine}`);
+  assert.ok(Buffer.byteLength(theirs + CHROME_SOCKET) < SUN_PATH_MAX, `${theirs}${CHROME_SOCKET} is ${Buffer.byteLength(theirs + CHROME_SOCKET)} bytes`);
+});
+
+test('regression (#604): running test/pr-batch.test.ts leaves no prbatch-* directory, nor anything else, in the system temp directory', { timeout: 300_000 }, async () => {
+  // A system temp directory of its own (the run's processes see it as theirs through TMPDIR, TMP and TEMP), so the
+  // count is this run's alone: on a shared /tmp other runs come and go.
+  const system = mkdtempSync(join(tmpdir(), 'system-tmp-'));
+  const env = { ...childEnv(), TMPDIR: system, TMP: system, TEMP: system };
+  const prbatch = () => readdirSync(system).filter((f) => f.startsWith('prbatch-'));
+  const before = prbatch();
+  const r = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', join(repoRoot, 'dist', 'test', 'pr-batch.test.js')], env);
+  assert.equal(r.code, 0, r.out.slice(-4000));
+  assert.match(r.out, /^# pass [1-9]\d*$/m, 'its tests ran');
+  assert.deepEqual(prbatch(), before, 'no new prbatch-* directory in the system temp directory');
+  assert.deepEqual(readdirSync(system), [], 'nothing left there at all: the test machines are gone too');
 });
 
 /** Every machine location the engine opens or runs, by name (src/os/system-paths.ts builds each). */

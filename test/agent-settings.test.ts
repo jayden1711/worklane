@@ -128,6 +128,8 @@ if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMetho
 ${STDIN_LINE};
 const i = args.indexOf('--settings');
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ settings: i >= 0 ? JSON.parse(args[i + 1]) : null }));
+// As claude does with a --settings it applied (#626): the init event reports its outputStyle.
+console.log(JSON.stringify({ type: 'system', subtype: 'init', output_style: (i >= 0 && JSON.parse(args[i + 1]).outputStyle) || 'default' }));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
 `,
   );

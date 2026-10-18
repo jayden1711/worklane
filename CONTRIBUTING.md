@@ -2,6 +2,10 @@
 
 Thanks for helping. A few rules keep this project safe to depend on.
 
+## Commit messages
+
+Line 1 is the subject, at most 180 characters, and line 2 is blank before any body: the push gate (pre-push hook and CI) refuses anything else, since rewording a pushed commit takes a force-push.
+
 ## Sign-off
 
 Every commit must carry a [Developer Certificate of Origin](https://developercertificate.org/) sign-off matching the commit author:

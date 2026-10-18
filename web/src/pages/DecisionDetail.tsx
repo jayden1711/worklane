@@ -1,26 +1,27 @@
 // A decision's detail (/decisions/<id>, from the Inbox, Decisions, Waiting on you and PR cards): everything needed to
-// decide from the dashboard alone, each part in its own card, in a fixed order. What the log doesn't have says "not
-// recorded". The page's data is one request (GET /api/decisions/:id, src/decision-detail.ts); the PR body's sections
-// are a second, shown last so their arrival moves nothing above them, and the diff is asked for on a click.
+// decide from the dashboard alone, each part in its own card, in a fixed order. It opens with the decision card's three
+// lines (what happened, the recommendation by name, what each option does, each option once); a part the log doesn't
+// have is left out, never shown as "not recorded". The page's data is one request (GET /api/decisions/:id,
+// src/decision-detail.ts); the PR body's sections are a second, shown last so their arrival moves nothing above them,
+// and the diff is asked for on a click.
 import { useEffect, useState, type ReactNode } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { api, decide, useView, type DecisionDetail, type DecisionDiff, type DecisionPrBody, type State } from '../api';
+import { api, useView, type DecisionDetail, type DecisionDiff, type DecisionPrBody, type State } from '../api';
 import { navigate } from '../App';
-import { DotPill, FileChip, Loading, StatusMark, ValuePill, type MarkState } from '../components/patterns';
+import { DotPill, FileChip, Loading, StatusMark, type MarkState } from '../components/patterns';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
+import { DecisionLines, FLAG_LABEL, LEVEL_MEANING, proseOf, useAnswer } from './Decisions';
 
-/** Every section, in page order (the render checks render each for every kind). */
-export const DETAIL_SECTIONS = ['summary', 'options', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body'] as const;
+/** Every section, in page order (the render checks render each for every kind); one with nothing recorded isn't drawn. */
+export const DETAIL_SECTIONS = ['summary', 'asked', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body'] as const;
 type SectionId = (typeof DETAIL_SECTIONS)[number];
-/** How a section stands: shown, not recorded in the log, not one this kind of decision has, or not this person's. */
-type SectionState = 'shown' | 'not-recorded' | 'not-applicable' | 'withheld';
+/** How a drawn section stands: shown, not one this kind of decision has, or not this person's. */
+type SectionState = 'shown' | 'not-applicable' | 'withheld';
 
 const KIND_LABEL: Record<DecisionDetail['kind'], string> = { land: 'Approve landing', question: 'Question', domain: 'Network access', plan: 'Plan', intake: 'Intake report', delegation: 'Review settings', automation: 'Automation run', pr: 'PR held for you' };
-const FLAG_LABEL = { 'money-path': 'Money path', auth: 'Auth', secrets: 'Secrets' } as const;
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink', unavailable: 'orange' };
 const CONF_TONE: Record<string, 'ok' | 'warn' | 'danger'> = { high: 'ok', medium: 'warn', low: 'danger' };
-const NOT_RECORDED = 'not recorded';
 
 function Section({ id, testId, title, state, children }: { id: SectionId; testId: `decision-${SectionId}`; title: string; state: SectionState; children: ReactNode }) {
   return (
@@ -45,38 +46,12 @@ const internal = (to: string) => ({ href: to, onClick: (e: React.MouseEvent) => 
 const ext = { target: '_blank', rel: 'noopener noreferrer' } as const;
 const runMark = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
-/** The answer buttons: one click answers (the server checks the role again). */
-function Answer({ d }: { d: DecisionDetail }) {
-  const [busy, setBusy] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  if (d.answer || !d.canAnswer || !d.options.length) return null;
-  const answer = async (o: string) => {
-    setBusy(o);
-    setErr(null);
-    try {
-      await decide(d.id, o);
-    } catch (e) {
-      setErr((e as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-  return (
-    <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
-      {d.options.map((o) => (
-        <Button key={o.option} type="button" size="sm" data-option={o.option} data-testid="decision-detail-option" variant={o.recommended ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o.option)}>
-          {busy === o.option ? `${o.option}…` : o.option}
-        </Button>
-      ))}
-      {err && <span className="text-[12px] text-red">{err}</span>}
-    </div>
-  );
-}
-
 /** The diff, asked for on a click (the owners'); shown in a box of its own height, scrolled inside. */
 function DiffSection({ d, initial = null }: { d: DecisionDetail; initial?: DecisionDiff | { error: string } | 'loading' | null }) {
   const [diff, setDiff] = useState(initial);
-  const state: SectionState = d.diff === 'owner' ? 'shown' : d.diff === 'owners-only' ? 'withheld' : 'not-recorded';
+  // No change with its commits recorded: nothing to show.
+  if (d.diff === 'none' || !d.diff) return null;
+  const state: SectionState = d.diff === 'owner' ? 'shown' : 'withheld';
   const load = () => {
     setDiff('loading');
     api<DecisionDiff>(`/api/decisions/${encodeURIComponent(d.id)}/diff`)
@@ -85,9 +60,7 @@ function DiffSection({ d, initial = null }: { d: DecisionDetail; initial?: Decis
   };
   return (
     <Section id="diff" testId="decision-diff" title="The diff" state={state}>
-      {d.diff === 'none' || !d.diff ? (
-        <Quiet>{NOT_RECORDED}: no change with its commits is recorded for this decision.</Quiet>
-      ) : d.diff === 'owners-only' ? (
+      {d.diff === 'owners-only' ? (
         <Quiet>The diff is for the instance's owners{d.pr ? '; it is on the PR on GitHub' : ''}.</Quiet>
       ) : diff === null ? (
         <Button size="sm" variant="outline" onClick={load} data-testid="decision-diff-show">
@@ -116,10 +89,11 @@ function DiffSection({ d, initial = null }: { d: DecisionDetail; initial?: Decis
 }
 
 function PrPart({ label, text, testId }: { label: string; text: string | null | undefined; testId: string }) {
+  if (!text) return null;
   return (
     <div className="mt-1.5 first:mt-0" data-testid={testId}>
       <div className="text-[12px] font-medium text-ink-3">{label}</div>
-      {text ? <div className="mt-0.5 whitespace-pre-wrap break-words rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink-2 shadow-hairline">{text}</div> : <Quiet>{NOT_RECORDED}</Quiet>}
+      <div className="mt-0.5 whitespace-pre-wrap break-words rounded-control bg-inset px-2.5 py-2 text-[12.5px] text-ink-2 shadow-hairline">{text}</div>
     </div>
   );
 }
@@ -138,11 +112,11 @@ function PrBodySection({ d, initial }: { d: DecisionDetail; initial?: DecisionPr
     };
   }, [d.id, d.prBody, initial]);
   const loaded = body && !('error' in body) ? body : null;
+  // No PR for this decision: nothing to read.
+  if (!d.prBody) return null;
   return (
-    <Section id="pr-body" testId="decision-pr-body" title="From the PR: fail-without and what it can never do" state={!d.prBody ? 'not-recorded' : 'shown'}>
-      {!d.prBody ? (
-        <Quiet>{NOT_RECORDED}: there's no PR for this decision.</Quiet>
-      ) : body === null ? (
+    <Section id="pr-body" testId="decision-pr-body" title="From the PR: fail-without and what it can never do" state="shown">
+      {body === null ? (
         <Quiet>Reading the PR body…</Quiet>
       ) : 'error' in body ? (
         <span className="text-red">Can't read the PR body: {body.error}</span>
@@ -151,6 +125,7 @@ function PrBodySection({ d, initial }: { d: DecisionDetail; initial?: DecisionPr
           {loaded?.why && <div className="text-[12px] text-ink-3">{loaded.why}</div>}
           <PrPart label="Fail-without" text={loaded?.failWithout} testId="decision-fail-without" />
           <PrPart label="What this can never do" text={loaded?.never} testId="decision-never" />
+          {!loaded?.why && !loaded?.failWithout && !loaded?.never && <Quiet>The PR body has neither section.</Quiet>}
         </>
       )}
     </Section>
@@ -160,7 +135,10 @@ function PrBodySection({ d, initial }: { d: DecisionDetail; initial?: DecisionPr
 /** The detail from its data (also what the render checks render). `prBody` and `diff`: as already read, for the checks. */
 export function DecisionDetailView({ d, prBody, diff }: { d: DecisionDetail; prBody?: DecisionPrBody | { error: string } | null; diff?: DecisionDiff | { error: string } | null }) {
   const viewer = d.withheld !== null;
-  const recommended = d.options.find((o) => o.recommended);
+  const ans = useAnswer(d.id);
+  const options = d.options.map((o) => ({ option: o.option, does: o.does, cannot: o.cannot }));
+  // A viewer's has no reasoning: an older event's free-text recommendation is its only prose.
+  const prose = d.reasoning ?? proseOf(d.recommendation, options.map((o) => o.option), []);
   return (
     <div className="space-y-3" data-testid="decision-detail" data-kind={d.kind}>
       <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
@@ -181,15 +159,33 @@ export function DecisionDetailView({ d, prBody, diff }: { d: DecisionDetail; prB
         )}
       </div>
 
+      <Section id="summary" testId="decision-summary" title="In short" state="shown">
+        {options.length ? (
+          <DecisionLines happened={d.summary?.happened ?? d.question} recommendation={d.recommendation} prose={prose} options={options} answerable={!d.answer && d.canAnswer} ans={ans} testId="decision-detail-option" />
+        ) : (
+          <>
+            <p className="text-[14px] font-medium leading-snug text-ink" data-line="happened" data-testid="decision-happened">
+              {d.summary?.happened ?? d.question}
+            </p>
+            <p className="mt-1.5 text-ink-2" data-line="effects" data-testid="decision-effects">
+              Answered on GitHub: merging the PR lands it; closing it (or asking for changes) doesn't. Nothing here can merge it.
+            </p>
+          </>
+        )}
+        {ans.err && <p className="mt-1.5 text-[12px] text-red">{ans.err}</p>}
+        {!d.answer && !d.canAnswer && options.length > 0 && (
+          <p className="mt-2 text-[12px] text-ink-3">Waiting on @{d.owner}; {d.kind === 'plan' || d.kind === 'land' ? "a held plan or a high-risk merge is for the instance's owners (admin on its repo)" : "the instance's owners and writers (write on its repo) can answer it"}.</p>
+        )}
+      </Section>
+
       {viewer ? (
         <div className="rounded-control bg-inset px-3 py-2 text-[12.5px] text-ink-2 shadow-hairline" data-testid="decision-withheld">
           {d.withheld!.replace(/^a decision/, 'A decision')}.
         </div>
       ) : (
-        <Section id="summary" testId="decision-summary" title="In short" state="shown">
-          <p data-testid="decision-happened">{d.summary?.happened}</p>
-          <p className="mt-1">
-            <span className="font-medium">Asked:</span> {d.question}
+        <Section id="asked" testId="decision-asked" title="As asked: the question, the agent's words and the receipts" state="shown">
+          <p className="whitespace-pre-line break-words font-medium" data-testid="decision-question">
+            {d.question}
           </p>
           {d.summary?.agent && (
             <div className="mt-1.5" data-testid="decision-agent-summary">
@@ -197,56 +193,9 @@ export function DecisionDetailView({ d, prBody, diff }: { d: DecisionDetail; prB
               <div className="whitespace-pre-line break-words text-ink-2">{d.summary.agent}</div>
             </div>
           )}
-          {d.options.length ? (
-            <ul className="mt-2 space-y-1.5" data-testid="decision-effects">
-              {d.options.map((o) => (
-                <li key={o.option} className="break-words" data-option={o.option}>
-                  <ValuePill>{o.option}</ValuePill> <span className="text-ink-2">{o.does}</span> <span className="text-ink-3">{o.cannot}</span>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-1.5 text-ink-2" data-testid="decision-effects">Answered on GitHub: merging the PR lands it; closing it (or asking for changes) doesn't. Nothing here can merge it.</p>
-          )}
+          {!!(d.receipts ?? []).length && <Lines items={d.receipts!} testId="decision-receipts" />}
         </Section>
       )}
-
-      <Section id="options" testId="decision-options" title="The question, every option, and the recommendation" state="shown">
-        <p className="whitespace-pre-line break-words font-medium">{d.question}</p>
-        {d.options.length ? (
-          <ol className="mt-1.5 flex flex-wrap gap-1.5" data-testid="decision-option-list">
-            {d.options.map((o) => (
-              <li key={o.option}>
-                <ValuePill tone={o.recommended ? 'green' : undefined}>
-                  {o.option}
-                  {o.recommended ? ' (recommended)' : ''}
-                </ValuePill>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="mt-1 text-ink-3">No options here: the PR is reviewed and merged (or closed) on GitHub.</p>
-        )}
-        <div className="mt-2" data-testid="decision-reasoning">
-          <span className="font-medium">Recommended: </span>
-          {recommended ? <ValuePill>{recommended.option}</ValuePill> : !d.recommendation.trim() ? <Quiet>none recorded</Quiet> : viewer ? <span className="whitespace-pre-line break-words text-ink-2">{d.recommendation}</span> : <Quiet>in words, below</Quiet>}
-          {!viewer && ((d.reasoning ?? []).length ? (
-            (d.reasoning ?? []).map((t, i) => (
-              <p key={i} className="mt-1 whitespace-pre-line break-words text-ink-2">
-                <span className="font-medium text-ink">Why: </span>
-                {t}
-              </p>
-            ))
-          ) : (
-            <p className="mt-1 text-ink-3">Why: no reasoning recorded.</p>
-          ))}
-        </div>
-        {!viewer && !!(d.receipts ?? []).length && <Lines items={d.receipts!} testId="decision-receipts" />}
-        <Answer d={d} />
-        {!d.answer && !d.canAnswer && d.options.length > 0 && (
-          <p className="mt-2 text-[12px] text-ink-3">Waiting on @{d.owner}; {d.kind === 'plan' || d.kind === 'land' ? "a held plan or a high-risk merge is for the instance's owners (admin on its repo)" : "the instance's owners and writers (write on its repo) can answer it"}.</p>
-        )}
-      </Section>
 
       {!viewer && <Impact d={d} />}
 
@@ -282,15 +231,17 @@ export function DecisionDetailView({ d, prBody, diff }: { d: DecisionDetail; prB
 
 function Impact({ d }: { d: DecisionDetail }) {
   const i = d.impact;
-  const recorded = !!i && i.flags.some((f) => f.files !== null);
+  // Only the flags whose files are known: one that isn't recorded isn't drawn, and neither is the section when none is.
+  const known = (i?.flags ?? []).filter((f): f is typeof f & { files: string[] } => f.files !== null);
+  if (!i || !known.length) return null;
   return (
-    <Section id="impact" testId="decision-impact" title="Impact: money path, auth, secrets" state={recorded ? 'shown' : 'not-recorded'}>
+    <Section id="impact" testId="decision-impact" title="Impact: money path, auth, secrets" state="shown">
       <ul className="space-y-1">
-        {(i?.flags ?? []).map((f) => (
-          <li key={f.flag} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="decision-impact-flag" data-flag={f.flag} data-touches={f.files === null ? 'unknown' : f.files.length ? 'yes' : 'no'}>
+        {known.map((f) => (
+          <li key={f.flag} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="decision-impact-flag" data-flag={f.flag} data-touches={f.files.length ? 'yes' : 'no'}>
             <span className="w-24 shrink-0 font-medium">{FLAG_LABEL[f.flag]}</span>
-            {f.files === null ? <Quiet>{NOT_RECORDED}</Quiet> : f.files.length ? <Badge tone="danger">touches it</Badge> : <Badge tone="ok">doesn't touch it</Badge>}
-            {f.files?.map((p) => <FileChip key={p} file={p} />)}
+            {f.files.length ? <Badge tone="danger">touches it</Badge> : <Badge tone="ok">doesn't touch it</Badge>}
+            {f.files.map((p) => <FileChip key={p} file={p} />)}
           </li>
         ))}
       </ul>
@@ -303,15 +254,16 @@ function Impact({ d }: { d: DecisionDetail }) {
 function Findings({ d }: { d: DecisionDetail }) {
   const f = d.findings;
   const applies = d.kind === 'question';
+  if (!f && applies) return null;
   return (
-    <Section id="findings" testId="decision-findings" title="Findings" state={f ? 'shown' : applies ? 'not-recorded' : 'not-applicable'}>
+    <Section id="findings" testId="decision-findings" title="Findings" state={f ? 'shown' : 'not-applicable'}>
       {!f ? (
-        <Quiet>{applies ? `${NOT_RECORDED}.` : "None: this kind of decision isn't based on an agent's findings."}</Quiet>
+        <Quiet>None: this kind of decision isn't based on an agent's findings.</Quiet>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
             <span>{f.list.length} finding(s)</span>
-            {f.confidence ? <Badge tone={CONF_TONE[f.confidence] ?? 'neutral'}>confidence {f.confidence}</Badge> : <Quiet>confidence {NOT_RECORDED}</Quiet>}
+            {f.confidence && <Badge tone={CONF_TONE[f.confidence] ?? 'neutral'}>confidence {f.confidence}</Badge>}
           </div>
           {f.list.length ? (
             <ol className="mt-1.5 space-y-2">
@@ -319,9 +271,13 @@ function Findings({ d }: { d: DecisionDetail }) {
                 <li key={i} className="rounded-control bg-inset px-2.5 py-2 shadow-hairline" data-testid="decision-finding">
                   <div className="whitespace-pre-line break-words font-medium">{x.claim}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px]">
-                    {x.file ? <span data-testid="decision-finding-at"><FileChip file={`${x.file}:${x.line ?? '?'}`} /></span> : <Quiet>file:line {NOT_RECORDED}</Quiet>}
-                    <Badge>{x.severity ? `severity ${x.severity}` : `severity ${NOT_RECORDED}`}</Badge>
-                    <Badge tone={x.confidence ? (CONF_TONE[x.confidence] ?? 'neutral') : 'neutral'}>{x.confidence ? `confidence ${x.confidence}` : `confidence ${NOT_RECORDED}`}</Badge>
+                    {x.file && (
+                      <span data-testid="decision-finding-at">
+                        <FileChip file={`${x.file}:${x.line ?? '?'}`} />
+                      </span>
+                    )}
+                    {x.severity && <Badge>severity {x.severity}</Badge>}
+                    {x.confidence && <Badge tone={CONF_TONE[x.confidence] ?? 'neutral'}>confidence {x.confidence}</Badge>}
                   </div>
                   <div className="mt-1 whitespace-pre-wrap break-words font-mono text-[11.5px] text-ink-2">{x.evidence}</div>
                 </li>
@@ -344,21 +300,25 @@ function Findings({ d }: { d: DecisionDetail }) {
 
 function Change({ d }: { d: DecisionDetail }) {
   const c = d.change;
+  if (!c) return null;
   return (
-    <Section id="change" testId="decision-change" title="The change: files, review level and why" state={c ? 'shown' : 'not-recorded'}>
-      {!c ? (
-        <Quiet>{NOT_RECORDED}: no change is recorded for this decision.</Quiet>
-      ) : (
-        <>
+    <Section id="change" testId="decision-change" title="The change: files, review level and why" state="shown">
+      <>
           <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
-            {c.level ? <Badge tone={c.level === 'L3' ? 'danger' : c.level === 'L2' ? 'warn' : 'neutral'}>review level {c.level}</Badge> : <Quiet>review level {NOT_RECORDED}</Quiet>}
+            {c.level && (
+              <Badge tone={c.level === 'L3' ? 'danger' : c.level === 'L2' ? 'warn' : 'neutral'}>{`review level ${c.level}${LEVEL_MEANING[c.level] ? `: ${LEVEL_MEANING[c.level]}` : ''}`}</Badge>
+            )}
             <span>
               {c.files.length + c.filesMore} file(s){c.base && c.head ? ` · ${c.base.slice(0, 8)}..${c.head.slice(0, 8)}` : ''}
             </span>
             {c.source === 'log' && <Quiet>(from the issue's log)</Quiet>}
           </div>
-          <div className="mt-1.5 text-[12px] font-medium text-ink-3">Why this level</div>
-          {c.levelReasons.length ? <Lines items={c.levelReasons} testId="decision-level-reasons" /> : <Quiet>{NOT_RECORDED}</Quiet>}
+          {!!c.levelReasons.length && (
+            <>
+              <div className="mt-1.5 text-[12px] font-medium text-ink-3">Why this level</div>
+              <Lines items={c.levelReasons} testId="decision-level-reasons" />
+            </>
+          )}
           {!!c.files.length && (
             <ul className="mt-2 flex max-w-full flex-wrap gap-1.5" aria-label="Files changed">
               {c.files.map((f) => (
@@ -374,8 +334,7 @@ function Change({ d }: { d: DecisionDetail }) {
               {c.filesMore > 0 && <li className="self-center text-[12px] text-ink-3">and {c.filesMore} more</li>}
             </ul>
           )}
-        </>
-      )}
+      </>
     </Section>
   );
 }
@@ -383,10 +342,11 @@ function Change({ d }: { d: DecisionDetail }) {
 function Verdict({ d }: { d: DecisionDetail }) {
   const v = d.verdict;
   const applies = d.kind === 'land' || d.kind === 'pr';
+  if (!v && applies) return null;
   return (
-    <Section id="verdict" testId="decision-verdict" title="The evaluator's verdict and confidence" state={v ? 'shown' : applies ? 'not-recorded' : 'not-applicable'}>
+    <Section id="verdict" testId="decision-verdict" title="The evaluator's verdict and confidence" state={v ? 'shown' : 'not-applicable'}>
       {!v ? (
-        <Quiet>{applies ? `${NOT_RECORDED}.` : "None: this kind of decision isn't evaluated."}</Quiet>
+        <Quiet>None: this kind of decision isn't evaluated.</Quiet>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-1.5">
@@ -395,10 +355,12 @@ function Verdict({ d }: { d: DecisionDetail }) {
             <Badge tone={CONF_TONE[v.confidence] ?? 'neutral'}>confidence {v.confidence}</Badge>
             {v.designChange !== null && <Badge tone={v.designChange ? 'warn' : 'neutral'}>{v.designChange ? 'design change' : 'no design change'}</Badge>}
           </div>
-          <p className="mt-1.5" data-testid="decision-confidence-reason">
-            <span className="font-medium">Why this confidence: </span>
-            {v.confidenceReason ? <span className="whitespace-pre-line break-words text-ink-2">{v.confidenceReason}</span> : <Quiet>no reason recorded</Quiet>}
-          </p>
+          {v.confidenceReason && (
+            <p className="mt-1.5" data-testid="decision-confidence-reason">
+              <span className="font-medium">Why this confidence: </span>
+              <span className="whitespace-pre-line break-words text-ink-2">{v.confidenceReason}</span>
+            </p>
+          )}
           {v.advice && <p className="mt-1 whitespace-pre-line break-words text-ink-2">{v.advice}</p>}
           {v.designReason && <p className="mt-1 text-ink-2">Design: {v.designReason}</p>}
           {!!v.unread.length && (
@@ -422,10 +384,11 @@ function Verdict({ d }: { d: DecisionDetail }) {
 function Tests({ d }: { d: DecisionDetail }) {
   const t = d.tests;
   const applies = d.kind === 'land' || d.kind === 'pr';
+  if (!t && applies && !d.tampered?.length) return null;
   return (
-    <Section id="tests" testId="decision-tests" title="Tests the harness ran" state={t ? 'shown' : applies ? 'not-recorded' : 'not-applicable'}>
+    <Section id="tests" testId="decision-tests" title="Tests the harness ran" state={t ? 'shown' : applies ? 'shown' : 'not-applicable'}>
       {!t ? (
-        <Quiet>{applies ? `${NOT_RECORDED}.` : "None: this kind of decision has no change to test."}</Quiet>
+        applies ? null : <Quiet>None: this kind of decision has no change to test.</Quiet>
       ) : !t.length ? (
         <Quiet>No checks ran.</Quiet>
       ) : (
@@ -455,11 +418,10 @@ function Tests({ d }: { d: DecisionDetail }) {
 
 function Ci({ d }: { d: DecisionDetail }) {
   const pr = d.pr;
+  if (!pr) return null;
   return (
-    <Section id="ci" testId="decision-ci" title="CI on the PR, per required check" state={pr ? 'shown' : 'not-recorded'}>
-      {!pr ? (
-        <Quiet>{NOT_RECORDED}: there's no PR for this decision.</Quiet>
-      ) : (
+    <Section id="ci" testId="decision-ci" title="CI on the PR, per required check" state="shown">
+      {(
         <>
           {pr.checksOnHead && pr.checks.length ? (
             <span className="flex flex-wrap gap-1.5" data-testid="decision-ci-checks">
@@ -497,8 +459,10 @@ function Ci({ d }: { d: DecisionDetail }) {
 function Runs({ d }: { d: DecisionDetail }) {
   const runs = d.runs;
   const auth = d.auth;
+  // Not on an issue, so no runs to list: drawn only for a login refused or held.
+  if (!runs && !auth?.held && !auth?.failed.length) return null;
   return (
-    <Section id="runs" testId="decision-runs" title="The agent's runs" state={runs ? 'shown' : 'not-recorded'}>
+    <Section id="runs" testId="decision-runs" title="The agent's runs" state="shown">
       {auth?.held && (
         <div role="alert" className="mb-2 rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="decision-auth-held">
           <span className="font-medium text-red">Claude sign-in failed on this machine</span> ({auth.held.login}), since {ago(auth.held.since)}: no new runs on that login until a check call works. {auth.held.detail}
@@ -506,12 +470,10 @@ function Runs({ d }: { d: DecisionDetail }) {
       )}
       {!!auth?.failed.length && (
         <div role="alert" className="mb-2 rounded-control bg-red-tint px-3 py-2 text-[12.5px] text-ink-2" data-testid="decision-auth-failed">
-          <span className="font-medium text-red">auth_failed:</span> Claude refused the login on {auth.failed.length} run(s) of this task. Last, {ago(auth.failed.at(-1)!.at)} ({auth.failed.at(-1)!.role}): {auth.failed.at(-1)!.detail || 'no detail recorded'}
+          <span className="font-medium text-red">auth_failed:</span> Claude refused the login on {auth.failed.length} run(s) of this task. Last, {ago(auth.failed.at(-1)!.at)} ({auth.failed.at(-1)!.role}){auth.failed.at(-1)!.detail ? `: ${auth.failed.at(-1)!.detail}` : '.'}
         </div>
       )}
-      {!runs ? (
-        <Quiet>{NOT_RECORDED}: this decision isn't on an issue.</Quiet>
-      ) : runs.length ? (
+      {!runs ? null : runs.length ? (
         <ul className="divide-y divide-line">
           {runs.map((r) => (
             <li key={r.id}>
