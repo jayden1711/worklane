@@ -529,6 +529,9 @@ test('main watch revert: when a revert PR can\'t be opened (a conflict with a la
   // Fail closed: a revert that failed never suppresses the stop or the alert.
   assert.equal(of(w.f, 'merge.stopped').length, 4);
   assert.notEqual(w.c.autoMergeStopped(), null);
+  // The dashboard's banner (the latest alert, the refused path) says why, through protectionState.
+  const banner = protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: w.f.log.read(0), role: 'owner' }).alert!;
+  assert.deepEqual([banner.sha, banner.revert, banner.trip_revert, banner.no_revert], [secret, null, null, alerts[3]!.no_revert]);
 });
 
 /** The files that differ between two commits, as git's name-status lines. */
