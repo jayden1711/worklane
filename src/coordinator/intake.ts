@@ -32,7 +32,9 @@ const INTERRUPTED_REPLY = "Sorry, we couldn't finish handling your message. Coul
 // WHY: a github report is never taken twice (the seen ledger), so asking for it again would go nowhere.
 const GITHUB_INTERRUPTED_REPLY = "Sorry, we couldn't finish triaging this issue; it stays here for a maintainer.";
 const GITHUB_AWAITING_REPLY = 'Thanks. A maintainer approves this before it is taken on as work; until then it stays in triage.';
-const GITHUB_REJECTED_REPLY = 'A maintainer decided not to take this on as work for now; it stays in triage.';
+// WHY (#643): a GitHub report is worked from the draft intake checked, so "edit" can't mean editing it on GitHub.
+const GITHUB_EDIT_RECEIPT ="reported as a GitHub issue: it is worked from this checked draft whatever is edited on GitHub (its body or the draft's comment); to work it differently, a writer opens a new issue";
+const GITHUB_REJECTED_REPLY ='A maintainer decided not to take this on as work for now; it stays in triage.';
 const ownIssue = (r: Pick<IncomingReport, 'source' | 'sourceId'> | null): number | null => (r?.source === 'github' && /^\d+$/.test(r.sourceId) ? Number(r.sourceId) : null);
 
 export abstract class Intake extends QuickReplies {
@@ -251,6 +253,17 @@ export abstract class Intake extends QuickReplies {
     return { ok: true, body: issue.body };
   }
 
+  /**
+   * #643: issue `n` as a later run on its task (a CI, review or conflict fix, and their evaluator) is briefed: its body
+   * is intakeWorkedBody's, read again now, so a reporter's edit after dispatch never reaches an agent. Without one, the
+   * body is left out and the brief says why.
+   */
+  protected async intakeWorkedIssue(n: number): Promise<Issue> {
+    const issue = await this.d.backlog.get(n);
+    const worked = this.intakeWorkedBody(issue);
+    return { ...issue, body: worked.ok ? worked.body : `(The issue's body is left out: ${worked.why}.)` };
+  }
+
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
   private intakeMoneyPaths(): RegExp[] {
     try {
@@ -276,7 +289,7 @@ export abstract class Intake extends QuickReplies {
         // WHY: the issue number is kept with the draft: the raw report may be purged before anyone answers.
         const own = ownIssue(r);
         writeOwnerOnly(join(this.d.stateDir, 'intake', 'drafts', `${id}.json`), JSON.stringify({ title: a.title, body: a.body, labels: a.labels, ...(own !== null ? { issue: own } : {}) }));
-        const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it']);
+        const decision = await this.ask('intake', null, owner, `File this report (via ${r.source}) as an issue: "${a.title.slice(0, 150)}"?`, a.options, 'approve', [`intake:${id}`, 'sender not trusted: approve files it ready, edit files it without ready, reject drops it', ...(own !== null ? [GITHUB_EDIT_RECEIPT] : [])]);
         this.emit('intake.awaiting', { id, decision });
         if (own !== null) await this.intakeReply(id, r, 'awaiting', GITHUB_AWAITING_REPLY);
         return;

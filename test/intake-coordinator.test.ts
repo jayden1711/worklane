@@ -10,6 +10,7 @@ import { checkDraftedIssue, parseContract, type DoneWhenList, type Issue } from 
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
+import { optionEffect } from '../src/decision-detail.js';
 import { EventLog } from '../src/events/log.js';
 import { runHook } from '../src/hook.js';
 import type { InstanceSettings } from '../src/instance.js';
@@ -337,6 +338,19 @@ test("intake (#643): an outsider's intake issue a writer marked ready before int
   const [missing] = payloads(t.log, 'contract.missing');
   assert.equal(missing!.issue, n);
   assert.match(String(missing!.why), /came in through intake/);
+});
+
+test("intake (#643): the Inbox says that editing a GitHub-sourced report on GitHub doesn't change what is worked, and what to do instead", async () => {
+  const t = githubSetup([]);
+  t.backlog.open({ title: 'Discount ignored', body: 'the total ignores my code', author: 'outsider', labels: [INTAKE_LABEL.name] });
+  await t.c.checkIntake();
+  const [q] = payloads(t.log, 'decision.asked');
+  const note = /worked from this checked draft whatever is edited on GitHub .*; to work it differently, a writer opens a new issue/;
+  assert.ok((q!.receipts as string[]).some((x) => note.test(x)), `the GitHub-sourced decision carries the note: ${JSON.stringify(q!.receipts)}`);
+  assert.match(optionEffect('intake', 'edit').does, /GitHub issue is worked from its checked draft whatever is edited on GitHub: to work it differently, open a new issue/);
+  const other = setup({ triage: () => ({ kind: 'bug', draft: DRAFT }), batches: [[report({ from: STRANGER_ID })]] });
+  await other.c.checkIntake();
+  assert.ok(!(payloads(other.log, 'decision.asked')[0]!.receipts as string[]).some((x) => note.test(x)), 'a chat report has no such note');
 });
 
 test('intake (#643): a draft with a decoy done_when block above its Deliverable is refused, and the coordinator reads no block from such a body', async () => {

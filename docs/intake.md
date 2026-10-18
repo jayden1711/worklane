@@ -480,7 +480,8 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   (never against its own issue), the money-path (L3) rule and the trust policy (`src/intake/decide.ts`). The issue
   already exists, so filing it labels that issue (`ready` and the kind label) and puts the drafted five-part issue
   on it as one comment; no second issue is opened.
-- The task is worked from the draft intake checked (its contract, `- repro: true` for a bug, and its brief),
+- The task is worked from the draft intake checked (its contract, `- repro: true` for a bug, and the brief of
+  every run on it, CI, review and conflict fix runs included),
   kept in the coordinator's owner-only state (`intake/checked/<issue>.json`) when it is filed. Never from the
   issue's body: the reporter wrote it and can edit it at any time. Nor from the comment: anyone can post one
   carrying the intake marker, and it is only the visible copy. So a writer's later edits there don't change the

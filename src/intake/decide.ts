@@ -139,6 +139,10 @@ export function decide(o: { report: IncomingReport; redacted: string; triage: Tr
   const money = moneyPathFiles(f.body, o.moneyPaths ?? []);
   const risk = money.length ? `\n\n**High risk:** names money-path files (${money.slice(0, 5).map((p) => `\`${p}\``).join(', ')}), so its work waits for the owner (L3).` : '';
   const body = `${f.body.trim()}\n\n---\n${reportSection(report, redacted, triage)}${risk}`;
+  // INVARIANT (#643): the body filed holds exactly the one block checked, whatever was added below the draft.
+  const filed = parseContract(body);
+  const drafted = parseContract(f.body);
+  if (!filed.ok || !drafted.ok || JSON.stringify(filed.done_when) !== JSON.stringify(drafted.done_when)) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: `the body as filed doesn't hold exactly the checked contract${filed.ok ? '' : `: ${filed.why}`}` };
   const labels = [...f.labels, ...(money.length ? ['money-path'] : [])];
   if (trusted) return { action: 'file', title: triage.draft.title, body, labels: ['ready', ...labels] };
   return { action: 'decision', title: triage.draft.title, body, options: ['approve', 'edit', 'reject'], labels };

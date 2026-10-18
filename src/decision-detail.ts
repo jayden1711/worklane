@@ -131,7 +131,7 @@ export function optionEffect(kind: DetailKind, option: string, o: { investigatio
   }
   if (kind === 'intake') {
     if (option === 'approve') return { does: 'Files the report as an issue, marked ready, so it is built.', cannot: "It doesn't trust the sender for later reports." };
-    if (option === 'edit') return { does: 'Files the report as an issue without ready, for you to edit first.', cannot: 'Nothing is built until you mark it ready.' };
+    if (option === 'edit') return { does: 'Files the report as an issue without ready, for you to edit first. A report that came in as a GitHub issue is worked from its checked draft whatever is edited on GitHub: to work it differently, open a new issue.', cannot: 'Nothing is built until you mark it ready.' };
     if (option === 'reject') return { does: 'Drops the report, and the sender is told it was declined.', cannot: 'No issue is filed.' };
     if (option === 'answered') return { does: 'Marks the question answered.', cannot: "It doesn't send your answer: reply to the sender yourself." };
   }
