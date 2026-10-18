@@ -68,6 +68,22 @@ export function lowerConfidence(c: 'high' | 'medium' | 'low', unbacked: number):
   return c === 'high' ? 'medium' : 'low';
 }
 
+/**
+ * The three receipt sections in one line, for the owner's review packet (src/coordinator/review-packet.ts): how many
+ * checks passed and failed (the failing ones named), how many claims nothing backs, how many things went unchecked.
+ */
+export function receiptSummary(o: { checks: CheckRecord[]; doneWhen: DoneWhenList; unverified: string[] }): string {
+  const passed = o.checks.filter((c) => c.status === 'pass').length;
+  const failed = o.checks.filter((c) => c.status === 'fail');
+  const notRun = o.checks.filter((c) => c.status === 'skipped' || c.status === 'unavailable').length;
+  const manual = o.doneWhen.filter((d) => 'manual' in d).length;
+  // Each name one line in a code span with no backtick inside: shown as typed (a name can't start a line or add markup).
+  const named = failed.slice(0, 2).map((c) => `\`${c.check.replace(/\s+/g, ' ').replace(/`/g, "'").slice(0, 40)}\``).join(', ') + (failed.length > 2 ? ', …' : '');
+  const verified = passed + failed.length ? `${passed} passed${failed.length ? `, ${failed.length} FAILED (${named})` : ''}` : 'nothing (no checks ran)';
+  const claims = o.unverified.length;
+  return `verified: ${verified}; not verified: ${claims} claim${claims === 1 ? '' : 's'}; not checked: ${manual + notRun}`;
+}
+
 /** The three receipt sections for a PR description. */
 export function receiptLines(o: { checks: CheckRecord[]; doneWhen: DoneWhenList; unverified: string[] }): string[] {
   const ran = o.checks.filter((c) => c.status === 'pass' || c.status === 'fail');
