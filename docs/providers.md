@@ -75,6 +75,10 @@ sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
   the role's normal model, with a `provider.fallback` event); and by the runner again right before it would set
   `ANTHROPIC_BASE_URL` (a host refused since the run was resolved: the run doesn't start). Each refusal is logged once
   per provider and reason. The file is read each time, so a change applies without a restart.
+- **On the Machine page** (its Machine health section), read-only, to owners and writers: "Provider hosts: a, b (from
+  /etc/worklane/providers.json)", or that provider runs are off because there is no file or no host, or the file's
+  refusal in red; and each configured provider whose `base_url` is outside the set, in red, with why. A viewer gets
+  none of it. Nothing on the page can change the list.
 
 ## Hosted models and the instance's model cap
 

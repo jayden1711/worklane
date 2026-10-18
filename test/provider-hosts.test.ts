@@ -1,7 +1,8 @@
 // Root's provider hosts (#392): a provider's base_url sends its key and every prompt to a host root allows in
 // /etc/<cli>/providers.json, or nowhere. The file's checks (root's, not writable by others, bounded, this shape), the
 // exact host and port match, the URL's shape at config load, the fallback when the coordinator resolves a run, the
-// runner's own check right before claude would start, what is said at start, and the refusal logged once.
+// runner's own check right before claude would start, what is said at start, the refusal logged once, and the Health
+// page's line (owners and writers only).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -11,10 +12,13 @@ import { loadConfig } from '../src/config/load.js';
 import { AgentsConfig } from '../src/config/schema.js';
 import { resolveProvider } from '../src/coordinator/providers.js';
 import { InstanceSettings } from '../src/instance.js';
-import { baseUrlProblem, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostRefusal, providerHostsAtStart, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
+import { startDashboard } from '../src/dashboard.js';
+import { EventLog } from '../src/events/log.js';
+import { healthView } from '../src/health.js';
+import { baseUrlProblem, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostRefusal, providerHostsAtStart, providerHostsHealth, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
 import { PROVIDER_GATE_FILE } from '../src/providers.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
-import { allowProviderHosts, exampleProject } from './helpers.js';
+import { allowProviderHosts, asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const me = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -256,4 +260,59 @@ test('a refusal is logged once per provider and reason', () => {
   logRefusalOnce('hosted:once', 'y is not allowed', log);
   logRefusalOnce('local-once', 'x is not allowed', log);
   assert.deepEqual(lines, ['provider hosted:once refused: x is not allowed', 'provider hosted:once refused: y is not allowed', 'provider local-once refused: x is not allowed']);
+});
+
+// ---- the Health page's line: root's hosts and each configured provider they refuse, for the owners and writers only
+
+test("the Health line: root's hosts, or why there are none, and each configured provider outside them; nothing when there is no file and no provider", () => {
+  const agents = AgentsConfig.parse({ ...base, providers: { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'm' }, hosted: { glm: GLM } } });
+  assert.deepEqual(providerHostsHealth(agents, ok('127.0.0.1:8080')), { ...ok('127.0.0.1:8080'), refused: [{ provider: 'hosted:glm', reason: 'open.example.com is not an allowed provider host (127.0.0.1:8080, from /etc/x/providers.json)' }] });
+  assert.deepEqual(providerHostsHealth(agents, ok('127.0.0.1:8080', 'open.example.com')), { ...ok('127.0.0.1:8080', 'open.example.com'), refused: [] });
+  const missing: ProviderHosts = { file: '/etc/x/providers.json', state: 'missing', hosts: [], error: null };
+  const off = [{ provider: 'local', reason: 'no provider host is allowed on this machine' }, { provider: 'hosted:glm', reason: 'no provider host is allowed on this machine' }];
+  assert.deepEqual(providerHostsHealth(agents, missing), { ...missing, refused: off });
+  const bad: ProviderHosts = { file: '/etc/x/providers.json', state: 'refused', hosts: [], error: '/etc/x/providers.json: is not JSON; no provider host is allowed' };
+  assert.deepEqual(providerHostsHealth(agents, bad), { ...bad, refused: off });
+  assert.equal(providerHostsHealth(AgentsConfig.parse(base), missing), null, 'no provider and no file: nothing to show');
+  assert.deepEqual(providerHostsHealth(AgentsConfig.parse(base), ok('127.0.0.1:8080')), { ...ok('127.0.0.1:8080'), refused: [] }, 'a file and no provider: its hosts');
+});
+
+test("the health view carries the line, read from root's file now against the instance's providers", { skip: !posix && 'root-owned files are POSIX' }, () => {
+  const saved = { ...machineProviderHosts };
+  try {
+    const f = allowProviderHosts('127.0.0.1:8080');
+    const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+    assert.deepEqual(healthView([], null, { updates: [], network: null, agents }).providerHosts, { file: f, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: `open.example.com is not an allowed provider host (127.0.0.1:8080, from ${f})` }] });
+    allowProviderHosts('open.example.com');
+    assert.deepEqual(healthView([], null, { updates: [], network: null, agents }).providerHosts?.refused, [], 'a change to the file shows on the next read');
+    machineProviderHosts.file = join(tmpdir(), 'no-such-dir', 'providers.json');
+    assert.equal(healthView([], null, { updates: [], network: null }).providerHosts, null, 'no file and no provider');
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+  }
+});
+
+test('GET /api/health: the owners and writers get the provider hosts line; a viewer gets none of it, nor any host in it', { skip: !posix && 'root-owned files are POSIX' }, async () => {
+  const saved = { ...machineProviderHosts };
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  cfg.agents = AgentsConfig.parse({ ...base, providers: { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'small-1' }, hosted: { glm: GLM } } });
+  const stateDir = mkdtempSync(join(tmpdir(), 'prov-health-'));
+  const db = join(stateDir, 'events.db');
+  new EventLog(db).close();
+  const d = await startDashboard({ root, cfg, eventsDb: db, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(stateDir, 'slots'), pollMs: 50 });
+  try {
+    const f = allowProviderHosts('127.0.0.1:8080');
+    const url = `${d.url.split('/?')[0]!}/api/health`;
+    const get = async (who: string) => (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<{ providerHosts?: unknown }>;
+    for (const who of ['example-collaborator', 'example-owner']) {
+      assert.deepEqual((await get(who)).providerHosts, { file: f, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: `open.example.com is not an allowed provider host (127.0.0.1:8080, from ${f})` }] }, who);
+    }
+    const viewer = await get('someone-else');
+    assert.equal(viewer.providerHosts, null, 'a viewer gets no provider hosts');
+    assert.doesNotMatch(JSON.stringify(viewer), /127\.0\.0\.1|open\.example\.com|providers\.json/, "no host, nor the file, anywhere in a viewer's health");
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+    await d.close();
+  }
 });

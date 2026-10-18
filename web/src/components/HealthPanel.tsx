@@ -174,6 +174,44 @@ export function OutboundProxy({ network: n }: { network: NonNullable<HealthView[
   );
 }
 
+/**
+ * Where provider runs may send their key and prompts, read-only: root's hosts in providers.json (docs/providers.md),
+ * never set from the page. No file, no host or a refused file means provider runs are off; a refused file, and each
+ * configured provider whose base_url is outside the set, in red.
+ */
+export function ProviderHosts({ hosts: p }: { hosts: NonNullable<HealthView['providerHosts']> }) {
+  const file = <code className="font-mono text-[12px]">{p.file}</code>;
+  return (
+    <div className="space-y-0.5 text-[12.5px] text-ink-2">
+      {p.state === 'refused' ? (
+        <div role="alert" className="rounded-control bg-red-tint px-3 py-2" data-testid="health-provider-hosts-refused">
+          <span className="font-medium text-red">Provider hosts refused:</span> <span className="break-all">{p.error}</span>. Provider runs are off.
+        </div>
+      ) : p.state === 'missing' ? (
+        <div data-testid="health-provider-hosts-none">
+          No provider hosts: {file} doesn&apos;t exist, so provider runs are off (root writes it: docs/providers.md)
+        </div>
+      ) : (
+        <div data-testid="health-provider-hosts">
+          Provider hosts: {p.hosts.length ? <code className="font-mono text-[12px]">{p.hosts.join(', ')}</code> : 'none, so provider runs are off'} (from {file})
+        </div>
+      )}
+      {p.refused.length > 0 && (
+        <ul data-testid="health-provider-refused">
+          {p.refused.map((r) => (
+            <li key={r.provider}>
+              <span className="font-medium text-red">
+                Provider <code className="font-mono text-[12px]">{r.provider}</code> refused:
+              </span>{' '}
+              <span className="break-all">{r.reason}</span>; its runs take the role&apos;s normal model
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /** The panel from its data (also what the render checks render). `instances`: on a hub, every instance's view. */
 /** A held engine update, in red: rolled back (a failed migration, or services that didn't come up) and not retried. */
 export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold']> }) {
@@ -226,6 +264,9 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
         const network = view.network ?? instances?.map((i) => i.view?.network).find(Boolean) ?? null;
         return network ? <OutboundProxy network={network} /> : null;
       })()}
+
+      {/* This instance's: its configured providers are checked against the machine's hosts. */}
+      {view.providerHosts && <ProviderHosts hosts={view.providerHosts} />}
 
       <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />
 

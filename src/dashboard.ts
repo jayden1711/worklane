@@ -2019,11 +2019,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' } });
+          const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' }, agents: opts.cfg.agents });
           // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
-          // WHY: the proxy's internal host is the machine's network layout: writers only, as costs are.
-          return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, docs: { backups: docsUrl('backups') } });
+          // WHY: the proxy's internal host, root's provider hosts and each provider's host are the machine's network
+          // layout: writers only, as costs are.
+          return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, providerHosts: isWriter(who.role) ? view.providerHosts : null, docs: { backups: docsUrl('backups') } });
         }
         // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
         // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix).

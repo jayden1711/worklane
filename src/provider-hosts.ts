@@ -164,6 +164,27 @@ export function providerHostsAtStart(agents: Parameters<typeof configuredProvide
   return [head, ...refused];
 }
 
+/** The Health page's provider-hosts line: root's hosts as read now, and each configured provider they refuse. */
+export interface ProviderHostsHealth extends ProviderHosts {
+  /** Each configured provider whose base_url root's hosts don't allow (every one, when there are none), and why. */
+  refused: { provider: string; reason: string }[];
+}
+
+/**
+ * What the Health page shows (owners and writers only: src/dashboard.ts): the same facts as providerHostsAtStart,
+ * read now. Null when there is no file and no provider is configured: nothing would use one.
+ */
+export function providerHostsHealth(agents: Parameters<typeof configuredProviders>[0], h: ProviderHosts = machineProviderHostsConfig()): ProviderHostsHealth | null {
+  const providers = configuredProviders(agents);
+  if (h.state === 'missing' && !providers.length) return null;
+  const refused = providers.flatMap(({ label, baseUrl }) => {
+    const shape = baseUrlProblem(baseUrl);
+    const why = h.state === 'ok' ? providerHostRefusal(baseUrl, h) : shape ? `its base_url ${shape}` : 'no provider host is allowed on this machine';
+    return why ? [{ provider: label, reason: why }] : [];
+  });
+  return { ...h, hosts: [...h.hosts], refused };
+}
+
 const logged = new Set<string>();
 
 /** Says a provider's refusal on stderr, once per provider and reason in this process (each run still records its fallback). */
