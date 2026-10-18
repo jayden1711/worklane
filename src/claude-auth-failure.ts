@@ -95,6 +95,16 @@ export interface AuthHold {
   lastCheck: { at: string; ok: boolean; detail: string } | null;
 }
 
+/**
+ * A held login as the sign-in banner gets it (GET /api/usage). The owners and writers get the account as Claude names
+ * it and Claude's words, to fix it. A viewer gets that a login was refused, since when, and whether the last check
+ * was answered: never which account it is or what Claude said about it (issue #567).
+ */
+export function signinFailedView(h: AuthHold, full: boolean) {
+  const lastCheck = h.lastCheck && (full ? h.lastCheck : { at: h.lastCheck.at, ok: h.lastCheck.ok });
+  return full ? { login: h.login, detail: h.detail, since: h.since, lastCheck } : { since: h.since, lastCheck };
+}
+
 /** Every login held now: the last claude_auth.failed of each key with no claude_auth.recovered of that key after it. */
 export function authHoldsOf(events: StoredEvent[]): AuthHold[] {
   const holds = new Map<string, AuthHold>();

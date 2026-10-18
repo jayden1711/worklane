@@ -109,6 +109,66 @@ test('issue drafts: the five parts, checked by the contract parser, commands as 
   assert.ok(!s.runner.calls.some((r) => r.role !== 'chat'), 'nothing but the chat ran; nothing was filed');
 });
 
+const DRAFT = '**Outcome:** Totals skip zero quantities.\n**Sources:** the totals code.\n**Constraints:** leave rounding alone.\n**Deliverable:**\n```done_when\n- command: |\n    npm test -- --grep zero\n```\n**Review point:** L1; waits for the owner if it changes pricing rules.\n';
+const NO_REVIEW_POINT = DRAFT.slice(0, DRAFT.indexOf('**Review point:**'));
+
+test('a refused draft is asked for once more, with the reason; the valid one comes back, still a preview', async () => {
+  const s = setup(() => ({ answer: 'drafted', citations: [], issue_draft: { title: 'Skip zero quantities', body: s.runner.calls.length === 1 ? NO_REVIEW_POINT : DRAFT }, summary: { done: `try ${s.runner.calls.length}` } }));
+  const a = await chatTurn({ ...s.opts, question: 'draft an issue', by: owner });
+  assert.equal(s.runner.calls.length, 2, 'exactly one retry');
+  const [first, retry] = s.runner.calls as [RunRequest, RunRequest];
+  assert.ok(!first.prompt.includes("can't be filed"), 'the first ask is the plain question');
+  assert.ok(retry.prompt.startsWith(first.prompt), 'the retry asks the same question, with the same context');
+  assert.match(retry.prompt, /can't be filed as it is: .*missing or empty: Review point/);
+  assert.ok(retry.prompt.includes(JSON.stringify(NO_REVIEW_POINT)), 'and shows the draft it refused');
+  assert.match(retry.prompt, /never say it is filed/);
+  // The retry is the same read-only chat run: same role, tools, schema, model and lane.
+  for (const k of ['role', 'allowedTools', 'disallowedTools', 'jsonSchema', 'model', 'cwd', 'appendSystemPrompt', 'lane'] as const) assert.deepEqual(retry[k], first[k], k);
+  // It counts against the same caps: the answer's budget and its turns, less what the first try used.
+  assert.equal(retry.maxBudgetUsd, first.maxBudgetUsd - 0.12);
+  assert.equal(retry.maxTurns, first.maxTurns - 2);
+  assert.deepEqual(s.costs, [0.12, 0.12], 'each run reports its own cost');
+  assert.equal(a.costUsd, 0.24, 'the answer costs both runs');
+  assert.deepEqual(a.issueDraft, { ok: true, title: 'Skip zero quantities', body: DRAFT, labels: ['ready'] });
+  assert.equal(readSummary(s.opts.stateDir).done, 'try 2', "the answer kept is the retry's");
+  assert.ok(!s.runner.calls.some((r) => r.role !== 'chat'), 'nothing but the chat ran; nothing was filed');
+});
+
+test('a draft refused twice is shown refused, with the reason: no third ask', async () => {
+  const s = setup(() => ({ answer: 'drafted', citations: [], issue_draft: { title: 'Skip zero quantities', body: NO_REVIEW_POINT } }));
+  const a = await chatTurn({ ...s.opts, question: 'draft an issue', by: owner });
+  assert.equal(s.runner.calls.length, 2, 'one retry, then stop');
+  assert.ok(a.issueDraft && !a.issueDraft.ok && /missing or empty: Review point/.test(a.issueDraft.why));
+  assert.deepEqual(s.costs, [0.12, 0.12]);
+});
+
+test('a valid draft, no draft, or a reader who is not the owner: no retry', async () => {
+  for (const [issue_draft, by] of [[{ title: 'Skip zero quantities', body: DRAFT }, owner], [undefined, owner], [{ title: 't', body: NO_REVIEW_POINT }, 'collaborator']] as const) {
+    const s = setup(() => ({ answer: 'ok', citations: [], ...(issue_draft ? { issue_draft } : {}) }));
+    await chatTurn({ ...s.opts, question: 'draft an issue', by });
+    assert.equal(s.runner.calls.length, 1, `${by} ${issue_draft ? 'draft' : 'no draft'}`);
+  }
+});
+
+test('the retry never runs past the caps, and a failed retry keeps the first answer', async () => {
+  // What the first try left of the answer's cap is under the floor: no retry, the refusal is shown.
+  const spent = setup(() => ({ answer: 'drafted', citations: [], issue_draft: { title: 't', body: NO_REVIEW_POINT } }));
+  const a = await chatTurn({ ...spent.opts, run: { model: 'sonnet', maxBudgetUsd: 0.15 }, question: 'draft an issue', by: owner });
+  assert.equal(spent.runner.calls.length, 1);
+  assert.ok(a.issueDraft && !a.issueDraft.ok);
+  // The first try used every turn: no retry.
+  const turns = new FakeRunner(() => ({ structured: { answer: 'drafted', citations: [], issue_draft: { title: 't', body: NO_REVIEW_POINT } }, costUsd: 0.1, turns: 30 }));
+  await chatTurn({ ...spent.opts, runner: turns, question: 'draft an issue', by: owner });
+  assert.equal(turns.calls.length, 1);
+  // The retry ran out (or failed): the first answer stands, its draft refused with the reason.
+  const failed: FakeRunner = new FakeRunner((req) => (failed.calls.length === 1 ? { structured: { answer: 'first answer', citations: [], issue_draft: { title: 't', body: NO_REVIEW_POINT } }, costUsd: 0.1, turns: 2 } : { reason: 'budget_exhausted' as const, costUsd: 0.2, turns: 1, model: req.model }));
+  const b = await chatTurn({ ...spent.opts, runner: failed, question: 'draft an issue', by: owner });
+  assert.equal(failed.calls.length, 2);
+  assert.equal(b.answer, 'first answer');
+  assert.ok(b.issueDraft && !b.issueDraft.ok && /Review point/.test(b.issueDraft.why));
+  assert.ok(Math.abs(b.costUsd - 0.3) < 1e-9, 'the failed retry still costs');
+});
+
 test('actions are only references to confirm flows; anything else is refused', async () => {
   const s = setup(() => ({
     answer: 'two proposals',

@@ -1,6 +1,6 @@
 // `harness-eval run` and `harness-eval add-task`: the suite by hand (the coordinator runs it on its schedule; see
 // src/coordinator/harness-evals.ts).
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
 import { loadConfig } from '../config/load.js';
@@ -96,11 +96,13 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
       pr: null,
       workDir: work,
       source: (t) => `https://github.com/${t.repo}.git`,
+      // This checkout is the harness under test: its harness config replaces each task's own (old) one.
+      ...(existsSync(join(root, BRAND.configDir)) ? { harnessConfig: root } : {}),
       keep,
       emit: (type, payload) => void log?.append(type, payload, actor),
       say: (l) => console.log(l),
     });
-    console.log(`${BRAND.name} harness evals: ${run.passed}/${run.runs} replays passed; $${run.cost_usd.toFixed(2)} of $${run.budget_usd}; ${(run.wall_ms / 60_000).toFixed(1)} min; ${run.interventions} human intervention(s)${run.stopped ? '; STOPPED at the budget' : ''}${run.error ? `; ${run.error}` : ''}`);
+    console.log(`${BRAND.name} harness evals: ${run.passed}/${run.runs} replays passed; $${run.cost_usd.toFixed(2)} of $${run.budget_usd}; ${(run.wall_ms / 60_000).toFixed(1)} min; ${run.turns ?? 0} turns; ${run.interventions} human intervention(s)${run.stopped ? '; STOPPED at the budget' : ''}${run.error ? `; ${run.error}` : ''}`);
     return run.runs > 0 && run.passed === run.runs ? 0 : 1;
   } finally {
     log?.close();

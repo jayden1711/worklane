@@ -1026,6 +1026,8 @@ export const EventSchemas = {
     cost_usd: z.number().nonnegative(),
     wall_ms: z.number().int().nonnegative(),
     interventions: z.number().int().nonnegative(),
+    /** The turns its agents reported (their run.cost events); absent on replays recorded before turns were counted. */
+    turns: z.number().int().nonnegative().optional(),
     detail: z.string(),
   }),
   /**
@@ -1128,6 +1130,8 @@ export const EventSchemas = {
     cost_usd: z.number().nonnegative(),
     wall_ms: z.number().int().nonnegative(),
     interventions: z.number().int().nonnegative(),
+    /** Every replay's turns; absent on runs recorded before turns were counted. */
+    turns: z.number().int().nonnegative().optional(),
     budget_usd: z.number().positive(),
     stopped: z.enum(['budget']).nullable(),
     error: z.string().optional(),

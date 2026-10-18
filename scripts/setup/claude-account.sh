@@ -332,6 +332,11 @@ cache_files() { # <user> <claude config dir>
   [ "$2" != "$h/.claude" ] || echo "$h/.claude.json"
   echo "$2/.claude.json"
 }
+# Why a token install (or its rollback) failed, for the end of its line: cut off by its bound (lib.sh cut_off_status,
+# #613) is a home that didn't answer; any other status, nothing more to say.
+install_cut_off() { # <install_claude_token's or restore_claude_credentials's status>
+  if cut_off_status "$1"; then printf ": cut off after %s s (its home didn't answer)" "$CLAUDE_TOKEN_INSTALL_SECONDS"; fi
+}
 # Drops the account cached for a login dir's previous login, as that user: sets dropped (what was dropped, as
 # cached_account prints it; {} for nothing) and why (the files it couldn't drop it from, and why; empty when none).
 drop_cached() { # <user> <claude config dir>
@@ -702,7 +707,7 @@ for (const m of t.matchAll(/https:\/\/[^\s"<>]+/g)) {
         [ "$dropped" = "{}" ] || note="; the account cached there for an earlier login dropped"
         pemit install done "$n" "$user" "stored in $d, 0600, that user's own$note"
       else
-        pemit install failed "$n" "$user" "couldn't store the token in $d"
+        pemit install failed "$n" "$user" "couldn't store the token in $d$(install_cut_off $?)"
         bad="${bad:-could not store the token for $user}"
         continue
       fi
@@ -908,7 +913,8 @@ for n in "${all[@]}"; do
         [ -z "$why" ] || note="$note; couldn't drop the account cached for the previous login in $why: claude auth status may still name the previous account"
         emit install done "$n" "stored in its own Claude login, 0600$note" "$user"
       else
-        emit install failed "$n" "couldn't store the token in $cfg/.credentials.json" "$user"
+        # Cut off (#613): named, then the same path as any failed install (this instance left paused for a rerun).
+        emit install failed "$n" "couldn't store the token in $cfg/.credentials.json$(install_cut_off $?)" "$user"
         failed="$failed$n "
         continue
       fi
@@ -955,7 +961,7 @@ if [ -n "$refused" ]; then
       fi
       emit install failed "$n" "rolled back: the API refused the new login, so this user is on its previous login again$note" "$user"
     else
-      emit install failed "$n" "the API refused the new login, and putting the previous one back failed: sign this user in again" "$user"
+      emit install failed "$n" "the API refused the new login, and putting the previous one back failed$(install_cut_off $?): sign this user in again" "$user"
       left_broken="${left_broken:-} $n"
     fi
   done
