@@ -375,11 +375,59 @@ test('conflict fix: a file whose name isn\'t valid UTF-8 and that the merge brou
   assert.ok('conflicted' in merged, JSON.stringify(merged));
   assert.deepEqual([Object.keys(merged.conflicted), merged.otherFiles], [['x.ts'], ['lib/bad�.ts']]);
   const staged = mergeBase.stagedBlobs(dir, merged.otherFiles);
+  // The merge staged it, but its blob can't be asked for by name: that is said, never read as "not there".
+  assert.deepEqual(staged, { 'lib/bad�.ts': mergeBase.UNREADABLE });
   write(dir, { 'x.ts': 'one\nTWO-pr TWO-main\nthree\n' });
   writeFileSync(bad(dir), `${big('n')}base\nevil\n`);
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '--no-edit');
   assert.deepEqual(mergeBase.resolutionStrays(dir, ['x.ts'], merged.otherFiles, staged), ['lib/bad�.ts']);
+});
+
+test('conflict fix: a conflicted file whose name isn\'t valid UTF-8 is a stray, even resolved to the branch\'s own side', { skip: process.platform !== 'linux' && 'names that are not UTF-8 on disk: Linux only' }, () => {
+  const bad = (dir: string) => Buffer.concat([Buffer.from(`${dir}/`), ff('lib/bad', '.ts')]);
+  const { dir } = repo({ 'x.ts': 'x\n' });
+  mkdirSync(join(dir, 'lib'));
+  writeFileSync(bad(dir), 'one\ntwo\nthree\n');
+  commit(dir, 'add lib/bad\\xff.ts');
+  git(dir, 'checkout', '-q', '-b', 'pr');
+  writeFileSync(bad(dir), 'one\nTWO-pr\nthree\n');
+  const prSide = commit(dir, 'pr');
+  git(dir, 'checkout', '-q', 'main');
+  writeFileSync(bad(dir), 'one\nTWO-main\nthree\n');
+  const baseSha = commit(dir, 'base');
+  git(dir, 'checkout', '-q', 'pr');
+  const merged = mergeBase.mergeBaseInto(dir, baseSha, 'Merge main into pr', IDENTITY);
+  assert.ok('conflicted' in merged, JSON.stringify(merged));
+  assert.deepEqual([Object.keys(merged.conflicted), merged.otherFiles], [['lib/bad�.ts'], []]);
+  const staged = mergeBase.stagedBlobs(dir, merged.otherFiles);
+  // The branch's side, so the merge commit doesn't change it against the branch: only its name can say it.
+  git(dir, 'checkout', '-q', prSide, '--', 'lib');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '--no-edit');
+  assert.deepEqual(mergeBase.resolutionStrays(dir, Object.keys(merged.conflicted), merged.otherFiles, staged), ['lib/bad�.ts']);
+});
+
+test('conflict fix: a resolver that drops a file the merge brought in cleanly is a stray, even when its name reads like a stage spec (0:lib/x.ts)', { skip: process.platform === 'win32' && 'a colon in a file name' }, () => {
+  // `:0:lib/x.ts` is stage 0 of lib/x.ts, not the file 0:lib/x.ts: a lookup of the index by `:<path>` finds no blob
+  // for it, and once the resolver drops it, HEAD has none either. Two empty lookups must not pass as "unchanged".
+  const { dir } = repo({ 'x.ts': 'one\ntwo\nthree\n' });
+  git(dir, 'checkout', '-q', '-b', 'pr');
+  write(dir, { 'x.ts': 'one\nTWO-pr\nthree\n' });
+  commit(dir, 'pr');
+  git(dir, 'checkout', '-q', 'main');
+  write(dir, { 'x.ts': 'one\nTWO-main\nthree\n', '0:lib/x.ts': 'export const guard = true;\n' });
+  const baseSha = commit(dir, 'base');
+  git(dir, 'checkout', '-q', 'pr');
+  const merged = mergeBase.mergeBaseInto(dir, baseSha, 'Merge main into pr', IDENTITY);
+  assert.ok('conflicted' in merged, JSON.stringify(merged));
+  assert.deepEqual([Object.keys(merged.conflicted), merged.otherFiles], [['x.ts'], ['0:lib/x.ts']]);
+  const staged = mergeBase.stagedBlobs(dir, merged.otherFiles);
+  write(dir, { 'x.ts': 'one\nTWO-pr TWO-main\nthree\n' });
+  git(dir, 'rm', '-q', '-f', '--', '0:lib/x.ts');
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '--no-edit');
+  assert.deepEqual(mergeBase.resolutionStrays(dir, ['x.ts'], merged.otherFiles, staged), ['0:lib/x.ts']);
 });
 
 // ---- One way to list changed names or counts

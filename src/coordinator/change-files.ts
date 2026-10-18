@@ -110,6 +110,14 @@ export function untrackedNames(cwd: string): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
 }
 
+/**
+ * Every file in the index (`ls-files --cached -z`, `rev` null) or in a commit's tree (`ls-tree -r -z --name-only`),
+ * each read by nameOf: whether a file is there at all, apart from whether its blob can be asked for by name.
+ */
+export function presentNames(cwd: string, rev: string | null): Set<string> {
+  return new Set(names(must(runBytes(cwd, rev === null ? ['ls-files', '--cached', '-z'] : ['ls-tree', '-r', '-z', '--name-only', rev, '--']))));
+}
+
 /** Each path `git diff <args>` touches with its status letter (A, M, D, T, ...): a rename as a delete and an add. */
 export function changedStatuses(cwd: string, args: string[]): { status: string; path: string }[] {
   const parts = fields(must(runBytes(cwd, ['diff', '--name-status', '--no-renames', '-z', ...nameArgs(args)])));

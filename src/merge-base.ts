@@ -5,7 +5,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { changedNames, changedNamesOrNull } from './coordinator/change-files.js';
+import { changedNames, changedNamesOrNull, presentNames } from './coordinator/change-files.js';
 import { isNonUtf8Path } from './review.js';
 
 const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' });
@@ -45,23 +45,42 @@ export function mergeBaseInto(worktree: string, base: string, message: string, i
   return { clean: false, conflicted, otherFiles: staged.filter((f) => !(f in conflicted)) };
 }
 
+/** A blob that couldn't be read although its file is there (see resolutionStrays). Never a blob id, never null. */
+export const UNREADABLE = 'unreadable';
+
+/**
+ * A file's blob at `rev:path` (`:0:` for the index's), null when the file isn't there (deleted), or UNREADABLE when
+ * it is there but its blob can't be asked for by name (`present`, from presentNames). The index is read at stage 0
+ * by number, so a file named like a stage spec (`0:lib/x.ts`) is read as itself, not as stage 0 of lib/x.ts.
+ */
+const blobOf = (cwd: string, rev: string, path: string, present: Set<string>): string | null =>
+  blob(cwd, `${rev}:${path}`) ?? (present.has(path) ? UNREADABLE : null);
+
 /** What the merge itself made of each file it changed cleanly (its staged blob), before a resolver touches anything. */
 export function stagedBlobs(worktree: string, otherFiles: string[]): Record<string, string | null> {
-  return Object.fromEntries(otherFiles.map((f) => [f, blob(worktree, `:${f}`)]));
+  const present = presentNames(worktree, null);
+  return Object.fromEntries(otherFiles.map((f) => [f, blobOf(worktree, ':0', f, present)]));
 }
 
 /**
  * Where a committed resolution (HEAD, the merge commit) strays from the conflicted files: a file the merge changed
  * cleanly whose committed blob isn't the one the merge staged (`staged`, from stagedBlobs), and a file the merge
  * commit changes against the branch that the merge didn't touch at all (a rename as both its paths). A file whose
- * blobs can't be read is a stray too: a name that isn't valid UTF-8 (review.ts isNonUtf8Path) names no blob, so its
- * staged and committed lookups would both come back empty and compare equal whatever the resolver did.
+ * blob can't be read (UNREADABLE, staged or committed) is a stray too, never "unchanged": two lookups that both
+ * fail would compare equal whatever the resolver did. A name that isn't valid UTF-8 (review.ts isNonUtf8Path) names
+ * no blob, so it is always one.
  */
 export function resolutionStrays(worktree: string, conflicted: string[], otherFiles: string[], staged: Record<string, string | null>): string[] {
   const expected = new Set([...conflicted, ...otherFiles]);
+  const inHead = presentNames(worktree, 'HEAD');
   const strays = [
-    ...otherFiles.filter((f) => isNonUtf8Path(f) || blob(worktree, `HEAD:${f}`) !== staged[f]),
+    ...otherFiles.filter((f) => {
+      const committed = blobOf(worktree, 'HEAD', f, inHead);
+      return isNonUtf8Path(f) || committed === UNREADABLE || staged[f] === UNREADABLE || committed !== staged[f];
+    }),
     ...changedNames(worktree, ['HEAD^1', 'HEAD']).filter((f) => !expected.has(f) || isNonUtf8Path(f)),
+    // A conflicted file's text and resolution are read by name too, so one that isn't valid UTF-8 can't be checked.
+    ...conflicted.filter(isNonUtf8Path),
   ];
   return [...new Set(strays)];
 }
