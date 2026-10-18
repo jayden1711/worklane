@@ -5,7 +5,7 @@ import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
 import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
-import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, loadMoneyPaths, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
 import { execFileSync } from 'node:child_process';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { loosenedProblems } from '../src/delegation.js';
@@ -393,4 +393,19 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     assert.equal(d.auto, false, path);
     assert.ok(d.reasons.includes(`high-risk: engine-guards (${path})`), `${path}: ${d.reasons.join(' | ')}`);
   }
+});
+
+test("regression: a one-line change to the money-path list that the engine's own review.yaml names is L3 and waits for the owner (#715)", () => {
+  // The engine itself sees the list file as an ordinary file (a .txt is docs), so a PR that only edits it would be L0 and
+  // merge itself, and the next PR would be judged by the shorter list. Until the engine holds that file itself (#715),
+  // this repo's review.yaml must: put the file in an L3 category that merge.wait_categories also names (engine-guards).
+  const own = loadConfig(repoRoot).review!;
+  const src = own.money_path_source;
+  // This repo names no money-path list today, so there's nothing to hold yet. Name one, and this test holds it.
+  if (!src) return;
+  assert.ok(engineFiles.includes(src.file), `money_path_source.file ${src.file} is a real file`);
+  const lvl = computeLevel({ files: [{ path: src.file, added: 1, removed: 0 }], labels: [], moneyPaths: loadMoneyPaths(repoRoot, src) }, own);
+  assert.equal(lvl.level, 'L3', `${src.file}: ${lvl.reasons.join(' | ')}; list it under engine-guards in ${BRAND.configDir}/review.yaml`);
+  const d = mergeDecision(clean({ level: lvl, lines: 1, files: 1, waitCategories: waitCategoriesOf(own) }));
+  assert.equal(d.auto, false, `${src.file}: ${d.reasons.join(' | ')}`);
 });
