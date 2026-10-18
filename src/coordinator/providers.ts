@@ -13,7 +13,7 @@ import { isProtectedPath } from '../guardrails/engine.js';
 import type { GuardrailsConfig } from '../config/schema.js';
 import type { RunRequest } from '../runner.js';
 import type { ReviewConfig } from '../config/schema.js';
-import { computeLevel, type ChangeFile } from '../review.js';
+import { computeLevel, type ChangeFile, type LockScope } from '../review.js';
 import { instructionTargets } from '../skilleval.js';
 
 export interface ProviderDeps {
@@ -86,14 +86,14 @@ function resolveCliAgent(req: RunRequest, route: NonNullable<RunRequest['route']
  * WHY: item 38. Its run had no claude sandbox or hooks, so its change is held to more than a hosted model's: L1 or
  * below and no protected path, besides everything hostedChangeRefusal refuses.
  */
-export function cliChangeRefusal(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; guardrails: Pick<GuardrailsConfig, 'protected_paths'> }): string | null {
+export function cliChangeRefusal(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; guardrails: Pick<GuardrailsConfig, 'protected_paths'>; scope: LockScope | undefined }): string | null {
   const touched = o.files.map((f) => f.path).filter((p) => isProtectedPath(p, o.guardrails));
   if (touched.length) return `another vendor's CLI changed a protected path (${touched.slice(0, 3).join(', ')}), which it may never do`;
   const hosted = hostedChangeRefusal(o);
   if (hosted) return hosted.replace('a hosted model', "another vendor's CLI");
   let lvl: ReturnType<typeof computeLevel>;
   try {
-    lvl = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths() }, o.review);
+    lvl = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths(), scope: o.scope }, o.review);
   } catch {
     return "another vendor's CLI made a change that can't be levelled, so it can't stand";
   }
@@ -105,11 +105,11 @@ export function cliChangeRefusal(o: { files: ChangeFile[]; labels: string[]; mon
  * Why a change a hosted open model built may not stand (or null): it is L3, touches a money path, or changes agent
  * instructions (a skill, AGENTS.md, a role prompt). Hosted models never do that work; the task redoes it on Anthropic.
  */
-export function hostedChangeRefusal(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig }): string | null {
+export function hostedChangeRefusal(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; scope: LockScope | undefined }): string | null {
   if (instructionTargets(o.files.map((f) => f.path)).length) return 'a hosted model changed agent instructions, which it may never do';
   let lvl: ReturnType<typeof computeLevel>;
   try {
-    lvl = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths() }, o.review);
+    lvl = computeLevel({ files: o.files, labels: o.labels, moneyPaths: o.moneyPaths(), scope: o.scope }, o.review);
   } catch {
     return "a hosted model's change can't be levelled, so it can't stand";
   }

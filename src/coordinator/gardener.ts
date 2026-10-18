@@ -10,7 +10,7 @@ import { waitCategoriesOf } from '../merge-policy.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import { rolePrompt } from '../roles.js';
 import { Delegation } from './delegation.js';
-import { DEFAULT_REVIEW } from './shared.js';
+import { DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { CORRECTIONS_DISALLOWED, CORRECTIONS_TOOLS } from './corrections.js';
 
 export abstract class Gardener extends Delegation {
@@ -38,7 +38,8 @@ export abstract class Gardener extends Delegation {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const never = new Set([...protectedCategories(review), ...waitCategoriesOf(review)]);
     const money = loadMoneyPaths(this.d.repo, review.money_path_source);
-    return (path) => Object.keys(computeLevel({ files: [{ path, added: 0, removed: 0 }], labels: [], moneyPaths: money }, review).categories).some((c) => never.has(c));
+    const scope = lockScopeOf(this.d);
+    return (path) => Object.keys(computeLevel({ files: [{ path, added: 0, removed: 0 }], labels: [], moneyPaths: money, scope }, review).categories).some((c) => never.has(c));
   }
 
   private async garden(startedAt: string): Promise<void> {
