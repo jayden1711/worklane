@@ -209,7 +209,9 @@ test('#563 experiments-dashboard: started the way `dashboard --instance` starts 
     assert.equal(view.unavailable, undefined, `a view, not: ${view.unavailable}`);
     // The test machine has no root file (test/isolate.ts moves /etc): missing setup, not a refusal.
     assert.equal(view.setup!.state, 'off');
-    assert.match(view.setup!.why!, /^experiments are not set up yet for shop on this machine \(no root file\): root sets them up with `sudo bash scripts\/setup\/experiments\.sh install shop`$/);
+    assert.match(view.setup!.why!, /^experiments are not set up yet for shop on this machine \(no root file\): root sets them up with: sudo bash scripts\/setup\/experiments\.sh install shop$/);
+    // The page shows the text as it is: no Markdown marks to show literally.
+    assert.doesNotMatch(view.setup!.why!, /`/);
     assert.deepEqual(view.setup!.commands, rootCommands('shop'));
     assert.equal(((await (await fetch(`${url}/api/state`, { headers: h })).json()) as { experiments?: boolean }).experiments, false, 'not set up: no sidebar item');
   } finally {
