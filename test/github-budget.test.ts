@@ -1,12 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdtempSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubBacklog, GitHubError } from '../src/backlog/github.js';
 import { budgetFor, BudgetPaused, credentialKey, GitHubBudget } from '../src/github/budget.js';
+
+/** src/github/budget.ts MAX_PAUSE_S: the longest pause that counts. */
+const MAX_PAUSE_S = 15 * 60;
 
 const budgetModule = pathToFileURL(fileURLToPath(new URL('../src/github/budget.js', import.meta.url))).href;
 const fresh = () => mkdtempSync(join(tmpdir(), 'gh-budget-'));
@@ -50,11 +53,11 @@ test('two processes sharing a budget never exceed it, and use all of it', async 
 test('a GitHub response lowers the budget, never raises it within a window; a new window replaces it', () => {
   const dir = fresh();
   const b = new GitHubBudget(credentialKey('token-b'), dir);
-  const reset = inAnHour();
+  const reset = Math.floor(Date.now() / 1000) + 600;
   b.observe('core', { 'x-ratelimit-remaining': '10', 'x-ratelimit-reset': String(reset) });
   b.observe('core', { 'x-ratelimit-remaining': '12', 'x-ratelimit-reset': String(reset) });
   assert.equal(b.read().resources.core?.remaining, 10, 'a late answer from before other calls does not hand them back');
-  b.observe('core', { 'x-ratelimit-remaining': '4999', 'x-ratelimit-reset': String(reset + 3600) });
+  b.observe('core', { 'x-ratelimit-remaining': '4999', 'x-ratelimit-reset': String(reset + 3000) });
   assert.equal(b.read().resources.core?.remaining, 4999);
   b.observe('graphql', { 'x-ratelimit-remaining': '3', 'x-ratelimit-reset': String(reset), 'x-ratelimit-resource': 'graphql' });
   assert.equal(b.read().resources.core?.remaining, 4999, 'GraphQL has its own limit');
@@ -109,6 +112,14 @@ test('the backlog client: a 403 secondary limit pauses every client on the token
   // Another token is its own budget.
   await new GitHubBacklog('o/r', () => 'other', ok, undefined, budget).get(1);
   assert.equal(calls, 2);
+  // A 429 with calls left in the window is a secondary limit too: it pauses the token the same way.
+  const tooMany = (async () => {
+    calls++;
+    return new Response(JSON.stringify({ message: 'Too many requests' }), { status: 429, headers: { 'retry-after': '30', 'x-ratelimit-remaining': '4000', 'x-ratelimit-reset': String(inAnHour()) } });
+  }) as typeof fetch;
+  await assert.rejects(new GitHubBacklog('o/r', () => 'tok429', tooMany, undefined, budget).get(1), (e: GitHubError) => e.kind === 'secondary_rate_limited');
+  await assert.rejects(new GitHubBacklog('o/r2', () => 'tok429', ok, undefined, budget).get(1), (e: GitHubError) => e.kind === 'secondary_rate_limited' && (e.retryAfter ?? 0) > 20);
+  assert.equal(calls, 3, 'the call after the 429 never reached GitHub');
 });
 
 test('the backlog client reads the rate headers of every response into the shared budget', async () => {
@@ -145,4 +156,79 @@ test('an unreadable or corrupt state file starts afresh instead of stopping ever
   const key = credentialKey('token-g');
   writeFileSync(join(dir, `github-budget-${key}.json`), '{not json');
   await new GitHubBudget(key, dir, { maxWaitMs: 0 }).take('x');
+});
+
+test('a state no real limit could produce never stops calls: each is taken as "not known" and the call goes', async () => {
+  const now = Date.now();
+  const nowS = Math.floor(now / 1000);
+  const tenYears = 10 * 365 * 86400;
+  const hostile: [string, object][] = [
+    ['a pause 10 years ahead', { resources: {}, pausedUntil: now + tenYears * 1000, pauseKind: 'secondary_rate_limited' }],
+    ['none left, reset 10 years ahead', { resources: { core: { limit: 5000, remaining: 0, reset: nowS + tenYears, used: {} } }, pausedUntil: 0 }],
+    ['none left, no reset', { resources: { core: { limit: 5000, remaining: 0, reset: null, used: {} } }, pausedUntil: 0 }],
+    ['a pause at 1e300', { resources: {}, pausedUntil: 1e300 }],
+    ['remaining not a number', { resources: { core: { limit: 5000, remaining: 'x', reset: nowS + 600, used: {} } }, pausedUntil: 0 }],
+    ['remaining negative', { resources: { core: { limit: 5000, remaining: -5, reset: nowS + 600, used: {} } }, pausedUntil: 0 }],
+  ];
+  for (const [what, state] of hostile) {
+    const dir = fresh();
+    const key = credentialKey('token-h');
+    writeFileSync(join(dir, `github-budget-${key}.json`), JSON.stringify(state));
+    const t0 = Date.now();
+    await new GitHubBudget(key, dir, { maxWaitMs: 0 }).take('x').catch((e: Error) => assert.fail(`${what}: ${e.message}`));
+    assert.ok(Date.now() - t0 < 1000, `${what}: no spin`);
+  }
+  // A real pause still counts.
+  const dir = fresh();
+  const key = credentialKey('token-h');
+  writeFileSync(join(dir, `github-budget-${key}.json`), JSON.stringify({ resources: {}, pausedUntil: now + 60_000 }));
+  await assert.rejects(new GitHubBudget(key, dir, { maxWaitMs: 0 }).take('x'), BudgetPaused);
+});
+
+test('GitHub itself cannot set an endless pause or window: Retry-After is capped at 15 min, a far reset is ignored', async () => {
+  const dir = fresh();
+  const b = new GitHubBudget(credentialKey('token-i'), dir, { maxWaitMs: 0 });
+  b.pause('secondary_rate_limited', 1e9);
+  await assert.rejects(b.take('x'), (e: BudgetPaused) => e.retryAfter <= MAX_PAUSE_S && e.retryAfter > MAX_PAUSE_S - 5);
+  const c = new GitHubBudget(credentialKey('token-j'), dir, { maxWaitMs: 0 });
+  c.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 10 * 3600) });
+  await c.take('x');
+});
+
+test('a held budget lock never blocks the event loop; one stuck past a few seconds is broken', async () => {
+  const dir = fresh();
+  const key = credentialKey('token-k');
+  const b = new GitHubBudget(key, dir, { maxWaitMs: 0 });
+  const lock = join(dir, `github-budget-${key}.lock`);
+  // Held now by a live process (this one's pid: alive everywhere): observe and pause give up at once.
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'held', acquiredAt: new Date().toISOString() }));
+  let t0 = Date.now();
+  b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(inAnHour()) });
+  b.pause('secondary_rate_limited', 60);
+  assert.ok(Date.now() - t0 < 100, `observe and pause took ${Date.now() - t0} ms synchronously`);
+  t0 = Date.now();
+  await b.take('x'); // waits LOCK_WAIT_MS at most, then lets the call go
+  assert.ok(Date.now() - t0 < 2000, `take waited ${Date.now() - t0} ms`);
+  // Held for a minute by a "live" pid: stuck or planted. It is broken, and the budget works again.
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'stuck', acquiredAt: new Date(Date.now() - 60_000).toISOString() }));
+  seed(b, 10);
+  assert.equal(b.read().resources.core?.remaining, 10);
+  t0 = Date.now();
+  await b.take('x');
+  assert.ok(Date.now() - t0 < 200, `took ${Date.now() - t0} ms`);
+  assert.equal(b.read().resources.core?.remaining, 9);
+});
+
+test('state files of tokens no longer used are removed (App tokens rotate hourly); live ones are kept', async () => {
+  const dir = fresh();
+  const old = join(dir, `github-budget-${credentialKey('rotated-away')}.json`);
+  const recent = join(dir, `github-budget-${credentialKey('still-used')}.json`);
+  writeFileSync(old, JSON.stringify({ resources: {}, pausedUntil: 0 }));
+  writeFileSync(recent, JSON.stringify({ resources: {}, pausedUntil: 0 }));
+  const threeHoursAgo = (Date.now() - 3 * 3600_000) / 1000;
+  utimesSync(old, threeHoursAgo, threeHoursAgo);
+  await new GitHubBudget(credentialKey('current'), dir).take('x');
+  assert.equal(existsSync(old), false, 'unchanged for 3 h: removed');
+  assert.equal(existsSync(recent), true);
+  assert.equal(existsSync(join(dir, `github-budget-${credentialKey('current')}.json`)), true);
 });
