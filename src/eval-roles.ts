@@ -17,7 +17,7 @@ import { lineDiff } from './line-diff.js';
 import { HELD_OUT_ENV } from './held-out-paths.js';
 import { CONTRACT_PARTS } from './role-contract.js';
 import { HELD_OUT_FROM_STATE_FLAG, heldOutAllowed, spendFromArgs } from './spend-gate.js';
-import { assertJudgeDiffers, comparisonDiff, comparisonLine, comparisonPasses, DEFAULT_SAMPLES, neutralDir, type Ask, type EvalCase, type EvalComparison, type ScoreComparison } from './skilleval.js';
+import { assertJudgeDiffers, comparisonDiff, comparisonLine, comparisonPasses, DEFAULT_SAMPLES, failedCost, neutralDir, type Ask, type EvalCase, type EvalComparison, type ScoreComparison } from './skilleval.js';
 
 /** Runs of each of base and head per role, unless another number is asked for. */
 export const DEFAULT_RUNS = 3;
@@ -98,7 +98,15 @@ export function evalRolesMaxSpend(o: EvalRolesOptions, roles: number): number {
 /** An Ask whose every call is recorded as run.cost (role, model, the CLI's estimate). */
 export function recordingAsk(ask: Ask, role: string, record: (cost: { role: string; model: string; usd: number; turns: number }) => void): Ask {
   return async (req) => {
-    const r = await ask(req);
+    let r;
+    try {
+      r = await ask(req);
+    } catch (e) {
+      // A failed call that spent is recorded too (AskFailed carries its cost).
+      const usd = failedCost(e);
+      if (usd > 0) record({ role, model: req.model, usd, turns: 1 });
+      throw e;
+    }
     record({ role, model: req.model, usd: r.costUsd, turns: 1 });
     return r;
   };

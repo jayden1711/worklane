@@ -5,10 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
+import { recordingAsk } from '../src/eval-roles.js';
+import type { AgentRunner } from '../src/runner.js';
+import { AskFailed, failedCost, runnerAsk } from '../src/skilleval.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { HELD_OUT_ENV } from '../src/held-out-paths.js';
 import { harnessEvalCommand } from '../src/harness-evals/cli.js';
@@ -25,8 +29,11 @@ interface Call {
   input: string;
 }
 
-/** A temporary machine: home, state dir (not created: the test checks nothing creates it) and a recording claude. */
-function machine() {
+/**
+ * A temporary machine: home, state dir (not created: the test checks nothing creates it) and a recording claude.
+ * With `failCostUsd`, every call fails as the CLI does at its budget (is_error) and reports that it spent that much.
+ */
+function machine(failCostUsd?: number) {
   const base = mkdtempSync(join(tmpdir(), 'spend-gate-'));
   const bin = join(base, 'bin');
   const home = join(base, 'home');
@@ -43,6 +50,7 @@ function machine() {
       "const input = args[0] === 'auth' ? '' : args.includes('--input-format') ? " + STDIN_LINE + " : fs.readFileSync(0, 'utf8');",
       `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ args, input }) + '\\n');`,
       "if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }",
+      failCostUsd === undefined ? '' : `console.log(JSON.stringify({ type: 'result', subtype: 'error_max_budget_usd', is_error: true, num_turns: 3, total_cost_usd: ${failCostUsd} })); process.exit(0);`,
       "const gen = (s) => { if (!s || typeof s !== 'object') return null; if (s.enum) return s.enum[0]; if (s.type === 'object') { const o = {}; for (const k of s.required || Object.keys(s.properties || {})) o[k] = gen((s.properties || {})[k]); return o; } if (s.type === 'boolean') return true; if (s.type === 'string') return 'x'; if (s.type === 'array') return []; if (s.type === 'number' || s.type === 'integer') return 0; return null; };",
       "const at = args.indexOf('--json-schema');",
       'const structured = gen(at >= 0 ? JSON.parse(args[at + 1]) : null);',
@@ -129,6 +137,39 @@ test('eval-stage-labels.mjs with no flags: exits 2 with its plan and no judge ca
   assert.ok(m.calls().length > 0, 'with --spend the judge is asked');
 });
 
+test('eval-stage-labels.mjs --spend: a call that fails after spending counts toward the ceiling and the total', posix, () => {
+  const m = machine(0.15);
+  const r = run(stageLabels, ['--spend', '0.2'], m.env);
+  // $0.15 spent by the first (failed) call leaves less than another call's $0.15: the rest are not run.
+  assert.equal(m.calls().length, 1, r.out);
+  assert.match(r.out, /cost ~\$0\.150/, 'the total counts the failed call');
+  assert.match(r.out, /not run/);
+});
+
+test('eval-roles.mjs: a dist/ whose eval-roles.js has no spend option still stops at the gate', posix, () => {
+  const m = machine();
+  // A root whose dist/src modules are the real ones, except an eval-roles.js whose options lack `spend` (an older
+  // build of that one file); the script itself is this checkout's.
+  const root = mkdtempSync(join(tmpdir(), 'stale-dist-'));
+  const real = (p: string) => pathToFileURL(join(repoRoot, 'dist', 'src', p)).href;
+  for (const p of ['skilleval.js', 'held-out.js', 'spend-gate.js', 'os/index.js', 'events/log.js']) {
+    mkdirSync(dirname(join(root, 'dist', 'src', p)), { recursive: true });
+    writeFileSync(join(root, 'dist', 'src', p), `export * from ${JSON.stringify(real(p))};\n`);
+  }
+  writeFileSync(
+    join(root, 'dist', 'src', 'eval-roles.js'),
+    `export * from ${JSON.stringify(real('eval-roles.js'))};\nimport { evalRolesOptions as current } from ${JSON.stringify(real('eval-roles.js'))};\nexport const evalRolesOptions = (argv) => { const o = current(argv); delete o.spend; return o; };\n`,
+  );
+  mkdirSync(join(root, 'scripts'));
+  writeFileSync(join(root, 'scripts', 'eval-roles.mjs'), readFileSync(evalRoles, 'utf8'));
+  for (const d of ['node_modules', 'src', 'templates']) symlinkSync(join(repoRoot, d), join(root, d));
+  const r = run(join(root, 'scripts', 'eval-roles.mjs'), ['--score', '--roles', 'feedback-checks'], m.env, root);
+  assert.equal(r.status, 2, r.out);
+  assert.match(r.out, /not run: this makes paid model calls/);
+  assert.deepEqual(m.calls(), []);
+  assert.ok(!existsSync(m.state), 'no state written');
+});
+
 test('skill eval without --spend: exits 2 with its plan; no runner or claude call, no event log', posix, () => {
   const m = machine();
   const { dir: project, stateDir } = exampleProject();
@@ -196,6 +237,20 @@ test('harness-eval run without --spend: exits 2 with its plan; the suite never r
   assert.ok(!existsSync(join(projectStateDir(root), 'events.db')), 'no event log');
 });
 
+test('harness-eval run without --spend reads no held-out task, even with the store named', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  t.mock.method(console, 'error', () => {});
+  const root = mkdtempSync(join(tmpdir(), 'he-root-'));
+  // A held-out task with a public task's id: reading the store at all throws (two tasks have the id).
+  const pub = readdirSync(PUBLIC_TASKS_DIR).find((f) => f.endsWith('.yaml'))!;
+  const dir = join(projectStateDir(root), 'evals', 'held-out', 'tasks');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'clash.yaml'), `repo: example/private\n${readFileSync(join(PUBLIC_TASKS_DIR, pub), 'utf8')}`);
+  const { suite, seen } = recordingSuite();
+  assert.equal(await harnessEvalCommand(root, 'run', ['--held-out-from-state'], helpers(suite)), 2);
+  assert.equal(seen.length, 0);
+});
+
 test('harness-eval run --spend: the suite runs under the ceiling; held-out tasks only from a store named on purpose', async (t) => {
   t.mock.method(console, 'log', () => {});
   t.mock.method(console, 'error', () => {});
@@ -227,4 +282,28 @@ test('spend gate: --spend takes a positive number of dollars; the ceiling cuts e
   await assert.rejects(b.ask(req), /ceiling \(\$1\) is reached/);
   assert.deepEqual(budgets.map((x) => Math.round(x * 100) / 100), [1, 0.6, 0.2], 'each call gets at most what is left');
   assert.equal(b.left(), 0);
+  assert.throws(() => spendFromArgs(['--spend=5']), /with a space/, 'the = form is named, not taken as absent');
+});
+
+test('spend gate: a call that fails after spending counts; the runner and the record carry its cost', async () => {
+  let asked = 0;
+  const failing = ceilingAsk(async () => {
+    asked++;
+    throw new AskFailed('claude failed: max budget', 0.6);
+  }, 1);
+  const req = { prompt: 'p', model: 'm', schema: {}, cwd: '.', maxBudgetUsd: 2 };
+  await assert.rejects(failing.ask(req), /max budget/);
+  await assert.rejects(failing.ask(req), /max budget/);
+  assert.equal(Math.round(failing.spent() * 100) / 100, 1.2, 'both failed calls counted');
+  await assert.rejects(failing.ask(req), /ceiling \(\$1\) is reached/);
+  assert.equal(asked, 2, 'no third call');
+
+  const runner = { run: async () => ({ reason: 'failed', costUsd: 0.3, turns: 3, detail: 'budget', model: 'm' }) } as unknown as AgentRunner;
+  const recorded: number[] = [];
+  const err = await recordingAsk(runnerAsk(runner, () => {}), 'instruction-eval', (c) => recorded.push(c.usd))(req).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.equal(failedCost(err), 0.3, "runnerAsk's failure carries the run's cost");
+  assert.deepEqual(recorded, [0.3], 'and the failed call is recorded as run.cost');
 });

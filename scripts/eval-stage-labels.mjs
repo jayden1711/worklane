@@ -49,7 +49,9 @@ if (spend === null) {
   process.exit(SPEND_REFUSED);
 }
 cap = Math.min(cap, spend);
-const cliAsk = ceilingAsk(unbounded, spend).ask;
+// Every call through the ceiling, which also counts what a failed call reported spending: `spent` is read from it.
+const bounded = ceilingAsk(unbounded, spend);
+const cliAsk = bounded.ask;
 const perCall = Math.min(0.15, cap);
 let spent = 0;
 let passed = 0;
@@ -69,13 +71,14 @@ for (const c of cases) {
   }
   try {
     const r = await cliAsk({ prompt: stagePrompt(c.run), model, schema: STAGE_SCHEMA, cwd: neutralDir(), maxBudgetUsd: perCall });
-    spent += r.costUsd;
+    spent = bounded.spent();
     const stage = r.structured?.stage;
     const ok = stage === c.expect && JUDGE_STAGES.includes(stage);
     passed += ok ? 1 : 0;
     console.log(`${ok ? 'pass' : 'FAIL'} ${c.id}: judge said ${stage} (expected ${c.expect}), $${r.costUsd.toFixed(3)}\n  reason: ${String(r.structured?.reason ?? '').slice(0, 300)}`);
   } catch (e) {
-    console.log(`FAIL ${c.id}: the judge call failed: ${e.message}`);
+    spent = bounded.spent();
+    console.log(`FAIL ${c.id}: the judge call failed${typeof e.costUsd === 'number' ? ` ($${e.costUsd.toFixed(3)})` : ''}: ${e.message}`);
   }
 }
 console.log(`score: ${passed}/${cases.length}, model ${model}, cost ~$${spent.toFixed(3)} (the CLI's estimate; cap $${cap})`);

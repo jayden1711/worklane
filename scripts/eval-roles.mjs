@@ -48,13 +48,22 @@ if (!existsSync(join(root, 'dist', 'src', 'skilleval.js')) || !existsSync(join(r
 const { cliAsk, compareInstructions, parseCases } = await load('skilleval.js');
 const { evalRoleRuns, evalRolesMaxSpend, evalRolesOptions, fixLoop, fixReport, recordingAsk, redactHeldOut, roleReport, runsReport, WRITER_BUDGET_USD } = await load('eval-roles.js');
 const { heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } = await load('held-out.js');
-const { ceilingAsk, HELD_OUT_NOT_ASKED, heldOutAllowed, SPEND_FLAG, spendRefusal, SPEND_REFUSED } = await load('spend-gate.js');
+const { ceilingAsk, HELD_OUT_NOT_ASKED, heldOutAllowed, SPEND_FLAG, spendFromArgs, spendRefusal, SPEND_REFUSED } = await load('spend-gate.js');
 const { stateDir } = await load('os/index.js');
 const { EventLog } = await load('events/log.js');
 const ts = (await import('typescript')).default;
+// An eval-roles.js older than the gate (a partly stale dist/) has no evalRolesMaxSpend: refuse it too.
+if (typeof evalRolesMaxSpend !== 'function') {
+  console.error('build first: npm run build (dist/ is older than this script)');
+  process.exit(2);
+}
 
 let o;
+// The ceiling is read here, from spend-gate.js, never from the options: an older eval-roles.js in dist/ has no
+// `spend` field, and the gate must not depend on it.
+let spend;
 try {
+  spend = spendFromArgs(process.argv.slice(2));
   o = evalRolesOptions(process.argv.slice(2));
 } catch (e) {
   console.error(e.message);
@@ -87,7 +96,7 @@ if (!o.scoreOnly) {
   } catch {
     console.error(`no src/roles.ts at ${o.base}`);
     // Without --spend the plan still prints (and the run stops there anyway).
-    if (o.spend !== null) process.exit(2);
+    if (spend !== null) process.exit(2);
     noBase = true;
   }
   if (!noBase) before = await promptsOf(baseSource, 'base');
@@ -103,7 +112,7 @@ if (!o.roles.length && !o.scoreOnly && !noBase) console.log(changed.length ? `ro
 const heldDir = heldOutAllowed(process.argv.slice(2)) ? heldOutDir(stateDir()) : null;
 
 // The spend gate: no model call, held-out read or state write before it passes.
-if (o.spend === null) {
+if (spend === null) {
   const plan = [
     `would evaluate role(s): ${roles.join(', ')}`,
     `  ${o.scoreOnly ? 'the current prompts, once' : `base ${o.base} against the working tree, ${o.runs} run(s) per side`}; model ${o.model}, judge ${o.judge}, ${o.samples} sample(s) per case`,
@@ -118,7 +127,7 @@ if (o.spend === null) {
 mkdirSync(join(stateDir(), 'evals'), { recursive: true, mode: 0o700 });
 const log = new EventLog(join(stateDir(), 'evals', 'events.db'));
 const record = (c) => log.append('run.cost', { issue: null, ...c }, 'eval-roles');
-const bounded = ceilingAsk(cliAsk, o.spend);
+const bounded = ceilingAsk(cliAsk, spend);
 const ask = recordingAsk(bounded.ask, 'instruction-eval', record);
 const writerAsk = recordingAsk(bounded.ask, 'eval-case-writer', record);
 if (!heldDir) console.log(`${HELD_OUT_NOT_ASKED}; scoring the visible cases only (the verdict needs held-out scores)`);
@@ -133,7 +142,7 @@ for (const role of roles) {
     continue;
   }
   const spentOut = () => {
-    console.log(`role ${role}: not run: the ${SPEND_FLAG} ceiling ($${o.spend}) is reached`);
+    console.log(`role ${role}: not run: the ${SPEND_FLAG} ceiling ($${spend}) is reached`);
     bad = true;
   };
   if (!(bounded.left() > 0)) {
@@ -183,5 +192,7 @@ for (const role of roles) {
   if (!heldOut && heldDir) console.log(`  no held-out cases for ${role} in ${heldDir}: run with --write-held-out`);
   if (r.fails) bad = true;
 }
-console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case${o.fixAttempts ? `, fix loop of up to ${o.fixAttempts} attempt(s) by ${o.fixer}` : ''}; ${SPEND_FLAG} $${o.spend}; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
+// The total through the ceiling: every call, including any that failed after spending.
+total = Math.max(total, bounded.spent());
+console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case${o.fixAttempts ? `, fix loop of up to ${o.fixAttempts} attempt(s) by ${o.fixer}` : ''}; ${SPEND_FLAG} $${spend}; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
 process.exit(bad ? 1 : 0);

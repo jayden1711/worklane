@@ -9,7 +9,7 @@
 // WHY: an agent ran scripts/eval-roles.mjs with no flags while developing; it made real model calls and read the
 // machine's held-out store, and nothing asked first.
 import { HELD_OUT_ENV } from './held-out-paths.js';
-import type { Ask } from './skilleval.js';
+import { failedCost, type Ask } from './skilleval.js';
 
 /** The one flag that lets a command spend: the most this invocation may spend in all, in dollars. */
 export const SPEND_FLAG = '--spend';
@@ -22,6 +22,8 @@ export const SPEND_REFUSED = 2;
 
 /** The --spend ceiling in dollars; null when it wasn't given. A value that isn't a positive number is refused. */
 export function spendFromArgs(argv: readonly string[]): number | null {
+  const glued = argv.find((a) => a.startsWith(`${SPEND_FLAG}=`));
+  if (glued) throw new Error(`write ${SPEND_FLAG} <usd> with a space, not ${glued}`);
   const i = argv.indexOf(SPEND_FLAG);
   if (i < 0) return null;
   const raw = argv[i + 1];
@@ -58,7 +60,7 @@ export class SpendCeilingReached extends Error {
 
 /**
  * Every call through `ask` under one ceiling for the whole invocation: each call's budget is cut to what is left,
- * and a call with nothing left is refused (SpendCeilingReached). One call can still end a little past its budget
+ * and a call with nothing left is refused (SpendCeilingReached). A call that fails counts what it reported spending. One call can still end a little past its budget
  * (the CLI checks it between turns); the next one is then refused.
  */
 export function ceilingAsk(ask: Ask, ceilingUsd: number): { ask: Ask; spent: () => number; left: () => number } {
@@ -67,7 +69,14 @@ export function ceilingAsk(ask: Ask, ceilingUsd: number): { ask: Ask; spent: () 
     ask: async (req) => {
       const left = ceilingUsd - spent;
       if (left <= 0) throw new SpendCeilingReached(ceilingUsd);
-      const r = await ask({ ...req, maxBudgetUsd: Math.min(req.maxBudgetUsd, left) });
+      let r;
+      try {
+        r = await ask({ ...req, maxBudgetUsd: Math.min(req.maxBudgetUsd, left) });
+      } catch (e) {
+        // A failed call can have spent (its budget, --max-turns): that counts too (AskFailed carries it).
+        spent += failedCost(e);
+        throw e;
+      }
       spent += r.costUsd;
       return r;
     },

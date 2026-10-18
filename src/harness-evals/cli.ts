@@ -89,7 +89,23 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
     return 2;
   }
   const extra = he?.tasks ? [resolve(root, he.tasks)] : [];
-  const { tasks: all, notes } = loadSuite({ publicDirs: [PUBLIC_TASKS_DIR], projectDirs: extra, heldOutDir: heldOut ? heldOutTasksDir(site.stateDir) : null });
+  // The held-out store is read only after the gate passes, even when it was named.
+  const suiteOf = (withHeldOut: boolean) => loadSuite({ publicDirs: [PUBLIC_TASKS_DIR], projectDirs: extra, heldOutDir: withHeldOut ? heldOutTasksDir(site.stateDir) : null });
+  if (spend === null) {
+    const { tasks: known, notes } = suiteOf(false);
+    for (const n of notes) console.error(n);
+    const tasks = only.length ? known.filter((t) => only.includes(t.id)) : known;
+    // Project task ids are never printed (src/harness-evals/tasks.ts): only how many.
+    const shown = tasks.filter((t) => !t.heldOut).map((t) => t.id);
+    const plan = [
+      `would replay ${tasks.length} task(s) × ${samples} sample(s) with real agents: ${shown.join(', ') || 'none public'}${tasks.length > shown.length ? ` and ${tasks.length - shown.length} project task(s)` : ''}`,
+      `  ${heldOut ? `plus the held-out tasks in the named store (not read without ${SPEND_FLAG})` : HELD_OUT_NOT_ASKED}`,
+      `  budget $${budget} (--budget, else harness_evals.budget_usd, else 20)`,
+    ];
+    console.error(spendRefusal(plan, budget));
+    return SPEND_REFUSED;
+  }
+  const { tasks: all, notes } = suiteOf(heldOut);
   for (const n of notes) console.error(n);
   if (!heldOut) console.error(HELD_OUT_NOT_ASKED);
   const tasks = only.length ? all.filter((t) => only.includes(t.id)) : all;
@@ -97,13 +113,6 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
   if (missing.length) {
     console.error(`no such task: ${missing.join(', ')} (have: ${all.map((t) => t.id).join(', ')})`);
     return 2;
-  }
-  if (spend === null) {
-    // Held-out task ids are never printed (src/harness-evals/tasks.ts): only how many.
-    const shown = tasks.filter((t) => !t.heldOut).map((t) => t.id);
-    const plan = [`would replay ${tasks.length} task(s) × ${samples} sample(s) with real agents: ${shown.join(', ') || 'none public'}${tasks.length > shown.length ? ` and ${tasks.length - shown.length} held-out or project task(s)` : ''}`, `  budget $${budget} (--budget, else harness_evals.budget_usd, else 20)`];
-    console.error(spendRefusal(plan, budget));
-    return SPEND_REFUSED;
   }
   mkdirSync(work, { recursive: true });
   const log = record ? new EventLog(site.eventsDb) : null;
