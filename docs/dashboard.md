@@ -756,6 +756,10 @@ viewer never sees the picker, and the server refuses a viewer every chat POST (4
   what's left of the conversation's cap and what's left of the day's budget. A conversation (above) counts over its
   whole life, under the id the server keeps for it (never one the client sends). Quick single-shot questions share
   one stream per instance, counted over the machine's local day.
+- **A refused draft:** when the contract parser refuses an answer's issue draft (a part missing, say), the chat is
+  asked once more with the reason, inside the same answer's caps: the retry gets only the budget and turns the first
+  try left (none when under $0.05 is left), and both runs count as that answer's spend. A second refusal is shown as
+  it is ("Can't be filed as it is", with the reason); there is never a third ask. Code: `src/chat.ts` (`chatTurn`).
 - **Per person:** anyone but an owner may spend at most `settings.chat.person_daily_usd` (the instance's
   policy.yaml, which only the owner edits; default $10) on chat answers in a local day, across all their
   conversations and quick questions. Owners are exempt. The person is the signed-in login the dashboard names,
