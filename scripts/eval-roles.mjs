@@ -6,12 +6,17 @@
 // judge answers yes/no per rubric item; a score is the items met. Prints `visible a/b → c/d` and
 // `held-out a/b → c/d` per role, the cases that changed, and the cost (the CLI's estimate); every model call is
 // recorded as run.cost in <state>/evals/events.db. 3 samples per case unless fewer are asked for (then noted).
+// Base and head each run --runs times (default 3; --samples stays samples per case within one run), and each role's
+// line gives the mean and min-max of its visible and held-out scores per side: one run's delta is noise.
+// A score drops when head's mean falls below base's mean by more than base's min-max spread.
 // Exits 1 when a role's held-out score drops, is incomplete or is missing, or its visible score drops.
+// --cap is dollars per role, the TOTAL across its N runs (cost grows with --runs): once reached, the remaining
+// runs don't start and the role is incomplete, which fails it.
 // Needs a build first (npm run build).
 //   node scripts/eval-roles.mjs [--base origin/main] [--roles worker,evaluator-verdict] [--model sonnet]
-//                               [--judge opus] [--samples 3] [--cap 10] [--write-held-out] [--score]
+//                               [--judge opus] [--runs 3] [--samples 3] [--cap 10] [--write-held-out] [--score]
 //   --write-held-out: write a held-out set for each role that has none (one case-writer run per role, from its
-//                     contract only); --score: score the current prompts only, no base.
+//                     contract only); --score: score the current prompts once, no base (no --runs).
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,7 +30,7 @@ if (!existsSync(join(root, 'dist', 'src', 'skilleval.js'))) {
   process.exit(2);
 }
 const { cliAsk, compareInstructions, parseCases } = await load('skilleval.js');
-const { evalRolesOptions, recordingAsk, roleReport } = await load('eval-roles.js');
+const { evalRoleRuns, evalRolesOptions, recordingAsk, roleReport, runsReport } = await load('eval-roles.js');
 const { heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } = await load('held-out.js');
 const { stateDir } = await load('os/index.js');
 const { EventLog } = await load('events/log.js');
@@ -100,12 +105,20 @@ for (const role of roles) {
     heldOut = readHeldOut(heldDir, role);
     console.log(`role ${role}: wrote ${heldOut?.length ?? 0} held-out case(s) (~$${costUsd.toFixed(2)})`);
   }
-  const c = await compareInstructions({ target: `role ${role}`, baseText: o.scoreOnly ? null : before(role) || null, headText: after(role), cases: parseCases(readFileSync(file, 'utf8')), heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd: o.cap, ask });
-  total += c.costUsd;
-  const r = roleReport(c);
+  const compare = (capUsd) => compareInstructions({ target: `role ${role}`, baseText: o.scoreOnly ? null : before(role) || null, headText: after(role), cases: parseCases(readFileSync(file, 'utf8')), heldOut, model: o.model, judge: o.judge, samples: o.samples, capUsd, ask });
+  let r;
+  if (o.scoreOnly) {
+    const c = await compare(o.cap);
+    total += c.costUsd;
+    r = roleReport(c);
+  } else {
+    const runs = await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd: o.cap, samples: o.samples, compare });
+    total += runs.costUsd;
+    r = runsReport(runs);
+  }
   for (const line of r.lines) console.log(line);
   if (!heldOut) console.log(`  no held-out cases for ${role} in ${heldDir}: run with --write-held-out`);
   if (r.fails) bad = true;
 }
-console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.samples} sample(s) per case; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
+console.log(`total: ~$${total.toFixed(2)} (the CLI's estimate; model ${o.model}, judge ${o.judge}, ${o.scoreOnly ? '1 run' : `${o.runs} run(s) per side`}, ${o.samples} sample(s) per case; recorded as run.cost in ${join(stateDir(), 'evals', 'events.db')})`);
 process.exit(bad ? 1 : 0);
