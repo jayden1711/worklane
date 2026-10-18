@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
+import { agentSettingsFileOf, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -688,7 +688,13 @@ export class CliRunner implements AgentRunner {
         : pinned;
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
-    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    const locked = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
+    // reports it before the agent's first turn: claude drops a whole --settings over one invalid value, silently.
+    const check = locked ? settingsCheckValue() : null;
+    const settings = locked && check ? { ...locked, [SETTINGS_CHECK_KEY]: check } : undefined;
+    const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
+    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${laneSettings ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
@@ -710,6 +716,8 @@ export class CliRunner implements AgentRunner {
       let ended: TerminalReason | null = null;
       /** Set when the session's init event shows something loaded that this run didn't pass. */
       let loadProblem: string | null = null;
+      /** The run's --settings: confirmed by the init event, or why the run stopped. Pending until then. */
+      let settingsState: 'pending' | 'applied' | { problem: string } = check ? 'pending' : 'applied';
       let buf = '';
       let stderr = '';
       let inputOpen = true;
@@ -764,6 +772,21 @@ export class CliRunner implements AgentRunner {
           } catch {
             continue;
           }
+          // Before anything else reads the line: settings not confirmed by the first init event, or an agent turn
+          // before any init, stop the run.
+          if (settingsState === 'pending' && check) {
+            const problem =
+              j.type === 'system' && j.subtype === 'init'
+                ? settingsAppliedProblem(j as { output_style?: unknown }, check, settingsName)
+                : j.type === 'assistant'
+                  ? `claude started the agent's turn before its init event confirmed the --settings this run passed (${settingsName}), so its deny rules and hooks may be off`
+                  : undefined;
+            if (problem) {
+              settingsState = { problem };
+              kill('failed');
+            } else if (problem === null) settingsState = 'applied';
+          }
+          if (typeof settingsState === 'object') continue;
           record?.line(j);
           feed?.line(j);
           req.onStreamLine?.(j);
@@ -829,6 +852,7 @@ export class CliRunner implements AgentRunner {
           const v = stuck.stopped;
           return done({ reason: 'stuck', detail: `stopped as stuck: the same ${v.tool} call failed ${v.failures} times in a row: ${v.input.slice(0, 200)}`, ...base });
         }
+        if (typeof settingsState === 'object') return done({ reason: 'failed', detail: `${settingsState.problem}; stopped`, ...base });
         if (loadProblem) return done({ reason: 'failed', detail: `${loadProblem}; stopped`, ...base });
         if (ended) return done({ reason: ended, detail: `killed: ${ended}`, ...base });
         // The subscription's usage limit (or a provider's rate limit): claude's rate_limit_event, a 429 it gave up on,
