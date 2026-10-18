@@ -31,13 +31,13 @@ test('batch commands: the short form and JSON give the same command; an unknown 
 test('pages are found by feature-map id or by path, with their parameters', () => {
   const find = fm.findPage as (m: unknown, w: string) => { page: { id: string }; params: Record<string, string> } | null;
   assert.equal(find(map, 'decisions')?.page.id, 'decisions');
-  assert.deepEqual(find(map, '/issues/12'), { page: map.pages.find((p) => p.id === 'issue-detail'), params: { n: '12' } });
-  assert.equal(find(map, '/issues?view=board')?.page.id, 'issues');
+  assert.deepEqual(find(map, '/work/issues/12'), { page: map.pages.find((p) => p.id === 'issue-detail'), params: { n: '12' } });
+  assert.equal(find(map, '/work/issues?view=board')?.page.id, 'issues');
   assert.equal(find(map, '/')?.page.id, 'board');
   assert.equal(find(map, '/overview')?.page.id, 'overview');
   assert.equal(find(map, '/nowhere'), null);
   const path = fm.pagePath as (p: unknown, params: object) => string;
-  assert.equal(path(map.pages.find((p) => p.id === 'issue-detail'), { n: 3 }), '/issues/3');
+  assert.equal(path(map.pages.find((p) => p.id === 'issue-detail'), { n: 3 }), '/work/issues/3');
   assert.throws(() => path(map.pages.find((p) => p.id === 'issue-detail'), {}), /needs n/);
 });
 

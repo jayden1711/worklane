@@ -5,10 +5,10 @@
 // machine helper. While the login step waits, its link is a button here, for machine owners and nobody else.
 // Nothing runs until a step is confirmed: leaving the panel alone is the skip, and the hub keeps its URL. Everyone
 // else gets nothing here: the server sends them no data, and the view renders nothing for them.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { getTailscale, tailscaleAction, type TailscaleAction, type TailscaleData, type TailscaleStepLine, type TailscaleStepView } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
-import { ago, Badge, Button, Card, cx } from './ui';
+import { ago, Badge, Button, Card, cx, Why, firstWhy } from './ui';
 
 const RUN_TONE: Record<NonNullable<TailscaleData['run']>['status'], 'info' | 'warn' | 'ok' | 'danger'> = { running: 'info', waiting: 'warn', done: 'ok', failed: 'danger', stalled: 'danger' };
 const RUN_LABEL: Record<NonNullable<TailscaleData['run']>['status'], string> = { running: 'running', waiting: 'waiting on you', done: 'done', failed: 'failed', stalled: 'stopped without finishing' };
@@ -51,9 +51,13 @@ function summary(d: TailscaleData): { tone: 'ok' | 'neutral' | 'warn'; label: st
   return { tone: 'ok', label: 'up', text: `Tailscale ${s.version ?? ''} is up: this machine is ${s.name}.` };
 }
 
-function StepCard({ n, step, d, next, confirming, busy, onAsk, onCancel, onRun }: { n: number; step: TailscaleStepView; d: TailscaleData; next: boolean; confirming: boolean; busy: boolean; onAsk: () => void; onCancel: () => void; onRun: () => void }) {
+function StepCard({ n, step, d, next, confirming, busy, heldAt, onAsk, onCancel, onRun }: { n: number; step: TailscaleStepView; d: TailscaleData; next: boolean; confirming: boolean; busy: boolean; heldAt: string; onAsk: () => void; onCancel: () => void; onRun: () => void }) {
   const active = d.run?.step === step.id && (d.run.status === 'running' || d.run.status === 'waiting');
-  const canRun = d.allowed && !d.busy && !step.blocked && !!d.status;
+  // Why its button can't be pressed: the server's reasons first (said once for the panel, at heldAt), then the step's.
+  const [blockedId, askingId] = [useId(), useId()];
+  const held = firstWhy(!d.allowed && (d.why ?? 'not allowed'), d.busy);
+  const why = firstWhy(held, step.blocked && `Not yet: ${step.blocked}`, !d.status && 'No setup script answered on this machine', busy && 'Asking…');
+  const whyAt = held ? heldAt : step.blocked && !step.done ? blockedId : undefined;
   const tone = step.done ? 'ok' : active ? RUN_TONE[d.run!.status] : step.blocked ? 'neutral' : 'warn';
   const label = step.done ? 'done' : active ? RUN_LABEL[d.run!.status] : step.blocked ? 'not yet' : 'not done';
   return (
@@ -64,13 +68,13 @@ function StepCard({ n, step, d, next, confirming, busy, onAsk, onCancel, onRun }
         <Badge tone={tone}>{label}</Badge>
         <span className="flex-1" />
         {!confirming && !active && (
-          <Button size="sm" variant={next && !step.done ? 'default' : 'ghost'} disabled={!canRun || busy} onClick={onAsk} data-testid="tailscale-step-run">
+          <Button size="sm" variant={next && !step.done ? 'default' : 'ghost'} why={why} {...(whyAt ? { whyAt } : {})} onClick={onAsk} data-testid="tailscale-step-run">
             {step.done ? 'Run again…' : `${step.title}…`}
           </Button>
         )}
       </div>
       {step.blocked && !step.done && (
-        <p className="break-words text-[12.5px] text-ink-2" data-testid="tailscale-step-blocked">
+        <p id={blockedId} className="break-words text-[12.5px] text-ink-2" data-testid="tailscale-step-blocked">
           Not yet: {step.blocked}.
         </p>
       )}
@@ -90,12 +94,13 @@ function StepCard({ n, step, d, next, confirming, busy, onAsk, onCancel, onRun }
             ))}
           </ul>
           <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" disabled={busy} onClick={onRun} data-testid="tailscale-step-confirm-run">
-              {busy ? 'Asking…' : 'Confirm'}
+            <Button size="sm" why={busy && 'Asking…'} whyAt={askingId} onClick={onRun} data-testid="tailscale-step-confirm-run">
+              Confirm
             </Button>
-            <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel} data-testid="tailscale-step-cancel">
+            <Button size="sm" variant="ghost" why={busy && 'Asking…'} whyAt={askingId} onClick={onCancel} data-testid="tailscale-step-cancel">
               Cancel
             </Button>
+            {busy && <Why id={askingId}>Asking…</Why>}
           </div>
         </div>
       )}
@@ -145,6 +150,7 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
   const [confirming, setConfirming] = useState<TailscaleAction | null>(initialConfirming);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const heldId = useId();
   if (!data.machineOwner) return null;
   const run = async (action: TailscaleAction) => {
     setBusy(true);
@@ -193,13 +199,18 @@ export function TailscaleSetupView({ data, onChanged, initialConfirming = null }
       {s && (
         <ol className="space-y-2" data-testid="tailscale-steps">
           {data.steps.map((step, i) => (
-            <StepCard key={step.id} n={i + 1} step={step} d={data} next={data.next === step.id} confirming={confirming === step.id} busy={busy} onAsk={() => (setErr(null), setConfirming(step.id))} onCancel={() => setConfirming(null)} onRun={() => void run(step.id)} />
+            <StepCard key={step.id} n={i + 1} step={step} d={data} next={data.next === step.id} confirming={confirming === step.id} busy={busy} heldAt={heldId} onAsk={() => (setErr(null), setConfirming(step.id))} onCancel={() => setConfirming(null)} onRun={() => void run(step.id)} />
           ))}
         </ol>
       )}
       {!data.allowed && data.why && (
-        <p className="break-words text-[12.5px] text-ink-2" data-testid="tailscale-disabled">
+        <p id={heldId} className="break-words text-[12.5px] text-ink-2" data-testid="tailscale-disabled">
           Read-only: {data.why}.
+        </p>
+      )}
+      {data.allowed && data.busy && (
+        <p id={heldId} className="break-words text-[12.5px] text-ink-3" data-testid="tailscale-busy">
+          {data.busy[0]!.toUpperCase() + data.busy.slice(1)}: the steps wait for it to end.
         </p>
       )}
       {open.map((r) => (

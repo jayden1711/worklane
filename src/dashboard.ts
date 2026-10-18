@@ -72,7 +72,7 @@ import { machineStats, processGroupUsage, type MachineStats, type ProcessGroupUs
 import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
-import { isMachineOwner, MACHINE_OWNERS_FILE, machineOwners } from './machine-owners.js';
+import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, lastCheck, UPDATES_CONFIG, UPDATES_LOG, UPDATES_STATE, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
 import { updateDrain } from './update-drain.js';
@@ -92,6 +92,7 @@ import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
 import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
+import { delegationView } from './delegation.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
@@ -119,7 +120,7 @@ import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
 import { profilesView } from './claude-profiles.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { readSecretBody } from './console/secrets.js';
 import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
@@ -497,6 +498,8 @@ export function machineView(o: Pick<DashboardOptions, 'cfg' | 'user' | 'slotsDir
     needs: o.breakGlass ? null : 'one of the console\'s allowed devices',
     /** Whether this request came from one (the hub says, on this view's read as on a change; always on the break-glass). */
     deviceReady: !!o.breakGlass || !!o.deviceOk,
+    /** Why a change from this page would be refused now, by the check each change makes (null: it wouldn't); the page shows it on its buttons. */
+    why: machineChangeRefusal({ login: o.user, breakGlass: !!o.breakGlass, deviceOk: !!o.deviceOk }, { file: ownersFile }),
     helper: MACHINE_HELPER,
     slots: { cap: slots.cap, running: slots.agents.length, min: SLOTS_MIN, max: SLOTS_MAX },
     testSlots: { cap: testSlotCap(o.slotsDir), running: testSlotsHeld(o.slotsDir).length, min: TEST_SLOTS_MIN, max: TEST_SLOTS_MAX },
@@ -1928,6 +1931,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             log.close();
           }
         }
+        // Gradual delegation (src/delegation.ts): each review category's record, who approved and how fast, and the
+        // suggestions with their answers. Read-only: a suggestion is answered in the Inbox and only files a PR. People's
+        // names and approvals, so the owners' and writers', like the learnings.
+        if (url.pathname === '/api/delegation') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the delegation summary is read-only' });
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the delegation summary is', who) });
+          const review = opts.cfg.review;
+          if (!review) return json(res, 200, { enabled: false, minClean: null, categories: [], approvers: [], suggestions: [] });
+          return json(res, 200, { enabled: review.delegation.enabled, minClean: review.delegation.min_clean, ...delegationView(eventCache.all(), review) });
+        }
         // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
         // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
         if (url.pathname === '/api/learnings' && req.method === 'GET') {
@@ -2613,7 +2626,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === `/api/${DEVICE_VIEWS.claudeAccount}` && req.method === 'GET') {
           if (!mayViewClaudeAccount(accountRequester, opts.machineOwnersFile)) return json(res, 403, { error: `the agents' Claude account is for the machine's owners; @${who.login} isn't one` });
           const events = eventCache.all().filter((e) => (MACHINE_EVENTS as readonly string[]).includes(e.type));
-          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name) });
+          // everAllowed: the same gate, asked as if from an allowed device; false means no device helps (the role), so
+          // the page draws no buttons for this person instead of disabled ones (#587).
+          const everAllowed = claudeAccountGate({ role: who.role, requester: { ...accountRequester, deviceOk: true } }, ownersOpt) === null;
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name) });
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {

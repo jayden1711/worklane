@@ -36,9 +36,19 @@ function codeRoutes(src: string): string[] {
   return [...out];
 }
 
-/** Sidebar rows: { to, label, chord } from the NAV list. */
+/** Sidebar rows: { to, label, chord, tabs } from the NAV list; `tabs`: the name of a group's tab list (#585). */
 function navRows(src: string) {
-  return [...src.matchAll(/\{ to: '([^']+)', label: '([^']+)', icon: \w+, chord: '([^']+)'[^}]*\}/g)].map((m) => ({ to: m[1]!, label: m[2]!, chord: m[3]! }));
+  return [...src.matchAll(/\{ to: '([^']+)', label: '([^']+)', icon: \w+, chord: '([^']+)'[^}]*?(?:tabs: (\w+) )?\}/g)].map((m) => ({ to: m[1]!, label: m[2]!, chord: m[3]!, tabs: m[4] ?? null }));
+}
+
+/** A group's tabs (#585): { to, label, chord } from its `const NAME: readonly NavTab[] = [...]` list. */
+function tabRows(src: string, name: string) {
+  const start = src.indexOf(`const ${name}: readonly NavTab[] = [`);
+  assert.ok(start >= 0, `the tab list ${name} was found`);
+  const list = src.slice(start, src.indexOf('];', start));
+  const tabs = [...list.matchAll(/\{ to: '([^']+)', label: '([^']+)', chord: '([^']+)', testId: '[^']+' \}/g)].map((m) => ({ to: m[1]!, label: m[2]!, chord: m[3]! }));
+  assert.equal(tabs.length, (list.match(/\{ to: '/g) ?? []).length, `every tab of ${name} was read`);
+  return tabs;
 }
 
 function files(dir: string): string[] {
@@ -78,13 +88,16 @@ test('the sidebar rows and their g shortcuts match the feature map', () => {
   const listed = [...(app.slice(app.indexOf('const NAV'), app.indexOf('];', app.indexOf('const NAV'))).match(/\{ to: '/g) ?? []), ...(app.match(/const FIRST_RUN_NAV = \{ to: '/g) ?? [])];
   assert.ok(nav.length >= 10, 'the NAV list was found');
   assert.equal(nav.length, listed.length, 'every NAV row was read');
-  for (const n of nav) {
+  // A group's tabs are its pages (#585): Sidebar `Group › Tab`, or the group's name for a tab that shares it.
+  const reached = nav.flatMap((n) => (n.tabs ? tabRows(app, n.tabs).map((t) => ({ ...t, label: t.label === n.label ? n.label : `${n.label} › ${t.label}` })) : [n]));
+  assert.ok(reached.length > nav.length, 'the groups\' tabs were read');
+  for (const n of reached) {
     const p = map.pages.find((x) => x.route === n.to);
-    assert.ok(p, `sidebar row ${n.label} (${n.to}) is not a mapped page`);
+    assert.ok(p, `sidebar row or tab ${n.label} (${n.to}) is not a mapped page`);
     assert.equal(p.sidebar, n.label, `${n.to}: sidebar label`);
     assert.equal(p.shortcut, `g ${n.chord}`, `${n.to}: shortcut`);
   }
-  for (const p of map.pages.filter((x) => x.sidebar)) assert.ok(nav.some((n) => n.to === p.route), `${p.id} claims a sidebar row the dashboard doesn't have`);
+  for (const p of map.pages.filter((x) => x.sidebar)) assert.ok(reached.some((n) => n.to === p.route), `${p.id} claims a sidebar row or tab the dashboard doesn't have`);
 });
 
 test('every data-testid the UI sets is in the feature map, and every mapped test id is set somewhere', () => {
@@ -96,7 +109,7 @@ test('every data-testid the UI sets is in the feature map, and every mapped test
 });
 
 test('the route reader catches a page added without a map entry', () => {
-  const added = app.replace("else if (path === '/health') page = <HealthPage />;", "else if (path === '/health') page = <HealthPage />;\n  else if (path === '/new-page') page = <HealthPage />;");
+  const added = app.replace("else if (path === '/machine/health') page = <HealthPage />;", "else if (path === '/machine/health') page = <HealthPage />;\n  else if (path === '/new-page') page = <HealthPage />;");
   assert.notEqual(added, app, 'the fixture edit applied');
   assert.ok(codeRoutes(added).includes('/new-page'));
   assert.ok(!map.pages.some((p) => p.route === '/new-page'));

@@ -1,10 +1,27 @@
-// WHY (#581): a page that moved keeps its old address working. Experiments left Extend for a sidebar item of its own,
-// and a bookmark or a link to /extend/experiments[/<study>] still opens it. A module of its own, so it is ready before
+// WHY (#581, #585): a page that moved keeps its old address working. Experiments left Extend for a sidebar item of its
+// own, and a bookmark or a link to /extend/experiments[/<study>] still opens it; the pages grouped in the sidebar (#585)
+// moved under their group, and /issues/12 or /decisions/<id>?x#y still opens. A module of its own, so it is ready before
 // App.tsx's module body asks it where the first address moved (defined below that line in App.tsx, it wasn't yet, and
 // every page failed to load).
 
 /** Old addresses and where each moved: a path at or under `from` lands at the same place under `to`, so an id after it is kept. */
-export const REDIRECTS: readonly { from: string; to: string }[] = [{ from: '/extend/experiments', to: '/experiments' }];
+export const REDIRECTS: readonly { from: string; to: string }[] = [
+  { from: '/extend/experiments', to: '/experiments' },
+  // #585: the pages grouped in the sidebar live under their group's address (App.tsx NAV, each group's tabs).
+  { from: '/inbox', to: '/needs-you/inbox' },
+  { from: '/waiting', to: '/needs-you/waiting' },
+  { from: '/decisions', to: '/needs-you/decisions' },
+  { from: '/issues', to: '/work/issues' },
+  { from: '/intake', to: '/work/intake' },
+  { from: '/prs', to: '/work/prs' },
+  { from: '/land', to: '/shipping/land' },
+  { from: '/deploys', to: '/shipping/deploys' },
+  { from: '/activity', to: '/agents/activity' },
+  { from: '/health', to: '/machine/health' },
+  { from: '/logs', to: '/machine/logs' },
+  { from: '/reports', to: '/machine/reports' },
+  { from: '/setup', to: '/settings/setup' },
+];
 
 /** Where an old address moved (REDIRECTS); null: it's a current one. */
 export function redirectFor(path: string): string | null {

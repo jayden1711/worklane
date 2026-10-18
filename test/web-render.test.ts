@@ -51,6 +51,7 @@ interface Render {
   renderFlaky(f: unknown): string;
   renderHarnessEvals(h: unknown): string;
   renderLearnings(l: unknown): string;
+  renderDelegation(d: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderRepoConfigForm(c: unknown, o?: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
@@ -131,6 +132,8 @@ interface Render {
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
   renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
+  renderAt(path: string, state: State, title?: string): string;
+  navCounts(state: unknown): Record<string, number | undefined>;
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
@@ -519,13 +522,13 @@ test('narrow screens: the page header\'s menu button opens a drawer with every p
   assert.match(drawer, /data-testid="nav-drawer-close"[^>]*aria-label="Close navigation"|aria-label="Close navigation"[^>]*data-testid="nav-drawer-close"/);
   assert.match(drawer, />Navigation</);
   // Every page of the sidebar, as a link to its route.
-  assert.ok(r.navRows.length >= 18, 'the sidebar rows were read');
+  assert.equal(r.navRows.length, 9, 'the sidebar groups were read (#585)');
   for (const n of r.navRows) assert.match(drawer, new RegExp(`<a href="${n.to.replace(/[/]/g, '\\/')}"[^>]*data-testid="${n.testId}"`), `the drawer links to ${n.label}`);
   assert.match(drawer, /data-testid="search-button"/);
   assert.match(drawer, /data-testid="theme-toggle"/);
   assert.match(drawer, /data-testid="live-indicator"/);
   // Off a hub: this instance's status dot, linking to Health.
-  assert.match(amber.slice(amber.indexOf('id="nav-drawer"')), /<a href="\/health"[^>]*>.*?data-status="amber" data-testid="instance-status-dot"/);
+  assert.match(amber.slice(amber.indexOf('id="nav-drawer"')), /<a href="\/machine\/health"[^>]*>.*?data-status="amber" data-testid="instance-status-dot"/);
   // On a hub: the instance list, each with its dot.
   const hubDrawer = hub.slice(hub.indexOf('id="nav-drawer"'));
   assert.match(hubDrawer, /data-testid="instance-switcher"/);
@@ -1060,6 +1063,11 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  // No revert PR: the banner says why, when the alert carries it (main_watch.unaccounted no_revert).
+  const why = "opening the revert PR failed: git revert of cccccccc on main's tip dddddddd conflicts with later commits: CONFLICT (content): Merge conflict in a.txt";
+  const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
+  assert.match(none, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
+  assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
 });
 
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
@@ -1803,6 +1811,38 @@ test('#581 the old Extend route redirects', () => {
   assert.match(r.renderPage('experiments', asOwner), /data-testid="page-experiments"/);
 });
 
+test('#585 a grouped page\'s header draws its group\'s tabs with the counts their rows had; the sidebar has one Needs you badge', () => {
+  const issues = r.renderAt('/work/issues', asOwner, 'Issues');
+  assert.deepEqual([...issues.matchAll(/<a href="([^"]+)"[^>]*data-testid="(tab-[a-z]+)"/g)].map((m) => `${m[2]} ${m[1]}`), ['tab-board /', 'tab-issues /work/issues', 'tab-intake /work/intake', 'tab-prs /work/prs']);
+  assert.match(issues, /<nav[^>]*aria-label="Work"[^>]*data-testid="group-tabs"/);
+  assert.match(issues, /aria-current="page"[^>]*data-testid="tab-issues"/);
+  assert.equal([...issues.matchAll(/aria-current="page"/g)].length, 1, 'one tab is the page shown');
+  // An issue's own page is on the Issues tab.
+  assert.match(r.renderAt('/work/issues/3', asOwner), /aria-current="page"[^>]*data-testid="tab-issues"/);
+  // The tab carries the count its sidebar row had.
+  const c = r.navCounts(asOwner);
+  assert.ok(c['/work/issues']! > 0, 'the demo has open issues');
+  assert.match(issues, new RegExp(`data-testid="tab-issues"[^>]*>Issues<span[^>]*>${c['/work/issues']}</span>`));
+  // The Setup console is a tab under Settings.
+  assert.match(r.renderAt('/settings', asOwner), /<a href="\/settings\/setup"[^>]*data-testid="tab-setup"[^>]*>Setup console</);
+  // A page outside a group has no tab row; nor does any page in setup mode.
+  for (const p of ['/overview', '/extend', '/experiments', '/runs/r-1', '/first-run']) assert.doesNotMatch(r.renderAt(p, asOwner), /group-tabs/, p);
+  assert.doesNotMatch(r.renderAt('/work/issues', { ...asOwner, setupMode: true } as never), /group-tabs/);
+  // The sidebar: one Needs you row with its one badge, and no row of its own for the Inbox or Decisions.
+  const g = globalThis as Record<string, unknown>;
+  const stub = g.window;
+  delete g.window;
+  let drawer: string;
+  try {
+    drawer = r.renderNavDrawer(asOwner);
+  } finally {
+    g.window = stub;
+  }
+  assert.ok(c['nav-needs-you']! > 0, 'the demo has open decisions');
+  assert.match(drawer, new RegExp(`<a href="/needs-you/inbox"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
+  assert.doesNotMatch(drawer, /data-testid="nav-(inbox|decisions|waiting)"/);
+});
+
 test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {
   // App.tsx's module body preloads the page for window.location when there is a window, through redirectFor. Loaded
   // with a window (as a browser loads it), every module it uses must be ready by then: CI's real Chrome caught
@@ -2532,6 +2572,27 @@ test('learnings: each cause with its sightings and stages; Promote only for an o
   const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
   assert.doesNotMatch(writer, /learning-promote/);
   assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
+});
+
+test("delegation summary: each category's record, time to approve and who approved, every approver's history, and the suggestions; protected ones say never suggested", async () => {
+  const { delegationView } = await import('../src/delegation.js');
+  const ev = (type: string, payload: object) => ({ ts: '2026-10-12T10:00:00.000Z', type, payload });
+  const held = (pr: number, categories: string[], by: string, role: string, waitMs: number) => ev('delegation.observed', { pr, issue: pr + 100, categories, unchanged: true, held: true, approved_by: by, approver_role: role, wait_ms: waitMs });
+  const review = { levels: { L3_human: { when: ['migration'] } }, merge: { wait_categories: ['copy', 'agent-instructions'], loosened: [] } };
+  const view = delegationView(
+    [held(1, ['copy'], 'example-owner', 'owner', 3_600_000), held(2, ['copy', 'agent-instructions'], 'example-collaborator', 'writer', 1_800_000), ev('delegation.suggested', { category: 'copy', direction: 'loosen', decision: 'd-1', receipts: ['r'] })],
+    review,
+  );
+  const html = r.renderDelegation({ enabled: true, minClean: 2, ...view });
+  assert.match(html, /data-testid="delegation-state">suggest-only</);
+  assert.match(html, /data-category="agent-instructions"[\s\S]*?Never suggested/);
+  assert.match(html, /data-category="copy"[\s\S]*?Waits for you[\s\S]*?2 PRs since the last answer: 2 approved unchanged, 0 changed[\s\S]*?2 waited for a person; time to approve: median 45m \(fastest 30m, slowest 1h 0m\)[\s\S]*?approved by @example-collaborator \(writer\) 1 of 1 unchanged, @example-owner \(owner\) 1 of 1 unchanged/);
+  assert.match(html, /data-testid="delegation-approver" data-by="example-collaborator"[\s\S]*?@example-collaborator \(writer\)<\/span>: 1 approved, 1 unchanged · median 30m to approve · agent-instructions, copy/);
+  assert.match(html, /data-testid="delegation-suggestion" data-answer=""[\s\S]*?Stop waiting on[\s\S]*?copy[\s\S]*?href="\/decisions\/d-1"[^>]*>waiting for your answer/);
+  const off = r.renderDelegation({ enabled: false, minClean: null, categories: [], approvers: [], suggestions: [] });
+  assert.match(off, /data-testid="delegation-state">off</);
+  assert.match(off, /Suggestions are off for this instance/);
+  assert.match(off, /data-testid="delegation-empty"/);
 });
 
 test('Tailscale and HTTPS: a machine owner sees the state, the four steps with what each changes and its script, and the login link only while up waits; anyone else nothing', () => {
