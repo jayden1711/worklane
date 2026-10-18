@@ -15,7 +15,7 @@ import { InstanceSettings } from '../src/instance.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { healthView } from '../src/health.js';
-import { baseUrlProblem, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostRefusal, providerHostsAtStart, providerHostsHealth, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
+import { baseUrlProblem, ENTRY_REFUSALS, type EntryRefusal, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostEntry, providerHostRefusal, providerHostsAtStart, providerHostsHealth, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
 import { PROVIDER_GATE_FILE } from '../src/providers.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
 import { allowProviderHosts, asPerson, exampleProject, exampleRoles } from './helpers.js';
@@ -292,8 +292,25 @@ test("the health view carries the line, read from root's file now against the in
   }
 });
 
-/** Entries root might mistype with a credential in them: each must refuse the file without the credential in the refusal. */
-const SECRET_ENTRIES = ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', '*.h?token=s3cret', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', `s3cret${'a'.repeat(300)}`];
+/**
+ * Entries root might mistype with a credential in them: each must refuse the file without the credential in the refusal.
+ * The last five pass the host[:port] shape and are refused only when WHATWG URL decodes them to a user, query or a
+ * forbidden code point: percent-encoded, fullwidth (U+FF1A, U+FF20), small (U+FE6B) and a NUL (round 3 of #675).
+ */
+const SECRET_ENTRIES = [
+  'alice:s3cret@api.example.com',
+  'https://alice:s3cret@h/',
+  '*.h?token=s3cret',
+  'api.example.com?key=s3cret',
+  'api.example.com#s3cret',
+  'api.example.com/s3cret',
+  `s3cret${'a'.repeat(300)}`,
+  'alice%3As3cret%40api.example.com',
+  'api.example.com%3Fkey%3Ds3cret',
+  'alice：s3cret＠api.example.com',
+  'alice﹫s3cret.example.com',
+  'api.example.com\u0000s3cret',
+];
 
 test('a refused entry is named by its position, never quoted while it could hold a credential: not in the refusal, nor at start', { skip: !posix && 'root-owned files are POSIX' }, () => {
   const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
@@ -308,8 +325,49 @@ test('a refused entry is named by its position, never quoted while it could hold
   const key = readProviderHosts(hostsFile({ hosts: ['ok.example.com'], 'https://alice:s3cret@h/': true }), { ownerUid: me });
   assert.match(key.error!, /an unknown key, not shown/);
   assert.doesNotMatch(key.error!, /s3cret/);
-  // Once an entry is host[:port] it can't hold a user, query or fragment: it is quoted, to say what to write instead.
-  assert.match(readProviderHosts(hostsFile({ hosts: ['API.example.com'] }), { ownerUid: me }).error!, /hosts entry 1 \("API\.example\.com"\) must be written as a URL normalises it: "api\.example\.com"/);
+  // Only the host WHATWG URL parsed from an entry is shown, to say what to write instead; never the entry as written.
+  assert.match(readProviderHosts(hostsFile({ hosts: ['API.example.com'] }), { ownerUid: me }).error!, /: hosts entry 1 must be written as a URL normalises it: "api\.example\.com"; no provider host/);
+});
+
+/** Entries that reach each way an entry is refused, most with a credential-like marker; typed so a new way needs entries here. */
+const BY_REFUSAL: Record<EntryRefusal, unknown[]> = {
+  'not-a-string': ['', 7, null, ['s3cret'], { user: 's3cret' }],
+  'too-long': [`s3cret${'a'.repeat(300)}`, `alice:s3cret@${'a'.repeat(250)}`],
+  wildcard: ['*.h?token=s3cret', 'alice:s3cret@*.example.com'],
+  'not-host-port': ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', '[alice:s3cret@::1]', 'api.example.com:8080@s3cret', 'api.example.com\u0000@s3cret'],
+  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret'],
+  'not-normalised': ['S3CRET.example.com', 'ｓ３ｃｒｅｔ.example.com', '%73%33cret.example.com', 'API.Example.COM:8443', '127.1'],
+  'bad-port': ['s3cret.example.com:0', 's3cret.example.com:080', 'api.example.com:99999', '[::1]:65536'],
+};
+
+test('every way an entry is refused shows no part of the entry: only its position and, at most, the host URL parsed from it', { skip: !posix && 'root-owned files are POSIX' }, () => {
+  assert.deepEqual(Object.keys(BY_REFUSAL).sort(), [...ENTRY_REFUSALS].sort(), 'an entry for every way');
+  const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  for (const why of ENTRY_REFUSALS) {
+    const texts = new Set<string>();
+    for (const entry of BY_REFUSAL[why]) {
+      const e = providerHostEntry(entry);
+      assert.ok('refused' in e && e.refused === why, `${JSON.stringify(entry)} is refused as ${why}: ${JSON.stringify(e)}`);
+      // The one thing a refusal may show is the host WHATWG URL parses from the entry, worked out here independently.
+      if (e.host !== null) assert.equal(e.host, new URL(`https://${String(entry).replace(/:\d+$/, '')}/`).hostname, `${why}: ${JSON.stringify(entry)}`);
+      const f = hostsFile({ hosts: ['ok.example.com', entry] });
+      const r = readProviderHosts(f, { ownerUid: me });
+      assert.equal(r.state, 'refused');
+      assert.match(r.error!, /: hosts entry 2\b/, `${why}: ${JSON.stringify(entry)}`);
+      const health = providerHostsHealth(agents, r)!;
+      // Every place the refusal goes: the file's error, the start-up lines, the coordinator's and runner's reason, the Health line.
+      const outputs = [r.error!, ...providerHostsAtStart(agents, r), providerHostRefusal(GLM.base_url, r)!, health.error!, ...health.refused.map((x) => x.reason)];
+      // With the parsed host taken out, nothing of the entry is left: not the marker, nor the entry itself.
+      const hide = (out: string) => (e.host === null ? out : out.split(JSON.stringify(e.host)).join('"<host>"'));
+      for (const out of outputs) {
+        assert.doesNotMatch(hide(out), /s3cret/i, `${why}: ${JSON.stringify(entry)} -> ${out}`);
+        if (typeof entry === 'string' && entry) assert.ok(!hide(out).includes(entry), `${why}: ${JSON.stringify(entry)} -> ${out}`);
+      }
+      texts.add(hide(r.error!.slice(f.length)));
+    }
+    // One fixed text per way, whatever the entry: nothing in it comes from what root wrote.
+    assert.equal(texts.size, 1, `${why}: ${[...texts].join(' | ')}`);
+  }
 });
 
 test("GET /api/health: a writer is never sent a credential from a mistyped entry in root's file", { skip: !posix && 'root-owned files are POSIX' }, async () => {
