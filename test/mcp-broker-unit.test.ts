@@ -2,12 +2,10 @@
 // server it starts see the cgroup tree read-only. Not ProtectKernelTunables: with it the broker's servers didn't start
 // on real systemd (ci-slow run 39093672334); /proc/sys stays unwritable to them by the kernel's permissions alone. The
 // proof is real systemd's (ci-slow.yml runs scripts/ci/mcp-broker-kernel.sh in the add-project job). These tests hold
-// the unit, that CI step, and the fixture server it runs.
+// the unit, that CI step and its checks; they read the fixture server it runs, and never run it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
 
@@ -61,23 +59,50 @@ test('ci-slow proves it on real systemd: the probe runs after the MCP broker ste
   assert.deepEqual(mcp.mcpServers.kernel?.args, ['${CLAUDE_PLUGIN_ROOT}/server.js', 'kernel']);
 });
 
-const unprivileged = process.platform === 'linux' && process.getuid?.() !== 0 && existsSync('/sys/fs/cgroup/cgroup.procs');
+// WHY: never run the escape fixture here. It writes at load, outside any sandbox: its default mode into every home, and
+// its kernel mode into the cgroup tree (a delegated cgroup takes the child it makes) and the root cgroup.procs. A
+// fixture that doesn't know "kernel" (main's, in a fail-without run) falls into the default mode. ci-slow's probe runs it
+// inside the broker's sandbox, the only place it may run; here the probe's own checks get its words, as data.
 
-test("the escape fixture's kernel server tries the sysctls and the cgroup tree and reports each try (denied here: not root)", { skip: !unprivileged && 'Linux with cgroup v2, not as root' }, () => {
-  // A copy outside the repo: the fixture is CommonJS, as it is in the plugin store, and the repo's package.json is a module.
-  const dir = mkdtempSync(join(tmpdir(), 'escape-kernel-'));
-  copyFileSync(join(repoRoot, 'test', 'fixtures', 'plugins', 'escape', 'server.js'), join(dir, 'server.js'));
-  const input = ['{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25"}}', '{"jsonrpc":"2.0","id":2,"method":"tools/list"}', ''].join('\n');
-  const r = spawnSync(process.execPath, ['server.js', 'kernel'], { cwd: dir, input, encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' });
-  const list = r.stdout.split('\n').filter(Boolean).map((l) => JSON.parse(l) as { id: number; result?: { tools?: { description: string }[] } }).find((m) => m.id === 2);
-  assert.ok(list?.result?.tools, `tools/list answered: ${r.stdout}${r.stderr}`);
-  const tries = list.result.tools[0]!.description.split(' ');
-  assert.equal(tries.length, 6, tries.join('\n'));
-  assert.match(tries[0]!, /^\/proc\/sys\/kernel\/domainname=denied\(E[A-Z]+\)$/);
-  assert.match(tries[1]!, /^\/proc\/sys\/vm\/swappiness=denied\(E[A-Z]+\)$/);
-  assert.match(tries[2]!, /^\/sys\/fs\/cgroup\/.*\/escaped=denied\(E[A-Z]+\)$/);
-  assert.match(tries[3]!, /^\/sys\/fs\/cgroup\/cgroup\.procs=denied\(E[A-Z]+\)$/);
-  // How each is mounted here (this host's, not a sandbox's): reported, whatever it is.
-  assert.match(tries[4]!, /^\/proc\/sys:mount=(ro|rw|none)$/);
-  assert.match(tries[5]!, /^\/sys\/fs\/cgroup:mount=(ro|rw|none)$/);
+/** The probe's verdict on a kernel server's description, as mcp-broker-kernel.sh reaches it: its patterns, read from it. */
+function probeAccepts(description: string): boolean {
+  const sh = read('scripts', 'ci', 'mcp-broker-kernel.sh');
+  const loop = /^for t in ((?:'[^']*' ?)+); do$/m.exec(sh);
+  assert.ok(loop, "the probe's pattern loop");
+  const patterns = [...loop[1]!.matchAll(/'([^']*)'/g)].map((m) => new RegExp(`^${m[1]}`));
+  assert.ok(sh.includes(`if echo "$tries" | grep -q 'WROTE'; then`), "the probe's WROTE check");
+  const lines = description.split(' ');
+  return patterns.every((re) => lines.some((l) => re.test(l))) && !description.includes('WROTE');
+}
+
+// The kernel server's description in ci-slow run 39097410636 (real systemd, inside the broker's sandbox), word for word.
+const cgroup = `/sys/fs/cgroup/system.slice/system-worklane\\x2dmcp.slice/${['worklane-mcp', 'ci.service'].join('@')}`;
+const ci = [
+  '/proc/sys/kernel/domainname=denied(EACCES)',
+  '/proc/sys/vm/swappiness=denied(EACCES)',
+  `${cgroup}/escaped=denied(EROFS)`,
+  '/sys/fs/cgroup/cgroup.procs=denied(EROFS)',
+  '/proc/sys:mount=none',
+  '/sys/fs/cgroup:mount=ro',
+].join(' ');
+
+test("the probe accepts the kernel server's real-systemd report, and refuses one where any try landed or the cgroup tree is writable", () => {
+  assert.equal(probeAccepts(ci), true);
+  for (const [from, to] of [
+    ['/proc/sys/kernel/domainname=denied(EACCES)', '/proc/sys/kernel/domainname=WROTE'],
+    ['/proc/sys/vm/swappiness=denied(EACCES)', '/proc/sys/vm/swappiness=WROTE'],
+    [`${cgroup}/escaped=denied(EROFS)`, `${cgroup}/escaped=WROTE`],
+    ['/sys/fs/cgroup/cgroup.procs=denied(EROFS)', '/sys/fs/cgroup/cgroup.procs=WROTE'],
+    ['/sys/fs/cgroup:mount=ro', '/sys/fs/cgroup:mount=rw'],
+    ['/sys/fs/cgroup:mount=ro', '/sys/fs/cgroup:mount=none'],
+    ['/proc/sys/vm/swappiness=denied(EACCES) ', ''],
+  ]) {
+    assert.ok(ci.includes(from!), from);
+    assert.equal(probeAccepts(ci.replace(from!, to!)), false, `${from} -> ${to}`);
+  }
+  // The fixture's kernel mode makes exactly these tries (its source, read, never run).
+  const server = read('test', 'fixtures', 'plugins', 'escape', 'server.js');
+  for (const s of ["'/proc/sys/kernel/domainname', '/proc/sys/vm/swappiness'", "path.join('/sys/fs/cgroup', own, 'escaped')", "attempt('/sys/fs/cgroup/cgroup.procs'", "for (const m of ['/proc/sys', '/sys/fs/cgroup'])"]) {
+    assert.ok(server.includes(s), `fixture: ${s}`);
+  }
 });
