@@ -239,7 +239,7 @@ export class ExperimentLoop {
     const j = judgeStage2(st.entries, c, planOf(s), flagged);
     const finite = (x: number) => (Number.isFinite(x) ? x : null);
     this.h.emit('experiment.judged', { study: s.id, version: pin.version, n, decision: j.decision as EventPayload<'experiment.judged'>['decision'], why: j.why.slice(0, 500), stage2: { ...j.stage2, meanCandidate: finite(j.stage2.meanCandidate), meanBest: finite(j.stage2.meanBest), spread: finite(j.stage2.spread) }, ...(j.value !== undefined ? { value: j.value } : {}), ...(j.after ? { after: j.after } : {}) });
-    if (j.decision === 'held') this.h.notify(`${s.id}#${n}`, `experiment ${s.id}: result #${n} is held for your review (${flagged ? 'the tampering monitor flagged its session' : 'it beats the best by more than the anomaly margin'}). Review it on Extend -> Experiments -> ${s.id}.`);
+    if (j.decision === 'held') this.h.notify(`${s.id}#${n}`, `experiment ${s.id}: result #${n} is held for your review (${flagged ? 'the tampering monitor flagged its session' : 'it beats the best by more than the anomaly margin'}). Review it on Experiments -> ${s.id}.`);
   }
 
   /** The next job: the baseline, a seed, or one agent session's candidate. Ends with one proposal or one refusal. */
@@ -301,7 +301,7 @@ export class ExperimentLoop {
     const flagged = !ok || out.flagged === true;
     const findings = ok ? (Array.isArray(out.findings) ? out.findings.map((f) => redactString(String(f)).slice(0, 300)).slice(0, 10) : []) : [`the monitor didn't answer (${r.reason}): held for review`];
     this.h.emit('experiment.monitor', { study: s.id, version: pin.version, session, n, flagged, findings, cost_usd: r.costUsd });
-    if (flagged) this.h.notify(`${s.id}#${n}`, `experiment ${s.id}: the tampering monitor flagged session #${n}; its job waits for your review on Extend -> Experiments -> ${s.id}.`);
+    if (flagged) this.h.notify(`${s.id}#${n}`, `experiment ${s.id}: the tampering monitor flagged session #${n}; its job waits for your review on Experiments -> ${s.id}.`);
     return flagged;
   }
 

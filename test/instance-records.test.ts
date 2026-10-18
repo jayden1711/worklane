@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
@@ -414,48 +414,60 @@ test("a rename keeps the old instance home's directories but state/: archived wh
   for (const f of [tarf, list]) assert.equal(statSync(f).mode & 0o777, 0o600, f);
 });
 
-test("orphaned files are given to root:root only in the engine's own places, a link itself and never its target, nothing outside followed into; a refused chown is listed", { skip: !posix && 'bash, find' }, () => {
+test("orphaned files are given to root:root only in the engine's own places, a link itself and never its target, nothing outside followed into; a refused chown is listed", { skip: (!posix && 'bash, find') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
   const root = mkdtempSync(join(tmpdir(), 'rechown-'));
-  const mk = (p: string, data = 'x') => {
+  const mk = (p: string, mode = 0o664) => {
     mkdirSync(dirname(join(root, p)), { recursive: true });
-    writeFileSync(join(root, p), data);
+    writeFileSync(join(root, p), 'x');
+    chmodSync(join(root, p), mode);
   };
-  mk('engine/agent-slots/incidents.json');
-  mk('engine/agent-slots/sub/keep.json');
-  mk('outside/target.conf');
-  mk('outside/dir/inner.txt');
+  mk('engine/agent-slots/incidents.json', 0o660);
+  mk('engine/agent-slots/suid-tool', 0o6755);
+  mk('outside/target.conf', 0o6775);
+  mk('outside/dir/inner.txt', 0o6775);
   mk('locks/worklane-full-run.lock');
   mk('locks/other-tool.lock');
-  mk('engine/agent-slots/suid-tool');
   // Planted links under an engine path: one at a file outside, one at a directory outside.
   spawnSync('ln', ['-s', join(root, 'outside/target.conf'), join(root, 'engine/agent-slots/link-to-file')]);
   spawnSync('ln', ['-s', join(root, 'outside/dir'), join(root, 'engine/agent-slots/link-to-dir')]);
-  const calls = join(root, 'calls');
   const uid = String(process.getuid!());
-  // chown and stat stood in for (a test isn't root): each call recorded, and one path refused.
-  const chmods = join(root, 'chmods');
-  // stat: 6755 for the planted setuid file until chmod strips it, else 640.
-  const stubs = `chown() { printf '%s\\n' "$*" >> "${calls}"; case "$*" in *keep.json*) echo "Operation not permitted" >&2; return 1 ;; esac; }; chmod() { printf '%s\\n' "$*" >> "${chmods}"; case "$*" in *suid-tool*) : > "${root}/stripped" ;; esac; }; stat() { case "$*" in *%g*) case "$*" in *incidents.json*) echo 50 ;; *) echo 4242 ;; esac ;; *%U:%G*) case "$*" in *incidents.json*) echo root:agent-slots ;; *) echo root:root ;; esac ;; *suid-tool*) if [ -e "${root}/stripped" ]; then echo 755; else echo 6755; fi ;; *) echo 640 ;; esac; }`;
-  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242,4243 ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), `${join(root, 'engine')}:${join(root, 'missing')}`, join(root, 'locks')], { encoding: 'utf8' });
-  assert.equal(r.status, 1, 'a refused chown fails the step');
-  const made = readFileSync(calls, 'utf8').trim().split('\n');
-  for (const c of made) assert.match(c, /^-h root(:root)? -- /, `every chown is -h, to root: ${c}`);
-  // The group goes to root only when it was the instance's (4242): the slot directory's agent-slots group (50) stays.
-  assert.ok(made.some((c) => c === `-h root -- ${join(root, 'engine/agent-slots/incidents.json')}`), 'a shared file keeps its group');
-  assert.ok(made.some((c) => c === `-h root:root -- ${join(root, 'engine/agent-slots/suid-tool')}`), "the instance's group goes to root");
-  const paths = made.map((c) => c.replace(/^-h root(:root)? -- /, '')).sort();
+  const gid = String(process.getgid!());
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const mode = (p: string) => (statSync(join(root, p)).mode & 0o7777).toString(8);
+  // Real files and modes (a test isn't root): "root" is this user, and its own group plays agent-slots (no gid of the
+  // instance's, 4242 and 4243).
+  const run = (gids: string, rootIds: string, list: string) =>
+    spawnSync('bash', ['-c', `source "$1"; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' "$5" ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, list), `${join(root, 'engine')}:${join(root, 'missing')}`, join(root, 'locks'), gids], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: rootIds } });
+  const r = run('4242,4243', `${uid}:${gid}`, 'list');
+  assert.equal(r.status, 0, r.stderr);
+  const list = readFileSync(join(root, 'list'), 'utf8');
+  const paths = list.trim().split('\n').map((l) => l.replace(/^\S+ \d+ -> \d+ /, '').replace(/ \(g\+w kept: .*\)$/, ''));
   assert.ok(paths.includes(join(root, 'engine/agent-slots/link-to-file')), 'the link itself');
   assert.ok(paths.includes(join(root, 'locks/worklane-full-run.lock')), "the engine's lock file");
   assert.ok(!paths.some((p) => p.startsWith(join(root, 'outside'))), `nothing outside, never through a link: ${paths.join(' ')}`);
   assert.ok(!paths.some((p) => p.includes('link-to-dir/')), 'never into a linked directory');
   assert.ok(!paths.includes(join(root, 'locks/other-tool.lock')), "another program's lock in the shared directory is left alone");
-  const list = readFileSync(join(root, 'list'), 'utf8');
-  assert.match(list, new RegExp(`^root:agent-slots 640 -> 640 ${join(root, 'engine/agent-slots/incidents.json').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'));
-  assert.ok(list.includes(`root:root 6755 -> 755 ${join(root, 'engine/agent-slots/suid-tool')}`), 'setuid and setgid stripped, the old mode listed');
-  const cm = readFileSync(chmods, 'utf8').trim().split('\n');
-  for (const c of cm) assert.match(c, /^u-s,g-s -- /, c);
-  assert.ok(!cm.some((c) => c.includes('link-to')), 'never chmod through a link');
-  assert.match(list, /^FAILED .*keep\.json: Operation not permitted$/m, 'a refused chown is listed, not hidden');
+  assert.equal(mode('outside/target.conf'), '6775', "a link's target keeps its mode");
+  assert.equal(mode('outside/dir/inner.txt'), '6775');
+  // In the shared group: group write off too; setuid and setgid off, the old mode listed.
+  assert.match(list, new RegExp(`^\\S+ 660 -> 640 ${esc(join(root, 'engine/agent-slots/incidents.json'))}$`, 'm'));
+  assert.match(list, new RegExp(`^\\S+ 6755 -> 755 ${esc(join(root, 'engine/agent-slots/suid-tool'))}$`, 'm'), 'setuid and setgid stripped, the old mode listed');
+  assert.equal(mode('engine/agent-slots/suid-tool'), '755');
+
+  // A refused change (here: a group this user isn't in) is listed, not hidden, and fails the step.
+  mk('engine/agent-slots/own.json', 0o660);
+  const f = run(gid, `${uid}:0`, 'list-failed');
+  assert.equal(f.status, 1, 'a refused chown fails the step');
+  assert.match(readFileSync(join(root, 'list-failed'), 'utf8'), new RegExp(`^FAILED ${esc(join(root, 'engine/agent-slots/own.json'))}: EPERM `, 'm'), 'a refused chown is listed, not hidden');
+  assert.equal(mode('engine/agent-slots/own.json'), '660', 'nothing changed on a refused chown');
+  // The instance's group goes to "root" (another group of this user's, where it has one): its mode kept otherwise.
+  const other = process.getgroups?.().find((g) => String(g) !== gid && g !== 0);
+  if (other !== undefined) {
+    const o = run(gid, `${uid}:${other}`, 'list-own');
+    assert.equal(o.status, 0, o.stderr);
+    assert.equal(String(statSync(join(root, 'engine/agent-slots/own.json')).gid), String(other), "the instance's group goes to root");
+    assert.equal(mode('engine/agent-slots/own.json'), '660');
+  }
 
   // What they own outside the engine's places is listed (read-only), the removed home pruned.
   mk('home/wl-x/secret');
@@ -464,6 +476,112 @@ test("orphaned files are given to root:root only in the engine's own places, a l
   const listed = readFileSync(join(root, 'left'), 'utf8').trim().split('\n');
   assert.ok(listed.includes(join(root, 'outside/target.conf')), listed.join(' '));
   assert.ok(!listed.some((p) => p.startsWith(join(root, 'outside/dir'))), 'a skipped path is pruned');
+});
+
+test("a link renamed over a removed user's file mid-walk (by another agent-slots member) is never followed: what it points at keeps its owner and mode", { skip: !posix && 'bash, find, POSIX modes' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-swap-'));
+  const slots = join(root, 'engine/agent-slots');
+  mkdirSync(slots, { recursive: true });
+  mkdirSync(join(root, 'outside'), { recursive: true });
+  for (const f of ['a.json', 'b.json', 'outside-a', 'outside-b']) {
+    const p = f.startsWith('outside') ? join(root, 'outside', f) : join(slots, f);
+    writeFileSync(p, '{}');
+    chmodSync(p, f.startsWith('outside') ? 0o6770 : 0o660);
+  }
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  // The swap, as another coordinator could make it in the 2770 slot directory (no sticky bit): a link at a file
+  // outside, renamed over the file. a.json: right before any chmod of it (between a type check and the change);
+  // b.json: right after the walk listed it.
+  const swap = (f: string, to: string) => `ln -sfn "${join(root, 'outside', to)}" "${join(slots, '.l')}" && mv -fT "${join(slots, '.l')}" "${join(slots, f)}"`;
+  const stubs = [
+    'chown() { :; }',
+    `chmod() { case "$*" in *a.json*) [ -L "${join(slots, 'a.json')}" ] || ${swap('a.json', 'outside-a')} ;; esac; command chmod "$@"; }`,
+    `find() { command find "$@"; [ -L "${join(slots, 'b.json')}" ] || ${swap('b.json', 'outside-b')}; }`,
+  ].join('\n');
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242 ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), join(root, 'engine'), join(root, 'locks')], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  for (const f of ['outside-a', 'outside-b']) assert.equal((statSync(join(root, 'outside', f)).mode & 0o7777).toString(8), '6770', `${f}: never changed through the link (${r.stdout}${r.stderr})`);
+});
+
+test("a removed user's file whose name is not UTF-8 (or inside such a directory) is re-owned like any other, listed by its own bytes", { skip: (!posix && 'bash, find, POSIX modes') || (process.platform === 'darwin' && 'APFS refuses non-UTF-8 names') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-bytes-'));
+  const slots = Buffer.from(join(root, 'engine/agent-slots'));
+  const bad = Buffer.concat([slots, Buffer.from('/bad'), Buffer.from([0xff]), Buffer.from('.lock')]);
+  const badDir = Buffer.concat([slots, Buffer.from('/dir'), Buffer.from([0xff])]);
+  const inner = Buffer.concat([badDir, Buffer.from('/inner.json')]);
+  mkdirSync(badDir, { recursive: true });
+  for (const p of [bad, inner]) {
+    writeFileSync(p, '{}');
+    chmodSync(p, 0o660);
+  }
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  const r = spawnSync('bash', ['-c', `source "$1"; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242 ${uid}`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), join(root, 'engine'), join(root, 'locks')], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  assert.equal(r.status, 0, r.stderr);
+  const list = readFileSync(join(root, 'list'));
+  for (const p of [bad, inner]) {
+    assert.equal((statSync(p).mode & 0o7777).toString(8), '640', `${p.toString('latin1')}: changed, not skipped`);
+    assert.ok(list.includes(Buffer.concat([Buffer.from(' 660 -> 640 '), p, Buffer.from('\n')])), `${p.toString('latin1')}: listed by its own bytes: ${list.toString('latin1')}`);
+  }
+});
+
+test("a file a removed user still owns after the walk fails the step, listed", { skip: (!posix && 'bash, find') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'rechown-after-'));
+  mkdirSync(join(root, 'engine/agent-slots'), { recursive: true });
+  writeFileSync(join(root, 'engine/agent-slots/ok.json'), '{}');
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  // uid 4244 stands for a removed user the change missed: the second walk (after the change) still finds its file.
+  const left = join(root, 'engine/agent-slots/missed.json');
+  const n = join(root, 'n');
+  const stub = `find() { command find "$@"; case "$*" in *"-uid 4244"*) echo x >> "${n}"; [ "$(wc -l < "${n}")" -lt 2 ] || printf '%s\\0' "${left}" ;; esac; }`;
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stub}; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' 4242 ${uid} 4244`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), join(root, 'list'), join(root, 'engine'), join(root, 'locks')], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  assert.equal(r.status, 1, 'a file still theirs fails the step');
+  assert.match(readFileSync(join(root, 'list'), 'utf8'), new RegExp(`^FAILED ${left.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: still a removed user's after the change$`, 'm'));
+});
+
+test("in a shared engine group, a removed instance's regular file loses group write; a directory keeps it, listed with why; its own group's files and a link's target are left as they were", { skip: (!posix && 'bash, find, POSIX modes') || (process.getgid?.() === 0 && 'group root plays no shared group') }, () => {
+  // Real files, modes and stat; only chown stood in for (a test isn't root). This user's own group plays the shared
+  // engine group (agent-slots): it is not among the removed instance's gids (4242) and not root.
+  const root = mkdtempSync(join(tmpdir(), 'rechown-gw-'));
+  const slots = join(root, 'engine/agent-slots');
+  mkdirSync(join(slots, 'shared-dir'), { recursive: true });
+  mkdirSync(join(root, 'outside'), { recursive: true });
+  const mk = (p: string, mode: number) => {
+    writeFileSync(join(root, p), '{}');
+    chmodSync(join(root, p), mode);
+  };
+  mk('engine/agent-slots/agent-7.lock', 0o660);
+  mk('engine/agent-slots/incidents.json', 0o660);
+  mk('engine/agent-slots/read-only.json', 0o640);
+  mk('outside/target', 0o660);
+  chmodSync(join(slots, 'shared-dir'), 0o2770);
+  spawnSync('ln', ['-s', join(root, 'outside/target'), join(slots, 'link')]);
+  const uid = String(process.getuid!());
+  const gid = String(process.getgid!());
+  const lib = join(repoRoot, 'scripts', 'setup', 'lib.sh');
+  const run = (gids: string, list: string) =>
+    spawnSync('bash', ['-c', `source "$1"; chown() { :; }; rechown_orphans "$2" "$3" "$4" 'worklane-*.lock' "$5" ${uid}`, '_', lib, list, join(root, 'engine'), join(root, 'locks'), gids], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_ROOT_IDS: `${uid}:${gid}` } });
+  const mode = (p: string) => (statSync(join(root, p)).mode & 0o7777).toString(8);
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const r = run('4242', join(root, 'list'));
+  assert.equal(r.status, 0, r.stderr);
+  const list = readFileSync(join(root, 'list'), 'utf8');
+  for (const f of ['agent-7.lock', 'incidents.json']) {
+    assert.equal(mode(`engine/agent-slots/${f}`), '640', `${f}: group write off`);
+    assert.match(list, new RegExp(`^\\S+ 660 -> 640 ${esc(join(slots, f))}$`, 'm'), `${f}: listed with its old and new mode`);
+  }
+  assert.equal(mode('engine/agent-slots/read-only.json'), '640');
+  assert.equal(mode('engine/agent-slots/shared-dir'), '2770', 'a directory keeps group write: the group adds and replaces files in it');
+  assert.match(list, new RegExp(`^\\S+ 2770 -> 2770 ${esc(join(slots, 'shared-dir'))} \\(g\\+w kept: .+\\)$`, 'm'), 'a kept group write is listed with why');
+  assert.equal(mode('outside/target'), '660', "a link's target is never changed");
+
+  // The instance's own group (it goes to root): not a shared group, so its mode is kept as it was.
+  mk('engine/agent-slots/own.json', 0o660);
+  const own = run(`4242,${gid}`, join(root, 'list2'));
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(mode('engine/agent-slots/own.json'), '660');
 });
 
 // --- no process of the removed users left before userdel and the walk; the updater held off meanwhile

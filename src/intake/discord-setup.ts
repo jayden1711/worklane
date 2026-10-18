@@ -28,6 +28,10 @@ import { instanceUnit } from '../service.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import type { BotApplication, ChannelRow } from './discord-channels.js';
 import { IntakeConfig, intakeWarnings } from './report.js';
+import { lineDiff } from '../line-diff.js';
+
+// Moved to a leaf module (src/line-diff.ts); still exported here for source-setup and the tests.
+export { lineDiff };
 
 export class DiscordSetupError extends Error {
   constructor(
@@ -371,34 +375,6 @@ export function applyIntake(o: { path: string; values: Record<string, unknown>; 
   const check = loadIntakeConfig(o.path);
   if (!check || 'error' in check) throw new DiscordSetupError(`${INTAKE_FILE} was written, but it does not load: ${check ? check.error : 'it is missing'}`, 409);
   return plan;
-}
-
-/** A unified diff of two texts by line, three lines of context; `before` null is a file that doesn't exist yet. */
-export function lineDiff(before: string | null, after: string, name: string): string {
-  const lines = (t: string) => (t === '' ? [] : t.replace(/\n$/, '').split('\n'));
-  const a = lines(before ?? '');
-  const b = lines(after);
-  // The longest common subsequence, by table (these files are a few hundred lines at most).
-  const lcs: number[][] = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
-  for (let i = a.length - 1; i >= 0; i--) for (let j = b.length - 1; j >= 0; j--) lcs[i]![j] = a[i] === b[j] ? lcs[i + 1]![j + 1]! + 1 : Math.max(lcs[i + 1]![j]!, lcs[i]![j + 1]!);
-  const ops: { op: ' ' | '-' | '+'; line: string }[] = [];
-  for (let i = 0, j = 0; i < a.length || j < b.length; ) {
-    if (i < a.length && j < b.length && a[i] === b[j]) ops.push({ op: ' ', line: a[i++]! }), j++;
-    else if (i < a.length && (j >= b.length || lcs[i + 1]![j]! >= lcs[i]![j + 1]!)) ops.push({ op: '-', line: a[i++]! });
-    else ops.push({ op: '+', line: b[j++]! });
-  }
-  const keep = new Set<number>();
-  ops.forEach((o, n) => {
-    if (o.op !== ' ') for (let k = Math.max(0, n - 3); k <= Math.min(ops.length - 1, n + 3); k++) keep.add(k);
-  });
-  const out = [before === null ? `--- (no ${name} yet)` : `--- ${name}`, `+++ ${name}`];
-  let last = -1;
-  for (const n of [...keep].sort((x, y) => x - y)) {
-    if (last >= 0 && n > last + 1) out.push('@@');
-    out.push(`${ops[n]!.op}${ops[n]!.line}`);
-    last = n;
-  }
-  return out.join('\n');
 }
 
 // --- what the step shows ---------------------------------------------------------------------------------------
