@@ -244,7 +244,8 @@ journal() { journalctl --no-pager -o cat -n 6 -u "$1" 2>/dev/null | sed 's/^/   
 runpid=""
 start_run() {
   runpid=""
-  : > "$work/runpid"
+  # WHY rm, not truncate: a root-made file is not the test user's to write, so the run could not record its pid.
+  rm -f "$work/runpid"
   systemctl stop worklane-spike-run.service >/dev/null 2>&1 || true
   systemd-run --quiet --collect --unit=worklane-spike-run --slice="$SLICE" --uid="$USER_" --gid="$USER_" \
     -p PrivateNetwork=yes -p NoNewPrivileges=yes \
