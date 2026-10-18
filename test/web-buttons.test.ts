@@ -20,6 +20,13 @@ interface Render {
   renderDecisionCard(d: unknown, sending?: string): string;
   renderMachine(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
+  renderUnderUsage(usage: unknown[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: unknown }): string;
+  renderPausedWork(usage: unknown[], current: string | null, why?: string): string;
+  renderLandsUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; configPr: unknown }): string;
+  renderVoiceBannerUnderUsage(usage: unknown[], current: string | null, view: unknown, decisions: { id: string; kind: string }[]): string;
+  approvalFor(state: unknown, issue: number): { ok: boolean; why?: string };
+  renderDecisionUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; detail: unknown }): string;
+  renderFirstTaskFiledUnderUsage(usage: unknown[], current: string | null, first: unknown, filed: { number: number; labelCreated: boolean; url: string | null }): string;
 }
 let r: Render;
 
@@ -126,6 +133,189 @@ test('a button this person can never use is not drawn; one held by the device sa
   } finally {
     d.close();
   }
+});
+
+/** The owner's words (#587): an action that starts work, while its instance is paused on the usage limit. */
+const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
+/** The owner's words (#664): an action that lands work while paused. Landing has no usage-pause check; agent runs wait. */
+const LANDS_HINT = 'lands now; only agent runs wait';
+/**
+ * The owner's words (#664): an action whose own write happens at once while paused (File it, Add ready, an intake
+ * approval: the issue or the ready label is on GitHub now); only the agent runs it leads to wait.
+ */
+const NOW_HINT = 'happens now; only agent runs wait';
+/** The actions that start work in renderUnderUsage: an automation's Run now, a study's Start. */
+const STARTS = ['automation-run', 'experiment-start'];
+/** The actions in renderUnderUsage that write to GitHub at once: File it (the issue, with ready), Add ready (the label). */
+const NOW = ['first-task-file', 'issue-ignored-add-ready'];
+const usageOf = (instance: string, paused: boolean) => ({ instance, paused: paused ? { since: '2026-10-18T09:00:00Z', resetAt: '2026-10-18T14:00:00Z', source: 'claude', kind: 'five_hour' } : null, today: { runs: 3, limitHits: paused ? 1 : 0 }, lastHit: null });
+const starters = {
+  first: { local: true, why: null, template: { label: 'ready', body: 'b' }, tests: [] },
+  ignored: { issues: [{ issue: 3, title: 'no label', url: 'https://github.com/o/r/issues/3', author: 'someone', labels: [], reasons: [{ kind: 'no-ready', text: 'no ready label', fix: 'add-ready' }] }], error: null, canFix: true, local: true },
+  automation: { id: 'nightly', name: 'Nightly', owner: 'example-owner', enabled: true, trigger: { kind: 'schedule', cron: '0 3 * * *' }, mode: 'task', template: { title: 't', outcome: 'o', done_when: [] }, budget: { per_run_usd: 1, per_day_usd: 2 }, limits: { runs_per_day: 1, cooldown_minutes: 0 }, when: 'daily at 03:00', summary: [], next: null, today: { runs: 0, spentUsd: 0 }, runs: [], refused: [], pausedBy: null, webhook: null, waiting: [] },
+  study: { id: 's1', goal: 'lower loss', kind: 'ml_train', screen: { margin: 0, seeds: 1 }, ladder: [], metric: { name: 'loss', direction: 'min', min_delta: 0 }, job: { max_minutes: 10, gpus: 1, output_gb: 1 }, budget: { gpu_hours_per_day: 1, agent_usd_per_day: 1, agent_usd_total: 1, max_jobs: 1 }, exploration: { share: 0.1, near_miss: 0 }, editable: ['train.py'], started: false, startRefused: null },
+};
+
+test('paused reason: a paused instance\'s start actions are not refused; each says it takes effect when the instance resumes', () => {
+  // The owner's decision on #587: no new refusals while paused; the action stays usable and says when it takes effect.
+  const html = r.renderUnderUsage([usageOf('example', true)], null, starters);
+  for (const id of STARTS) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.ok(b.id, `${id}'s aria-describedby names the hint: ${b.tag}`);
+    assert.equal(b.text, PAUSED_HINT, id);
+  }
+  assert.equal(html.split(PAUSED_HINT).length - 1, STARTS.length, 'only the actions that start work say it, once each');
+  // Running: nothing said, nothing held (as before).
+  const running = r.renderUnderUsage([usageOf('example', false)], null, starters);
+  for (const id of STARTS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+  assert.doesNotMatch(running, /takes effect when the instance resumes/);
+  // On a hub: the pause of the instance chosen, not of another one.
+  const hub = [usageOf('a', false), usageOf('b', true)];
+  assert.doesNotMatch(r.renderUnderUsage(hub, 'a', starters), /takes effect when the instance resumes/, 'a is running; b is paused');
+  assert.equal(described(r.renderUnderUsage(hub, 'b', starters), 'automation-run').text, PAUSED_HINT);
+});
+
+test('paused reason: File it and Add ready write to GitHub at once, so while paused each says it happens now and only agent runs wait', () => {
+  // The owner's decision on #664: the issue (filed with ready) or the ready label is written in the request
+  // (src/dashboard.ts's first-task and ready routes, no usage-pause check); only the agent picking it up waits.
+  const html = r.renderUnderUsage([usageOf('example', true)], null, starters);
+  for (const id of NOW) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.equal(b.text, NOW_HINT, `${id}'s aria-describedby names the happens-now text: ${b.tag}`);
+  }
+  assert.equal(html.split(NOW_HINT).length - 1, NOW.length, 'once per action that writes at once, and on no other');
+  // Running: nothing said, nothing held.
+  const running = r.renderUnderUsage([usageOf('example', false)], null, starters);
+  for (const id of NOW) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+  assert.doesNotMatch(running, /happens now/);
+});
+
+test("paused reason: File it's success line says agents pick the issue up when the instance resumes while paused, and within a minute while running", () => {
+  const filed = { number: 5, labelCreated: true, url: 'https://github.com/o/r/issues/5' };
+  const said = (paused: boolean) => {
+    const html = r.renderFirstTaskFiledUnderUsage([usageOf('example', paused)], null, starters.first, filed);
+    return /data-testid="first-task-result"[^>]*>([\s\S]*?)<\/p>/.exec(html)?.[1]?.replaceAll('<!-- -->', '').replace(/<[^>]+>/g, '');
+  };
+  assert.equal(said(true), 'filed as #5 (the ready label was created): agents pick it up when the instance resumes; watch it on the Board https://github.com/o/r/issues/5', 'paused: filed, and picked up on the resume');
+  assert.equal(said(false), 'filed as #5 (the ready label was created): the coordinator picks it up within a minute; watch it on the Board https://github.com/o/r/issues/5', 'running: as before');
+});
+
+test('paused reason: a land action says it lands now and only agent runs wait; a start action says it waits for the resume', () => {
+  // The owner's decision on #664: landing has no usage-pause check, so a land button must not say it waits.
+  const html = r.renderPausedWork([usageOf('example', true)], null);
+  const land = described(html, 'paused-lands');
+  assert.equal(land.disabled, false, `a land action is not refused while paused: ${land.tag}`);
+  assert.equal(land.text, LANDS_HINT, `the land action's aria-describedby names the land text: ${land.tag}`);
+  const start = described(html, 'paused-starts');
+  assert.equal(start.disabled, false, `a start action is not refused while paused: ${start.tag}`);
+  assert.equal(start.text, PAUSED_HINT, `the start action's aria-describedby names the resume text: ${start.tag}`);
+  assert.equal(html.split(LANDS_HINT).length - 1, 1, 'the land text once, on the land action only');
+  assert.equal(html.split(PAUSED_HINT).length - 1, 1, 'the resume text once, on the start action only');
+  // Running: neither says anything.
+  const running = r.renderPausedWork([usageOf('example', false)], null);
+  for (const id of ['paused-lands', 'paused-starts']) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+});
+
+/** A Board card waiting for the owner's landing approval, as src/board.ts builds it (approve only on a 'land' decision). */
+const landCard = { instance: 'example', issue: 12, title: 'Migrate', column: 'waiting', status: 'in-review', pr: null, startedAt: '2026-10-18T08:00:00Z', since: '2026-10-18T08:30:00Z', waiting: null, decision: { id: 'land-12', kind: 'land', question: 'Approve landing #12 (L3)?', options: ['approve', 'reject'], recommendation: 'approve' }, level: 'L3', highRisk: true, actions: { watch: null, steer: false, answer: false, approve: { decision: 'land-12', options: ['approve', 'reject'] } } };
+const openConfigPr = { number: 7, url: 'https://github.com/o/r/pull/7', kind: 'config', base: 'main', state: 'open', mergedBy: null, mergedAt: null, synced: false, sha: null, why: null, retry: false, command: null };
+/** The real land buttons: the Board's Approve and Approve and land (decide, then landNext), a config PR's Confirm merge (gh pr merge, at once). */
+const LANDS = ['board-approve', 'board-approve-confirm', 'config-pr-merge-confirm'];
+
+test('paused reason: the real land buttons (Board approve, config PR merge) say they land now, not that they wait', () => {
+  const html = r.renderLandsUnderUsage([usageOf('example', true)], null, { card: landCard, configPr: openConfigPr });
+  for (const id of LANDS) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.equal(b.text, LANDS_HINT, `${id}'s aria-describedby names the land text: ${b.tag}`);
+  }
+  assert.equal(html.split(LANDS_HINT).length - 1, LANDS.length, 'once per land button');
+  assert.doesNotMatch(html, /takes effect when the instance resumes/, 'no land button says it waits for the resume');
+  const running = r.renderLandsUnderUsage([usageOf('example', false)], null, { card: landCard, configPr: openConfigPr });
+  for (const id of LANDS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+});
+
+/** The option button `option` with this test id, described as `described` does (a decision draws one per option). */
+function optionDescribed(html: string, testId: string, option: string) {
+  const tags = [...html.matchAll(new RegExp(`<button[^>]*data-testid="${testId}"[^>]*>`, 'g'))].map((m) => m[0]);
+  const tag = tags.find((t) => t.includes(`data-option="${option}"`));
+  assert.ok(tag, `a ${testId} button for ${option} is drawn`);
+  const id = /aria-describedby="([^"]+)"/.exec(tag)?.[1];
+  const text = id ? new RegExp(`id="${id.replace(/[^\w]/g, '\\$&')}"[^>]*>([\\s\\S]*?)</(p|span)>`).exec(html)?.[1]?.replaceAll('<!-- -->', '') : undefined;
+  return { tag, disabled: /\sdisabled=""/.test(tag), id, text };
+}
+
+test("paused reason: a decision's approve option, on its card and its own page, says what its kind does: a landing lands now, an intake happens now, a plan waits", () => {
+  const card = (kind: string) => ({ id: `${kind}-9`, kind, issue: 9, owner: 'example-owner', question: 'Q?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [], askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true });
+  const detail = (kind: string) => ({ id: `${kind}-9`, kind, issue: 9, owner: 'example-owner', question: 'Q?', options: ['approve', 'reject'].map((option) => ({ option, does: 'd', cannot: 'c', recommended: option === 'approve' })), recommendation: 'approve', askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true, ifNothing: 'n', withheld: null });
+  const render = (kind: string, paused: boolean) => r.renderDecisionUnderUsage([usageOf('example', paused)], null, { card: card(kind), detail: detail(kind) });
+  const want: Record<string, string | undefined> = { land: LANDS_HINT, intake: NOW_HINT, plan: PAUSED_HINT, question: undefined };
+  for (const [kind, text] of Object.entries(want)) {
+    const html = render(kind, true);
+    for (const testId of ['decision-option', 'decision-detail-option']) {
+      const approve = optionDescribed(html, testId, 'approve');
+      assert.equal(approve.disabled, false, `${kind} ${testId}: not refused while paused: ${approve.tag}`);
+      assert.equal(approve.text, text, `${kind} ${testId}: the approve option says ${text ?? 'nothing'}: ${approve.tag}`);
+      assert.equal(optionDescribed(html, testId, 'reject').id, undefined, `${kind} ${testId}: only the approve option says it`);
+    }
+    if (text) assert.equal(html.split(text).length - 1, 2, `${kind}: once on the card, once on the page`);
+    // Running: nothing said.
+    const running = render(kind, false);
+    for (const testId of ['decision-option', 'decision-detail-option']) assert.equal(optionDescribed(running, testId, 'approve').id, undefined, `${kind} ${testId}: nothing while running`);
+  }
+});
+
+test("paused reason: the voice banner's Approve says what its decision's kind does (decisionWork); voice reaches only plan decisions, so a plan waits; voice never approves a landing", () => {
+  const pending = (decision: string) => ({ pending: { kind: 'approve', issue: 12, decision, title: 'T', effect: 'e', until: Date.now() + 10_000 }, left: 10 });
+  const decisions = [
+    { id: 'land-12', kind: 'land' },
+    { id: 'intake-12', kind: 'intake' },
+    { id: 'plan-12', kind: 'plan' },
+    { id: 'q-12', kind: 'question' },
+  ];
+  const paused = [usageOf('example', true)];
+  const say = (decision: string) => described(r.renderVoiceBannerUnderUsage(paused, null, pending(decision), decisions), 'voice-banner-confirm');
+  // The decisionWork mechanism only: voice never approves a landing (the pin below), so no real banner shows this.
+  assert.equal(say('land-12').text, LANDS_HINT, 'mechanism: decisionWork gives a land kind the land text');
+  // The decisionWork mechanism only: voice can't reach an intake decision (asked with issue null; approvalFor matches
+  // the spoken number), so no real banner shows this either.
+  assert.equal(say('intake-12').text, NOW_HINT, 'mechanism: decisionWork gives an intake kind the happens-now text');
+  assert.equal(say('plan-12').text, PAUSED_HINT, 'a plan decision starts work: it waits for the resume');
+  assert.equal(say('q-12').id, undefined, 'any other kind says nothing');
+  for (const d of ['land-12', 'intake-12']) assert.equal(say(d).disabled, false, `${d}: not refused while paused`);
+  // Running: nothing said.
+  assert.equal(described(r.renderVoiceBannerUnderUsage([usageOf('example', false)], null, pending('land-12'), decisions), 'voice-banner-confirm').id, undefined);
+  // Pins (existing behaviour, not this change): voice never approves a landing. The server marks every land decision
+  // voiceRefused (NEVER_FROM_CHAT, src/voice.ts), and approvalFor refuses it, so no Approve banner is shown for one.
+  const land = { id: 'land-12', kind: 'land', issue: 12, owner: 'example-owner', question: 'Land #12?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [], askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true, voiceRefused: 'a high-risk merge the owner holds is approved only by a click on the dashboard or on GitHub' };
+  const refused = r.approvalFor({ decisions: [land], tasks: [] }, 12);
+  assert.equal(refused.ok, false, 'approvalFor refuses a land decision');
+  assert.match(refused.why ?? '', /can't be approved by voice/);
+});
+
+test('paused reason: a `why` that holds wins over `work` while paused, for both kinds of work', () => {
+  const html = r.renderPausedWork([usageOf('example', true)], null, 'Saving…');
+  for (const id of ['paused-lands', 'paused-starts']) {
+    const b = described(html, id);
+    assert.equal(b.disabled, true, `${id} is held by its why: ${b.tag}`);
+    assert.equal(b.text, 'Saving…', `${id} says its why, not the pause`);
+  }
+  assert.doesNotMatch(html, /lands now|takes effect when the instance resumes/, 'neither pause text is said');
+});
+
+test('emergency stop is unchanged: its banner still says the coordinator halted and starts none, and it adds no pause hint or hold', () => {
+  const state = { brand: { cli: 'wl' }, emergency: { inForce: { by: 'ops', at: '', reason: 'spend' }, halted: { at: new Date().toISOString(), running: 2 }, lastStop: null, lastResume: null } };
+  const html = r.renderUnderUsage([usageOf('example', false)], null, { ...starters, state });
+  assert.match(html.replaceAll('<!-- -->', ''), /data-testid="emergency-stop"[\s\S]*?Emergency stop in force[\s\S]*?by ops: spend\.[\s\S]*?This coordinator halted 2 running agent\(s\) [^<]* and starts none\. Agents on this\s+machine stay stopped until it(&#x27;|')s lifted on the machine with <code[^>]*>wl resume-all</);
+  for (const id of [...STARTS, ...NOW]) assert.deepEqual([described(html, id).disabled, described(html, id).id], [false, undefined], `${id}: as without the stop`);
+  assert.doesNotMatch(html, /takes effect when the instance resumes|happens now/, 'an emergency stop is not a usage pause');
+  // Paused on the usage limit as well: the stop's banner is the same banner.
+  const banner = (h: string) => /<div role="alert"[^>]*data-testid="emergency-stop">[\s\S]*?<\/div>/.exec(h)?.[0];
+  const both = r.renderUnderUsage([usageOf('example', true)], null, { ...starters, state });
+  assert.ok(banner(html));
+  assert.equal(banner(both), banner(html));
 });
 
 /**

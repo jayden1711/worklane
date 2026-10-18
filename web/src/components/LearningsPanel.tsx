@@ -22,7 +22,7 @@ function Promote({ g, onDone }: { g: LearningGroup; onDone: () => void }) {
   };
   return (
     <div className="mt-2 flex flex-wrap items-center gap-2">
-      <input value={line} onChange={(e) => setLine(e.target.value)} aria-label="The line to add to AGENTS.md" className="h-7 min-w-0 flex-1 basis-64 rounded-control bg-field px-2 font-mono text-[12px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="learning-line" />
+      <input value={line} onChange={(e) => setLine(e.target.value)} aria-label="The line to add to AGENTS.md" className="h-7 min-w-0 flex-1 basis-64 rounded-control bg-field px-2 font-mono text-[12px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]" data-testid="learning-line" />
       <Button size="sm" variant="outline" disabled={busy || !line.trim()} onClick={() => void go()} data-testid="learning-promote">
         Promote to AGENTS.md
       </Button>

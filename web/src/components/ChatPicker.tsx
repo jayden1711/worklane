@@ -5,7 +5,7 @@
 import { useEffect, useState } from 'react';
 import { chatPickerOptions, type ChatPick, type ChatPickerOptions } from '../api';
 
-const field = 'h-6 rounded-control bg-field px-1.5 text-[11.5px] text-ink-2 shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
+const field = 'h-6 rounded-control bg-field px-1.5 text-[11.5px] text-ink-2 shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]';
 
 /** The picker's options for the instance asked (null: this page's own); none while loading, on error or for a viewer. */
 export function useChatPicker(instance: string | null, active: boolean): ChatPickerOptions | null {

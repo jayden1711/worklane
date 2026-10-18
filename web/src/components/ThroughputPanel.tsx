@@ -42,7 +42,7 @@ export function MergedBars({ days }: { days: Throughput['merged']['perDay'] }) {
       <div className="flex h-16 items-end gap-0.5" role="img" aria-label={`merged PRs per day, the last ${days.length} days: ${days.map((d) => d.merged).join(', ')}`}>
         {days.map((d) => (
           <div key={d.day} className="group flex h-full flex-1 items-end" title={`${d.day}: ${d.merged} merged`} data-testid="throughput-day">
-            <div className="w-full rounded-t-[4px] bg-blue group-hover:opacity-80" style={{ height: d.merged ? `${(d.merged / max) * 100}%` : 2, opacity: d.merged ? 1 : 0.25 }} />
+            <div className="w-full rounded-t-[4px] bg-ring group-hover:opacity-80" style={{ height: d.merged ? `${(d.merged / max) * 100}%` : 2, opacity: d.merged ? 1 : 0.25 }} />
           </div>
         ))}
       </div>
@@ -122,7 +122,7 @@ export function ThroughputView({ t }: { t: Throughput }) {
             <td className="primitive-table-cell">
               <div className="flex items-center gap-2">
                 <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-label={`${STAGE_LABEL[s.stage]} share`} aria-valuenow={Math.round(s.share * 100)} aria-valuemin={0} aria-valuemax={100}>
-                  <div className="h-full rounded-full bg-blue" style={{ width: `${s.share * 100}%` }} />
+                  <div className="h-full rounded-full bg-ring" style={{ width: `${s.share * 100}%` }} />
                 </div>
                 <span className="w-9 text-right text-[12px] tabular-nums text-ink-3">{pct(s.share)}</span>
               </div>
@@ -142,7 +142,7 @@ export function ThroughputView({ t }: { t: Throughput }) {
               <td className="primitive-table-cell">
                 <div className="flex items-center gap-2">
                   <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-label={`${modelLabel(m.model)} share`} aria-valuenow={Math.round(m.share * 100)} aria-valuemin={0} aria-valuemax={100}>
-                    <div className="h-full rounded-full bg-blue" style={{ width: `${m.share * 100}%` }} />
+                    <div className="h-full rounded-full bg-ring" style={{ width: `${m.share * 100}%` }} />
                   </div>
                   <span className="w-9 text-right text-[12px] tabular-nums text-ink-3">{pct(m.share)}</span>
                 </div>

@@ -16,7 +16,7 @@ import { exampleProject } from './helpers.js';
 
 const cfg = loadConfig(exampleProject().dir);
 const review = cfg.review!;
-const level = (paths: string[]) => computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [] }, review);
+const level = (paths: string[]) => computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [], scope: undefined }, review);
 
 /** A change the policy merges: everything clean. Each test turns one thing. */
 function clean(over: Partial<MergeInput> = {}): MergeInput {
@@ -73,14 +73,14 @@ test("regression: a change to the agents' role prompts, skills, AGENTS.md or any
     merge: { ...review.merge, wait_categories: [] as string[] },
   };
   for (const path of [`${BRAND.configDir}/roles/worker.md`, `${BRAND.configDir}/skills/x/SKILL.md`, 'AGENTS.md', 'CLAUDE.md', 'web/CLAUDE.md']) {
-    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose);
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, loose);
     assert.deepEqual(lvl.categories[AGENT_INSTRUCTIONS], [path], path);
     const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose) }));
     assert.equal(d.auto, false, path);
     assert.match(d.reasons.join(), new RegExp(`high-risk: ${AGENT_INSTRUCTIONS}`), path);
   }
   // Other files don't land in the category (only the root AGENTS.md counts).
-  for (const path of ['src/a.ts', 'docs/AGENTS.md']) assert.equal(computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose).categories[AGENT_INSTRUCTIONS], undefined, path);
+  for (const path of ['src/a.ts', 'docs/AGENTS.md']) assert.equal(computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, loose).categories[AGENT_INSTRUCTIONS], undefined, path);
 });
 
 /** The engine's own files, as git tracks them. */
@@ -129,6 +129,15 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/runner.ts', 'the evaluator and the agent runner'],
     ['src/sandbox.ts', 'the sandbox and test runs'],
     ['src/testrun/affected.ts', 'the sandbox and test runs'],
+    ['src/hook.ts', "the agents' tool guard"],
+    ['src/hook-imports.ts', "the agents' tool guard"],
+    ['src/hook-main.ts', "the agents' tool guard"],
+    ['src/install.ts', "the agents' tool guard's hook commands"],
+    ['src/instance.ts', "the agents' tool guard's hook commands"],
+    ['src/config/load.ts', "the agents' tool guard"],
+    ['src/events/redact.ts', "the agents' tool guard"],
+    ['src/managed-apps.ts', 'where the self-modification locks apply'],
+    ['scripts/setup/managed-apps.sh', 'the machine setup'],
     ['scripts/push-gate.mjs', 'the push gate, denylist and secret scan'],
     ['scripts/push-gate-hook.mjs', 'the push gate, denylist and secret scan'],
     ['scripts/check-denylist.mjs', 'the push gate, denylist and secret scan'],
@@ -146,6 +155,7 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/denylist.test.ts', 'the tests of the harness controls'],
     ['test/push-gate.test.ts', 'the tests of the harness controls'],
     ['test/package-files.test.ts', 'the tests of the harness controls'],
+    ['test/managed-apps.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
     ['src/coordinator/base.ts', 'the coordinator'],
@@ -169,14 +179,14 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
     merge: { ...review.merge, wait_categories: [] as string[] },
   };
   const waits = (path: string, what: string) => {
-    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [] }, loose);
+    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, loose);
     assert.equal(lvl.level, 'L3', `${path}: always L3`);
     const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose), lines: 3, files: 1 }));
     assert.equal(d.auto, false, path);
     assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes ${what}: ${path}` }, path);
   };
   // A tests-only change to a test that holds a control: L0 and merged by the harness before these were named.
-  for (const path of ['test/review.test.ts', 'test/merge-policy.test.ts', 'test/denylist.test.ts', 'test/push-gate.test.ts', 'test/package-files.test.ts', 'test/guardrails.test.ts', 'test/push-check.test.ts', 'test/main-watch.test.ts']) waits(path, 'the tests of the harness controls');
+  for (const path of ['test/review.test.ts', 'test/merge-policy.test.ts', 'test/denylist.test.ts', 'test/push-gate.test.ts', 'test/package-files.test.ts', 'test/guardrails.test.ts', 'test/push-check.test.ts', 'test/main-watch.test.ts', 'test/managed-apps.test.ts']) waits(path, 'the tests of the harness controls');
   // The denylist's data and the release rules: one file of each, as the owner asked.
   waits('.denylist.json', 'the push gate, denylist and secret scan');
   waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
@@ -188,7 +198,7 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
   waits(`${BRAND.configDir}/experiments.yaml`, 'the experiment studies');
   // Another test, and another doc, still merge on their own.
   for (const path of ['test/dashboard.test.ts', 'docs/notes-for-the-test.md']) {
-    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [] }, loose);
+    const lvl = computeLevel({ files: [{ path, added: 2, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, loose);
     assert.equal(lvl.level, 'L0', path);
     assert.equal(mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose), lines: 3, files: 1 })).auto, true, path);
   }
@@ -208,7 +218,7 @@ test('regression: a harness PR touching any self-modification file waits for the
       for (const path of engineFiles.filter((f) => globToRegExp(glob).test(f))) {
         // The first part that matches names it (scripts/machine's updater is the updater, not machine setup).
         const what = SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => globToRegExp(g).test(path)))!.what;
-        const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, loose);
+        const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, loose);
         assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], path);
         assert.equal(lvl.level, 'L3', `${path}: always L3`);
         const d = mergeDecision(clean({ level: lvl, waitCategories: waitCategoriesOf(loose) }));
@@ -236,7 +246,7 @@ test('regression: a PR touching only .github/release-signers is L3, waits for th
     merge: { ...own.merge, wait_categories: [] as string[] },
   };
   for (const [name, rc] of [['this repo', own], ['the example', review], ['loosened', loose]] as const) {
-    const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [] }, rc);
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, rc);
     assert.equal(lvl.level, 'L3', name);
     assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], name);
     const d = mergeDecision(clean({ level: lvl, lines: 2, waitCategories: waitCategoriesOf(rc) }));
@@ -245,7 +255,7 @@ test('regression: a PR touching only .github/release-signers is L3, waits for th
     assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes who may sign a release: ${path}` }, name);
   }
   // This repo's review.yaml names it too, at L3 and waiting.
-  const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [] }, own);
+  const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, own);
   assert.deepEqual(lvl.categories['release-signing'], [path]);
   assert.deepEqual(lvl.categories['release-config'], [path]);
   assert.ok(own.levels.L3_human.when.includes('release-signing') && own.merge.wait_categories.includes('release-signing'));
@@ -257,7 +267,7 @@ test('merge policy: why a high-risk PR waits, plainly, naming the category and i
     { category: 'migration', text: 'changes a database migration: db/migrations/002.sql' },
     { category: SELF_MODIFICATION, text: 'changes the merge policy: src/merge-policy.ts and 1 more' },
   ]);
-  const custom = computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [] }, { ...review, categories: { pricing: ['src/price.js'] } });
+  const custom = computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, { ...review, categories: { pricing: ['src/price.js'] } });
   assert.deepEqual(mergeDecision(clean({ level: custom, waitCategories: ['pricing'] })).why, [{ category: 'pricing', text: 'touches pricing: src/price.js' }]);
   assert.deepEqual(mergeDecision(clean()).why, [], 'nothing high-risk: nothing to say');
 });
@@ -276,12 +286,12 @@ test('merge policy: high-risk paths wait (L3 categories, CI config, and the repo
     assert.equal(d.auto, false, path);
     assert.match(d.reasons.join(), new RegExp(`high-risk: ${cat} \\(${path.replace(/\./g, '\\.')}`), path);
   }
-  const custom = computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [] }, { ...review, categories: { pricing: ['src/price.js'] } });
+  const custom = computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, { ...review, categories: { pricing: ['src/price.js'] } });
   assert.match(mergeDecision(clean({ level: custom, waitCategories: ['pricing'] })).reasons.join(), /high-risk: pricing \(src\/price\.js\)/);
 });
 
 test('merge policy: anything deleting data waits', () => {
-  const l = computeLevel({ files: [{ path: 'src/cleanup.js', added: 1, removed: 0, addedLines: ['db.exec("DELETE FROM orders")'] }], labels: [], moneyPaths: [] }, review);
+  const l = computeLevel({ files: [{ path: 'src/cleanup.js', added: 1, removed: 0, addedLines: ['db.exec("DELETE FROM orders")'] }], labels: [], moneyPaths: [], scope: undefined }, review);
   assert.match(mergeDecision(clean({ level: l })).reasons.join(), /high-risk: deletes-data/);
 });
 
@@ -371,7 +381,7 @@ test("the engine's own review.yaml already holds every self-modification file, w
   assert.deepEqual(unheld, [], 'files the code locks that this repo\'s review.yaml leaves to auto-merge: list them in a category under L3_human and merge.wait_categories');
 });
 
-test("regression: a tests-only change to the tests' own machine, the slot-write check or a tool-guard denial test waits for the owner in the engine's own review.yaml (engine-guards)", () => {
+test("regression: a tests-only change to the tests' own machine, the slot-write check or a tool-guard denial test, or a docs-only change to an architecture doc, waits for the owner in the engine's own review.yaml (engine-guards)", () => {
   const own = loadConfig(repoRoot).review!;
   for (const path of [
     'test/isolate.ts',
@@ -383,10 +393,12 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     'test/experiments-coordinator.test.ts',
     'test/intake-coordinator.test.ts',
     'test/domain-runner.test.ts',
+    // The architecture docs (docs/design/**): the owner asked that they always wait for the owner (#698).
+    'docs/design/product-architecture.md',
   ]) {
     // Every entry is a real file, so a rename can't leave a dead entry.
     assert.ok(engineFiles.includes(path), `${path} is a real file`);
-    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, own);
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, own);
     assert.equal(lvl.level, 'L3', `${path}: ${lvl.reasons.join(' | ')}`);
     assert.deepEqual(lvl.categories['engine-guards'], [path], path);
     const d = mergeDecision(clean({ level: lvl, lines: 1, files: 1, waitCategories: waitCategoriesOf(own) }));

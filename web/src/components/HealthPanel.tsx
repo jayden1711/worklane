@@ -36,7 +36,7 @@ function Usage({ used, total, warnAt, label }: { used: number; total: number; wa
   return (
     <div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-label={label} aria-valuenow={Math.round(pct)} aria-valuemin={0} aria-valuemax={100}>
-        <div className={cx('h-full rounded-full', pct >= warnAt ? 'bg-orange' : 'bg-blue')} style={{ width: `${pct}%` }} />
+        <div className={cx('h-full rounded-full', pct >= warnAt ? 'bg-orange' : 'bg-ring')} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
