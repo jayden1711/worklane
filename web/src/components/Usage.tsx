@@ -110,30 +110,35 @@ function RecheckSignin({ instance }: { instance: string }) {
   );
 }
 
-/** One banner per Claude login the API refused (src/claude-auth-failure.ts): who it is, Claude's words, and what to do. */
+/**
+ * One banner per Claude login the API refused (src/claude-auth-failure.ts): who it is, Claude's words, and what to do.
+ * A viewer's server sends neither the account nor Claude's words (#567), so the banner names neither.
+ */
 function SigninBanner({ usage }: { usage: UsageInfo[] }) {
   const failed = usage.filter((u) => u.signinFailed?.length);
   if (!failed.length) return null;
   return (
     <>
       {failed.map((u) =>
-        u.signinFailed!.map((f) => (
-          <div key={`${u.instance} ${f.login}`} role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="signin-banner" data-instance={u.instance}>
+        u.signinFailed!.map((f, i) => (
+          <div key={`${u.instance} ${f.login ?? i}`} role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="signin-banner" data-instance={u.instance}>
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span className="font-semibold text-red">Claude sign-in failed: no new runs</span>
               <span className="text-ink-2">{u.instance}</span>
               {u.canRecheckSignin && <RecheckSignin instance={u.instance} />}
             </div>
             <div className="mt-1 text-ink-2">
-              Claude refused the login <span className="font-medium text-ink">{f.login}</span> {ago(f.since)}. No new Claude run starts on it (tasks were requeued, not failed). Sign the agent user in to Claude
+              Claude refused {f.login ? <>the login <span className="font-medium text-ink">{f.login}</span></> : "this instance's Claude login"} {ago(f.since)}. No new Claude run starts on it (tasks were requeued, not failed). Sign the agent user in to Claude
               again (switch the Claude account); it resumes on its own once a check call on the login succeeds.
             </div>
-            <div className="mt-1 whitespace-pre-wrap break-words text-ink-2" data-testid="signin-detail">
-              Claude said: {f.detail}
-            </div>
+            {f.detail !== undefined && (
+              <div className="mt-1 whitespace-pre-wrap break-words text-ink-2" data-testid="signin-detail">
+                Claude said: {f.detail}
+              </div>
+            )}
             {f.lastCheck && (
               <div className="mt-1 text-ink-3">
-                Last checked {ago(f.lastCheck.at)}: {f.lastCheck.ok ? 'answered' : f.lastCheck.detail}
+                Last checked {ago(f.lastCheck.at)}: {f.lastCheck.ok ? 'answered' : (f.lastCheck.detail ?? 'still refused')}
               </div>
             )}
           </div>

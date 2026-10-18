@@ -45,6 +45,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
   { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
   { what: 'the sandbox and test runs', globs: ['src/sandbox.ts', 'src/testrun/**'] },
+  // The PreToolUse guard (which tool calls an agent may make, the config folder's guard among them) and the post-edit hook.
+  { what: "the agents' tool guard", globs: ['src/hook*'] },
   { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },
   // A tests-only change is L0 and merges itself: so the tests that hold the controls above are named here, one by one.
   {

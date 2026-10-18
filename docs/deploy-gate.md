@@ -151,6 +151,11 @@ The gate decides what `deploy` may move to. The post-deploy check looks at what 
    - **A red incident** ("Production failed its post-deploy check").
    - **An ops post** with each failing check, its status, a short snippet of its body, and what was rolled back per service. The snippet is redacted: secret-shaped strings, cookie, session and token values are removed. No response header is ever kept.
    - **No host token stored:** the same, except nothing is rolled back. The post says the rollback needs the token.
+   - **A follow-up issue** in the project's tracker, labelled `post-deploy`. It links the commit, lists each failed check (its name, kind, error and status) and the rollback's result per service. It is **never** labelled `ready`, so nothing builds it on its own: to have it built, give it a `done_when` contract and label it `ready`.
+     - The issue never carries the response's body: the repo may be public, and the redactor can't know every secret's shape. The snippet stays in the ops post. The host's and the request's error text sits in Markdown code spans, so no link, image, URL, `#n` reference or mention in it renders.
+     - One issue per commit and failing check, ever. The same check failing again on the same commit files nothing more; a different check failing on it files one issue for that check. The coordinator records each issue in its state before filing it, and marks the issue's body once per check (`<!-- post-deploy:<sha>:<check> -->`), so a restart between the two finds the open issue instead of filing a second one; a check no open issue carries is filed.
+     - The issue is filed beside the check, not inside it: a slow or refusing tracker never delays the next commit's check or rollback. If the tracker refuses it (GitHub down, say), the rollback, the incident and the ops post still happen; the error is logged and it is tried again after 1 minute, doubling up to 30 minutes.
+     - "Not deployed" and "the deploy failed" file no issue: no check ran. Their incident and ops post say what happened.
 
 Post-deploy failures are posted to `discord.ops_channel` even with `notify: off`. A pass is never posted.
 
@@ -186,7 +191,9 @@ The schema refuses:
 - a set of checks without a `health`, a `sign_in` and an `api` check, or a check name used twice;
 - ids that aren't Railway ids.
 
-The results are `deploy_gate.post_deploy` events: `passed`, `failed`, `timed_out` or `deploy_failed`, with each check, the rollback and the GitHub cross-check.
+The results are `deploy_gate.post_deploy` events: `passed`, `failed`, `timed_out` or `deploy_failed`, with each check, the rollback and the GitHub cross-check. A `failed` one also files its follow-up issue (above).
+
+Without `post_deploy`, nothing runs after a move: nothing is watched, smoke-tested, rolled back or filed.
 
 ### The host token
 

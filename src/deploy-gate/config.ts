@@ -22,6 +22,11 @@ const branchName = z
 export const POST_DEPLOY_INCIDENT = 'deploy_post_check_failed';
 /** The incident a deploy the host didn't finish in time raises. */
 export const POST_DEPLOY_WAIT_INCIDENT = 'deploy_post_check_no_deploy';
+/**
+ * The label of the follow-up issue a failed post-deploy check files: never `ready` (nothing builds it on its own; the
+ * owner writes its contract and labels it), and how a restarted coordinator finds the issues it already filed.
+ */
+export const POST_DEPLOY_LABEL = { name: 'post-deploy', color: 'b60205', description: 'Production failed its post-deploy check; fix forward (not built on its own)' } as const;
 /** The credential the host's API token is stored under (the instance's secrets, console/secrets.ts). */
 export const HOST_TOKEN_CREDENTIAL = 'railway-token';
 
