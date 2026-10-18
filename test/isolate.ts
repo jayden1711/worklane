@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
@@ -75,6 +75,9 @@ for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });
   process.env[k] = v;
 }
+// The machine itself, for what the engine refuses to use outside it in a test process: the GitHub budget's slot
+// directory (src/github/budget.ts defaultBudgetDir, #669). Kept in the service modes' environment (serviceModeEnv).
+process.env[TEST_MACHINE_VAR] = testMachine;
 
 // The mark that lets this process and its children use the system root above (src/os/system-paths.ts
 // systemRootRefusal): a fresh token, in the environment and in a file of this user's alone inside the root. A suite

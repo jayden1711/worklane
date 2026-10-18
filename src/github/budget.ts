@@ -21,6 +21,23 @@ import { chmodSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, 
 import { join } from 'node:path';
 import { tryLock, type Lock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { testSlotsRefusal } from '../os/system-paths.js';
+
+export class TestSlotsRefused extends Error {
+  override name = 'TestSlotsRefused';
+}
+
+/**
+ * Where a budget lives when no directory is given: the machine's slot directory. In a test run, only the test
+ * machine's (test/isolate.ts); anything else throws before any file is opened, so a test that builds a GitHub client
+ * without the isolation can never read or write the machine's own budget (#669). Outside a test run: slotsDir(), as
+ * always.
+ */
+export function defaultBudgetDir(): string {
+  const refusal = testSlotsRefusal(process.env.AGENT_SLOTS_DIR);
+  if (refusal) throw new TestSlotsRefused(`GitHub budget: ${refusal}`);
+  return slotsDir();
+}
 
 /** How long take() waits out a pause or an exhausted budget before refusing (the caller sees GitHub's own kind of error). */
 export const DEFAULT_MAX_WAIT_MS = 10_000;
@@ -117,7 +134,7 @@ export class GitHubBudget {
 
   constructor(
     readonly key: string,
-    readonly dir: string = slotsDir(),
+    readonly dir: string = defaultBudgetDir(),
     private readonly opts: BudgetOptions = {},
   ) {
     this.file = join(dir, `github-budget-${key}.json`);
@@ -291,5 +308,5 @@ export class GitHubBudget {
 
 /** The machine's budget for this token. */
 export function budgetFor(token: string, dir?: string, opts?: BudgetOptions): GitHubBudget {
-  return new GitHubBudget(credentialKey(token), dir ?? slotsDir(), opts);
+  return new GitHubBudget(credentialKey(token), dir ?? defaultBudgetDir(), opts);
 }

@@ -21,7 +21,7 @@
 // a non-zero exit naming the variable, before anything starts), and systemPath() throws, so no import can read a
 // moved path either. The service modes refuse it even in a marked process (serviceModeRefusal).
 import { lstatSync, readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 
 /** The variable that moves every system location under one directory (tests only; test/isolate.ts). */
@@ -29,6 +29,8 @@ export const SYSTEM_ROOT_VAR = `${BRAND.envPrefix}_SYSTEM_ROOT`;
 /** The test preload's per-run token: 64 hex characters, also written to TEST_MARK_FILE inside the root. */
 export const TEST_TOKEN_VAR = `${BRAND.envPrefix}_TEST_ISOLATION`;
 export const TEST_MARK_FILE = '.test-isolation';
+/** The test preload's machine: the directory that holds this test process's home, state, slots and system root. */
+export const TEST_MACHINE_VAR = `${BRAND.envPrefix}_TEST_MACHINE`;
 /** Set by systemd in every process a unit starts (and inherited by its children). */
 export const SYSTEMD_MARKERS = ['INVOCATION_ID', 'JOURNAL_STREAM'] as const;
 
@@ -63,6 +65,47 @@ export function systemRootRefusal(env: NodeJS.ProcessEnv = process.env, uid: num
   } catch {
     return no('it holds no test mark');
   }
+  return null;
+}
+
+/**
+ * Why this process counts as a test run, or null when it doesn't (every real machine's engine): node's test runner
+ * started it (NODE_TEST_CONTEXT in a file's process, --test in the runner's own), its main module is a test file, or the
+ * test preload marked it. The engine never starts itself any of these ways (childEnv drops NODE_TEST_CONTEXT).
+ */
+export function testRunSign(env: NodeJS.ProcessEnv = process.env, proc: { argv: readonly string[]; execArgv: readonly string[] } = process): string | null {
+  if (env.NODE_TEST_CONTEXT !== undefined) return 'NODE_TEST_CONTEXT is set';
+  if (proc.execArgv.includes('--test')) return 'node runs with --test';
+  if (/\.test\.[cm]?[jt]s$/.test(proc.argv[1] ?? '')) return `its main module is a test file (${proc.argv[1]})`;
+  for (const k of [TEST_TOKEN_VAR, TEST_MACHINE_VAR]) if (env[k] !== undefined) return `${k} is set`;
+  return null;
+}
+
+/**
+ * Why `dir` may not be this process's slot directory by default, or null when it may: always null outside a test run
+ * (testRunSign). In a test run, only a directory inside the test machine (test/isolate.ts) is: one of this user's alone
+ * that the preload names in TEST_MACHINE_VAR. So a test file that forgot the preload, or a test that pointed
+ * AGENT_SLOTS_DIR elsewhere, fails before it opens anything in the machine's own slot directory (#669).
+ *
+ * THREAT: accidents, not a hostile test: a test that sets TEST_MACHINE_VAR to a directory of its own on purpose gets it.
+ * `dir` is compared as written (symlinks not followed): it may not exist yet.
+ */
+export function testSlotsRefusal(dir: string | undefined, env: NodeJS.ProcessEnv = process.env, proc: { argv: readonly string[]; execArgv: readonly string[] } = process, uid: number | null = currentUid()): string | null {
+  const sign = testRunSign(env, proc);
+  if (!sign) return null;
+  const machine = env[TEST_MACHINE_VAR];
+  const no = (why: string) => `this is a test run (${sign}), and the slot directory isn't the test machine's: ${why}. Run tests with the isolation preloaded (node --import ./dist/test/isolate.js --test <file>, or npm test), or pass a directory of the test's own.`;
+  if (!machine) return no(`${TEST_MACHINE_VAR} is unset, so the test isolation isn't loaded`);
+  if (!isAbsolute(machine)) return no(`${TEST_MACHINE_VAR} (${machine}) is not an absolute path`);
+  try {
+    const d = lstatSync(machine);
+    if (!d.isDirectory() || (process.platform !== 'win32' && ((uid !== null && d.uid !== uid) || (d.mode & 0o022) !== 0))) return no(`${TEST_MACHINE_VAR} (${machine}) isn't a directory of this user's alone`);
+  } catch {
+    return no(`${TEST_MACHINE_VAR} (${machine}) doesn't exist`);
+  }
+  if (!dir) return no('AGENT_SLOTS_DIR is unset, so it would be the machine\'s own');
+  const r = relative(machine, resolve(dir));
+  if (r === '' || r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r)) return no(`${dir} is outside ${machine}`);
   return null;
 }
 
