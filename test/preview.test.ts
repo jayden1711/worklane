@@ -164,7 +164,7 @@ async function setup(o: { token?: boolean; prs: OpenPr[]; envs?: Env[]; config?:
         flowsRun.push({ flow, origin });
         const screenshot = join(outDir, `${flow}.png`);
         writeFileSync(screenshot, Buffer.alloc(2000, 1));
-        const ev: FlowEvidence = { flow, ok: !o.flowFails, steps: [{ step: 'goto /', ok: !o.flowFails, ms: 5, ...(o.flowFails ? { error: 'nothing there' } : {}) }], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot, views: [], durationMs: 5 };
+        const ev: FlowEvidence = { flow, ok: !o.flowFails, steps: [{ step: 'goto /', ok: !o.flowFails, ms: 5, ...(o.flowFails ? { error: 'nothing there' } : {}) }], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot, views: [], viewErrors: [], durationMs: 5 };
         return ev;
       },
     },

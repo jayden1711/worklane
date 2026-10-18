@@ -54,12 +54,22 @@ name other than lowercase letters, digits and dashes is refused, with the reason
    of frames dropped; "not measured" when the trace has no frame events), and screenshots in `outDir` of where
    the flow ended:
    - `<flow>.png`: the run's own view, 1440 px wide, light.
-   - `<flow>-dark.png`: the same width with `prefers-color-scheme: dark` emulated.
-   - `<flow>-phone.png`: 390 px wide (at 2x), a mobile viewport, light again.
+   - `<flow>.dark.png`: the same width with `prefers-color-scheme: dark` emulated.
+   - `<flow>.phone.png`: 390 px wide (at 2x), a mobile viewport, light again.
 
-   Each shot is of the viewport only, never the whole page, so a run keeps three images at most. If the desktop
-   shot fails, the run fails. If the dark or phone shot fails, the evidence says why in its place; the run doesn't
-   fail for it.
+   The dot is a separator no flow name has, so names never collide, even with every flow in one folder (as
+   previews do). Each shot is of the viewport only, never the whole page, so a run keeps three images at most.
+
+   If the desktop shot fails, the run fails. If the dark or phone shot fails, the evidence says why in its place,
+   and the run doesn't fail for it. The dark and phone shots share a budget of 10 s, and each of their commands gets
+   5 s (both scaled like the timeouts below). A view not reached in the budget is listed as not tried.
+
+   The verdict is about the flow only. Console errors and failed requests seen once the desktop shot is taken
+   come from the dark and phone relayout, so they are listed per view, "not judged" (20 at most), and never fail
+   the check.
+
+   The two extra shots add about 1 s to each flow run. A coordinator check runs each flow twice, at the base and
+   at the head, so about 2 s per flow per check. Previews run every flow on every previewed PR, whatever it touches.
 6. Always stops Chrome and the app, the app's own children included (`taskkill /T` on Windows), however it ends.
 
 With no Chrome or Chromium on the machine (set `CHROME` to its path), the run is skipped with that reason and
@@ -114,7 +124,8 @@ The PR description gets a `BROWSER CHECKS` section:
 
 Text from the app (console messages, URLs) is shown as code, so its markup or mentions never render. The
 screenshots (desktop, dark mode, phone width) are named, not given by path: the path is on the machine that ran
-the check. A view that couldn't be shot is listed with why.
+the check. A view that couldn't be shot is listed with why. Errors seen during the dark and phone shots are
+listed under each view as not judged.
 
 In the claims receipts, a passing browser check is recorded as one (`kind: browser` on the check, never inferred
 from its name). It backs a worker's claim about the browser, the UI or a screenshot. It doesn't back a claim

@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfig } from '../src/config/schema.js';
 import { findChrome, freePort, launchChrome, portInUse } from '../src/browser/cdp.js';
-import { captureShots, isLocal, isOnOrigin, runFlow, runFlowAt, stepLabel, type FlowEvidence } from '../src/browser/run.js';
+import { judgeFlow } from '../src/browser/check.js';
+import { captureShots, isLocal, isOnOrigin, runFlow, runFlowAt, stepLabel, VIEW_ERRORS_MAX, watch, type FlowEvidence } from '../src/browser/run.js';
 import { summarizeTrace } from '../src/browser/trace.js';
 
 test('the browser may only reach the app on this machine (and in-page schemes); everything else is refused', () => {
@@ -30,28 +31,40 @@ test('the trace summary: long tasks on the page\'s main thread only, the longest
 
 /**
  * A stand-in for Chrome's DevTools, with no Chrome: it records each command, and each "screenshot" it returns says
- * what was emulated when it was taken (the colour scheme, the width, mobile or not). `fail` makes a command throw.
+ * what was emulated when it was taken (the colour scheme, the width, mobile or not). `fail` makes a command throw;
+ * `page` is the page answering a command (emitting the events a real page's code would, through `emit`).
  */
-function fakeCdp(fail: (method: string, params: Record<string, unknown>, shots: number) => string | undefined = () => undefined) {
-  const sent: { method: string; params: Record<string, unknown> }[] = [];
+function fakeCdp(fail: (method: string, params: Record<string, unknown>, shots: number) => string | undefined = () => undefined, page: (method: string, params: Record<string, unknown>, emit: (event: string, p: Record<string, unknown>) => void) => Promise<void> | void = () => {}) {
+  const sent: { method: string; params: Record<string, unknown>; ms: number | undefined }[] = [];
+  const handlers = new Map<string, ((p: Record<string, unknown>) => void)[]>();
+  const emit = (event: string, p: Record<string, unknown>) => {
+    for (const h of handlers.get(event) ?? []) h(p);
+  };
   let scheme = 'light';
   let view = '1440';
   let shots = 0;
   const cdp = {
-    async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
-      sent.push({ method, params });
+    async send<T>(method: string, params: Record<string, unknown> = {}, ms?: number): Promise<T> {
+      sent.push({ method, params, ms });
       if (method === 'Page.captureScreenshot') shots++;
       const why = fail(method, params, shots);
       if (why) throw new Error(why);
       if (method === 'Emulation.setEmulatedMedia') scheme = (params.features as { name: string; value: string }[]).find((f) => f.name === 'prefers-color-scheme')?.value || 'light';
       if (method === 'Emulation.setDeviceMetricsOverride') view = `${String(params.width)}${params.mobile ? ' mobile' : ''}`;
+      await page(method, params, emit);
       if (method === 'Page.captureScreenshot') return { data: Buffer.from(`${scheme} ${view}`).toString('base64') } as T;
       if (method === 'Runtime.evaluate') return { result: {} } as T;
       return {} as T;
     },
+    on(event: string, fn: (p: Record<string, unknown>) => void) {
+      handlers.set(event, [...(handlers.get(event) ?? []), fn]);
+    },
   };
-  return { cdp, sent };
+  return { cdp, sent, emit };
 }
+
+const blankEvidence = (): FlowEvidence => ({ flow: 'home', ok: true, steps: [{ step: 'goto /', ok: true, ms: 5 }], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: { longTasks: 0, maxTaskMs: 0, droppedFramePct: 0, frames: 10 }, screenshot: null, views: [], viewErrors: [], durationMs: 0 });
+const thresholds = { max_long_task_ms: 200, max_dropped_frame_pct: 25, slow_request_ms: 3000 };
 
 test('where a flow ended is shot three times: at desktop width, in dark mode at that width, then at phone width in light; each of the viewport only', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
@@ -61,11 +74,11 @@ test('where a flow ended is shot three times: at desktop width, in dark mode at 
   assert.equal(r.screenshot, join(dir, 'evidence', 'checkout.png'));
   assert.equal(shot('checkout.png'), 'light 1440', 'the desktop shot is the run\'s own view');
   assert.deepEqual(r.views, [
-    { view: 'dark', path: join(dir, 'evidence', 'checkout-dark.png') },
-    { view: 'phone', path: join(dir, 'evidence', 'checkout-phone.png') },
+    { view: 'dark', path: join(dir, 'evidence', 'checkout.dark.png') },
+    { view: 'phone', path: join(dir, 'evidence', 'checkout.phone.png') },
   ]);
-  assert.equal(shot('checkout-dark.png'), 'dark 1440', 'dark mode, at desktop width');
-  assert.equal(shot('checkout-phone.png'), 'light 390 mobile', 'phone width, a mobile viewport, and light again');
+  assert.equal(shot('checkout.dark.png'), 'dark 1440', 'dark mode, at desktop width');
+  assert.equal(shot('checkout.phone.png'), 'light 390 mobile', 'phone width, a mobile viewport, and light again');
   const captures = sent.filter((s) => s.method === 'Page.captureScreenshot');
   assert.equal(captures.length, 3, 'three shots, no more');
   for (const c of captures) assert.deepEqual(c.params, { format: 'png' }, 'the viewport only, never the whole page');
@@ -79,16 +92,16 @@ test("a dark or phone shot that fails says why in its place and never fails the 
   const r = await captureShots(lateFail.cdp, join(dir, 'a'), 'home');
   assert.deepEqual(r.views, [
     { view: 'dark', error: 'Page.captureScreenshot: no answer from Chrome in 30 s' },
-    { view: 'phone', path: join(dir, 'a', 'home-phone.png') },
+    { view: 'phone', path: join(dir, 'a', 'home.phone.png') },
   ]);
-  assert.equal(readFileSync(join(dir, 'a', 'home-phone.png'), 'utf8'), 'light 390 mobile');
-  assert.equal(existsSync(join(dir, 'a', 'home-dark.png')), false);
+  assert.equal(readFileSync(join(dir, 'a', 'home.phone.png'), 'utf8'), 'light 390 mobile');
+  assert.equal(existsSync(join(dir, 'a', 'home.dark.png')), false);
 
   // The phone width can't be set: the dark shot stands, the phone one says why.
   const noPhone = fakeCdp((method) => (method === 'Emulation.setDeviceMetricsOverride' ? 'Emulation.setDeviceMetricsOverride: the DevTools connection closed' : undefined));
   const p = await captureShots(noPhone.cdp, join(dir, 'b'), 'home');
   assert.deepEqual(p.views, [
-    { view: 'dark', path: join(dir, 'b', 'home-dark.png') },
+    { view: 'dark', path: join(dir, 'b', 'home.dark.png') },
     { view: 'phone', error: 'Emulation.setDeviceMetricsOverride: the DevTools connection closed' },
   ]);
 
@@ -98,10 +111,76 @@ test("a dark or phone shot that fails says why in its place and never fails the 
   assert.equal(none.sent.some((s) => s.method.startsWith('Emulation.')), false, 'no other view is tried');
 });
 
+test('shot names never collide, even with every flow in one folder (as previews do): flow home\'s dark shot is not flow home-dark\'s desktop one', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  const home = await captureShots(fakeCdp().cdp, dir, 'home');
+  // The second flow's Chrome starts at the desktop view in light, as each run's own Chrome does.
+  const homeDark = await captureShots(fakeCdp().cdp, dir, 'home-dark');
+  const paths = [home, homeDark].flatMap((r) => [r.screenshot, ...r.views.map((v) => ('path' in v ? v.path : ''))]);
+  assert.equal(new Set(paths).size, 6, paths.join('\n'));
+  assert.equal(readFileSync(home.screenshot, 'utf8'), 'light 1440');
+  assert.equal(readFileSync(homeDark.screenshot, 'utf8'), 'light 1440');
+  const homeDarkView = home.views.find((v) => v.view === 'dark');
+  assert.ok(homeDarkView && 'path' in homeDarkView);
+  assert.equal(readFileSync(homeDarkView.path, 'utf8'), 'dark 1440', "flow home's dark shot was not overwritten by flow home-dark's desktop shot");
+});
+
+test('what the page does during the dark and phone shots is listed per view and never judged: a page whose phone-width resize throws still passes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  const ev = blankEvidence();
+  let view: 'dark' | 'phone' | null = null;
+  const { cdp, emit } = fakeCdp(undefined, (method, params, send) => {
+    if (method === 'Emulation.setEmulatedMedia' && JSON.stringify(params).includes('dark')) {
+      send('Network.requestWillBeSent', { requestId: 'r1', request: { url: 'http://127.0.0.1:5173/dark-logo.png', method: 'GET' }, timestamp: 1 });
+      send('Network.responseReceived', { requestId: 'r1', response: { url: 'http://127.0.0.1:5173/dark-logo.png', status: 404 } });
+    }
+    if (method === 'Emulation.setDeviceMetricsOverride') send('Runtime.exceptionThrown', { exceptionDetails: { text: 'Uncaught', exception: { description: 'Error: phone layout broke' } } });
+  });
+  watch(cdp, ev, thresholds.slow_request_ms, () => true, () => view);
+  // During the flow: judged as ever.
+  emit('Runtime.consoleAPICalled', { type: 'error', args: [{ value: 'flow error' }] });
+  assert.deepEqual(ev.consoleErrors, [{ kind: 'console.error', text: 'flow error' }]);
+  ev.consoleErrors = [];
+  const shots = await captureShots(cdp, dir, 'home', { onView: (v) => (view = v) });
+  assert.deepEqual(shots.views.map((v) => 'path' in v), [true, true]);
+  assert.deepEqual(ev.consoleErrors, [], 'the relayout\'s exception is not a flow console error');
+  assert.deepEqual(ev.failedRequests, [], "the dark view's 404 is not a flow failed request");
+  assert.deepEqual(ev.viewErrors, [
+    { view: 'dark', kind: 'failed request', text: 'GET http://127.0.0.1:5173/dark-logo.png (404)' },
+    { view: 'phone', kind: 'exception', text: 'Error: phone layout broke' },
+  ]);
+  const verdict = judgeFlow(ev, thresholds);
+  assert.equal(verdict.pass, true, verdict.reasons.join('; '));
+
+  // Never more than VIEW_ERRORS_MAX of them, however noisy the relayout.
+  for (let i = 0; i < 50; i++) emit('Runtime.consoleAPICalled', { type: 'error', args: [{ value: `noise ${i}` }] });
+  assert.equal(ev.viewErrors.length, VIEW_ERRORS_MAX);
+});
+
+test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  // The page answers the dark view's frame wait late: by then the budget is spent.
+  const { cdp, sent } = fakeCdp(undefined, async (method) => {
+    if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 80));
+  });
+  const r = await captureShots(cdp, dir, 'home', { commandMs: 1234, budgetMs: 50 });
+  assert.deepEqual(r.views, [
+    { view: 'dark', path: join(dir, 'home.dark.png') },
+    { view: 'phone', error: "not tried: the extra shots' 0.05 s were spent" },
+  ]);
+  assert.equal(sent.some((s) => s.method === 'Emulation.setDeviceMetricsOverride'), false, 'the phone view was not set up');
+  const [desktop, ...extra] = sent;
+  assert.equal(desktop!.ms, undefined, 'the desktop shot keeps the usual command timeout');
+  assert.ok(extra.length > 0 && extra.every((s) => s.ms === 1234), JSON.stringify(extra));
+});
+
 /** A PNG's width in pixels (its IHDR chunk). */
 const pngWidth = (path: string) => readFileSync(path).readUInt32BE(16);
 
-/** A tiny app: a page whose button logs an error, throws, fetches a missing path, a slow path and another host; dark in dark mode. */
+/**
+ * A tiny app: a page whose button logs an error, throws, fetches a missing path, a slow path and another host; dark
+ * in dark mode; and whose layout code throws at phone width (seen, never judged).
+ */
 function fixtureApp(dir: string) {
   writeFileSync(
     join(dir, 'server.mjs'),
@@ -112,6 +191,7 @@ const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { s
 import('node:fs').then((fs) => fs.writeFileSync('child.pid', String(child.pid)));
 const page = \`<!doctype html><title>shop</title><style>@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }</style><button data-testid="go">Go</button><div data-testid="out"></div>
 <script>
+matchMedia('(max-width: 500px)').addEventListener('change', (e) => { if (e.matches) throw new Error('phone layout broke'); });
 document.querySelector('[data-testid=go]').onclick = async () => {
   console.error('boom from the page');
   fetch('/missing').catch(() => {});
@@ -165,6 +245,10 @@ test('a flow against a real app: errors, a failed, a slow and a blocked request,
   const [dark, phone] = ev.views.map((v) => ('path' in v ? v.path : ''));
   assert.notDeepEqual(readFileSync(dark!), readFileSync(ev.screenshot), 'the dark shot shows the page in dark mode');
   assert.equal(pngWidth(phone!), 390 * 2, 'the phone shot is 390 CSS px wide, at 2x');
+  // The page's layout code throws at phone width: seen, under the phone view, and never judged.
+  assert.ok(ev.viewErrors.some((e) => e.view === 'phone' && e.kind === 'exception' && /phone layout broke/.test(e.text)), JSON.stringify(ev.viewErrors));
+  assert.ok(!ev.consoleErrors.some((e) => /phone layout broke/.test(e.text)), JSON.stringify(ev.consoleErrors));
+  assert.ok(!judgeFlow(ev, app.thresholds).reasons.some((r) => /phone layout broke/.test(r)), 'the phone view\'s exception is not a reason the flow fails');
   // Torn down: the port is free again, and the app's own child is gone.
   assert.equal(await portInUse(port), false, 'the app stopped');
   const childPid = Number(readFileSync(join(dir, 'child.pid'), 'utf8'));

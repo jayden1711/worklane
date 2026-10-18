@@ -56,7 +56,7 @@ test('the change at a head: its base and files; none at a head no change was pro
   assert.equal(changeAt(ev, 'c3'), null);
 });
 
-const evidence = (errors: string[] = []): FlowEvidence => ({ flow: 'home', ok: true, steps: [{ step: 'goto /', ok: true, ms: 5 }], consoleErrors: errors.map((text) => ({ kind: 'console.error', text })), failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, views: [], durationMs: 10 });
+const evidence = (errors: string[] = []): FlowEvidence => ({ flow: 'home', ok: true, steps: [{ step: 'goto /', ok: true, ms: 5 }], consoleErrors: errors.map((text) => ({ kind: 'console.error', text })), failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, views: [], viewErrors: [], durationMs: 10 });
 
 /** A baseline source over fakes: counts worktrees made and removed, and flows run. */
 function fakeSource(o: { open?: () => Promise<{ path: string; setupErrors: string[] }>; run?: (flow: string) => Promise<Awaited<ReturnType<typeof runFlow>>>; remove?: () => void; cache?: Map<string, BaselineRun> } = {}) {

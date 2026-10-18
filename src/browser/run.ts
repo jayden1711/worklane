@@ -54,6 +54,11 @@ export interface FlowEvidence {
   screenshot: string | null;
   /** The same end state in dark mode and at phone width: each shot's file, or why it wasn't taken. */
   views: ViewShot[];
+  /**
+   * Console errors and failed requests seen once the desktop shot was taken (the dark and phone views' relayout):
+   * listed, never judged, as those views are evidence for a reviewer, not part of the flow. At most VIEW_ERRORS_MAX.
+   */
+  viewErrors: ViewError[];
   durationMs: number;
   /** What went wrong cleaning up (a profile left behind): reported, never judged. */
   notes?: string[];
@@ -65,6 +70,15 @@ export type FlowRun = FlowEvidence | { flow: string; skipped: string };
 export type ShotView = 'dark' | 'phone';
 /** A shot at another view: its file, or why it wasn't taken. */
 export type ViewShot = { view: ShotView; path: string } | { view: ShotView; error: string };
+/** A console error or failed request seen while a view was being shot. */
+export interface ViewError {
+  view: ShotView;
+  /** As a console error's kind (exception, console.error, ...), or 'failed request'. */
+  kind: string;
+  text: string;
+}
+/** How many view errors a run keeps: they are never judged, so a noisy relayout can't grow the evidence. */
+export const VIEW_ERRORS_MAX = 20;
 
 /** The viewport every flow runs in. */
 export const DESKTOP_VIEWPORT = { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false } as const;
@@ -72,41 +86,65 @@ export const DESKTOP_VIEWPORT = { width: 1440, height: 1000, deviceScaleFactor: 
 export const PHONE_VIEWPORT = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } as const;
 
 /** Two frames (at most 500 ms, should frames not come), then a moment for a theme's transitions to finish. */
-async function settle(cdp: Pick<Cdp, 'send'>) {
-  await evalIn(cdp, 'new Promise((ok) => { requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 500); })');
+async function settle(cdp: Pick<Cdp, 'send'>, ms: number) {
+  await evalIn(cdp, 'new Promise((ok) => { requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 500); })', ms);
   await sleep(250);
 }
 
 /**
+ * A shot's file name. INVARIANT: no two (flow, view) pairs share one: flow names are lowercase letters, digits and
+ * dashes (src/config/schema.ts), so the dot is a separator no flow name has (`home.dark.png` is never flow
+ * `home-dark`'s, or any flow's, desktop shot), even when every flow writes into one folder, as previews do.
+ */
+export const shotName = (flow: string, view?: ShotView) => (view ? `${flow}.${view}.png` : `${flow}.png`);
+
+/**
  * Shoot where the flow ended: at the run's desktop view, then in dark mode (prefers-color-scheme: dark, still at
  * desktop width), then at phone width (light again). The desktop shot failing fails the run, as it always has; a
- * dark or phone shot that fails says why in its place and is never a reason the run fails.
+ * dark or phone shot that fails says why in its place and is never a reason the run fails. `onView` is told each
+ * view before it is set up, so what the page does from then on is attributed to it (drive() records it unjudged).
  * INVARIANT: three shots at most per run, each of the viewport only (never the whole page), so a run's evidence
- * stays bounded however long the app's page is.
+ * stays bounded however long the app's page is. The dark and phone views together get `budgetMs` (10 s, scaled
+ * like every browser timeout) and each of their commands `commandMs` (5 s, scaled): a page or Chrome that stalls
+ * them costs seconds, and a view not reached in the budget says so.
  */
-export async function captureShots(cdp: Pick<Cdp, 'send'>, outDir: string, flow: string): Promise<{ screenshot: string; views: ViewShot[] }> {
+export async function captureShots(
+  cdp: Pick<Cdp, 'send'>,
+  outDir: string,
+  flow: string,
+  o: { onView?: (view: ShotView) => void; commandMs?: number; budgetMs?: number } = {},
+): Promise<{ screenshot: string; views: ViewShot[] }> {
+  const commandMs = o.commandMs ?? browserTimeouts().commandMs / 6;
+  const budgetMs = o.budgetMs ?? commandMs * 2;
   mkdirSync(outDir, { recursive: true });
-  const shoot = async (name: string) => {
-    const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
+  const shoot = async (name: string, ms?: number) => {
+    // No `ms` (the desktop shot): the usual command timeout.
+    const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' }, ms);
     const path = join(outDir, name);
     writeFileSync(path, Buffer.from(data, 'base64'));
     return path;
   };
-  const screenshot = await shoot(`${flow}.png`);
+  const screenshot = await shoot(shotName(flow));
   const set: Record<ShotView, () => Promise<unknown>> = {
-    dark: () => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }),
+    dark: () => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, commandMs),
     // WHY: an empty list clears the dark emulation first, so a failed dark shot never leaves the phone shot dark.
     phone: async () => {
-      await cdp.send('Emulation.setEmulatedMedia', { features: [] });
-      await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_VIEWPORT });
+      await cdp.send('Emulation.setEmulatedMedia', { features: [] }, commandMs);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_VIEWPORT }, commandMs);
     },
   };
   const views: ViewShot[] = [];
+  const start = Date.now();
   for (const view of ['dark', 'phone'] as const) {
+    if (Date.now() - start >= budgetMs) {
+      views.push({ view, error: `not tried: the extra shots' ${budgetMs / 1000} s were spent` });
+      continue;
+    }
+    o.onView?.(view);
     try {
       await set[view]();
-      await settle(cdp);
-      views.push({ view, path: await shoot(`${flow}-${view}.png`) });
+      await settle(cdp, commandMs);
+      views.push({ view, path: await shoot(shotName(flow, view), commandMs) });
     } catch (e) {
       views.push({ view, error: (e as Error).message.split('\n')[0]!.slice(0, 300) });
     }
@@ -206,8 +244,10 @@ async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: 
   try {
     browser = await launchChrome(o.chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
     const cdp = browser.cdp;
-    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, views: [], durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
-    watch(cdp, ev, o.app.thresholds.slow_request_ms, o.allow);
+    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, views: [], viewErrors: [], durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
+    // Null until the desktop shot is taken; from then on, what the page does belongs to the view being shot.
+    let view: ShotView | null = null;
+    watch(cdp, ev, o.app.thresholds.slow_request_ms, o.allow, () => view);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
@@ -235,7 +275,7 @@ async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: 
     await cdp.send('Tracing.end');
     await Promise.race([traced, sleep(10_000)]);
     ev.trace = summarizeTrace(trace);
-    const shots = await captureShots(cdp, o.outDir, o.flow);
+    const shots = await captureShots(cdp, o.outDir, o.flow, { onView: (v) => (view = v) });
     ev.screenshot = shots.screenshot;
     ev.views = shots.views;
     ev.durationMs = Date.now() - t0;
@@ -251,21 +291,35 @@ async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: 
   }
 }
 
-/** Collect console errors, failed and slow requests; refuse every request that isn't to the app on localhost. */
-function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number, allow: (url: string) => boolean) {
+/**
+ * Collect console errors, failed and slow requests; refuse every request that isn't to the app on localhost.
+ * INVARIANT: once `view()` names a view (the desktop shot is taken), console errors and failed requests go to
+ * ev.viewErrors, which judgeFlow never reads: what the dark and phone relayout does can't change the verdict.
+ */
+export function watch(cdp: Pick<Cdp, 'send' | 'on'>, ev: FlowEvidence, slowMs: number, allow: (url: string) => boolean, view: () => ShotView | null = () => null) {
+  const consoleError = (e: FlowEvidence['consoleErrors'][number]) => {
+    const v = view();
+    if (!v) ev.consoleErrors.push(e);
+    else if (ev.viewErrors.length < VIEW_ERRORS_MAX) ev.viewErrors.push({ view: v, kind: e.kind, text: e.text });
+  };
+  const failedRequest = (r: FlowEvidence['failedRequests'][number]) => {
+    const v = view();
+    if (!v) ev.failedRequests.push(r);
+    else if (ev.viewErrors.length < VIEW_ERRORS_MAX) ev.viewErrors.push({ view: v, kind: 'failed request', text: `${r.method} ${r.url} (${r.status ?? r.error ?? ''})` });
+  };
   cdp.on('Runtime.exceptionThrown', (p) => {
     const d = p.exceptionDetails as { text: string; url?: string; exception?: { description?: string } };
-    ev.consoleErrors.push({ kind: 'exception', text: d.exception?.description ?? d.text, ...(d.url ? { url: d.url } : {}) });
+    consoleError({ kind: 'exception', text: d.exception?.description ?? d.text, ...(d.url ? { url: d.url } : {}) });
   });
   cdp.on('Runtime.consoleAPICalled', (p) => {
     if (p.type !== 'error' && p.type !== 'assert') return;
     const args = (p.args as { value?: unknown; description?: string }[]).map((a) => (a.value !== undefined ? String(a.value) : (a.description ?? ''))).join(' ');
-    ev.consoleErrors.push({ kind: `console.${p.type}`, text: args });
+    consoleError({ kind: `console.${p.type}`, text: args });
   });
   cdp.on('Log.entryAdded', (p) => {
     const e = p.entry as { level: string; source: string; text: string; url?: string };
     // A request the browser logs as failed is reported once, as a failed request.
-    if (e.level === 'error' && e.source !== 'network') ev.consoleErrors.push({ kind: e.source, text: e.text, ...(e.url ? { url: e.url } : {}) });
+    if (e.level === 'error' && e.source !== 'network') consoleError({ kind: e.source, text: e.text, ...(e.url ? { url: e.url } : {}) });
   });
   cdp.on('Fetch.requestPaused', (p) => {
     const req = p.request as { url: string };
@@ -283,7 +337,7 @@ function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number, allow: (url: string) 
   cdp.on('Network.responseReceived', (p) => {
     const r = p.response as { url: string; status: number };
     const s = started.get(String(p.requestId));
-    if (r.status >= 400) ev.failedRequests.push({ url: r.url.slice(0, 300), method: s?.method ?? 'GET', status: r.status, error: null });
+    if (r.status >= 400) failedRequest({ url: r.url.slice(0, 300), method: s?.method ?? 'GET', status: r.status, error: null });
   });
   cdp.on('Network.loadingFinished', (p) => {
     const s = started.get(String(p.requestId));
@@ -295,12 +349,12 @@ function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number, allow: (url: string) 
     const s = started.get(String(p.requestId));
     // A request this run refused is reported as blocked, not failed.
     if (!s || p.blockedReason === 'inspector' || String(p.errorText).includes('ERR_BLOCKED_BY_CLIENT')) return;
-    ev.failedRequests.push({ url: s.url.slice(0, 300), method: s.method, status: null, error: String(p.errorText) });
+    failedRequest({ url: s.url.slice(0, 300), method: s.method, status: null, error: String(p.errorText) });
   });
 }
 
-async function evalIn(cdp: Pick<Cdp, 'send'>, expr: string): Promise<unknown> {
-  const r = await cdp.send<{ result: { value?: unknown }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
+async function evalIn(cdp: Pick<Cdp, 'send'>, expr: string, ms?: number): Promise<unknown> {
+  const r = await cdp.send<{ result: { value?: unknown }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, ms);
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
   return r.result.value;
 }

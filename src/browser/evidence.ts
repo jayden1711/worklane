@@ -23,6 +23,7 @@ export function evidenceSummary(ev: FlowEvidence): string {
 }
 
 const LIST_MAX = 5;
+const VIEW_LABEL: Record<ShotView, string> = { dark: 'dark mode', phone: 'phone width' };
 function listed<T>(label: string, items: T[], line: (x: T) => string): string[] {
   if (!items.length) return [];
   return [`  - ${label}:`, ...items.slice(0, LIST_MAX).map((x) => `    - ${line(x)}`), ...(items.length > LIST_MAX ? [`    - and ${items.length - LIST_MAX} more`] : [])];
@@ -57,11 +58,10 @@ export function browserEvidenceLines(o: { gate: BrowserGate; runs: { result: Bro
     for (const n of r.verdict?.notes ?? []) out.push(`  - note: ${plain(n, 300)}`);
     const shots = shotsListed(ev);
     if (shots.length) out.push(`  - screenshots (kept with the run): ${shots.join(', ')}`);
+    out.push(...listed('seen during the dark mode and phone width shots (not judged)', ev.viewErrors, (e) => `${VIEW_LABEL[e.view]}: ${e.kind}: ${quoted(e.text)}`));
   }
   return out;
 }
-
-const VIEW_LABEL: Record<ShotView, string> = { dark: 'dark mode', phone: 'phone width' };
 
 /** Every shot a run took, by file name only (the path is the run's machine, which the PR's readers don't share), and each view it couldn't shoot, with why. */
 function shotsListed(ev: FlowEvidence): string[] {
