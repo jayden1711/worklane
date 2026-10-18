@@ -4,11 +4,11 @@
 // per coordinator; the dashboard itself can't sudo). The owner proposes, sees current and new, and
 // confirms; the request shows as pending until the coordinator has run it. Below, the history:
 // engine updates (installed, refused, rolled back) and every change the helper made.
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api } from '../api';
 import { DotPill, RecordsTable } from './patterns';
 import { UpdaterSetupView, type UpdaterData } from './UpdaterSetup';
-import { ago, Button, Card, cx } from './ui';
+import { ago, Button, Card, cx, Why, firstWhy } from './ui';
 
 /** A machine change asked for from the dashboard, as the coordinator has handled it so far (src/machine-requests.ts). */
 export interface MachineRequestRow {
@@ -33,6 +33,8 @@ export interface MachineData {
   needs?: string | null;
   /** Whether this page came from one of the console's allowed devices (the hub says); absent from older servers. */
   deviceReady?: boolean;
+  /** Why this person can't ask for a change now (the check each change makes), null when they can; absent from older servers. */
+  why?: string | null;
   helper: string;
   slots: { cap: number; running: number; min: number; max: number };
   /** The machine's test-run slot cap; absent from older servers. */
@@ -54,10 +56,15 @@ const EVENT_TONE: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { install
 const short = (s?: string | null) => (s ? s.slice(0, 8) : '–');
 const val = (v: unknown) => (v === true ? 'on' : v === false ? 'off' : v === null || v === undefined ? '–' : String(v));
 
-function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm, disabled }: { label: string; testKey: string; current: string; bounds: string; input: React.ReactNode; proposed: { value: unknown; text: string } | { error: string } | null; onConfirm: (v: unknown) => Promise<void>; disabled: boolean }) {
+/**
+ * One setting's row. `readOnly`: this person can never change it (or there is nothing to change), so no input and no
+ * button is drawn. `refusal`: why they can't now (the server's own check, MachineData.why), shown on the buttons.
+ */
+function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm, readOnly, refusal }: { label: string; testKey: string; current: string; bounds: string; input: React.ReactNode; proposed: { value: unknown; text: string } | { error: string } | null; onConfirm: (v: unknown) => Promise<void>; readOnly: boolean; refusal: string | null }) {
   const [review, setReview] = useState<{ value: unknown; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const savingId = useId();
   return (
     <tr className="border-b border-line align-top last:border-0" data-testid="machine-setting-row" data-setting={testKey}>
       <td className="primitive-table-cell text-[13px] font-medium text-ink">{label}</td>
@@ -65,13 +72,12 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
         {current}
       </td>
       <td className="primitive-table-cell">
-        {disabled ? (
+        {readOnly ? (
           <span className="text-[12px] text-ink-3">{bounds}</span>
         ) : (
           <div className="space-y-1.5">
             {input}
             <div className="text-[11.5px] text-ink-3">{bounds}</div>
-            {proposed && 'error' in proposed && <div className="text-[12px] text-red">{proposed.error}</div>}
             {review ? (
               <div className="rounded-control bg-inset p-2 shadow-hairline" data-testid="machine-setting-review">
                 <div className="grid grid-cols-[56px_1fr] gap-x-2 gap-y-0.5 font-mono text-[12px]">
@@ -80,10 +86,11 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
                   <span className="text-ink-3">new</span>
                   <span className="text-green">{review.text}</span>
                 </div>
-                <div className="mt-2 flex gap-1.5">
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
                   <Button
                     size="sm"
-                    disabled={busy}
+                    why={firstWhy(refusal, busy && 'Saving…')}
+                    {...(busy && !refusal ? { whyAt: savingId } : {})}
                     data-testid="machine-setting-confirm"
                     onClick={async () => {
                       setBusy(true);
@@ -99,15 +106,16 @@ function ChangeRow({ label, testKey, current, bounds, input, proposed, onConfirm
                       }
                     }}
                   >
-                    {busy ? 'Changing…' : 'Confirm'}
+                    Confirm
                   </Button>
-                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => setReview(null)} data-testid="machine-setting-cancel">
+                  <Button size="sm" variant="ghost" why={busy && 'Saving…'} whyAt={savingId} onClick={() => setReview(null)} data-testid="machine-setting-cancel">
                     Cancel
                   </Button>
+                  {busy && <Why id={savingId}>Saving…</Why>}
                 </div>
               </div>
             ) : (
-              <Button size="sm" variant="outline" disabled={!proposed || 'error' in proposed || proposed.text === current} onClick={() => proposed && 'value' in proposed && setReview(proposed)} data-testid="machine-setting-review-button">
+              <Button size="sm" variant="outline" why={firstWhy(refusal, !proposed && 'Nothing to change', !!proposed && 'error' in proposed && `Not a valid value: ${proposed.error}`, !!proposed && 'text' in proposed && proposed.text === current && 'That is the value now: choose another')} onClick={() => proposed && 'value' in proposed && setReview(proposed)} data-testid="machine-setting-review-button">
                 Review change
               </Button>
             )}
@@ -139,6 +147,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
   const testSlotsProposed = !ts ? null : !testSlots.trim() || !Number.isInteger(tn) ? { error: 'a whole number' } : tn < ts.min || tn > ts.max ? { error: `${ts.min} to ${ts.max}` } : { value: tn, text: String(tn) };
   const n = Number(slots);
   const slotsProposed = !slots.trim() || !Number.isInteger(n) ? { error: 'a whole number' } : n < data.slots.min || n > data.slots.max ? { error: `${data.slots.min} to ${data.slots.max}` } : { value: n, text: String(n) };
+  // The server's own reason (a device that isn't allowed), as a sentence on each button it holds.
+  const refusal = data.canChange && data.why ? data.why[0]!.toUpperCase() + data.why.slice(1) : null;
   const send = (what: 'slots' | 'updates' | 'testSlots') => async (value: unknown) => {
     const r = await api<{ machine: MachineData }>('/api/machine', { method: 'POST', body: JSON.stringify({ what, value }) });
     // Confirmed: this input follows what is set again (the card's own choice, never a remount's).
@@ -188,7 +198,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               testKey="slots"
               current={String(data.slots.cap)}
               bounds={`${data.slots.min}–${data.slots.max}; ${data.slots.running} in use now`}
-              disabled={!data.canChange}
+              readOnly={!data.canChange}
+              refusal={refusal}
               proposed={slotsProposed}
               onConfirm={send('slots')}
               input={<input value={slots} onChange={(e) => setSlots(e.target.value)} aria-label="slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
@@ -199,7 +210,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
                 testKey="testSlots"
                 current={String(ts.cap)}
                 bounds={`${ts.min}–${ts.max}; ${ts.running} running now; the recommendation for this machine is in docs/test-runs.md`}
-                disabled={!data.canChange}
+                readOnly={!data.canChange}
+                refusal={refusal}
                 proposed={testSlotsProposed}
                 onConfirm={send('testSlots')}
                 input={<input value={testSlots} onChange={(e) => setTestSlots(e.target.value)} aria-label="test-run slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
@@ -210,7 +222,8 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               testKey="updates"
               current={data.updates.configured ? (data.updates.enabled ? 'on' : 'off') : 'not set up'}
               bounds={data.updates.configured ? `on: the updater installs green ${data.updates.branch} commits when the machine is quiet, and rolls back a failed one` : data.updater ? "the updater isn't set up on this machine: install it in Updater setup, above" : "the updater isn't set up on this machine (an admin runs its setup script)"}
-              disabled={!data.canChange || !data.updates.configured}
+              readOnly={!data.canChange || !data.updates.configured}
+              refusal={refusal}
               proposed={{ value: updates === 'on', text: updates }}
               onConfirm={send('updates')}
               input={

@@ -1536,6 +1536,8 @@ export interface ClaudeAccountData {
   /** Whether this person may refresh or switch (the server checks again). */
   allowed: boolean;
   why: string | null;
+  /** False when no device would help (this person's role here): Refresh and Switch aren't drawn; absent from older servers. */
+  everAllowed?: boolean;
   canSwitch: boolean;
   busy: string | null;
   canPasteToken: boolean;
