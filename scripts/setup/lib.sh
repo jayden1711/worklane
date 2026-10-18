@@ -562,18 +562,26 @@ repo_ok() {
   [[ "$1" == */* && "$rest" != */* ]] && github_login_ok "$owner" && [[ "${#rest}" -le 100 && "$rest" =~ ^[A-Za-z0-9_.-]+$ && "$rest" != . && "$rest" != .. ]]
 }
 
+# The bounds of the agent-user steps on a Claude login (#613): the token install and its rollback
+# (restore_claude_credentials), then the login check. timeout -k: SIGTERM at the bound, then SIGKILL
+# CLAUDE_KILL_AFTER_SECONDS later, since a process with a TERM handler (node has one) or blocked on a hung mount is
+# only ended by SIGKILL. Plain assignments: never read from the environment.
+CLAUDE_TOKEN_INSTALL_SECONDS=30
+CLAUDE_LOGIN_SECONDS=60
+CLAUDE_KILL_AFTER_SECONDS=5
+# Whether a step's status is timeout cutting it off: 124 (ended by SIGTERM) or 137 (SIGKILL, -k).
+cut_off_status() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 # The agent's Claude login, from `claude setup-token`'s token on stdin, written as that user's own Claude
 # credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude; or <dir>/.credentials.json when an instance
 # names its agent's claude_config_dir), keeping the file's other entries. The token goes from stdin to that file and
 # nowhere else: never an argument, an environment variable or a log line (timeout passes stdin through).
-# Bounded, like claude_status_json and cached_account (#613): a home on a hung FUSE or network mount must not hold
-# root's switch (every instance paused) for ever. Cut off, it says so on stderr and fails with timeout's 124, which
-# every caller reads as a failed install.
+# Bounded (#613): a home on a hung FUSE or network mount must not hold root's switch (every instance paused) for ever.
+# Cut off, it says so on stderr and fails (cut_off_status), which every caller reads as a failed install. A cut-off
+# between its write and its rename can leave <file>.tmp-<pid> in that user's own 0700 dir (#667).
 #   install_claude_token <user> [<claude config dir>]
-CLAUDE_TOKEN_INSTALL_SECONDS=30
 install_claude_token() {
   local rc=0
-  (cd / && sudo -H -u "$1" timeout "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" --input-type=module -e '
+  (cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" --input-type=module -e '
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -603,17 +611,16 @@ writeFileSync(tmp, `${JSON.stringify(c)}\n`, { mode: 0o600 });
 renameSync(tmp, file);
 console.log(`installed ${file} (0600, this user only)`);
 ' "${2:-}") || rc=$?
-  [ "$rc" -ne 124 ] || echo "installing the Claude token as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2
+  if cut_off_status "$rc"; then echo "installing the Claude token as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2; fi
   return "$rc"
 }
 # Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes). Bounded
-# like claude_status_json (#613): no answer within the limit is a no, with why on stderr.
-CLAUDE_LOGIN_SECONDS=60
+# (#613, CLAUDE_LOGIN_SECONDS): no answer within the limit is a no, with why on stderr.
 claude_login_ok() {
   command -v claude >/dev/null 2>&1 || return 0
   local out rc=0
-  out="$(cd / && sudo -H -u "$1" timeout "$CLAUDE_LOGIN_SECONDS" claude auth status --json)" || rc=$?
-  if [ "$rc" -eq 124 ]; then
+  out="$(cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_LOGIN_SECONDS" claude auth status --json)" || rc=$?
+  if cut_off_status "$rc"; then
     echo "claude auth status, as $1, didn't answer within $CLAUDE_LOGIN_SECONDS s (its home may be on a hung mount)" >&2
     return 1
   fi
@@ -675,9 +682,11 @@ process.exit(1);
 }
 # One user's Claude credentials file put back as it was (a switch's rollback): the content on stdin, written as that
 # user, 0600, by a rename; empty stdin: there was none, so the file is removed. Never an argument or a log line.
+# Bounded like the install (#613: it runs while every instance is paused): cut off, it says so on stderr and fails.
 #   restore_claude_credentials <user> <claude config dir>
 restore_claude_credentials() {
-  (cd / && sudo -H -u "$1" "$(command -v node)" -e '
+  local rc=0
+  (cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" -e '
 const { existsSync, readFileSync, renameSync, rmSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const dir = process.argv[1];
@@ -691,7 +700,9 @@ if (!prev.trim()) {
 const tmp = `${file}.tmp-${process.pid}`;
 writeFileSync(tmp, prev, { mode: 0o600 });
 renameSync(tmp, file);
-' "$2")
+' "$2") || rc=$?
+  if cut_off_status "$rc"; then echo "putting the previous Claude login back as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2; fi
+  return "$rc"
 }
 # Whether a path is a plain file (not a link) that this user owns.
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -user "$2" 2>/dev/null)" ]; }
