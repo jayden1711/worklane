@@ -21,6 +21,7 @@ import { addProjectView } from '../src/console/add-project.js';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
+import { REMOVED_CREDENTIAL_PATHS } from '../src/claude-credential-guard.js';
 import { profilesView } from '../src/claude-profiles.js';
 import { resetWords } from '../src/usage-limit.js';
 import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
@@ -2459,6 +2460,20 @@ test('#711: the Claude account panel takes no credential: no password field, no 
   assert.match(html, /data-testid="claude-account-switch-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh switch</);
   assert.match(html, /data-testid="claude-profile-add-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh profile-add &lt;name&gt;</);
   assert.match(html, /data-testid="claude-switch-token-elsewhere">It is pasted in the terminal where the switch was started\. This page never takes it\./);
+});
+
+test('#711: no page source sends to a removed credential route, or asks the switch or a relayed sign-in to start', () => {
+  const walk = (d: string): string[] => readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : /\.tsx?$/.test(e.name) ? [join(d, e.name)] : []));
+  const files = walk(join(repoRoot, 'web', 'src'));
+  assert.ok(files.length > 20, 'the page sources were found');
+  const found: string[] = [];
+  for (const f of files) {
+    const s = readFileSync(f, 'utf8');
+    for (const route of REMOVED_CREDENTIAL_PATHS) if (s.includes(route)) found.push(`${f}: ${route}`);
+    // The machine requests the server half refuses: a switch (it waits for a token) and a relayed sign-in.
+    if (/action: 'switch'|claudeAccountAction\('switch'\)|claudeProfileAction\('login'/.test(s)) found.push(`${f}: starts a switch or a relayed sign-in`);
+  }
+  assert.deepEqual(found, []);
 });
 
 test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
