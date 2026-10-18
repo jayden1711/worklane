@@ -14,7 +14,9 @@
 // src/roles.ts or any other file; the owner applies the proposed diff by hand and reruns the eval.
 import { rmSync } from 'node:fs';
 import { lineDiff } from './line-diff.js';
+import { HELD_OUT_ENV } from './held-out-paths.js';
 import { CONTRACT_PARTS } from './role-contract.js';
+import { HELD_OUT_FROM_STATE_FLAG, heldOutAllowed, spendFromArgs } from './spend-gate.js';
 import { assertJudgeDiffers, comparisonDiff, comparisonLine, comparisonPasses, DEFAULT_SAMPLES, neutralDir, type Ask, type EvalCase, type EvalComparison, type ScoreComparison } from './skilleval.js';
 
 /** Runs of each of base and head per role, unless another number is asked for. */
@@ -43,9 +45,19 @@ export interface EvalRolesOptions {
   fixer: string;
   /** Dollars per role for the whole fix loop: every fixer call and every rerun (--fix-cap). */
   fixCap: number;
+  /**
+   * --spend: the most this invocation may spend in all (src/spend-gate.ts); null when not given, and then the script
+   * prints its plan and makes no model call. It bounds --cap and --fix-cap from above.
+   */
+  spend: number | null;
+  /** --held-out-from-state: read (and with --write-held-out, write) the held-out store in this machine's state. */
+  heldOutFromState: boolean;
 }
 
-export function evalRolesOptions(argv: string[]): EvalRolesOptions {
+/** Each held-out case writer's budget (one call per role with --write-held-out). */
+export const WRITER_BUDGET_USD = 2;
+
+export function evalRolesOptions(argv: string[], env: NodeJS.ProcessEnv = process.env): EvalRolesOptions {
   const arg = (name: string, fallback: string) => {
     const i = argv.indexOf(`--${name}`);
     return i >= 0 && argv[i + 1] && !argv[i + 1]!.startsWith('--') ? argv[i + 1]! : fallback;
@@ -71,7 +83,16 @@ export function evalRolesOptions(argv: string[]): EvalRolesOptions {
   if (fixAttempts && scoreOnly) throw new Error('--fix needs a base/head comparison; --score has no base');
   const fixCap = Number(arg('fix-cap', '10'));
   if (!(fixCap > 0)) throw new Error('--fix-cap must be a positive number of dollars');
-  return { base: arg('base', 'origin/main'), roles: roles ? roles.split(',') : [], model, judge, samples, runs, cap, writeHeldOut: argv.includes('--write-held-out'), scoreOnly, fixAttempts, fixer: arg('fixer', 'opus'), fixCap };
+  const spend = spendFromArgs(argv);
+  const writeHeldOut = argv.includes('--write-held-out');
+  // Writing goes into a held-out store, so it needs one named on purpose, like reading (#612).
+  if (writeHeldOut && !heldOutAllowed(argv, env)) throw new Error(`--write-held-out writes into a held-out store: set ${HELD_OUT_ENV} or pass ${HELD_OUT_FROM_STATE_FLAG}`);
+  return { base: arg('base', 'origin/main'), roles: roles ? roles.split(',') : [], model, judge, samples, runs, cap, writeHeldOut, scoreOnly, fixAttempts, fixer: arg('fixer', 'opus'), fixCap, spend, heldOutFromState: argv.includes(HELD_OUT_FROM_STATE_FLAG) };
+}
+
+/** The most a run with these options could spend on `roles` roles: each role's caps, before --spend bounds them. */
+export function evalRolesMaxSpend(o: EvalRolesOptions, roles: number): number {
+  return roles * (o.cap + (o.fixAttempts ? o.fixCap : 0) + (o.writeHeldOut ? WRITER_BUDGET_USD : 0));
 }
 
 /** An Ask whose every call is recorded as run.cost (role, model, the CLI's estimate). */
