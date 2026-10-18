@@ -174,12 +174,14 @@ const STATUS_AB = { at: '2026-10-14T00:00:00Z', users: [{ instance: 'alpha', kin
 const pausedAt = (log: EventLog, instance: string, reset: string) => log.append('usage.paused', { reset_at: reset, source: 'claude', kind: 'five_hour', issue: 7, role: 'worker', detail: 'usage limit' }, instance, 'coordinator');
 const limitsIn = (t: ReturnType<typeof profilesTable>) => t.profiles.flatMap((p) => p.cells.filter((c) => c.limit !== null).map((c) => [p.name, c.instance, c.limit]));
 
-test('#566: profilesTable marks the active cell of a paused instance with its reset time, and no other cell', () => {
+test('#566: profilesTable marks the active cell of a paused instance with its reset time, and no other cell', (ctx) => {
   const dir = accountDir(twoProfiles({ alpha: { profile: 'work', since: 'x' } }));
   writeFileSync(join(dir, 'status.json'), JSON.stringify(STATUS_AB));
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'cp-usage-')), 'e.db'));
   try {
     const now = Date.parse('2026-10-18T12:00:00Z');
+    // The log stamps usage.paused with the clock: the same `now` as the table's, never the wall clock.
+    ctx.mock.timers.enable({ apis: ['Date'], now });
     const reset = '2026-10-18T14:05:00.000Z';
     pausedAt(log, 'alpha', reset);
     const t = profilesTable({ dir, now, usage: { instance: 'alpha', pause: pauseOf(log.read(0)) } });
@@ -192,12 +194,16 @@ test('#566: profilesTable marks the active cell of a paused instance with its re
   }
 });
 
-test('#566: an unpaused instance has no limit on any cell: no pause, after usage.resumed, after its reset, or after a profile switch since it began', () => {
+test('#566: an unpaused instance has no limit on any cell: no pause, after usage.resumed, after its reset, or after a profile switch since it began', (ctx) => {
   const dir = accountDir(twoProfiles({ alpha: { profile: 'work', since: 'x' } }));
   writeFileSync(join(dir, 'status.json'), JSON.stringify(STATUS_AB));
   const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'cp-usage-')), 'e.db'));
   try {
     const now = Date.parse('2026-10-18T12:00:00Z');
+    // WHY: the log stamps usage.paused with the clock, and the switch below is compared with that stamp. On the wall
+    // clock the pause began whenever the test ran, so a switch at a fixed time was "since the pause began" only before
+    // it (main went red on 2026-10-18 after 12:00 UTC). The log's clock is the table's `now`.
+    ctx.mock.timers.enable({ apis: ['Date'], now });
     const reset = '2026-10-18T14:05:00.000Z';
     const table = (o: { now?: number; dir?: string } = {}) => profilesTable({ dir: o.dir ?? dir, now: o.now ?? now, usage: { instance: 'alpha', pause: pauseOf(log.read(0)) } });
     const cells = (t: ReturnType<typeof profilesTable>) => t.profiles.flatMap((p) => p.cells);
@@ -214,10 +220,15 @@ test('#566: an unpaused instance has no limit on any cell: no pause, after usage
     // Paused again: its reset come (the coordinator resumes at its next tick), or a profile switch since it began
     // (a switch ends the pause: src/coordinator/base.ts resumeIfDue), shows none.
     pausedAt(log, 'alpha', reset);
+    assert.equal(pauseOf(log.read(0))?.since, new Date(now).toISOString(), 'the pause began at the test clock, not the wall clock');
     assert.deepEqual(limitsIn(table({ now: Date.parse(reset) + 1000 })), [], 'its reset has come');
-    const switched = accountDir({ ...twoProfiles({ alpha: { profile: 'work', since: 'x' } }), switched_at: { alpha: new Date(now + 1000).toISOString() } });
-    writeFileSync(join(switched, 'status.json'), JSON.stringify(STATUS_AB));
-    assert.deepEqual(limitsIn(table({ dir: switched })), [], 'switched since the pause began');
+    const switchedAt = (at: number) => {
+      const d = accountDir({ ...twoProfiles({ alpha: { profile: 'work', since: 'x' } }), switched_at: { alpha: new Date(at).toISOString() } });
+      writeFileSync(join(d, 'status.json'), JSON.stringify(STATUS_AB));
+      return d;
+    };
+    assert.deepEqual(limitsIn(table({ dir: switchedAt(now + 1000) })), [], 'switched since the pause began');
+    assert.equal(limitsIn(table({ dir: switchedAt(now - 1000) })).length, 1, 'a switch before the pause began does not end it');
     // No usage given (an older caller): nothing is marked, and no instance's limit is claimed as read.
     const unread = profilesTable({ dir, now });
     assert.ok(cells(unread).every((c) => c.limit === null));
