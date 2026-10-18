@@ -137,7 +137,7 @@ interface Render {
   renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
-  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown): Record<string, number | undefined>;
   renderNeedsYou(state: State, waiting: unknown, now?: number, error?: string | null): string;
   NEEDS_YOU_ORDER: string;
   nextStep(f: unknown): { id: string } | null;
@@ -1875,7 +1875,9 @@ test('#585 Needs you is one queue: what the three tabs list, each once, blocking
   // Blocking first; the hotspot hold is the oldest of all, but nothing waits on it but you, so it is last.
   assert.equal(rows.at(-1), 'hotspot_held no');
   assert.ok(rows.slice(0, -1).every((x) => x.endsWith(' yes')), rows.join(', '));
-  assert.equal(rows.length, r.navCounts(asOwner, w)['nav-needs-you'], 'the badge counts the queue');
+  // #633: the badge from the state alone, whose waiting keys are what /api/waiting lists.
+  const keyed = { ...asOwner, waiting: { count: w.items.length, keys: w.items.map((i) => ({ kind: i.kind, issue: i.issue, ...('decision' in i ? { decision: i.decision } : {}) })) } };
+  assert.equal(rows.length, r.navCounts(keyed)['nav-needs-you'], 'the badge counts the queue');
   // Every open decision is in it once, the one Waiting on you lists too among them.
   for (const d of open) assert.equal(html.split(`href="/needs-you/decisions/${d.id}"`).length - 1, 1, d.id);
   assert.match(html, /href="\/needs-you\/decisions\/pr-31"/);

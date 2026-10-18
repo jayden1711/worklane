@@ -3,7 +3,7 @@
 // The nav is App.tsx's (NAV, navFor, pagesFor), bundled for Node with the project's own vite.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,12 +15,10 @@ interface Nav {
   navFor(state: unknown): Page[];
   pagesFor(state: unknown): Page[];
   placeOf(path: string): { row: Page; tab: Page | null } | null;
-  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown): Record<string, number | undefined>;
   navigate(to: string): void;
   needsYou(state: unknown, waiting?: unknown): { key: string; kind: string; blocking: boolean; since: string; issue: number | null; href: string | null }[];
   ORDER: string;
-  WAITING_EVERY_MS: number;
-  waitingDelay(keptAt: number | undefined, live: boolean, now: number): number;
   KIND: Record<string, { label: string; holds: string | null }>;
 }
 interface Redirects {
@@ -163,15 +161,17 @@ test('Needs you is one queue, urgency-sorted', () => {
   assert.equal(q.find((i) => i.issue === 4)!.since, hoursAgo(8));
   // Each opens its own page.
   assert.deepEqual(q.slice(0, 4).map((i) => i.href), ['/needs-you/decisions/p', '/needs-you/decisions/b', '/needs-you/decisions/pr-70', '/work/issues/4']);
-  // The one badge counts the queue: inbox, waiting and decisions, each thing once (the Inbox's L2 landings aside).
-  const c = nav.navCounts(state, waiting);
+  // The one badge counts the queue: inbox, waiting and decisions, each thing once (the Inbox's L2 landings aside). #633:
+  // from the state alone, which carries what Waiting on you lists by the queue's keys (its kind, issue and decision).
+  const withWaiting = { ...state, waiting: { count: waiting.items.length, keys: waiting.items.map(({ kind, issue, decision }: { kind: string; issue: number | null; decision?: string }) => ({ kind, issue, ...(decision ? { decision } : {}) })) } };
+  const c = nav.navCounts(withWaiting);
   assert.equal(c['nav-needs-you'], 11);
   assert.equal(c['/needs-you'], 11);
-  // Before Waiting on you answers, or for a viewer it is refused to: the decisions and your blocked tasks.
+  // For a viewer (its state has no waiting key), or an older server: the decisions and your blocked tasks.
   assert.deepEqual(nav.needsYou(state).map(shown), ['plan_held #2', 'awaiting_decision', 'awaiting_decision #1', 'blocked #4', 'blocked #5']);
   assert.equal(nav.navCounts(state)['nav-needs-you'], 5);
-  // The answer the shell kept can be up to a minute old; the live state is newer. Once it shows decision a and plan p
-  // answered and #4 moving again, they are not counted, though the kept answer still lists them.
+  // The queue page reads /api/waiting after the state, so the live state can be newer. Once it shows decision a and
+  // plan p answered and #4 moving again, they are not listed, though the answer read still lists them.
   const answer = { by: 'example-owner', answer: 'yes', at: hoursAgo(0) };
   const later = {
     ...state,
@@ -182,19 +182,32 @@ test('Needs you is one queue, urgency-sorted', () => {
   assert.deepEqual(nav.needsYou(later, waiting).map(shown), [
     'awaiting_decision', 'needs_owner #7', 'blocked #9', 'emergency_halt', 'blocked #5', 'hotspot_held #10', 'hotspot_held #10', 'deploy_failed',
   ]);
-  assert.equal(nav.navCounts(later, waiting)['nav-needs-you'], 8);
   // The page states the order, from the same table the sort reads: every kind is named, and which side it is on.
   for (const [kind, k] of Object.entries(nav.KIND)) assert.ok(nav.ORDER.includes(k.label), `the order names ${kind}`);
-  // WHY: /api/waiting is computed from the whole log on each read (about 350 ms on a 200 000-event log), and reading it
-  // for the badge on every change and every instance switch loaded a busy instance on each. Off
-  // the queue the shell reads it at most once a minute; on the queue, or with nothing kept for the instance, at once.
-  const t = 1_000_000;
-  assert.equal(nav.WAITING_EVERY_MS, 60_000);
-  assert.equal(nav.waitingDelay(undefined, false, t), 0, 'nothing kept for this instance: read it');
-  assert.equal(nav.waitingDelay(t - 10_000, false, t), 50_000, 'kept 10 s ago: an instance switch shows it, read again in 50 s');
-  assert.equal(nav.waitingDelay(t - 90_000, false, t), 0, 'kept over a minute ago: read it');
-  assert.equal(nav.waitingDelay(t - 10_000, true, t), 0, 'on the queue: every change');
   assert.ok(nav.ORDER.indexOf(nav.KIND.blocked!.label) < nav.ORDER.indexOf('then the rest') && nav.ORDER.indexOf('then the rest') < nav.ORDER.indexOf(nav.KIND.deploy_failed!.label));
+});
+
+test("#633: the shell counts the Needs you badge from the state alone and never reads /api/waiting; #627's once-a-minute read is gone", () => {
+  const t0 = Date.parse('2026-10-01T00:00:00Z');
+  const ago = (h: number) => new Date(t0 - h * 3_600_000).toISOString();
+  const state = {
+    ...owner,
+    decisions: [{ id: 'a', kind: 'question', issue: 1, owner: 'example-owner', question: 'A?', askedAt: ago(2), answer: null }],
+    inbox: { decisions: [], blocked: [], notify: [] },
+    tasks: [],
+    landQueue: [],
+  };
+  // A new wait of a kind the state's own lists don't show (a PR left to you, a stop): counted as soon as the state has it.
+  const waiting = { count: 3, keys: [{ kind: 'emergency_halt', issue: null }, { kind: 'awaiting_decision', issue: 1, decision: 'a' }, { kind: 'needs_owner', issue: 7 }] };
+  assert.equal(nav.navCounts(state)['nav-needs-you'], 1, 'no waiting key (a viewer): the decisions and your blocked tasks');
+  assert.equal(nav.navCounts({ ...state, waiting })['nav-needs-you'], 3, "the state's waiting keys, decision a once");
+  assert.equal(nav.navCounts({ ...state, waiting: { count: 2, keys: waiting.keys.slice(1) } })['nav-needs-you'], 2, 'the stop resumed: the next state drops it');
+  const shell = nav as unknown as Record<string, unknown>;
+  assert.equal(shell.WAITING_EVERY_MS, undefined, 'no throttle on a read the shell no longer makes');
+  assert.equal(shell.waitingDelay, undefined);
+  // WHY: the guard on the wiring. The shell's own module asks for /api/waiting nowhere (only the queue page and the
+  // Waiting on you page do, for their rows).
+  assert.doesNotMatch(readFileSync(join(repoRoot, 'web', 'src', 'App.tsx'), 'utf8'), /['"`]\/api\/waiting/, 'App.tsx never requests /api/waiting');
 });
 
 test('old routes redirect', () => {
