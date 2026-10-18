@@ -4,7 +4,7 @@
 // synthetic event log (test/synthetic-events.ts, a fixed seed), a fake GitHub for the hub's sign-in and the
 // instances' role reads, and headless Chrome (src/browser/cdp.ts launchChrome) with its network slowed by the
 // DevTools protocol (Network.emulateNetworkConditions). It then times a cold first load, a warm reload, an instance
-// switch and the page switches Overview -> Board -> PRs -> Machine -> Health, through the hub and straight to an instance.
+// switch and the page switches Overview -> Board -> PRs -> Health, through the hub and straight to an instance.
 //
 //   npm run build && npm run build:web
 //   nice node scripts/dev/perf-dashboard.mjs [--events 200000,50000,20000,5000] [--seed 1] [--latency 120]
@@ -265,9 +265,8 @@ async function main() {
       return 0;
     };
     const click = (testid) => async () => evaluate(`(() => { const t = performance.now(); document.querySelector('[data-testid="${testid}"]').click(); return t; })()`);
-    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview. PRs is a tab on the Board's page,
-    // Health one on the Machine page (#585): Machine is the step between them.
-    const pages = [['board', 'nav-work'], ['prs', 'tab-prs'], ['machine', 'nav-machine'], ['health', 'tab-health'], ['overview', 'nav-overview']];
+    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview.
+    const pages = [['board', 'nav-board'], ['prs', 'nav-prs'], ['health', 'nav-health'], ['overview', 'nav-overview']];
 
     // Bundle evaluation: from a trace of the cold load.
     let bundle = null;
