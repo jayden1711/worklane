@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReviewConfig } from '../src/config/schema.js';
-import { computeLevel, loadMoneyPaths, type ChangeFile } from '../src/review.js';
+import { computeLevel, loadMoneyPaths, SELF_MODIFICATION, selfModificationPart, type ChangeFile } from '../src/review.js';
 
 const cfg = ReviewConfig.parse({
   version: 1,
@@ -47,6 +47,18 @@ test('data deletion in added lines is L3 wherever it appears', () => {
 test('dependency bumps and test machinery: L2', () => {
   assert.equal(level([f('package.json', 1, 1), f('package-lock.json', 40, 30)]).level, 'L2');
   assert.equal(level([f('scripts/build.mjs')]).level, 'L2');
+});
+
+// WHY (#629): src/hook.ts is the agents' PreToolUse guard (which tool calls an agent may make, the .worklane/** guard
+// among them) and the post-edit hook. Held only by a repo's own `engine: src/**`, a review.yaml without that glob let a
+// change to it merge below the owner.
+test("regression: a change to the agents' tool guard (src/hook.ts) is self-modification, L3, with a review.yaml that lists no src/**", () => {
+  assert.ok(!Object.values(cfg.categories ?? {}).flat().some((g) => g.startsWith('src')), 'this review.yaml names no src/ glob');
+  const r = level([f('src/hook.ts', 1, 1)]);
+  assert.equal(r.level, 'L3', r.reasons.join('; '));
+  assert.deepEqual(r.categories[SELF_MODIFICATION], ['src/hook.ts']);
+  assert.ok(r.reasons.includes(`${SELF_MODIFICATION}: src/hook.ts`), r.reasons.join('; '));
+  assert.equal(selfModificationPart('src/hook.ts'), "the agents' tool guard");
 });
 
 test('a failed or low-confidence verdict bumps one level; an agent can raise but not lower', () => {
