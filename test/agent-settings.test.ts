@@ -100,6 +100,19 @@ test("a run's settings: the instance's hooks and rules, the lane's sandbox, the 
   assert.equal(s.disableAllHooks, false);
 });
 
+// The setting names are Claude Code's own (its settings schema, CLI 2.1.302): `attribution.commit` / `attribution.pr`,
+// where an empty string hides it, and the deprecated `includeCoAuthoredBy` that older versions read.
+const attributionOff = (s: Settings) => {
+  assert.deepEqual(s.attribution, { commit: '', pr: '' }, 'no attribution in commits or PR bodies');
+  assert.equal(s.includeCoAuthoredBy, false);
+};
+
+test("a run's settings turn commit and PR attribution off, and neither the instance's nor the lane's settings can turn it back on (#576)", () => {
+  attributionOff(runSettings({ disableAllHooks: false }, undefined, {}));
+  const on = { attribution: { commit: 'Co-Authored-By: x', pr: 'Generated with x' }, includeCoAuthoredBy: true };
+  attributionOff(runSettings({ disableAllHooks: false, ...on }, on, {}));
+});
+
 /** A stand-in claude that records its arguments, or `null` when it was never started past auth. */
 function fakeClaude(): { bin: string; seen: () => { settings: Settings | null } | null } {
   const dir = mkdtempSync(join(tmpdir(), 'fake-claude-'));
@@ -145,6 +158,7 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(s.env![`${BRAND.envPrefix}_ROLE`], 'worker');
   assert.deepEqual(s.sandbox, { enabled: true }, "the lane's sandbox is kept");
   assert.ok(s.permissions!.deny!.includes('Read(//x/**)') && s.permissions!.deny!.includes('Read(~/.ssh/**)'));
+  attributionOff(s);
 
   // A lane with its own hooks (research without repo access) runs on those alone.
   c = fakeClaude();
