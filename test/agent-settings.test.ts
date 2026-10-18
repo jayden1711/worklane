@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentSettingsPath, guardrailSettings, HOOK_MARKER, projectSettingsRefusal, readAgentSettings, runSettings, type Settings } from '../src/agent-settings.js';
+import { agentSettingsPath, guardrailSettings, HOOK_MARKER, NO_ATTRIBUTION, projectSettingsRefusal, readAgentSettings, runSettings, SETTINGS_CHECK_KEY, type Settings } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { hookEntry, install, invokedEngine } from '../src/install.js';
@@ -101,6 +101,20 @@ test("a run's settings: the instance's hooks and rules, the lane's sandbox, the 
   assert.equal(s.disableAllHooks, false);
 });
 
+// The setting names are Claude Code's own (its settings schema in the pinned CLI, 2.1.296): `attribution.commit` /
+// `attribution.pr`, where an empty string hides it, `attribution.sessionUrl: false` (no session trailer or PR-body
+// link), and the deprecated `includeCoAuthoredBy` that older versions read.
+const attributionOff = (s: Settings) => {
+  assert.deepEqual(s.attribution, { commit: '', pr: '', sessionUrl: false }, 'no attribution or session link in commits or PR bodies');
+  assert.equal(s.includeCoAuthoredBy, false);
+};
+
+test("a run's settings turn commit and PR attribution off, and neither the instance's nor the lane's settings can turn it back on (#576)", () => {
+  attributionOff(runSettings({ disableAllHooks: false }, undefined, {}));
+  const on = { attribution: { commit: 'Co-Authored-By: x', pr: 'Generated with x' }, includeCoAuthoredBy: true };
+  attributionOff(runSettings({ disableAllHooks: false, ...on }, on, {}));
+});
+
 /** A stand-in claude that records its arguments, or `null` when it was never started past auth. */
 function fakeClaude(): { bin: string; seen: () => { settings: Settings | null } | null } {
   const dir = mkdtempSync(join(tmpdir(), 'fake-claude-'));
@@ -115,6 +129,8 @@ if (args[0] === 'auth') { console.log(JSON.stringify({ loggedIn: true, authMetho
 ${STDIN_LINE};
 const i = args.indexOf('--settings');
 fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ settings: i >= 0 ? JSON.parse(args[i + 1]) : null }));
+// As claude does with a --settings it applied (#626): the init event reports its outputStyle.
+console.log(JSON.stringify({ type: 'system', subtype: 'init', output_style: (i >= 0 && JSON.parse(args[i + 1]).outputStyle) || 'default' }));
 console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }));
 `,
   );
@@ -146,6 +162,7 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(s.env![`${BRAND.envPrefix}_ROLE`], 'worker');
   assert.deepEqual(s.sandbox, { enabled: true }, "the lane's sandbox is kept");
   assert.ok(s.permissions!.deny!.includes('Read(//x/**)') && s.permissions!.deny!.includes('Read(~/.ssh/**)'));
+  attributionOff(s);
 
   // A lane with its own hooks (research without repo access) runs on those alone.
   c = fakeClaude();
@@ -160,6 +177,35 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(r.reason, 'failed');
   assert.match(r.detail, /could loosen agent runs: it sets env/);
   assert.equal(c.seen(), null, 'claude never ran');
+});
+
+test('a run without instance guardrails still gets attribution off in any --settings it is passed, and none when it is passed none (#576)', { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
+  const { dir } = setup(t);
+  const lanes = { default: { settings: { sandbox: { enabled: true } } }, research: { ownHooks: true, settings: { permissions: { deny: ['Read(//x/**)'] } } }, bare: { ownHooks: true } };
+  for (const lane of ['default', 'research']) {
+    const c = fakeClaude();
+    const r = await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, lane));
+    assert.equal(r.reason, 'succeeded', r.detail);
+    attributionOff(c.seen()!.settings!);
+  }
+  const c = fakeClaude();
+  assert.equal((await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, 'bare'))).reason, 'succeeded');
+  assert.equal(c.seen()!.settings, null, 'no --settings is invented for a run that had none');
+});
+
+test("the attribution pin can never replace the run's --settings check value: the check key is spread last (#576, #626)", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
+  const { dir } = setup(t);
+  const lanes = { default: { settings: { sandbox: { enabled: true } } } };
+  // A pin that grew a value for the check key: the run's own fresh check value must still be the one claude gets.
+  const pin = NO_ATTRIBUTION as unknown as Record<string, unknown>;
+  pin[SETTINGS_CHECK_KEY] = 'from-the-attribution-pin';
+  t.after(() => delete pin[SETTINGS_CHECK_KEY]);
+  const c = fakeClaude();
+  const r = await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir));
+  assert.equal(r.reason, 'succeeded', r.detail);
+  const s = c.seen()!.settings! as Record<string, unknown>;
+  assert.match(String(s[SETTINGS_CHECK_KEY]), /-settings-check-[0-9a-f]{16}$/, "the run's own check value, not the pin's");
+  attributionOff(s as Settings);
 });
 
 test("doctor checks an instance's agent hooks where they now live, and fails an older install's project-level hooks", (t) => {

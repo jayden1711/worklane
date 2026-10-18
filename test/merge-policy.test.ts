@@ -394,9 +394,8 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     'test/intake-coordinator.test.ts',
     'test/domain-runner.test.ts',
   ]) {
-    // test/slot-dir-writes.test.ts comes with #654 and may not exist yet: drop this skip once #654 has merged.
-    // The rest are real files, so a rename can't leave a dead entry.
-    if (path !== 'test/slot-dir-writes.test.ts') assert.ok(engineFiles.includes(path), `${path} is a real file`);
+    // Every entry is a real file, so a rename can't leave a dead entry.
+    assert.ok(engineFiles.includes(path), `${path} is a real file`);
     const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, own);
     assert.equal(lvl.level, 'L3', `${path}: ${lvl.reasons.join(' | ')}`);
     assert.deepEqual(lvl.categories['engine-guards'], [path], path);

@@ -324,13 +324,20 @@ archive_dirs() {
 #      broker, network helpers: worklane-*, User= checked first, so another instance's unit is never touched) and
 #      their user slices (user-<uid>.slice, user@<uid>.service) killed and stopped: the cgroup takes the whole tree;
 #   4. what is left outside those cgroups: pkill -KILL by uid (real and effective, never a name), pass after pass
-#      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart.
+#      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart;
+#   5. the last check, failing closed (#614): STOP_RECHECKS (5) listings, 0.2 s apart, as $PROC_DIR names them. Every
+#      pid any of them lists counts as left and refuses the removal, named with its command ("?" when it can't be
+#      read). One gone before its command is read (it ended, or a fork loop moved on to a new pid, its next one born
+#      after the scan) is named "(gone before its command could be read)", with a line saying a process was seen and
+#      to run the removal again once the instance is stopped. Only when no listing lists any pid does it go on: a
+#      single empty listing never passes by itself, since a scan can miss a process that forks and exits fast.
 # INSTANCE_REMOVE_TEST_NO_KILL=1 (CI's proof that a process left refuses the removal): steps 3 and 4 are skipped, so
 # the check only ever finds more; it never lets a removal go on.
 #   stop_uids <name> <user>...
 STOP_PASSES=20
+STOP_RECHECKS=5
 stop_uids() {
-  local name="$1" u uid uids=() names=() unit owner pass left pid
+  local name="$1" u uid uids=() names=() unit owner pass left pid cmd round gone
   shift
   for u in "$@"; do user_exists "$u" && { names+=("$u"); uids+=("$(id -u "$u")"); }; done
   [ "${#uids[@]}" -gt 0 ] || return 0
@@ -366,15 +373,33 @@ stop_uids() {
       sleep 0.5
     done
   fi
-  left=""
-  for uid in "${uids[@]}"; do
-    while read -r pid; do
-      [ -n "$pid" ] || continue
-      printf '%s %s %s\n' "$pid" "$uid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-200)"
-      left=1
-    done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
+  for ((round = 0; round < STOP_RECHECKS; round++)); do
+    [ "$round" -eq 0 ] || sleep 0.2
+    left="" gone=""
+    for uid in "${uids[@]}"; do
+      while read -r pid; do
+        [ -n "$pid" ] || continue
+        # Every pid listed counts as left, whatever its read finds (#614, failing closed). The read only names it:
+        # stderr is redirected before the input, so a vanished file's open says nothing, and no pipe hides the read's
+        # status. A failed read with the /proc dir still there: "?"; with it gone: the process was seen, then ended.
+        if ! cmd="$(tr '\0' ' ' 2>/dev/null < "$PROC_DIR/$pid/cmdline")"; then
+          if [ -d "$PROC_DIR/$pid" ]; then
+            cmd="?"
+          else
+            cmd="(gone before its command could be read)"
+            [[ " $gone " == *" $uid "* ]] || gone="${gone:+$gone }$uid"
+          fi
+        fi
+        printf '%s %s %s\n' "$pid" "$uid" "${cmd:0:200}"
+        left=1
+      done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
+    done
+    if [ -n "$left" ]; then
+      [ -z "$gone" ] || echo "uid $gone: a process was seen, then was gone before its command could be read (it ended, or a fork loop moved on to a new pid): it counts as still running; stop the instance, then run the removal again"
+      return 1
+    fi
   done
-  [ -z "$left" ]
+  return 0
 }
 
 # Files the removed users <uid>... own in the engine's own places, given to root: in each <tree> (find -P, -xdev: a
@@ -444,7 +469,7 @@ left_owned() {
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
-# run's directory. PROC_DIR is the process table it reads (a test's stand-in).
+# run's directory. PROC_DIR is the process table it (and stop_uids's last listing) reads (a test's stand-in).
 PROC_DIR=/proc
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm

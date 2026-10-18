@@ -159,6 +159,9 @@ function standIn() {
 const fs = require('node:fs'), path = require('node:path');
 if (process.argv[2] === 'auth') { fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'auth-called'), ''); console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' })); process.exit(0); }
 fs.writeFileSync(path.join(${JSON.stringify(dir)}, 'got.json'), JSON.stringify({ argv: process.argv.slice(2), env: process.env }));
+// As claude does with a --settings it applied (#626): the init event reports its outputStyle.
+const at = process.argv.indexOf('--settings');
+process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', output_style: (at >= 0 && JSON.parse(process.argv[at + 1]).outputStyle) || 'default' }) + '\\n');
 process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.5, usage: { input_tokens: 1200, output_tokens: 300 }, duration_ms: 4200 }) + '\\n');
 process.stdin.on('data', () => {}); process.stdin.on('end', () => process.exit(0));
 setTimeout(() => process.exit(0), 200);

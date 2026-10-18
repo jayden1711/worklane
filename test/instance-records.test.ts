@@ -596,6 +596,10 @@ function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: b
   const log = join(root, 'log');
   const n = join(root, 'n');
   writeFileSync(n, '0');
+  // The process table its last listing reads (PROC_DIR, #614): pid 4242 there, never the machine's own.
+  const proc = join(root, 'proc');
+  mkdirSync(join(proc, '4242'), { recursive: true });
+  writeFileSync(join(proc, '4242', 'cmdline'), 'busy\0--loop\0');
   const stubs = [
     `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
     `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
@@ -605,9 +609,102 @@ function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: b
     `pkill() { echo "pkill $*" >> "${log}"; [ "$*" != "-KILL -U 1001" ] || echo $(($(cat "${n}") + 1)) > "${n}"; }`,
     `pgrep() { if [ "\${2:-}" = 1001 ] && [ "$(cat "${n}")" -lt ${o.busy} ]; then echo 4242; return 0; fi; return 1; }`,
   ].join('\n');
-  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; ${o.passes ? `STOP_PASSES=${o.passes};` : ''} stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], { encoding: 'utf8', env: { ...process.env, ...(o.noKill ? { INSTANCE_REMOVE_TEST_NO_KILL: '1' } : {}) } });
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; PROC_DIR="$2"; ${o.passes ? `STOP_PASSES=${o.passes};` : ''} stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, ...(o.noKill ? { INSTANCE_REMOVE_TEST_NO_KILL: '1' } : {}) } });
   return { r, ran: existsSync(log) ? readFileSync(log, 'utf8') : '' };
 }
+
+/**
+ * stop_uids's last listing alone (INSTANCE_REMOVE_TEST_NO_KILL=1, and every kill and wait stood in for besides, so
+ * nothing real is ever killed) over a stand-in process table (PROC_DIR), pgrep finding <live> and <gone> as uid 1001's.
+ * A live pid with a command has its cmdline; one with null has its /proc dir but no cmdline that can be read. Each
+ * <gone> pid is listed once, then exits, its /proc dir reaped, before the listing reads its command (a fork loop's
+ * short-lived child, #614). <hop>: a process that forks and exits over and over, its next pid born after each scan:
+ * each pgrep lists a fresh pid that has exited the same way, except in the listings (0-based) whose bit is set in
+ * <hop>, which miss it altogether (a real scan misses a fast one, in runs: the round-2 verdict on #666). Returns the
+ * run, how many times pgrep was called for uid 1001 (-U and -u: 2 a listing), and the log of any kill or wait.
+ */
+function listRun(o: { live?: Record<string, string | null>; gone?: string[]; hop?: number }) {
+  const root = mkdtempSync(join(tmpdir(), 'stop-list-'));
+  const proc = join(root, 'proc');
+  const log = join(root, 'log');
+  const calls = join(root, 'calls');
+  writeFileSync(calls, '0');
+  const live = o.live ?? {};
+  const gone = o.gone ?? [];
+  for (const [pid, cmd] of Object.entries(live)) {
+    mkdirSync(join(proc, pid), { recursive: true });
+    if (cmd !== null) writeFileSync(join(proc, pid, 'cmdline'), cmd);
+  }
+  for (const pid of gone) {
+    mkdirSync(join(proc, pid), { recursive: true });
+    writeFileSync(join(proc, pid, 'cmdline'), 'brief\0');
+  }
+  const stubs = [
+    `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
+    `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
+    `usermod() { :; }; systemctl() { return 1; }`,
+    `pkill() { echo "pkill $*" >> "${log}"; }; loginctl() { echo "loginctl $*" >> "${log}"; }; sleep() { echo "sleep $*" >> "${log}"; }`,
+    [
+      `pgrep() {`,
+      `  [ "\${2:-}" = 1001 ] || return 1`,
+      `  local n p; n=$(($(cat "${calls}") + 1)); echo "$n" > "${calls}"`,
+      `  for p in ${Object.keys(live).join(' ')}; do echo "$p"; done`,
+      `  for p in ${gone.join(' ')}; do if [ -d "$PROC_DIR/$p" ]; then echo "$p"; rm -rf -- "$PROC_DIR/$p"; fi; done`,
+      o.hop === undefined ? '' : `  if (( ((${o.hop} >> ((n - 1) / 2)) & 1) == 0 )); then p=$((5000 + n)); mkdir -p "$PROC_DIR/$p"; printf 'hop\\0' > "$PROC_DIR/$p/cmdline"; echo "$p"; rm -rf -- "$PROC_DIR/$p"; fi`,
+      `  :`,
+      `}`,
+    ].join('\n'),
+  ].join('\n');
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}\nPROC_DIR="$2"; stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_NO_KILL: '1' } });
+  return { ...r, pgreps: Number(readFileSync(calls, 'utf8')), ran: existsSync(log) ? readFileSync(log, 'utf8') : '' };
+}
+
+const SEEN_GONE = 'uid 1001: a process was seen, then was gone before its command could be read (it ended, or a fork loop moved on to a new pid): it counts as still running; stop the instance, then run the removal again\n';
+
+test('issue #614: a process that exits between pgrep and the read of its command still counts as left (fail closed): named as gone, nothing on stderr, and it refuses the removal', { skip: !posix && 'bash' }, () => {
+  const r = listRun({ gone: ['4243'] });
+  assert.equal(r.stderr, '', 'no "No such file or directory" for its cmdline');
+  assert.equal(r.stdout, `4243 1001 (gone before its command could be read)\n${SEEN_GONE}`);
+  assert.equal(r.status, 1, 'a process was seen: the removal refuses');
+  assert.doesNotMatch(r.ran, /pkill|loginctl/, 'nothing killed');
+  // With one still there: both named, the live one with its command from the process table.
+  const both = listRun({ live: { '4242': 'busy\0--loop\0' }, gone: ['4243'] });
+  assert.equal(both.stderr, '');
+  assert.equal(both.stdout, `4242 1001 busy --loop \n4243 1001 (gone before its command could be read)\n${SEEN_GONE}`);
+  assert.equal(both.status, 1);
+});
+
+test('issue #614: a process still there whose command cannot be read is named all the same, and refuses the removal', { skip: !posix && 'bash' }, () => {
+  const r = listRun({ live: { '4245': null } });
+  assert.match(r.stdout, /^4245 1001\b/m, 'never skipped while its /proc dir is there');
+  assert.equal(r.status, 1);
+});
+
+test('issue #614: an empty listing never passes by itself: a process that keeps changing pid refuses the removal whenever any of the 5 listings sees it, missed by the others or not', { skip: !posix && 'bash' }, () => {
+  // The round-2 hopper (#666): each pid it shows pgrep is gone before its read, its successor born after the scan, and
+  // some listings miss it altogether. 50 tries, cycling through every pattern of missed listings but "all 5 missed".
+  const tries = Array.from({ length: 50 }, (_, i) => ({ i, miss: i % 31, r: listRun({ hop: i % 31 }) }));
+  const passed = tries.filter((t) => t.r.status !== 1).map((t) => `try ${t.i} (missed listings, bit 0 the first: ${t.miss.toString(2).padStart(5, '0')}): rc ${t.r.status}`);
+  assert.deepEqual(passed, [], `the hopper refuses the removal in every try; it went on in ${passed.length}/50`);
+  for (const { r } of tries) {
+    assert.equal(r.stderr, '');
+    assert.doesNotMatch(r.ran, /pkill|loginctl/, 'nothing killed');
+    assert.ok(r.stdout.endsWith(SEEN_GONE), r.stdout);
+  }
+  // Seen in its first listing: refused there, no more listings and no wait.
+  const first = listRun({ hop: 0 });
+  assert.equal(first.status, 1);
+  assert.equal(first.pgreps, 2);
+  assert.match(first.stdout, /^5001 1001 \(gone before its command could be read\)$/m);
+  assert.doesNotMatch(first.ran, /sleep/);
+  // Nothing in any listing: the removal goes on, after STOP_RECHECKS (5) listings 0.2 s apart. A hopper missed by all
+  // five looks exactly like this, the one case no listing can tell from none.
+  const none = listRun({});
+  assert.equal(none.status, 0, none.stdout);
+  assert.equal(none.stdout, '');
+  assert.equal(none.pgreps, 10, 'STOP_RECHECKS (5) listings, 2 pgrep calls each');
+  assert.equal((none.ran.match(/^sleep 0\.2$/gm) ?? []).length, 4, 'a short wait between listings');
+});
 
 test("before userdel: the accounts are locked, the users' engine units (User= checked) and slices stopped, then pkill by uid pass after pass until none is left", { skip: !posix && 'bash' }, () => {
   const { r, ran } = stopRun({ busy: 3 });

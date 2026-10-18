@@ -14,6 +14,7 @@
 // login's config dir, which is a path.
 import type { StoredEvent } from './events/types.js';
 import { redactString } from './events/redact.js';
+import { SIGN_IN_HOLD_REASON } from './governor-holds.js';
 
 /** What the channel chat answers while the login is held, or when its own run was refused. */
 export const AUTH_FAILED_CHAT_TEXT = 'Claude sign-in failed on this machine; the owner has been told.';
@@ -65,15 +66,38 @@ export function authFailedDetail(o: { apiErrorStatus?: number | null; text: stri
 /** The red claude_auth incident for an instance's refused logins: the coordinator raises it, the watchdog's probe keeps it. */
 export const authIncidentKey = (instance: string) => `${instance}:refused`;
 
-/** The incident's words for the logins held now, never a token. */
-export function authIncidentText(holds: readonly AuthHold[]): { detail: string; fix: string; tried: string[] } {
-  const named = holds.map((h) => `${h.login} (since ${h.since}): ${h.detail.slice(0, 300)}`).join('; ');
-  const checks = holds.flatMap((h) => (h.lastCheck ? [`checked ${h.login} with a minimal real call at ${h.lastCheck.at}: ${h.lastCheck.ok ? 'answered' : h.lastCheck.detail.slice(0, 200)}`] : []));
+/**
+ * A held login as the ops channel may have it: which lane's login, on what run, since when, and whether the last check
+ * was answered. Never the account (its email, org or the user's login) nor Claude's words, which can name it.
+ * WHY (#680): the incident and the notices below are posted to the Discord ops channel, whose readers are whoever is
+ * in that channel, not a role on the instance. They take only this, so their text has nothing to name the account
+ * with; which account it is, and what Claude said, are on the dashboard (the Machine page, the sign-in banner).
+ */
+export type OpsHold = Pick<AuthHold, 'lane' | 'role' | 'issue' | 'since'> & { lastCheck: Pick<NonNullable<AuthHold['lastCheck']>, 'at' | 'ok'> | null };
+
+/** Which login, in words that name no account: the lane whose runs use it, and the run it was refused on. */
+const whichLogin = (h: OpsHold) => `the ${h.lane} lane's login (refused on a ${h.role} run${h.issue !== null ? ` for #${h.issue}` : ''}, since ${h.since})`;
+
+const CHECK_ACCOUNT = 'Which account it is, and what Claude said, are on the dashboard: check the account on the Machine page';
+
+/** The incident's words for the logins held now (posted to the ops channel too): never the account, never a token. */
+export function authIncidentText(holds: readonly OpsHold[]): { detail: string; fix: string; tried: string[] } {
+  const checks = holds.flatMap((h) => (h.lastCheck ? [`checked the ${h.lane} lane's login with a minimal real call at ${h.lastCheck.at}: ${h.lastCheck.ok ? 'answered' : 'still refused'}`] : []));
   return {
-    detail: `Claude refused ${holds.length === 1 ? 'a login' : `${holds.length} logins`} this instance's runs use: ${named}. No new Claude run starts on it until a call on it succeeds`,
-    fix: `Sign the agent user in to Claude again (switch the Claude account, or a new setup-token for that user). It resumes on its own: the login is checked with one tiny real call every ${AUTH_RECHECK_MS / 60_000} minutes, at once after an account switch, or with Re-check on the dashboard`,
+    detail: `Claude refused ${holds.length === 1 ? 'a login' : `${holds.length} logins`} this instance's runs use: ${holds.map(whichLogin).join('; ')}. No new Claude run starts on it until a call on it succeeds. ${CHECK_ACCOUNT}`,
+    fix: `Check the Claude account on the Machine page, and sign the agent user in to Claude again (switch the Claude account, or a new setup-token for that user). It resumes on its own: the login is checked with one tiny real call every ${AUTH_RECHECK_MS / 60_000} minutes, at once after an account switch, or with Re-check on the dashboard`,
     tried: ['paused new Claude runs on that login (dispatch, chat, research, fix runs, evals); tasks requeued, no attempt counted', ...checks],
   };
+}
+
+/**
+ * The incident's detail for the machine's owners only (Incident.ownerDetail): each held login as Claude names it, with
+ * Claude's words and the last check's. Never posted: the ops post reads the incident's `detail` (authIncidentText),
+ * and the Health page shows this one to the machine owners alone (src/watchdog/view.ts, #680).
+ */
+export function authIncidentOwnerDetail(holds: readonly AuthHold[]): string {
+  const named = holds.map((h) => `${h.login} (${h.lane} lane, since ${h.since}): ${h.detail.slice(0, 300)}${h.lastCheck && !h.lastCheck.ok ? `; last check at ${h.lastCheck.at}: ${h.lastCheck.detail.slice(0, 120)}` : ''}`).join('; ');
+  return `Claude refused ${holds.length === 1 ? 'a login' : `${holds.length} logins`} this instance's runs use: ${named}. No new Claude run starts on it until a call on it succeeds`;
 }
 
 /** One held login, as the log has it. */
@@ -125,16 +149,19 @@ export function authHoldsOf(events: StoredEvent[]): AuthHold[] {
   return [...holds.values()];
 }
 
-/** The ops channel's notices: one when a login is held, one when it works again. */
-export function authHoldPost(h: AuthHold, o: { dashboardUrl?: string | null; instance: string }): string {
+/**
+ * The ops channel's notices: one when a login is held, one when it works again. Neither names the account (OpsHold,
+ * #680): the held notice opens with the hold's own fixed words (SIGN_IN_HOLD_REASON, #567).
+ */
+export function authHoldPost(h: OpsHold, o: { dashboardUrl?: string | null; instance: string }): string {
   return [
-    `**Claude sign-in failed on ${o.instance}: no new Claude runs start on that login.**`,
-    `Login: ${h.login}. Claude said: ${h.detail.slice(0, 600)}`,
+    `**${SIGN_IN_HOLD_REASON}.**`,
+    `Instance ${o.instance}: ${whichLogin(h)}. ${CHECK_ACCOUNT}.`,
     `What to do: sign the agent user in to Claude again (switch the Claude account, or a new setup-token for that user). It resumes on its own once a check call on the login succeeds; checked every ${AUTH_RECHECK_MS / 60_000} min, or at once with Re-check on the dashboard.`,
-    ...(o.dashboardUrl ? [`${o.dashboardUrl.replace(/\/+$/, '')}/overview`] : []),
+    ...(o.dashboardUrl ? [`${o.dashboardUrl.replace(/\/+$/, '')}/machine`] : []),
   ].join('\n');
 }
 
-export function authRecoveredPost(login: string, o: { instance: string }): string {
-  return `Claude sign-in works again on ${o.instance} (${login}): runs start again.`;
+export function authRecoveredPost(o: { instance: string }): string {
+  return `Claude sign-in works again on ${o.instance}: runs start again.`;
 }

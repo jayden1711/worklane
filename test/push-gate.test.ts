@@ -5,6 +5,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from '
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 import { which } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
 
@@ -252,4 +253,66 @@ test('push gate still refuses the owner\'s handle in prose next to an own sign-o
   assert.notEqual(p.status, 0);
   assert.match(p.stderr, /COMMIT_MSG:3: denied term "secretproject"/);
   assert.doesNotMatch(p.stderr, /COMMIT_MSG:5:/);
+});
+
+// #576: the repo's attribution is the DCO sign-off only. No Co-Authored-By trailer (whatever the address, even the
+// commit's own, which the email scan drops) and no vendor "Generated with" line, in a commit or in a PR body.
+const vendorAddress = ['noreply', 'anthropic.com'].join('@');
+const attributed = [
+  ["a Co-Authored-By trailer with the commit's own email", 'Add ok\n\nCo-Authored-By: Ada <ada@example.com>\nSigned-off-by: Ada <ada@example.com>', 3],
+  ['a Co-authored-by trailer with no address', 'Add ok\n\nCo-authored-by: Someone', 3],
+  ["a coding agent's no-reply attribution trailer", `Add ok\n\nSigned-off-by: Ada <ada@example.com>\nCo-Authored-By: Claude Opus <${vendorAddress}>`, 4],
+  ['a "Generated with Claude Code" line', 'Add ok\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nSigned-off-by: Ada <ada@example.com>', 3],
+] as const;
+
+for (const [what, msg, line] of attributed) {
+  test(`push gate refuses ${what}: the repo's attribution is the DCO sign-off only`, { skip }, () => {
+    const r = repo();
+    const base = r.git('rev-parse', 'HEAD');
+    r.commit('ok.md', 'fine\n', msg);
+    const p = gateRange(r.dir, base);
+    assert.notEqual(p.status, 0, 'refused');
+    assert.match(p.stderr, new RegExp(`COMMIT_MSG:${line}: vendor attribution`));
+    assert.match(p.stderr, /attribution is the DCO sign-off \(git commit -s\) only/);
+    const hook = r.push();
+    assert.notEqual(hook.status, 0, 'the pre-push hook refuses it too');
+    assert.match(hook.stderr, /vendor attribution/);
+  });
+}
+
+test('push gate allows attribution named in prose, not as a trailer or a "Generated with" line', { skip }, () => {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('ok.md', 'fine\n', 'Refuse attribution trailers\n\nThe gate refuses a Co-Authored-By: trailer and a Generated with Claude Code line.\n\nSigned-off-by: Ada <ada@example.com>');
+  const p = gateRange(r.dir, base);
+  assert.equal(p.status, 0, p.stderr);
+});
+
+/** The gate's PR-body check over an event payload whose pull_request.body is `body` (as CI's $GITHUB_EVENT_PATH). */
+function prBody(body: string | null, env: NodeJS.ProcessEnv = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'pushgate-pr-'));
+  const event = join(dir, 'event.json');
+  writeFileSync(event, JSON.stringify({ pull_request: { number: 1, body } }));
+  return spawnSync(process.execPath, [gate, '--pr-body'], { cwd: dir, encoding: 'utf8', input: '', env: { ...process.env, GITHUB_EVENT_PATH: event, ...env } });
+}
+
+test('push gate --pr-body refuses a PR body with vendor attribution, allows one without, and fails closed', () => {
+  for (const body of ['Intent.\r\n\r\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\r\n', 'Intent.\n\nCo-Authored-By: Someone']) {
+    const p = prBody(body);
+    assert.equal(p.status, 1, JSON.stringify(body));
+    assert.match(p.stderr, /PR_BODY:3: vendor attribution/);
+    assert.match(p.stderr, /attribution is the DCO sign-off \(git commit -s\) only/);
+  }
+  for (const body of ['**Intent:** refuse a Generated with Claude Code line.\n\nCloses #1', '', null]) assert.equal(prBody(body).status, 0, JSON.stringify(body));
+  const unset = prBody('fine', { GITHUB_EVENT_PATH: '' });
+  assert.equal(unset.status, 1, 'no event payload: refused, never skipped');
+  assert.match(unset.stderr, /GITHUB_EVENT_PATH/);
+});
+
+test("CI runs the PR-body check on every PR and every body edit, reading the body from the event payload, never from an expression in the shell line", () => {
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'new-deps.yml'), 'utf8')) as { on: { pull_request: { types: string[] } }; jobs: Record<string, { steps: { run?: string }[] }> };
+  assert.ok(wf.on.pull_request.types.includes('edited'), 'an edited body is checked again');
+  const steps = Object.values(wf.jobs).flatMap((j) => j.steps).filter((s) => /node scripts\/push-gate\.mjs --pr-body\b/.test(s.run ?? ''));
+  assert.equal(steps.length, 1);
+  assert.doesNotMatch(steps[0]!.run!, /\$\{\{/, 'no expression interpolated into the shell (script injection)');
 });
