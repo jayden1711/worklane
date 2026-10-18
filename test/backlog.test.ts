@@ -44,7 +44,8 @@ test('owner: an assigned writer, else the first matching area, else the default'
 
 test('GitHub backlog surfaces classified errors, not "missing permission" for everything', async () => {
   const fake = (status: number, headers: Record<string, string>, body: object) => async () => new Response(JSON.stringify(body), { status, headers });
-  const rl = new GitHubBacklog('o/r', () => 't', fake(403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 60) }, { message: 'API rate limit exceeded' }) as typeof fetch);
+  // Its own token: a rate limit pauses every client of the token it was met on (src/github/budget.ts).
+  const rl = new GitHubBacklog('o/r', () => 't-limited', fake(403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 60) }, { message: 'API rate limit exceeded' }) as typeof fetch);
   await assert.rejects(rl.get(1), (e: GitHubError) => e.kind === 'rate_limited' && (e.retryAfter ?? 0) > 0);
   const role = new GitHubBacklog('o/r', () => 't', fake(403, {}, { message: 'Resource not accessible by integration' }) as typeof fetch);
   await assert.rejects(role.addLabels(1, ['x']), (e: GitHubError) => e.kind === 'insufficient_role');
