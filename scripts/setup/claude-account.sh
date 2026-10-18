@@ -332,10 +332,10 @@ cache_files() { # <user> <claude config dir>
   [ "$2" != "$h/.claude" ] || echo "$h/.claude.json"
   echo "$2/.claude.json"
 }
-# Why a token install failed, for the end of its line: install_claude_token's 124 is a home that didn't answer within
-# its bound (#613); any other status, nothing more to say.
-install_cut_off() { # <install_claude_token's status>
-  if [ "$1" -eq 124 ]; then printf ": cut off after %s s (its home didn't answer)" "$CLAUDE_TOKEN_INSTALL_SECONDS"; fi
+# Why a token install (or its rollback) failed, for the end of its line: cut off by its bound (lib.sh cut_off_status,
+# #613) is a home that didn't answer; any other status, nothing more to say.
+install_cut_off() { # <install_claude_token's or restore_claude_credentials's status>
+  if cut_off_status "$1"; then printf ": cut off after %s s (its home didn't answer)" "$CLAUDE_TOKEN_INSTALL_SECONDS"; fi
 }
 # Drops the account cached for a login dir's previous login, as that user: sets dropped (what was dropped, as
 # cached_account prints it; {} for nothing) and why (the files it couldn't drop it from, and why; empty when none).
@@ -961,7 +961,7 @@ if [ -n "$refused" ]; then
       fi
       emit install failed "$n" "rolled back: the API refused the new login, so this user is on its previous login again$note" "$user"
     else
-      emit install failed "$n" "the API refused the new login, and putting the previous one back failed: sign this user in again" "$user"
+      emit install failed "$n" "the API refused the new login, and putting the previous one back failed$(install_cut_off $?): sign this user in again" "$user"
       left_broken="${left_broken:-} $n"
     fi
   done
