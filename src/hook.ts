@@ -19,6 +19,7 @@ import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
 import { expSecretGlobs } from './experiments/paths.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
 import { splitCommands } from './guardrails/shell.js';
+import { checkWorkingFile, formatFindings } from './comment-policy.js';
 
 export interface HookInput {
   hook_event_name?: string;
@@ -188,10 +189,28 @@ const POST_EDIT_MAX_CHARS = 4000;
 /** One shell word (project commands run in bash on every platform). */
 const shellWord = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
+const cut = (s: string) => (s.length > POST_EDIT_MAX_CHARS ? `${s.slice(0, POST_EDIT_MAX_CHARS)}\n… (cut)` : s);
+
+/** WHY: its own function so a failing post_edit can't hide the comment policy's report (#330). Null: passed or timed out. */
+function postEditCheck(root: string, file: string, template: string, timeoutMs: number): string | null {
+  const [bin, args] = shellCommand(template.replaceAll('{file}', shellWord(file)));
+  const r = spawnSync(bin, args, { cwd: root, encoding: 'utf8', timeout: timeoutMs, env: childEnv() });
+  if (r.error || r.signal || r.status === null || r.status === 0) return null;
+  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
+  return `[${BRAND.cli}] the project's post-edit check found problems in ${file} (${template}):\n${cut(out) || `exit ${r.status}`}`;
+}
+
+/** INVARIANT: the same rule and words as the PR check (#330), judged on the file's lines that are new since HEAD. */
+function commentCheck(root: string, file: string, policy: Config['project']['comment_policy']): string | null {
+  const findings = checkWorkingFile(root, file, policy);
+  if (!findings.length) return null;
+  return `[${BRAND.cli}] the comment policy refuses ${findings.length === 1 ? 'a new comment' : `${findings.length} new comments`} in ${file}: start each with WHY: or INVARIANT:, or cite an issue or decision id; no narration; at most ${policy.max_lines} lines. It is the same rule the PR check uses.\n${cut(formatFindings(findings))}`;
+}
+
 /**
- * After an Edit/Write: the project's fast check of that one file (tests.yaml `post_edit`), its findings returned
- * to the agent as context. It never blocks or undoes the edit: no config, a file outside the project, a timeout or
- * any error is a silent no-op (exit 0, no output). The PreToolUse guard is separate and unchanged.
+ * INVARIANT: never blocks or undoes the edit (#330). After an Edit/Write, the comment policy (when on) and tests.yaml
+ * `post_edit` report to the agent as context; no config, a file outside the project, a timeout or an error is a
+ * no-op for that check, silent except a comment check that couldn't run, which says so. PreToolUse is separate.
  */
 function postToolUse(input: HookInput, timeoutMs: number): HookOutput {
   const none: HookOutput = { exitCode: 0 };
@@ -202,18 +221,31 @@ function postToolUse(input: HookInput, timeoutMs: number): HookOutput {
     const cwd = input.cwd ?? process.cwd();
     const root = findProjectRoot(cwd);
     if (!root) return none;
-    const template = loadConfig(root).tests.post_edit;
-    if (!template) return none;
+    const cfg = loadConfig(root);
     const rel = relative(root, resolve(cwd, target));
     if (!rel || rel.startsWith('..') || isAbsolute(rel)) return none;
     const file = rel.split(sep).join('/');
-    const [bin, args] = shellCommand(template.replaceAll('{file}', shellWord(file)));
-    const r = spawnSync(bin, args, { cwd: root, encoding: 'utf8', timeout: timeoutMs, env: childEnv() });
-    if (r.error || r.signal || r.status === null || r.status === 0) return none;
-    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim();
-    const text = out.length > POST_EDIT_MAX_CHARS ? `${out.slice(0, POST_EDIT_MAX_CHARS)}\n… (cut)` : out || `exit ${r.status}`;
-    const context = `[${BRAND.cli}] the project's post-edit check found problems in ${file} (${template}):\n${text}`;
-    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: context } }), exitCode: 0 };
+    const found: string[] = [];
+    if (cfg.project.comment_policy.enabled) {
+      try {
+        const r = commentCheck(root, file, cfg.project.comment_policy);
+        if (r) found.push(r);
+      } catch (e) {
+        // WHY: the edit can't be undone here (#330), so a check that can't run fails open and says so; it never guesses.
+        found.push(`[${BRAND.cli}] the comment policy could not check ${file} (${(e as Error).message.split('\n')[0]!.slice(0, 200)}); its comments were not judged.`);
+      }
+    }
+    const template = cfg.tests.post_edit;
+    if (template) {
+      try {
+        const r = postEditCheck(root, file, template, timeoutMs);
+        if (r) found.push(r);
+      } catch {
+        // WHY: a post_edit command that can't start stays the silent no-op it always was, without hiding the policy's findings.
+      }
+    }
+    if (!found.length) return none;
+    return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: found.join('\n\n') } }), exitCode: 0 };
   } catch {
     return none;
   }

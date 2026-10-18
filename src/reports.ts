@@ -7,6 +7,7 @@ import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { failureModes, failureModesMarkdown, mergeCostMarkdown, stageLabelsMarkdown, type FailureProposal } from './failure-modes.js';
+import { holdReason } from './governor-holds.js';
 import { mergeMetrics } from './merge-metrics.js';
 import { offsiteLine, offsiteStatus } from './offsite-backup.js';
 import { project } from './projection.js';
@@ -131,7 +132,8 @@ export function buildReport(events: StoredEvent[], cfg: Config, opts: { since: D
   const spendSince = events.filter((e) => after(e) && e.type === 'run.cost').reduce((s, e) => s + (e.payload as { usd: number }).usd, 0);
   lines.push('', `**Spend** (the CLI's cost estimate, not billed money): ~${money(spendSince)} since the last report; ~${money(p.spendToday)} today, against the ${money(cfg.agents.daily_budget_usd)} daily usage guard.`);
 
-  const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => (e.payload as { reason: string }).reason);
+  // Posted on the repo, which may be public: never a refused login's account (holdReason, #567).
+  const holds = events.filter((e) => after(e) && e.type === 'governor.hold').map((e) => holdReason(e.payload as { kind?: string; reason: string }));
   if (holds.length) lines.push('', `**Machine**: dispatch held ${holds.length} time(s): ${[...new Set(holds)].slice(0, 3).join('; ')}.`);
 
   // Off-machine backup (once set up): when the last verified copy was made; a warning once it's over a day old.

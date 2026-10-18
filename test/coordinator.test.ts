@@ -1977,8 +1977,9 @@ test('#471: a medium verdict with no reason is asked once more; its reason is on
   await green(t);
   assert.ok(reasonsOf(t).reasons.includes('doubt: evaluator confidence medium: the zero-quantity case is not covered by any test'), reasonsOf(t).reasons.join('; '));
   const hold = (await t.f.backlog.comments(t.opened.number)).map((x) => x.body).find((b) => /waits for you/.test(b))!;
-  assert.match(hold, /- doubt: evaluator confidence medium: the zero-quantity case is not covered by any test/);
-  assert.match(hold, /\*\*Evaluator's advice:\*\* add a test for a zero quantity/);
+  // The review packet shows text from the record verbatim, in code spans (src/coordinator/review-packet.ts).
+  assert.match(hold, /- `doubt: evaluator confidence medium: the zero-quantity case is not covered by any test`/);
+  assert.match(hold, /\*\*Evaluator's advice:\*\* `add a test for a zero quantity`/);
 
   // Asked again and still no reason: recorded as such, never a blank doubt.
   const mute = await openPr({ 'evaluator-verdict': (req) => ({ ...approve()(req), confidence: 'medium' }) }, { autoMerge: () => true });

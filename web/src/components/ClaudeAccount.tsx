@@ -1,9 +1,9 @@
 // The agents' Claude account, on the Machine page, for the machine's owners only (src/claude-account.ts): which
 // account and expiry each agent user has, and switching every agent on the machine to another account, step by step
 // (pause, paste the token, each instance's check, resume), each instance's result as it happens. Everyone else gets
-// nothing here: the server refuses them, and the view renders nothing for them.
+// only whether an account is set (issue #567): the server refuses them the accounts, and sends that in the state.
 import { useEffect, useId, useRef, useState } from 'react';
-import { claudeAccountAction, getClaudeAccount, pasteClaudeToken, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
+import { claudeAccountAction, getClaudeAccount, isRefusal, pasteClaudeToken, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
 import { ago, Badge, Button, Card, cx, firstWhy, Why } from './ui';
 import { ClaudeProfiles } from './ClaudeProfiles';
@@ -304,18 +304,44 @@ export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | '
 }
 
 /**
- * The panel: loaded, and looked at again every few seconds while a switch or a request is under way. Hidden on
- * refusal; a look that fails otherwise keeps the last good data, and a token being pasted, on screen (web/src/refresh.tsx).
+ * For anyone the panel refuses (a viewer, a writer, an owner who isn't a machine owner): whether the agents' Claude
+ * account is set, from the state, and nothing more. The server sends them no account, plan or profile name (#567).
+ * Nothing when the state doesn't say (a checkout, an older server).
  */
-export function ClaudeAccountPanel({ onLoaded }: { onLoaded?: () => void }) {
+export function ClaudeAccountSet({ set }: { set: boolean | null | undefined }) {
+  if (set === undefined) return null;
+  return (
+    <Card className="space-y-1 p-4" data-testid="claude-account-set" data-set={set === null ? 'unknown' : String(set)}>
+      <div className="text-[14px] font-medium text-ink">Claude account</div>
+      <p className="text-[12.5px] text-ink-2">
+        {set === null ? "Not known yet: the machine hasn't checked the agents' Claude login." : set ? 'An account is set for this instance\'s agents.' : "No account is signed in for this instance's agents."}
+      </p>
+      <p className="text-[12px] text-ink-3">Which account it is, and switching it, are for the machine's owners.</p>
+    </Card>
+  );
+}
+
+/**
+ * The panel: loaded, and looked at again every few seconds while a switch or a request is under way. On refusal, only
+ * whether an account is set (`accountSet`, from the state); a look that fails otherwise keeps the last good data, and
+ * a token being pasted, on screen (web/src/refresh.tsx).
+ */
+export function ClaudeAccountPanel({ onLoaded, accountSet }: { onLoaded?: () => void; accountSet?: boolean | null | undefined }) {
   const scope = useScope();
   const [loaded, setLoaded] = useState<Loaded<ClaudeAccountData>>(NOTHING_YET);
+  const [refused, setRefused] = useState(false);
   const data = loaded.data;
   const load = () =>
     getClaudeAccount()
       .then(
-        (d) => setLoaded({ data: d, stale: null }),
-        (error: unknown) => setLoaded((p) => afterLoad(p, { error })),
+        (d) => {
+          setRefused(false);
+          setLoaded({ data: d, stale: null });
+        },
+        (error: unknown) => {
+          if (isRefusal(error)) setRefused(true);
+          setLoaded((p) => afterLoad(p, { error }));
+        },
       )
       .finally(() => onLoaded?.());
   useEffect(() => void load(), []);
@@ -326,7 +352,7 @@ export function ClaudeAccountPanel({ onLoaded }: { onLoaded?: () => void }) {
     const t = window.setInterval(() => void load(), 3000);
     return () => window.clearInterval(t);
   }, [active]);
-  if (!data) return null;
+  if (!data) return refused ? <ClaudeAccountSet set={accountSet} /> : null;
   return (
     <div className="space-y-1">
       <StaleNote stale={loaded.stale} />

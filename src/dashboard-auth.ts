@@ -142,8 +142,13 @@ export function repoPermission(o: { repo: string; token: () => Promise<string>; 
   };
 }
 
-/** Roles from a permission lookup, cached per login for at most `ttl`; an error refuses (and is retried after ROLE_ERROR_CACHE_MS). */
-export function cachedRoles(permission: (login: string) => Promise<string>, now: () => number = Date.now, ttl = ROLE_CACHE_MS): RoleOf {
+/**
+ * Roles from a permission lookup, cached per login for at most `ttl`; an error refuses (and is retried after ROLE_ERROR_CACHE_MS).
+ * WHY (#622): `now` is the clock the cache ages by, in ms; monotonic (performance.now) when unset, as the dashboard's
+ * other caches (#582), so a wall-clock step back (an NTP correction) can't keep a revoked role past its window, nor a
+ * step forward cut one short. Nothing here is shown or saved, so no wall time is needed. Tests advance it instead.
+ */
+export function cachedRoles(permission: (login: string) => Promise<string>, now: () => number = () => performance.now(), ttl = ROLE_CACHE_MS): RoleOf {
   const cache = new Map<string, { role: Role | null; until: number }>();
   return async (login, o = {}) => {
     if (!validLogin(login)) return null;
