@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
 import type { Role } from '../src/dashboard-auth.js';
-import { startDashboard } from '../src/dashboard.js';
+import { protectionState, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { mainWatchPost } from '../src/intake/channel.js';
@@ -404,6 +404,11 @@ test('main watch caps: a multi-commit trip with a missing check opens one revert
   // Fail closed: a capped commit still stops auto-merge.
   assert.equal(of(w.f, 'merge.stopped').length, 4);
   assert.notEqual(w.c.autoMergeStopped(), null);
+  // The dashboard's banner, as it stood after c3's alert: why it has no revert PR, and its trip's.
+  const upToC3 = w.f.log.read(0).filter((e) => !(e.type === 'main_watch.unaccounted' && (e.payload as { sha: string }).sha === direct));
+  const banner = protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: upToC3, role: 'owner' }).alert!;
+  assert.deepEqual([banner.sha, banner.revert, banner.trip_revert], [c3, null, tripPr]);
+  assert.equal(banner.no_revert, alerts[2]!.no_revert);
 });
 
 test('main watch caps: at most 3 revert PRs a day on an instance, across a restart; past the cap the alert says so and opens none, and the commit still stops auto-merge', async () => {
@@ -425,6 +430,8 @@ test('main watch caps: at most 3 revert PRs a day on an instance, across a resta
   assert.equal(last.revert, null);
   assert.equal(last.no_revert, 'the per-day cap is reached (main_watch.revert_prs_per_day: 3): the main watch opened 3 revert PRs in the last 24 hours');
   assert.equal(reverts(w.f).length, 3, 'no fourth revert PR');
+  const banner = protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: w.f.log.read(0), role: 'owner' }).alert!;
+  assert.deepEqual([banner.sha, banner.revert, banner.trip_revert, banner.no_revert], [fourth, null, null, last.no_revert], 'the banner says why');
   // Fail closed: stopped again, by this commit.
   assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { sha: string }).sha, fourth);
   assert.notEqual(w.c.autoMergeStopped(), null);

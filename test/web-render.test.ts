@@ -1054,8 +1054,22 @@ test('the protection mode on the Machine page, the last commit checked for write
   // No revert PR: the banner says why, when the alert carries it (main_watch.unaccounted no_revert).
   const why = "opening the revert PR failed: git revert of cccccccc on main's tip dddddddd conflicts with later commits: CONFLICT (content): Merge conflict in a.txt";
   const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
-  assert.match(none, /data-testid="main-watch-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
+  assert.match(none, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
   assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
+});
+
+test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
+  const sha = 'd'.repeat(40);
+  const base = { mode: 'main_watch' as const, detail: '', lastChecked: null, stopped: 'main watch: x', canClear: false };
+  const alert = { at: new Date().toISOString(), sha, url: `https://github.com/o/r/commit/${sha}`, reason: '#42 was merged into main with required checks not green on eeeeeeee at merge time: ci missing', number: 42, revert: null };
+  const trip = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: 'https://github.com/o/r/pull/9', no_revert: "the per-trip cap is reached (main_watch.revert_prs_per_trip: 1): this trip's revert PR https://github.com/o/r/pull/9; the trip's commits so far: aaaaaaaa, dddddddd" } });
+  assert.match(trip, /No revert PR of its own; its trip&#x27;s revert PR waits for a human: <a[^>]*data-testid="main-watch-alert-revert"[^>]*>https:\/\/github.com\/o\/r\/pull\/9</);
+  assert.match(trip, /data-testid="main-watch-alert-no-revert"[^>]*> Why: the per-trip cap is reached[\s\S]*aaaaaaaa, dddddddd/);
+  assert.doesNotMatch(trip, /No revert PR was opened/, 'the trip has one');
+  const day = r.renderMainWatchAlert({ ...base, alert: { ...alert, trip_revert: null, no_revert: 'the per-day cap is reached (main_watch.revert_prs_per_day: 3): the main watch opened 3 revert PRs in the last 24 hours' } });
+  assert.match(day, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: the per-day cap is reached/);
+  assert.doesNotMatch(day, /main-watch-alert-revert/);
+  assert.match(r.renderMainWatchAlert({ ...base, alert }), /No revert PR was opened\.</, 'an older alert, with neither: as before');
 });
 
 test('a dead required check on the Machine page: named, since when, and why merges keep tripping; nothing when there is none', () => {

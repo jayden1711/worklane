@@ -433,7 +433,8 @@ left_owned() {
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
-# run's directory.
+# run's directory. PROC_DIR is the process table it reads (a test's stand-in).
+PROC_DIR=/proc
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm
   st="$(systemctl show -p ActiveState --value "worklane-$name.service" 2>/dev/null || true)"
@@ -444,13 +445,15 @@ instance_in_flight() {
     [ "$k" = user ] && user_exists "$u" && uids+=("$(id -u "$u")")
   done < <("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$name")
   if [ "${#uids[@]}" -gt 0 ]; then
-    for pid in /proc/[0-9]*; do
+    for pid in "$PROC_DIR"/[0-9]*; do
       uid="$(stat -c %u "$pid" 2>/dev/null)" || continue
       [[ " ${uids[*]} " == *" $uid "* ]] || continue
-      cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null || true)"
+      # A read that fails because the process has exited since its uid was read (its /proc dir gone: a fork loop's
+      # short-lived child) leaves nothing in flight; one that fails on a process still there is named all the same.
+      cg="$(sed -n 's/^0:://p' "$pid/cgroup" 2>/dev/null)" || [ -d "$pid" ] || continue
       case "$cg" in */worklane-dashboard-"$name".service | */worklane-mcp@"$name".service | */worklane-mcp@"$name".service/* | */worklane-test-"$name"-docker.service | */worklane-test-"$name"-docker.service/* | */user@"$uid".service | */user@"$uid".service/*) continue ;; esac
-      comm="$(cat "$pid/comm" 2>/dev/null || true)"
-      echo "process ${pid#/proc/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${cg##*/}"
+      comm="$(cat "$pid/comm" 2>/dev/null)" || [ -d "$pid" ] || continue
+      echo "process ${pid##*/} ($comm) as $(id -nu "$uid" 2>/dev/null || echo "$uid"), in ${cg##*/}"
     done
   fi
   if [ -n "$(ls -A "/var/lib/worklane-test/$name/runs" 2>/dev/null)" ]; then

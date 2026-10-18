@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventLog } from '../src/events/log.js';
@@ -21,6 +21,13 @@ function world(n: number) {
   const seed = join(base, 'seed');
   git(base, 'init', '-q', '--bare', '-b', 'main', remote);
   git(base, 'init', '-q', '-b', 'main', seed);
+  // No background maintenance or auto-gc (#496, as #307 did for exampleProject): since git 2.54 each push starts a
+  // detached geometric `repack -d` in the remote, which deleted loose objects the clone below was still copying.
+  for (const r of [remote, seed]) {
+    git(r, 'config', 'maintenance.auto', 'false');
+    git(r, 'config', 'gc.auto', '0');
+  }
+  git(remote, 'config', 'receive.autogc', 'false');
   writeFileSync(join(seed, 'README'), 'base\n');
   git(seed, 'add', 'README');
   git(seed, ...ID, 'commit', '-q', '-m', 'init');
@@ -115,6 +122,23 @@ async function pass(b: PrBatcher) {
   b.tick();
   await b.idle();
 }
+
+test("the test world's repos never start a background gc or maintenance (#496)", () => {
+  // WHY: since git 2.54 a push starts a detached geometric `repack -d` in the remote, which deleted a loose object
+  // world()'s clone was copying ("failed to copy file", one CI run in ~1000). Counted from git's own trace, not timing.
+  const trace = join(mkdtempSync(join(tmpdir(), 'prbatch-trace-')), 'trace2.txt');
+  const before = process.env.GIT_TRACE2;
+  process.env.GIT_TRACE2 = trace;
+  try {
+    world(2);
+  } finally {
+    if (before === undefined) delete process.env.GIT_TRACE2;
+    else process.env.GIT_TRACE2 = before;
+  }
+  const lines = readFileSync(trace, 'utf8').split('\n');
+  assert.ok(lines.some((l) => /child_start/.test(l)), 'the trace recorded git starting its children');
+  assert.deepEqual(lines.filter((l) => /child_start\[\d+\] git (maintenance run|gc) --auto/.test(l)), []);
+});
 
 test('a green batch: one full run of one merge commit of every PR, in queue order; the full check posted on each head; each handed to the merge policy', async () => {
   const w = world(3);

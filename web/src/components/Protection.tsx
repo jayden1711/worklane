@@ -167,9 +167,6 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
   const [error, setError] = useState<string | null>(null);
   const a = protection?.alert;
   if (!a) return null;
-  // Why no revert PR was opened (main_watch.unaccounted no_revert): a cap, a failed revert (a conflict, the push checks'
-  // refusal), a rewrite. Shown once the dashboard's alert carries it (src/dashboard.ts protectionState, web/src/api.ts).
-  const noRevert = (a as { no_revert?: string | null }).no_revert;
   const clear = async () => {
     setBusy(true);
     setError(null);
@@ -192,16 +189,16 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
           {a.sha.slice(0, 8)}
         </a>
         . {a.reason}. Auto-merge is stopped on this instance until an admin clears it.{' '}
-        {a.revert ? (
+        {a.revert || a.trip_revert ? (
           <>
-            A revert PR waits for a human:{' '}
-            <a className="underline-offset-2 hover:underline" href={a.revert} target="_blank" rel="noreferrer">
-              {a.revert}
+            {a.revert ? 'A revert PR waits for a human: ' : "No revert PR of its own; its trip's revert PR waits for a human: "}
+            <a className="underline-offset-2 hover:underline" href={a.revert ?? a.trip_revert ?? ''} target="_blank" rel="noreferrer" data-testid="main-watch-alert-revert">
+              {a.revert ?? a.trip_revert}
             </a>
-            .
+            .{!a.revert && a.no_revert ? <span data-testid="main-watch-alert-no-revert"> Why: {a.no_revert}.</span> : null}
           </>
-        ) : noRevert ? (
-          <span data-testid="main-watch-no-revert">No revert PR was opened: {noRevert}.</span>
+        ) : a.no_revert ? (
+          <span data-testid="main-watch-alert-no-revert">No revert PR was opened: {a.no_revert}.</span>
         ) : (
           'No revert PR was opened.'
         )}

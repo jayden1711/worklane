@@ -4,6 +4,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { DoneWhenList, Issue } from './backlog/types.js';
 
+/**
+ * INVARIANT (#579): claude --effort's levels (CLI 2.1.302 `claude --help`), the one list a role's effort in agents.yaml
+ * (src/config/schema.ts) and the runner's command line (src/runner.ts cliArgs) are checked against.
+ */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type Effort = (typeof EFFORTS)[number];
+
 /** How sure a claim is (src/claim-labels.ts): measured (run and read), inferred (reasoned, not run) or guess. */
 export const CLAIM_LABELS = ['measured', 'inferred', 'guess'] as const;
 export type ClaimLabel = (typeof CLAIM_LABELS)[number];

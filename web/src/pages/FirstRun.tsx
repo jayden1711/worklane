@@ -3,7 +3,7 @@
 // or the provider's own page (a login, a consent) with this page noticing when it's done. It checks again on a short
 // poll while open, and on Re-check. Start installs and starts the coordinator's service, after showing what it changes
 // and a confirmation (the server records it in the audit). `doctor` shows the same steps with the same states.
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { cancelGhLogin, getFirstRun, getGhLogin, runFirstRunAction, skipStep, startCoordinator, startGhLogin, type FirstRun, type GhLoginView, type FirstRunActionPlan, type PolicyChange, type ConfigChange, type FirstRunAutoConfig, type FirstRunStart, type FirstRunVerification, type SetupStepView, type State, type ClaudeSigninData } from '../api';
 import { navigate } from '../App';
 import { ClaudeSigninPanel, ClaudeSigninView } from '../components/ClaudeSignin';
@@ -685,24 +685,57 @@ export const firstRunRefusal = (state: Pick<State, 'canReadDigest' | 'user' | 'r
 /** The step a link asked to open (Settings links here to run a step again): /first-run?open=<step>. */
 const openFromUrl = () => (typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('open'));
 
+/** Where an open panel is on screen: its step and its offset in the view. */
+type PanelAt = { step: string; top: number };
+const panelOf = (step: string) => document.querySelector(`[data-testid="first-run-step"][data-step="${CSS.escape(step)}"] [data-testid="first-run-fix-panel"]`);
+/** The first open panel on screen, and where it is; null when none is. */
+function panelOnScreen(): PanelAt | null {
+  for (const p of document.querySelectorAll<HTMLElement>('[data-testid="first-run-fix-panel"]')) {
+    const step = p.closest<HTMLElement>('[data-testid="first-run-step"]')?.dataset.step;
+    const r = p.getBoundingClientRect();
+    if (step && r.bottom > 0 && r.top < window.innerHeight) return { step, top: r.top };
+  }
+  return null;
+}
+/** Scrolls the page by however far that panel moved, so it is back where it was on screen. */
+function keepPanel(at: PanelAt) {
+  const p = panelOf(at.step);
+  const moved = p ? p.getBoundingClientRect().top - at.top : 0;
+  if (!p || Math.abs(moved) < 0.5) return;
+  let s: Element | null = p.parentElement;
+  while (s && !(/(auto|scroll)/.test(getComputedStyle(s).overflowY) && s.scrollHeight > s.clientHeight)) s = s.parentElement;
+  (s ?? document.scrollingElement)?.scrollBy({ top: moved, behavior: 'instant' });
+}
+
 export function FirstRunPage({ state }: { state: State }) {
   const refused = firstRunRefusal(state);
   // WHY: Settings' Setup list opens one step here (?step=<id>), done or not, to run it again.
   const [rerun] = useState(() => new URLSearchParams(window.location.search).get('step'));
   const [f, setF] = useState<FirstRun | { error: string } | null>(null);
   const [checking, setChecking] = useState(false);
+  // WHY (#417): a new answer can change a step's detail line above an open panel (longer, shorter, folded to one
+  // line), which moved the panel under the pointer. Where the open panel on screen is gets noted just before the
+  // answer is drawn, and the page scrolls by however far it moved.
+  const anchor = useRef<PanelAt | null>(null);
   const load = useCallback(
     (fresh: boolean) => {
       if (refused) return;
       if (fresh) setChecking(true);
       getFirstRun(fresh)
-        .then(setF)
+        .then((next) => {
+          anchor.current = panelOnScreen();
+          setF(next);
+        })
         .catch((e: Error) => setF({ error: e.message }))
         .finally(() => fresh && setChecking(false));
     },
     [refused],
   );
   useEffect(() => load(false), [load, state.lastId]);
+  useLayoutEffect(() => {
+    if (anchor.current) keepPanel(anchor.current);
+    anchor.current = null;
+  }, [f]);
   const setupMode = !!(f && 'setupMode' in f && f.setupMode);
   const drafting = !!(f && 'draft' in f && f.draft?.running);
   // WHY: setup mode hands over to the dashboard on the same address: the first answer from it (not in setup mode) reloads the app, on First run.

@@ -355,7 +355,8 @@ export interface Protection {
   mode: 'github' | 'main_watch' | 'off' | 'unknown';
   detail?: string;
   lastChecked?: { sha: string; url: string; at: string | null } | null;
-  alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null } | null;
+  /** `no_revert`: why this commit has no revert PR of its own (a cap); `trip_revert`: its trip's revert PR, if any. */
+  alert?: { at: string; sha: string; url: string; reason: string; number: number | null; revert: string | null; no_revert?: string | null; trip_revert?: string | null } | null;
   stopped?: string | null;
   canClear?: boolean;
   /** Commits admins accepted as bootstrap merges (owners and writers); `appliedTo`: the commit the watch accounted with it. */
