@@ -110,7 +110,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 `,
   );
   chmodSync(join(bin, 'claude'), 0o755);
-  const out = execFileSync(process.execPath, [engineCli, 'skill', 'eval', skill, '--samples', '1'], { cwd: project, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: stateDir, ANTHROPIC_API_KEY: '' } });
+  const out = execFileSync(process.execPath, [engineCli, 'skill', 'eval', skill, '--samples', '1', '--spend', '1'], { cwd: project, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: stateDir, ANTHROPIC_API_KEY: '' } });
   assert.match(out, /1\/1 passed \(model sonnet, judge opus\)/);
   const calls = readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { auth?: boolean; model?: string; input?: string; streamJson?: boolean });
   const runs = calls.filter((c) => c.model);

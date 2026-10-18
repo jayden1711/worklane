@@ -180,7 +180,8 @@ test('merge train: merge subjects and messages never carry a handle or an e-mail
   await c.watchPrs();
   const pr = t.f.backlog.prs().find((p) => p.number === opened[0]!.number)!;
   assert.ok(pr.merged);
-  assert.equal(pr.mergeTitle, `Fix totals for (thanks) (#${opened[0]!.number})`);
+  // The backlog already took the address out of the PR's title when it opened it (events/redact.ts, TRACKER).
+  assert.equal(pr.mergeTitle, `Fix totals for (thanks [email]) (#${opened[0]!.number})`);
   assert.doesNotMatch(`${pr.mergeTitle}\n${pr.mergeBody}`, /@|some-person|example\.com/);
 });
 

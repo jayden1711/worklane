@@ -93,6 +93,81 @@ test('heredocs: a run: block\'s heredoc ends at its indented closing word; <<<, 
   assert.deepEqual(verdict('a.sh', "cat <<-'EOF'\n\t# body\n\tEOF\n# after\n"), [untagged(4)]);
 });
 
+test('#628: quoted <<EOF, CRLF terminators and two heredocs on one line leave the rest of the file checked', () => {
+  const untagged = (line: number) => `${line}: no WHY:, INVARIANT: or issue/decision id`;
+  assert.deepEqual(verdict('a.sh', 'echo "use <<EOF here"\n# after a quoted <<\n'), [untagged(2)]);
+  assert.deepEqual(verdict('a.sh', "echo 'x <<EOF'\n# after\n"), [untagged(2)]);
+  assert.deepEqual(verdict('a.sh', 'cat <<EOF\r\n# body\r\nEOF\r\n# after\r\n'), [untagged(4)]);
+  const crlfYaml = ['steps:', '  - run: |', '      cat <<EOF', '      # body', '      EOF', '      # after'].join('\r\n');
+  assert.deepEqual(verdict('ci.yml', crlfYaml), [untagged(6)]);
+  assert.deepEqual(verdict('a.sh', 'cat <<A <<B\n# a body\nA\n# b body\nB\n# after\n'), [untagged(6)]);
+  assert.deepEqual(verdict('a.ts', '// eslint complains\n'), [untagged(1)]);
+  assert.deepEqual(verdict('a.ts', '/* eslint-env node, browser */\n'), [], 'a real eslint-env list stays exempt');
+});
+
+test('#634: $\'…\' escapes, whole-word heredoc delimiters, ${…} and nested $(( )) leave the rest checked; an unclosed opener fails closed', () => {
+  const untagged = (...lines: number[]) => lines.map((l) => `${l}: no WHY:, INVARIANT: or issue/decision id`);
+  const cases: [string, number[]][] = [
+    ["echo $'it\\'s'\n# a\necho ok\n# b\n", [2, 4]],
+    ['cat <<END-X\n# body\nEND-X\n# after\n', [4]],
+    ['cat <<EOF.txt\n# body\nEOF.txt\n# after\n', [4]],
+    ["cat <<'END X'\n# body\nEND X\n# after\n", [4]],
+    ['echo ${v:-<<x}\n# after\n', [2]],
+    ['y=$(( $((a)) << b ))\n# after\n', [2]],
+    ['echo "never closed\n# after\n', [2]],
+    ['cat <<NEVER\n# after\n', [2]],
+  ];
+  for (const [sh, lines] of cases) {
+    assert.deepEqual(verdict('a.sh', sh), untagged(...lines), sh);
+    const yaml = `steps:\n  - run: |\n${sh
+      .trimEnd()
+      .split('\n')
+      .map((l) => `      ${l}`)
+      .join('\n')}\n  - name: next\n`;
+    assert.deepEqual(verdict('ci.yml', yaml), untagged(...lines.map((l) => l + 2)), `run: ${sh}`);
+  }
+  assert.deepEqual(verdict('a.ts', '// eslint warns: unused var\n'), untagged(1));
+  assert.deepEqual(verdict('a.ts', '/* eslint quotes: [2, "double"] */\n'), []);
+});
+
+/** A shell script and the same script as a workflow's `run:` block (its lines 2 below) get one verdict (#634). */
+function shAndRun(sh: string, lines: number[]): void {
+  const untagged = (ls: number[]) => ls.map((l) => `${l}: no WHY:, INVARIANT: or issue/decision id`);
+  assert.deepEqual(verdict('a.sh', sh), untagged(lines), sh.slice(0, 80));
+  const yaml = `steps:\n  - run: |\n${sh
+    .trimEnd()
+    .split('\n')
+    .map((l) => `      ${l}`)
+    .join('\n')}\n  - name: next\n`;
+  assert.deepEqual(verdict('ci.yml', yaml), untagged(lines.map((l) => l + 2)), `run: ${sh.slice(0, 80)}`);
+}
+
+test('#634 round 3: a brace inside quotes in ${…} doesn\'t close it, so the quote after it hides nothing', () => {
+  shAndRun('echo ${x:-"}"}\n# untagged 2\necho "hi"\n# untagged 4\n', [2, 4]);
+  shAndRun('echo ${x:-"a}b"}\n# untagged 2\necho "hi"\n# untagged 4\n', [2, 4]);
+  shAndRun("echo ${x:-'}'}\n# untagged 2\necho 'hi'\n# untagged 4\n", [2, 4]);
+  shAndRun("echo ${x:-$'\\'}'}\n# untagged 2\necho 'hi'\n# untagged 4\n", [2, 4]);
+});
+
+test('#634 round 3: bracket matching is linear in the line: 200 KB of (( or ${ on one line reads in well under a second', () => {
+  for (const unit of ['((', '${', '$((', '${"', '(("']) {
+    const times = Math.ceil(200_000 / unit.length);
+    const started = performance.now();
+    assert.deepEqual(verdict('a.sh', `${unit.repeat(times)}\n# after\n`), ['2: no WHY:, INVARIANT: or issue/decision id'], unit);
+    const ms = performance.now() - started;
+    assert.ok(ms < 1000, `${unit} x ${times}: ${Math.round(ms)} ms`);
+  }
+});
+
+test('#634 round 3: past the rescan cap the scan fails closed: every quote and heredoc opener is code, nothing is hidden', () => {
+  for (const n of [101, 150]) {
+    const openers = Array.from({ length: n }, (_, k) => `cat <<W${k}`).join('\n');
+    shAndRun(`${openers}\n# untagged\n`, [n + 1]);
+    const oneLine = Array.from({ length: n }, (_, k) => `<<W${k}`).join(' ');
+    shAndRun(`cat ${oneLine}\n# untagged\necho "a # b"\n`, [2, 3]);
+  }
+});
+
 test('directives are exempt only in their real syntax; prose that starts like one is judged', () => {
   for (const ok of ['// @ts-expect-error: upstream type', '// eslint-disable-next-line no-console', '/* eslint-disable */', '/* eslint no-console: off */', '/* global window, document: readonly */', '// #region helpers', '// #endregion', '# shellcheck disable=SC2086', '/* istanbul ignore next */', '// prettier-ignore']) {
     assert.deepEqual(verdict(ok.startsWith('#') ? 'a.sh' : 'a.ts', `${ok}\n`), [], ok);
