@@ -97,6 +97,68 @@ test('push gate --range checks exactly the given commits (CI mode)', { skip }, (
   assert.equal(spawnSync('node', [gate, '--range', 'nonsense..HEAD'], { cwd: r.dir, encoding: 'utf8' }).status, 1, 'an unresolvable range refuses');
 });
 
+// #603: a message whose line 2 isn't blank makes git read the whole first paragraph as the subject (two PRs shipped
+// 295- and 617-character subjects that way), and an over-long subject is a paragraph too. Fixing either after a push
+// takes a force-push, so the gate refuses them before they leave.
+const sized = (n: number) => `Long subject ${'x'.repeat(n - 13)}`;
+
+test('push gate refuses a message with no blank line after the subject, naming the commit and its line 1 (range and hook)', { skip }, () => {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('ok.md', 'fine\n', 'Add ok\nbody line\n\nSigned-off-by: Ada <ada@example.com>');
+  const short = r.git('rev-parse', '--short=8', 'HEAD');
+  const p = gateRange(r.dir, base);
+  assert.notEqual(p.status, 0, 'refused');
+  assert.match(p.stderr, new RegExp(`${short}: line 2 is not blank`));
+  assert.match(p.stderr, /line 1: Add ok\n/);
+  assert.match(p.stderr, /reword it before pushing/i);
+  assert.match(p.stderr, /owner's OK to force-push/);
+  const hook = r.push();
+  assert.notEqual(hook.status, 0, 'the pre-push hook refuses it too');
+  assert.match(hook.stderr, /line 2 is not blank/);
+  assert.equal(spawnSync('git', ['ls-remote', 'origin', 'refs/heads/feature'], { cwd: r.dir, encoding: 'utf8' }).stdout, '', 'nothing reached the remote');
+});
+
+test('push gate refuses a subject over 180 characters (200 refused, 181 refused) and allows 180 and 100', { skip }, () => {
+  for (const [n, ok] of [[200, false], [181, false], [180, true], [100, true]] as const) {
+    const r = repo();
+    const base = r.git('rev-parse', 'HEAD');
+    r.commit('ok.md', 'fine\n', `${sized(n)}\n\nSigned-off-by: Ada <ada@example.com>`);
+    assert.equal(r.git('log', '-1', '--format=%s').length, n);
+    const p = gateRange(r.dir, base);
+    if (ok) assert.equal(p.status, 0, `${n}: ${p.stderr}`);
+    else {
+      assert.notEqual(p.status, 0, `${n} characters refused`);
+      assert.match(p.stderr, new RegExp(`${r.git('rev-parse', '--short=8', 'HEAD')}: the subject is ${n} characters, over 180`));
+      assert.match(p.stderr, new RegExp(`line 1: ${sized(n)}\\n`));
+    }
+  }
+});
+
+test('push gate allows a GitHub merge commit, a one-line message, and a subject with only a sign-off after the blank line', { skip }, () => {
+  const m = merged('Merge pull request #12 from someone/feat/x\n\nA pull request title').run();
+  assert.equal(m.status, 0, m.stderr);
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('a.md', 'fine\n', 'Add a');
+  r.commit('b.md', 'fine\n', 'Add b\n\nSigned-off-by: Ada <ada@example.com>');
+  r.commit('c.md', 'fine\n', 'Add c\n\nWhy it changed.\nOn two lines.\n\nSigned-off-by: Ada <ada@example.com>');
+  const p = gateRange(r.dir, base);
+  assert.equal(p.status, 0, p.stderr);
+  assert.equal(r.push().status, 0);
+});
+
+test('push gate judges only the pushed range: a malformed message already on the remote does not refuse a later push', { skip }, () => {
+  const r = repo();
+  r.commit('old.md', 'fine\n', 'Old\nrun-on line');
+  assert.equal(spawnSync('git', ['push', '-q', '--no-verify', 'origin', 'HEAD:refs/heads/main'], { cwd: r.dir, encoding: 'utf8' }).status, 0);
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('new.md', 'fine\n', 'New');
+  assert.equal(gateRange(r.dir, base).status, 0);
+  const hook = r.push();
+  assert.equal(hook.status, 0, hook.stderr);
+});
+
 /** The gate over base..HEAD with GITHUB_REPOSITORY set to `ghRepo`, or unset (CI sets the real one). */
 function gateRange(dir: string, base: string, ghRepo?: string) {
   const env = { ...process.env };
