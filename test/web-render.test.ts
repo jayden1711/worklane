@@ -691,14 +691,14 @@ test('#198: the GitHub API budget on the health panel, read-only: per credential
   const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, offsiteBackup: null, suggestions: ['Nothing to suggest.'] };
   const reset = new Date(Date.now() + 30 * 60_000).toISOString();
   const until = new Date(Date.now() + 5 * 60_000).toISOString();
-  const githubBudget = {
+  const githubRate = {
     credentials: [
       { id: 'credential 1', resources: [{ resource: 'core', limit: 5000, remaining: 12, resetAt: reset }], backoff: { kind: 'secondary_rate_limited', until }, top: [{ consumer: 'backlog', calls: 40 }], calls: 40, updatedAt: new Date().toISOString() },
       { id: 'credential 2', resources: [{ resource: 'core', limit: 5000, remaining: 4321, resetAt: reset }, { resource: 'graphql', limit: null, remaining: null, resetAt: null }], backoff: null, top: [{ consumer: 'pr-watch', calls: 120 }, { consumer: 'backlog', calls: 7 }], calls: 127, updatedAt: new Date().toISOString() },
     ],
     notShown: 1,
   };
-  const html = r.renderHealth({ ...base, githubBudget });
+  const html = r.renderHealth({ ...base, githubRate });
   assert.match(html, /data-testid="health-github-budget"/);
   const rows = html.match(/data-testid="health-github-budget-row"[\s\S]*?<\/tr>/g) ?? [];
   assert.equal(rows.length, 2, 'one row per credential');
@@ -715,10 +715,10 @@ test('#198: the GitHub API budget on the health panel, read-only: per credential
   const from = html.slice(html.indexOf('data-testid="health-github-budget"'));
   assert.doesNotMatch(from.slice(0, from.indexOf('</section>')), /<(?:input|button|form|select|textarea)\b/i, 'nothing in it changes the budget');
   // A viewer (the server sends null), or no budget yet: no section at all.
-  assert.doesNotMatch(r.renderHealth({ ...base, githubBudget: null }), /health-github-budget/);
+  assert.doesNotMatch(r.renderHealth({ ...base, githubRate: null }), /health-github-budget/);
   assert.doesNotMatch(r.renderHealth(base), /health-github-budget/);
   // On a hub, the machine's budget from any instance's view.
-  const hub = r.renderHealth({ ...base, githubBudget: null }, [{ name: 'shop', view: { ...base, githubBudget }, error: null }]);
+  const hub = r.renderHealth({ ...base, githubRate: null }, [{ name: 'shop', view: { ...base, githubRate }, error: null }]);
   assert.match(hub, /data-testid="health-github-budget"/);
 });
 

@@ -224,7 +224,7 @@ const inMin = (iso: string) => {
  * resets per resource, a back-off in force (in red), and the consumers that used most of the current window.
  * Credentials are numbered, never named by their token.
  */
-export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githubBudget']> }) {
+export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githubRate']> }) {
   const cell = 'primitive-table-cell text-[12.5px] tabular-nums text-ink-2';
   return (
     <section className="space-y-1.5" aria-label="GitHub API budget" data-testid="health-github-budget">
@@ -318,7 +318,7 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
 
       {(() => {
         // The machine's, so any instance's view (on the hub) shows it.
-        const budget = view.githubBudget ?? instances?.map((i) => i.view?.githubBudget).find(Boolean) ?? null;
+        const budget = view.githubRate ?? instances?.map((i) => i.view?.githubRate).find(Boolean) ?? null;
         return budget ? <GitHubBudget budget={budget} /> : null;
       })()}
 

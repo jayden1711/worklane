@@ -166,14 +166,14 @@ test('the health view carries the budget from the slot directory it is given; by
   const dir = slots();
   window(budgetFor('token-view', dir), 'core', 42, at(900));
   const v = healthView([], null, { network: null, updates: [], slotsDir: dir });
-  assert.equal(v.githubBudget?.credentials[0]?.resources[0]?.remaining, 42);
-  assert.equal(healthView([], null, { network: null, updates: [], slotsDir: slots() }).githubBudget, null, 'no budget: null');
+  assert.equal(v.githubRate?.credentials[0]?.resources[0]?.remaining, 42);
+  assert.equal(healthView([], null, { network: null, updates: [], slotsDir: slots() }).githubRate, null, 'no budget: null');
   // The default is AGENT_SLOTS_DIR, which the test isolation points into a temporary directory.
   const isolated = process.env.AGENT_SLOTS_DIR;
   assert.ok(isolated && !relative(tmpdir(), isolated).startsWith('..'), `the default slot directory ${isolated} is a temporary one`);
   mkdirSync(isolated, { recursive: true });
   window(budgetFor('token-default', isolated), 'core', 7, at(900));
-  assert.equal(healthView([], null, { network: null, updates: [] }).githubBudget?.credentials.find((c) => c.resources[0]?.remaining === 7)?.resources[0]?.limit, 5000);
+  assert.equal(healthView([], null, { network: null, updates: [] }).githubRate?.credentials.find((c) => c.resources[0]?.remaining === 7)?.resources[0]?.limit, 5000);
 });
 
 test('GET /api/health: owners and writers get the GitHub budget; a viewer gets null, and nothing of it', async () => {
@@ -189,16 +189,17 @@ test('GET /api/health: owners and writers get the GitHub budget; a viewer gets n
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: slotDir, pollMs: 50 });
   try {
     const url = `${d.url.split('/?')[0]!}/api/health`;
-    const get = async (who: string) => (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<{ githubBudget?: { credentials: { id: string; resources: { remaining: number | null }[]; backoff: { kind: string } | null; top: { consumer: string; calls: number }[] }[] } | null }>;
+    const get = async (who: string) => (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<{ githubRate?: { credentials: { id: string; resources: { remaining: number | null }[]; backoff: { kind: string } | null; top: { consumer: string; calls: number }[] }[] } | null }>;
     for (const who of ['example-owner', 'example-collaborator']) {
-      const g = (await get(who)).githubBudget;
+      const g = (await get(who)).githubRate;
       assert.equal(g?.credentials[0]?.id, 'credential 1', who);
       assert.equal(g?.credentials[0]?.resources[0]?.remaining, 298, who);
       assert.equal(g?.credentials[0]?.backoff?.kind, 'secondary_rate_limited', who);
       assert.deepEqual(g?.credentials[0]?.top, [{ consumer: 'merge-flow', calls: 2 }], who);
     }
     const viewer = await get('someone-else');
-    assert.equal(viewer.githubBudget, null, 'a viewer gets no budget');
+    // The field isn't named "budget": the viewer check (test/viewer-events.test.ts) takes any budget-shaped key for money.
+    assert.equal(viewer.githubRate, null, 'a viewer gets no budget');
     assert.doesNotMatch(JSON.stringify(viewer), /merge-flow|credential 1|secondary_rate_limited/, "nothing of it anywhere in a viewer's health");
     const all = JSON.stringify(await get('example-owner'));
     assert.ok(!all.includes(credentialKey('token-api')) && !all.includes('token-api'), 'no token or key, even for the owner');

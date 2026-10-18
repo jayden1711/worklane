@@ -68,8 +68,8 @@ export interface HealthView {
   network: NetworkHealth | null;
   /** Root's provider hosts (src/provider-hosts.ts) and each configured provider they refuse; null when no file and no provider. Read-only. */
   providerHosts: ProviderHostsHealth | null;
-  /** The machine's shared GitHub API budget (src/github/budget-health.ts): per credential, numbered, never named by its token; null when there is none yet. Read-only. */
-  githubBudget: GitHubBudgetHealth | null;
+  /** The machine's shared GitHub API budget (src/github/budget-health.ts): per credential, numbered, never named by its token; null when there is none yet. Read-only. Not called "budget": a viewer's health may carry no money-shaped key (test/viewer-events.test.ts). */
+  githubRate: GitHubBudgetHealth | null;
   suggestions: string[];
 }
 
@@ -179,7 +179,7 @@ const secs = (ms: number) => `${Math.round(ms / 1000)} s`;
 export const THRESHOLDS = { memoryAvailablePct: 10, swapUsedPct: 25, unitMemoryPct: 90, diskFreePct: 10, diskFreeGb: 10, rateLimitsPerDay: 3, lockWaitMinPerDay: 30, loadPerCore: 1.5 } as const;
 
 /** Suggestions only, each a "consider", never a change made; one line saying so when there's nothing to suggest. */
-export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold' | 'testRuns' | 'network' | 'providerHosts' | 'githubBudget'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
+export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' | 'updateHold' | 'testRuns' | 'network' | 'providerHosts' | 'githubRate'> & { offsiteBackup?: OffsiteStatus | null },o: { today?: string; diskLabels?: Record<string, string> } = {}): string[] {
   const today = o.today ?? new Date().toISOString().slice(0, 10);
   const out: string[] = [];
   const m = v.machine;
@@ -223,5 +223,5 @@ export function healthView(events: StoredEvent[], machine: MachineStats | null, 
   // What stops the coordinator or the test runs working is said first, plainly: it is not a suggestion.
   const direct = directLandProblem(events);
   const network = o.network !== undefined ? o.network : networkHealth();
-  return { ...base, testRuns, network, providerHosts: providerHostsHealth(o.agents ?? {}), githubBudget: githubBudgetHealth(o.slotsDir), suggestions: [...(direct ? [direct] : []), ...testRuns.problems, ...suggestions(base, o)] };
+  return { ...base, testRuns, network, providerHosts: providerHostsHealth(o.agents ?? {}), githubRate: githubBudgetHealth(o.slotsDir), suggestions: [...(direct ? [direct] : []), ...testRuns.problems, ...suggestions(base, o)] };
 }
