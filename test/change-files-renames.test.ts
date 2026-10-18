@@ -21,7 +21,7 @@ import { globToRegExp } from '../src/guardrails/glob.js';
 import * as mergeBase from '../src/merge-base.js';
 import { mergeDecision } from '../src/merge-policy.js';
 import { riskClassOf, sizeFiles, sizeVerdict } from '../src/pr-rules.js';
-import { computeLevel, type ChangeFile } from '../src/review.js';
+import { computeLevel, type ChangeFile, type LevelInput } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -82,7 +82,8 @@ const LEVELS = {
   L3_human: { when: ['engine-guards', 'deletes-data'], over_lines: 800 },
 };
 const cfg = ReviewConfig.parse({ version: 1, levels: LEVELS });
-const level = (files: ChangeFile[], c = cfg) => computeLevel({ files, labels: [], moneyPaths: [] }, c);
+// The engine's own repo: no lock scope given (`as`, so this still compiles once #691 makes the scope a required key).
+const level = (files: ChangeFile[], c = cfg) => computeLevel({ files, labels: [] as string[], moneyPaths: [] as RegExp[] } as LevelInput, c);
 
 /** A test file of `n` assertions, long enough that a small edit keeps it a rename (over git's 50% similarity). */
 const testFile = (n: number) => `import assert from 'node:assert/strict';\n${Array.from({ length: n }, (_, i) => `test('case ${i}', () => assert.equal(f(${i}), ${i * 2}));`).join('\n')}\n`;
@@ -263,7 +264,7 @@ test('a path with a newline stays under its `**` glob: protected, and L3 under t
   const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
   // The built-in protected paths, and a project's own list on top.
   const guard = { protected_paths: ['src/guardrails/**', '.github/workflows/**'] };
-  const each = (p: string) => ({ path: p, level: computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, engine).level, protected: isProtectedPath(p, guard) });
+  const each = (p: string) => ({ path: p, level: level([{ path: p, added: 1, removed: 0 }], engine).level, protected: isProtectedPath(p, guard) });
   // Each as its twin without the newline: L3, and protected unless it is the agents' own (roles are theirs to edit).
   assert.deepEqual(NEWLINE_PATHS.map(each), NEWLINE_PATHS.map((p) => ({ ...each(p.replace('\n', '')), path: p })));
   assert.deepEqual(NEWLINE_PATHS.map((p) => [each(p).level, each(p).protected]), [['L3', true], ['L3', true], ['L3', true], ['L3', false]]);
@@ -276,7 +277,7 @@ test('a changed path with a control character is L3 "path with a control charact
   const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
   const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const };
   const one = (p: string) => {
-    const lvl = computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, plain);
+    const lvl = level([{ path: p, added: 1, removed: 0 }], plain);
     const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
     return { path: p, level: lvl.level, reason: lvl.reasons.find((r) => r.startsWith('path with a control character')) ?? lvl.reasons.join('; '), cls: riskClassOf({ paths: [p], level: lvl, waitCategories: [] }).cls, auto: merge.auto, protected: isProtectedPath(p, { protected_paths: [] }) };
   };
@@ -306,7 +307,7 @@ test('a newline path committed to a repo comes out of changeFiles as itself and 
   const head = commit(dir, 'add a skill');
   const files = changeFiles(dir, base, head);
   assert.deepEqual(files.map((f) => f.path), ['.claude/skills/a\nb/SKILL.md']);
-  assert.equal(computeLevel({ files, labels: [], moneyPaths: [] }, engine).level, 'L3');
+  assert.equal(level(files, engine).level, 'L3');
   assert.deepEqual(await inspect(dir, base, head), { rejected: 'changes protected harness files: .claude/skills/a\nb/SKILL.md' });
 });
 
