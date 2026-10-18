@@ -41,7 +41,7 @@ export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; o
         void send();
       }}
     >
-      <input ref={field} type="password" autoComplete="off" spellCheck={false} name={`secret-${a.credential}`} aria-label={`Value of ${a.credential}`} placeholder={`${a.credential} (not shown)`} className="min-w-64 flex-1 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="ask-secret" />
+      <input ref={field} type="password" autoComplete="off" spellCheck={false} name={`secret-${a.credential}`} aria-label={`Value of ${a.credential}`} placeholder={`${a.credential} (not shown)`} className="min-w-64 flex-1 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="ask-secret" />
       <Button type="submit" size="sm" disabled={busy}>
         {busy ? 'Storing…' : 'Store'}
       </Button>

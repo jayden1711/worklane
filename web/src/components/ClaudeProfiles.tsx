@@ -67,8 +67,8 @@ function AddForm({ disabled, onDone }: { disabled: boolean; onDone: (err: string
         void send();
       }}
     >
-      <input ref={name} name="claude-profile-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-name" />
-      <input ref={token} type="password" autoComplete="off" spellCheck={false} name="claude-profile-token" aria-label="The token claude setup-token printed for that account" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-token" />
+      <input ref={name} name="claude-profile-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line-strong dark:border-linebg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-name" />
+      <input ref={token} type="password" autoComplete="off" spellCheck={false} name="claude-profile-token" aria-label="The token claude setup-token printed for that account" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-linebg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-token" />
       <Button type="submit" size="sm" disabled={disabled || busy} data-testid="claude-profile-add-send">
         {busy ? 'Adding…' : 'Add account'}
       </Button>
@@ -108,7 +108,7 @@ function Failover({ table, self, confirmScript, disabled, onDone }: { table: Pro
         When the account in use hits its usage limit, move {self} to the next one in this order, after a real call on it as its agent user; a notice says which and when the limit resets. Never on a sign-in failure, and never to a staged account. Every instance's setting is a root admin's: <code>sudo bash {confirmScript} failover a+b back</code>.
       </p>
       <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
-        <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
+        <input value={order} onChange={(e) => setOrder(e.target.value)} aria-label="The accounts to move through, in order, comma-separated" className="min-w-0 flex-1 basis-48 rounded-control border border-line-strong dark:border-linebg-surface px-2.5 py-1.5 font-mono text-[12.5px]" data-testid="claude-failover-order" />
         <label className="flex items-center gap-1">
           <input type="checkbox" checked={back} onChange={(e) => setBack(e.target.checked)} data-testid="claude-failover-back" />
           move back after the reset
@@ -160,7 +160,7 @@ function SignIn({ self, signin, disabled, onDone }: { self: string; signin: NonN
             if (n) void run(() => claudeProfileAction('login', n));
           }}
         >
-          <input ref={name} name="claude-signin-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-name" />
+          <input ref={name} name="claude-signin-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line-strong dark:border-linebg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-name" />
           <Button type="submit" size="sm" disabled={disabled || busy} data-testid="claude-signin-start">
             {busy ? 'Starting…' : 'Sign in'}
           </Button>
@@ -182,7 +182,7 @@ function SignIn({ self, signin, disabled, onDone }: { self: string; signin: NonN
               if (v) void run(() => pasteLoginCode(v));
             }}
           >
-            <input ref={code} type="password" autoComplete="off" spellCheck={false} name="claude-signin-code" aria-label="The code Anthropic's sign-in page showed" placeholder="the code (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-code" />
+            <input ref={code} type="password" autoComplete="off" spellCheck={false} name="claude-signin-code" aria-label="The code Anthropic's sign-in page showed" placeholder="the code (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-linebg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-code" />
             <Button type="submit" size="sm" disabled={busy} data-testid="claude-signin-code-send">
               {busy ? 'Sending…' : 'Finish sign-in'}
             </Button>

@@ -251,6 +251,40 @@ test("a control's edge is 3:1 on every resting light background", () => {
   assert.deepEqual(failing, [], 'a control edge is under WCAG 1.4.11');
 });
 
+/** Each native control's opening tag in web/src (`<input`, `<select`, `<textarea`, `<button` up to its `>`), with the
+ *  file and the line each of its lines is on. */
+function controlTags(): { file: string; line: number; text: string }[] {
+  const out: { file: string; line: number; text: string }[] = [];
+  for (const file of files(webSrc)) {
+    const src = readFileSync(file, 'utf8');
+    for (const m of src.matchAll(/<(input|select|textarea|button)(?![\w-])/g)) {
+      let i = m.index + m[0].length;
+      let depth = 0;
+      for (; i < src.length; i++) {
+        const c = src[i];
+        if (c === '{') depth++;
+        else if (c === '}') depth--;
+        else if (depth === 0 && (c === '"' || c === "'")) i = src.indexOf(c, i + 1);
+        else if (depth === 0 && c === '>') break;
+      }
+      const first = src.slice(0, m.index).split('\n').length;
+      src.slice(m.index, i + 1).split('\n').forEach((text, k) => out.push({ file: file.slice(repoRoot.length), line: first + k, text }));
+    }
+  }
+  return out;
+}
+
+test("a field's or button's own edge class is the control edge, not the divider", () => {
+  // `border-line` is a divider (2.11:1 on the page, 1.78:1 on a card); a control's edge is `border-line-strong`.
+  // Dark mode keeps its own edge (`dark:border-line`), so a dark: variant is not light mode's edge.
+  const found = new Set<string>();
+  for (const tag of controlTags())
+    for (const m of tag.text.matchAll(/(?<![\w-])((?:[\w-]+:)*)border-line(?![\w-])/g))
+      if (!m[1]?.split(':').includes('dark')) found.add(`${tag.file}:${tag.line}: ${m[0]}`);
+  assert.ok(controlTags().length > 50, 'the control scan finds the native controls (else it is broken)');
+  assert.deepEqual([...found], [], 'a control draws its edge with the divider colour: use border-line-strong');
+});
+
 test('dark mode is unchanged', () => {
   const dark = blockText('.dark');
   assert.ok(dark, 'styles.css has a .dark block');
