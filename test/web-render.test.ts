@@ -31,6 +31,7 @@ import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
 import type { StarterCiView } from '../src/starter-ci.js';
+import { ACCOUNT, ACCOUNT_TEXT, accountDashboard } from './account-fixture.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -75,6 +76,7 @@ interface Render {
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number, scope?: { current: string | null; all: boolean; instances: (string | null)[] } | null): string;
+  renderClaudeAccountSet(state: unknown): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
   tailscaleBusy(d: unknown, now?: number): boolean;
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
@@ -2417,6 +2419,45 @@ test("#566: the accounts table shows the usage-limit badge and its reset time on
   assert.equal(cells(free).length, 4);
   assert.doesNotMatch(free, /data-testid="claude-profile-limit"/);
   for (const c of cells(free)) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
+});
+
+test("#567: each role's Machine page and sign-in banner, from what the server sent that role: a viewer sees that an account is set and nothing naming it", { skip: process.platform === 'win32' }, async () => {
+  const { d, get } = await accountDashboard();
+  try {
+    const now = Date.parse('2026-10-18T10:00:00Z');
+    const seen = async (login: string) => {
+      const state = JSON.parse((await get('/api/state', asPerson(login))).text) as { claudeAccount?: unknown };
+      const usage = JSON.parse((await get('/api/usage', asPerson(login))).text) as unknown;
+      // The Machine page's account part: the full panel for a machine owner, else whether an account is set.
+      const panel = await get('/api/claude-account', asPerson(login));
+      const machine = panel.status === 200 ? r.renderClaudeAccount(JSON.parse(panel.text), now) : r.renderClaudeAccountSet(state);
+      return { machine, banner: r.renderUsageBanner([usage], now), state };
+    };
+    const viewer = await seen('someone-else');
+    assert.match(viewer.machine, /data-testid="claude-account-set" data-set="true"/);
+    assert.match(viewer.machine, /An account is set for this instance&#x27;s agents\./);
+    assert.match(viewer.banner, /data-testid="signin-banner"/, 'a viewer still sees that runs are held on a refused login');
+    assert.match(viewer.banner, /Claude refused this instance&#x27;s Claude login/);
+    assert.doesNotMatch(viewer.banner, /Claude said|signin-recheck/);
+    for (const html of [viewer.machine, viewer.banner]) assert.doesNotMatch(html, ACCOUNT_TEXT);
+    const writer = await seen('example-collaborator');
+    assert.match(writer.machine, /data-testid="claude-account-set" data-set="true"/);
+    assert.doesNotMatch(writer.machine, ACCOUNT_TEXT, 'the accounts are the machine owners');
+    assert.match(writer.banner, new RegExp(`Claude refused the login <span[^>]*>${ACCOUNT.email.replace(/[.]/g, '\\.')}</span>`));
+    assert.match(writer.banner, /Claude said: .*OAuth token has expired/);
+    const owner = await seen('example-owner');
+    assert.match(owner.machine, /data-testid="claude-account"/);
+    assert.doesNotMatch(owner.machine, /claude-account-set/);
+    assert.match(owner.machine, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
+    assert.match(owner.machine, new RegExp(ACCOUNT.profile));
+    assert.match(owner.banner, /data-testid="signin-recheck"/);
+    // What the line says when no account is signed in, when the machine hasn't said, and with no answer at all.
+    assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: false } }), /data-set="false"[\s\S]*No account is signed in/);
+    assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: null } }), /data-set="unknown"[\s\S]*Not known yet/);
+    assert.equal(r.renderClaudeAccountSet({ claudeAccount: null }), '');
+  } finally {
+    await d.close();
+  }
 });
 
 test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {

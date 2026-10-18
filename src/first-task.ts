@@ -9,6 +9,7 @@
 import { BRAND } from './brand.js';
 import { LABELS, parseContract, type Issue } from './backlog/types.js';
 import type { StoredEvent } from './events/types.js';
+import { holdReason } from './governor-holds.js';
 
 export class FirstTaskError extends Error {}
 
@@ -127,7 +128,7 @@ export function ignoredIssues(open: Issue[], events: StoredEvent[], o: { repo: s
     if (blocked && (!claimed || blocked.id > claimed.id)) reasons.push({ kind: 'blocked', text: blocked.payload.why, fix: null });
     const hot = last(events, 'hotspot.held', i.number);
     if (after(hot, last(events, 'hotspot.released', i.number))) reasons.push({ kind: 'held', text: `held: ${hot!.payload.reason} (#${hot!.payload.by} is changing ${hot!.payload.files.slice(0, 3).join(', ')})`, fix: null });
-    if (!reasons.length && holdOn && i.labels.includes('ready') && c.ok) reasons.push({ kind: 'held', text: `held: ${hold!.payload.reason}`, fix: null });
+    if (!reasons.length && holdOn && i.labels.includes('ready') && c.ok) reasons.push({ kind: 'held', text: `held: ${holdReason(hold!.payload)}`, fix: null });
     if (reasons.length) out.push({ issue: i.number, title: i.title, url: `https://github.com/${o.repo}/issues/${i.number}`, author: i.author, labels: i.labels, reasons });
   }
   return out;

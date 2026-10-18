@@ -339,6 +339,11 @@ export interface State {
   protection?: Protection;
   /** The pre-deploy gate, when tests.yaml has one (owners and writers only). */
   deployGate?: DeployGate;
+  /**
+   * Whether the agents' Claude account is set (null: nothing on the machine says yet), for everyone; the accounts are
+   * the machine owners' only. null on a checkout; absent from an older server.
+   */
+  claudeAccount?: { set: boolean | null } | null;
 }
 
 /** The pre-deploy gate: the commit the deploy branch is at, the last held commit and why, and a refusal in force. */
@@ -618,8 +623,11 @@ export interface UsageInfo {
   paused: { since: string; resetAt: string; source: 'claude' | 'default'; kind: string | null } | null;
   today: { runs: number; limitHits: number };
   lastHit: string | null;
-  /** Claude logins the API refused (no new runs on them until a call succeeds): the account and Claude's words, never a token. */
-  signinFailed?: { login: string; detail: string; since: string; lastCheck: { at: string; ok: boolean; detail: string } | null }[];
+  /**
+   * Claude logins the API refused (no new runs on them until a call succeeds): for the owners and writers the account
+   * and Claude's words, never a token; a viewer gets neither, only that one was refused and since when.
+   */
+  signinFailed?: { login?: string; detail?: string; since: string; lastCheck: { at: string; ok: boolean; detail?: string } | null }[];
   /** This viewer may ask the coordinator to re-check a refused login now. */
   canRecheckSignin?: boolean;
 }
