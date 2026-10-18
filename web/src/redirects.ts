@@ -23,8 +23,15 @@ export const REDIRECTS: readonly { from: string; to: string }[] = [
   { from: '/setup', to: '/settings/setup' },
 ];
 
-/** Where an old address moved (REDIRECTS); null: it's a current one. */
+/**
+ * A group's own address where no page is (#585): it opens the group's first tab, as its sidebar row does. Exact only,
+ * since its tabs are under it. (Needs you's is its queue; Agents', Machine's and Settings' are their first tab.)
+ */
+export const GROUP_HOMES: Readonly<Record<string, string>> = { '/work': '/', '/shipping': '/shipping/land' };
+
+/** Where an old address moved (REDIRECTS), or where a group's bare address opens (GROUP_HOMES); null: it's a current one. */
 export function redirectFor(path: string): string | null {
+  if (Object.hasOwn(GROUP_HOMES, path)) return GROUP_HOMES[path]!;
   for (const r of REDIRECTS) if (path === r.from || path.startsWith(`${r.from}/`)) return r.to + path.slice(r.from.length);
   return null;
 }

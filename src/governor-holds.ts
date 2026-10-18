@@ -175,6 +175,21 @@ export function holdBanner(h: { kind?: string | undefined; reason: string; facts
   }
 }
 
+/** A refused Claude login's hold, in words that name no account: what the coordinator records (issue #567). */
+export const SIGN_IN_HOLD_REASON = 'Claude sign-in failed: no new runs until a call on the refused login succeeds';
+
+/**
+ * A recorded hold's reason as it is shown or posted anywhere: the dashboard state and Activity, the ignored-issues
+ * list and the report posted on the repo. Every reader of a `governor.hold` reason goes through this.
+ * WHY (#567): a refused login's hold recorded before #567 named the account (its email or org), and one recorded
+ * before holds had kinds (#463 before #470) has no kind, so it is known by its words. Either way it reads as the
+ * fixed words above, for every role: which login it is is on the sign-in banner, for the owners and writers only.
+ */
+export function holdReason(p: { kind?: unknown; reason?: unknown }): string {
+  const reason = String(p.reason);
+  return p.kind === 'sign_in' || /^Claude sign-in failed \(/.test(reason) ? SIGN_IN_HOLD_REASON : reason;
+}
+
 /** The banner as a viewer may have it: why work is held, never the way to change it (no fix, no link). */
 export function bannerForViewer(b: HoldBanner): HoldBanner {
   return { ...b, fix: null, link: null };

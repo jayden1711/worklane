@@ -55,7 +55,7 @@ import { CI_CHOICE_FIX, ciChoiceProblem } from './ci-choice.js';
 import { researchTrigger } from './research.js';
 import { scanRange } from './scan/secrets.js';
 import { emergencyStop, tryAgentSlot } from './slots.js';
-import { nextRunWindowStart } from './governor-holds.js';
+import { nextRunWindowStart, SIGN_IN_HOLD_REASON } from './governor-holds.js';
 import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
@@ -627,7 +627,9 @@ export class Coordinator extends AutomationRuns {
     // A Claude login the API refused: nothing starts until a call on it succeeds (the tick's sign-in step checks it).
     const refused = this.authHeld();
     if (refused) {
-      this.noteHold({ kind: 'sign_in', reason: `Claude sign-in failed (${refused.login}): no new runs until a call on that login succeeds`, load: null, freeDiskPct: null });
+      // WHY: the reason reaches every viewer's state and the report posted on the repo: it names no account (#567).
+      // The owners and writers see which login it is on the sign-in banner (/api/usage) and the incident.
+      this.noteHold({ kind: 'sign_in', reason: SIGN_IN_HOLD_REASON, load: null, freeDiskPct: null });
       return 0;
     }
     // WHY: a full disk, or one below its floor (src/disk-guard.ts): nothing new starts until there is room.
@@ -1947,7 +1949,7 @@ export class Coordinator extends AutomationRuns {
           })
           .finally(() => rmSync(cwd, { recursive: true, force: true }));
       },
-      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Extend -> Experiments`),
+      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Experiments (/experiments)`),
       commitChange: (path, parent, message) => {
         removeSandboxPlaceholders(path);
         this.git(path, 'add', '-A');
