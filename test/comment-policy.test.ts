@@ -45,9 +45,12 @@ test('untouched old comments never fail: only blocks with an added line are judg
   // WHY: a line added inside an old block changes that block, so the whole block is judged.
   assert.equal(checkComments('a.ts', src, new Set([3]), policy).length, 1);
   assert.deepEqual(checkComments('a.ts', src, new Set(), policy), []);
-  // WHY: new lines next to an old block are judged on their own: a long old block is not their fault...
+  // WHY: in an old block, narration and length are judged on the new lines only; a long old block is not theirs...
   const grown = src.replace('const x = 1;\n', '// WHY: a new paragraph (#9)\nconst x = 1;\n');
   assert.deepEqual(checkComments('a.ts', grown, new Set([6]), policy), []);
+  // WHY: ...and the tag may be the old block's: an untagged line under an old WHY: or #N block passes (owner's call).
+  assert.deepEqual(checkComments('a.ts', '// WHY: old\n// an untagged new line\n', new Set([2]), policy), []);
+  assert.deepEqual(checkComments('a.ts', '// old, see #5\n// an untagged new line\n', new Set([2]), policy), []);
   // INVARIANT: ...but they may not push a block that fit over max_lines.
   const fit = '// WHY: a\n// b\n// c\n// d\n// e\nconst x = 1;\n';
   assert.deepEqual(checkComments('a.ts', fit, new Set([5]), policy).map((f) => f.reasons), [['5 lines with the new ones (at most 4)']]);
@@ -78,9 +81,46 @@ test('shell and YAML: # comments, not ones in quotes, ${#x}, heredocs or text bl
   assert.deepEqual(verdict('notes.md', '<!-- anything -->\n'), [], 'a language it does not know is not checked');
 });
 
+test('heredocs: a run: block\'s heredoc ends at its indented closing word; <<<, $(( << )) and <<\\EOF are read right', () => {
+  const untagged = (line: number) => `${line}: no WHY:, INVARIANT: or issue/decision id`;
+  const run = ['jobs:', '  a:', '    steps:', '      - run: |', '          cat <<EOF', '          # body, not a comment', '          EOF', '          # after the heredoc', '          make'].join('\n');
+  assert.deepEqual(verdict('ci.yml', run), [untagged(8)]);
+  const tabs = ['steps:', '  - run: |', '      cat <<-EOF', '      \t# body', '      \tEOF', '      # after'].join('\n');
+  assert.deepEqual(verdict('ci.yml', tabs), [untagged(6)]);
+  assert.deepEqual(verdict('a.sh', 'grep x <<< hello\n# after a here-string\n'), [untagged(2)]);
+  assert.deepEqual(verdict('a.sh', 'y=$(( x << y ))\n(( z = 1 << 2 ))\n# after a shift\n'), [untagged(3)]);
+  assert.deepEqual(verdict('a.sh', 'cat <<\\EOF\n# body\nEOF\n# after\n'), [untagged(4)]);
+  assert.deepEqual(verdict('a.sh', "cat <<-'EOF'\n\t# body\n\tEOF\n# after\n"), [untagged(4)]);
+});
+
+test('directives are exempt only in their real syntax; prose that starts like one is judged', () => {
+  for (const ok of ['// @ts-expect-error: upstream type', '// eslint-disable-next-line no-console', '/* eslint-disable */', '/* eslint no-console: off */', '/* global window, document: readonly */', '// #region helpers', '// #endregion', '# shellcheck disable=SC2086', '/* istanbul ignore next */', '// prettier-ignore']) {
+    assert.deepEqual(verdict(ok.startsWith('#') ? 'a.sh' : 'a.ts', `${ok}\n`), [], ok);
+  }
+  for (const prose of ['// global state is shared here', '// global counter', '// region where the loop runs', '// eslint is noisy here', '# shellcheck is not installed in CI']) {
+    assert.equal(verdict(prose.startsWith('#') ? 'a.sh' : 'a.ts', `${prose}\n`).length, 1, prose);
+  }
+});
+
+test('the hook and CI agree whatever the git config: diff.mnemonicPrefix and diff.noprefix', () => {
+  for (const [key, value] of [['diff.mnemonicPrefix', 'true'], ['diff.noprefix', 'true']] as const) {
+    const { dir, git, base } = project();
+    git('config', key, value);
+    mkdirSync(join(dir, 'b'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'old.ts'), '// an old untagged comment\nexport const a = 1;\n// untagged new\n');
+    writeFileSync(join(dir, 'b', 'y.ts'), '// untagged in a dir named b\n');
+    git('add', '-A');
+    const atWrite = [...checkWorkingFile(dir, 'src/old.ts', policy), ...checkWorkingFile(dir, 'b/y.ts', policy)].map((f) => `${f.file}:${f.line}`);
+    git('commit', '-q', '-m', 'change');
+    const inCi = checkRange(dir, base, 'HEAD', policy).map((f) => `${f.file}:${f.line}`);
+    assert.deepEqual(atWrite.sort(), ['b/y.ts:1', 'src/old.ts:3'], key);
+    assert.deepEqual(inCi.sort(), atWrite, key);
+  }
+});
+
 test('the diff parser: added lines per new-side path, deletions and context ignored', () => {
-  const diff = ['diff --git a/x.ts b/x.ts', '--- a/x.ts', '+++ b/x.ts', '@@ -3,0 +4,2 @@', '+a', '+b', '@@ -9 +10,0 @@', '-c', 'diff --git a/y.ts b/y.ts', '--- a/y.ts', '+++ /dev/null', '@@ -1 +0,0 @@', '-z'].join('\n');
-  assert.deepEqual([...addedLines(diff)].map(([f, s]) => [f, [...s]]), [['x.ts', [4, 5]]]);
+  const diff = ['diff --git a/x.ts b/x.ts', '--- a/x.ts', '+++ b/x.ts', '@@ -3,0 +4,3 @@', '+a', '+b', '+++ c', '@@ -9 +11,0 @@', '-c', 'diff --git a/y.ts b/y.ts', '--- a/y.ts', '+++ /dev/null', '@@ -1 +0,0 @@', '-z'].join('\n');
+  assert.deepEqual([...addedLines(diff)].map(([f, s]) => [f, [...s]]), [['x.ts', [4, 5, 6]]], 'an added line "++ c" is a line, not a path');
 });
 
 /** The example project with the policy on, committed (CI reads the base's config). */
