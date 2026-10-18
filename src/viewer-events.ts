@@ -6,7 +6,7 @@
 // writers', like the runs routes.
 import type { StoredEvent } from './events/types.js';
 import { summarize } from './projection.js';
-import { governorForViewer, type HoldBanner } from './governor-holds.js';
+import { bannerForViewer, type HoldBanner } from './governor-holds.js';
 
 /** Event type -> the payload fields a viewer sees. Only the task's progress, its decisions, PRs and deploys. */
 export const VIEWER_EVENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -82,6 +82,8 @@ export const VIEWER_DECISION_FIELDS: readonly string[] = Object.freeze(['id', 'k
 export const VIEWER_BATCH_FIELDS: readonly string[] = Object.freeze(['id', 'kind', 'issues', 'prs', 'outcome', 'at']);
 /** The default branch's protection as a viewer sees it: GitHub enforced, the main watch, or off. */
 export const VIEWER_PROTECTION_FIELDS: readonly string[] = Object.freeze(['mode']);
+/** The agents' Claude account as a viewer sees it: whether one is set, never which (issue #567). */
+export const VIEWER_CLAUDE_ACCOUNT_FIELDS: readonly string[] = Object.freeze(['set']);
 /** The machine's slots as a viewer sees them: how many are in use and how many there are, not which agents hold them. */
 export const VIEWER_SLOT_FIELDS: readonly string[] = Object.freeze(['cap', 'running']);
 
@@ -113,9 +115,13 @@ export function stateForViewer(state: Record<string, unknown>): Record<string, u
     const ib = out.inbox as Record<string, unknown>;
     out.inbox = { decisions: decisionsOnly(ib.decisions), blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
   }
-  // A hold's banner: why work is held and its numbers, never the way to change it (no fix, no Settings link), and
-  // never which Claude account a refused login is (issue #567).
-  if (out.governor && typeof out.governor === 'object') out.governor = governorForViewer(out.governor as { reason?: string | null; banner?: HoldBanner | null });
+  // A hold's banner: why work is held and its numbers, never the way to change it (no fix, no Settings link).
+  if (out.governor && typeof out.governor === 'object') {
+    const g = out.governor as { banner?: HoldBanner | null };
+    out.governor = { ...g, banner: g.banner ? bannerForViewer(g.banner) : null };
+  }
+  // The agents' Claude account: whether one is set, and no field added to it later (#567).
+  if (out.claudeAccount && typeof out.claudeAccount === 'object') out.claudeAccount = pick(out.claudeAccount as Record<string, unknown>, VIEWER_CLAUDE_ACCOUNT_FIELDS);
   // How the default branch is guarded: the mode only, never the commits checked or an alert's detail.
   if (out.protection && typeof out.protection === 'object') out.protection = pick(out.protection as Record<string, unknown>, VIEWER_PROTECTION_FIELDS);
   // Only the errors still current (src/projection.ts CoordinatorErrors), each as often as it happened; never the earlier ones.

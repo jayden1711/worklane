@@ -5,7 +5,7 @@ import { batchSummaries } from './coordinator/pr-batch.js';
 import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
 import { DIRECT_LAND_REFUSED } from './direct-land.js';
 import { localDay } from './local-day.js';
-import { holdBanner, type HoldBanner, type HoldFacts } from './governor-holds.js';
+import { holdBanner, holdReason, type HoldBanner, type HoldFacts } from './governor-holds.js';
 
 export type TaskStatus =
   | 'triage'
@@ -272,7 +272,7 @@ export function summarize(e: StoredEvent): string {
       return `${p.id} ${String(p.step).replace('_', ' ')}${prs ? `: ${prs}` : ''}${p.tier ? ` (${p.tier})` : ''}`;
     }
     case 'governor.hold':
-      return `dispatch held: ${p.reason}`;
+      return `dispatch held: ${holdReason(p)}`;
     case 'governor.release':
       return 'dispatch resumed';
     case 'report.posted':
@@ -532,7 +532,7 @@ export function project(events: StoredEvent[], today = localDay()): Projection {
         break;
       }
       case 'governor.hold':
-        governor = { held: true, reason: String(p.reason), load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts, banner: holdBanner({ kind: p.kind as string | undefined, reason: String(p.reason), facts: p.facts as HoldFacts | undefined }, e.ts) };
+        governor = { held: true, reason: holdReason(p), load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts, banner: holdBanner({ kind: p.kind as string | undefined, reason: holdReason(p), facts: p.facts as HoldFacts | undefined }, e.ts) };
         break;
       case 'governor.release':
         governor = { held: false, reason: null, load: (p.load as number | null) ?? null, freeDiskPct: (p.free_disk_pct as number | null) ?? null, at: e.ts, banner: null };

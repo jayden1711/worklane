@@ -175,23 +175,24 @@ export function holdBanner(h: { kind?: string | undefined; reason: string; facts
   }
 }
 
-/**
- * A refused Claude login's hold, in words that name no account. The coordinator records this; a hold recorded before
- * it named the login (its email or org), which only the owners and writers are sent (issue #567).
- */
+/** A refused Claude login's hold, in words that name no account: what the coordinator records (issue #567). */
 export const SIGN_IN_HOLD_REASON = 'Claude sign-in failed: no new runs until a call on the refused login succeeds';
 
 /**
- * The banner as a viewer may have it: why work is held, never the way to change it (no fix, no link). A refused
- * login's numbers are the fixed words above: an older hold's reason names the account, and a viewer learns no account.
+ * A recorded hold's reason as it is shown or posted anywhere: the dashboard state and Activity, the ignored-issues
+ * list and the report posted on the repo. Every reader of a `governor.hold` reason goes through this.
+ * WHY (#567): a refused login's hold recorded before #567 named the account (its email or org), and one recorded
+ * before holds had kinds (#463 before #470) has no kind, so it is known by its words. Either way it reads as the
+ * fixed words above, for every role: which login it is is on the sign-in banner, for the owners and writers only.
  */
-export function bannerForViewer(b: HoldBanner): HoldBanner {
-  return { ...b, fix: null, link: null, ...(b.kind === 'sign_in' ? { numbers: SIGN_IN_HOLD_REASON } : {}) };
+export function holdReason(p: { kind?: unknown; reason?: unknown }): string {
+  const reason = String(p.reason);
+  return p.kind === 'sign_in' || /^Claude sign-in failed \(/.test(reason) ? SIGN_IN_HOLD_REASON : reason;
 }
 
-/** The governor's last hold as a viewer may have it: the banner above, and a refused login's reason in fixed words. */
-export function governorForViewer<G extends { reason?: string | null; banner?: HoldBanner | null }>(g: G): G {
-  return { ...g, ...(g.banner?.kind === 'sign_in' ? { reason: SIGN_IN_HOLD_REASON } : {}), banner: g.banner ? bannerForViewer(g.banner) : null };
+/** The banner as a viewer may have it: why work is held, never the way to change it (no fix, no link). */
+export function bannerForViewer(b: HoldBanner): HoldBanner {
+  return { ...b, fix: null, link: null };
 }
 
 /** doctor's and First run's disk check: warn when free disk is under the floor, or would be after one more worktree. */
