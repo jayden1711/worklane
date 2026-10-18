@@ -1060,16 +1060,21 @@ export abstract class MergeFlow extends FixRuns {
 
   /**
    * Each dead check raised (main_watch.dead_check) and not cleared since: one ops post, once per check and since;
-   * one more when it clears. What is over the ops posts' limit waits for a later pass.
+   * one more when it clears. What is over the ops posts' limit waits for a later pass. A raise with `workflow` names
+   * the disabled workflow and its state; those come from GitHub and a repo file, so each goes in as `lit` (a code
+   * span: no mention, link or markdown) after redaction. The check's name is a code span too. A post over Discord's
+   * REPLY_CHARS is cut by the adapter's fitPost, which keeps or drops each span whole.
    */
   protected async deadCheckOutbound() {
     const last = new Map<string, EventPayload<'main_watch.dead_check'>>();
     for (const e of this.d.log.read(0, ['main_watch.dead_check'])) last.set((e.payload as EventPayload<'main_watch.dead_check'>).check, e.payload as EventPayload<'main_watch.dead_check'>);
     for (const d of last.values()) {
+      const wf = d.workflow ? ` Its workflow ${lit(redactString(d.workflow.name), 200)} (${lit(redactString(d.workflow.path), 200)}) is disabled on GitHub (${lit(d.workflow.state, 60)}), so it can't post the check until someone enables it again.` : '';
+      const check = lit(d.check, 200);
       const text =
         d.state === 'raised'
-          ? `Main watch: the required check "${d.check}" has had no run on any commit judged since ${d.since}. Merges into ${this.branch} keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`
-          : `Main watch: the required check "${d.check}" has a run again, or is no longer required: its dead-check warning is cleared.`;
+          ? `Main watch: the required check ${check} has had no run on any commit judged since ${d.since}.${wf} Merges into ${this.branch} keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`
+          : `Main watch: the required check ${check} has a run again, or is no longer required: its dead-check warning is cleared.`;
       const key = (state: string) => `main-watch-dead-check:${state}:${d.check}:${d.since}`;
       // Cleared before its warning went out: nothing to clear in the channel.
       if (d.state === 'cleared' && !this.postedKeys().has(key('raised'))) continue;

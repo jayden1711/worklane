@@ -147,6 +147,11 @@ test("text from the record shows as typed: it can't forge a packet line, mention
   assert.equal(lit(''), "''");
 });
 
+test('regression: lit cuts a long text before an emoji, never through it', () => {
+  assert.equal(lit('😀'.repeat(150), 200), `\`${'😀'.repeat(98)}…\``);
+  assert.equal(lit(`x${'😀'.repeat(150)}`, 200), `\`x${'😀'.repeat(98)}…\``);
+});
+
 test('receiptSummary: counts per receipt section, the failing checks named', () => {
   assert.equal(receiptSummary({ checks: [], doneWhen: [], unverified: [] }), 'verified: nothing (no checks ran); not verified: 0 claims; not checked: 0');
   const fails = ['a', 'b', 'c'].map((check) => ({ check, status: 'fail' as const, exitCode: 1 }));
