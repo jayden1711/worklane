@@ -21,6 +21,7 @@
 //   run's harness variables are pinned in --settings too; and a project file
 //   that sets env, widens allow rules, or sets anything but hooks and
 //   permission rules refuses the run (projectSettingsRefusal).
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
@@ -77,6 +78,11 @@ function readSettings(file: string): Settings {
   return v as Settings;
 }
 
+/** The file each instance's agent settings were read from, for a refusal that names it. */
+const settingsFiles = new WeakMap<object, string>();
+/** The file `readAgentSettings` read these settings from, or undefined. */
+export const agentSettingsFileOf = (s: object): string | undefined => settingsFiles.get(s);
+
 /** Every way an instance's agent settings fall short: the hooks, and disableAllHooks pinned off. */
 export function agentSettingsProblems(s: Settings): string[] {
   const out = hookChecks(s).filter((c) => !c.ok).map((c) => `hook ${c.event}: ${c.detail}`);
@@ -96,6 +102,7 @@ export function readAgentSettings(instanceHome: string): Settings {
   }
   const problems = agentSettingsProblems(s);
   if (problems.length) throw new AgentSettingsError(`${file}: ${problems.join('; ')}`);
+  settingsFiles.set(s, file);
   return s;
 }
 
@@ -178,4 +185,31 @@ export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv:
     env: { ...(ours.env ?? {}), ...(l.env ?? {}), ...pinnedEnv },
     disableAllHooks: false,
   };
+}
+
+/**
+ * Proof that claude applied a run's --settings (#626). The pinned Claude Code (2.1.296, src/tool-install.ts) drops
+ * the whole --settings when one value in it is invalid, deny rules and hooks included, and says nothing; the run
+ * goes on without its guardrails. So every --settings carries a check value, new for each run, and the run stops
+ * unless claude's init event reports that value back before any line but a system one (settingsAppliedProblem); a
+ * session that ends with it unconfirmed fails.
+ *
+ * The value rides in outputStyle, read in the 2.1.296 package: its settings schema takes any string there; the init
+ * event's output_style is the merged settings' outputStyle as given; and a name no style has resolves to no style,
+ * the same as the default, so the agent's prompt doesn't change. Nothing else can set it: a project file that sets
+ * any key but hooks and permission rules refuses the run (projectSettingsRefusal), --settings outranks it, and the
+ * value is made when the run starts. A CLI upgrade re-runs test/runner-settings-applied.test.ts and must keep these.
+ */
+export const SETTINGS_CHECK_KEY = 'outputStyle';
+
+/** A fresh check value for one run's --settings. */
+export const settingsCheckValue = (): string => `${BRAND.cli}-settings-check-${randomBytes(8).toString('hex')}`;
+
+/**
+ * Why a run must stop because claude's init event doesn't show this run's --settings applied, or null.
+ * `what` names the settings (the instance's agent settings file, when they came from one).
+ */
+export function settingsAppliedProblem(init: { output_style?: unknown }, check: string, what: string): string | null {
+  if (init.output_style === check) return null;
+  return `claude did not apply the --settings this run passed (${what}): its init event doesn't report the run's check value in output_style, so the run's deny rules and hooks may be off (one invalid value makes claude drop the whole file without a word)`;
 }
