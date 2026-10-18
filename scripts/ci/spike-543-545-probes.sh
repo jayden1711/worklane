@@ -259,14 +259,18 @@ start_run() {
 # namespaces by path, with no capability today's root slirp unit keeps; its IPAddressDeny= refuses the host's loopback,
 # its LAN address and the host's veth address. Then, from inside the run's netns: the public stand-in, slirp's
 # gateway (the host's loopback), the LAN address and the veth address. Sets CJ CPUB CGW CLAN CHV.
+# The variant slirp_case runs (set by slirp_pick): SL_CAPS, the unit's capability props (today's root unit's caps
+# dropped, or the default bounding set kept); SL_FLAGS, slirp's own sandbox flags.
+SL_DROP=(-p "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE")
+SL_CAPS=("${SL_DROP[@]}")
+SL_FLAGS=(--enable-sandbox --enable-seccomp)
 slirp_case() {
   local label="$1" i; shift
   CJ=no CPUB=- CGW=- CLAN=- CHV=-
   systemd-run --quiet --collect --unit="worklane-spike-slirp-$label" --slice="$SLICE" --uid="$USER_" --gid="$USER_" \
-    -p NoNewPrivileges=yes \
-    -p "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
+    -p NoNewPrivileges=yes ${SL_CAPS[@]+"${SL_CAPS[@]}"} \
     -p "IPAddressDeny=127.0.0.0/8 ::1/128 $LAN/32 $HOSTV/32" "$@" \
-    /usr/bin/slirp4netns --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp \
+    /usr/bin/slirp4netns --configure --mtu=65520 --disable-host-loopback ${SL_FLAGS[@]+"${SL_FLAGS[@]}"} \
     --userns-path="/proc/$runpid/ns/user" --netns-type=path "/proc/$runpid/ns/net" tap0 2>>"$work/slirp.err" || true
   for i in $(seq 100); do
     if nsenter --target "$runpid" --net ip -o link show tap0 >/dev/null 2>&1; then CJ=yes; break; fi
@@ -280,7 +284,8 @@ slirp_case() {
     CLAN="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$LAN" "$HP" 2>/dev/null)"
     CHV="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$HOSTV" "$HP" 2>/dev/null)"
   else
-    echo "  slirp unit $label never brought up tap0; its journal:"; journal "worklane-spike-slirp-$label.service"
+    echo "  slirp unit $label never brought up tap0; its journal (banner lines left out):"
+    journalctl --no-pager -o cat -n 40 -u "worklane-spike-slirp-$label.service" 2>/dev/null | grep -v '^\* \|^ *\* \|^Started \|^sent tapfd\|^received tapfd' | tail -n 12 | sed 's/^/    /'
   fi
   echo "  [$label] joined=$CJ public=$CPUB host-loopback-via-gateway=$CGW LAN=$CLAN host-veth=$CHV"
   systemctl stop "worklane-spike-slirp-$label.service" >/dev/null 2>&1 || true
@@ -320,12 +325,23 @@ fi
 
 if [ -n "$userns_how" ]; then
   echo "run namespace up via $userns_how (NoNewPrivileges=yes, PrivateNetwork=yes): pid $runpid"
-  slirp_case c
-  c_join="$CJ" c_pub="$CPUB"
-  if [ "$CJ" = yes ] && [ "$CPUB" = OK ] && [ "$CGW" != OK ] && [ "$CLAN" != OK ] && [ "$CHV" != OK ]; then
-    Qc="PASS (c): slirp4netns as $USER_ in its own unit (no root, none of today's slirp capabilities) joined the run's user+net namespace (made via $userns_how): public OK; host loopback, LAN and host address refused"
+  # Variants, strictest first; the first that joins is the one (c) reports and (d) reuses. WHY a matrix: if the
+  # strictest fails, which of slirp's own sandbox or the dropped bounding set is the cause decides the build.
+  c_variant="" n=0
+  for v in "sandbox+seccomp, today's caps dropped" "sandbox+seccomp, default caps" "seccomp only, today's caps dropped" "seccomp only, default caps"; do
+    case "$v" in *dropped) SL_CAPS=("${SL_DROP[@]}") ;; *) SL_CAPS=() ;; esac
+    case "$v" in sandbox*) SL_FLAGS=(--enable-sandbox --enable-seccomp) ;; *) SL_FLAGS=(--enable-seccomp) ;; esac
+    n=$((n + 1))
+    echo "  variant c$n: $v"
+    slirp_case "c$n"
+    if [ "$CJ" = yes ]; then c_variant="$v"; break; fi
+  done
+  if [ -n "$c_variant" ] && [ "$CPUB" = OK ] && [ "$CGW" != OK ] && [ "$CLAN" != OK ] && [ "$CHV" != OK ]; then
+    Qc="PASS (c): slirp4netns as $USER_ in its own unit (no root; $c_variant) joined the run's user+net namespace (made via $userns_how): public OK; host loopback, LAN and host address refused"
+  elif [ -n "$c_variant" ]; then
+    Qc="FAIL (c): joined with $c_variant (userns via $userns_how) but public=$CPUB (want OK) gateway=$CGW LAN=$CLAN host=$CHV (want refused)"
   else
-    Qc="FAIL (c): userns via $userns_how; joined=$CJ public=$CPUB (want OK) gateway=$CGW LAN=$CLAN host=$CHV (want refused)"
+    Qc="FAIL (c): the run's namespace was made (via $userns_how) but slirp4netns as $USER_ joined it in no variant (see each variant's journal above)"
   fi
 else
   Qc="FAIL (c): the test user's run unit could not create a user+net namespace (restriction=$restricted; plain unshare and the AppArmor-allowed wrapper both refused; see above)"
@@ -342,8 +358,9 @@ if [ "$nft_ok" != 1 ]; then
 else
   load_543_table || true
   # 1. The #545 design under #543: the test user's slirp unit, without and with NFTSet= (the memos' combined plan).
-  d545="not measured: (c) made no run namespace"
-  if [ -n "$userns_how" ] && start_run "$unshare_bin"; then
+  d545="not measured: (c) had no test-user slirp that joined"
+  if [ -n "$userns_how" ] && [ -n "${c_variant:-}" ] && start_run "$unshare_bin"; then
+    echo "  (slirp variant from (c): $c_variant)"
     slirp_case d-plain
     d_plain_pub="$CPUB"
     slirp_case d-exempt -p "NFTSet=cgroup:inet:$TABLE:$SET"
