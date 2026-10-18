@@ -12,7 +12,7 @@ You need:
 
 ## Local or server
 
-You choose where it runs. Both are a single machine, which is and stays a first-class mode with the same guarantees, not a trial version of a cloud install. Running in your own cloud account is the next mode being built.
+You choose where it runs. Both are a single machine, which is and stays a first-class mode with the same guarantees, not a trial version of a cloud install. Running in your own cloud account is planned next.
 
 | | local | server |
 |---|---|---|
