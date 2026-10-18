@@ -1564,11 +1564,15 @@ export interface ProfileCell {
   apiOk: boolean | null;
   apiError: string | null;
   checkedAt: string | null;
+  /** The usage limit on it (the instance's pause, on its active account): when it resets, and that in words. Absent from an older server. */
+  limit?: { resetAt: string; resets: string } | null;
 }
 export interface ProfilesTable {
   instances: string[];
   profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
   active: Record<string, string>;
+  /** The instance whose usage-limit pause the server read (its own); every other column's limit is not shown here. Absent from an older server. */
+  limitsOf?: string | null;
   /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
   failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
 }

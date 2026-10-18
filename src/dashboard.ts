@@ -61,7 +61,7 @@ import { networkFilePath, networkPolicy } from './testrun/network.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
-import { usageView } from './usage-limit.js';
+import { pauseOf, usageView } from './usage-limit.js';
 import { authHoldsOf } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
@@ -2630,7 +2630,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // everAllowed: the same gate, asked as if from an allowed device; false means no device helps (the role), so
           // the page draws no buttons for this person instead of disabled ones (#587).
           const everAllowed = claudeAccountGate({ role: who.role, requester: { ...accountRequester, deviceOk: true } }, ownersOpt) === null;
-          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name) });
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name, pauseOf(eventCache.all())) });
         }
         // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
