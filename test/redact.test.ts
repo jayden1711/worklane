@@ -68,6 +68,12 @@ const IDENTIFIERS: [string, string, string][] = [
   ['a .lan host', `ssh ${host('nas-1', 'lan')} failed`, host('nas-1', 'lan')],
   ['a .corp host', `proxy ${host('gw', 'office', 'corp')} refused`, host('gw', 'office', 'corp')],
   ['a tailnet host', `https://${host('box', 'tail1234', 'ts', 'net')}/`, host('box', 'tail1234', 'ts', 'net')],
+  // One-word hosts, and hosts whose first label is also a common variable name.
+  ...[
+    ['nas', 'lan'], ['vault', 'internal'], ['jira', 'corp'], ['gitlab', 'corp'], ['grafana', 'internal'], ['myapp', 'internal'],
+    ['raspberrypi', 'local'], ['homeassistant', 'local'], ['printer', 'home', 'arpa'], ['NAS', 'LAN'],
+    ['app', 'internal'], ['app', 'prod', 'internal'], ['data', 'corp'], ['node', 'cluster', 'local'], ['node', 'internal'],
+  ].map((l): [string, string, string] => [`the host ${host(...l)}`, `curl http://${host(...l)}/x and ssh ${host(...l)}`, host(...l)]),
   ['a home path', `at Object.<anonymous> (${['', 'home', USER, 'proj', 'src', 'a.ts'].join('/')}:12:3)`, USER],
   ['a macOS home path', `open ${['', 'Users', USER, 'Desktop', 'notes.txt'].join('/')}`, USER],
   ['a WSL home path', `cd ${['', 'mnt', 'c', 'Users', USER, 'proj'].join('/')}`, USER],
@@ -104,7 +110,12 @@ const MUST_SURVIVE = [
   `const k = ${j('_', 'sk', 'test', 'someLongCamelCaseName')};`,
   // Code is not a host.
   'this.local = true; options.private = false',
-  'const v = this.internal; if (opts.corp) return; this.config.internal; node.internal; someObj.lan',
+  'const v = this.internal; if (opts.corp) return; this.config.internal; someObj.lan; redisCache.internal',
+  // Ordinary words: the suffixes on their own, after a missing space, in a relative import and in file names.
+  'Keep it internal. Local runs pass; the corp VPN and the lan are fine, and the intranet is down.',
+  'Tests passed.Internal review next; it ran.Local too.',
+  "import { x } from './util.internal'; import y from '../lib/env.local';",
+  'Copy .env.local to settings.local.json and app.local.ts.',
   'eyJ is how base64 JSON starts; sk-live and sk_live are prefixes; AIza too.',
   'Run it at 12:30, the 2026-10-18 build, 3/4 done.',
 ];
@@ -117,6 +128,26 @@ test('every secret shape in the corpus is redacted by default, and secretKinds n
   });
   assert.deepEqual(missed.map(([what]) => what), []);
   assert.deepEqual(SECRETS.filter(([, s]) => secretKinds(s).length === 0).map(([what]) => what), [], 'secretKinds names each one');
+});
+
+test('a credential key is found by what its name says, not by a list: each family, any prefix, any case', () => {
+  const FAMILIES: [string, string[]][] = [
+    ['secret', ['aws_secret_access_key', 'AWS_SECRET_ACCESS_KEY', 'stripe_secret_key', 'clientSecret', 'webhook-secret', 'secrets_value']],
+    ['password', ['db_password', 'DB_PASSWORD', 'adminPassword', 'smtp-passwd', 'db_pass', 'pwd', 'passphrase']],
+    ['token', ['private_token', 'slack_bot_token', 'authToken', 'X-Auth-Token', 'refresh_token', 'jwt', 'bearer']],
+    ['api or access key', ['x-api-key', 'openai_api_key', 'OPENAI_API_KEY', 'apiKey', 'ApiKey', 'APIKey', 'apikey', 'access_key', 'privateKey', 'signing-key', 'key']],
+    ['authorization and credentials', ['authorization', 'Authorization', 'credentials', 'db_credential', 'auth', 'proxy_auth']],
+  ];
+  const missed = FAMILIES.flatMap(([family, keys]) =>
+    keys.flatMap((k) =>
+      [json(k), JSON.stringify({ detail: json(k) })].flatMap((s, i) => (redactString(s).includes(VALUE) || secretKinds(s).length === 0 ? [`${family}: ${k}${i ? ' (escaped)' : ''}`] : [])),
+    ),
+  );
+  assert.deepEqual(missed, []);
+  // Names that hold no credential keep their value, however random it looks: no credential word, and a key qualified
+  // by a word that names no secret.
+  const PLAIN = ['cacheKey', 'cache_key', 'sortKey', 'sort_key', 'primaryKey', 'primary_key', 'idempotency_key', 'partition-key', 'publicKey', 'keyId', 'key_id', 'oauth', 'tokenizer', 'author', 'passive', 'bypass_reason'];
+  assert.deepEqual(PLAIN.filter((k) => redactString(json(k)) !== json(k)), []);
 });
 
 test('a redacted JSON value keeps its key and the rest of the document', () => {
@@ -205,6 +236,26 @@ test('a done_when contract and a research block are left as written; the text ar
   check((await f.get(await f.createIssue('t', body, []))).body, 'the file backlog');
 });
 
+test('only a real fenced block is left as written: a mention of the fence in prose does not switch redaction off', () => {
+  const email = j('@', 'ops.person', host('example', 'org'));
+  const home = ['', 'home', USER].join('/');
+  const leaky = (out: string) => [email, USER, host('db-1', 'prod', 'internal')].filter((l) => out.includes(l));
+  for (const fence of ['```done_when', '```research']) {
+    // The opener is not followed by a line break, so parseContract and the research parser would not take it.
+    const prose = `Not starting: add a ${fence} block.\nLog from ${home}/proj/a.ts:12 by ${email} on ${host('db-1', 'prod', 'internal')}\n\`\`\`\ntrace\n\`\`\``;
+    assert.deepEqual(leaky(redactString(prose, TRACKER)), [], `${fence} in prose`);
+    assert.deepEqual(leaky(redactString(`See ${fence}x and ${fence}: then ${email}\n\`\`\``, TRACKER)), [], `${fence} glued to a word`);
+  }
+  // A real block after a prose mention is still kept, and the prose around both is redacted.
+  const { body } = contractIssue();
+  const mixed = `Say ${'```'}done_when here: ${email}\n${body}`;
+  const out = redactString(mixed, TRACKER);
+  assert.deepEqual(parseContract(out), parseContract(body));
+  assert.ok(out.startsWith('Say ```done_when here: [email]\n'), out.split('\n')[0]);
+  // The openers the parsers accept: trailing spaces and a CRLF line break.
+  assert.deepEqual(parseContract(redactString(body.replace('```done_when\n', '```done_when  \r\n'), TRACKER)), parseContract(body));
+});
+
 test('every pattern runs in linear time on 100 KB of hostile input', () => {
   const N = 100_000;
   const run = (unit: string, head = '', tail = '') => head + unit.repeat(Math.ceil(N / unit.length)) + tail;
@@ -216,6 +267,9 @@ test('every pattern runs in linear time on 100 KB of hostile input', () => {
     ['"token":"', run('"token":"')], ['escaped "key"', run('\\"key\\":\\"')], ['"key": "a', run('a', '"key": "')],
     ['10.', run('10.')], ['1.', run('1.')], ['fd00:', run('fd00:')], ['C:\\Users\\', run('C:\\Users\\')],
     ['a.lan.', run('a.lan.')], ['x@ + x', run('x', 'x@')], ['x@ + a.', run('a.', 'x@')], ['a + @', run('a', '', '@')],
+    ['" + a', run('a', '"')], ['" + a_', run('a_', '"', '":"')], ['"a', run('"a')], ['"x-api-key":"', run('"x-api-key":"')],
+    ['"a_b_key": + value', run('a_b_', '"', `key":"${'Aa1'.repeat(6)}"`)], ['//a.lan', run('//a.lan')], ['/a.lan', run('/a.lan')],
+    ['a.Internal ', run('a.Internal ')], ['aB.local ', run('aB.local ')], ['this.a.internal', run('a.', 'this.', 'internal')],
   ];
   // The URL-password pattern predates #644 and is quadratic on these shapes too: a follow-up, not this change.
   const KNOWN_SLOW = new Set(['password in a URL']);
@@ -235,6 +289,8 @@ test('every pattern runs in linear time on 100 KB of hostile input', () => {
   const t0 = performance.now();
   redactString(run('```done_when\n'), TRACKER);
   redactString(run('```research\nx\n```\n'), TRACKER);
+  redactString(run('```done_when block '), TRACKER);
+  redactString(run('```research  '), TRACKER);
   assert.ok(performance.now() - t0 < 600, 'the machine-block finder is linear');
 });
 
