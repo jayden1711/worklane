@@ -75,8 +75,8 @@ for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });
   process.env[k] = v;
 }
-// The machine itself, for what the engine refuses to use outside it in a test process: the GitHub budget's slot
-// directory (src/github/budget.ts defaultBudgetDir, #669). Kept in the service modes' environment (serviceModeEnv).
+// The machine itself, for what the engine refuses to use outside it in a test process: the slot directory
+// (src/os/index.ts slotsDir, #669). It counts only with the system root below and its mark (testSlotsRefusal).
 process.env[TEST_MACHINE_VAR] = testMachine;
 
 // The mark that lets this process and its children use the system root above (src/os/system-paths.ts
