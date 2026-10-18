@@ -84,9 +84,11 @@ export const LOCKED_CATEGORIES: Record<string, string[]> = {
 /**
  * Whose repo a change is in, for the locks above (#665). 'engine': the engine's own, where every lock applies. The
  * other value, a managed app's, comes only from root's word on this machine (src/managed-apps.ts readLockScope), never
- * from anything in a repo; there the globs that name the engine's own source tree (ENGINE_TREE) stand aside, and the
- * rest (the config folder's review.yaml, guardrails.yaml and experiments.yaml, CI workflows, the push gate's and
- * secret scan's files, the agents' instructions) still hold: each changes the harness's rules for that repo.
+ * from anything in a repo; there the globs that name the engine's own source tree (ENGINE_TREE) stand aside, the push
+ * gate's and release-tag check's scripts under scripts/ among them, and the rest (the config folder's review.yaml,
+ * guardrails.yaml and experiments.yaml, CI workflows and release signers, the git hooks and secret-scan files:
+ * .githooks/**, .denylist* and .gitleaks*, and the agents' instructions) still hold: each changes the harness's rules
+ * for that repo.
  * INVARIANT: absent, unknown or unreadable is 'engine' (fails closed).
  */
 export type LockScope = 'engine' | 'managed-app';

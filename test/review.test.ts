@@ -229,7 +229,7 @@ test("regression: where root says the repo is a managed app, the app's own src/c
   }
 });
 
-test('the globs that hold in every repo are exactly the config folder, CI, push gate and secret-scan ones; every other lock names the engine\'s own source', () => {
+test("the globs that hold in every repo are exactly the config folder's, CI's, the git hooks' and the secret scan's (the push gate's scripts are engine source); every other lock names the engine's own source", () => {
   const everyRepo = LOCKED_CATEGORIES[SELF_MODIFICATION]!.filter((g) => !review.engineSourceGlob(g));
   assert.deepEqual(everyRepo, [
     `${BRAND.configDir}/review.yaml`, `${BRAND.configDir}/guardrails.yaml`, '.github/workflows/**', '.github/release-signers',

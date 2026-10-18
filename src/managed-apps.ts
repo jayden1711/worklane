@@ -8,7 +8,9 @@
 //   {"version":1,"apps":{"<instance>":"<owner/repo>"}}
 //
 // Only for that instance, working exactly that repo (its instance.yaml, outside the repo), do the locks on the engine's
-// own source paths stand aside (review.ts LockScope); the config folder's, CI's and the push gate's still hold.
+// own source paths stand aside (review.ts LockScope), the push gate's scripts under scripts/ among them; the config
+// folder's, CI's, and the git hooks' and secret scan's files (.githooks/**, .denylist*, .gitleaks*) still hold. Nor is
+// the engine's own repo ever an app (engineRepos), whatever the file says.
 //
 // INVARIANT: fails closed. No file; one that isn't root's regular file alone (a symlink, another owner, writable by its
 // group or others, too big, unreadable); one not in exactly the script's form; or one that doesn't name this instance
