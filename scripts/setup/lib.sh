@@ -557,10 +557,15 @@ repo_ok() {
 # The agent's Claude login, from `claude setup-token`'s token on stdin, written as that user's own Claude
 # credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude; or <dir>/.credentials.json when an instance
 # names its agent's claude_config_dir), keeping the file's other entries. The token goes from stdin to that file and
-# nowhere else: never an argument, an environment variable or a log line.
+# nowhere else: never an argument, an environment variable or a log line (timeout passes stdin through).
+# Bounded, like claude_status_json and cached_account (#613): a home on a hung FUSE or network mount must not hold
+# root's switch (every instance paused) for ever. Cut off, it says so on stderr and fails with timeout's 124, which
+# every caller reads as a failed install.
 #   install_claude_token <user> [<claude config dir>]
+CLAUDE_TOKEN_INSTALL_SECONDS=30
 install_claude_token() {
-  (cd / && sudo -H -u "$1" "$(command -v node)" --input-type=module -e '
+  local rc=0
+  (cd / && sudo -H -u "$1" timeout "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" --input-type=module -e '
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -589,12 +594,22 @@ const tmp = `${file}.tmp-${process.pid}`;
 writeFileSync(tmp, `${JSON.stringify(c)}\n`, { mode: 0o600 });
 renameSync(tmp, file);
 console.log(`installed ${file} (0600, this user only)`);
-' "${2:-}")
+' "${2:-}") || rc=$?
+  [ "$rc" -ne 124 ] || echo "installing the Claude token as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2
+  return "$rc"
 }
-# Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes).
+# Whether claude, as this user, says it is signed in (no claude on this machine yet: nothing to ask, so yes). Bounded
+# like claude_status_json (#613): no answer within the limit is a no, with why on stderr.
+CLAUDE_LOGIN_SECONDS=60
 claude_login_ok() {
   command -v claude >/dev/null 2>&1 || return 0
-  (cd / && sudo -H -u "$1" claude auth status --json) | grep -q '"loggedIn": *true'
+  local out rc=0
+  out="$(cd / && sudo -H -u "$1" timeout "$CLAUDE_LOGIN_SECONDS" claude auth status --json)" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    echo "claude auth status, as $1, didn't answer within $CLAUDE_LOGIN_SECONDS s (its home may be on a hung mount)" >&2
+    return 1
+  fi
+  [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"loggedIn": *true'
 }
 
 # The Claude account switch (claude-account.sh): what it last found for each agent user (status.json), the last
