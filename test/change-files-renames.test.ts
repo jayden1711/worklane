@@ -276,7 +276,7 @@ test('a path with a newline stays under its `**` glob: protected, and L3 under t
 test('a changed path with a control character is L3 "path with a control character" and never merges itself, whatever review.yaml lists', () => {
   // A review.yaml with no L3 category these paths fall in: only the control character can make them L3.
   const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
-  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const };
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const, design_change: false };
   const one = (p: string) => {
     const lvl = level([{ path: p, added: 1, removed: 0 }], plain);
     const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
@@ -327,23 +327,25 @@ test('a changed name that isn\'t valid UTF-8 is L3 "path that isn\'t valid UTF-8
   // Review.yaml files that would let it through if anything could: no L3 at all, the category emptied, docs everywhere.
   const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
   const hostile = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } }, categories: { 'non-utf8-path': [], docs: ['**'] } });
-  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const };
-  const got: unknown[] = [];
-  for (const [rel, text] of [[ff('web/bad', '.ts'), "await db.query('DROP TABLE users');\n"], [ff('docs/bad', '.md'), '# notes\n']] as const) {
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const, design_change: false };
+  /** The change `rel` adds, as each review.yaml judges it, and whether the merge gate (waiting on nothing) takes it. */
+  const judge = (rel: Buffer, text: string) => {
     const { dir, base } = repo({ 'README.md': '# x\n' });
     stageBytes(dir, rel, text);
     git(dir, 'commit', '-q', '-m', 'add a file');
-    const head = git(dir, 'rev-parse', 'HEAD');
-    const files = changeFiles(dir, base, head);
-    for (const c of [engine, plain, hostile]) {
+    const files = changeFiles(dir, base, git(dir, 'rev-parse', 'HEAD'));
+    return [engine, plain, hostile].map((c) => {
       const lvl = level(files, c);
       const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
       const paths = files.map((f) => f.path);
-      got.push({ paths, level: lvl.level, reason: lvl.reasons.find((r) => r.startsWith('path that')), cls: riskClassOf({ paths, level: lvl, waitCategories: [] }).cls, auto: merge.auto });
-    }
-  }
+      return { paths, level: lvl.level, reason: lvl.reasons.find((r) => r.startsWith('path that')), cls: riskClassOf({ paths, level: lvl, waitCategories: [] }).cls, auto: merge.auto };
+    });
+  };
   const want = (p: string) => ({ paths: [p], level: 'L3', reason: `path that isn't valid UTF-8: ${JSON.stringify(p)}`, cls: 'protected', auto: false });
-  assert.deepEqual(got, [...Array(3).fill(want('web/bad�.ts')), ...Array(3).fill(want('docs/bad�.md'))]);
+  assert.deepEqual(judge(ff('web/bad', '.ts'), "await db.query('DROP TABLE users');\n"), Array(3).fill(want('web/bad�.ts')));
+  assert.deepEqual(judge(ff('docs/bad', '.md'), '# notes\n'), Array(3).fill(want('docs/bad�.md')));
+  // The same gate takes the plain twin, so the name is what holds the change above.
+  assert.deepEqual(judge(Buffer.from('docs/ok.md'), '# notes\n').map((r) => [r.level, r.cls, r.auto]), Array(3).fill(['L0', 'docs-only', true]));
   // The helper's other readers name it the same way: never a string that drops or hides the bad byte.
   const { dir, base } = repo({ 'README.md': '# x\n' });
   stageBytes(dir, ff('src/bad', '.ts'), 'x\n');
