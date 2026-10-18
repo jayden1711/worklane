@@ -212,6 +212,54 @@ export function ProviderHosts({ hosts: p }: { hosts: NonNullable<HealthView['pro
   );
 }
 
+const count = (n: number) => n.toLocaleString('en-US');
+const utc = (iso: string) => `${new Date(iso).toISOString().slice(11, 16)} UTC`;
+const inMin = (iso: string) => {
+  const min = Math.round((Date.parse(iso) - Date.now()) / 60_000);
+  return min < 1 ? 'in under a minute' : `in ${min} min`;
+};
+
+/**
+ * The machine's shared GitHub API budget (src/github/budget.ts), read-only: per credential, what is left and when it
+ * resets per resource, a back-off in force (in red), and the consumers that used most of the current window.
+ * Credentials are numbered, never named by their token.
+ */
+export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githubBudget']> }) {
+  const cell = 'primitive-table-cell text-[12.5px] tabular-nums text-ink-2';
+  return (
+    <section className="space-y-1.5" aria-label="GitHub API budget" data-testid="health-github-budget">
+      <div className="text-[13px] font-medium text-ink">GitHub API budget</div>
+      {budget.credentials.length > 0 && (
+        <RecordsTable testId="health-github-budget-table" head={['Credential', 'Left', 'Resets', 'Back-off', 'Top consumers']} className="[&_th:nth-child(1)]:w-28">
+          {budget.credentials.map((c) => (
+            <tr key={c.id} className="border-b border-line last:border-0 align-top" data-testid="health-github-budget-row">
+              <td className="primitive-table-cell text-[13px] text-ink" title={`changed ${ago(c.updatedAt)}`}>
+                {c.id}
+              </td>
+              <td className={cell}>
+                {c.resources.length
+                  ? c.resources.map((r) => <div key={r.resource}>{r.remaining === null ? `${r.resource} not known yet` : `${r.resource} ${count(r.remaining)}${r.limit ? ` of ${count(r.limit)}` : ''} left`}</div>)
+                  : 'not known yet'}
+              </td>
+              <td className={cell}>{c.resources.length ? c.resources.map((r) => <div key={r.resource}>{r.resetAt ? `${r.resource} ${utc(r.resetAt)} (${inMin(r.resetAt)})` : `${r.resource} –`}</div>) : '–'}</td>
+              <td className="primitive-table-cell text-[12.5px] text-ink-2" data-testid="health-github-budget-backoff">
+                {c.backoff ? <span className="font-medium text-red">{`${c.backoff.kind === 'secondary_rate_limited' ? 'secondary limit' : 'rate limit'}: paused until ${utc(c.backoff.until)}`}</span> : 'none'}
+              </td>
+              <td className="primitive-table-cell text-[12.5px] text-ink-2">{c.top.length ? c.top.map((t) => `${t.consumer} ${count(t.calls)}`).join(' · ') : '–'}</td>
+            </tr>
+          ))}
+        </RecordsTable>
+      )}
+      {budget.notShown > 0 && (
+        <div className="text-[12px] text-ink-3" data-testid="health-github-budget-not-shown">
+          {budget.notShown} more budget {budget.notShown === 1 ? 'file' : 'files'} not shown (past the most recent few, or not readable as one)
+        </div>
+      )}
+      <div className="text-[11.5px] text-ink-3">Shared by every process on this machine that calls GitHub with the same token; a back-off pauses all of them. Credentials are numbered here, never named by their token.</div>
+    </section>
+  );
+}
+
 /** The panel from its data (also what the render checks render). `instances`: on a hub, every instance's view. */
 /** A held engine update, in red: rolled back (a failed migration, or services that didn't come up) and not retried. */
 export function UpdateHold({ hold }: { hold: NonNullable<HealthView['updateHold']> }) {
@@ -267,6 +315,12 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
 
       {/* This instance's: its configured providers are checked against the machine's hosts. */}
       {view.providerHosts && <ProviderHosts hosts={view.providerHosts} />}
+
+      {(() => {
+        // The machine's, so any instance's view (on the hub) shows it.
+        const budget = view.githubBudget ?? instances?.map((i) => i.view?.githubBudget).find(Boolean) ?? null;
+        return budget ? <GitHubBudget budget={budget} /> : null;
+      })()}
 
       <OffsiteBackup status={view.offsiteBackup ?? null} docs={view.docs?.backups ?? null} />
 
