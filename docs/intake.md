@@ -480,6 +480,12 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   (never against its own issue), the money-path (L3) rule and the trust policy (`src/intake/decide.ts`). The issue
   already exists, so filing it labels that issue (`ready` and the kind label) and puts the drafted five-part issue
   on it as one comment; no second issue is opened.
+- The task is worked from the draft intake checked (its contract, `- repro: true` for a bug, and its brief),
+  kept in the coordinator's owner-only state (`intake/checked/<issue>.json`) when it is filed. Never from the
+  issue's body: the reporter wrote it and can edit it at any time. Nor from the comment: anyone can post one
+  carrying the intake marker, and it is only the visible copy. So a writer's later edits there don't change the
+  contract either; to work it differently, a writer opens a new issue. An outsider's issue with the intake label
+  and no checked draft (a writer added `ready` before intake took it) is not worked, and a comment says why.
 - A login in `trusted.github` is filed `ready` at once; anyone else's draft is an Inbox decision, approved,
   edited or rejected exactly as for Discord. Until then, and when it is rejected, asked for details or dropped,
   the issue stays in triage and a comment on it says why (the engine's reason code only, never agent text).
@@ -623,8 +629,7 @@ trusted:
      writer has chosen the issue, the task first has a separate evaluator write a test that fails on the unfixed
      code, frozen so the worker can't edit it (the reproduction step in `src/coordinator.ts`). A bug whose
      done_when can't take the item is refused like any invalid draft (step 8), or asked about in a conversation.
-     Not yet for a GitHub-sourced report (2.4): its draft goes on the reporter's issue as a comment, and the task
-     reads the contract from the issue's body.
+     A GitHub-sourced report (2.4) is worked from that same checked draft, never from the reporter's body.
    - Not reproduced: the issue (or the Inbox draft) is labelled `couldnt-reproduce`.
    - Already fixed on main: no issue; the sender is told it looks fixed. The reply names the fixing commit only
      when the agent gave one and the coordinator's own `git merge-base --is-ancestor` on its checkout confirms it
@@ -632,7 +637,10 @@ trusted:
 8. **Draft.** The issue body has the five parts every issue the harness drafts itself has: **Outcome** (one
    sentence), **Sources** (where to look, nowhere else), **Constraints** (what to leave alone), **Deliverable** (a
    closed ```` ```done_when ```` block, commands as YAML block scalars) and **Review point** (the expected review
-   level, L0 to L3, and what would make it wait for the owner). The engine's contract parser checks all five. An invalid draft is refused and retried once with the reason,
+   level, L0 to L3, and what would make it wait for the owner). The engine's contract parser checks all five, and
+   then the whole body as the coordinator reads it: the Deliverable's block must be the body's only
+   ```` ```done_when ```` block (a second one anywhere, such as a decoy in Sources, is refused; the coordinator
+   refuses any issue with more than one too), and Windows line endings read the same in both. An invalid draft is refused and retried once with the reason,
    then dropped to the Inbox for the owner or a writer.
 9. **Risk.** A draft whose Sources name a file on the project's money paths (`review.yaml` `money_path_source`)
    is labelled `money-path` and says so, so its work is high-risk (L3) whichever files it ends up touching.

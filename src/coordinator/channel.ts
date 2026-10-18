@@ -20,7 +20,8 @@ import { issueSetupLink, LINK_TTL_MS } from '../console/links.js';
 import type { Ask } from '../console/asks.js';
 import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { alreadyText, approvedText, askBack, askPost, asksForLink, commentText, decidedText, decisionPost, dmText, highRiskAskBack, mainWatchPost, mergePost, usagePausePost, notOwnerText, parseChoice, parseHighRisk, readConfirm, SETUP_NOT_OWNER_TEXT, SETUP_THREAD_TEXT, wrongNumberText, type ChannelPost } from '../intake/channel.js';
 import { REPLY_CHARS } from '../intake/discord.js';
 import { acceptThread, checkSummary, confirmText, fallbackSummary, noAnswerText, notYourConfirmText, summaryRun, threadRun, threadRunDir, type ThreadRecord } from '../intake/explain.js';
@@ -122,10 +123,21 @@ export abstract class Channel extends ResearchOnDemand {
 
   // WHY: a github report is already an issue; filing it labels that issue. The draft goes on it as one marked
   // comment, so a pass retried after a crash adds the labels again (idempotent) but never a second comment.
+  // INVARIANT (#643): the task is worked from the draft as checked here, kept where only the coordinator writes, before
+  // anything is posted: never from the issue's body (the reporter's, editable by them at any time) nor from a comment
+  // (anyone can post one with this marker, whose id is a hash of the issue number). See intakeWorkedBody.
   protected async intakeLabelOnce(n: number, id: string, body: string, labels: string[]): Promise<number> {
+    ownerOnlyDir(join(this.d.stateDir, 'intake'));
+    ownerOnlyDir(dirname(this.intakeCheckedFile(n)));
+    writeOwnerOnly(this.intakeCheckedFile(n), JSON.stringify({ id, body }));
     if (!(await this.intakeLabelled(n, id))) await this.d.backlog.comment(n, `${body}\n\n${intakeMarker(id)}`);
     if (labels.length) await this.d.backlog.addLabels(n, labels);
     return n;
+  }
+
+  /** Where the draft intake checked for a report on its own GitHub issue `n` is kept (owner-only, as drafts are). */
+  protected intakeCheckedFile(n: number): string {
+    return join(this.d.stateDir, 'intake', 'checked', `${n}.json`);
   }
 
   protected async intakeLabelled(n: number, id: string): Promise<boolean> {

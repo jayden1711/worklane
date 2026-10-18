@@ -31,7 +31,7 @@ const KIND_LABEL: Record<string, string> = { bug: 'bug', feature: 'enhancement' 
 /** A bug the intake agent couldn't reproduce from the code (one of the engine's LABELS, so setup creates it). */
 export const NOT_REPRODUCED_LABEL = 'couldnt-reproduce' satisfies (typeof LABELS)[number]['name'];
 
-/** The done_when block the coordinator reads (parseContract's pattern: the body's first). */
+/** The done_when block the coordinator reads (parseContract's pattern; a checked draft has exactly one). */
 const DONE_WHEN_BLOCK = /```done_when\s*\n([\s\S]*?)\n```/;
 
 /**
@@ -72,7 +72,9 @@ export function fileableDraft(triage: Pick<Triage, 'kind' | 'draft' | 'reproduct
   const check = checkDraft(triage.draft);
   if (!check.ok) return check;
   const bug = triage.kind === 'bug';
-  const body = bug ? withRepro(triage.draft.body) : triage.draft.body;
+  // WHY (#643): filed with LF line endings, as every contract reader reads it, so the text rewritten is the text read.
+  const draft = triage.draft.body.replace(/\r\n/g, '\n');
+  const body = bug ? withRepro(draft) : draft;
   if (body === null) return { ok: false, why: "a bug's done_when must take `- repro: true`, and this one can't as written" };
   const kindLabel = KIND_LABEL[triage.kind];
   const notReproduced = bug && triage.reproduction?.result === 'not_reproduced';
@@ -99,7 +101,8 @@ export function excerpt(redacted: string, max = 280): string {
 }
 
 function reportSection(report: IncomingReport, redacted: string, triage: Triage): string {
-  const repro = triage.reproduction ? `\n\n**Reproduction:** ${triage.reproduction.result.replace(/_/g, ' ')}${triage.reproduction.commit ? ` (${triage.reproduction.commit})` : ''}. ${triage.reproduction.detail}` : '';
+  // INVARIANT (#643): the agent's detail goes on one line, so it can never add a second ```done_when block to a body.
+  const repro = triage.reproduction ? `\n\n**Reproduction:** ${triage.reproduction.result.replace(/_/g, ' ')}${triage.reproduction.commit ? ` (${triage.reproduction.commit})` : ''}. ${triage.reproduction.detail.replace(/\s+/g, ' ').trim()}` : '';
   return `**Reported via ${report.source}** at ${report.receivedAt}:\n\n> ${excerpt(redacted).replace(/\n/g, '\n> ')}${repro}`;
 }
 

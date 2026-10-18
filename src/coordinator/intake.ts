@@ -3,7 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { mayAnswer } from '../backlog/types.js';
+import { mayAnswer, type Issue } from '../backlog/types.js';
+import { INTAKE_LABEL } from '../intake/github.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { loadMoneyPaths } from '../review.js';
@@ -226,6 +227,28 @@ export abstract class Intake extends QuickReplies {
     } catch {
       return { ...t, reproduction: rest };
     }
+  }
+
+  /**
+   * #643: the body an issue is worked from: its contract and its brief. A report filed onto its own GitHub issue is
+   * worked from the draft intake checked (kept when it was filed: intakeLabelOnce), `- repro: true` and all, never from
+   * the issue's body or comments. An outsider's issue carrying the intake label with no such draft is not worked: its
+   * only contract would be the reporter's. Any other issue: its body, as before.
+   */
+  protected intakeWorkedBody(issue: Pick<Issue, 'number' | 'body' | 'labels' | 'author'>): { ok: true; body: string } | { ok: false; why: string } {
+    const file = this.intakeCheckedFile(issue.number);
+    if (existsSync(file)) {
+      let body: unknown;
+      try {
+        body = (JSON.parse(readFileSync(file, 'utf8')) as { body?: unknown }).body;
+      } catch {
+        body = undefined;
+      }
+      return typeof body === 'string' ? { ok: true, body } : { ok: false, why: 'the draft intake checked for it can no longer be read' };
+    }
+    const writer = this.d.cfg.project.owners.writers.some((w) => w.toLowerCase() === issue.author.toLowerCase());
+    if (issue.labels.includes(INTAKE_LABEL.name) && !writer) return { ok: false, why: `it came in through intake (${INTAKE_LABEL.name}) and intake hasn't checked a draft for it, so its only contract is the reporter's own` };
+    return { ok: true, body: issue.body };
   }
 
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
