@@ -81,21 +81,31 @@ interface Finding {
   what: string;
 }
 
-const calleeName = (e: ts.Expression): string | null => (ts.isIdentifier(e) ? e.text : ts.isPropertyAccessExpression(e) ? e.name.text : null);
+/** A callee's name: `f`, `x.f`, or `x['f']`. */
+function calleeName(e: ts.Expression): string | null {
+  if (ts.isIdentifier(e)) return e.text;
+  if (ts.isPropertyAccessExpression(e)) return e.name.text;
+  if (ts.isElementAccessExpression(e) && ts.isStringLiteralLike(e.argumentExpression)) return e.argumentExpression.text;
+  return null;
+}
+
+/** The object a member callee is read from (`x` in `x.f` or `x['f']`), when it is a plain name. */
+const calleeRoot = (e: ts.Expression): string | null => ((ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) && ts.isIdentifier(e.expression) ? e.expression.text : null);
 
 /** Calls that build a path from their arguments: a slot-dir name inside one is still this argument's. */
 const PATH_CALLS = new Set(['join', 'resolve', 'dirname', 'String']);
 
 /**
- * Whether an argument carries a slot-dir name: directly, or through a path built from one. A nested call of anything
- * else, and a function's body, are their own: each such call is checked where it is.
+ * Whether an argument carries a slot-dir name: directly, or through a path built from one (`pathCalls`: the path
+ * builders' names in this module, renamed imports included). A nested call of anything else, and a function's body,
+ * are their own: each such call is checked where it is.
  */
-function mentionsSlot(n: ts.Node): boolean {
+function mentionsSlot(n: ts.Node, pathCalls: ReadonlySet<string> = PATH_CALLS): boolean {
   let hit = false;
   const visit = (x: ts.Node) => {
     if (hit || ts.isFunctionLike(x)) return;
     if ((ts.isIdentifier(x) || ts.isPrivateIdentifier(x)) && SLOT_NAMES.has(x.text.replace(/^#/, ''))) hit = true;
-    else if ((ts.isCallExpression(x) || ts.isNewExpression(x)) && !PATH_CALLS.has(calleeName(x.expression) ?? '')) visit(x.expression);
+    else if ((ts.isCallExpression(x) || ts.isNewExpression(x)) && !pathCalls.has(calleeName(x.expression) ?? '')) visit(x.expression);
     else ts.forEachChild(x, visit);
   };
   visit(n);
@@ -155,9 +165,12 @@ function inPlace(call: ts.CallExpression, name: string): string | null {
     case 'createWriteStream':
       return exclusive(flagOf(a[1])) ? null : `createWriteStream(${a[0]?.getText()}) without an exclusive flag`;
     default:
-      return `${name}(${a[0]?.getText()}) writes in place`;
+      return `${name}(${a[baseTarget(name)]?.getText()}) writes in place`;
   }
 }
+
+/** Which argument an fs write call writes: the destination for a copy, else the first. */
+const baseTarget = (name: string) => (/^(copyFile|cp)(Sync)?$/.test(name) ? 1 : 0);
 
 /** The src/ module a relative import names, as a REVIEWED key. */
 function resolveImport(from: string, spec: string): string | null {
@@ -165,45 +178,149 @@ function resolveImport(from: string, spec: string): string | null {
   return relative(repoRoot, resolve(repoRoot, from, '..', spec)).split(sep).join('/').replace(/\.js$/, '.ts');
 }
 
+/** A parsed module and what its imports name. */
+interface Mod {
+  file: string;
+  src: ts.SourceFile;
+  /** A name imported from a src/ module: the module, and the name it exports. */
+  imported: Map<string, { mod: string; name: string }>;
+  /** A namespace import of a src/ module: the module. */
+  namespaces: Map<string, string>;
+  /** An fs function under its local name (`import { writeFileSync as put }`): its fs name. */
+  fsAlias: Map<string, string>;
+  /** The path builders' local names (`import { join as j }` included). */
+  pathCalls: Set<string>;
+}
+
+function parseMod(file: string, text: string): Mod {
+  const m: Mod = { file, src: ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS), imported: new Map(), namespaces: new Map(), fsAlias: new Map(), pathCalls: new Set(PATH_CALLS) };
+  for (const s of m.src.statements) {
+    if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.importClause) continue;
+    const spec = s.moduleSpecifier.text;
+    const b = s.importClause.namedBindings;
+    const named = b && ts.isNamedImports(b) ? b.elements.map((e) => ({ local: e.name.text, name: (e.propertyName ?? e.name).text })) : [];
+    if (/^(node:)?fs(\/promises)?$/.test(spec)) for (const e of named) m.fsAlias.set(e.local, e.name);
+    if (/^(node:)?path$/.test(spec)) for (const e of named) if (PATH_CALLS.has(e.name)) m.pathCalls.add(e.local);
+    const mod = resolveImport(file, spec);
+    if (!mod) continue;
+    if (b && ts.isNamespaceImport(b)) m.namespaces.set(b.name.text, mod);
+    for (const e of named) m.imported.set(e.local, { mod, name: e.name });
+    if (s.importClause.name) m.imported.set(s.importClause.name.text, { mod, name: 'default' });
+  }
+  return m;
+}
+
+/** In-place wrappers: module → function name → the parameter it writes in place. */
+type Wrappers = Map<string, Map<string, number>>;
+
+/** A write call: an fs write, or a wrapper's (`via`: the wrapper's module). `target`: the argument it writes. */
+interface Write {
+  name: string;
+  target: number;
+  via: string | null;
+}
+
+function writeOf(m: Mod, call: ts.CallExpression, wrappers: Wrappers): Write | null {
+  const e = call.expression;
+  const name = calleeName(e);
+  if (!name) return null;
+  const base = (n: string): Write | null => (WRITE_CALLS.has(n) ? { name: n, target: baseTarget(n), via: null } : null);
+  const wrapped = (mod: string, n: string): Write | null => {
+    const i = wrappers.get(mod)?.get(n);
+    return i === undefined ? null : { name: n, target: i, via: mod };
+  };
+  if (ts.isIdentifier(e)) {
+    const fsName = m.fsAlias.get(name);
+    if (fsName) return base(fsName);
+    const imp = m.imported.get(name);
+    if (imp) return wrapped(imp.mod, imp.name);
+    return wrapped(m.file, name) ?? base(name);
+  }
+  const root = calleeRoot(e);
+  const ns = root ? m.namespaces.get(root) : undefined;
+  return ns ? wrapped(ns, name) : base(name);
+}
+
+/** Why this write call writes in place, or null when it can't open an existing file for write. */
+function whyInPlace(call: ts.CallExpression, w: Write): string | null {
+  if (!w.via) return inPlace(call, w.name);
+  const target = call.arguments[w.target]?.getText() ?? '';
+  return placedFrom(enclosing(call), target) ? null : `${w.name}(${target}) writes its final name in place (through ${w.via}): write a temp file, then rename or link it into place`;
+}
+
+/** A named function: `function f() {}`, or `const f = () => {}` / `function () {}`. */
+function namedFunction(n: ts.Node): { name: string; fn: ts.SignatureDeclaration } | null {
+  if (ts.isFunctionDeclaration(n) && n.name && n.body) return { name: n.name.text, fn: n };
+  if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))) return { name: n.name.text, fn: n.initializer };
+  return null;
+}
+
+/**
+ * Every function in src/ that writes one of its own parameters in place (as writeGroupOnly and writeAgentReadable in
+ * src/os/index.ts do), found from the code rather than listed: a call of one is a write, like writeFileSync. A
+ * wrapper of a wrapper counts too (repeated until nothing new is found).
+ */
+function deriveWrappers(mods: Mod[]): Wrappers {
+  const wrappers: Wrappers = new Map();
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const m of mods) {
+      const visit = (n: ts.Node) => {
+        const f = namedFunction(n);
+        if (f && !wrappers.get(m.file)?.has(f.name)) {
+          const params = f.fn.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : null));
+          let written: number | null = null;
+          const scan = (x: ts.Node) => {
+            if (written !== null) return;
+            if (ts.isCallExpression(x)) {
+              const w = writeOf(m, x, wrappers);
+              const t = w ? x.arguments[w.target] : undefined;
+              if (w && t && ts.isIdentifier(t) && params.includes(t.text) && whyInPlace(x, w)) written = params.indexOf(t.text);
+            }
+            ts.forEachChild(x, scan);
+          };
+          ts.forEachChild(f.fn, scan);
+          if (written !== null) {
+            if (!wrappers.has(m.file)) wrappers.set(m.file, new Map());
+            wrappers.get(m.file)!.set(f.name, written);
+            changed = true;
+          }
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(m.src);
+    }
+  }
+  return wrappers;
+}
+
 /** The lint over a set of modules (path relative to the repo root, with / separators, to its text). */
 function lintSlotWrites(files: Map<string, string>): Finding[] {
   const out: Finding[] = [];
   for (const key of Object.keys(REVIEWED)) if (!files.has(key)) out.push({ file: key, line: 0, what: 'reviewed here but not in src/ any more: drop it from REVIEWED' });
-  for (const [file, text] of files) {
-    const src = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const mods = [...files].map(([file, text]) => parseMod(file, text));
+  const wrappers = deriveWrappers(mods);
+  for (const m of mods) {
+    const { file, src } = m;
     const review = REVIEWED[file];
     const at = (n: ts.Node, what: string) => out.push({ file, line: src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1, what });
-    const imported = new Map<string, string>();
-    /** fs functions imported under another name: `import { writeFileSync as put }` is still a write. */
-    const fsAlias = new Map<string, string>();
-    for (const s of src.statements) {
-      if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.importClause) continue;
-      const b0 = s.importClause.namedBindings;
-      if (/^(node:)?fs(\/promises)?$/.test(s.moduleSpecifier.text) && b0 && ts.isNamedImports(b0)) for (const e of b0.elements) fsAlias.set(e.name.text, (e.propertyName ?? e.name).text);
-      const mod = resolveImport(file, s.moduleSpecifier.text);
-      if (!mod) continue;
-      const b = s.importClause.namedBindings;
-      if (b && ts.isNamespaceImport(b)) imported.set(b.name.text, mod);
-      if (b && ts.isNamedImports(b)) for (const e of b.elements) imported.set(e.name.text, mod);
-      if (s.importClause.name) imported.set(s.importClause.name.text, mod);
-    }
     let slot = false;
     const visit = (n: ts.Node) => {
       if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && SLOT_NAMES.has(n.text.replace(/^#/, ''))) slot = true;
       if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
-        const called = calleeName(n.expression);
-        const name = called && ts.isIdentifier(n.expression) ? (fsAlias.get(called) ?? called) : called;
         const args = n.arguments ?? [];
-        const hands = args.some(mentionsSlot);
-        if (ts.isCallExpression(n) && name && WRITE_CALLS.has(name)) {
+        const hands = args.some((a) => mentionsSlot(a, m.pathCalls));
+        const w = ts.isCallExpression(n) ? writeOf(m, n, wrappers) : null;
+        if (w && ts.isCallExpression(n)) {
           if (review?.kind === 'writer') {
-            const why = inPlace(n, name);
+            const why = whyInPlace(n, w);
             if (why) at(n, why);
-          } else if (hands) at(n, `${name} on a path built from a slot-dir name: slot-dir files are written by a reviewed writer, through a temp file`);
+          } else if (hands) at(n, `${w.name} on a path built from a slot-dir name: slot-dir files are written by a reviewed writer, through a temp file`);
         }
         if (hands) {
-          const root = ts.isPropertyAccessExpression(n.expression) && ts.isIdentifier(n.expression.expression) ? n.expression.expression.text : called;
-          const mod = root ? imported.get(root) : undefined;
+          const called = calleeName(n.expression);
+          const root = calleeRoot(n.expression);
+          const mod = ts.isIdentifier(n.expression) && called ? m.imported.get(called)?.mod : root ? m.namespaces.get(root) : undefined;
           if (mod && !REVIEWED[mod]) at(n, `hands a slot-dir path to ${mod}, which is not reviewed: add it to REVIEWED after reading its writes`);
         }
       }
@@ -281,6 +398,38 @@ test('lint: a pass-through module that writes a slot-dir path itself, or hands o
   const found = show(lintSlotWrites(files));
   assert.match(found, /src\/cores\.ts:\d+: hands a slot-dir path to src\/fixture-gate\.ts, which is not reviewed/);
   assert.match(found, /src\/cores\.ts:\d+: writeFileSync on a path built from a slot-dir name/, 'a write imported under another name is still a write');
+});
+
+test("lint: a write through the repo's own in-place wrappers (writeGroupOnly, writeAgentReadable) is a write", () => {
+  const files = srcFiles();
+  files.set(
+    'src/fixture-group.ts',
+    ["import { join } from 'node:path';", "import { slotsDir, writeAgentReadable, writeGroupOnly } from './os/index.js';", "writeGroupOnly(join(slotsDir(), 'x.json'), '{}');", "writeAgentReadable(join(slotsDir(), 'y.json'), '{}', 0);", ''].join('\n'),
+  );
+  // In a reviewed writer: the wrapper on the final name is reported; on a temp file renamed into place it is not.
+  files.set('src/slots.ts', `${files.get('src/slots.ts')!}\nimport { writeGroupOnly as wg } from './os/index.js';\nexport function w(file: string, tmp: string) {\n  wg(file, 'x');\n  wg(tmp, 'x');\n  renameSync(tmp, file);\n}\n`);
+  const found = show(lintSlotWrites(files));
+  assert.match(found, /src\/fixture-group\.ts:3: writeGroupOnly on a path built from a slot-dir name/);
+  assert.match(found, /src\/fixture-group\.ts:4: writeAgentReadable on a path built from a slot-dir name/);
+  const inWriter = found.split('\n').filter((l) => l.startsWith('src/slots.ts:'));
+  assert.equal(inWriter.length, 1, inWriter.join('\n'));
+  assert.match(inWriter[0]!, /writeGroupOnly\(file\) writes its final name/);
+});
+
+test('lint: a wrapper of a wrapper, a local helper, a computed fs key and a renamed join are still writes', () => {
+  const files = srcFiles();
+  files.set('src/fixture-wrap.ts', ["import { writeGroupOnly } from './os/index.js';", 'export function save(path: string, data: string) {', '  writeGroupOnly(path, data);', '}', ''].join('\n'));
+  files.set(
+    'src/cores.ts',
+    `${files.get('src/cores.ts')!}\nimport * as fs from 'node:fs';\nimport { join as qjoin } from 'node:path';\nimport { save } from './fixture-wrap.js';\nconst put = (p: string) => fs.appendFileSync(p, 'x');\nexport const y = (slotsDir: string) => (save(qjoin(slotsDir, 'a'), ''), put(qjoin(slotsDir, 'b')), fs['writeFileSync'](qjoin(slotsDir, 'c'), ''));\n`,
+  );
+  const all = lintSlotWrites(files).filter((f) => f.file === 'src/cores.ts');
+  assert.match(show(all), /hands a slot-dir path to src\/fixture-wrap\.ts, which is not reviewed/);
+  const found = show(all.filter((f) => f.what.includes('on a path built'))).split('\n');
+  assert.equal(found.length, 3, found.join('\n'));
+  assert.match(found[0]!, /save on a path built from a slot-dir name/);
+  assert.match(found[1]!, /put on a path built from a slot-dir name/);
+  assert.match(found[2]!, /writeFileSync on a path built from a slot-dir name/);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
