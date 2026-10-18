@@ -1,7 +1,7 @@
 // The GitHub calls the main watch makes (src/main-watch.ts), one REST request each, with the instance's own token.
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
-import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt } from '../main-watch.js';
+import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt, WorkflowAt } from '../main-watch.js';
 
 type Fetch = typeof fetch;
 
@@ -68,6 +68,19 @@ export class GitHubMainWatchApi implements MainWatchApi {
     if (!res.ok) throw new Error(`GitHub ${res.status} reading @${login}'s permission`);
     const j = (await res.json()) as { permission?: unknown; role_name?: unknown };
     return roleFromPermission(j.role_name) ?? roleFromPermission(j.permission);
+  }
+
+  /**
+   * The repo's Actions workflows (one page of 100): each one's name, file and state. Null when the token may not read
+   * Actions (403) or GitHub has none to show (404): the caller then says nothing about them.
+   */
+  async workflows(): Promise<WorkflowAt[] | null> {
+    const res = await this.get(`/repos/${this.repo}/actions/workflows?per_page=100`);
+    if (res.status === 403 || res.status === 404) return null;
+    if (!res.ok) throw new Error(`GitHub ${res.status} reading the Actions workflows`);
+    const j = (await res.json()) as { workflows?: unknown };
+    if (!Array.isArray(j.workflows)) return null;
+    return (j.workflows as { name?: unknown; path?: unknown; state?: unknown }[]).flatMap((w) => (w && typeof w.name === 'string' && typeof w.path === 'string' && typeof w.state === 'string' ? [{ name: w.name, path: w.path, state: w.state }] : []));
   }
 
   /**
