@@ -330,7 +330,7 @@ archive_dirs() {
 #   stop_uids <name> <user>...
 STOP_PASSES=20
 stop_uids() {
-  local name="$1" u uid uids=() names=() unit owner pass left pid
+  local name="$1" u uid uids=() names=() unit owner pass left pid cmd
   shift
   for u in "$@"; do user_exists "$u" && { names+=("$u"); uids+=("$(id -u "$u")"); }; done
   [ "${#uids[@]}" -gt 0 ] || return 0
@@ -370,7 +370,15 @@ stop_uids() {
   for uid in "${uids[@]}"; do
     while read -r pid; do
       [ -n "$pid" ] || continue
-      printf '%s %s %s\n' "$pid" "$uid" "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-200)"
+      # A pid that exits between pgrep and this read (its /proc dir gone: a fork loop's short-lived child) is not
+      # left; one whose read fails while it is still there is named all the same, its command "?" (#614, as
+      # instance_in_flight, #592). stderr is redirected before the input, so a vanished file's open says nothing,
+      # and no pipe hides the read's status.
+      if ! cmd="$(tr '\0' ' ' 2>/dev/null < "$PROC_DIR/$pid/cmdline")"; then
+        [ -d "$PROC_DIR/$pid" ] || continue
+        cmd="?"
+      fi
+      printf '%s %s %s\n' "$pid" "$uid" "${cmd:0:200}"
       left=1
     done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
   done
@@ -444,7 +452,7 @@ left_owned() {
 # What an instance has in flight, one line each; nothing when it has none (instance-remove.sh and instance-rename.sh
 # refuse while it has any): its coordinator service not inactive, any process of its users (the registry's, in
 # instance-records.cjs) outside its dashboard, its MCP broker, its test Docker daemon and its own user manager, or a test
-# run's directory. PROC_DIR is the process table it reads (a test's stand-in).
+# run's directory. PROC_DIR is the process table it (and stop_uids's last listing) reads (a test's stand-in).
 PROC_DIR=/proc
 instance_in_flight() {
   local name="$1" st k u uids=() pid uid cg comm

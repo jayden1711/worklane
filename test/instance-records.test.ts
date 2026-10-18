@@ -592,6 +592,10 @@ function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: b
   const log = join(root, 'log');
   const n = join(root, 'n');
   writeFileSync(n, '0');
+  // The process table its last listing reads (PROC_DIR, #614): pid 4242 there, never the machine's own.
+  const proc = join(root, 'proc');
+  mkdirSync(join(proc, '4242'), { recursive: true });
+  writeFileSync(join(proc, '4242', 'cmdline'), 'busy\0--loop\0');
   const stubs = [
     `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
     `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
@@ -601,9 +605,56 @@ function stopRun(o: { busy: number; active?: string; passes?: number; noKill?: b
     `pkill() { echo "pkill $*" >> "${log}"; [ "$*" != "-KILL -U 1001" ] || echo $(($(cat "${n}") + 1)) > "${n}"; }`,
     `pgrep() { if [ "\${2:-}" = 1001 ] && [ "$(cat "${n}")" -lt ${o.busy} ]; then echo 4242; return 0; fi; return 1; }`,
   ].join('\n');
-  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; ${o.passes ? `STOP_PASSES=${o.passes};` : ''} stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh')], { encoding: 'utf8', env: { ...process.env, ...(o.noKill ? { INSTANCE_REMOVE_TEST_NO_KILL: '1' } : {}) } });
+  const r = spawnSync('bash', ['-c', `source "$1"; ${stubs}; PROC_DIR="$2"; ${o.passes ? `STOP_PASSES=${o.passes};` : ''} stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, ...(o.noKill ? { INSTANCE_REMOVE_TEST_NO_KILL: '1' } : {}) } });
   return { r, ran: existsSync(log) ? readFileSync(log, 'utf8') : '' };
 }
+
+/**
+ * stop_uids's last listing alone (INSTANCE_REMOVE_TEST_NO_KILL=1: nothing killed) over a stand-in process table
+ * (PROC_DIR), pgrep finding <live> and <gone> as uid 1001's. A live pid with a command has its cmdline; one with null
+ * has its /proc dir but no cmdline that can be read. Each <gone> pid exits, its /proc dir reaped, right after pgrep
+ * lists it: before the listing reads its command (a fork loop's short-lived child, #614).
+ */
+function listRun(o: { live?: Record<string, string | null>; gone?: string[] }) {
+  const root = mkdtempSync(join(tmpdir(), 'stop-list-'));
+  const proc = join(root, 'proc');
+  const live = o.live ?? {};
+  const gone = o.gone ?? [];
+  for (const [pid, cmd] of Object.entries(live)) {
+    mkdirSync(join(proc, pid), { recursive: true });
+    if (cmd !== null) writeFileSync(join(proc, pid, 'cmdline'), cmd);
+  }
+  for (const pid of gone) {
+    mkdirSync(join(proc, pid), { recursive: true });
+    writeFileSync(join(proc, pid, 'cmdline'), 'brief\0');
+  }
+  const pids = [...Object.keys(live), ...gone].join(' ');
+  const stubs = [
+    `user_exists() { case "$1" in wl-alpha|wl-alpha-agent) return 0 ;; esac; return 1; }`,
+    `id() { case "$2" in wl-alpha) echo 1001 ;; wl-alpha-agent) echo 1002 ;; esac; }`,
+    `usermod() { :; }; systemctl() { return 1; }`,
+    `pgrep() { [ "\${2:-}" = 1001 ] || return 1; printf '%s\\n' ${pids}; for p in ${gone.join(' ')}; do rm -rf -- "$PROC_DIR/$p"; done; }`,
+  ].join('\n');
+  return spawnSync('bash', ['-c', `source "$1"; ${stubs}; PROC_DIR="$2"; stop_uids alpha wl-alpha wl-alpha-agent`, '_', join(repoRoot, 'scripts', 'setup', 'lib.sh'), proc], { encoding: 'utf8', env: { ...process.env, INSTANCE_REMOVE_TEST_NO_KILL: '1' } });
+}
+
+test('issue #614: a process that exits between pgrep and the read of its command is not left: not listed, nothing on stderr, and alone it refuses nothing', { skip: !posix && 'bash' }, () => {
+  const r = listRun({ gone: ['4243'] });
+  assert.equal(r.stderr, '', 'no "No such file or directory" for its cmdline');
+  assert.equal(r.stdout, '');
+  assert.equal(r.status, 0, 'nothing left');
+  // With one still there: only that one is named, with its command from the process table.
+  const both = listRun({ live: { '4242': 'busy\0--loop\0' }, gone: ['4243'] });
+  assert.equal(both.stderr, '');
+  assert.equal(both.stdout, '4242 1001 busy --loop \n');
+  assert.equal(both.status, 1);
+});
+
+test('issue #614: a process still there whose command cannot be read is named all the same, and refuses the removal', { skip: !posix && 'bash' }, () => {
+  const r = listRun({ live: { '4245': null } });
+  assert.match(r.stdout, /^4245 1001\b/m, 'never skipped while its /proc dir is there');
+  assert.equal(r.status, 1);
+});
 
 test("before userdel: the accounts are locked, the users' engine units (User= checked) and slices stopped, then pkill by uid pass after pass until none is left", { skip: !posix && 'bash' }, () => {
   const { r, ran } = stopRun({ busy: 3 });
