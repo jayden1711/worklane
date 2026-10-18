@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { DEFAULT_FIX_ATTEMPTS, evalRoleRuns, evalRolesOptions, FIXER_SCHEMA, fixLoop, fixReport, recordingAsk, roleReport, runsPass, runsReport, scoreSpread, spreadDropped, type RoleRuns } from '../src/eval-roles.js';
+import { DEFAULT_FIX_ATTEMPTS, evalRoleRuns, evalRolesOptions, FIXER_SCHEMA, fixLoop, fixReport, recordingAsk, redactHeldOut, versionScores, roleReport, runsPass, runsReport, scoreSpread, spreadDropped, type RoleRuns } from '../src/eval-roles.js';
 import { CASE_WRITER_SCHEMA, caseWriterPrompt, contractOf, HELD_OUT_ENV, heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } from '../src/held-out.js';
 import { REPLIER_ROLE, REPLY_STAGES } from '../src/intake/replier.js';
 import { runHook } from '../src/hook.js';
@@ -374,6 +374,37 @@ test('fix loop (#332): no attempt beats the start: nothing is proposed; an uncha
   assert.deepEqual(reruns, ['write a note; act at once'], 'the unchanged prompt costs no rerun');
   assert.equal(loop.best, 0);
   assert.equal(fixReport(loop).at(-1), '  final: no attempt beat the start; nothing proposed');
+});
+
+test('fix loop (#332, review): held-out only vetoes; an attempt with the same visible score and a higher held-out one is not better, not the proposal, and not what the next fixer call revises', async () => {
+  // The head "plain" scores visible 2/4 and held-out 1/2; "plain; read the row" keeps visible at 2/4 and raises held-out to 2/2.
+  const { loop, fixerCalls } = await fixSetup({ maxAttempts: 2, start: 'plain', prompts: ['plain; read the row', 'plain; read the row; more'] });
+  assert.deepEqual([loop.attempts[0]!.scores!.visible, loop.attempts[0]!.scores!.heldOut], [[2, 2], [2, 2]]);
+  assert.deepEqual(versionScores(loop.start).heldOut, [1, 1]);
+  assert.equal(loop.attempts[0]!.verdict, 'not better', 'a held-out gain alone never promotes an attempt');
+  assert.equal(loop.best, 0, 'nothing proposed');
+  assert.equal(loop.attempts[1]!.from, 0);
+  assert.match(fixerCalls[1]!.prompt, /<instructions>\nplain\n<\/instructions>/, 'the next fixer call revises the start, not the attempt held-out preferred');
+  assert.equal(fixReport(loop).at(-1), '  final: no attempt beat the start; nothing proposed');
+});
+
+test('fix loop (#332, review): the loop strips held-out titles on the way in; its whole record holds held-out scores, ids and outcomes only', async () => {
+  const { loop } = await fixSetup({ maxAttempts: 3, prompts: ['write a note; cite; act at once', 'read the row; write a note', 'read the row; write a note; guess'] });
+  const record = JSON.stringify(loop);
+  for (const t of HELD_TEXT) assert.ok(!record.includes(t), `the loop's record holds held-out text: ${t}`);
+  assert.ok(loop.start.runs.every((c) => c.heldOut!.changes.every((x) => x.title === '' && x.id === '1')), 'ids and outcomes stay, titles go');
+  // The caller's own runs are left as they were (the head's report prints from them).
+  const runs = await evalRoleRuns({ target: 'role worker', runs: 1, capUsd: 100, samples: 1, compare: (capUsd) => compareInstructions({ target: 'role worker', baseText: null, headText: 'x', cases: FIX_VISIBLE, heldOut: HELD, model: 'sonnet', judge: 'opus', capUsd, ask: echoAsk(0) }) });
+  const stripped = redactHeldOut(runs);
+  assert.equal(runs.runs[0]!.heldOut!.changes[0]!.title, 'Read first');
+  assert.equal(stripped.runs[0]!.heldOut!.changes[0]!.title, '');
+  assert.deepEqual(versionScores(stripped), versionScores(runs), 'the scores are untouched');
+});
+
+test('fix loop (#332, review): the eval module loads no intake module (lineDiff lives in a leaf module with no imports)', () => {
+  const src = readFileSync(join(repoRoot, 'src', 'eval-roles.ts'), 'utf8');
+  assert.ok(!/from '\.\/intake\//.test(src), 'src/eval-roles.ts imports nothing from src/intake/');
+  assert.doesNotMatch(readFileSync(join(repoRoot, 'src', 'line-diff.ts'), 'utf8'), /^import /m);
 });
 
 test('fix loop (#332): no loop without held-out cases, nor when every case already passes; the fix cap stops it', async () => {

@@ -7,11 +7,13 @@
 // more than base's min-max spread. The cost cap covers all N runs of a role.
 // The fix loop (--fix, #332): when a role's head has a failing case, a fixer proposes a revised prompt from the
 // failing VISIBLE cases only, the proposal is rerun (visible and held-out, N runs), and this repeats up to the attempt
-// cap. An attempt whose held-out score drops is rejected whatever its visible score did. Every attempt is recorded
+// cap. An attempt whose held-out score drops is rejected whatever its visible score did; held-out never ranks
+// attempts. The fixer's prompt (fixerPrompt) has no held-out input at all, and the loop's record holds held-out
+// scores, ids and outcomes only (titles are blanked on the way in: redactHeldOut). Every attempt is recorded
 // (diff, scores, cost) and the report goes start → each attempt → final. The loop only proposes: it never edits
 // src/roles.ts or any other file; the owner applies the proposed diff by hand and reruns the eval.
 import { rmSync } from 'node:fs';
-import { lineDiff } from './intake/discord-setup.js';
+import { lineDiff } from './line-diff.js';
 import { CONTRACT_PARTS } from './role-contract.js';
 import { assertJudgeDiffers, comparisonDiff, comparisonLine, comparisonPasses, DEFAULT_SAMPLES, neutralDir, type Ask, type EvalCase, type EvalComparison, type ScoreComparison } from './skilleval.js';
 
@@ -200,6 +202,14 @@ export function allCasesPass(r: RoleRuns): boolean {
   return versionScores(r).complete && r.runs.every((c) => c.changes.every((x) => x.head === 'pass') && (c.heldOut?.changes ?? []).every((x) => x.head === 'pass'));
 }
 
+/**
+ * The runs with every held-out case's title blanked (ids, outcomes and scores kept): what the fix loop holds. A new
+ * object; the caller's runs are untouched. Held-out situations and rubrics are never in a RoleRuns to begin with.
+ */
+export function redactHeldOut(r: RoleRuns): RoleRuns {
+  return { ...r, runs: r.runs.map((c) => (c.heldOut ? { ...c, heldOut: { ...c.heldOut, changes: c.heldOut.changes.map((x) => ({ ...x, title: '' })) } } : c)) };
+}
+
 /** The visible cases that failed in at least one run: all the fixer is told. Held-out outcomes are never read here. */
 export function visibleFailures(r: RoleRuns, visible: EvalCase[]): EvalCase[] {
   const failing = new Set(r.runs.flatMap((c) => c.changes.filter((x) => x.head !== 'pass').map((x) => x.id)));
@@ -273,24 +283,31 @@ export interface FixLoop {
 }
 
 const meanOf = (xs: number[]) => (xs.length ? scoreSpread(xs).mean : -Infinity);
-/** A higher visible mean, or the same visible mean and a higher held-out one. */
-const beats = (a: VersionScores, b: VersionScores) => meanOf(a.visible) > meanOf(b.visible) || (meanOf(a.visible) === meanOf(b.visible) && meanOf(a.heldOut) > meanOf(b.heldOut));
+/**
+ * A higher visible mean; nothing else. Held-out never ranks attempts (a tie broken on it would pick the proposal, and
+ * the next fixer call's input, by held-out score): it only vetoes a drop and decides "every case passes".
+ */
+const beats = (a: VersionScores, b: VersionScores) => meanOf(a.visible) > meanOf(b.visible);
 
 /**
  * Fix → rerun, up to `maxAttempts` times, within `capUsd` for the fixer's calls and the reruns together. Each attempt
  * revises the best version so far from its failing visible cases. An attempt whose held-out mean dropped below the
  * start's or the version it revised (by more than that version's spread) is rejected, whatever its visible score did.
  * It stops when every case passes, at the attempt cap or at the cost cap, and returns every attempt and the best one.
- * It proposes only: it writes no file. The held-out cases never reach it; `rerun` holds them.
+ * It proposes only: it writes no file. The held-out cases themselves (situations, rubrics) never reach it: `rerun`
+ * holds them. Its runs carry held-out scores, ids and outcomes; their titles are blanked on the way in
+ * (redactHeldOut), so the loop's record holds no held-out text. Held-out decides only the veto and "every case
+ * passes"; which attempt is better, and so what the next fixer call revises, is the visible score's alone.
  */
 export async function fixLoop(o: { role: string; prompt: string; start: RoleRuns; visible: EvalCase[]; rerun: (prompt: string, capUsd: number) => Promise<RoleRuns>; fixer: Ask; fixerModel: string; maxAttempts: number; capUsd: number }): Promise<FixLoop> {
-  const out: FixLoop = { target: o.start.target, role: o.role, fixer: o.fixerModel, maxAttempts: o.maxAttempts, capUsd: o.capUsd, costUsd: 0, start: o.start, attempts: [], best: 0, stopped: 'attempt cap' };
-  const startScores = versionScores(o.start);
+  const start = redactHeldOut(o.start);
+  const out: FixLoop = { target: start.target, role: o.role, fixer: o.fixerModel, maxAttempts: o.maxAttempts, capUsd: o.capUsd, costUsd: 0, start, attempts: [], best: 0, stopped: 'attempt cap' };
+  const startScores = versionScores(start);
   // Without held-out cases nothing guards a fix against overfitting the visible ones: no loop.
-  if (!o.start.runs.length || o.start.runs.some((c) => c.heldOut === null)) return { ...out, stopped: 'no held-out cases' };
+  if (!start.runs.length || start.runs.some((c) => c.heldOut === null)) return { ...out, stopped: 'no held-out cases' };
   if (!startScores.complete) return { ...out, stopped: 'start incomplete' };
-  if (allCasesPass(o.start)) return { ...out, stopped: 'every case passes' };
-  const version = (n: number) => (n === 0 ? { prompt: o.prompt, runs: o.start, scores: startScores } : { prompt: out.attempts[n - 1]!.prompt, runs: out.attempts[n - 1]!.runs!, scores: out.attempts[n - 1]!.scores! });
+  if (allCasesPass(start)) return { ...out, stopped: 'every case passes' };
+  const version = (n: number) => (n === 0 ? { prompt: o.prompt, runs: start, scores: startScores } : { prompt: out.attempts[n - 1]!.prompt, runs: out.attempts[n - 1]!.runs!, scores: out.attempts[n - 1]!.scores! });
   for (let n = 1; n <= o.maxAttempts; n++) {
     const from = version(out.best);
     const failing = visibleFailures(from.runs, o.visible);
@@ -322,7 +339,7 @@ export async function fixLoop(o: { role: string; prompt: string; start: RoleRuns
       out.stopped = 'fix cost cap';
       break;
     }
-    a.runs = await o.rerun(prompt, o.capUsd - out.costUsd);
+    a.runs = redactHeldOut(await o.rerun(prompt, o.capUsd - out.costUsd));
     a.costUsd += a.runs.costUsd;
     out.costUsd += a.runs.costUsd;
     a.scores = versionScores(a.runs);

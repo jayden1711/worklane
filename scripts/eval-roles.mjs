@@ -16,7 +16,8 @@
 // --fix [n] (default 3 attempts): for a role whose head has a failing case, a fixer (--fixer, default opus) proposes
 // a revised prompt from the failing visible cases only (never a held-out case, score or outcome), the proposal is
 // rerun (visible and held-out, --runs runs) and this repeats up to n attempts or until every case passes. An attempt
-// whose held-out score drops is rejected. Each attempt's diff, scores and cost are printed, then the best attempt.
+// whose held-out score drops is rejected; held-out never ranks attempts (the best is the highest visible mean).
+// Each attempt's diff, scores and cost are printed, then the best attempt.
 // It only proposes: this script never edits src/roles.ts; apply the diff by hand and rerun. --fix-cap is dollars per
 // role for the loop (fixer calls and reruns), on top of --cap. The exit code is the head's verdict, as without --fix.
 // Needs a build first (npm run build).
@@ -38,7 +39,7 @@ if (!existsSync(join(root, 'dist', 'src', 'skilleval.js'))) {
   process.exit(2);
 }
 const { cliAsk, compareInstructions, parseCases } = await load('skilleval.js');
-const { evalRoleRuns, evalRolesOptions, fixLoop, fixReport, recordingAsk, roleReport, runsReport } = await load('eval-roles.js');
+const { evalRoleRuns, evalRolesOptions, fixLoop, fixReport, recordingAsk, redactHeldOut, roleReport, runsReport } = await load('eval-roles.js');
 const { heldOutDir, readHeldOut, writeHeldOut, writeHeldOutCases } = await load('held-out.js');
 const { stateDir } = await load('os/index.js');
 const { EventLog } = await load('events/log.js');
@@ -126,9 +127,13 @@ for (const role of roles) {
     total += runs.costUsd;
     r = runsReport(runs);
     if (o.fixAttempts) {
-      // The loop gets the visible cases only; the held-out ones stay inside `rerun`. Its proposal is printed, never written.
-      const rerun = (text, capUsd) => evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd, samples: o.samples, compare: compareOf(null, text) });
-      loop = await fixLoop({ role, prompt: after(role), start: runs, visible: cases, rerun, fixer: ask, fixerModel: o.fixer, maxAttempts: o.fixAttempts, capUsd: o.fixCap });
+      // The head's report first, so a fixer or rerun that throws doesn't take it with it.
+      for (const line of r.lines) console.log(line);
+      r = { ...r, lines: [] };
+      // The held-out cases stay inside `rerun`; the loop gets their scores, ids and outcomes with the titles blanked
+      // (redactHeldOut), and the fixer's prompt gets nothing of them. The proposal is printed, never written.
+      const rerun = async (text, capUsd) => redactHeldOut(await evalRoleRuns({ target: `role ${role}`, runs: o.runs, capUsd, samples: o.samples, compare: compareOf(null, text) }));
+      loop = await fixLoop({ role, prompt: after(role), start: redactHeldOut(runs), visible: cases, rerun, fixer: ask, fixerModel: o.fixer, maxAttempts: o.fixAttempts, capUsd: o.fixCap });
       total += loop.costUsd;
     }
   }
