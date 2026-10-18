@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -150,6 +150,54 @@ test("#633: a snapshot's views are of its own events, after the cache has read m
   assert.deepEqual(cache.fold('issues', () => [] as number[], () => assert.fail('nothing new to step')), [1, 2]);
   assert.equal(second.snapshot(), second, 'a snapshot handed on is itself, never a later read');
   log.close();
+});
+
+const askedPayload = (id: string) => ({ id, kind: 'question' as const, issue: null, owner: 'example-owner', question: `Which ${id}?`, options: ['a', 'b'], recommendation: 'a', receipts: [] });
+
+/** A cache that has folded a log of decisions d1 to d3; `change` then changes what is at the path, and the answer is read again. */
+function afterReset(change: (db: string, ask: (log: EventLog, id: string) => void) => void): (string | undefined)[] {
+  const dir = mkdtempSync(join(tmpdir(), 'waiting-reset-'));
+  const db = join(dir, 'events.db');
+  const updates: UpdateEntry[] = [];
+  const ask = (log: EventLog, id: string) => void log.append('decision.asked', askedPayload(id), 'coordinator');
+  const log = new EventLog(db);
+  for (const id of ['d1', 'd2', 'd3']) ask(log, id);
+  log.close();
+  const cache = new EventCache(db);
+  const decisions = () => {
+    const now = new Date(Date.now() + 60_000);
+    const got = asJson(waitingCached(cache, now, { updates }));
+    assert.deepEqual(got, asJson(waitingOnYou(cache.all(), now, { updates })), 'the cached answer is the whole-log one');
+    return got.items.map((i) => i.decision);
+  };
+  assert.deepEqual(decisions(), ['d1', 'd2', 'd3']);
+  change(db, ask);
+  return decisions();
+}
+
+test('#633: a reset of the event cache drops the fold: a log restored over the path is answered from its own events', () => {
+  const got = afterReset((db, ask) => {
+    // Another log, with fewer events, moved over the path.
+    const restored = join(dirname(db), 'restored.db');
+    const other = new EventLog(restored);
+    ask(other, 'x9');
+    other.close();
+    renameSync(restored, db);
+  });
+  assert.deepEqual(got, ['x9'], "the restored file's decisions, not the fold of the file it replaced");
+});
+
+test('#633: a reset of the event cache drops the fold: events a migration rewrote (a new user_version) are answered as rewritten', () => {
+  const got = afterReset((db) => {
+    // The same file and the same number of events, rewritten, under a new user_version.
+    const raw = new DatabaseSync(db);
+    raw.exec('DROP TRIGGER events_no_update');
+    raw.exec("UPDATE events SET payload = json_set(payload, '$.id', 'm' || substr(json_extract(payload, '$.id'), 2)) WHERE type = 'decision.asked'");
+    const version = Number((raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version);
+    raw.exec(`PRAGMA user_version = ${version + 1}`);
+    raw.close();
+  });
+  assert.deepEqual(got, ['m1', 'm2', 'm3'], "the migrated events' decisions, not the fold of the events before the migration");
 });
 
 // --- The incremental answer against the whole-log one, over random logs ---------------------------------------------
