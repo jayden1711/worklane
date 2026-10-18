@@ -34,8 +34,10 @@ case "${EVENT:-}" in
     fi
     ;;
   pull_request)
-    # --no-renames: a file moved out of a slow job's paths still names them (#683).
-    files="$(git diff --name-only --no-renames "$(git merge-base "$PR_BASE" "$PR_HEAD")" "$PR_HEAD")"
+    # --no-renames: a file moved out of a slow job's paths still names them. -z: each path as itself, never C-quoted
+    # ("scripts/setup/na\303\257ve.sh" matched no pattern below). The NULs become newlines for grep: a newline inside a
+    # name only adds a line, which can add a job, never drop one (#683).
+    files="$(git diff --name-only --no-renames -z "$(git merge-base "$PR_BASE" "$PR_HEAD")" "$PR_HEAD" | tr '\0' '\n')"
     if [ "${FULL:-false}" = true ] || grep -qE '^\.github/workflows/' <<< "$files"; then
       run="$ALL"
     else

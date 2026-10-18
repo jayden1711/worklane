@@ -901,8 +901,9 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
   } catch {
     return { ok: false, reason: `${tag} wasn't cut from main: ${parents[0].slice(0, 12)} isn't on main` };
   }
-  // --no-renames: a file moved into dist/ still names the path it left (#683).
-  const outside = g('diff', '--name-only', '--no-renames', parents[0], commit).split('\n').filter((f) => f && !f.startsWith('dist/'));
+  // --no-renames: a file moved into dist/ still names the path it left. -z, untrimmed: each path as itself, never
+  // C-quoted, and ` dist/x` is not `dist/x` (#683).
+  const outside = exec('git', ['--git-dir', gitDir, 'diff', '--name-only', '--no-renames', '-z', parents[0], commit]).split('\0').filter((f) => f && !f.startsWith('dist/'));
   if (outside.length) return { ok: false, reason: `${tag}'s release commit changes more than dist/: ${outside.slice(0, 5).join(', ')}` };
   return { ok: true, base: parents[0] };
 }

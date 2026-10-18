@@ -40,6 +40,7 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { TaskGraph } from './coordinator/task-graph.js';
 import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, readGoalSplit, splitComment } from './goal-split.js';
 import { changedFiles } from './merge-base.js';
+import { changedNames, diffStatText, rawChanges } from './coordinator/change-files.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
@@ -98,9 +99,6 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
-
-/** git's output as is (a -z listing keeps its NULs). */
-const execGit = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
@@ -1169,7 +1167,7 @@ export class Coordinator extends AutomationRuns {
     const earlier = sinceReset(this.events(n)).filter((e) => e.type === 'attempt.failed').map((e) => (e.payload as { fingerprint: string }).fingerprint).slice(0, -1);
     let changed = '';
     try {
-      changed = this.git(path, 'diff', '--stat', start).slice(0, 3000);
+      changed = diffStatText(path, start).slice(0, 3000);
     } catch {
       // no diff to show: the brief says so
     }
@@ -1285,7 +1283,7 @@ export class Coordinator extends AutomationRuns {
       };
       if (r.reason !== 'succeeded' || !s) return unavailable(`evaluator run ${r.reason}`);
       if (s.not_reproducible || !s.test_path) return unavailable(s.not_reproducible ?? 'no test path');
-      const changed = this.git(path, 'diff', '--name-only', '--no-renames', base).split('\n').filter(Boolean).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
+      const changed = changedNames(path, [base]).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
       if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${changed.join(', ')}`);
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
@@ -1514,8 +1512,9 @@ export class Coordinator extends AutomationRuns {
     const id = this.identity;
     const strangers = this.git(path, 'log', '--format=%h %an <%ae> / %cn <%ce>', `${base}..${head}`).split('\n').filter(Boolean).filter((l) => !l.endsWith(` ${id.name} <${id.email}> / ${id.name} <${id.email}>`));
     if (strangers.length) return { rejected: `commits must carry the harness identity ${id.name} <${id.email}>, which your environment already sets; never set GIT_AUTHOR_*/GIT_COMMITTER_*, user.name/user.email or --author. Recommit these without an identity of your own: ${strangers.slice(0, 5).join('; ')}` };
-    // A rename as both its paths, so moving a protected file away is still a change to it (#683).
-    const names = this.git(path, 'diff', '--name-only', '--no-renames', `${base}..${head}`).split('\n').filter(Boolean);
+    // A rename as both its paths, so moving a protected file away is still a change to it; each path as itself, so
+    // `.claude/agents/naïve.md` is protected and not the quoted string git would print without -z (#683).
+    const names = changedNames(path, [`${base}..${head}`]);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
     const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
@@ -1815,10 +1814,11 @@ export class Coordinator extends AutomationRuns {
     const mb = this.gitOrNull(this.d.repo, 'merge-base', pr.headSha, mainSha);
     if (!mb) return { hold: `can't find where this PR branched from ${baseRef}, so the combination can't be checked` };
     const mainChanged = mb === mainSha ? [] : changedFiles(this.d.repo, mb, mainSha);
-    const prFiles = this.git(this.d.repo, 'diff', '--name-only', '--no-renames', mb, pr.headSha).split('\n').filter(Boolean);
+    const prFiles = changedNames(this.d.repo, [mb, pr.headSha]);
     const imports: Record<string, string[]> = {};
     if (mainChanged.length) {
-      const tree = new Set(this.git(this.d.repo, 'ls-tree', '-r', '--name-only', pr.headSha).split('\n').filter(Boolean));
+      // -z, as prFiles: each path as itself, so an import of a file with an odd byte in its name still resolves.
+      const tree = new Set(execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', pr.headSha], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).split('\0').filter(Boolean));
       for (const f of prFiles) {
         if (!/\.((m|c)?(j|t)sx?|py)$/.test(f)) continue;
         const r = spawnSync('git', ['show', `${pr.headSha}:${f}`], { cwd: this.d.repo, encoding: 'utf8' });
@@ -1956,7 +1956,7 @@ export class Coordinator extends AutomationRuns {
         this.git(path, 'add', '-A');
         const tree = this.git(path, 'write-tree');
         const commit = this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit-tree', tree, '-p', parent, '-m', message);
-        return { commit, raw: execGit(path, ['diff', '--raw', '-z', '--no-renames', parent, commit]) };
+        return { commit, raw: rawChanges(path, [parent, commit]) };
       },
       bundle: (ref, commit) => {
         this.git(this.d.repo, 'update-ref', ref, commit);

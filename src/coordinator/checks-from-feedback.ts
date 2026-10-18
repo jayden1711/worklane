@@ -13,6 +13,7 @@ import { FEEDBACK_CHECK_BRANCH_PREFIX } from '../merge-policy.js';
 import { checkedPush } from '../push-check.js';
 import { rolePrompt } from '../roles.js';
 import { removeSandboxPlaceholders } from '../worktrees.js';
+import { changedStatuses } from './change-files.js';
 import { Optimizer } from './optimize.js';
 
 /** The drafting run reads the repo and writes only files (no shell beyond git's read commands and ast-grep). */
@@ -91,13 +92,7 @@ export abstract class ChecksFromFeedback extends Optimizer {
       if (a.act === 'invalid') return drop(a.why, true);
       removeSandboxPlaceholders(dir);
       this.git(dir, 'add', '-A', '--', '.');
-      const files = this.git(dir, 'diff', '--cached', '--name-status', '--no-renames')
-        .split('\n')
-        .filter(Boolean)
-        .map((l) => {
-          const [status, path] = l.split('\t') as [string, string];
-          return { status, path, content: status.startsWith('D') ? '' : readFileSync(join(dir, path), 'utf8') };
-        });
+      const files = changedStatuses(dir, ['--cached']).map(({ status, path }) => ({ status, path, content: status.startsWith('D') ? '' : readFileSync(join(dir, path), 'utf8') }));
       const ok = checkDraft(mode, files);
       if (!ok.ok) return drop(`the draft was refused: ${ok.why}`, true);
       const draft = files.map((f) => `\`${f.path}\`:\n\n\`\`\`\n${f.content.slice(0, 4000)}\n\`\`\``).join('\n\n');

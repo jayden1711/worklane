@@ -17,6 +17,7 @@ import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
+import { changedNamesOrNull } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
@@ -88,8 +89,8 @@ export abstract class MergeFlow extends FixRuns {
         isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
         firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
-        // A rename as both its paths, so a locked category on either one holds (#683).
-        files: (sha) => (git('diff', '--name-only', '--no-renames', `${sha}^1`, sha) ?? '').split('\n').filter(Boolean),
+        // A rename as both its paths and each path as itself, so a locked category on either one holds (#683).
+        files: (sha) => changedNamesOrNull(this.d.repo, [`${sha}^1`, sha]) ?? [],
         diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },
       config: () => this.d.cfg.project.fix_forward,

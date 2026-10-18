@@ -20,6 +20,7 @@ import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
+import { changedNames } from './coordinator/change-files.js';
 import { findProjectRoot, readStdin, runHook, type HookInput } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
@@ -260,8 +261,8 @@ function option(args: string[], name: string): string | undefined {
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
   const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-  // --no-renames: a renamed test file is an added one, and is checked (with renames on it was R, and skipped; #683).
-  const files = execFileSync('git', ['diff', '--name-only', '--no-renames', '--diff-filter=AM', base], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); each path as itself (#683).
+  const files = changedNames(root, ['--diff-filter=AM', base]);
   const res = globs.map((g) => globToRegExp(g));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }

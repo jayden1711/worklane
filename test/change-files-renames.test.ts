@@ -1,26 +1,36 @@
 // A renamed file is judged on its old and its new path (#683). With git's rename detection on, `git diff --numstat`
 // prints one combined path for a rename with an edit (`test/{review.test.ts => review2.test.ts}`), which matches no
 // glob: renaming a locked file and weakening it in the same change came out L0, and the content checks saw nothing.
+// The same class: a path git C-quotes (a non-ASCII byte, a tab, a quote, a backslash) or one with a newline in it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { parse } from 'yaml';
+import { BRAND } from '../src/brand.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { Coordinator } from '../src/coordinator.js';
-import { changedFiles } from '../src/merge-base.js';
+import * as changeFilesModule from '../src/coordinator/change-files.js';
+import { isProtectedPath } from '../src/guardrails/engine.js';
+import { globToRegExp } from '../src/guardrails/glob.js';
+// A namespace import, so the file still loads against a merge-base.ts without the stray check's helpers (fail-without).
+import * as mergeBase from '../src/merge-base.js';
 import { sizeFiles, sizeVerdict } from '../src/pr-rules.js';
 import { computeLevel, type ChangeFile } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const IDENTITY = { name: 'Ada', email: 'ada@example.com' };
 
 /** A scratch repo with `files` committed; returns it and its first commit. */
 function repo(files: Record<string, string>): { dir: string; base: string } {
   const dir = mkdtempSync(join(tmpdir(), 'rename-paths-'));
   git(dir, 'init', '-q', '-b', 'main');
-  for (const [k, v] of [['user.email', 'ada@example.com'], ['user.name', 'Ada'], ['commit.gpgsign', 'false']]) git(dir, 'config', k!, v!);
+  for (const [k, v] of [['user.email', IDENTITY.email], ['user.name', IDENTITY.name], ['commit.gpgsign', 'false']]) git(dir, 'config', k!, v!);
   write(dir, files);
   return { dir, base: commit(dir, 'init') };
 }
@@ -50,6 +60,14 @@ function renameWithEdit(dir: string, from: string, to: string, edit: (text: stri
 const changeFiles = (dir: string, base: string, head: string): ChangeFile[] =>
   (Coordinator.prototype as unknown as { changeFiles(cwd: string, base: string, head: string): ChangeFile[] }).changeFiles.call(Object.create(Coordinator.prototype), dir, base, head);
 
+/** The coordinator's inspect step (its protected-path guard comes before anything that needs a scanner or config). */
+async function inspect(dir: string, base: string, head: string): Promise<{ rejected?: string }> {
+  const c = Object.create(Coordinator.prototype) as object;
+  Object.defineProperty(c, 'identity', { value: IDENTITY });
+  Object.defineProperty(c, 'd', { value: { cfg: { guardrails: { protected_paths: [] } } } });
+  return (c as { inspect(n: number, path: string, base: string, head: string, repro: null): Promise<{ rejected?: string }> }).inspect(1, dir, base, head, null);
+}
+
 const LEVELS = {
   L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 },
   L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 },
@@ -65,8 +83,9 @@ const testFile = (n: number) => `import assert from 'node:assert/strict';\n${Arr
 test('a rename with an edit of a locked test file lists both paths and comes out L3 / self-modification', () => {
   const { dir, base } = repo({ 'test/review.test.ts': testFile(20), 'README.md': '# x\n' });
   const head = renameWithEdit(dir, 'test/review.test.ts', 'test/review2.test.ts', (t) => t.replace(/test\('case 3'.*\n/, ''));
-  // Git itself still pairs them (rename detection is on by default): the combined form is what the old reader got.
-  assert.match(git(dir, 'diff', '--numstat', `${base}..${head}`), /test\/\{review\.test\.ts => review2\.test\.ts\}/);
+  // Git itself pairs them when rename detection is on (pinned: a developer's own diff.renames=false would turn it
+  // off): the combined form is what the old reader got.
+  assert.match(git(dir, '-c', 'diff.renames=true', 'diff', '--numstat', `${base}..${head}`), /test\/\{review\.test\.ts => review2\.test\.ts\}/);
   const files = changeFiles(dir, base, head);
   assert.deepEqual(files.map((f) => f.path).sort(), ['test/review.test.ts', 'test/review2.test.ts']);
   const lvl = level(files);
@@ -128,7 +147,7 @@ test('a repo set to detect copies (diff.renames=copies) still gets plain paths',
 test('combined-state check: a rename on main names the path the PR may still touch (merge-base changedFiles)', () => {
   const { dir, base } = repo({ 'src/price.ts': testFile(20) });
   const head = renameWithEdit(dir, 'src/price.ts', 'src/cost.ts', (t) => t.replace('case 3', 'case three'));
-  assert.deepEqual(changedFiles(dir, base, head).sort(), ['src/cost.ts', 'src/price.ts']);
+  assert.deepEqual(mergeBase.changedFiles(dir, base, head).sort(), ['src/cost.ts', 'src/price.ts']);
 });
 
 test('size limit: an edit moved into a generated path still counts; a pure rename still counts 0', () => {
@@ -144,13 +163,180 @@ test('size limit: an edit moved into a generated path still counts; a pure renam
   assert.deepEqual([rename.ok, rename.lines], [true, 0], rename.why);
 });
 
-// Every other reader of changed paths that a level, merge, test-selection or guard decision rests on lists a rename
-// as both its paths (--no-renames). One that only counts lines, or wants renames paired on purpose, says so here.
-const PAIRED_ON_PURPOSE: Record<string, { line: RegExp; why: string }> = {
-  'src/push-check.ts': { line: /'diff', '--numstat', range/, why: 'only sums the line counts (a rename counts its edit); no path is read' },
+// ---- Odd bytes: every reader takes each path as itself (-z, through one helper)
+
+test('the inspect guard refuses a protected path with an odd byte in its name, read as itself (.claude/agents/naïve.md)', async () => {
+  const odd = ['.claude/agents/naïve.md', '.claude/agents/tab\there.md', '.claude/agents/say "hi".md', '.claude/agents/back\\slash.md'];
+  for (const p of odd) {
+    const { dir, base } = repo({ 'README.md': '# x\n' });
+    write(dir, { [p]: 'Be careful.\n' });
+    const head = commit(dir, `add ${p}`);
+    assert.deepEqual(await inspect(dir, base, head), { rejected: `changes protected harness files: ${p}` }, p);
+  }
+});
+
+test('conflict fix: a resolver\'s edit to lib/naïve.ts, which the merge brought in cleanly, is a stray', () => {
+  const big = (tag: string) => Array.from({ length: 30 }, (_, i) => `line ${i} ${tag}`).join('\n') + '\n';
+  const { dir } = repo({ 'x.ts': 'one\ntwo\nthree\n', 'lib/naïve.ts': big('n') });
+  git(dir, 'checkout', '-q', '-b', 'pr');
+  write(dir, { 'x.ts': 'one\nTWO-pr\nthree\n' });
+  commit(dir, 'pr');
+  git(dir, 'checkout', '-q', 'main');
+  write(dir, { 'x.ts': 'one\nTWO-main\nthree\n', 'lib/naïve.ts': `${big('n')}base\n` });
+  const baseSha = commit(dir, 'base');
+  git(dir, 'checkout', '-q', 'pr');
+  const merged = mergeBase.mergeBaseInto(dir, baseSha, 'Merge main into pr', IDENTITY);
+  assert.ok('conflicted' in merged, JSON.stringify(merged));
+  assert.deepEqual([Object.keys(merged.conflicted), merged.otherFiles], [['x.ts'], ['lib/naïve.ts']]);
+  const staged = mergeBase.stagedBlobs(dir, merged.otherFiles);
+  write(dir, { 'x.ts': 'one\nTWO-pr TWO-main\nthree\n', 'lib/naïve.ts': `${big('n')}base\nevil\n` });
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '--no-edit');
+  assert.deepEqual(mergeBase.resolutionStrays(dir, ['x.ts'], merged.otherFiles, staged), ['lib/naïve.ts']);
+});
+
+test('scripts: slow-jobs.sh reads a PR\'s paths with -z, so scripts/setup/naïve.sh still runs the machine jobs', { skip: process.platform === 'win32' && 'bash' }, () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { 'scripts/setup/naïve.sh': 'echo hi\n' });
+  const head = commit(dir, 'add a setup script');
+  const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', EVENT: 'pull_request', FULL: 'false', PR_BASE: base, PR_HEAD: head } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^run= testrun-real-systemd add-project-real-systemd auth-probe-real-users wizard-e2e-real-systemd $/m);
+});
+
+test('scripts: the updater\'s release check reads the release commit with -z, so dist/naïve.js is inside dist/', () => {
+  const update = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', `${BRAND.cli}-update.cjs`)) as {
+    verifyRelease(repoUrl: string, tag: string, signers: string, exec: (f: string, a: string[]) => string, gitDir?: string): { ok: boolean; reason?: string };
+  };
+  const { dir } = repo({ 'package.json': '{"version":"1.0.0"}\n' });
+  write(dir, { 'dist/naïve.js': '// built\n', 'dist/src/cli.js': '// built\n' });
+  commit(dir, 'Release v1.0.1');
+  git(dir, 'tag', '-a', 'v1.0.1', '-m', 'v1.0.1');
+  git(dir, 'checkout', '-q', '--detach');
+  git(dir, 'branch', '-f', 'main', 'HEAD~1');
+  // The signature check is the release channel's own test's (release-channel.test.ts); here only the paths matter.
+  const exec = (file: string, args: string[]) => (args.includes('verify-tag') ? '' : execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
+  const v = update.verifyRelease(dir, 'v1.0.1', join(dir, 'package.json'), exec, join(mkdtempSync(join(tmpdir(), 'verify-')), 'v.git'));
+  assert.deepEqual(v, { ok: true, base: git(dir, 'rev-parse', 'v1.0.1~1') });
+});
+
+test('changedNames: each path as itself (non-ASCII, tab, quote, backslash, newline, leading space), a rename as both', () => {
+  const { dir, base } = repo({ 'src/old.ts': testFile(20) });
+  const odd = ['src/naïve.ts', 'src/tab\there.ts', 'src/say "hi".ts', 'src/back\\slash.ts', 'src/new\nline.ts', ' lead.ts'];
+  write(dir, Object.fromEntries(odd.map((p) => [p, `export const p = ${JSON.stringify(p)};\n`])));
+  const head = renameWithEdit(dir, 'src/old.ts', 'src/renamed.ts', (t) => t.replace('case 3', 'case three'));
+  const want = [...odd, 'src/old.ts', 'src/renamed.ts'].sort();
+  assert.deepEqual(changeFilesModule.changedNames(dir, [`${base}..${head}`]).sort(), want);
+  assert.deepEqual(changeFilesModule.changedNames(dir, ['-r', '-m', '--first-parent', '--no-commit-id', head], { tree: true }).sort(), want);
+  assert.deepEqual(changeFilesModule.changedStatuses(dir, [`${base}..${head}`]).map((s) => `${s.status} ${s.path}`).sort(), want.map((p) => `${p === 'src/old.ts' ? 'D' : 'A'} ${p}`).sort());
+  assert.equal(changeFilesModule.changedNamesOrNull(dir, ['no-such-commit']), null);
+});
+
+test('changedNames refuses an option that would turn renames back on, change the format or write a file', () => {
+  const { dir, base } = repo({ 'a.ts': 'a\n' });
+  for (const opt of ['--find-renames', '-M', '-M50%', '--find-copies', '-C', '--stat', '--output=x', '--relative', '--name-status', '--no-renames'])
+    assert.throws(() => changeFilesModule.changedNames(dir, [opt, base]), /is not an option a name list takes/, opt);
+});
+
+test('the helper module exports functions only: no flag list another file could build a reader from', () => {
+  for (const [name, v] of Object.entries(changeFilesModule)) assert.equal(typeof v, 'function', name);
+});
+
+// ---- A newline can't take a path out of a `**` glob
+
+/** The evaluator's paths: a newline in a directory or file name under a guarded tree. */
+const NEWLINE_PATHS = ['.claude/skills/a\nb/SKILL.md', 'src/guardrails/a\nb.ts', '.github/workflows/a\nb.yml', `${BRAND.configDir}/roles/a\nb.md`];
+
+test('a path with a newline stays under its `**` glob: protected, and L3 under the engine\'s own review.yaml', () => {
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  assert.ok(globToRegExp('.claude/**').test('.claude/skills/a\nb/SKILL.md'));
+  assert.ok(globToRegExp('src/**/*.ts').test('src/a\nb/c.ts'));
+  assert.ok(!globToRegExp('src/*.ts').test('src/a/b.ts'), 'a single * still stops at a slash');
+  // The built-in protected paths, and a project's own list on top.
+  const guard = { protected_paths: ['src/guardrails/**', '.github/workflows/**'] };
+  for (const p of NEWLINE_PATHS) {
+    const lvl = computeLevel({ files: [{ path: p, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, engine);
+    assert.equal(lvl.level, 'L3', `${JSON.stringify(p)}: ${lvl.reasons.join('; ')}`);
+    // Protected exactly when the same path without the newline is (the agents' own roles are theirs to edit).
+    assert.equal(isProtectedPath(p, guard), isProtectedPath(p.replace('\n', ''), guard), JSON.stringify(p));
+  }
+  assert.deepEqual(NEWLINE_PATHS.map((p) => isProtectedPath(p, guard)), [true, true, true, false]);
+});
+
+test('a newline path committed to a repo comes out of changeFiles as itself and is L3 / protected', async () => {
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { '.claude/skills/a\nb/SKILL.md': '# skill\n' });
+  const head = commit(dir, 'add a skill');
+  const files = changeFiles(dir, base, head);
+  assert.deepEqual(files.map((f) => f.path), ['.claude/skills/a\nb/SKILL.md']);
+  assert.equal(computeLevel({ files, labels: [], moneyPaths: [] }, engine).level, 'L3');
+  assert.deepEqual(await inspect(dir, base, head), { rejected: 'changes protected harness files: .claude/skills/a\nb/SKILL.md' });
+});
+
+// ---- One way to list changed names or counts
+
+/** The helper: the only module that asks git which paths a change touches or how many lines it changes. */
+const HELPER = 'src/coordinator/change-files.ts';
+
+/**
+ * What lists changed paths or counts lines from git, or reads paths from a patch, however the call is written (split
+ * over lines, flags in a constant, a comment beside it): each is searched for in the whole file text.
+ */
+const READER_WORDS: Record<string, RegExp> = {
+  'name-only': /name-only/g,
+  'name-status': /name-status/g,
+  numstat: /numstat/g,
+  stat: /--stat\b|shortstat|dirstat|--(?:compact-)?summary\b/g,
+  raw: /--raw\b/g,
+  whatchanged: /whatchanged/g,
+  porcelain: /porcelain/g,
+  'rename detection': /find-renames|find-copies|--follow\b|diff\.renames|['"`]-M\d*%?['"`]/g,
+  'patch headers': /\+\+\+|diff --git|rename (?:from|to) /g,
 };
 
-test('no reader of changed paths in src/ or scripts/ leaves rename detection on, unless it says why', () => {
+/**
+ * Files outside the helper that hold one of those words, each with how many times (exactly: one more is a new reader)
+ * and why. src/: none of them lists the paths a change touches for a decision. scripts/: their own -z parsing.
+ */
+const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: string; must?: RegExp[] }> = {
+  // src/: not a list of what a change touches.
+  'src/checkout-sync.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the checkout clean (empty or not); no path is read' },
+  'src/coordinator/landing.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the worktree clean; no path is read' },
+  'src/worktree-pool.ts': { words: { porcelain: 2 }, why: '`status --porcelain`: is a pooled worktree clean; no path is read' },
+  'src/coordinator.ts': { words: { 'name-only': 1, porcelain: 2 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change (combined-state imports); `status --porcelain` twice: is the worktree clean' },
+  'src/config/load.ts': { words: { 'name-only': 1 }, why: '`ls-tree --name-only`: the role files of a tree, not a change' },
+  'src/harness-evals/replay.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change' },
+  'src/starter-ci.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r --name-only`: the files of a tree, not a change' },
+  'src/testrun/select.ts': { words: { 'name-only': 1 }, why: '`ls-tree -r -z --name-only`: the files of a tree, not a change' },
+  'src/claims.ts': { words: { porcelain: 1 }, why: '`push --porcelain`: the push result, no diff' },
+  'src/worktrees.ts': { words: { porcelain: 1 }, why: '`worktree list --porcelain`: the worktrees, no diff' },
+  'src/coordinator/loop-control.ts': { words: { stat: 1 }, why: 'prompt text naming `git diff --stat`; the text comes from diffStatText' },
+  'src/experiments/proposal.ts': { words: { raw: 2 }, why: 'parseRawDiff, in comments: it parses what rawChanges returns' },
+  'src/run-record.ts': { words: { 'name-only': 1, 'name-status': 1, numstat: 1, stat: 2 }, why: "a regex that recognises these flags in an agent's own commands; runs no git" },
+  'src/instance-rename.ts': { words: { 'patch headers': 1 }, why: 'a commit message ("rename from <name>"), no diff' },
+  'src/line-diff.ts': { words: { 'patch headers': 1 }, why: 'writes a diff header for display; reads none' },
+  'src/run-feed.ts': { words: { 'patch headers': 1 }, why: 'writes a diff header for display; reads none' },
+  // src/: readers that stay outside the helper, each with why.
+  'src/comment-policy.ts': {
+    words: { 'rename detection': 1, 'patch headers': 3 },
+    why: "the comment lint over added lines wants renames paired (a moved file's lines aren't new); it is in the agents' tool guard's import tree, which can't take a new import while #691 lists that tree",
+  },
+  'src/push-check.ts': {
+    words: { 'name-only': 1, numstat: 1 },
+    why: '`log --name-only --no-renames` (refuse_paths, workflows, the SKILL.md lint) still splits on newlines: a follow-up moves it here (-z); `--numstat` only sums line counts, no path is read',
+  },
+  // scripts/: their own -z parsing, in their own language.
+  'scripts/ci/slow-jobs.sh': { words: { 'name-only': 1 }, why: 'CI slow-job selection', must: [/--name-only --no-renames -z/] },
+  'scripts/pin-engine.mjs': { words: { 'name-only': 1 }, why: 'the release commit "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
+  'scripts/machine/worklane-update.cjs': { words: { 'name-only': 1 }, why: 'the updater\'s "changes only dist/" check', must: [/'--name-only', '--no-renames', '-z'/, /split\('\\0'\)/] },
+  'scripts/ci/affected.mjs': { words: { 'name-only': 2 }, why: 'CI test selection', must: [/'--name-only', '--no-renames', '-z'/, /'--name-only', '--no-renames', '--diff-filter=A', '-z'/] },
+  'scripts/push-gate.mjs': { words: { 'name-only': 1, 'patch headers': 2 }, why: '`ls-tree --name-only`: a tree; `show --no-renames` added lines: the denylist scan of what is pushed (a follow-up: its `+++ ` header parse)' },
+  'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },
+  'scripts/release.mjs': { words: { porcelain: 1 }, why: '`status --porcelain`: is the tree clean before a release' },
+};
+
+test('one helper is the only way src/ lists changed names or counts; scripts/ only on this keyed list', () => {
   const files: string[] = [];
   const walk = (d: string) => {
     for (const e of readdirSync(d, { withFileTypes: true })) {
@@ -161,16 +347,19 @@ test('no reader of changed paths in src/ or scripts/ leaves rename detection on,
   walk(join(repoRoot, 'src'));
   walk(join(repoRoot, 'scripts'));
   const bad: string[] = [];
+  const seen = new Set<string>();
   for (const f of files) {
     const rel = relative(repoRoot, f).split('\\').join('/');
-    readFileSync(f, 'utf8')
-      .split('\n')
-      .forEach((l, i) => {
-        if (!/--(name-only|name-status|numstat|raw)\b/.test(l) || !/\b(diff|diff-tree|log|show)\b/.test(l) || /ls-tree/.test(l)) return;
-        if (/--no-renames/.test(l)) return;
-        if (PAIRED_ON_PURPOSE[rel]?.line.test(l)) return;
-        bad.push(`${rel}:${i + 1}: ${l.trim().slice(0, 140)}`);
-      });
+    if (rel === HELPER) continue;
+    const text = readFileSync(f, 'utf8');
+    const words = Object.fromEntries(Object.entries(READER_WORDS).map(([w, re]) => [w, text.match(re)?.length ?? 0]).filter(([, n]) => n));
+    if (!Object.keys(words).length) continue;
+    seen.add(rel);
+    const allowed = OUTSIDE_THE_HELPER[rel];
+    if (!allowed) bad.push(`${rel}: ${JSON.stringify(words)} (not on the list)`);
+    else if (!isDeepStrictEqual(words, allowed.words)) bad.push(`${rel}: ${JSON.stringify(words)}, listed ${JSON.stringify(allowed.words)}`);
+    else for (const re of allowed.must ?? []) if (!re.test(text)) bad.push(`${rel}: no ${re}`);
   }
-  assert.deepEqual(bad, [], 'add --no-renames, or list the reader in PAIRED_ON_PURPOSE with why its paths never matter');
+  for (const rel of Object.keys(OUTSIDE_THE_HELPER)) if (!seen.has(rel)) bad.push(`${rel}: listed, but holds none of the words any more (take it off the list)`);
+  assert.deepEqual(bad, [], `list changed names or counts through ${HELPER} (changedNames, changedStatuses, changeFiles, ...)`);
 });

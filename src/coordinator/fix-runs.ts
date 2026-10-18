@@ -12,7 +12,8 @@ import { computeLevel, loadMoneyPaths } from '../review.js';
 import { issueBrief, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { conflictBrief, conflictFixesUsed, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from '../conflicts.js';
-import { mergeBaseInto } from '../merge-base.js';
+import { mergeBaseInto, resolutionStrays, stagedBlobs } from '../merge-base.js';
+import { changedNames } from './change-files.js';
 import { type Readiness } from '../pr-watch.js';
 import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
@@ -547,14 +548,14 @@ export abstract class FixRuns extends Landing {
       if (!merged.clean) {
         files = Object.keys(merged.conflicted).sort();
         // What the merge itself made of every other file, to tell a resolution that strays from one that doesn't.
-        const staged = Object.fromEntries(merged.otherFiles.map((f) => [f, this.gitOrNull(path, 'rev-parse', `:${f}`)]));
+        const staged = stagedBlobs(path, merged.otherFiles);
         const hunks = Object.entries(merged.conflicted).flatMap(([f, t]) => parseConflicts(f, t));
         const brief = conflictBrief({ baseRef, baseSha, strategy: 'merge', hunks, ours: { label: `this pull request (#${number}, issue #${n}: ${issue.title})`, intent: issue.body }, theirs: this.baseSides(path, pr.headSha, baseSha, files) });
         const s = await this.conflictAgent(issue, doneWhen, path, taskFile, repro, pr, brief, attempt);
         if ('ended' in s) return await give(s.ended);
         summary = s.summary;
         removeSandboxPlaceholders(path);
-        if (this.git(path, 'diff', '--name-only', '--no-renames', '--diff-filter=U')) return await give('the fix run left conflicts unresolved');
+        if (changedNames(path, ['--diff-filter=U']).length) return await give('the fix run left conflicts unresolved');
         // Still exactly the merge of the PR's head and the base: no rewritten history, no extra commits.
         if (this.gitOrNull(path, 'rev-parse', 'HEAD^1') !== pr.headSha || this.gitOrNull(path, 'rev-parse', 'HEAD^2') !== baseSha) return await give('the fix run did not finish the merge commit of the branch and its base (it rewrote history, added commits, or left the merge uncommitted)');
         // Exactly as committed (no trimming): the comparison is line for line, the last line included.
@@ -563,12 +564,9 @@ export abstract class FixRuns extends Landing {
           return r.status === 0 ? r.stdout : null;
         };
         const resolved = Object.fromEntries(files.map((f) => [f, committed(f)]));
-        const expected = new Set([...files, ...merged.otherFiles]);
-        const strays = [
-          ...merged.otherFiles.filter((f) => this.gitOrNull(path, 'rev-parse', `HEAD:${f}`) !== staged[f]),
-          // A rename as both its paths: moving a file the merge didn't touch onto one it did is still a stray (#683).
-          ...this.git(path, 'diff', '--name-only', '--no-renames', 'HEAD^1', 'HEAD').split('\n').filter((f) => f && !expected.has(f)),
-        ];
+        // Each path as itself and a rename as both its paths (#683): an edit to `lib/naïve.ts`, or moving a file the
+        // merge didn't touch onto one it did, is still a stray.
+        const strays = resolutionStrays(path, files, merged.otherFiles, staged);
         outside = outsideHunks(merged.conflicted, resolved, strays);
         resolution = ['How the conflicts were resolved (a combined diff of the merge commit against both parents):', '```diff', (this.gitOrNull(path, 'show', '--format=', '--cc', 'HEAD') ?? '').slice(0, 12_000), '```'].join('\n');
       }

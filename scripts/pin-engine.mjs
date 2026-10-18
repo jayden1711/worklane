@@ -67,8 +67,8 @@ const commit = git('rev-parse', `${tag}^{commit}`);
 const parents = git('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
 const facts = {
   parents: parents.length,
-  // --no-renames: a file moved into dist/ still names the path it left (#683).
-  changed: parents.length === 1 ? git('diff', '--name-only', '--no-renames', parents[0], commit).split('\n').filter(Boolean) : [],
+  // --no-renames: a file moved into dist/ still names the path it left. -z, untrimmed: each path as itself (#683).
+  changed: parents.length === 1 ? execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', parents[0], commit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\0').filter(Boolean) : [],
   hasCli: ok('cat-file', '-e', `${commit}:dist/src/cli.js`),
   version: (() => {
     try {

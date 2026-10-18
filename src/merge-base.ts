@@ -5,8 +5,14 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { changedNames, changedNamesOrNull } from './coordinator/change-files.js';
 
 const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' });
+/** A blob's id at `rev:path` (or the index's, `:path`), or null when there is none. */
+const blob = (cwd: string, spec: string) => {
+  const r = git(cwd, 'rev-parse', '--verify', '-q', spec);
+  return r.status === 0 ? r.stdout.replace(/\n$/, '') : null;
+};
 
 export type MergeResult =
   | { clean: true; head: string }
@@ -22,7 +28,8 @@ export type MergeResult =
 export function mergeBaseInto(worktree: string, base: string, message: string, identity: { name: string; email: string }): MergeResult {
   const r = git(worktree, '-c', `user.name=${identity.name}`, '-c', `user.email=${identity.email}`, '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff', '--no-edit', '-m', message, base);
   if (r.status === 0) return { clean: true, head: git(worktree, 'rev-parse', 'HEAD').stdout.trim() };
-  const unmerged = git(worktree, 'diff', '--name-only', '--no-renames', '--diff-filter=U').stdout.split('\n').filter(Boolean);
+  // Each path as itself (-z, through changedNames): a quoted `"lib/na\303\257ve.ts"` names no file (#683).
+  const unmerged = changedNamesOrNull(worktree, ['--diff-filter=U']) ?? [];
   if (!unmerged.length) return { error: (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ') || `git merge exited ${r.status}` };
   const conflicted: Record<string, string> = {};
   for (const f of unmerged) {
@@ -33,8 +40,23 @@ export function mergeBaseInto(worktree: string, base: string, message: string, i
     }
   }
   // A rename as both its paths, as the fix run's stray check lists the merge commit (#683).
-  const staged = git(worktree, 'diff', '--name-only', '--no-renames', '--cached').stdout.split('\n').filter(Boolean);
+  const staged = changedNamesOrNull(worktree, ['--cached']) ?? [];
   return { clean: false, conflicted, otherFiles: staged.filter((f) => !(f in conflicted)) };
+}
+
+/** What the merge itself made of each file it changed cleanly (its staged blob), before a resolver touches anything. */
+export function stagedBlobs(worktree: string, otherFiles: string[]): Record<string, string | null> {
+  return Object.fromEntries(otherFiles.map((f) => [f, blob(worktree, `:${f}`)]));
+}
+
+/**
+ * Where a committed resolution (HEAD, the merge commit) strays from the conflicted files: a file the merge changed
+ * cleanly whose committed blob isn't the one the merge staged (`staged`, from stagedBlobs), and a file the merge
+ * commit changes against the branch that the merge didn't touch at all (a rename as both its paths).
+ */
+export function resolutionStrays(worktree: string, conflicted: string[], otherFiles: string[], staged: Record<string, string | null>): string[] {
+  const expected = new Set([...conflicted, ...otherFiles]);
+  return [...otherFiles.filter((f) => blob(worktree, `HEAD:${f}`) !== staged[f]), ...changedNames(worktree, ['HEAD^1', 'HEAD']).filter((f) => !expected.has(f))];
 }
 
 /** Undo an unfinished merge (a conflict nobody will resolve here). */
@@ -44,6 +66,5 @@ export function abortMerge(worktree: string): void {
 
 /** Files changed between two commits (a..b), for "did main touch what this PR touches"; a rename as both its paths. */
 export function changedFiles(repo: string, from: string, to: string): string[] {
-  const r = git(repo, 'diff', '--name-only', '--no-renames', `${from}...${to}`);
-  return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : [];
+  return changedNamesOrNull(repo, [`${from}...${to}`]) ?? [];
 }

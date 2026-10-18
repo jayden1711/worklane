@@ -5,6 +5,7 @@
 // fast checks pass; a bot's or an unmapped author's only once an admin approved it.
 import { execFileSync } from 'node:child_process';
 import { BRAND } from '../brand.js';
+import { changedNames } from './change-files.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import type { RunHost } from '../testrun/host.js';
@@ -161,8 +162,7 @@ export class PrTestRuns {
   private changed(pr: OpenPr): string[] {
     if (this.d.changed) return this.d.changed(pr);
     // A rename as both its paths: test selection runs everything when a changed file is gone (#683).
-    const out = execFileSync('git', ['-C', this.d.repo, 'diff', '--name-only', '--no-renames', '-z', `${this.d.remote}/${pr.base}...${pr.headSha}`], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
-    return out.split('\0').filter(Boolean);
+    return changedNames(this.d.repo, [`${this.d.remote}/${pr.base}...${pr.headSha}`], { timeout: 120_000 });
   }
 
   /** One pass: list open PRs (at most every pollMs), cancel superseded runs, start runs for new heads. */
