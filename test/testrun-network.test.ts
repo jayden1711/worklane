@@ -12,7 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { networkCheck } from '../src/doctor.js';
 import { TestRunConfig } from '../src/testrun/config.js';
-import { npmFetchScript } from '../src/testrun/fetch.js';
+import { npmFetchScript, pipFetchScript, requirementsFileProblem } from '../src/testrun/fetch.js';
 import { localHost, postgresSocketUrl, sandboxHost } from '../src/testrun/host.js';
 import { networkFileText, networkLine, networkPolicy, networkRecord, networkSummaryLine, parseNetworkFile } from '../src/testrun/network.js';
 import { testRunsView } from '../src/testrun/status.js';
@@ -308,6 +308,38 @@ test('fetch: its own namespace with slirp4netns as a granted run\'s; no run\'s T
   }
 });
 
+test('pip fetch: the same unit as npm\'s, given PIP_FIND_LINKS; the requirements files are the script\'s arguments, each checked as the engine checks it', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.mkRun('fast-p-1');
+    const key = 'd'.repeat(32);
+    const cache = join(h.base, 'shop', 'cache', `pip-${key}`);
+    mkdirSync(cache, { recursive: true });
+    const r = h.run('fetch', 'fast-p-1', 'pip', 'pip', key, '600', 'requirements.txt', 'req/dev.txt');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^worklane-testrun: fetch pip \(no script run; public addresses and the machine's DNS only\)\n/);
+    const { argv, props } = h.lastProps();
+    assert.ok(argv.some((x) => /^--unit=worklane-test-shop_fast-p-1_fetch_\d+$/.test(x)));
+    for (const p of NO_NET) assert.ok(props.includes(p), p);
+    assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-p-1', 'fetch')}`, `ReadWritePaths=${cache}`]);
+    assert.ok(argv.includes(`--setenv=PIP_FIND_LINKS=${cache}`) && !argv.some((x) => x.startsWith('--setenv=npm_config_cache')));
+    // FETCH_PIP, then $0 and the files (the stub writes one argument a line, so the script's own lines are in between).
+    assert.ok(argv.includes('  python3 -I -m pip download --only-binary=:all: --no-cache-dir --disable-pip-version-check --no-input --progress-bar off --dest "$PIP_FIND_LINKS" -r "$1" || { echo "fetch: pip download failed: the fetch takes wheels only (building an sdist runs its code), so a package with no wheel for this Python and platform is refused; if that is why, grant the setup steps the network instead (docs/test-runs.md, Network)" >&2; exit 4; }'));
+    assert.deepEqual(argv.slice(-3), ['fetch', 'requirements.txt', 'req/dev.txt']);
+    // npm takes no file; pip takes 1 to 8, each as requirementsFileProblem allows.
+    const nine = Array.from({ length: 9 }, (_, i) => `r${i}.txt`);
+    for (const bad of [['pip', 'pip', key, '60'], ['npm', 'pip', key, '60', 'requirements.txt'], ['pip', 'pip', key, '60', ...nine], ['yarn', 'pip', key, '60', 'r.txt']]) {
+      assert.equal(h.run('fetch', 'fast-p-1', ...bad).status, 2, bad.join(' '));
+    }
+    for (const f of ['requirements.txt', 'a/b-c_d@e+f.txt', '.hidden/r.txt', '../r.txt', '/etc/passwd', 'a//b', './r.txt', 'a/./b', 'a/../b', '-r', 'a b', '$HOME', 'a%n', 'r"q', 'x'.repeat(201), 'a\nb']) {
+      const got = h.run('fetch', 'fast-p-1', 'pip', 'pip', key, '600', f);
+      assert.equal(got.status === 0, requirementsFileProblem(f) === null, `${JSON.stringify(f)}: the helper and the engine agree (${got.stderr.trim().split('\n').pop()})`);
+    }
+  } finally {
+    h.done();
+  }
+});
+
 const SLIRP_DNS = `${10}.0.2.3`;
 
 test('DNS: a granted run\'s resolv.conf names only slirp4netns\'s forwarder and its unit denies the upstream servers; slirp\'s own resolv.conf names them, in an empty /etc', { skip: !posix && 'bash' }, () => {
@@ -358,6 +390,12 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
 test('the helper\'s FETCH_NPM is the engine\'s npmFetchScript, byte for byte', () => {
   const src = readFileSync(helperSrc, 'utf8');
   assert.equal(/^FETCH_NPM='([\s\S]*?)'$/m.exec(src)?.[1], npmFetchScript());
+});
+
+test('the helper\'s FETCH_PIP is the engine\'s pipFetchScript, byte for byte; it has no \' to end its quoting early', () => {
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.equal(/^FETCH_PIP='([\s\S]*?)'$/m.exec(src)?.[1], pipFetchScript());
+  assert.ok(!pipFetchScript().includes("'"));
 });
 
 /** A run directory as the local host makes it: work/ with these files, and the fetch's cache key directory. */

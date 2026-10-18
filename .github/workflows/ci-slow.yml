@@ -540,6 +540,8 @@ jobs:
           echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
       - name: "test-run network (real systemd, a host listener, no internet): none by default and for a repo's ask alone (the old helper let the same probe out); root's grant gives that tier the public stand-in only, never the host's 127.0.0.1 services (a hub stand-in on 4399, a dashboard's) or the LAN (the PR's earlier host-namespace helper reached the hub); fetch the same; the database container reaches nothing"
         run: bash scripts/ci/testrun-network-real-systemd.sh "$I2"
+      - name: "test-run pip fetch (real systemd, an index on a public stand-in): the wheels of a pin and of the repo's build requirement with no grant, and no repo code run (the index never saw a canary); the install step builds the repo (-e .) from the cache with no network; an sdist-only pin fails the fetch unbuilt; the old way (a granted setup step's pip download) runs the builds with network"
+        run: bash scripts/ci/testrun-pip-real-systemd.sh
       - name: "regression: an instance whose name is a prefix of another's (ci2-sandbox, ci2-sandbox-long-name) never wipes the other's units, Docker or containers"
         run: |
           # Run ids and instance names are both [a-z0-9-]: with units named <cli>-test-<name>-<id>-<pid>, ci2-sandbox's

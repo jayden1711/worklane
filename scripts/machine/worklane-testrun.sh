@@ -26,7 +26,8 @@
 # comes from the coordinator, so the grant is per instance at most: a coordinator can only name a tier root listed for
 # its own instance. On stderr, after any GPU line: "worklane-testrun: network
 # granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
-# a fixed npm download of what the lockfile pins, with no script run, that never reaches this host's loopback or LAN.
+# a fixed npm or pip download of what the lockfile or requirements files pin, with no script or build run, that never
+# reaches this host's loopback or LAN.
 # The run's Postgres has no network either (docker run --network none): it is reached on its Unix socket only.
 #
 #   worklane-testrun <name> create <id> <branch> <head> <base> <head sha> <base sha> [<dir>]...
@@ -43,6 +44,11 @@
 #                                                             downloads what the run's lockfile pins into the cache
 #                                                             (npm ci --ignore-scripts in a directory of its own): no
 #                                                             script, no repo config; public addresses only
+#   worklane-testrun <name> fetch <id> pip <cache> <key> <timeout_s> <requirements file>...
+#                                                             the wheels of what those files pin (name==version) and
+#                                                             of the repo's build requirements, into the cache (pip
+#                                                             download --only-binary=:all: of the helper's own files):
+#                                                             no build, no repo file given to pip; public addresses only
 #   worklane-testrun <name> exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command>
 #                                                             the run's variables on stdin, each NAME=value then a NUL;
 #                                                             --gpu asks for the GPU, which root's file may grant (GPU below);
@@ -80,7 +86,7 @@ set -euo pipefail
 # Set here, never inherited: sudo's secure_path differs between hosts, and runuser lives in /usr/sbin on Ubuntu.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 umask 077
-PROTOCOL=10
+PROTOCOL=11
 
 # Fixed paths: the installed helper takes none from its caller.
 BASE=/var/lib/worklane-test
@@ -348,6 +354,173 @@ JS
 npm ci --ignore-scripts --no-audit --no-fund --no-update-notifier --prefer-offline --fetch-retry-mintimeout=2000 --fetch-retry-maxtimeout=10000
 rm -rf node_modules
 echo "fetch: every package $lock pins is in the cache"'
+
+# The pip fetch (fetch_cmd), the same: src/testrun/fetch.ts pipFetchScript, byte for byte (a test checks they match).
+# Its arguments are the requirements files tests.yaml names. pip is never given a file of the repo's: Python reads
+# them (and each -r they include, and pyproject.toml) as data, with no symlink and nothing outside the workspace, and
+# writes requirements files of its own: the name==version pins (with any --hash), and the build requirements of the
+# repo (and of each directory -e names), which the offline install needs to build it. Anything else is refused: an
+# option (an index, find-links or --no-binary: such a line overrides the command line's --only-binary and builds an
+# sdist, running its setup.py), a URL or direct reference, a range. Then pip download --only-binary=:all: takes only
+# wheels; a package with none fails the fetch, never a build. -e . is skipped here: the repo's build backend is the
+# repo's code, and runs in the offline install step, with no network.
+FETCH_PIP='set -euo pipefail
+w=../work
+[ "$#" -ge 1 ] || { echo "fetch: no requirements file named" >&2; exit 3; }
+python3 -I -c "import tomllib" 2> /dev/null || { echo "fetch: needs python3 3.11 or later (it reads pyproject.toml with tomllib)" >&2; exit 3; }
+python3 -I -m pip --version > /dev/null 2>&1 || { echo "fetch: no pip for python3 on this machine (apt-get install python3-pip)" >&2; exit 3; }
+python3 -I - "$w" "$@" <<"PY"
+import os, re, stat, sys, tomllib
+w = os.path.realpath(sys.argv[1])
+def no(m):
+    print("fetch: " + m, file=sys.stderr)
+    sys.exit(3)
+N = r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?"
+X = r"(?:\[\s*(?:" + N + r"(?:\s*,\s*" + N + r")*)?\s*\])?"
+V = r"(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*(?:[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[0-9]*)?(?:[-_.]?(?:post|rev|r)[0-9]*)?(?:[-_.]?dev[0-9]*)?(?:\+[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*)?"
+M = r"[A-Za-z0-9_.<>=!~()\x22\x27 ,+-]+"
+S = r"(?:===|==|!=|<=|>=|~=|<|>)\s*[A-Za-z0-9*][A-Za-z0-9.*+!_-]*"
+PIN = re.compile("(" + N + r")\s*(" + X + r")\s*(===?)\s*(" + V + r")\s*(?:;\s*(" + M + "))?", re.I)
+REQ = re.compile("(" + N + r")\s*(" + X + r")\s*(\(?\s*(?:" + S + r"(?:\s*,\s*" + S + r")*)?\s*\)?)\s*(?:;\s*(" + M + "))?", re.I)
+HASH = re.compile(r"sha256:[0-9a-f]{64}|sha384:[0-9a-f]{96}|sha512:[0-9a-f]{128}")
+def rel(p):
+    return os.path.relpath(p, w)
+def inside(base, r, what):
+    p = os.path.normpath(os.path.join(base, r))
+    if r.startswith("/") or (p != w and not p.startswith(w + os.sep)):
+        no(what + r + ": not a path inside the repo")
+    if os.path.realpath(p) != p:
+        no(what + r + ": a symlink, or under one (the fetch reads regular files of the repo only)")
+    return p
+def text(p):
+    try:
+        st = os.lstat(p)
+    except OSError:
+        no(rel(p) + ": no such file in the repo")
+    if not stat.S_ISREG(st.st_mode):
+        no(rel(p) + ": not a regular file")
+    if st.st_size > 1048576:
+        no(rel(p) + ": over 1 MB")
+    with open(p, "rb") as f:
+        b = f.read()
+    try:
+        return b.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        no(rel(p) + ": not UTF-8")
+pins, dirs, seen = [], [w], set()
+def local(r, where):
+    m = re.fullmatch(r"(\.[A-Za-z0-9._/@+-]*)(\[[A-Za-z0-9._, -]*\])?", r)
+    if not m:
+        no(where + r + ": not a directory of the repo (./<path>): the fetch takes pins from the index, and the repo itself as -e . or .")
+    d = inside(w, m.group(1), where)
+    if not os.path.isdir(d):
+        no(where + r + ": no such directory in the repo")
+    dirs.append(d)
+def operand(t, short, long, where):
+    if t[0] in (short, long):
+        if len(t) != 2:
+            no(where + t[0] + " takes one path")
+        return t[1]
+    v = t[0][len(long) + 1:] if t[0].startswith(long + "=") else t[0][len(short):]
+    if len(t) != 1 or not v:
+        no(where + t[0] + " takes one path")
+    return v
+def parse(p, depth):
+    if p in seen:
+        return
+    if depth > 8 or len(seen) >= 64:
+        no(rel(p) + ": too many requirements files, or nested too deep (-r)")
+    seen.add(p)
+    buf, start, items = None, 0, []
+    for k, l in enumerate(text(p).splitlines(), 1):
+        if l.endswith("\\") and not re.match(r"\s*#", l):
+            if buf is None:
+                buf, start = "", k
+            buf += l[:-1]
+            continue
+        if buf is not None:
+            items.append((start, buf + l))
+            buf = None
+        else:
+            items.append((k, l))
+    if buf is not None:
+        items.append((start, buf))
+    for k, l in items:
+        line(p, depth, k, re.sub(r"(^|\s+)#.*$", "", l).strip())
+def line(p, depth, k, l):
+    where = rel(p) + " line " + str(k) + ": "
+    if not l:
+        return
+    t = l.split()
+    if t[0] in ("-r", "--requirement") or t[0].startswith("--requirement=") or re.match(r"-r[^-]", t[0]):
+        parse(inside(os.path.dirname(p), operand(t, "-r", "--requirement", where), where), depth + 1)
+        return
+    if t[0] in ("-e", "--editable") or t[0].startswith("--editable=") or re.match(r"-e[^-]", t[0]):
+        local(operand(t, "-e", "--editable", where), where)
+        return
+    if t[0].startswith("-"):
+        no(where + t[0] + ": an option the fetch does not take (only pins, -r and the repo itself as -e .): an index, find-links or binary option changes where pip downloads from, or makes it build an sdist, which runs its code")
+    j = next((i for i, s in enumerate(t) if s.startswith("-")), len(t))
+    r, opts = " ".join(t[:j]), t[j:]
+    if r.startswith(".") and not opts:
+        local(r, where)
+        return
+    if re.search(r"[/:@$]", r):
+        no(where + r + ": a URL, path or direct reference: the fetch takes pins of name==version from the index only")
+    m = PIN.fullmatch(r)
+    if not m:
+        no(where + r + ": not a pin: the fetch takes name==version only, as pip-compile, uv pip compile or pip freeze write it")
+    h, i = [], 0
+    while i < len(opts):
+        o, v = opts[i], None
+        if o == "--hash" and i + 1 < len(opts):
+            v, i = opts[i + 1], i + 2
+        elif o.startswith("--hash="):
+            v, i = o[7:], i + 1
+        if v is None or not HASH.fullmatch(v):
+            no(where + o + ": the only option a pin may have is --hash=sha256:<hex> (or sha384, sha512)")
+        h.append(v)
+    s = m.group(1) + re.sub(r"\s", "", m.group(2)) + m.group(3) + m.group(4)
+    if m.group(5):
+        s += " ; " + m.group(5).strip()
+    pins.append(s + "".join(" --hash=" + x for x in h))
+for a in sys.argv[2:]:
+    parse(inside(w, a, ""), 0)
+def toml(p):
+    try:
+        return tomllib.loads(text(p))
+    except tomllib.TOMLDecodeError as e:
+        no(rel(p) + ": not TOML (" + str(e) + ")")
+build = []
+for d in dict.fromkeys(dirs):
+    pp = os.path.join(d, "pyproject.toml")
+    data = toml(inside(d, "pyproject.toml", "")) if os.path.lexists(pp) else None
+    bs = data.get("build-system") if data is not None else None
+    if bs is not None:
+        r = bs.get("requires", []) if isinstance(bs, dict) else None
+        if not isinstance(r, list) or not all(isinstance(x, str) for x in r):
+            no(rel(pp) + ": build-system.requires is not a list of strings")
+        for x in r:
+            x = x.strip()
+            if re.search(r"[/:@$]", x) or re.search(r"(^|\s)-", x) or not REQ.fullmatch(x):
+                no(rel(pp) + ": build requirement " + x + ": the fetch takes a name and version ranges from the index only (no URL or direct reference)")
+            build.append(x)
+    elif data is not None or os.path.lexists(os.path.join(d, "setup.py")) or os.path.lexists(os.path.join(d, "setup.cfg")):
+        build += ["setuptools>=40.8.0", "wheel"]
+build = list(dict.fromkeys(build))
+with open("pins.txt", "w") as f:
+    f.write("".join(x + "\n" for x in pins))
+with open("build.txt", "w") as f:
+    f.write("".join(x + "\n" for x in build))
+print("fetch: " + str(len(pins)) + " pinned in " + ", ".join(sys.argv[2:]) + "; build requirements: " + (", ".join(build) or "none"))
+PY
+get() {
+  [ -s "$1" ] || return 0
+  python3 -I -m pip download --only-binary=:all: --no-cache-dir --disable-pip-version-check --no-input --progress-bar off --dest "$PIP_FIND_LINKS" -r "$1" || { echo "fetch: pip download failed: the fetch takes wheels only (building an sdist runs its code), so a package with no wheel for this Python and platform is refused; if that is why, grant the setup steps the network instead (docs/test-runs.md, Network)" >&2; exit 4; }
+}
+get pins.txt
+get build.txt
+echo "fetch: every pinned package and build requirement is in the cache, as wheels"'
 
 # A directory a workspace leaves out: src/checkout.ts sparseDirProblem's rule (a test keeps them alike).
 valid_dir() {
@@ -875,17 +1048,30 @@ exec_run() {
   return "$rc"
 }
 
-# Fill a cache with what the run's lockfile pins (FETCH_NPM above), in a unit of its own: the exec sandbox, but the
-# host's network minus its loopback, the LAN, link-local and multicast (the machine's DNS resolvers allowed); no run's
-# TMPDIR (where a database's socket is) and no workspace it can write. Root's grant is never needed: no code of the
-# repo's runs here, only npm, on files the helper copied.
+# A requirements file the pip fetch reads: src/testrun/fetch.ts requirementsFileProblem's rule (a test keeps them
+# alike). Relative, no empty, . or .. part, and no character a shell or systemd expands ($, %, quotes, spaces).
+valid_requirements() {
+  local p="$1"
+  [[ "$p" =~ ^[A-Za-z0-9._@+][A-Za-z0-9._@+/-]{0,199}$ && "/$p/" != *//* && "/$p/" != */./* && "/$p/" != */../* ]] || die "not a requirements file: $p"
+}
+
+# Fill a cache with what the run's lockfile or requirements files pin (FETCH_NPM, FETCH_PIP above), in a unit of its
+# own: the exec sandbox, but the host's network minus its loopback, the LAN, link-local and multicast (the machine's
+# DNS resolvers allowed); no run's TMPDIR (where a database's socket is) and no workspace it can write. Root's grant is
+# never needed: no code of the repo's runs here, only npm or pip, on files the helper copied or wrote.
 fetch_cmd() {
-  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d fd dir cmd flag inaccessible p unit pid rc=0
-  local -a noexpand=()
-  [ "$#" -eq 5 ] || die "usage: fetch <id> npm <cache> <key> <timeout_s>"
+  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d fd dir cmd flag inaccessible p unit pid rc=0 script envvar f
+  local -a noexpand=() files=()
+  local usage="usage: fetch <id> npm <cache> <key> <timeout_s>, or fetch <id> pip <cache> <key> <timeout_s> <requirements file>..."
+  [ "$#" -ge 5 ] || die "$usage"
   valid_id "$id"
-  [ "$eco" = npm ] || die "fetch: npm only, got $eco"
-  [[ "$c" =~ ^[a-z][a-z0-9_-]{0,39}$ && "$key" =~ ^[0-9a-f]{16,64}$ ]] || die "usage: fetch <id> npm <cache name> <hex key> <timeout_s>"
+  case "$eco" in
+    npm) [ "$#" -eq 5 ] || die "$usage"; script="$FETCH_NPM"; envvar=npm_config_cache ;;
+    pip) [ "$#" -ge 6 ] && [ "$#" -le 13 ] || die "$usage (1 to 8 requirements files)"; script="$FETCH_PIP"; envvar=PIP_FIND_LINKS
+      for f in "${@:6}"; do valid_requirements "$f"; files+=("$f"); done ;;
+    *) die "fetch: npm or pip only, got $eco" ;;
+  esac
+  [[ "$c" =~ ^[a-z][a-z0-9_-]{0,39}$ && "$key" =~ ^[0-9a-f]{16,64}$ ]] || die "usage: fetch <id> $eco <cache name> <hex key> <timeout_s>"
   [[ "$timeout" =~ ^[1-9][0-9]{0,4}$ ]] || die "timeout_s: seconds, got $timeout"
   d="$(run_dir "$id")"
   [ -d "$d/work" ] || die "no run $id"
@@ -895,7 +1081,7 @@ fetch_cmd() {
   as_user rm -rf -- "$fd"
   as_user mkdir -m 0700 -- "$fd" "$fd/home" || die "can't make $fd"
   slirp_ok || die "fetch: $NET_WHY"
-  cmd="$(systemd_command "$(systemd_version)" "$NET_WAIT$FETCH_NPM")"
+  cmd="$(systemd_command "$(systemd_version)" "$NET_WAIT$script")"
   flag="${cmd%%$'\n'*}"; cmd="${cmd#*$'\n'}"
   [ -z "$flag" ] || noexpand=("$flag")
   inaccessible="-$sock_dir -$root/docker -$root/docker-home -$GPU_LOCK_DIR"
@@ -904,7 +1090,7 @@ fetch_cmd() {
   trap 'if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE" "$SLIRP_RESOLV"; fi' EXIT
   net_props 1
   unit="$(run_unit "$id" "fetch_$$")"
-  echo "worklane-testrun: fetch npm (no script run; public addresses and the machine's DNS only)" >&2
+  echo "worklane-testrun: fetch $eco (no script run; public addresses and the machine's DNS only)" >&2
   trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
   systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} --unit="$unit" --slice="$SLICE" --uid="$user" --gid="$user" \
     -p WorkingDirectory="$fd" -p RuntimeMaxSec="$timeout" -p KillMode=control-group -p UMask=0077 \
@@ -914,8 +1100,8 @@ fetch_cmd() {
     -p TemporaryFileSystem="$root/runs:ro" -p BindPaths="$d" -p ReadWritePaths="$fd" -p ReadWritePaths="$dir" \
     -p TemporaryFileSystem="$TMP_BASE:ro" -p "InaccessiblePaths=$inaccessible" \
     --setenv=HOME="$fd/home" --setenv=TMPDIR=/tmp --setenv=PATH=/usr/local/bin:/usr/bin:/bin --setenv=LANG=C.UTF-8 --setenv=CI=1 \
-    --setenv=USER="$user" --setenv=LOGNAME="$user" --setenv=npm_config_cache="$dir" \
-    /bin/bash -o pipefail -c "$cmd" < /dev/null &
+    --setenv=USER="$user" --setenv=LOGNAME="$user" --setenv="$envvar=$dir" \
+    /bin/bash -o pipefail -c "$cmd" fetch ${files[@]+"${files[@]}"} < /dev/null &
   pid=$!
   slirp_start "$unit" "$pid" "$id" || echo "worklane-testrun: the fetch's network could not be started" >&2
   wait "$pid" || rc=$?
