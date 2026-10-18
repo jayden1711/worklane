@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
-import { MenuButton } from '../App';
+import { GroupTabRow, MenuButton } from '../App';
 
-/** A page's header bar: its title, a line under it, and its actions; the menu button on a narrow screen. */
+/** A page's header bar: its title, a line under it, and its actions; the menu button on a narrow screen; under it, the tabs of the page's sidebar group (#585). */
 export function Header({ title, children, sub }: { title: string; sub?: string; children?: ReactNode }) {
   return (
     <>
@@ -11,6 +11,7 @@ export function Header({ title, children, sub }: { title: string; sub?: string; 
         {sub && <span className="truncate text-[12.5px] text-ink-3 max-md:hidden">{sub}</span>}
         <div className="ml-auto flex items-center gap-2">{children}</div>
       </header>
+      <GroupTabRow />
       {/* On a phone the line under the title is whole, under the bar, rather than cut short in it. */}
       {sub && <p className="px-6 pt-3 text-[12.5px] text-ink-3 md:hidden">{sub}</p>}
     </>

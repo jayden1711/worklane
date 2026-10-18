@@ -2,10 +2,10 @@
 // account and expiry each agent user has, and switching every agent on the machine to another account, step by step
 // (pause, paste the token, each instance's check, resume), each instance's result as it happens. Everyone else gets
 // nothing here: the server refuses them, and the view renders nothing for them.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { claudeAccountAction, getClaudeAccount, pasteClaudeToken, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
-import { ago, Badge, Button, Card, cx } from './ui';
+import { ago, Badge, Button, Card, cx, firstWhy, Why } from './ui';
 import { ClaudeProfiles } from './ClaudeProfiles';
 
 type Phase = 'pending' | 'running' | 'done' | 'failed';
@@ -71,8 +71,8 @@ function TokenForm({ onDone }: { onDone: (err: string | null) => void }) {
       }}
     >
       <input ref={field} type="password" autoComplete="off" spellCheck={false} name="claude-setup-token" aria-label="The token claude setup-token printed" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-switch-token" />
-      <Button type="submit" size="sm" disabled={busy} data-testid="claude-switch-token-send">
-        {busy ? 'Sending…' : 'Use this token'}
+      <Button type="submit" size="sm" why={busy && 'Sending…'} data-testid="claude-switch-token-send">
+        Use this token
       </Button>
     </form>
   );
@@ -169,6 +169,7 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
   const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [refusedId, busyId, askingId] = [useId(), useId(), useId()];
   if (!data.machineOwner) return null;
   const act = async (action: 'status' | 'switch') => {
     setBusy(action);
@@ -231,37 +232,41 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
       {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={all ? null : data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} signin={data.signin ?? null} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" variant="outline" disabled={!data.allowed || !!busy || open.some((r) => r.args[1] === 'status')} onClick={() => void act('status')} data-testid="claude-account-refresh">
-          {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
-        </Button>
-        {!confirm ? (
-          <Button size="sm" disabled={!data.canSwitch || !!busy} onClick={() => setConfirm(true)} data-testid="claude-account-switch">
-            Switch account…
+      {/* A person no device would help (their role here) gets no buttons, only the read-only line below. */}
+      {data.everAllowed !== false && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="outline" why={firstWhy(!data.allowed && (data.why ?? 'not allowed'), !!busy && 'Asking…', open.some((r) => r.args[1] === 'status') && 'A refresh is waiting for the coordinator')} {...(!data.allowed && data.why ? { whyAt: refusedId } : {})} onClick={() => void act('status')} data-testid="claude-account-refresh">
+            {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
           </Button>
-        ) : null}
-      </div>
+          {!confirm ? (
+            <Button size="sm" why={firstWhy(!data.allowed && (data.why ?? 'not allowed'), data.busy, !!busy && 'Asking…')} {...(!data.allowed && data.why ? { whyAt: refusedId } : data.busy && !data.switch?.waitingForToken ? { whyAt: busyId } : {})} onClick={() => setConfirm(true)} data-testid="claude-account-switch">
+              Switch account…
+            </Button>
+          ) : null}
+        </div>
+      )}
       {confirm && (
         <div className="space-y-2 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-confirm">
           <p className="text-[12.5px] text-ink-2">
             Every instance on this machine stops starting runs; the runs going now finish first (30 minutes at most). Then you paste the token <code>claude setup-token</code> prints for the new account, it goes to every agent user, each is checked, and each instance resumes. An instance whose check fails stays paused until it passes.
           </p>
-          <div className="flex gap-1.5">
-            <Button size="sm" disabled={!!busy} onClick={() => void act('switch')} data-testid="claude-account-switch-confirm">
-              {busy === 'switch' ? 'Starting…' : 'Pause and switch'}
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button size="sm" why={!!busy && 'Asking…'} whyAt={askingId} onClick={() => void act('switch')} data-testid="claude-account-switch-confirm">
+              Pause and switch
             </Button>
-            <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => setConfirm(false)}>
+            <Button size="sm" variant="ghost" why={!!busy && 'Asking…'} whyAt={askingId} onClick={() => setConfirm(false)}>
               Cancel
             </Button>
+            {busy && <Why id={askingId}>Asking…</Why>}
           </div>
         </div>
       )}
       {!data.allowed && data.why && (
-        <p className="text-[12.5px] text-ink-2" data-testid="claude-account-disabled">
+        <p id={refusedId} className="text-[12.5px] text-ink-2" data-testid="claude-account-disabled">
           Read-only: {data.why}.
         </p>
       )}
-      {data.allowed && data.busy && !data.switch?.waitingForToken && <p className="text-[12.5px] text-ink-3">{data.busy[0]!.toUpperCase() + data.busy.slice(1)}.</p>}
+      {data.allowed && data.busy && !data.switch?.waitingForToken && <p id={busyId} className="text-[12.5px] text-ink-3">{data.busy[0]!.toUpperCase() + data.busy.slice(1)}.</p>}
       {open.map((r) => (
         <p key={r.id} className="text-[12.5px] text-ink-3" data-testid="claude-account-request">
           {r.args.join(' ')}: {r.status === 'pending' ? 'waiting for the coordinator' : 'running'} (asked {ago(r.at)} by @{r.by})

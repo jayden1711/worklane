@@ -2,12 +2,12 @@
 // decide from the dashboard alone, each part in its own card, in a fixed order. What the log doesn't have says "not
 // recorded". The page's data is one request (GET /api/decisions/:id, src/decision-detail.ts); the PR body's sections
 // are a second, shown last so their arrival moves nothing above them, and the diff is asked for on a click.
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { ArrowLeft } from 'lucide-react';
 import { api, decide, useView, type DecisionDetail, type DecisionDiff, type DecisionPrBody, type State } from '../api';
 import { navigate } from '../App';
 import { DotPill, FileChip, Loading, StatusMark, ValuePill, type MarkState } from '../components/patterns';
-import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
+import { ago, Badge, Button, Card, cx, Empty, Why } from '../components/ui';
 import { Header } from '../components/Header';
 
 /** Every section, in page order (the render checks render each for every kind). */
@@ -49,6 +49,7 @@ const runMark = (reason: string | null): MarkState => (reason === null ? 'runnin
 function Answer({ d }: { d: DecisionDetail }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const savingId = useId();
   if (d.answer || !d.canAnswer || !d.options.length) return null;
   const answer = async (o: string) => {
     setBusy(o);
@@ -64,10 +65,11 @@ function Answer({ d }: { d: DecisionDetail }) {
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
       {d.options.map((o) => (
-        <Button key={o.option} type="button" size="sm" data-option={o.option} data-testid="decision-detail-option" variant={o.recommended ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o.option)}>
+        <Button key={o.option} type="button" size="sm" data-option={o.option} data-testid="decision-detail-option" variant={o.recommended ? 'default' : /reject|close|deny/.test(o.option) ? 'danger' : 'outline'} why={!!busy && 'Saving…'} whyAt={savingId} onClick={() => void answer(o.option)}>
           {busy === o.option ? `${o.option}…` : o.option}
         </Button>
       ))}
+      {busy && <Why id={savingId}>Saving…</Why>}
       {err && <span className="text-[12px] text-red">{err}</span>}
     </div>
   );

@@ -17,7 +17,8 @@ const ctl = (await import(pathToFileURL(join(dir, 'control-dashboard.mjs')).href
 const map = fm.loadFeatureMap();
 // First run is the sidebar's one row in setup mode only (#468); this instance is configured, so it has every other one
 // but Experiments, a row only where root's file turns experiments on (#581): the demo is a checkout, which has none.
-const sidebarPages = map.pages.filter((p) => p.sidebar && p.id !== 'first-run' && p.id !== 'experiments').length;
+// A group's pages are tabs under one row (#585): the map names them `Group › Tab`.
+const sidebarPages = new Set(map.pages.filter((p) => p.sidebar && p.id !== 'first-run' && p.id !== 'experiments').map((p) => p.sidebar!.split(' › ')[0])).size;
 
 /** In the page: how wide it is against the screen, and every visible control smaller than 44 x 44 px (a link inside a sentence aside). */
 const MEASURE = `(() => {
@@ -93,7 +94,7 @@ test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, an
   add('board', 'close-button', { op: 'click', target: '#nav-drawer [data-testid="nav-drawer-close"]' });
   add('board', 'closed-button', { op: 'eval', expr: CLOSED });
   add('board', 'menu', { op: 'click', target: 'testid:nav-menu' });
-  add('board', 'pick-health', { op: 'click', target: '#nav-drawer [data-testid="nav-health"]' });
+  add('board', 'pick-machine', { op: 'click', target: '#nav-drawer [data-testid="nav-machine"]' });
   add('board', 'settle', { op: 'wait', ms: 400 });
   add('board', 'closed-route', { op: 'eval', expr: CLOSED });
   add('board', 'menu', { op: 'click', target: 'testid:nav-menu' });
@@ -139,7 +140,7 @@ test('on a 390 x 844 phone every page fits the screen with 44 px tap targets, an
   assert.equal(at('board', 'closed-button')[0]!.open, false, 'the close button closes the drawer');
   assert.equal(at('board', 'closed-button')[0]!.focus, 'nav-menu');
   const route = at('board', 'closed-route')[0]!;
-  assert.deepEqual([route.open, route.path, route.focus], [false, '/health', 'nav-menu'], 'picking a page closes the drawer and focus goes to the new page\'s menu button');
+  assert.deepEqual([route.open, route.path, route.focus], [false, '/machine', 'nav-menu'], 'picking a page closes the drawer and focus goes to the new page\'s menu button');
   assert.deepEqual(at('board', 'command-menu')[0], { drawer: false, menu: true, fits: true }, 'Search closes the drawer and opens the command menu, on the screen');
   assert.deepEqual((out.at(-1) as unknown as { errors: unknown[] }).errors, [], 'no console errors');
   // The widths, for the record.

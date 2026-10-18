@@ -18,7 +18,7 @@ import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice
 import type { VoicePrefs } from './voice/prefs';
 import type { Support } from './voice/speech';
 import { WakeIndicator } from './voice/WakeIndicator';
-import { InstanceList, NAV, NavDrawer, NavMenu, SetupModeHidden, SidebarBody, SignInPage, StopBanner, WhoAmI } from './App';
+import { GroupTabs, InstanceList, NAV, NavDrawer, NavMenu, navCounts, SetupModeHidden, SidebarBody, SignInPage, StopBanner, tabsAt, WhoAmI } from './App';
 import { ExtendPage } from './pages/Extend';
 import { ExperimentsPage } from './pages/Experiments';
 import { Header } from './components/Header';
@@ -35,10 +35,15 @@ import { MetricsPanel, MetricsView } from './components/MetricsPanel';
 import { FlakyView } from './components/FlakyPanel';
 import { HarnessEvalsView } from './components/HarnessEvalsPanel';
 import { LearningsView } from './components/LearningsPanel';
+import { DelegationView } from './components/DelegationPanel';
+import type { Delegation } from './api';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
-import { Decisions } from './pages/Decisions';
+import { DecisionCard, Decisions } from './pages/Decisions';
+import type { Decision } from './api';
+import { Badge, Button } from './components/ui';
+import { ValuePill } from './components/patterns';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
 import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
@@ -121,6 +126,12 @@ export const renderHealth = (view: HealthView, instances?: InstanceHealth[]) => 
 export const renderInstanceSettings = (data: InstanceSettingsData) => renderToStaticMarkup(<InstanceSettingsView data={data} />);
 export { boundsOf, LABEL, parseEntry, showValue } from './components/InstanceSettings';
 export const renderMachine = (data: MachineData) => renderToStaticMarkup(<MachineSettingsView data={data} />);
+/** A display chip alone (test/web-buttons.test.ts): a ValuePill or a Badge, in a tone. */
+export const renderChip = (kind: 'value' | 'badge', tone?: string) =>
+  renderToStaticMarkup(kind === 'value' ? <ValuePill {...(tone === 'green' ? { tone } : {})}>approve</ValuePill> : <Badge {...(tone ? { tone: tone as 'ok' } : {})}>landed</Badge>);
+export const renderButton = (variant?: 'default' | 'outline' | 'ghost' | 'danger') => renderToStaticMarkup(<Button {...(variant ? { variant } : {})}>Go</Button>);
+/** One decision card; `sending`: the answer on its way as it draws. */
+export const renderDecisionCard = (d: Decision, sending?: string) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} />);
 /** The Updater setup steps alone; `review` opens one step's review as the server answered it. */
 export const renderUpdaterSetup = (data: MachineData, review: Parameters<typeof UpdaterSetupView>[0]['initialReview'] = null) => renderToStaticMarkup(<UpdaterSetupView data={data} initialReview={review} />);
 export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
@@ -178,6 +189,7 @@ export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<Metric
 export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
 export const renderHarnessEvals = (h: HarnessEvals) => renderToStaticMarkup(<HarnessEvalsView h={h} />);
 export const renderLearnings = (l: Learnings) => renderToStaticMarkup(<LearningsView l={l} />);
+export const renderDelegation = (d: Delegation) => renderToStaticMarkup(<DelegationView d={d} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);
@@ -231,7 +243,7 @@ export const renderNavDrawer = (state: State, o: { open?: boolean; hub?: HubInfo
     <NavMenu.Provider value={{ open, setOpen: () => {} }}>
       <Header title="Board" />
       <NavDrawer open={open} setOpen={() => {}}>
-        <SidebarBody state={state} path="/" counts={{}} health={{ hub: o.hub ?? null, status, ...(o.why ? { why: o.why } : {}) }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
+        <SidebarBody state={state} path="/" counts={navCounts(state)} health={{ hub: o.hub ?? null, status, ...(o.why ? { why: o.why } : {}) }} live theme="light" toggleTheme={() => {}} openSearch={() => {}} switcher={switcher} />
       </NavDrawer>
     </NavMenu.Provider>,
   );
@@ -248,6 +260,9 @@ export const renderHeader = (title: string) => renderToStaticMarkup(<Header titl
 export const navRows = NAV.map((n) => ({ to: n.to, label: n.label, testId: n.testId }));
 /** #581: the sidebar's rows for a state, the old addresses' redirects, and Extend's tabs. */
 export { navFor } from './App';
+/** #585: a page's header at a path, as the dashboard draws it there: with its sidebar group's tabs and their counts. */
+export const renderAt = (path: string, state: State, title = 'Page') => renderToStaticMarkup(<GroupTabs.Provider value={tabsAt(path, state, navCounts(state))}><Header title={title} /></GroupTabs.Provider>);
+export { navCounts } from './App';
 export { landOn, redirectFor } from './redirects';
 export { EXTEND_TABS } from './pages/Extend';
 

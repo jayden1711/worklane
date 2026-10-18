@@ -1,8 +1,8 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { decide, type Decision, type State } from '../api';
 import { navigate, pageKey, typing } from '../App';
 import { useEntrance, ValuePill } from '../components/patterns';
-import { ago, Avatar, Badge, Button, cx, Empty, Kbd } from '../components/ui';
+import { ago, Avatar, Badge, Button, cx, Empty, Kbd, Why } from '../components/ui';
 import { Header } from '../components/Header';
 import { useArrivalOrder } from '../arrival-order';
 
@@ -51,8 +51,10 @@ export function RecommendationText({ label, text }: { label: string; text: strin
  * an inset list, and each option is a row; picking one answers it. Only the
  * decision's owner or a writer gets the rows (canAnswer); everyone else sees whom it waits on.
  */
-export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decision; selected: boolean; onAnswered?: () => void; proposed?: string | null }) {
-  const [busy, setBusy] = useState<string | null>(null);
+export function DecisionCard({ d, selected, onAnswered, proposed, sending = null }: { d: Decision; selected: boolean; onAnswered?: () => void; proposed?: string | null; sending?: string | null }) {
+  // `sending`: an answer already on its way when the card draws (the render checks).
+  const [busy, setBusy] = useState<string | null>(sending);
+  const savingId = useId();
   const [err, setErr] = useState<string | null>(null);
   const answer = async (a: string) => {
     setBusy(a);
@@ -114,7 +116,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
           // destructive ones (reject, close) are red, the rest raised; each carries its key.
           <div className="mt-3 flex flex-wrap items-center gap-2" role="group" aria-label="Answer">
             {d.options.map((o, i) => (
-              <Button key={o} type="button" size="sm" data-option={o} data-testid="decision-option" variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} disabled={!!busy} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
+              <Button key={o} type="button" size="sm" data-option={o} data-testid="decision-option" variant={recommended(o) ? 'default' : /reject|close/.test(o) ? 'danger' : 'outline'} why={!!busy && 'Saving…'} whyAt={savingId} onClick={() => void answer(o)} title={recommended(o) ? 'recommended' : undefined}>
                 {busy === o ? `${o}…` : o}
                 {proposed === o && (
                   <span className="rounded-full bg-blue-tint px-1.5 text-[10.5px] font-medium text-blue-ink" data-testid="decision-proposed">
@@ -124,6 +126,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed }: { d: Decisio
                 <span className={cx('inline-flex h-4 min-w-4 items-center justify-center rounded-[4px] px-1 font-mono text-[10px]', recommended(o) ? 'bg-surface/20 text-surface' : 'bg-inset text-ink-3 shadow-hairline')}>{i + 1}</span>
               </Button>
             ))}
+            {busy && <Why id={savingId}>Saving…</Why>}
           </div>
         )}
       </div>
