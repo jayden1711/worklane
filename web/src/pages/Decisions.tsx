@@ -303,7 +303,7 @@ export function DecisionCard({ d, selected, onAnswered, proposed, sending = null
   const options = d.options.map((option) => ({ option, does: d.effects?.find((e) => e.option === option)?.does }));
   const entrance = useEntrance();
   return (
-    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-blue')} data-decision={d.id} data-testid="decision-card" style={entrance}>
+    <div id={d.id} className={cx('overflow-hidden rounded-card bg-surface shadow-card transition-shadow', selected && 'ring-2 ring-ring')} data-decision={d.id} data-testid="decision-card" style={entrance}>
       <div className="primitive-card-pad" data-testid="decision-body">
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3" data-testid="decision-meta">
           <Avatar login={d.owner} size={18} />
