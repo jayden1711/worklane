@@ -730,7 +730,7 @@ export abstract class Channel extends ResearchOnDemand {
     }
     for (const e of this.d.log.read(0, ['claude_auth.recovered'])) {
       const x = e.payload as EventPayload<'claude_auth.recovered'>;
-      if (posted.has(`claude-auth:${x.hold_id}`) && !posted.has(`claude-auth-ok:${x.hold_id}`)) await this.channelSend(src, `claude-auth-ok:${x.hold_id}`, { channel }, { kind: 'notice', text: authRecoveredPost(x.login, { instance: this.d.instance }).slice(0, REPLY_CHARS) });
+      if (posted.has(`claude-auth:${x.hold_id}`) && !posted.has(`claude-auth-ok:${x.hold_id}`)) await this.channelSend(src, `claude-auth-ok:${x.hold_id}`, { channel }, { kind: 'notice', text: authRecoveredPost({ instance: this.d.instance }).slice(0, REPLY_CHARS) });
     }
     // Each new thread explained in plain language, once.
     await this.explainThreads(cfg, src);
