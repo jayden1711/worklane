@@ -58,8 +58,8 @@ CLAUDE_VERSION=2.1.296
 # this script ships in (package.json's repository, beside it or one level up). Both lines are written by
 # `node scripts/pin-engine.mjs <tag>` once the signed tag exists: it checks the tag's signature and that its commit
 # is a release commit, then writes them. Never by hand: an empty or partial ENGINE_COMMIT is refused below.
-ENGINE_TAG=v0.5.1
-ENGINE_COMMIT=c9920af133b5bd789c39810943ab15ed254adc71
+ENGINE_TAG=v0.5.2
+ENGINE_COMMIT=0b98938563617e74686bf913fc922ee77cb68f90
 
 PREFIX="${WORKLANE_PREFIX:-$HOME/.local}"
 DRY=0 NO_REPO=0 HARDENED=0 YES=0 AFTER_CREDENTIALS=0
