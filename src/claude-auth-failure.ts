@@ -90,6 +90,16 @@ export function authIncidentText(holds: readonly OpsHold[]): { detail: string; f
   };
 }
 
+/**
+ * The incident's detail for the machine's owners only (Incident.ownerDetail): each held login as Claude names it, with
+ * Claude's words and the last check's. Never posted: the ops post reads the incident's `detail` (authIncidentText),
+ * and the Health page shows this one to the machine owners alone (src/watchdog/view.ts, #680).
+ */
+export function authIncidentOwnerDetail(holds: readonly AuthHold[]): string {
+  const named = holds.map((h) => `${h.login} (${h.lane} lane, since ${h.since}): ${h.detail.slice(0, 300)}${h.lastCheck && !h.lastCheck.ok ? `; last check at ${h.lastCheck.at}: ${h.lastCheck.detail.slice(0, 120)}` : ''}`).join('; ');
+  return `Claude refused ${holds.length === 1 ? 'a login' : `${holds.length} logins`} this instance's runs use: ${named}. No new Claude run starts on it until a call on it succeeds`;
+}
+
 /** One held login, as the log has it. */
 export interface AuthHold {
   /** The login's key: its config dir (a path), or DEFAULT_LOGIN_KEY. */

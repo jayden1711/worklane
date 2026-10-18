@@ -19,7 +19,7 @@ import { buildReport } from '../src/reports.js';
 import { ignoredIssues } from '../src/first-task.js';
 import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
-import { ACCOUNT, ACCOUNT_TEXT, accountDashboard, apiPaths, STRANGER } from './account-fixture.js';
+import { ACCOUNT, ACCOUNT_LOCAL, ACCOUNT_TEXT, accountDashboard, apiPaths, STRANGER } from './account-fixture.js';
 import { asPerson, exampleProject } from './helpers.js';
 
 const { accountSet } = profiles;
@@ -81,8 +81,14 @@ test('#567, writer: the accounts panel refused; the sign-in banner keeps the log
     assert.equal(usage.signinFailed[0]!.login, ACCOUNT.email);
     assert.match(usage.signinFailed[0]!.detail, /OAuth token has expired/);
     assert.match(usage.signinFailed[0]!.lastCheck.detail, /still refused/);
-    // The incident's detail names the login too, as the design gives a writer every incident's detail.
-    assert.match((await get('/api/health/incidents', as)).text, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
+    // #680: the incident's detail, which the ops channel is posted too, names no account for a writer: the account
+    // is the machine owners' (the same check as the accounts panel). Its detail, tried and fix are still there.
+    const incidents = await get('/api/health/incidents', as);
+    assert.doesNotMatch(incidents.text, ACCOUNT_TEXT, incidents.text);
+    assert.doesNotMatch(incidents.text, ACCOUNT_LOCAL, 'nor the email\'s local part');
+    const red = (JSON.parse(incidents.text) as { open: { kind: string; detail?: string; ownerDetail?: string }[] }).open.find((x) => x.kind === 'claude_auth')!;
+    assert.match(red.detail ?? '', /the default lane's login/, 'a writer still reads what broke');
+    assert.equal(red.ownerDetail, undefined);
     // The report preview is the scheduled report, which is posted on the repo: it names no account.
     const report = await get('/api/report', as);
     assert.equal(report.status, 200);
@@ -107,6 +113,28 @@ test('#567, owner who is a machine owner: the accounts panel with the email, pla
     const usage = JSON.parse((await get('/api/usage', as)).text) as { signinFailed: { login: string }[]; canRecheckSignin: boolean };
     assert.equal(usage.signinFailed[0]!.login, ACCOUNT.email);
     assert.equal(usage.canRecheckSignin, true);
+    // #680: the Health page keeps the account for the machine owners: the red incident's detail names the login and
+    // quotes Claude's words.
+    const incidents = JSON.parse((await get('/api/health/incidents', as)).text) as { open: { kind: string; detail?: string; ownerDetail?: string }[] };
+    const red = incidents.open.find((x) => x.kind === 'claude_auth')!;
+    assert.match(red.detail ?? '', new RegExp(`${ACCOUNT.email.replace(/[.]/g, '\\.')}.*OAuth token has expired`));
+    assert.equal(red.ownerDetail, undefined, 'one detail field, the owners\' in its place');
+  } finally {
+    await d.close();
+  }
+});
+
+test("#680, an instance owner who isn't a machine owner: the Health page's incident names no account, as a writer's doesn't", { skip: !posix }, async () => {
+  const { d, get } = await accountDashboard({ machineOwners: ['example-machine-admin'] });
+  try {
+    const as = asPerson('example-owner');
+    assert.equal((await get('/api/claude-account', as)).status, 403, 'not a machine owner: the accounts panel is refused (#567)');
+    const incidents = await get('/api/health/incidents', as);
+    assert.match(incidents.text, /Claude sign-in is failing/);
+    assert.doesNotMatch(incidents.text, ACCOUNT_TEXT, incidents.text);
+    assert.doesNotMatch(incidents.text, ACCOUNT_LOCAL);
+    const red = (JSON.parse(incidents.text) as { open: { kind: string; detail?: string }[] }).open.find((x) => x.kind === 'claude_auth')!;
+    assert.match(red.detail ?? '', /the default lane's login/, 'what broke, as a writer reads it');
   } finally {
     await d.close();
   }

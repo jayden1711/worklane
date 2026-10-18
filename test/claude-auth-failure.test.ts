@@ -156,6 +156,8 @@ test("watchdog: one auth_failed run raises a red claude_auth naming the instance
 /** A made-up account whose login is an email; Claude's words and the check's name it too, as they can. */
 const SOMEONE = 'someone@example.com';
 const NAMED = /someone/i;
+/** A finding's machine-owners detail (read untyped, so this file builds on an engine without it). */
+const ownerOf = (f: object) => (f as { ownerDetail?: string }).ownerDetail;
 
 test("#680: a refused login's ops notice and its incident post name neither the account's email nor its local part, even when Claude's words do; they say which instance and lane, and send the owner to the Machine page", () => {
   const events = [
@@ -176,6 +178,33 @@ test("#680: a refused login's ops notice and its incident post name neither the 
     assert.match(text, /Machine page/, `${what} sends the owner to the Machine page`);
   }
   assert.match(notice, /https:\/\/dashboard\.example\.test\/machine/);
+  // The machine owners' detail (Health page only, never posted) keeps the account and Claude's words.
+  assert.match(ownerOf(f) ?? '', /someone@example\.com .*OAuth token has expired/);
+  assert.doesNotMatch(postText({ ...incident, ownerDetail: ownerOf(f) } as Incident, 'raised', { dashboardUrl: DASH_URL }), NAMED, 'postText never reads ownerDetail');
+});
+
+test("#680: claude auth status printing the account, not JSON, stops the run auth_mismatch; the claude_auth incident's ops post names neither the email nor its local part, and only the machine owners' detail keeps what it printed", { skip: posixOnly }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-auth-'));
+  const bin = join(dir, 'claude');
+  writeFileSync(bin, `#!/usr/bin/env node\nif (process.argv[2] === 'auth') { console.log(${JSON.stringify(`Logged in as ${SOMEONE}`)}); process.exit(0); }\nprocess.exit(1);\n`);
+  chmodSync(bin, 0o755);
+  let t = Date.now();
+  const runner = new CliRunner('cli', { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: join(dir, 'login') }, bin, undefined, undefined, undefined, { now: () => t, sleep: async (ms) => ((t += ms), true) });
+  const out = await runner.run(req(dir));
+  assert.equal(out.reason, 'auth_mismatch');
+  assert.match(out.detail, /claude reports unknown: Logged in as someone@example\.com/, "the run's detail carries what the CLI printed");
+  const f = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: out.detail })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.equal(f.key, 'alice');
+  const incident: Incident = { id: 'inc-2', kind: 'claude_auth', key: f.key, instance: 'alice', severity: 'red', title: 'Claude sign-in is failing', detail: f.detail, fix: f.fix, tried: f.tried, since: '2026-10-15T06:00:00.000Z', lastSeen: '2026-10-15T06:10:00.000Z', resolvedAt: null, posted: {}, ...(ownerOf(f) !== undefined ? { ownerDetail: ownerOf(f) } : {}) } as Incident;
+  const posted = postText(incident, 'raised', { dashboardUrl: 'https://dashboard.example.test' });
+  assert.doesNotMatch(posted, NAMED, `the ops post names the account: ${posted}`);
+  assert.match(posted, /a run stopped on its Claude login: claude auth status didn't say which auth method/);
+  assert.match(ownerOf(f) ?? '', /Logged in as someone@example\.com/, "the machine owners' Health view keeps what it printed");
+  // A method the runner knows is named; one it doesn't is not repeated.
+  const known = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: 'runtime cli expects claude.ai or oauth_token auth, claude reports api_key; not starting (no silent billing switch)' })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.match(known.detail, /claude reports api_key auth, not the one this runtime expects/);
+  const odd = red(facts([ev(1, 'run.finished', { issue: 4, role: 'worker', reason: 'auth_mismatch', detail: `runtime cli expects claude.ai or oauth_token auth, claude reports ${SOMEONE}; not starting` })], Date.parse('2026-10-15T06:10:00.000Z')))[0]!;
+  assert.doesNotMatch(odd.detail, NAMED);
 });
 
 // ---- 3. the pause, the chat's words, the way out
