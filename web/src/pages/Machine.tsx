@@ -81,8 +81,8 @@ export function MachinePage({ state }: { state: State }) {
           panels={[
             (loaded) => <TestRunsPanel onLoaded={loaded} />,
             (loaded) => <HealthPanel onLoaded={loaded} />,
-            // The agents' Claude account: the machine owners' only (it renders nothing for anyone else).
-            (loaded) => <ClaudeAccountPanel onLoaded={loaded} />,
+            // The agents' Claude account: the machine owners' only; anyone else sees whether one is set, nothing more.
+            (loaded) => <ClaudeAccountPanel onLoaded={loaded} accountSet={state.claudeAccount?.set} />,
             // Tailscale and HTTPS for the hub (the first-run wizard's screen): the machine owners' only, on a server instance.
             (loaded) => <TailscaleSetupPanel onLoaded={loaded} />,
             // The machine settings are the owners' and writers' (a viewer's request for them is refused).
