@@ -46,10 +46,13 @@
   --shadow-raised: 0 0 0 1px var(--line), var(--shadow-md);
   --shadow-overlay: 0 0 0 1px var(--line), 0 25px 50px 0 #0000000d, 0 12px 24px 0 #0000000a, 0 6px 12px 0 #00000008;
 }
-/* Light mode only: the hairline draws the edge of fields and toggles, so it takes the control-edge colour. Here
-   rather than in :root, which dark mode also reads (it sets no hairline of its own), so dark mode is unchanged. */
+/* Light mode only: the hairline draws the edge of fields and toggles, so it takes the control-edge colour; the
+   focus and selection ring is a darker accent, since the accent itself is under 3:1 here (#b5543a is 3.49:1 or more
+   on every light background). Here rather than in :root or the shared block below, which dark mode also reads, so
+   dark mode is unchanged. */
 :root:not(.dark) {
   --shadow-hairline: 0 0 0 1px var(--line-strong);
+  --ring: #b5543a;
 }
 .dark {
   --page: oklch(20.9% 0.004 264.477);

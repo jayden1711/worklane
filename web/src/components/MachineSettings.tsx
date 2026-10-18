@@ -202,7 +202,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
               refusal={refusal}
               proposed={slotsProposed}
               onConfirm={send('slots')}
-              input={<input value={slots} onChange={(e) => setSlots(e.target.value)} aria-label="slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
+              input={<input value={slots} onChange={(e) => setSlots(e.target.value)} aria-label="slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]" data-testid="machine-setting-input" />}
             />
             {ts ? (
               <ChangeRow
@@ -214,7 +214,7 @@ export function MachineSettingsView({ data, onChanged = () => {} }: { data: Mach
                 refusal={refusal}
                 proposed={testSlotsProposed}
                 onConfirm={send('testSlots')}
-                input={<input value={testSlots} onChange={(e) => setTestSlots(e.target.value)} aria-label="test-run slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="machine-setting-input" />}
+                input={<input value={testSlots} onChange={(e) => setTestSlots(e.target.value)} aria-label="test-run slot cap new value" className="h-7 w-24 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]" data-testid="machine-setting-input" />}
               />
             ) : null}
             <ChangeRow

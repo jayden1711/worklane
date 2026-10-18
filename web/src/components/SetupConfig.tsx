@@ -7,7 +7,7 @@ import { getSetupRepos, setupAnswers, setupDraft, setupDraftValues, setupOrigin,
 import { RepoConfigForm } from './RepoConfigForm';
 import { Button, cx } from './ui';
 
-const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-surface px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
 
 function useAct() {

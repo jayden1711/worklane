@@ -41,7 +41,10 @@ const noComments = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, '');
 function blockText(selector: string): string | undefined {
   const want = selector.replace(/\s+/g, '');
   for (const m of css.matchAll(/([^{}]*)\{[^{}]*\}/g)) {
-    const head = (m[1] ?? '').slice((m[1] ?? '').lastIndexOf(';') + 1);
+    // The selector starts after the previous declaration or comment (a `;` inside a comment is not a declaration's end).
+    const before = m[1] ?? '';
+    const commentEnd = before.lastIndexOf('*/');
+    const head = before.slice(Math.max(before.lastIndexOf(';') + 1, commentEnd < 0 ? 0 : commentEnd + 2));
     if (noComments(head).replace(/\s+/g, '') !== want) continue;
     const lead = /^(?:\s|\/\*[\s\S]*?\*\/)*/.exec(head)?.[0].length ?? 0;
     return m[0].slice(m[0].length - (head.length - lead) - (m[0].length - (m[1] ?? '').length));
@@ -249,6 +252,48 @@ test("a control's edge is 3:1 on every resting light background", () => {
     }
   }
   assert.deepEqual(failing, [], 'a control edge is under WCAG 1.4.11');
+});
+
+test('the focus ring is 3:1 on every light background', () => {
+  // Focus can land on a hovered or active row, so hover backgrounds count too.
+  const tokens = lightTokens();
+  const ring = parseColour(resolve('var(--ring)', tokens));
+  const failing = BACKGROUNDS.map((bg) => ({ bg, r: contrast(ring, parseColour(resolve(`var(--${bg})`, tokens))) }))
+    .filter(({ r }) => r < 3)
+    .map(({ bg, r }) => `--ring (${hexOf(ring)}) on ${bg}: ${r.toFixed(2)}:1, needs 3:1`);
+  assert.deepEqual(failing, [], 'the focus ring is under WCAG 1.4.11');
+});
+
+/** Focus and selection rings that still draw the accent, in files other open PRs hold; each goes once that PR lands. */
+const RING_OWED: Record<string, string> = {
+  'web/src/components/FirstTask.tsx:8': 'focus:shadow-[0_0_0_1px_var(--blue)]: after #664 / #633 merge',
+  'web/src/pages/Board.tsx:268': 'focus:shadow-[0_0_0_1px_var(--blue)]: after #664 / #633 merge',
+  'web/src/pages/Decisions.tsx:304': 'ring-blue (the selected decision): switched in #664',
+};
+
+test('focus and selection rings use the ring token, not the accent', () => {
+  // The accent is 2.96:1 on the page and 2.50:1 on a card; --ring is the light-mode ring that reaches 3:1. In dark mode
+  // --ring is the accent, so a switch to it changes nothing there.
+  const accent = /(?:^|-)blue(?:\/\d+)?$|var\(--blue\)/;
+  const found = new Map<string, string>();
+  for (const file of files(webSrc)) {
+    const rel = file.slice(repoRoot.length);
+    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      for (const tok of line.match(/[^\s"'`]+/g) ?? []) {
+        const [, variants = '', utility = ''] = /^((?:[\w-]+:)*)(.*)$/.exec(tok) ?? [];
+        const focus = /focus/.test(variants);
+        const ring = /^ring-blue(?:\/\d+)?$/.test(utility);
+        if ((focus && accent.test(utility)) || ring) found.set(`${rel}:${i + 1}`, tok);
+      }
+    });
+  }
+  for (const m of css.matchAll(/([^{}]*)\{([^{}]*)\}/g))
+    if (/focus/.test(m[1] ?? '') && /var\(--blue\)/.test(m[2] ?? '')) found.set(`web/src/styles.css: ${(m[1] ?? '').trim()}`, 'var(--blue)');
+  for (const [where, why] of Object.entries(RING_OWED)) {
+    assert.ok(found.has(where), `${where} no longer draws the accent: drop it from RING_OWED (${why})`);
+    found.delete(where);
+  }
+  assert.deepEqual([...found].map(([where, tok]) => `${where}: ${tok}`), [], 'a focus or selection ring draws the accent: use var(--ring) / ring-ring');
 });
 
 /** Each native control's opening tag in web/src (`<input`, `<select`, `<textarea`, `<button` up to its `>`), with the

@@ -12,7 +12,7 @@ import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../ref
 import { ago, Badge, Button, cx } from './ui';
 
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-surface px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
-const field = 'h-8 min-w-0 max-w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
+const field = 'h-8 min-w-0 max-w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]';
 const linkButton = 'inline-flex h-7 items-center rounded-full px-3 text-[12.5px] font-medium';
 
 type Ready = Extract<SourceSetup, { available: true }>;

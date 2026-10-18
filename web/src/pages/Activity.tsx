@@ -31,7 +31,7 @@ export function ActivityPage({ state }: { state: State }) {
   return (
     <div data-testid="page-activity">
       <Header title="Activity" sub="every event from the log, newest first">
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]" />
+        <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Filter…" className="h-7 w-48 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--ring)]" />
       </Header>
       <div className="space-y-3 p-6">
         {cited && !state.activity.some((a) => String(a.id) === cited) && (

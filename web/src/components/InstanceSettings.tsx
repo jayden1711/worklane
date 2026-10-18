@@ -171,7 +171,7 @@ function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: un
                 ))}
               </div>
             ) : (
-              <input value={entry} onChange={(e) => (setEntry(e.target.value), setReview(null))} aria-label={`${s.key} new value`} className="h-7 w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]" data-testid="setting-input" />
+              <input value={entry} onChange={(e) => (setEntry(e.target.value), setReview(null))} aria-label={`${s.key} new value`} className="h-7 w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]" data-testid="setting-input" />
             )}
             <div className="text-[11.5px] text-ink-3" data-testid="setting-bounds">
               {boundsOf(s.key, d)}
