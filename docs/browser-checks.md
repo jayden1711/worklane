@@ -62,7 +62,9 @@ name other than lowercase letters, digits and dashes is refused, with the reason
 
    If the desktop shot fails, the run fails. If the dark or phone shot fails, the evidence says why in its place,
    and the run doesn't fail for it. The dark and phone shots share a budget of 10 s, and each of their commands gets
-   5 s (both scaled like the timeouts below). A view not reached in the budget is listed as not tried.
+   5 s or what is left of the budget, whichever is less (both scaled like the timeouts below). So together they
+   never take longer than the budget, however slow the page or Chrome is. A view the budget cuts off is listed as
+   skipped, and a view not reached in it as not tried; neither fails the run.
 
    The verdict is about the flow only. Console errors and failed requests seen once the desktop shot is taken
    come from the dark and phone relayout, so they are listed per view, "not judged" (20 at most), and never fail

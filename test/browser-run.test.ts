@@ -159,19 +159,56 @@ test('what the page does during the dark and phone shots is listed per view and 
 
 test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
-  // The page answers the dark view's frame wait late: by then the budget is spent.
+  // The page answers the dark view's frame wait late: the budget ends while it waits, so the dark view is cut off
+  // there and the phone view is never started.
   const { cdp, sent } = fakeCdp(undefined, async (method) => {
     if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 80));
   });
   const r = await captureShots(cdp, dir, 'home', { commandMs: 1234, budgetMs: 50 });
   assert.deepEqual(r.views, [
-    { view: 'dark', path: join(dir, 'home.dark.png') },
+    { view: 'dark', error: "skipped: the extra shots' 0.05 s ran out while it was being taken" },
     { view: 'phone', error: "not tried: the extra shots' 0.05 s were spent" },
   ]);
+  assert.equal(sent.filter((s) => s.method === 'Page.captureScreenshot').length, 1, 'only the desktop shot was taken');
   assert.equal(sent.some((s) => s.method === 'Emulation.setDeviceMetricsOverride'), false, 'the phone view was not set up');
   const [desktop, ...extra] = sent;
   assert.equal(desktop!.ms, undefined, 'the desktop shot keeps the usual command timeout');
   assert.ok(extra.length > 0 && extra.every((s) => s.ms === 1234), JSON.stringify(extra));
+});
+
+test('the dark and phone shots never take longer than their budget together, however slow each command is: one cut off is listed as skipped and never fails the run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  // Chrome answers each extra emulation and screenshot just inside the per-command timeout (the frame wait is quick).
+  // Checked per view only, this budget lets the phone view start after the dark one and run its four commands to
+  // the end: about 2.5 s for a 1.1 s budget.
+  let captures = 0;
+  const { cdp } = fakeCdp(undefined, async (method) => {
+    if (method === 'Page.captureScreenshot' && ++captures === 1) return; // the desktop shot, which keeps its own timeout
+    if (method.startsWith('Emulation.') || method === 'Page.captureScreenshot') await new Promise((r) => setTimeout(r, 390));
+  });
+  const ev = blankEvidence();
+  const t0 = Date.now();
+  const shots = await captureShots(cdp, dir, 'home', { commandMs: 400, budgetMs: 1100 });
+  const took = Date.now() - t0; // the desktop shot answers at once, so this is the extra shots' time
+  assert.ok(took < 1100 + 250, `the extra shots took ${took} ms, past their 1100 ms budget`);
+  assert.deepEqual(shots.views, [
+    { view: 'dark', path: join(dir, 'home.dark.png') },
+    { view: 'phone', error: "skipped: the extra shots' 1.1 s ran out while it was being taken" },
+  ]);
+  assert.equal(existsSync(join(dir, 'home.phone.png')), false);
+  ev.views = shots.views;
+  const verdict = judgeFlow(ev, thresholds);
+  assert.equal(verdict.pass, true, `a view the budget cut off is never a reason: ${verdict.reasons.join('; ')}`);
+
+  // The frame wait answers just before the budget ends: the pause after it is cut short too, not a full 250 ms.
+  const late = fakeCdp(undefined, async (method) => {
+    if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 590));
+  });
+  const t1 = Date.now();
+  const lateShots = await captureShots(late.cdp, join(dir, 'late'), 'home', { commandMs: 1000, budgetMs: 600 });
+  const lateTook = Date.now() - t1;
+  assert.ok(lateTook < 600 + 120, `the extra shots took ${lateTook} ms, past their 600 ms budget`);
+  assert.deepEqual(lateShots.views.map((v) => ('error' in v ? v.error.split(':')[0] : 'taken')), ['skipped', 'not tried']);
 });
 
 /** A PNG's width in pixels (its IHDR chunk). */

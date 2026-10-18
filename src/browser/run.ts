@@ -85,11 +85,14 @@ export const DESKTOP_VIEWPORT = { width: 1440, height: 1000, deviceScaleFactor: 
 /** A common phone's CSS viewport, for the phone shot: no more pixels than the desktop shot. */
 export const PHONE_VIEWPORT = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } as const;
 
-/** Two frames (at most 500 ms, should frames not come), then a moment for a theme's transitions to finish. */
-async function settle(cdp: Pick<Cdp, 'send'>, ms: number) {
-  await evalIn(cdp, 'new Promise((ok) => { requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 500); })', ms);
-  await sleep(250);
+/** Two frames (at most 500 ms, should frames not come), then a moment (never past `left()`) for a theme's transitions. */
+async function settle(cdp: Pick<Cdp, 'send'>, left: () => number) {
+  await evalIn(cdp, 'new Promise((ok) => { requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 500); })');
+  await sleep(Math.min(250, Math.max(0, left())));
 }
+
+/** The extra shots' shared budget ran out while a view was being taken: the view is listed as skipped. */
+class BudgetSpent extends Error {}
 
 /**
  * A shot's file name. INVARIANT: no two (flow, view) pairs share one: flow names are lowercase letters, digits and
@@ -105,8 +108,9 @@ export const shotName = (flow: string, view?: ShotView) => (view ? `${flow}.${vi
  * view before it is set up, so what the page does from then on is attributed to it (drive() records it unjudged).
  * INVARIANT: three shots at most per run, each of the viewport only (never the whole page), so a run's evidence
  * stays bounded however long the app's page is. The dark and phone views together get `budgetMs` (10 s, scaled
- * like every browser timeout) and each of their commands `commandMs` (5 s, scaled): a page or Chrome that stalls
- * them costs seconds, and a view not reached in the budget says so.
+ * like every browser timeout) and each of their commands `commandMs` (5 s, scaled) or what is left of the budget,
+ * whichever is less: a page or Chrome that stalls them costs `budgetMs` at most, a view the budget cuts off is
+ * listed as skipped, and one not reached as not tried.
  */
 export async function captureShots(
   cdp: Pick<Cdp, 'send'>,
@@ -117,36 +121,57 @@ export async function captureShots(
   const commandMs = o.commandMs ?? browserTimeouts().commandMs / 6;
   const budgetMs = o.budgetMs ?? commandMs * 2;
   mkdirSync(outDir, { recursive: true });
-  const shoot = async (name: string, ms?: number) => {
-    // No `ms` (the desktop shot): the usual command timeout.
-    const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' }, ms);
+  const shoot = async (via: Pick<Cdp, 'send'>, name: string) => {
+    const { data } = await via.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
     const path = join(outDir, name);
     writeFileSync(path, Buffer.from(data, 'base64'));
     return path;
   };
-  const screenshot = await shoot(shotName(flow));
+  // The desktop shot: through `cdp` itself, so with the usual command timeout and no budget.
+  const screenshot = await shoot(cdp, shotName(flow));
+  const start = Date.now();
+  // WHY the flag: a timer may fire a millisecond before Date.now() says the budget is gone; once it has cut a
+  // command off, the budget is spent, whatever the clock reads.
+  let cutOff = false;
+  const left = () => (cutOff ? 0 : budgetMs - (Date.now() - start));
+  // INVARIANT: no extra command outlives the shared budget. Each waits for its answer (commandMs at most) or for the
+  // budget's end, whichever comes first, so the dark and phone views together never take longer than budgetMs.
+  const extra: Pick<Cdp, 'send'> = {
+    async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+      const ms = left();
+      if (ms <= 0) throw new BudgetSpent();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cut = new Promise<never>((_, fail) => (timer = setTimeout(() => ((cutOff = true), fail(new BudgetSpent())), ms)));
+      try {
+        return await Promise.race([cdp.send<T>(method, params, commandMs), cut]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  };
   const set: Record<ShotView, () => Promise<unknown>> = {
-    dark: () => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, commandMs),
+    dark: () => extra.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }),
     // WHY: an empty list clears the dark emulation first, so a failed dark shot never leaves the phone shot dark.
     phone: async () => {
-      await cdp.send('Emulation.setEmulatedMedia', { features: [] }, commandMs);
-      await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_VIEWPORT }, commandMs);
+      await extra.send('Emulation.setEmulatedMedia', { features: [] });
+      await extra.send('Emulation.setDeviceMetricsOverride', { ...PHONE_VIEWPORT });
     },
   };
   const views: ViewShot[] = [];
-  const start = Date.now();
   for (const view of ['dark', 'phone'] as const) {
-    if (Date.now() - start >= budgetMs) {
+    if (left() <= 0) {
       views.push({ view, error: `not tried: the extra shots' ${budgetMs / 1000} s were spent` });
       continue;
     }
     o.onView?.(view);
     try {
       await set[view]();
-      await settle(cdp, commandMs);
-      views.push({ view, path: await shoot(shotName(flow, view), commandMs) });
+      await settle(extra, left);
+      views.push({ view, path: await shoot(extra, shotName(flow, view)) });
     } catch (e) {
-      views.push({ view, error: (e as Error).message.split('\n')[0]!.slice(0, 300) });
+      // A view the budget cut off is skipped, like one never tried: a note in the evidence, never a failure.
+      if (e instanceof BudgetSpent) views.push({ view, error: `skipped: the extra shots' ${budgetMs / 1000} s ran out while it was being taken` });
+      else views.push({ view, error: (e as Error).message.split('\n')[0]!.slice(0, 300) });
     }
   }
   return { screenshot, views };
