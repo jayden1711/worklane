@@ -8,13 +8,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 
 /** A remote, a clone people push from, and the coordinator's clone the watch reads. */
-function world(o: { config?: string } = {}) {
+function world(o: { config?: string; files?: Record<string, string> } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'main-watch-'));
   const remote = join(base, 'remote.git');
   const person = join(base, 'person');
@@ -22,10 +22,11 @@ function world(o: { config?: string } = {}) {
   git(base, 'init', '-q', '-b', 'main', person);
   writeFileSync(join(person, 'a.txt'), 'a\n');
   git(person, 'add', 'a.txt');
-  if (o.config !== undefined) {
-    mkdirSync(dirname(join(person, CONFIG_PATH)), { recursive: true });
-    writeFileSync(join(person, CONFIG_PATH), o.config);
-    git(person, 'add', CONFIG_PATH);
+  const files = { ...(o.config !== undefined ? { [CONFIG_PATH]: o.config } : {}), ...o.files };
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(person, path)), { recursive: true });
+    writeFileSync(join(person, path), text);
+    git(person, 'add', path);
   }
   git(person, ...ident, 'commit', '-q', '-m', 'init');
   git(person, 'remote', 'add', 'origin', remote);
@@ -66,7 +67,8 @@ function fakeGitHub() {
   const roles = new Map<string, Role | null>();
   /** GitHub's compare, by `base...head`; not set: head is behind base (not in that merge). */
   const compares = new Map<string, Compared>();
-  const g = { protection: 'none' as 'enforced' | 'none', now: 0 };
+  /** `workflows`: the Actions workflows' list; null: GitHub answered 403 or 404; 'throw': any other error. */
+  const g = { protection: 'none' as 'enforced' | 'none', now: 0, workflows: null as WorkflowAt[] | null | 'throw' };
   const call = (what: string) => calls.push({ at: g.now, what });
   const api: MainWatchApi = {
     protection: async () => (call('protection'), g.protection),
@@ -76,6 +78,11 @@ function fakeGitHub() {
     statuses: async (sha) => (call(`statuses ${sha.slice(0, 7)}`), statuses.get(sha) ?? []),
     role: async (login) => (call(`role ${login}`), roles.get(login) ?? null),
     compare: async (base, head) => (call(`compare ${base.slice(0, 7)}...${head.slice(0, 7)}`), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
+    workflows: async () => {
+      call('workflows');
+      if (g.workflows === 'throw') throw new Error('GitHub 502 reading the Actions workflows');
+      return g.workflows;
+    },
   };
   /** A PR merged at `at` by `by`, its merge commit `merge`, its head `head`. */
   const pr = (number: number, merge: string, head: string, at: string, by: string | null, bot = false): MergedPull => {
@@ -92,7 +99,7 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
 function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] } = {}) {
-  const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string }[] };
+  const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string; workflow?: WorkflowAt }[] };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
@@ -119,8 +126,8 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string } = {}) {
-  const w = world(o.config === undefined ? {} : { config: o.config });
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string> } = {}) {
+  const w = world({ ...(o.config === undefined ? {} : { config: o.config }), ...(o.files ? { files: o.files } : {}) });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
   const s = watcher(w, gh, o);
@@ -469,6 +476,169 @@ test('regression: a check only the committed required_checks list, that never po
   await run(s.gh, s.watch, 1);
   assert.deepEqual(s.dead.map((d) => [d.check, d.state]), [['lint', 'raised']]);
   assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks.map((d) => d.check), ['lint']);
+});
+
+const TESTS_YML = 'name: Tests\non: push\njobs:\n  ci:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n';
+const disabledTests: WorkflowAt = { name: 'Tests', path: '.github/workflows/tests.yml', state: 'disabled_manually' };
+/** What each unaccounted commit was: its PR, whether it gets a revert, and whether its reason is the missing ci. */
+const tripped = (s: Awaited<ReturnType<typeof started>>) => s.unaccounted.map((u) => [u.number, u.revert, /required checks not green on \w+ at merge time: ci missing\b/.test(u.reason)]);
+
+test('main watch dead check: when the workflow that would post the check is disabled, the warning says so, from one read of the workflows kept for the dead window', async () => {
+  const s = await started({ files: { '.github/workflows/tests.yml': TESTS_YML } });
+  s.gh.g.workflows = [{ name: 'Docs', path: '.github/workflows/docs.yml', state: 'disabled_inactivity' }, disabledTests];
+  const reads = () => s.gh.calls.filter((c) => c.what === 'workflows').length;
+  mergeWith(s, 8, []);
+  await run(s.gh, s.watch, 7);
+  assert.equal(reads(), 0, 'no read before a check is dead');
+  s.gh.g.now += DEAD_CHECK_MS;
+  await run(s.gh, s.watch, 1);
+  assert.deepEqual(s.dead.map((d) => [d.check, d.state, d.workflow]), [['ci', 'raised', disabledTests]], 'the job "ci" in tests.yml posts it; docs.yml posts nothing of it');
+  assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks.map((d) => [d.check, d.workflow]), [['ci', disabledTests]], 'on the dashboard');
+  assert.equal(reads(), 1);
+  // Judging and the stop as without it: the next merge without its check is still judged, and unaccounted.
+  mergeWith(s, 9, []);
+  await run(s.gh, s.watch, 7);
+  assert.deepEqual(tripped(s), [[8, true, true], [9, true, true]]);
+  assert.equal(s.dead.length, 1, 'raised once');
+  assert.equal(reads(), 1, 'read once in the dead window');
+  // A dead window on, read once more for the dashboard: enabled again, the note goes; no second warning.
+  s.gh.g.workflows = [{ ...disabledTests, state: 'active' }];
+  s.gh.g.now += DEAD_CHECK_MS;
+  await run(s.gh, s.watch, 1);
+  assert.equal(reads(), 2);
+  assert.equal(s.dead.length, 1);
+  assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks, [{ check: 'ci', since: s.dead[0]!.since }]);
+});
+
+test('main watch dead check: a workflows read answering 403 or 404, or failing, adds nothing: the warning, judging and the stop are as without it', async () => {
+  for (const answer of [null, 'throw'] as const) {
+    const s = await started({ files: { '.github/workflows/tests.yml': TESTS_YML } });
+    s.gh.g.workflows = answer;
+    mergeWith(s, 8, []);
+    await run(s.gh, s.watch, 7);
+    s.gh.g.now += DEAD_CHECK_MS;
+    await run(s.gh, s.watch, 1);
+    const since = s.dead[0]?.since ?? '';
+    assert.deepEqual(s.dead, [{ check: 'ci', since, state: 'raised' }], `${answer}: raised in the same pass, with no note`);
+    assert.deepEqual(protectionView(s.w.stateFile, 'o/r').deadChecks, [{ check: 'ci', since }]);
+    mergeWith(s, 9, []);
+    await run(s.gh, s.watch, 7);
+    assert.deepEqual(tripped(s), [[8, true, true], [9, true, true]], `${answer}: judged and stopped as before`);
+    assert.equal(s.gh.calls.filter((c) => c.what === 'workflows').length, 1, `${answer}: not asked again`);
+  }
+  // The API: 403 and 404 are null, any other error throws (the watch catches it); GitHub's list is read by name, path and state.
+  const answer = { status: 200, body: '' };
+  const urls: string[] = [];
+  const f = (async (url: string) => (urls.push(url), new Response(answer.body, { status: answer.status }))) as unknown as typeof fetch;
+  const api = new GitHubMainWatchApi('x/y', async () => 't', f);
+  for (const status of [403, 404]) {
+    Object.assign(answer, { status, body: '{"message":"Resource not accessible by integration"}' });
+    assert.equal(await api.workflows(), null, String(status));
+  }
+  Object.assign(answer, { status: 500, body: '{}' });
+  await assert.rejects(api.workflows(), /GitHub 500 reading the Actions workflows/);
+  // The shape GitHub answers (measured: GET /repos/{o}/{r}/actions/workflows), state one of its REST description's enum.
+  const listed = [
+    { id: 1, node_id: 'W_1', name: 'Tests', path: '.github/workflows/tests.yml', state: 'disabled_manually', created_at: iso(T), updated_at: iso(T), url: 'https://api.github.com/repos/x/y/actions/workflows/1', html_url: 'https://github.com/x/y/blob/main/.github/workflows/tests.yml', badge_url: 'https://github.com/x/y/workflows/Tests/badge.svg' },
+    { id: 2, node_id: 'W_2', name: 'Docs', path: '.github/workflows/docs.yml', state: 'active' },
+    { id: 3, name: 7, path: null, state: 'active' },
+  ];
+  Object.assign(answer, { status: 200, body: JSON.stringify({ total_count: 3, workflows: listed }) });
+  assert.deepEqual(await api.workflows(), [disabledTests, { name: 'Docs', path: '.github/workflows/docs.yml', state: 'active' }]);
+  assert.ok(urls.every((u) => u === 'https://api.github.com/repos/x/y/actions/workflows?per_page=100'), urls.join(' '));
+});
+
+test('disabledWorkflowFor: a disabled workflow named as the check, a file named so, or one with a job that posts it; nothing for an active one', () => {
+  const files: Record<string, string> = {
+    '.github/workflows/ci.yml': 'name: CI\njobs:\n  test:\n    name: test (ubuntu-latest, 22)\n  shard:\n    name: test shard ${{ matrix.shard }}/4 (${{ matrix.os }})\n  desktop:\n    runs-on: x\n  matrix:\n    strategy: {}\n',
+    '.github/workflows/broken.yml': 'jobs: [\n',
+  };
+  const show = (p: string) => files[p] ?? null;
+  const wf = (name: string, path: string, state = 'disabled_manually'): WorkflowAt => ({ name, path, state });
+  const ciYml = wf('CI', '.github/workflows/ci.yml');
+  const at = (check: string, list: WorkflowAt[]) => disabledWorkflowFor(check, list, show)?.name ?? null;
+  assert.equal(at('test (ubuntu-latest, 22)', [ciYml]), 'CI', "a job's name");
+  assert.equal(at('desktop', [ciYml]), 'CI', "a job's id, when it has no name");
+  assert.equal(at('matrix (ubuntu-latest, 22)', [ciYml]), 'CI', "GitHub's matrix suffix");
+  assert.equal(at('test shard 2/4 (ubuntu-latest)', [ciYml]), 'CI', 'a name with expressions');
+  assert.equal(at('test shard 2/4 (ubuntu-latest); more', [ciYml]), null, 'only the text in their places');
+  assert.equal(at('CI', [ciYml]), 'CI', "the workflow's name");
+  assert.equal(at('scan', [wf('Secrets', '.github/workflows/scan.yaml', 'disabled_inactivity')]), 'Secrets', "the file's name");
+  assert.equal(at('lint', [ciYml]), null, 'no job posts it');
+  assert.equal(at('desktop', [{ ...ciYml, state: 'active' }]), null, 'active: nothing to say');
+  assert.equal(at('lint', [wf('Broken', '.github/workflows/broken.yml')]), null, "a file that doesn't parse");
+  const clipped = disabledWorkflowFor('CI', [wf('CI', `.github/workflows/a\n${'x'.repeat(300)}.yml`)], show);
+  assert.equal(clipped?.path.length, 200);
+  assert.doesNotMatch(clipped?.path ?? '\n', /\n/);
+});
+
+const disabled = (name: string, path: string): WorkflowAt => ({ name, path, state: 'disabled_manually' });
+
+test('regression: a disabled workflow whose job name is only expressions is blamed for no check', () => {
+  const files: Record<string, string> = {
+    '.github/workflows/nightly.yml': 'jobs:\n  targets:\n    name: ${{ matrix.target }}\n',
+    '.github/workflows/release.yml': 'jobs:\n  pair:\n    name: ${{ inputs.a }} ${{ inputs.b }}\n',
+  };
+  const show = (p: string) => files[p] ?? null;
+  for (const check of ['ci', 'lint', 'unit tests']) {
+    assert.equal(disabledWorkflowFor(check, [disabled('Nightly', '.github/workflows/nightly.yml'), disabled('Release', '.github/workflows/release.yml')], show), null, check);
+  }
+  // Nor does it hide the disabled workflow that does post it, further down the list.
+  files['.github/workflows/ci.yml'] = 'jobs:\n  ci:\n    runs-on: x\n';
+  assert.equal(disabledWorkflowFor('ci', [disabled('Nightly', '.github/workflows/nightly.yml'), disabled('CI', '.github/workflows/ci.yml')], show)?.name, 'CI');
+});
+
+test('regression: nothing is said when an active workflow would post the check too', () => {
+  const files: Record<string, string> = {
+    '.github/workflows/ci.yml': 'name: CI\non: pull_request\njobs:\n  build:\n    runs-on: x\n',
+    '.github/workflows/nightly-build.yml': 'name: Nightly build\non: schedule\njobs:\n  build:\n    runs-on: x\n',
+  };
+  const show = (p: string) => files[p] ?? null;
+  const nightly = disabled('Nightly build', '.github/workflows/nightly-build.yml');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }, nightly], show), null, 'ci.yml (active) posts build');
+  assert.equal(disabledWorkflowFor('build', [nightly, { name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }], show), null, 'whatever the order');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'disabled_inactivity' }, nightly], show)?.name, 'CI', 'both disabled: the first is named');
+  assert.equal(disabledWorkflowFor('build', [{ name: 'Docs', path: '.github/workflows/docs.yml', state: 'active' }, nightly], show)?.name, 'Nightly build', 'an active one that posts something else');
+});
+
+test('regression: a workflow file over the size cap is not parsed', () => {
+  const big = `jobs:\n  big:\n    runs-on: x\n${'# padding\n'.repeat(30_000)}`;
+  assert.ok(big.length > 256 * 1024);
+  assert.equal(disabledWorkflowFor('big', [disabled('Huge', '.github/workflows/huge.yml')], () => big), null);
+  assert.equal(disabledWorkflowFor('big', [disabled('Huge', '.github/workflows/huge.yml')], () => big.slice(0, 1000))?.name, 'Huge', 'the same file, small');
+});
+
+test('regression: a job name with many expressions matches in linear time, not by backtracking', () => {
+  const file = 'jobs:\n  j:\n    name: "${{ a }}${{ a }}${{ a }}${{ a }}${{ a }}X"\n';
+  const list = [disabled('W', '.github/workflows/w.yml')];
+  const t = performance.now();
+  assert.equal(disabledWorkflowFor('a'.repeat(180), list, () => file), null);
+  assert.ok(performance.now() - t < 150, `took ${Math.round(performance.now() - t)} ms`);
+  assert.equal(disabledWorkflowFor(`${'a'.repeat(180)}X`, list, () => file)?.name, 'W', 'and still matches its expansion');
+});
+
+test('disabledWorkflowsOf: one read parses each workflow file once, and none when no workflow is disabled', () => {
+  const shown: string[] = [];
+  const files: Record<string, string> = { '.github/workflows/ci.yml': 'jobs:\n  ci:\n    runs-on: x\n', '.github/workflows/nightly.yml': 'jobs:\n  lint:\n    runs-on: x\n' };
+  const show = (p: string) => (shown.push(p), files[p] ?? null);
+  const active = [{ name: 'CI', path: '.github/workflows/ci.yml', state: 'active' }, { name: 'Nightly', path: '.github/workflows/nightly.yml', state: 'active' }];
+  const none = disabledWorkflowsOf(active, show);
+  assert.deepEqual([none('ci'), none('lint'), none('scan')], [null, null, null]);
+  assert.deepEqual(shown, [], 'no disabled workflow: no file is read');
+  const some = disabledWorkflowsOf([active[0]!, disabled('Nightly', '.github/workflows/nightly.yml')], show);
+  assert.deepEqual([some('ci'), some('lint')?.name, some('scan'), some('lint')?.name], [null, 'Nightly', null, 'Nightly']);
+  assert.deepEqual([...shown].sort(), ['.github/workflows/ci.yml', '.github/workflows/nightly.yml'], 'each file once');
+});
+
+test('regression: a disabled workflow\'s name and path lose C1 and bidi controls', () => {
+  const w = disabledWorkflowFor('C\u0085I‮', [{ name: 'C\u0085I\u202e', path: '.github/workflows/\u2066ci\u2069.yml\u200f', state: 'disabled_manually' }], () => null);
+  assert.deepEqual(w, { name: 'C I ', path: '.github/workflows/ ci .yml ', state: 'disabled_manually' });
+});
+
+test('regression: clipping a disabled workflow\'s name to 200 characters never keeps half an emoji', () => {
+  const name = `x${'😀'.repeat(150)}`;
+  const w = disabledWorkflowFor(name, [{ name, path: '.github/workflows/ci.yml', state: 'disabled_manually' }], () => null);
+  assert.equal(w?.name, `x${'😀'.repeat(99)}`);
 });
 
 test('main watch: GitHub enforcing the protection leaves it to GitHub; a rewritten main is unaccounted, with no revert', async () => {
