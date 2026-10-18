@@ -1949,7 +1949,7 @@ export class Coordinator extends AutomationRuns {
           })
           .finally(() => rmSync(cwd, { recursive: true, force: true }));
       },
-      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Extend -> Experiments`),
+      notify: (key, detail) => this.d.incidents?.raiseIncident('experiment_review', `${x.instance}:${key}`, detail, `review it on the dashboard: Experiments (/experiments)`),
       commitChange: (path, parent, message) => {
         removeSandboxPlaceholders(path);
         this.git(path, 'add', '-A');
