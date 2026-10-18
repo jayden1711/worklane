@@ -59,16 +59,38 @@ test('check-comments: a passing change exits 0; the policy off at the base exits
   assert.match(r.stdout, /^comment policy: off in the config at /);
 });
 
-/** WHY: release.mjs lists each merged PR as "- <title> (#N)", and this PR's title names the command (#651 round 4). */
-const SHIPS = /\bcheck-comments\b|#651\b/;
+const lib = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelog.mjs')).href)) as {
+  prNumbers(subjects: string[]): number[];
+  changelogSection(version: string, date: string, prs: { number: number; title: string }[]): string;
+  handWritten(section: string | undefined): string;
+  withSection(existing: string, version: string, section: string): string;
+};
+
+/**
+ * WHY: changelogSection lists this PR as "- <title> (#651)"; a reverted line ends ": reverted by #N" and a guardrail
+ * line ends ": <files>", so neither matches, and another PR's line ends with its own number (#651 round 5).
+ */
+const SHIPS = /^- .*\(#651\)$/m;
 const cmp = (a: number[], b: number[]) => a.reduce((d, x, i) => d || x - b[i]!, 0);
 const v = (x: number[]) => x.join('.');
+/** WHY: a pre-release package.json ("0.6.0-rc.1") is preparing 0.6.0; split on dots it read as 0.6.NaN.1 (#651). */
+function core(version: string) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!m) throw new Error(`package.json's version ${version} is not X.Y.Z`);
+  return m.slice(1, 4).map(Number);
+}
 
-/** WHY: a release ships check-comments when its CHANGELOG.md section lists it; pre-release headings aren't releases (#651). */
+/**
+ * WHY: a release ships check-comments when its generated lists have #651's own line, not when the hand-written top
+ * (highlights, notes) or another PR's title names it (#651 round 5). Only "## vX.Y.Z (YYYY-MM-DD)", the heading
+ * release.mjs writes, is a release: "(unreleased)" notes and pre-release headings aren't.
+ */
 function releases(changelog: string) {
   return changelog.split(/^(?=## v)/m).flatMap((s) => {
-    const m = /^## v(\d+)\.(\d+)\.(\d+)(?=[ \n]|$)/.exec(s);
-    return m ? [{ version: m.slice(1, 4).map(Number), ships: SHIPS.test(s.slice(m[0].length)) }] : [];
+    const m = /^## v(\d+)\.(\d+)\.(\d+) \(\d{4}-\d{2}-\d{2}\)/.exec(s);
+    if (!m) return [];
+    const top = lib.handWritten(s);
+    return [{ version: m.slice(1, 4).map(Number), ships: SHIPS.test(s.slice(s.indexOf(top) + top.length)) }];
   });
 }
 
@@ -100,17 +122,12 @@ test('docs: the managed-repo step pins a release that CHANGELOG.md says ships ch
   const doc = readFileSync(join(repoRoot, 'docs', 'quickstart.md'), 'utf8');
   const pin = new RegExp(`npx -y ${BRAND.pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}@(\\d+)\\.(\\d+)\\.(\\d+) check-comments --base HEAD\\^1`).exec(doc);
   assert.ok(pin, 'the step names an exact version');
-  const version = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version: string }).version.split('.').map(Number);
+  const version = core((JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version: string }).version);
   const changelog = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
   assert.equal(pinProblem(pin.slice(1, 4).map(Number), version, changelog), null);
   assert.ok(doc.includes(`uses: ${PINNED.checkout}`), "the docs' checkout is the starter CI's pin");
   assert.match(doc, /persist-credentials: false/);
 });
-
-const lib = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelog.mjs')).href)) as {
-  prNumbers(subjects: string[]): number[];
-  changelogSection(version: string, date: string, prs: { number: number; title: string }[]): string;
-};
 
 test('docs pin rule: the pin is a release CHANGELOG.md says ships check-comments, else the next possible one', () => {
   const at = `docs/quickstart.md pins ${BRAND.pkg}@`;
@@ -135,6 +152,18 @@ test('docs pin rule: the pin is a release CHANGELOG.md says ships check-comments
   assert.match(pinProblem([0, 6, 0], [0, 6, 0], section('0.6.0', other) + log) ?? '', /v0\.6\.0 section doesn't list check-comments.*\(0\.6\.1, 0\.7\.0, 1\.0\.0\)$/, 'a minor release without it');
   assert.equal(pinProblem([0, 5, 4], [0, 5, 3], without), null, 'the next patch after it');
   assert.equal(pinProblem([0, 5, 4], [0, 5, 4], without), null, 'prep for 0.5.4, before its section is written');
+
+  // WHY: naming the command isn't shipping it (#651 round 5): a hand-written highlight, kept by the release, or another PR's title.
+  const noted = `## v0.5.3 (unreleased)\n\n### Highlights\n\n- Managed repos get the comment policy's PR check, \`check-comments\` (#651)\n\n### Guardrail changes\n\n- none in this release\n\n${log}`;
+  assert.equal(pinProblem([0, 5, 3], [0, 5, 2], noted), null, 'an "(unreleased)" section is not a release');
+  const highlighted = lib.withSection(noted, '0.5.3', section('0.5.3', other));
+  assert.match(highlighted, /^## v0\.5\.3 \(2026-10-20\)\n\n### Highlights\n\n- .*`check-comments` \(#651\)$/m, 'the release keeps the highlight');
+  assert.match(pinProblem([0, 5, 3], [0, 5, 3], highlighted) ?? '', /v0\.5\.3 section doesn't list check-comments.*\(0\.5\.4, 0\.6\.0, 1\.0\.0\)$/, 'a highlight naming the command');
+  const scriptPr = { number: 701, title: 'ci: scripts/check-comments.mjs prints the base it read' };
+  assert.match(pinProblem([0, 5, 3], [0, 5, 3], section('0.5.3', other, scriptPr) + log) ?? '', /v0\.5\.3 section doesn't list check-comments/, "another PR's title naming check-comments.mjs");
+  const revert = { number: 702, title: 'Revert #651: check-comments waits a release' };
+  assert.match(pinProblem([0, 5, 3], [0, 5, 3], section('0.5.3', thisPr, revert) + log) ?? '', /v0\.5\.3 section doesn't list check-comments/, 'this PR reverted in the same release');
+  assert.equal(pinProblem([0, 5, 3], core('0.6.0-rc.1'), log), `${at}0.5.3, but package.json is at 0.6.0, the release being prepared: set the pin to 0.6.0`, 'a pre-release package.json');
 
   // WHY: once a release lists it (#651), the pin is that release or a later released one.
   const shipped = section('0.5.4', other, thisPr) + without;
