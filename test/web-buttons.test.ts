@@ -129,7 +129,7 @@ test('a button this person can never use is not drawn; one held by the device sa
     assert.deepEqual([owner.allowed, owner.everAllowed], [false, true], 'the owner, from a device that is not allowed');
     const b = described(r.renderClaudeAccount(owner), 'claude-account-refresh');
     assert.ok(b.disabled);
-    assert.match(b.text ?? '', /^Read-only: a machine change needs one of the console(&#x27;|')s allowed devices/);
+    assert.match(b.text ?? '', /^Read-only: a machine change needs one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices\)/);
   } finally {
     d.close();
   }

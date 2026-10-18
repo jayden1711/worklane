@@ -2156,7 +2156,7 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
   assert.doesNotMatch(enabled, /data-testid="add-project-disabled"/);
   const cases: [string, ReturnType<typeof ownerRequester>, RegExp][] = [
     ['an instance-only owner', ownerRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
-    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
+    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices\)/],
   ];
   for (const [who, requester, why] of cases) {
     const html = view(requester);
@@ -2813,7 +2813,7 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   assert.equal([...done.matchAll(/Run again…/g)].length, 4);
   // Off an allowed device: read-only, and it says why.
   const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
-  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
+  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the machine&#x27;s allowed devices \(dashboards\.sh --machine-devices\)/);
   assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
   // Funnel: shown read-only. Off: it says nothing here turns it on. Already on: said in red, and neither later step can be asked for.
   assert.match(done, /data-testid="tailscale-funnel" data-funnel="off"[^>]*>Funnel \(the public internet\): off\. Nothing here turns it on/);

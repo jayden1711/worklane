@@ -119,7 +119,7 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/dashboard-auth.ts', 'sign-in, credentials or secrets'],
     ['src/github-app.ts', 'sign-in, credentials or secrets'],
     ['src/console/secrets.ts', 'sign-in, credentials or secrets'],
-    ['src/console/terminal.ts', 'sign-in, credentials or secrets'],
+    ['src/console/terminal-devices.ts', 'sign-in, credentials or secrets'],
     ['src/setup/app-manifest.ts', 'sign-in, credentials or secrets'],
     ['src/decide.ts', 'who may approve'],
     ['src/intake/people.ts', 'who may approve'],
