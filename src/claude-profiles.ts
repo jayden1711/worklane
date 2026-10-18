@@ -147,6 +147,18 @@ export function activeProfile(instance: string, p: Profiles = readProfiles()): s
   return name && p.profiles[name] && !p.profiles[name]!.staged ? name : DEFAULT_PROFILE;
 }
 
+/**
+ * Whether an instance's agents have a Claude account set: all that anyone the accounts panel refuses learns of them
+ * (issue #567: a viewer or a writer gets no email, plan or profile name). True on a confirmed profile other than
+ * default; on default, whether claude-account.sh last found the instance's agent user signed in; null when nothing on
+ * the machine says (no status record for it yet).
+ */
+export function accountSet(instance: string, dir = CLAUDE_ACCOUNT_DIR): boolean | null {
+  if (activeProfile(instance, readProfiles(dir)) !== DEFAULT_PROFILE) return true;
+  const rec = readAccountStatus(dir)?.users.find((u) => u.instance === instance && u.kind === 'agent');
+  return rec ? rec.loggedIn : null;
+}
+
 /** A user's default login dir (as runs always had it). */
 const defaultDir = (r: RunAs) => r.claudeConfigDir ?? posix.join(r.home, '.claude');
 /** A profile's dir for this agent user. */
