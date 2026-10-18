@@ -524,6 +524,37 @@ function usePrefetch(ready: boolean, current: string | null) {
   }, [ready, current]);
 }
 
+/** Off the Needs you queue, the shell reads Waiting on you's list at most this often, for the badge. */
+export const WAITING_EVERY_MS = 60_000;
+
+/** How long until the shell reads Waiting on you again: now on the queue or with nothing kept; else when what was kept is WAITING_EVERY_MS old. */
+export const waitingDelay = (keptAt: number | undefined, live: boolean, now: number) => (live || keptAt === undefined ? 0 : Math.max(0, keptAt + WAITING_EVERY_MS - now));
+
+/**
+ * Waiting on you's list (/api/waiting), for the Needs you badge and queue. WHY (#585): the server computes it from the
+ * whole log on every read (measured: about 350 ms on a 200 000-event log), so reading it on every change of every page
+ * and on every instance switch loaded a busy instance's dashboard on each. On the queue (`live`) it is read on every
+ * change, as Waiting on you reads it; elsewhere at most once a minute, after a change, and an instance switch shows what
+ * was kept for that instance (web/src/cache.ts) without asking again. Each read waits for the browser to be idle, so
+ * it follows the page's own reads.
+ */
+function useWaiting(on: boolean, live: boolean, lastId: number | undefined): { data: Waiting | null; error: string | null } {
+  const url = on ? viewUrl('/api/waiting') : null;
+  const [read, setRead] = useState(0);
+  useEffect(() => {
+    if (url === null) return;
+    const wait = waitingDelay(peek<Waiting>(url)?.at, live, Date.now());
+    let stopIdle = () => {};
+    const t = window.setTimeout(() => (stopIdle = idle(() => setRead((n) => n + 1), 1000)), wait);
+    return () => {
+      window.clearTimeout(t);
+      stopIdle();
+    };
+  }, [url, live, lastId]);
+  const v = useView<Waiting>(url !== null && read > 0 ? '/api/waiting' : null, read);
+  return { data: v.data ?? (url === null ? null : (peek<Waiting>(url)?.data ?? null)), error: v.error };
+}
+
 /** The small "updating…" mark while a view is shown from what was kept and its fresh answer is on its way. */
 function UpdatingMark() {
   const updating = useUpdating();
@@ -580,9 +611,9 @@ function InstanceDashboard({ health }: { health: Health | null }) {
     if (state) document.title = `${state.project.name} · ${state.brand.name}`;
   }, [state]);
 
-  // What waits on the owner (Waiting on you's list), for the Needs you queue and its badge: read again whenever the log
-  // changes, as Waiting on you reads it; never asked where the state says it would be refused (a viewer) or in setup mode.
-  const waiting = useView<Waiting>(state && !state.setupMode && state.canReadDigest !== false ? '/api/waiting' : null, state?.lastId);
+  // What waits on the owner (Waiting on you's list), for the Needs you queue and its badge; never asked where the state
+  // says it would be refused (a viewer) or in setup mode.
+  const waiting = useWaiting(!!state && !state.setupMode && state.canReadDigest !== false, path === '/needs-you', state?.lastId);
   const counts = useMemo(() => navCounts(state, waiting.data), [state, waiting.data]);
 
   const issueMatch = path.match(/^\/work\/issues\/(\d+)/);

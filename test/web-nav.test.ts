@@ -19,6 +19,8 @@ interface Nav {
   navigate(to: string): void;
   needsYou(state: unknown, waiting?: unknown): { key: string; kind: string; blocking: boolean; since: string; issue: number | null; href: string | null }[];
   ORDER: string;
+  WAITING_EVERY_MS: number;
+  waitingDelay(keptAt: number | undefined, live: boolean, now: number): number;
   KIND: Record<string, { label: string; holds: string | null }>;
 }
 interface Redirects {
@@ -170,6 +172,15 @@ test('Needs you is one queue, urgency-sorted', () => {
   assert.equal(nav.navCounts(state)['nav-needs-you'], 5);
   // The page states the order, from the same table the sort reads: every kind is named, and which side it is on.
   for (const [kind, k] of Object.entries(nav.KIND)) assert.ok(nav.ORDER.includes(k.label), `the order names ${kind}`);
+  // WHY: /api/waiting is computed from the whole log on each read (about 350 ms on a 200 000-event log), and reading it
+  // for the badge on every change and every instance switch loaded a busy instance on each. Off
+  // the queue the shell reads it at most once a minute; on the queue, or with nothing kept for the instance, at once.
+  const t = 1_000_000;
+  assert.equal(nav.WAITING_EVERY_MS, 60_000);
+  assert.equal(nav.waitingDelay(undefined, false, t), 0, 'nothing kept for this instance: read it');
+  assert.equal(nav.waitingDelay(t - 10_000, false, t), 50_000, 'kept 10 s ago: an instance switch shows it, read again in 50 s');
+  assert.equal(nav.waitingDelay(t - 90_000, false, t), 0, 'kept over a minute ago: read it');
+  assert.equal(nav.waitingDelay(t - 10_000, true, t), 0, 'on the queue: every change');
   assert.ok(nav.ORDER.indexOf(nav.KIND.blocked!.label) < nav.ORDER.indexOf('then the rest') && nav.ORDER.indexOf('then the rest') < nav.ORDER.indexOf(nav.KIND.deploy_failed!.label));
 });
 
