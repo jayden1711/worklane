@@ -658,8 +658,11 @@ export const EventSchemas = {
   /**
    * A commit on the default branch nothing accounts for (a direct push, a merge with checks not green, an unknown
    * actor, a rewritten history): auto-merge is stopped, the owner alerted, and `revert` is the revert PR, if any.
+   * `trip`: its trip (src/main-watch.ts tripOf); `no_revert`: why no revert PR was opened, when a cap says so.
    */
-  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable() }),
+  'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional() }),
+  /** A required check with no run on any commit the main watch judged since `since`: raised once, cleared when one appears. */
+  'main_watch.dead_check': z.strictObject({ check: z.string(), since: z.string(), state: z.enum(['raised', 'cleared']) }),
   /**
    * An unaccounted commit that landed without a PR (src/direct-push-alert.ts): `direct`, GitHub's commit-to-PR link
    * has no merged PR for it; `rewrite`, a force-push. `pusher`: a GitHub login only (`pusher_from`: the push's actor,

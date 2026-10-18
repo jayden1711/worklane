@@ -1,12 +1,14 @@
 // Open-model providers, wired: a run whose model names a provider (`local`, `hosted:<name>`) goes to it only when
 // every check passes, in this order, and otherwise runs on its route's fallback (the role's normal model), with a
-// provider.fallback event saying why. The checks: this instance opted in; the provider is configured and its key
-// installed; code allows it this work (src/providers.ts); the role passed its evals on the provider's model; and,
-// for the local model, the GPU lock is free and the server is up and fast enough. Nothing waits on a provider.
+// provider.fallback event saying why. The checks: this instance opted in; the provider is configured, root allows its
+// base_url's host (src/provider-hosts.ts; before anything contacts it), and its key is installed; code allows it this
+// work (src/providers.ts); the role passed its evals on the provider's model; and, for the local model, the GPU lock
+// is free and the server is up and fast enough. Nothing waits on a provider.
 import type { Config } from '../config/load.js';
 import type { InstanceSettings } from '../instance.js';
 import { flockHeld } from '../os/index.js';
 import { gatePasses, healthCheck, providerOf, providerRefusal, tierRefusal, type CliAgentName, type ProviderConfig } from '../providers.js';
+import { logRefusalOnce, providerHostRefusal } from '../provider-hosts.js';
 import { isProtectedPath } from '../guardrails/engine.js';
 import type { GuardrailsConfig } from '../config/schema.js';
 import type { RunRequest } from '../runner.js';
@@ -40,6 +42,12 @@ export async function resolveProvider(req: RunRequest, d: ProviderDeps): Promise
   if (named.kind === 'cli') return resolveCliAgent(req, req.route, named.name as CliAgentName, label, d, back);
   const p: ProviderConfig | undefined = named.kind === 'local' ? d.cfg.agents.providers?.local : d.cfg.agents.providers?.hosted?.[named.name];
   if (!p) return back(`${label} is not configured (agents.yaml providers)`);
+  // Root's provider hosts, read now: agents.yaml names the base_url, root decides whether a key and prompts go there.
+  const hostRefused = providerHostRefusal(p.base_url);
+  if (hostRefused) {
+    logRefusalOnce(label, hostRefused);
+    return back(hostRefused);
+  }
   const keyFile = d.providerKeys?.[p.credential];
   if (!keyFile) return back(`${label}'s key (${p.credential}) is not installed (credentials.yaml provider_keys)`);
   const refused = providerRefusal(named.kind, { route: req.route.kind, highRisk: req.route.highRisk === true });

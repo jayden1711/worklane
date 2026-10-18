@@ -11,6 +11,7 @@ import { join, posix } from 'node:path';
 import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
+import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
 import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { outboundEnv } from './network.js';
@@ -24,6 +25,7 @@ import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run
 import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
+import { EFFORTS, type Effort } from './roles.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
 
@@ -41,10 +43,11 @@ export interface RunRequest {
   cwd: string;
   model: string;
   /**
-   * claude --effort (2.1.296: low, medium, high, xhigh, max); unset: the CLI's default. Only the dashboard chat sets
-   * it, from a fixed list (src/chat-pick.ts CHAT_EFFORTS); cliArgs puts nothing else on the command line.
+   * claude --effort, one of EFFORTS (src/roles.ts); unset: no flag, so the CLI's default. Set from agents.yaml for the
+   * worker, evaluator (verdict and repro) and planner runs (#579), and by the dashboard chat from its own list
+   * (src/chat-pick.ts CHAT_EFFORTS); cliArgs puts nothing else on the command line.
    */
-  effort?: 'low' | 'medium' | 'high';
+  effort?: Effort;
   allowedTools: string[];
   disallowedTools?: string[];
   maxTurns: number;
@@ -418,7 +421,7 @@ export interface RetryOptions {
 /** Settings every instance run carries (Claude Code settings reference: each one only takes something away). */
 export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiConnectors: true, allowedMcpServers: [] as unknown[] } as const;
 /** The --effort values cliArgs passes (a mistyped one from anywhere is dropped, never put on the command line). */
-const EFFORTS = new Set(['low', 'medium', 'high']);
+const EFFORT_FLAGS = new Set<string>(EFFORTS);
 
 /**
  * The claude command line. The prompt is not on it: command lines are public
@@ -427,7 +430,8 @@ const EFFORTS = new Set(['low', 'medium', 'high']);
  */
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
   const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
-  if (req.effort && EFFORTS.has(req.effort)) args.push('--effort', req.effort);
+  // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
+  if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
   if (req.disallowedTools?.length) args.push('--disallowedTools', ...req.disallowedTools);
   if (systemPromptFile) args.push('--append-system-prompt-file', systemPromptFile);
@@ -530,6 +534,16 @@ export class CliRunner implements AgentRunner {
     const budget = this.retry.budgetMs ?? TRANSIENT_BUDGET_MS;
     const first = now();
     for (let tries = 1; ; tries++) {
+      // INVARIANT (#392): a provider run's endpoint is a host root allows (src/provider-hosts.ts). Root's file is read
+      // again before each try, so a host root took out since the coordinator resolved the run (or a run handed a
+      // provider some other way) can't slip past.
+      // Refused: not started, never retried. Not a fallback here: that would skip the coordinator's model cap and
+      // usage pause, which it applied when it resolved the run.
+      const hostRefused = req.provider && req.provider.kind !== 'cli' ? providerHostRefusal(req.provider.baseUrl) : null;
+      if (req.provider && hostRefused) {
+        logRefusalOnce(req.provider.name, hostRefused);
+        return { reason: 'failed', detail: `${req.provider.name}: ${hostRefused}; not starting`, costUsd: 0, turns: 0, model: req.model };
+      }
       const started = now();
       const key = this.loginOf(req);
       // Every run: the login's start lock, around the auth check and claude's start. Agent runs: its run lock too.
@@ -568,7 +582,7 @@ export class CliRunner implements AgentRunner {
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
     const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
-    // A provider run's endpoint (agents.yaml providers.*.base_url, checked by the config schema): set after agentEnv and
+    // A provider run's endpoint (agents.yaml providers.*.base_url, its host root's to allow, checked in run()): set after agentEnv and
     // runAsEnv, which strip every redirecting variable, so it is the only endpoint a provider run gets.
     const endpoint: Record<string, string> = req.provider ? { ANTHROPIC_BASE_URL: req.provider.baseUrl } : {};
     const agentVars = agentEnv(base, req.provider ? 'cli' : this.runtime, {

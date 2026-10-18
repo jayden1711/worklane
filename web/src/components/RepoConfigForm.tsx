@@ -4,6 +4,7 @@
 // In setup mode the same form changes the held draft instead (the preview's Change), and nothing is pushed.
 import { useEffect, useState } from 'react';
 import { changeRepoConfig, getChecksSeen, type ConfigChange, type FirstRunRepoConfig, type RepoConfigValues, type StarterCi as StarterCiView } from '../api';
+import { checksSeenSlot, type ChecksSeenAnswer } from '../checks-seen';
 import { StarterCi } from './StarterCi';
 import { Button, cx } from './ui';
 
@@ -26,7 +27,7 @@ export interface DraftTarget {
   onCancel: () => void;
 }
 
-export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialStarter = null, initialStarterOpen = false, onChanged, draft }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialStarter?: StarterCiView | null; initialStarterOpen?: boolean; onChanged?: () => void; draft?: DraftTarget }) {
+export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen = [], initialSeenNote = null, initialSeenLoaded = false, initialProposed = null, initialStarter = null, initialStarterOpen = false, onChanged, draft, reread = 0 }: { c: FirstRunRepoConfig; canEdit: boolean; initialChanges?: ConfigChange[] | null; initialSeen?: string[]; initialSeenNote?: string | null; initialSeenLoaded?: boolean; initialProposed?: string | null; initialStarter?: StarterCiView | null; initialStarterOpen?: boolean; onChanged?: () => void; draft?: DraftTarget; /** #569: a new value reads the tip's checks again (the page's Re-check). */ reread?: number }) {
   const [writers, setWriters] = useState(c.values.writers.join(', '));
   const [checks, setChecks] = useState<string[]>(c.values.required_checks);
   const [budget, setBudget] = useState(c.values.daily_budget_usd);
@@ -43,12 +44,25 @@ export function RepoConfigForm({ c, canEdit, initialChanges = null, initialSeen 
   const [changes, setChanges] = useState<ConfigChange[] | null>(initialChanges);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string; url?: string } | null>(initialProposed ? { ok: true, text: 'proposed: merge the PR to apply it', url: initialProposed } : null);
+  // WHY (#569): read again on each refresh (`reread`) and whenever the config's values change (a merged config PR brought
+  // in), so the note is about the tip as it is now; an answer to an earlier read that lands late is dropped.
+  const valuesKey = JSON.stringify(c.values);
   useEffect(() => {
+    let current = true;
+    const show = (r: ChecksSeenAnswer) => {
+      if (!current) return;
+      const slot = checksSeenSlot(r, !c.values.required_checks.length);
+      setSeen(slot.seen);
+      setSeenNote(slot.note);
+    };
     getChecksSeen()
-      .then((r) => (setSeen(r.checks), setSeenNote(r.error ?? (r.checks.length ? null : `GitHub ran no checks on its tip${c.values.required_checks.length ? '' : ': add a starter CI below'}`))))
-      .catch((e: Error) => setSeenNote(e.message))
-      .finally(() => setSeenLoaded(true));
-  }, []);
+      .then(show)
+      .catch((e: Error) => show({ checks: [], error: e.message }))
+      .finally(() => current && setSeenLoaded(true));
+    return () => {
+      current = false;
+    };
+  }, [reread, valuesKey]);
   const edited = () => (setChanges(null), setMsg(null));
   const values = (): Partial<RepoConfigValues> => ({ writers: list(writers), required_checks: checks, daily_budget_usd: budget, workers_count: count, workers_model: model, ...(ci !== (c.values.ci ?? 'github') ? { ci } : {}) });
   const send = async (confirm: boolean) => {

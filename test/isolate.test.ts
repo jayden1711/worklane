@@ -24,6 +24,7 @@ import { TEST_RUN_BASE } from '../src/disk-guard.js';
 import { HELPER_RULES, MACHINE_CHANGES, MACHINE_HELPER } from '../src/machine.js';
 import { MACHINE_OWNERS_FILE } from '../src/machine-owners.js';
 import { NETWORK_FILE } from '../src/network.js';
+import { PROVIDER_HOSTS_FILE } from '../src/provider-hosts.js';
 import { SYSTEM_SLOTS, UPDATE_DRAIN_FILE } from '../src/os/index.js';
 import { gpuFilePath, gpuLockPath } from '../src/testrun/gpu.js';
 import { devSlotsPath, serviceModeRefusal, SYSTEM_ROOT_VAR, systemRootRefusal, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
@@ -166,6 +167,7 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
 const machineLocations = (): [string, string][] => [
   ['MACHINE_OWNERS_FILE', MACHINE_OWNERS_FILE],
   ['NETWORK_FILE', NETWORK_FILE],
+  ['PROVIDER_HOSTS_FILE', PROVIDER_HOSTS_FILE],
   ['UPDATES_CONFIG', UPDATES_CONFIG],
   ['UPDATES_LOG', UPDATES_LOG],
   ['ENGINE_CURRENT', ENGINE_CURRENT],

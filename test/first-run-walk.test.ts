@@ -3,7 +3,8 @@
 // page that isn't there yet says what it needs; exactly one primary button, on the next required step; a done step
 // folds to its line and expands again, kept across a reload in the same tab; and the way to do a step without the
 // page is one complete command, folded under "Without this page". And (#417) an open panel stays where it is on screen
-// across a poll that changes the detail lines above it.
+// across a poll that changes the detail lines above it. And (#569) the Repo config form names the tip it found no
+// checks on, and reads the tip's checks again on Re-check.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -18,7 +19,7 @@ import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
 import { setupModeConfig } from '../src/setup-mode.js';
-import type { SetupProbe } from '../src/setup-steps.js';
+import type { RunResult, SetupProbe } from '../src/setup-steps.js';
 import { launchTestChrome, oneChromeAtATime, pressSteady, REAL_CHROME_TIMEOUT, realChromeTests, STEADY_PX, webUiSkip } from './browser-helpers.js';
 import { exampleProject } from './helpers.js';
 
@@ -229,6 +230,51 @@ test('#417 in a real Chrome: an open panel\'s offset does not change across a po
       assert.notDeepEqual(await heights(), was, `${what}: the lines above the panel changed height`);
       assert.ok(Math.abs(after - before) <= STEADY_PX, `${what}: the open panel moved from ${before} px to ${after} px in the view`);
     }
+  } finally {
+    await b.close();
+    await d.close();
+  }
+});
+
+test('#569 in a real Chrome: the Repo config form says "no checks yet on <short sha>" for the tip, and after a check runs on a new tip, Re-check reads it again: the check offered, the old sha gone', { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) }, async (ctx) => {
+  await oneChromeAtATime(ctx);
+  const { dir } = exampleProject();
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8' }).trim();
+  git('remote', 'add', 'origin', 'https://github.com/example-org/example-shop.git');
+  git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+  install({ root: dir });
+  const stateDir = projectStateDir(dir);
+  mkdirSync(stateDir, { recursive: true });
+  new EventLog(join(stateDir, 'events.db')).close();
+  // GitHub as the checks-seen endpoint asks it: the check runs and statuses on one commit; none until `ran` names some.
+  let ran: { sha: string; checks: string[] } | null = null;
+  const gh = (args: string[]): RunResult => {
+    const on = (sha: string) => !!args[1]?.includes(`/commits/${sha}/`);
+    if (args[0] === 'api' && args[1]?.endsWith('/check-runs')) return { status: 0, stdout: ran && on(ran.sha) ? `${ran.checks.join('\n')}\n` : '', stderr: '' };
+    if (args[0] === 'api' && args[1]?.endsWith('/status')) return { status: 0, stdout: '', stderr: '' };
+    return { status: 1, stdout: '', stderr: 'no stand-in' };
+  };
+  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', slotsDir: mkdtempSync(join(tmpdir(), 'frw-slots-')), setupProbe: probe, setupActions: { gh } });
+  const { b, cdp, open } = await browser(d.token);
+  const status = `${row('required-checks')} [data-testid="repo-config-checks-status"]`;
+  const said = () => js<string>(cdp, `${q(status)}?.textContent ?? ''`);
+  try {
+    const first = git('rev-parse', 'origin/main');
+    await open(`${d.url}/first-run?open=required-checks`, status);
+    await until('the first answer', () => js<boolean>(cdp, `${q(status)}.textContent !== 'checking GitHub…'`), 15_000, 100);
+    assert.match(await said(), new RegExp(`^no checks yet on ${first.slice(0, 7)}(:|$)`));
+    const slot = await js<number>(cdp, `${q(status)}.getBoundingClientRect().height`);
+    // A later tip (as a merged config PR brings it: origin's main moved on), and GitHub has run a check on it.
+    const later = git('commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'a later tip');
+    git('update-ref', 'refs/remotes/origin/main', later);
+    ran = { sha: later, checks: ['ci/e2e'] };
+    await pressSteady(cdp, q('[data-testid="first-run-recheck"]'), 'Re-check');
+    const chip = `${row('required-checks')} [data-testid="repo-config-check"][data-check="ci/e2e"]`;
+    await until('the check that ran offered', () => js<boolean>(cdp, `!!${q(chip)}`), 30_000, 100);
+    assert.equal(await said(), "the checks GitHub ran on main's tip are offered below");
+    assert.doesNotMatch(await said(), new RegExp(first.slice(0, 7)), 'the old tip is named no more');
+    // The status slot kept its reserved size through the change.
+    assert.equal(await js<number>(cdp, `${q(status)}.getBoundingClientRect().height`), slot);
   } finally {
     await b.close();
     await d.close();

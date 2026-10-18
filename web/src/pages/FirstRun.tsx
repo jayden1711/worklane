@@ -499,7 +499,7 @@ function StartCard({ start, canStart, blocked, confirming, setConfirming, onStar
 }
 
 /** The checklist from its data (also what the render checks render). `open` is the step whose Fix is open. */
-export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, sources, initialGhLogin = null }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; sources?: Partial<Record<'slack' | 'linear', ReactNode>>; initialGhLogin?: GhLoginView | null }) {
+export function FirstRunView({ f, onRecheck, checking = false, initialOpen = null, initialConfirming = false, initialActionConfirming = false, initialPolicyChanges = null, initialConfigChanges = null, initialDraftConfirming = false, rerun = null, signin = null, discord, sources, initialGhLogin = null, rechecked = 0 }: { f: FirstRun; onRecheck?: () => void; checking?: boolean; /** #569: how many Re-checks have answered; the Repo config form reads the tip's checks again on each. */ rechecked?: number; initialOpen?: string | null; initialConfirming?: boolean; initialActionConfirming?: boolean; initialPolicyChanges?: PolicyChange[] | null; initialConfigChanges?: ConfigChange[] | null; initialDraftConfirming?: boolean; rerun?: string | null; signin?: ClaudeSigninData | null; discord?: ReactNode; sources?: Partial<Record<'slack' | 'linear', ReactNode>>; initialGhLogin?: GhLoginView | null }) {
   const [skipError, setSkipError] = useState<string | null>(null);
   const skip = (id: string, on: boolean) => {
     setSkipError(null);
@@ -610,7 +610,7 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
                           Not from here yet: {f.repoConfig.error}
                         </p>
                       ) : (
-                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onChanged={() => onRecheck?.()} />
+                        <RepoConfigForm c={f.repoConfig} canEdit={!!f.canAct} initialChanges={initialConfigChanges} onChanged={() => onRecheck?.()} reread={rechecked} />
                       )
                     ) : s.fix.kind === 'form' && s.fix.form === 'setup-origin' && f.setupMode ? (
                       <SetupOrigin canEdit={!!f.canAct} onDone={() => onRecheck?.()} />
@@ -717,6 +717,9 @@ export function FirstRunPage({ state }: { state: State }) {
   // line), which moved the panel under the pointer. Where the open panel on screen is gets noted just before the
   // answer is drawn, and the page scrolls by however far it moved.
   const anchor = useRef<PanelAt | null>(null);
+  // WHY (#569): each Re-check that answers (the button, or a config PR merged from this page) has the Repo config form
+  // read the tip's checks again, after the fresh answer, so a check that ran since is offered and the note is current.
+  const [rechecked, setRechecked] = useState(0);
   const load = useCallback(
     (fresh: boolean) => {
       if (refused) return;
@@ -725,6 +728,7 @@ export function FirstRunPage({ state }: { state: State }) {
         .then((next) => {
           anchor.current = panelOnScreen();
           setF(next);
+          if (fresh) setRechecked((n) => n + 1);
         })
         .catch((e: Error) => setF({ error: e.message }))
         .finally(() => fresh && setChecking(false));
@@ -761,7 +765,7 @@ export function FirstRunPage({ state }: { state: State }) {
         ) : !f ? null : 'error' in f ? (
           <div className="text-[13px] text-red">Can't load the checklist: {f.error}</div>
         ) : (
-          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun ?? openFromUrl()} rerun={rerun} />
+          <FirstRunView f={f} onRecheck={() => load(true)} checking={checking} initialOpen={rerun ?? openFromUrl()} rerun={rerun} rechecked={rechecked} />
         )}
       </div>
     </div>

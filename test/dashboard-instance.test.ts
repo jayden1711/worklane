@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { dashboardSite, siteOptions, instancePort, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
+import { PINS_FILE } from '../src/experiments/store.js';
 import { initInstance } from '../src/instance.js';
 import { childEnv } from '../src/os/index.js';
 import { logPath } from '../src/service.js';
@@ -53,6 +54,16 @@ test('with --instance the dashboard reads and writes that instance\'s log and st
     await d.close();
     log.close();
   }
+});
+
+test('#563 siteOptions carries the instance\'s experiments site, and every other field dashboardSite builds', () => {
+  const { dir, repo, home } = instance();
+  const site = dashboardSite(repo, 'shop', dir);
+  // An instance with run_as (separate users): its experiments reach the dashboard cli.ts starts.
+  assert.deepEqual(siteOptions(site).experiments, { repo: site.root, branch: site.cfg.project.project.default_branch, instance: 'shop', pinsFile: join(home, PINS_FILE) });
+  assert.equal(siteOptions(dashboardSite(repo)).experiments, undefined, 'a checkout has none');
+  // INVARIANT: nothing the site builds is dropped on the way (but cfg and port, which cli.ts passes itself).
+  for (const s of [site, dashboardSite(repo)]) assert.deepEqual(Object.keys(siteOptions(s)).sort(), Object.keys(s).filter((k) => k !== 'cfg' && k !== 'port').sort());
 });
 
 test('an instance\'s dashboard port is fixed by its name, in its own range', () => {

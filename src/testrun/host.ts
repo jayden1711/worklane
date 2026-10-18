@@ -18,7 +18,7 @@ import { HELPER_PROTOCOL } from './helper.js';
 import { cloneScript } from './workspace.js';
 import { gpuLine, type GpuGrant } from './gpu.js';
 import { networkLine, NETWORK_TIER, type NetworkGrant } from './network.js';
-import { npmFetchScript, type Fetcher } from './fetch.js';
+import { FETCH_CACHE_ENV, fetchScript, MAX_REQUIREMENTS, requirementsFileProblem, type Fetcher } from './fetch.js';
 import { libexecPath } from '../os/system-paths.js';
 
 export const SANDBOX_HELPER = libexecPath('testrun');
@@ -243,10 +243,10 @@ export interface RunHost {
   /** The run's own Postgres: a unique container, reached on its Unix socket (the sandbox's has no network). */
   startDb(id: string, db: RunDbSpec): Promise<RunDatabase>;
   /**
-   * The fetch phase (./fetch.ts): what the run's lockfile pins, downloaded into cache `cache` (key `key`) with network,
-   * running none of the repo's code. Its output and exit as a setup step's.
+   * The fetch phase (./fetch.ts): what the run's lockfile pins (pip: its requirements `files`), downloaded into cache
+   * `cache` (key `key`) with network, running none of the repo's code. Its output and exit as a setup step's.
    */
-  fetch(id: string, fetcher: Fetcher, cache: string, key: string, timeoutMs: number, signal?: AbortSignal): Promise<ExecResult>;
+  fetch(id: string, fetcher: Fetcher, cache: string, key: string, timeoutMs: number, signal?: AbortSignal, files?: readonly string[]): Promise<ExecResult>;
   /**
    * Run a command in the workspace with exactly `env` (and the host's fixed PATH, HOME, TMPDIR, CI). With `o.gpu`, the
    * sandbox helper may grant the GPU; a wait for it counts against `timeoutMs`.
@@ -263,6 +263,16 @@ export interface RunHost {
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 function checkId(id: string): void {
   if (!RUN_ID.test(id)) throw new Error(`not a run id: ${id}`);
+}
+
+/** A fetcher and its arguments as the helper takes them: npm none, pip 1 to MAX_REQUIREMENTS requirements files. */
+function checkFetch(fetcher: Fetcher, files: readonly string[]): void {
+  if (fetcher !== 'npm' && fetcher !== 'pip') throw new Error(`no fetch for ${String(fetcher)}`);
+  if (fetcher === 'npm' ? files.length !== 0 : files.length < 1 || files.length > MAX_REQUIREMENTS) throw new Error(`fetch ${fetcher}: ${files.length} requirements files`);
+  for (const f of files) {
+    const why = requirementsFileProblem(f);
+    if (why) throw new Error(`not a requirements file: ${f} (${why})`);
+  }
 }
 
 /** A new run id: the kind, the commit, and enough randomness that two runs of one commit never share one. */
@@ -432,12 +442,12 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
       if (r.code !== 0 || !m) throw fail('db-start', `starting run ${id}'s database`, r);
       return { url: postgresSocketUrl(m[1]!, m[2]!, db.name), socketDir: m[1]!, container: `${BRAND.cli}-test-${instance}-${id}` };
     },
-    async fetch(id, fetcher, cache, key, timeoutMs, signal) {
+    async fetch(id, fetcher, cache, key, timeoutMs, signal, files = []) {
       checkId(id);
-      if (fetcher !== 'npm') throw new Error(`no fetch for ${String(fetcher)}`);
+      checkFetch(fetcher, files);
       if (!/^[a-z][a-z0-9_-]{0,39}$/.test(cache) || !/^[0-9a-f]{16,64}$/.test(key)) throw new Error(`not a cache: ${cache} ${key}`);
-      const r = await call(['fetch', id, fetcher, cache, key, String(Math.max(1, Math.ceil(timeoutMs / 1000)))], { timeoutMs: timeoutMs + 60_000, signal });
-      const line = new RegExp(`^${BRAND.cli}-testrun: fetch npm \\([^\\n]*\\)\\n`).exec(r.stderr);
+      const r = await call(['fetch', id, fetcher, cache, key, String(Math.max(1, Math.ceil(timeoutMs / 1000))), ...files], { timeoutMs: timeoutMs + 60_000, signal });
+      const line = new RegExp(`^${BRAND.cli}-testrun: fetch ${fetcher} \\([^\\n]*\\)\\n`).exec(r.stderr);
       const s = systemdRunStats(r.stderr);
       const own: Array<[number, number]> = [...(line ? [[0, line[0].length] as [number, number]] : []), ...s.own];
       const timedOut = s.result === 'timeout' || (r.code === null && !signal?.aborted);
@@ -576,16 +586,18 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       }
       throw new SetupStepError('db-start', `${container} wasn't ready after ${db.readyS}s`, '');
     },
-    async fetch(id, fetcher, cache, key, timeoutMs, signal) {
+    async fetch(id, fetcher, cache, key, timeoutMs, signal, files = []) {
       checkId(id);
-      if (fetcher !== 'npm') throw new Error(`no fetch for ${String(fetcher)}`);
+      checkFetch(fetcher, files);
       const dir = runDir(id);
       const fd = join(dir, 'fetch');
       rmSync(fd, { recursive: true, force: true });
       mkdirSync(join(fd, 'home'), { recursive: true, mode: 0o700 });
-      const [file, args] = shellCommand(npmFetchScript());
-      const full = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', npm_config_cache: await this.cache(cache, key) };
-      const r = await run(file, args, { cwd: fd, env: full, timeoutMs, signal });
+      // The workspace, then the requirements files, are the script's arguments, as the helper passes them. (The helper
+      // runs it in its unit's private /tmp; the local host has no sandbox, and uses a directory of the run's.)
+      const [file, args] = shellCommand(fetchScript(fetcher));
+      const full = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', [FETCH_CACHE_ENV[fetcher]]: await this.cache(cache, key) };
+      const r = await run(file, [...args, 'fetch', join(dir, 'work'), ...files], { cwd: fd, env: full, timeoutMs, signal });
       rmSync(fd, { recursive: true, force: true });
       return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
     },

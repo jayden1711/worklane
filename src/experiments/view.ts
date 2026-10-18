@@ -1,7 +1,7 @@
-// Extend -> Experiments, the dashboard's side: what a study's page shows (its log, best so far, queue and spend) and
+// The Experiments page, the dashboard's side: what a study's page shows (its log, best so far, queue and spend) and
 // every change a person makes, as a plan that writes nothing and a confirm that re-plans against what the plan saw.
 // Who may do what is here too, so the page and the tests share one rule: owners start, resume, approve, decline and
-// archive; writers (and owners) pause and stop a running job, the safe direction; viewers nothing (403, no tab).
+// archive; writers (and owners) pause and stop a running job, the safe direction; viewers nothing (403, no nav item).
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import type { Role } from '../dashboard-auth.js';
@@ -35,6 +35,18 @@ export interface ExpSite {
   pinsFile: string;
   root?: () => RootState;
 }
+
+/**
+ * Whether experiments are on for this dashboard's instance: root's file lists it (`setup.state === 'on'`). Off, unknown
+ * or no experiments site at all (a checkout, a same-user instance): false, so the sidebar hides Experiments (fail closed).
+ */
+export function experimentsOn(site: ExpSite | undefined): boolean {
+  return !!site && (site.root ?? (() => readRootFile(site.instance)))().state === 'on';
+}
+
+/** Why a dashboard has no experiments: only a checkout or a same-user instance has none (#563), and it says which. */
+export const noExperimentsHere = (instance: string | undefined) =>
+  `experiments are a server instance's (separate users): ${instance ? `the instance ${instance} runs as this dashboard's user` : 'this dashboard serves a checkout'}`;
 
 const show = (repo: string) => (commit: string, path: string) => {
   try {
