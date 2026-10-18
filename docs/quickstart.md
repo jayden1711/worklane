@@ -201,13 +201,17 @@ The step shows a summary, then the file. **Change** lets you edit it. **Confirm*
 
 ## The comment policy in CI (optional)
 
-With `comment_policy: { enabled: true }` in config.yaml, agents are told after each edit about any new comment that doesn't start with `WHY:` or `INVARIANT:` or cite an issue or decision id. A PR check can enforce the same rule. Add one step to a pull-request job in your workflow, after a checkout with `fetch-depth: 2`:
+With `comment_policy: { enabled: true }` in config.yaml, agents are told after each edit about any new comment that doesn't start with `WHY:` or `INVARIANT:` or cite an issue or decision id. A PR check can enforce the same rule. Add the last step below to a pull-request job in your workflow, after a checkout with `fetch-depth: 2`:
 
 ```yaml
-      - run: npx -y @worklane/cli check-comments --base HEAD^1 --head HEAD
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - run: npx -y @worklane/cli@0.5.3 check-comments --base HEAD^1 --head HEAD
 ```
 
-On a pull request, the checkout is GitHub's merge commit, so `HEAD^1` is the base. The step judges only the comment lines the PR adds, using the policy committed on the base, so a PR can't switch it off through config. While the policy is off it prints `comment policy: off …` and passes. It exits 1 with each finding as `file:line: reason`, and exits 2 if it can't check. The engine never writes this step for you: add it yourself, like the starter CI.
+`check-comments` needs 0.5.3 or later: 0.5.2 and earlier print `unknown command: check-comments` and fail the step. Pin the version, as above, so the step runs the release you chose rather than whatever is newest. On a pull request, the checkout is GitHub's merge commit, so `HEAD^1` is the base. The step judges only the comment lines the PR adds, using the policy committed on the base, so a PR can't switch it off through config. While the policy is off it prints `comment policy: off …` and passes. It exits 1 with each finding as `file:line: reason`, and exits 2 if it can't check. The engine never writes this step for you: add it yourself, like the starter CI.
 
 ## Protect
 

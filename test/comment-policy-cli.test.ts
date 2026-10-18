@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { engineCli, exampleProject } from './helpers.js';
+import { PINNED } from '../src/starter-ci.js';
+import { engineCli, exampleProject, repoRoot } from './helpers.js';
 
 const script = fileURLToPath(new URL('../../scripts/check-comments.mjs', import.meta.url));
 
@@ -56,6 +57,22 @@ test('check-comments: a passing change exits 0; the policy off at the base exits
   const r = both(off.dir, ['--base', off.base, '--head', 'HEAD']);
   assert.equal(r.status, 0);
   assert.match(r.stdout, /^comment policy: off in the config at /);
+});
+
+/** WHY: the newest release without `check-comments` (#651 review): npx of it prints "unknown command". */
+const LAST_WITHOUT: [number, number, number] = [0, 5, 2];
+const cmp = (a: number[], b: number[]) => a.reduce((d, x, i) => d || x - b[i]!, 0);
+
+test('docs: the managed-repo step pins a release with check-comments, no later than the next one, behind the pinned checkout', () => {
+  const doc = readFileSync(join(repoRoot, 'docs', 'quickstart.md'), 'utf8');
+  const pin = new RegExp(`npx -y ${BRAND.pkg.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}@(\\d+)\\.(\\d+)\\.(\\d+) check-comments --base HEAD\\^1`).exec(doc);
+  assert.ok(pin, 'the step names an exact version');
+  const pinned = pin.slice(1, 4).map(Number);
+  const [maj, min, patch] = (JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version: string }).version.split('.').map(Number) as [number, number, number];
+  assert.ok(cmp(pinned, LAST_WITHOUT) > 0, `${pinned.join('.')} is newer than ${LAST_WITHOUT.join('.')}, which has no check-comments`);
+  assert.ok(cmp(pinned, [maj, min, patch + 1]) <= 0, `${pinned.join('.')} is not past the next release after ${maj}.${min}.${patch}`);
+  assert.ok(doc.includes(`uses: ${PINNED.checkout}`), "the docs' checkout is the starter CI's pin");
+  assert.match(doc, /persist-credentials: false/);
 });
 
 test('check-comments: no --base, or a base git can\'t resolve, exits 2', () => {
