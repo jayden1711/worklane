@@ -635,6 +635,12 @@ test('regression: a disabled workflow\'s name and path lose C1 and bidi controls
   assert.deepEqual(w, { name: 'C I ', path: '.github/workflows/ ci .yml ', state: 'disabled_manually' });
 });
 
+test('regression: clipping a disabled workflow\'s name to 200 characters never keeps half an emoji', () => {
+  const name = `x${'😀'.repeat(150)}`;
+  const w = disabledWorkflowFor(name, [{ name, path: '.github/workflows/ci.yml', state: 'disabled_manually' }], () => null);
+  assert.equal(w?.name, `x${'😀'.repeat(99)}`);
+});
+
 test('main watch: GitHub enforcing the protection leaves it to GitHub; a rewritten main is unaccounted, with no revert', async () => {
   const w = world();
   const gh = fakeGitHub();

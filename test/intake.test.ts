@@ -8,7 +8,7 @@ import { BugStoreIntake, pullBugReports, readCursor, withCursor } from '../src/i
 import { candidates, similarity } from '../src/intake/dedupe.js';
 import { LABELS, parseContract } from '../src/backlog/types.js';
 import { decide, statusReply, NEEDS_INFO_REPLY, type IntakeAction } from '../src/intake/decide.js';
-import { DiscordIntake, INTENTS, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
+import { DiscordIntake, fitPost, INTENTS, REPLY_CHARS, type Socket } from '../src/intake/discord.js';
 import { luhn, redactPii } from '../src/intake/redact.js';
 import { IntakeConfig, intakeWarnings, isAllowed, isTrusted, type IncomingReport, type Source } from '../src/intake/report.js';
 import { IntakeMeter, purgeRaw, readRaw, reportId, storeRaw } from '../src/intake/store.js';
@@ -219,6 +219,33 @@ test('chat bot: a reply is capped at 500 characters', async () => {
   await d.reply('111111', 'x'.repeat(2000));
   await d.reply('111111', 'short');
   assert.deepEqual(posts.map((p) => (JSON.parse(String(p.init.body)) as { content: string }).content.length), [500, 5]);
+});
+
+test('regression: the cut to 500 characters never leaves a code span open, a backtick run split or an emoji halved', async () => {
+  const lone = /[\uD800-\uDBFF]$/;
+  // Inside a span: the cut moves back to before its opening backtick, so the span is dropped whole.
+  assert.equal(fitPost('ab `cd **x** ef` gh', 10), 'ab ');
+  assert.equal(fitPost('`a` b `c` d `eeeeeeee`', 14), '`a` b `c` d ');
+  // On a span's end: kept whole.
+  assert.equal(fitPost('`a` b `cd` e', 10), '`a` b `cd`');
+  // Never in the middle of a run (``` cut to ` would pair with an earlier one).
+  assert.equal(fitPost('a ``b`` ```code```', 10), 'a ``b`` ');
+  assert.equal(fitPost('x ` y ```', 7), 'x ');
+  // Never half an emoji, and the count stays even through one.
+  assert.equal(fitPost('ab😀cd', 3), 'ab');
+  assert.equal(fitPost('`😀` x', 2), '');
+  assert.equal(fitPost('short `x', 500), 'short `x', 'what fits is sent as it is');
+  for (const text of ['`'.repeat(1001), `${'`a` '.repeat(200)}`, `\`${'😀'.repeat(300)}\``, `x\`${'y'.repeat(600)}\``]) {
+    const t = fitPost(text, REPLY_CHARS);
+    assert.ok(t.length <= REPLY_CHARS && text.startsWith(t));
+    assert.equal((t.match(/`/g) ?? []).length % 2, 0, t);
+    assert.doesNotMatch(t, lone);
+  }
+  const posts: { url: string; init: RequestInit }[] = [];
+  const { d } = readyBot(posts);
+  const path = `\`${'p'.repeat(200)} **bold** <#123456789012345678>\``;
+  await d.reply('111111', `${'x'.repeat(400)} ${path}`);
+  assert.equal((JSON.parse(String(posts[0]!.init.body)) as { content: string }).content, `${'x'.repeat(400)} `, 'the reply is cut by fitPost');
 });
 
 test('in-product reports: the fixed query with only a validated cursor filled in; the cursor advances privately, only past what is recorded', { skip: !posix && 'POSIX modes' }, async () => {

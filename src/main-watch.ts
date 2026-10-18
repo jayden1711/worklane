@@ -450,7 +450,7 @@ function jobChecks(text: string | null): ((check: string) => boolean)[] {
 }
 
 /** A workflow's name or path as the dashboard shows it: no control, C1 or bidi characters, at most 200 characters. */
-const clipText = (x: string) => x.replace(/[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]+/g, ' ').slice(0, 200);
+const clipText = (x: string) => x.replace(/[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]+/g, ' ').slice(0, 200).replace(/[\uD800-\uDBFF]$/, '');
 
 /**
  * For one read of the Actions workflows' list: the disabled workflow (state disabled_*) that would post a check, when

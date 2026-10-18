@@ -13,8 +13,9 @@ import { protectionState, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { mainWatchPost } from '../src/intake/channel.js';
+import { DiscordIntake, REPLY_CHARS } from '../src/intake/discord.js';
 import { IntakeConfig, type IntakeSource } from '../src/intake/report.js';
-import { CONFIG_PATH, protectionView, type CheckRunAt, type MainWatchApi, type MergedPull, type WorkflowAt } from '../src/main-watch.js';
+import { CONFIG_PATH, disabledWorkflowFor, protectionView, type CheckRunAt, type MainWatchApi, type MergedPull, type WorkflowAt } from '../src/main-watch.js';
 import type { PrTestRuns, OpenPr } from '../src/coordinator/test-runs.js';
 import type { TestRunRequest, TestRuns } from '../src/coordinator/pr-batch.js';
 import { FakeRunner } from '../src/runner.js';
@@ -639,15 +640,15 @@ test('main watch dead check: a required check with no run for dead_check_days is
   w.clock.t += 7 * 24 * 3600_000;
   await w.watch(3);
   assert.deepEqual(dead(), [['ci', 'raised']]);
-  assert.equal(posts(/the required check "ci" has had no run on any commit judged since .* keep tripping the watch until it posts/).length, 1);
+  assert.equal(posts(/the required check `ci` has had no run on any commit judged since .* keep tripping the watch until it posts/).length, 1);
   assert.deepEqual(view(), ['ci'], 'on the dashboard');
   await w.watch(3);
   assert.equal(dead().length, 1, 'once');
-  assert.equal(posts(/"ci" has had no run/).length, 1, 'posted once');
+  assert.equal(posts(/`ci` has had no run/).length, 1, 'posted once');
   await merge('feature/two', true);
   await w.watch(8);
   assert.deepEqual(dead(), [['ci', 'raised'], ['ci', 'cleared']]);
-  assert.equal(posts(/"ci" has a run again/).length, 1);
+  assert.equal(posts(/`ci` has a run again/).length, 1);
   assert.deepEqual(view(), []);
 });
 
@@ -672,19 +673,36 @@ async function deadWith(workflows: WorkflowAt[]) {
   w.clock.t += 7 * 24 * 3600_000;
   await w.watch(3);
   const raised = of<EventPayload<'main_watch.dead_check'>>(w.f, 'main_watch.dead_check');
-  const posts = chat.posts.filter((p) => p.where === OPS_CHANNEL && /"ci" has had no run/.test(p.text)).map((p) => p.text);
+  const posts = chat.posts.filter((p) => p.where === OPS_CHANNEL && /required check .ci. has had no run/.test(p.text)).map((p) => p.text);
   return { raised, posts };
 }
 
-test('regression: the dead-check ops post names the disabled workflow and its state; without one, its text is as before', async () => {
+/** What Discord receives for `text` posted to the ops channel: the adapter's own reply, with a fake fetch. */
+async function discordGets(text: string) {
+  const sent: { content: string; allowed_mentions: unknown }[] = [];
+  const bot = new DiscordIntake({
+    token: 'x',
+    guild: '555555',
+    channels: [],
+    allowedSenders: [],
+    prefixes: [],
+    opsChannel: OPS_CHANNEL,
+    fetch: (async (_url: string, init: { body: string }) => (sent.push(JSON.parse(init.body)), new Response('{}'))) as unknown as typeof fetch,
+  });
+  assert.equal(await bot.reply(OPS_CHANNEL, text), true);
+  assert.equal(sent.length, 1);
+  return sent[0]!;
+}
+
+test('regression: the dead-check ops post names the disabled workflow and its state; without one, it has no workflow sentence', async () => {
   const a = await deadWith([{ name: 'Tests', path: '.github/workflows/ci.yml', state: 'disabled_manually' }]);
   assert.equal(a.raised.length, 1);
   assert.deepEqual(a.posts, [
-    `Main watch: the required check "ci" has had no run on any commit judged since ${a.raised[0]!.since}. Its workflow \`Tests\` (\`.github/workflows/ci.yml\`) is disabled on GitHub (\`disabled_manually\`), so it can't post the check until someone enables it again. Merges into main keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`,
+    `Main watch: the required check \`ci\` has had no run on any commit judged since ${a.raised[0]!.since}. Its workflow \`Tests\` (\`.github/workflows/ci.yml\`) is disabled on GitHub (\`disabled_manually\`), so it can't post the check until someone enables it again. Merges into main keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`,
   ]);
   const b = await deadWith([]);
   assert.equal(b.raised[0]!.workflow, undefined);
-  assert.deepEqual(b.posts, [`Main watch: the required check "ci" has had no run on any commit judged since ${b.raised[0]!.since}. Merges into main keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`], 'as before');
+  assert.deepEqual(b.posts, [`Main watch: the required check \`ci\` has had no run on any commit judged since ${b.raised[0]!.since}. Merges into main keep tripping the watch until it posts, or until it leaves required_checks in config.yaml.`], 'no workflow sentence');
 });
 
 test('regression: a hostile workflow name in the dead-check ops post is inert: no mention, link or markdown outside a code span', async () => {
@@ -695,8 +713,29 @@ test('regression: a hostile workflow name in the dead-check ops post is inert: n
   const post = a.posts[0]!;
   // The name is one code span (its own backticks replaced, so it can't close the span): Discord renders nothing in it.
   const spans = [...post.matchAll(/`([^`]*)`/g)].map((x) => x[1]);
-  assert.deepEqual(spans, ["@everyone [x](http://evil.example/a) '**b**' <@123>", '.github/workflows/ci.yml', 'disabled_inactivity']);
+  assert.deepEqual(spans, ['ci', "@everyone [x](http://evil.example/a) '**b**' <@123>", '.github/workflows/ci.yml', 'disabled_inactivity']);
   assert.doesNotMatch(post.replace(/`[^`]*`/g, ''), /@everyone|<@|\]\(|\*\*|evil\.example/, 'nothing of the name outside its code span');
+});
+
+test('regression: a 200-character workflow name and a 200-character hostile path keep their code spans whole after Discord cuts the post to 500 characters', async () => {
+  const name = `@everyone **n** ${'n'.repeat(240)}`;
+  const hostile = 'x **bold** ||spoiler|| <#123456789012345678> <t:1:R> <@&123456789012345678> [l](https://evil.example/a) ';
+  const path = `.github/workflows/${hostile}${'p'.repeat(120)}/ci.yml`;
+  const list: WorkflowAt[] = [{ name, path, state: 'disabled_manually' }];
+  const recorded = disabledWorkflowFor('ci', list, () => null);
+  assert.deepEqual([recorded?.name.length, recorded?.path.length], [200, 200], 'both clipped to 200 by disabledWorkflowFor');
+  const a = await deadWith(list);
+  assert.deepEqual(a.raised[0]!.workflow, recorded, 'the watch records what disabledWorkflowFor gives');
+  assert.equal(a.posts.length, 1);
+  assert.ok(a.posts[0]!.length > REPLY_CHARS, `the built post is longer than Discord's cut: ${a.posts[0]!.length}`);
+  const got = await discordGets(a.posts[0]!);
+  const ticks = (got.content.match(/`/g) ?? []).length;
+  assert.ok(got.content.length <= REPLY_CHARS);
+  assert.equal(ticks % 2, 0, `backticks: ${ticks}: ${got.content}`);
+  const outside = got.content.replace(/`[^`]*`/g, '');
+  assert.doesNotMatch(outside, /@everyone|<[@#t]|\]\(|\*\*|\|\||evil\.example/, `nothing hostile outside a span: ${outside}`);
+  assert.ok(got.content.includes(`\`@everyone **n** ${'n'.repeat(20)}`), 'the name is still there, whole, as one span');
+  assert.deepEqual(got.allowed_mentions, { parse: [] }, 'and it pings nobody');
 });
 
 test('main watch dead check: the raised warning records the disabled workflow that would post the check, and is shown with it; posted once', async () => {
@@ -723,7 +762,7 @@ test('main watch dead check: the raised warning records the disabled workflow th
   const raised = of<EventPayload<'main_watch.dead_check'>>(w.f, 'main_watch.dead_check');
   assert.deepEqual(raised.map((d) => [d.check, d.state, d.workflow]), [['ci', 'raised', disabled]], 'the event log took the note');
   assert.deepEqual(protectionView(join(w.f.stateDir, 'main-watch.json'), w.f.cfg.project.project.repo).deadChecks.map((d) => d.workflow), [disabled]);
-  assert.equal(chat.posts.filter((p) => p.where === OPS_CHANNEL && /"ci" has had no run/.test(p.text)).length, 1);
+  assert.equal(chat.posts.filter((p) => p.where === OPS_CHANNEL && /`ci` has had no run/.test(p.text)).length, 1);
   assert.equal(w.gh.calls.filter((c) => c === 'workflows').length, 1);
   assert.equal(of(w.f, 'merge.stopped').length, 1, 'the stop as before');
 });

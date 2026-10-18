@@ -18,8 +18,31 @@ export const GATEWAY_URL = 'wss://gateway.discord.gg/?v=10&encoding=json';
 export const API = 'https://discord.com/api/v10';
 /** GUILD_MESSAGES | MESSAGE_CONTENT: the least the bot needs to read addressed messages. No direct messages. */
 export const INTENTS = (1 << 9) | (1 << 15);
-/** The longest reply the bot sends; anything longer is cut. */
+/** The longest reply the bot sends; anything longer is cut (fitPost). */
 export const REPLY_CHARS = 500;
+
+const TICK = 96;
+/**
+ * `text` cut to at most `max` characters for a post. The cut never splits an emoji (a surrogate pair) or a run of
+ * backticks, and what it keeps has an even number of backticks: while that is odd, the cut moves back to before the
+ * last run. So a code span (a pair of single backticks with none inside, as `lit` in review-packet.ts builds) is kept
+ * whole or dropped whole, never left open for the rest of the post to render as markdown. Text that fits is unchanged.
+ */
+export function fitPost(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const tick = (i: number) => text.charCodeAt(i) === TICK;
+  let end = Math.max(0, max);
+  while (end > 0 && tick(end - 1) && tick(end)) end--;
+  const last = text.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end--;
+  let ticks = 0;
+  for (let i = 0; i < end; i++) if (tick(i)) ticks++;
+  while (ticks % 2) {
+    while (!tick(end - 1)) end--;
+    while (end > 0 && tick(end - 1)) (end--, ticks--);
+  }
+  return text.slice(0, end);
+}
 
 /** The part of WebSocket the adapter uses, so tests can pass a fake. */
 export interface Socket {
@@ -315,7 +338,7 @@ export class DiscordIntake {
     const headers = { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' };
     let on = from;
     if (!on) {
-      const r = await f(`${API}/channels/${encodeURIComponent(channel)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: text.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
+      const r = await f(`${API}/channels/${encodeURIComponent(channel)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: fitPost(text, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
       if (!r.ok) return null;
       on = String(((await r.json()) as { id?: unknown }).id ?? '');
       if (!/^\d{5,25}$/.test(on)) return null;
@@ -342,7 +365,7 @@ export class DiscordIntake {
     const r = await (this.o.fetch ?? fetch)(`${API}/channels/${encodeURIComponent(threadId)}/messages`, {
       method: 'POST',
       headers: { authorization: `Bot ${this.o.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ content: `${content.slice(0, REPLY_CHARS - tail.length)}${tail}`, allowed_mentions: { parse: [], ...(users.length ? { users } : {}) } }),
+      body: JSON.stringify({ content: `${fitPost(content, REPLY_CHARS - tail.length)}${tail}`, allowed_mentions: { parse: [], ...(users.length ? { users } : {}) } }),
     });
     return r.ok;
   }
@@ -359,7 +382,7 @@ export class DiscordIntake {
     if (!c.ok) return false;
     const id = String(((await c.json()) as { id?: unknown }).id ?? '');
     if (!SNOWFLAKE.test(id)) return false;
-    const r = await f(`${API}/channels/${encodeURIComponent(id)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: content.slice(0, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
+    const r = await f(`${API}/channels/${encodeURIComponent(id)}/messages`, { method: 'POST', headers, body: JSON.stringify({ content: fitPost(content, REPLY_CHARS), allowed_mentions: { parse: [] } }) });
     return r.ok;
   }
 }
