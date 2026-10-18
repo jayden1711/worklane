@@ -175,9 +175,23 @@ export function holdBanner(h: { kind?: string | undefined; reason: string; facts
   }
 }
 
-/** The banner as a viewer may have it: why work is held, never the way to change it (no fix, no link). */
+/**
+ * A refused Claude login's hold, in words that name no account. The coordinator records this; a hold recorded before
+ * it named the login (its email or org), which only the owners and writers are sent (issue #567).
+ */
+export const SIGN_IN_HOLD_REASON = 'Claude sign-in failed: no new runs until a call on the refused login succeeds';
+
+/**
+ * The banner as a viewer may have it: why work is held, never the way to change it (no fix, no link). A refused
+ * login's numbers are the fixed words above: an older hold's reason names the account, and a viewer learns no account.
+ */
 export function bannerForViewer(b: HoldBanner): HoldBanner {
-  return { ...b, fix: null, link: null };
+  return { ...b, fix: null, link: null, ...(b.kind === 'sign_in' ? { numbers: SIGN_IN_HOLD_REASON } : {}) };
+}
+
+/** The governor's last hold as a viewer may have it: the banner above, and a refused login's reason in fixed words. */
+export function governorForViewer<G extends { reason?: string | null; banner?: HoldBanner | null }>(g: G): G {
+  return { ...g, ...(g.banner?.kind === 'sign_in' ? { reason: SIGN_IN_HOLD_REASON } : {}), banner: g.banner ? bannerForViewer(g.banner) : null };
 }
 
 /** doctor's and First run's disk check: warn when free disk is under the floor, or would be after one more worktree. */

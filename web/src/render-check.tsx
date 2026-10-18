@@ -76,7 +76,7 @@ import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
-import { ClaudeAccountView } from './components/ClaudeAccount';
+import { ClaudeAccountSet, ClaudeAccountView } from './components/ClaudeAccount';
 import { TailscaleSetupView } from './components/TailscaleSetup';
 export { tailscaleBusy, tailscaleStepEnded } from './components/TailscaleSetup';
 export { accountBusy } from './components/ClaudeAccount';
@@ -224,6 +224,8 @@ export { keyData } from './pages/Setup';
 export { addProjectInvalid } from './api';
 /** The Claude account panel; `scope`: the hub page's instance scope, as ClaudeAccountPanel passes it (absent: off a hub). */
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number, scope?: InstanceScope | null) => renderToStaticMarkup(<ClaudeAccountView data={data} scope={scope ?? null} {...(now !== undefined ? { now } : {})} />);
+/** What the Machine page shows anyone the Claude account panel refuses: whether an account is set, from their state. */
+export const renderClaudeAccountSet = (state: Pick<State, 'claudeAccount'>) => renderToStaticMarkup(<ClaudeAccountSet set={state.claudeAccount?.set} />);
 export const renderTailscaleSetup = (data: TailscaleData, o: { confirming?: TailscaleAction } = {}) => renderToStaticMarkup(<TailscaleSetupView data={data} initialConfirming={o.confirming ?? null} />);
 export const renderUsageBanner = (usage: UsageInfo[], now: number) => renderToStaticMarkup(<UsageBanner usage={usage} now={now} />);
 /** A decision's detail page from its data; `prBody` and `diff` as already read (undefined: not asked yet). */

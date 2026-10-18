@@ -6,7 +6,7 @@
 // writers', like the runs routes.
 import type { StoredEvent } from './events/types.js';
 import { summarize } from './projection.js';
-import { bannerForViewer, type HoldBanner } from './governor-holds.js';
+import { governorForViewer, type HoldBanner } from './governor-holds.js';
 
 /** Event type -> the payload fields a viewer sees. Only the task's progress, its decisions, PRs and deploys. */
 export const VIEWER_EVENTS: Readonly<Record<string, readonly string[]>> = Object.freeze({
@@ -67,6 +67,8 @@ export function viewerActivity(events: StoredEvent[]) {
 export const VIEWER_STATE_KEYS: readonly string[] = Object.freeze([
   'brand', 'project', 'user', 'role', 'via', 'owners', 'slots', 'lastId', 'tasks', 'decisions', 'landedToday', 'baseline', 'deploys',
   'coordinator', 'activity', 'landQueue', 'batches', 'governor', 'emergency', 'reports', 'inbox', 'prCounts', 'costBasis', 'protection',
+  // Whether the agents' Claude account is set, and nothing more of it (issue #567: no email, plan or profile names).
+  'claudeAccount',
   'canReadIntake', 'canReadThroughput', 'canReadReports', 'canReadRuns', 'canReadDigest', 'canReadLogs', 'canReadMachine', 'canWrite', 'canReadAudit',
 ]);
 export const VIEWER_TASK_FIELDS: readonly string[] = Object.freeze([
@@ -111,11 +113,9 @@ export function stateForViewer(state: Record<string, unknown>): Record<string, u
     const ib = out.inbox as Record<string, unknown>;
     out.inbox = { decisions: decisionsOnly(ib.decisions), blocked: tasksOnly(ib.blocked), notify: tasksOnly(ib.notify) };
   }
-  // A hold's banner: why work is held and its numbers, never the way to change it (no fix, no Settings link).
-  if (out.governor && typeof out.governor === 'object') {
-    const g = out.governor as { banner?: HoldBanner | null };
-    out.governor = { ...g, banner: g.banner ? bannerForViewer(g.banner) : null };
-  }
+  // A hold's banner: why work is held and its numbers, never the way to change it (no fix, no Settings link), and
+  // never which Claude account a refused login is (issue #567).
+  if (out.governor && typeof out.governor === 'object') out.governor = governorForViewer(out.governor as { reason?: string | null; banner?: HoldBanner | null });
   // How the default branch is guarded: the mode only, never the commits checked or an alert's detail.
   if (out.protection && typeof out.protection === 'object') out.protection = pick(out.protection as Record<string, unknown>, VIEWER_PROTECTION_FIELDS);
   // Only the errors still current (src/projection.ts CoordinatorErrors), each as often as it happened; never the earlier ones.
