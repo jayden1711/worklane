@@ -191,7 +191,7 @@ const shellWord = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 const cut = (s: string) => (s.length > POST_EDIT_MAX_CHARS ? `${s.slice(0, POST_EDIT_MAX_CHARS)}\n… (cut)` : s);
 
-/** The project's post_edit command on one file: its output when it fails, else null (a timeout or error: null). */
+/** WHY: its own function so a failing post_edit can't hide the comment policy's report (#330). Null: passed or timed out. */
 function postEditCheck(root: string, file: string, template: string, timeoutMs: number): string | null {
   const [bin, args] = shellCommand(template.replaceAll('{file}', shellWord(file)));
   const r = spawnSync(bin, args, { cwd: root, encoding: 'utf8', timeout: timeoutMs, env: childEnv() });
@@ -200,19 +200,17 @@ function postEditCheck(root: string, file: string, template: string, timeoutMs: 
   return `[${BRAND.cli}] the project's post-edit check found problems in ${file} (${template}):\n${cut(out) || `exit ${r.status}`}`;
 }
 
-/** The comment policy (#330) on the lines this edit added against HEAD: the same rule as the PR check. */
+/** INVARIANT: the same rule and words as the PR check (#330), judged on the file's lines that are new since HEAD. */
 function commentCheck(root: string, file: string, policy: Config['project']['comment_policy']): string | null {
   const findings = checkWorkingFile(root, file, policy);
   if (!findings.length) return null;
-  return `[${BRAND.cli}] the comment policy refuses ${findings.length === 1 ? 'a new comment' : `${findings.length} new comments`} in ${file}: start each with WHY: or INVARIANT:, or cite an issue or decision id; no narration; at most ${policy.max_lines} lines. CI runs the same check on the PR.\n${cut(formatFindings(findings))}`;
+  return `[${BRAND.cli}] the comment policy refuses ${findings.length === 1 ? 'a new comment' : `${findings.length} new comments`} in ${file}: start each with WHY: or INVARIANT:, or cite an issue or decision id; no narration; at most ${policy.max_lines} lines. It is the same rule the PR check uses.\n${cut(formatFindings(findings))}`;
 }
 
 /**
- * After an Edit/Write: the comment policy when the project turned it on (config.yaml comment_policy), and the
- * project's fast check of that one file (tests.yaml `post_edit`), their findings returned to the agent as context.
- * It never blocks or undoes the edit: no config, a file outside the project, a timeout or any error is a no-op for
- * that check (exit 0), silent except a comment check that couldn't run, which says so. The PreToolUse guard is
- * separate and unchanged.
+ * INVARIANT: never blocks or undoes the edit (#330). After an Edit/Write, the comment policy (when on) and tests.yaml
+ * `post_edit` report to the agent as context; no config, a file outside the project, a timeout or an error is a
+ * no-op for that check, silent except a comment check that couldn't run, which says so. PreToolUse is separate.
  */
 function postToolUse(input: HookInput, timeoutMs: number): HookOutput {
   const none: HookOutput = { exitCode: 0 };
@@ -233,8 +231,8 @@ function postToolUse(input: HookInput, timeoutMs: number): HookOutput {
         const r = commentCheck(root, file, cfg.project.comment_policy);
         if (r) found.push(r);
       } catch (e) {
-        // WHY: the edit already happened and CI judges the PR (#330), so a check that can't run fails open, with a note.
-        found.push(`[${BRAND.cli}] the comment policy could not check ${file} (${(e as Error).message.split('\n')[0]!.slice(0, 200)}); CI checks the PR.`);
+        // WHY: the edit can't be undone here (#330), so a check that can't run fails open and says so; it never guesses.
+        found.push(`[${BRAND.cli}] the comment policy could not check ${file} (${(e as Error).message.split('\n')[0]!.slice(0, 200)}); its comments were not judged.`);
       }
     }
     const template = cfg.tests.post_edit;
