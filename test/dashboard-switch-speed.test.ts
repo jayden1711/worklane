@@ -298,7 +298,7 @@ async function switches(link: Link, cache: boolean): Promise<{ instance: number[
     for (let i = 0; i < SWITCHES; i++) {
       const target: string = onPrs ? boardOf(on) : shownPrs;
       assert.equal(await js<boolean>(cdp, target), false, `the ${onPrs ? 'Board' : 'PR page'} isn't shown before the switch to it`);
-      const r: Timed = await js(cdp, onPrs ? timedSwitch(navRow('nav-board'), target, otherCards(on)) : timedSwitch(navRow('nav-prs'), target, otherCards(on)));
+      const r: Timed = await js(cdp, onPrs ? timedSwitch(navRow('tab-board'), target, otherCards(on)) : timedSwitch(navRow('tab-prs'), target, otherCards(on)));
       assert.ok(r.ms >= 0, `the switch to the ${onPrs ? 'Board' : 'PR page'} showed ${on}'s own data`);
       if (cache) assert.equal(r.entrance, false, `the switch to the ${onPrs ? 'Board' : 'PR page'} from cache showed no entrance animation`);
       assert.equal(r.wrong, false, `no card of another instance on ${on}'s pages`);

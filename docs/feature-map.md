@@ -16,42 +16,52 @@ is there and its heading (`[data-testid="page-title"]`, inside
 
 | Page | Route | File | Sidebar | Shortcut | Root | Ready when |
 |---|---|---|---|---|---|---|
-| `board` | `/` | `web/src/pages/Board.tsx` | Board | `g b` | `[data-testid="page-board"]` | `Board` |
+| `board` | `/` | `web/src/pages/Board.tsx` | Work › Board | `g b` | `[data-testid="page-board"]` | `Board` |
 | `overview` | `/overview` | `web/src/pages/Overview.tsx` | Overview | `g o` | `[data-testid="page-overview"]` | `Overview` |
-| `inbox` | `/inbox` | `web/src/pages/Inbox.tsx` | Inbox | `g i` | `[data-testid="page-inbox"]` | `Inbox` |
-| `waiting` | `/waiting` | `web/src/pages/Waiting.tsx` | Waiting on you | `g w` | `[data-testid="page-waiting"]` | `Waiting on you` |
-| `decisions` | `/decisions` | `web/src/pages/Decisions.tsx` | Decisions | `g d` | `[data-testid="page-decisions"]` | `Decisions` |
-| `setup` | `/setup` | `web/src/pages/Setup.tsx` | Setup console | `g u` | `[data-testid="page-setup"]` | `Setup console` |
+| `inbox` | `/needs-you/inbox` | `web/src/pages/Inbox.tsx` | Needs you › Inbox | `g i` | `[data-testid="page-inbox"]` | `Inbox` |
+| `waiting` | `/needs-you/waiting` | `web/src/pages/Waiting.tsx` | Needs you › Waiting on you | `g w` | `[data-testid="page-waiting"]` | `Waiting on you` |
+| `decisions` | `/needs-you/decisions` | `web/src/pages/Decisions.tsx` | Needs you › Decisions | `g d` | `[data-testid="page-decisions"]` | `Decisions` |
+| `setup` | `/settings/setup` | `web/src/pages/Setup.tsx` | Settings › Setup console | `g u` | `[data-testid="page-setup"]` | `Setup console` |
 | `first-run` | `/first-run` | `web/src/pages/FirstRun.tsx` | First run | `g f` | `[data-testid="page-first-run"]` | `First run` |
-| `issues` | `/issues` | `web/src/pages/Issues.tsx` | Issues | `g s` | `[data-testid="page-issues"]` | `Issues` |
-| `intake` | `/intake` | `web/src/pages/Intake.tsx` | Intake | `g n` | `[data-testid="page-intake"]` | `Intake` |
-| `issue-detail` | `/issues/<n>` | `web/src/pages/IssueDetail.tsx` | – | `Enter` on an issue row | `[data-testid="page-issue-detail"]` | `#<n>` |
-| `land` | `/land` | `web/src/pages/Landing.tsx` | Land queue | `g l` | `[data-testid="page-land"]` | `Land queue` |
-| `prs` | `/prs` | `web/src/pages/PullRequests.tsx` | Pull requests | `g p` | `[data-testid="page-prs"]` | `Pull requests` |
+| `issues` | `/work/issues` | `web/src/pages/Issues.tsx` | Work › Issues | `g s` | `[data-testid="page-issues"]` | `Issues` |
+| `intake` | `/work/intake` | `web/src/pages/Intake.tsx` | Work › Intake | `g n` | `[data-testid="page-intake"]` | `Intake` |
+| `issue-detail` | `/work/issues/<n>` | `web/src/pages/IssueDetail.tsx` | – | `Enter` on an issue row | `[data-testid="page-issue-detail"]` | `#<n>` |
+| `land` | `/shipping/land` | `web/src/pages/Landing.tsx` | Shipping › Land queue | `g l` | `[data-testid="page-land"]` | `Land queue` |
+| `prs` | `/work/prs` | `web/src/pages/PullRequests.tsx` | Work › Pull requests | `g p` | `[data-testid="page-prs"]` | `Pull requests` |
 | `agents` | `/agents` | `web/src/pages/Agents.tsx` | Agents | `g a` | `[data-testid="page-agents"]` | `Agents` |
 | `extend` | `/extend` | `web/src/pages/Extend.tsx` | Extend | `g x` | `[data-testid="page-extend"]` | `Extend` |
 | `experiments` | `/experiments` | `web/src/pages/Experiments.tsx` | Experiments | `g t` | `[data-testid="page-experiments"]` | `Experiments` |
-| `activity` | `/activity` | `web/src/pages/Activity.tsx` | Activity | `g e` | `[data-testid="page-activity"]` | `Activity` |
-| `deploys` | `/deploys` | `web/src/pages/Deploys.tsx` | Deploys | `g y` | `[data-testid="page-deploys"]` | `Deploys` |
-| `reports` | `/reports` | `web/src/pages/Reports.tsx` | Reports | `g r` | `[data-testid="page-reports"]` | `Reports` |
-| `logs` | `/logs` | `web/src/pages/Logs.tsx` | Logs | `g j` | `[data-testid="page-logs"]` | `Logs` |
-| `health` | `/health` | `web/src/pages/Health.tsx` | Health | `g h` | `[data-testid="page-health"]` | `Health` |
+| `activity` | `/agents/activity` | `web/src/pages/Activity.tsx` | Agents › Activity | `g e` | `[data-testid="page-activity"]` | `Activity` |
+| `deploys` | `/shipping/deploys` | `web/src/pages/Deploys.tsx` | Shipping › Deploys | `g y` | `[data-testid="page-deploys"]` | `Deploys` |
+| `reports` | `/machine/reports` | `web/src/pages/Reports.tsx` | Machine › Reports | `g r` | `[data-testid="page-reports"]` | `Reports` |
+| `logs` | `/machine/logs` | `web/src/pages/Logs.tsx` | Machine › Logs | `g j` | `[data-testid="page-logs"]` | `Logs` |
+| `health` | `/machine/health` | `web/src/pages/Health.tsx` | Machine › Health | `g h` | `[data-testid="page-health"]` | `Health` |
 | `machine` | `/machine` | `web/src/pages/Machine.tsx` | Machine | `g m` | `[data-testid="page-machine"]` | `Machine` |
 | `settings` | `/settings` | `web/src/pages/Settings.tsx` | Settings | `g ,` | `[data-testid="page-settings"]` | `Settings` |
 | `run-detail` | `/runs/<id>` | `web/src/pages/RunDetail.tsx` | – | a run row on an issue page | `[data-testid="page-run-detail"]` | `run` |
-| `decision-detail` | `/decisions/<decision>` | `web/src/pages/DecisionDetail.tsx` | – | Details on a decision card (Decisions, Inbox), a Waiting on you item, or a PR waiting for you | `[data-testid="page-decision-detail"]` | `Decision` |
+| `decision-detail` | `/needs-you/decisions/<decision>` | `web/src/pages/DecisionDetail.tsx` | – | Details on a decision card (Decisions, Inbox), a Waiting on you item, or a PR waiting for you | `[data-testid="page-decision-detail"]` | `Decision` |
 
 Any other path shows the Board, the dashboard's home.
+
+**Sidebar groups (#585).** The sidebar lists groups: Needs you, Work, Overview, Shipping, Agents, Extend,
+Experiments, Machine and Settings. A grouped page is a tab under its group (Sidebar `Group › Tab`; a group's first
+tab shares its name or is what the group's row opens) and keeps its `g` key. The old addresses redirect (replace, not
+push; an id, the query and the hash kept): `/inbox`, `/waiting`, `/decisions[/<decision>]` to `/needs-you/…`;
+`/issues[/<n>]`, `/intake`, `/prs` to `/work/…`; `/land`, `/deploys` to `/shipping/…`; `/activity` to
+`/agents/activity`; `/health`, `/logs`, `/reports` to `/machine/…`; `/setup` to `/settings/setup`
+(`web/src/redirects.ts`).
 
 ## Features
 
 | Feature | Where | How a person reaches it | Keys | Selector |
 |---|---|---|---|---|
 | Page heading | every page | the bar at the top of the page | – | `[data-testid="page-title"]` |
-| Sidebar navigation | every page | the left column; the current page is highlighted. In setup mode (a checkout with no config yet) the one row is First run (`nav-first-run`), and the command menu and the `g` keys offer it alone; otherwise rows: `nav-board`, `nav-overview`, `nav-inbox`, `nav-waiting`, `nav-decisions`, `nav-setup`, `nav-issues`, `nav-intake`, `nav-land`, `nav-prs`, `nav-agents`, `nav-extend` (owners and writers only: the sidebar, the command menu and the `g` keys skip a page the person's role can't use), `nav-experiments` (owners and writers, only where experiments are on), `nav-activity`, `nav-deploys`, `nav-reports`, `nav-logs`, `nav-health`, `nav-machine`, `nav-settings` | `g` then the page's key (table above) | `[data-testid="nav-board"]`, `[data-testid="nav-overview"]`, `[data-testid="nav-inbox"]`, `[data-testid="nav-waiting"]`, `[data-testid="nav-decisions"]`, `[data-testid="nav-setup"]`, `[data-testid="nav-issues"]`, `[data-testid="nav-intake"]`, `[data-testid="nav-land"]`, `[data-testid="nav-prs"]`, `[data-testid="nav-agents"]`, `[data-testid="nav-extend"]`, `[data-testid="nav-experiments"]`, `[data-testid="nav-activity"]`, `[data-testid="nav-deploys"]`, `[data-testid="nav-reports"]`, `[data-testid="nav-logs"]`, `[data-testid="nav-health"]`, `[data-testid="nav-machine"]`, `[data-testid="nav-settings"]`, `[data-testid="nav-first-run"]` |
+| Sidebar navigation | every page | the left column; the current page is highlighted. In setup mode (a checkout with no config yet) the one row is First run (`nav-first-run`), and the command menu and the `g` keys offer it alone; otherwise the groups (#585): `nav-needs-you`, `nav-work`, `nav-overview`, `nav-shipping`, `nav-agents`, `nav-extend` (owners and writers only: the sidebar, the command menu and the `g` keys skip a page the person's role can't use), `nav-experiments` (owners and writers, only where experiments are on), `nav-machine`, `nav-settings`. A group's row opens its first tab and is highlighted on any of its tabs; the command menu lists every page, a group's tabs included | `g` then the page's key (table above) | `[data-testid="nav-needs-you"]`, `[data-testid="nav-work"]`, `[data-testid="nav-overview"]`, `[data-testid="nav-shipping"]`, `[data-testid="nav-agents"]`, `[data-testid="nav-extend"]`, `[data-testid="nav-experiments"]`, `[data-testid="nav-machine"]`, `[data-testid="nav-settings"]`, `[data-testid="nav-first-run"]` |
+| Group tabs | every page in a sidebar group | under the page heading, the group's tabs, each its own address, the one shown marked: Needs you (`tab-inbox`, `tab-waiting`, `tab-decisions`), Work (`tab-board`, `tab-issues`, `tab-intake`, `tab-prs`), Shipping (`tab-land`, `tab-deploys`), Agents (`tab-agents`, `tab-activity`), Machine (`tab-machine`, `tab-health`, `tab-logs`, `tab-reports`), Settings (`tab-settings`, `tab-setup`: the Setup console). A tab shows the count its sidebar row had (Inbox, Decisions, Issues, Pull requests, Land queue, Agents) | `g` then the page's key | `[data-testid="group-tabs"]`, `[data-testid="tab-inbox"]`, `[data-testid="tab-waiting"]`, `[data-testid="tab-decisions"]`, `[data-testid="tab-board"]`, `[data-testid="tab-issues"]`, `[data-testid="tab-intake"]`, `[data-testid="tab-prs"]`, `[data-testid="tab-land"]`, `[data-testid="tab-deploys"]`, `[data-testid="tab-agents"]`, `[data-testid="tab-activity"]`, `[data-testid="tab-machine"]`, `[data-testid="tab-health"]`, `[data-testid="tab-logs"]`, `[data-testid="tab-reports"]`, `[data-testid="tab-settings"]`, `[data-testid="tab-setup"]` |
+| Needs you count | every page | the Needs you row's one badge: each open decision once (your Inbox's are among them) and each of your blocked tasks | `g i` | `[data-testid="nav-needs-you"]` |
 | A page not there yet, in setup mode | any page's address in setup mode, but First run | that page's name, that it shows once this checkout has its config, and Open First run | – | `[data-testid="setup-mode-hidden"]`, `[data-testid="setup-mode-hidden-why"]`, `[data-testid="setup-mode-hidden-link"]` |
 | Navigation menu (narrow screens) | every page, under 768 px wide | where the sidebar is hidden (a phone), the menu button at the left of the page header opens the sidebar as a drawer over the page: the project and its status dot (on a hub, the instance list with each instance's dot), Search, every page, who is signed in, the live indicator and the theme toggle. Focus moves into it and back to the menu button; it closes on Escape, a tap on the overlay, its close button and a change of page. On a phone every control is a 44 x 44 px tap target and nothing is wider than the screen (test/dashboard-mobile.test.ts) | `Esc` closes it | `[data-testid="nav-menu"]`, `[data-testid="nav-drawer"]`, `[data-testid="nav-drawer-close"]`, `[data-testid="nav-drawer-overlay"]` |
-| Pull requests count | every page | the Pull requests row shows how many PRs wait for you | `g p` | `[data-testid="nav-prs"]` |
+| Pull requests count | every page | the Work row shows how many PRs wait for you (and the Pull requests tab, on a Work page) | `g p` | `[data-testid="nav-work"]`, `[data-testid="tab-prs"]` |
 | Command menu | every page | the sidebar's Search field | `⌘K` / `Ctrl+K` | `[data-testid="search-button"]`, `[data-testid="command-menu"]` |
 | Theme toggle | every page | sun/moon button at the bottom of the sidebar | – | `[data-testid="theme-toggle"]` |
 | Live indicator | every page | dot and event count at the bottom of the sidebar | – | `[data-testid="live-indicator"]` |
