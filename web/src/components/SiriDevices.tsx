@@ -1,8 +1,8 @@
 // Settings, Siri devices (docs/siri.md): each phone's token, when it was last used and from which Tailscale device,
 // and Revoke. Owners make a token here (shown once, never again) from an allowed console device; writers see the list.
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { api, useView } from '../api';
-import { ago, Badge, Button, Card } from './ui';
+import { ago, Badge, Button, Card, Why, firstWhy } from './ui';
 
 export interface SiriDevice {
   id: string;
@@ -30,6 +30,9 @@ const TONE = { active: 'ok', revoked: 'neutral', expired: 'warn' } as const;
 /** The list and its controls, as rendered (the page passes the server's view and the handlers). */
 export function SiriDevicesCard({ view, made, error, busy, onCreate, onRevoke, onUnbind, onDismiss }: { view: SiriDevicesView; made: { name: string; token: string } | null; error: string | null; busy: boolean; onCreate: (name: string) => void; onRevoke: (id: string) => void; onUnbind: (id: string) => void; onDismiss: () => void }) {
   const [name, setName] = useState('');
+  // The server's reason (said once, under the form) holds Unbind and New token alike.
+  const [refusedId, busyId] = [useId(), useId()];
+  const held = (more?: string | false) => ({ why: firstWhy(view.createRefused, busy && 'Saving…', more), ...(view.createRefused ? { whyAt: refusedId } : busy ? { whyAt: busyId } : {}) });
   return (
     <Card className="overflow-hidden" data-testid="settings-siri">
       <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Siri devices</div>
@@ -76,11 +79,11 @@ export function SiriDevicesCard({ view, made, error, busy, onCreate, onRevoke, o
               {view.owner && d.state !== 'revoked' && (
                 <span className="ml-auto flex gap-2">
                   {d.boundNode && (
-                    <Button disabled={busy || !!view.createRefused} onClick={() => onUnbind(d.id)} data-testid="siri-unbind">
+                    <Button {...held()} onClick={() => onUnbind(d.id)} data-testid="siri-unbind">
                       Unbind
                     </Button>
                   )}
-                  <Button disabled={busy} onClick={() => onRevoke(d.id)} data-testid="siri-revoke">
+                  <Button why={busy && 'Saving…'} whyAt={busyId} onClick={() => onRevoke(d.id)} data-testid="siri-revoke">
                     Revoke
                   </Button>
                 </span>
@@ -100,15 +103,20 @@ export function SiriDevicesCard({ view, made, error, busy, onCreate, onRevoke, o
           }}
         >
           <input className="min-w-0 flex-1 rounded border border-line bg-surface px-2 py-1.5 text-[13px]" placeholder="This phone's name" maxLength={40} value={name} onChange={(e) => setName(e.target.value)} disabled={busy || !!view.createRefused} data-testid="siri-name" />
-          <Button type="submit" disabled={busy || !!view.createRefused || !name.trim()} data-testid="siri-create">
+          <Button type="submit" {...held(!name.trim() && "Name this phone first")} data-testid="siri-create">
             New token
           </Button>
           {view.createRefused && (
-            <span className="basis-full text-[12px] text-ink-3" data-testid="siri-create-refused">
+            <span id={refusedId} className="basis-full text-[12px] text-ink-3" data-testid="siri-create-refused">
               {view.createRefused}
             </span>
           )}
         </form>
+      )}
+      {busy && (
+        <p className="border-t border-line px-4 py-2">
+          <Why id={busyId}>Saving…</Why>
+        </p>
       )}
       {error && (
         <p className="border-t border-line px-4 py-2 text-[12.5px] text-red" data-testid="siri-error">

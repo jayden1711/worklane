@@ -22,7 +22,7 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
-import { MainWatch, repoGit, type Trip } from '../main-watch.js';
+import { MainWatch, repoGit, type MainWatchDeps, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
@@ -793,13 +793,17 @@ export abstract class MergeFlow extends FixRuns {
     const title = o.number ? `Revert "${o.title}" (#${o.number})` : `Revert ${o.culprit.slice(0, 8)} (culprit of ${this.branch} going red)`;
     const body = `Reverts ${c}: after it, ${this.branch}'s required checks failed: ${s.failed.join(', ')}.\n\n${o.evidence}\n\nOpened by ${BRAND.name}. It never merges this; a human does.`;
     let revert: { url: string; number: number } | null = null;
+    let why = '';
     try {
-      revert = await this.openRevertOf(o.culprit, o.number ? `pr-${o.number}` : o.culprit.slice(0, 12), title, body);
+      const r = await this.openRevertOf(o.culprit, o.number ? `pr-${o.number}` : o.culprit.slice(0, 12), title, body);
+      if ('why' in r) why = r.why;
+      else revert = r;
     } catch (e) {
-      this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward revert ${o.culprit.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
+      why = (e as Error).message.slice(0, 500);
+      this.emit('coordinator.error', { instance: this.d.instance, where: `fix-forward revert ${o.culprit.slice(0, 8)}`, kind: 'error', message: why });
     }
     const what = `${this.branch}'s required checks failed (${s.failed.join(', ')}) on \`${s.sha.slice(0, 8)}\`${s.number ? ` after auto-merging #${s.number}` : ''}; the culprit is ${c}`;
-    const reason = `${what}${revert ? `; revert PR ${revert.url}` : '; opening a revert PR failed'}`;
+    const reason = `${what}${revert ? `; revert PR ${revert.url}` : `; opening a revert PR failed${why ? `: ${redactString(why).replace(/\s+/g, ' ')}` : ''}`}`;
     this.stopFor(reason, s.number, s.sha, revert?.url ?? null);
     const owner = this.redOwner(o.culprit, s.sha);
     for (const n of new Set([s.number, o.number].filter((x): x is number => x !== null))) await this.d.backlog.comment(n, `[${BRAND.cli}] @${owner} ${reason}. ${this.stopResume}`);
@@ -839,27 +843,36 @@ export abstract class MergeFlow extends FixRuns {
 
   /**
    * A revert PR of commit `sha` on the current tip (`-m 1` for a merge commit), on `<cli>/revert-<name>`, through the
-   * push checks. The merge policy never auto-merges a revert branch (neverAutoMerge), and it is never watched.
+   * push checks; with `range` (revertRange), one commit reverting all of them instead. The merge policy never
+   * auto-merges a revert branch (neverAutoMerge), and it is never watched. `why`: it could not be opened, and why.
    */
-  private async openRevertOf(sha: string, name: string, title: string, body: string): Promise<{ url: string; number: number } | null> {
+  private async openRevertOf(sha: string, name: string, title: string, body: string, range: string[] | null = null): Promise<{ url: string; number: number } | { why: string }> {
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
     const dir = join(this.d.stateDir, 'reverts', name);
     const branch = `${REVERT_BRANCH_PREFIX}${name}`;
+    const as = ['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`];
+    const failed = (why: string) => {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: why.slice(0, 500) });
+      return { why: why.slice(0, 500) };
+    };
     spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
       const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
-      const rv = spawnSync('git', ['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
-      if (rv.status !== 0) {
-        this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: (rv.stderr || rv.stdout).trim().slice(-500) });
-        return null;
+      // A range: newest first (git revert's order), into one commit (no pre-commit or commit-msg hook, as git revert itself).
+      const rv = range
+        ? spawnSync('git', [...as, 'revert', '--no-commit', `${range[0]}^..${range.at(-1)}`], { cwd: dir, encoding: 'utf8' })
+        : spawnSync('git', [...as, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
+      const done = rv.status === 0 && range ? spawnSync('git', [...as, 'commit', '-q', '--no-verify', '-m', `${title}\n\nThis reverts commits ${range[0]}^..${range.at(-1)}.`], { cwd: dir, encoding: 'utf8' }) : rv;
+      if (done.status !== 0) {
+        const lines = `${done.stdout ?? ''}\n${done.stderr ?? ''}`.split('\n').map((l) => l.trim()).filter(Boolean);
+        const conflicts = lines.filter((l) => l.startsWith('CONFLICT'));
+        const what = `git revert of ${range && range.length > 1 ? `${range[0]!.slice(0, 8)}..${range.at(-1)!.slice(0, 8)}` : sha.slice(0, 8)} on ${this.branch}'s tip ${tip.slice(0, 8)}`;
+        return failed(conflicts.length ? `${what} conflicts with later commits: ${conflicts.slice(0, 5).join('; ')}` : `${what} failed: ${lines.find((l) => /^(error|fatal):/.test(l)) ?? lines.at(-1) ?? `exit ${done.status}`}`);
       }
       const head = this.git(dir, 'rev-parse', 'HEAD');
       const push = checkedPush({ cwd: dir, remote: this.remote, base: tip, head, ref: `refs/heads/${branch}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), force: true });
-      if (!push.ok) {
-        this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: ('refused' in push ? push.refused.join('; ') : push.error).slice(0, 500) });
-        return null;
-      }
+      if (!push.ok) return failed('refused' in push ? `the push checks refused the revert branch: ${push.refused.join('; ')}` : `pushing the revert branch failed: ${push.error}`);
       const pr = await this.d.backlog.openPr(branch, this.branch, title, body, { headSha: head });
       return { url: pr.url, number: pr.number };
     } finally {
@@ -919,7 +932,7 @@ export abstract class MergeFlow extends FixRuns {
    * it on the dashboard), then alert (main_watch.unaccounted: the dashboard; the asks channel posts it) and open a revert
    * PR for a human, unless a cap on revert PRs says not to (revertCapped). Once per commit, even across a restart.
    */
-  private async mainUnaccounted(o: { sha: string; reason: string; number: number | null; revert: boolean; push: { kind: 'direct' | 'rewrite'; alert: boolean } | null; trip: Trip | null }) {
+  private async mainUnaccounted(o: Parameters<MainWatchDeps['unaccounted']>[0]) {
     const before = this.d.log.read(0, ['main_watch.unaccounted']);
     if (before.some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
@@ -929,37 +942,74 @@ export abstract class MergeFlow extends FixRuns {
     // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
     if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;
+    let through: string | null = null;
+    let failed: string | null = null;
     const capped = o.revert && o.trip ? this.revertCapped(o.sha, o.trip, before) : null;
     if (o.revert && !capped) {
-      const body = `Reverts \`${o.sha.slice(0, 8)}\` on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
       try {
-        revert = await this.openRevertOf(o.sha, o.sha.slice(0, 12), `Revert ${o.sha.slice(0, 8)} (unaccounted on ${this.branch})`, body);
-        if (revert) {
+        // A rebase-merged PR's commits: one revert of them all, so a later one that edits the same files can't conflict.
+        const range = o.through ? this.revertRange(o.sha, o.through.sha, o.through.commits) : null;
+        const what = range ? `the ${range.length} commits${o.number ? ` of #${o.number}` : ''} from \`${o.sha.slice(0, 8)}\` through \`${range.at(-1)!.slice(0, 8)}\`` : `\`${o.sha.slice(0, 8)}\``;
+        const title = range ? `Revert ${o.sha.slice(0, 8)}..${range.at(-1)!.slice(0, 8)} (${o.number ? `#${o.number}, ` : ''}${range.length} commits, unaccounted on ${this.branch})` : `Revert ${o.sha.slice(0, 8)} (unaccounted on ${this.branch})`;
+        const body = `Reverts ${what} on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
+        const r = await this.openRevertOf(o.sha, o.sha.slice(0, 12), title, body, range);
+        if ('why' in r) failed = r.why;
+        else {
+          revert = r;
+          through = range ? range.at(-1)! : null;
           await this.d.backlog.addLabels(revert.number, ['needs-owner']);
           await this.d.backlog.requestReview(revert.number, [this.d.cfg.project.owners.default]).catch(() => undefined);
         }
       } catch (e) {
+        if (!revert) failed = (e as Error).message;
         this.emit('coordinator.error', { instance: this.d.instance, where: `main watch revert ${o.sha.slice(0, 8)}`, kind: 'error', message: (e as Error).message.slice(0, 500) });
       }
     }
-    this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null, ...(o.trip ? { trip: o.trip.id } : {}), no_revert: capped });
+    // Why there is no revert PR, whenever there is none: a cap, its failure, or a rewrite (no commit to revert).
+    const none = capped ?? (revert ? null : o.revert ? `opening the revert PR failed: ${failed ?? 'no reason was given'}` : `${this.branch} was rewritten: there is no commit to revert`);
+    const noRevert = none === null ? null : redactString(none).replace(/\s+/g, ' ').slice(0, 1000);
+    this.emit('main_watch.unaccounted', { sha: o.sha, url, reason: o.reason.slice(0, 1000), number: o.number, revert: revert?.url ?? null, ...(o.trip ? { trip: o.trip.id } : {}), no_revert: noRevert, ...(through ? { revert_through: through } : {}) });
   }
 
   /**
-   * Why an unaccounted commit gets no revert PR of its own, when a cap says so (null: it gets one). Per trip: the
-   * trip has its revert PR(s) already; the alert names them and the trip's commits. Per day: this instance's main watch
-   * opened so many in the last 24 hours. Counted from the log (`before`), so both hold across a restart.
+   * The commits from `sha` through `through`, oldest first, when they are one straight line of single-parent commits
+   * on the default branch's tip, no more than the PR has (`commits`) and at most 250 (GitHub's limit on a rebase
+   * merge): a rebase-merged PR's. Null otherwise, and the revert is of `sha` alone, as before.
+   */
+  private revertRange(sha: string, through: string, commits: number): string[] | null {
+    const tip = `${this.remote}/${this.branch}`;
+    if (spawnSync('git', ['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
+    // Parents before children whatever the commit dates say, so only the checks below decide.
+    const r = spawnSync('git', ['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
+    if (r.status !== 0) return null;
+    const rows = r.stdout.split('\n').filter(Boolean).map((l) => l.split(' '));
+    if (rows.length < 2 || rows.length > Math.min(commits, 250) || rows[0]![0] !== sha || rows.at(-1)![0] !== through) return null;
+    if (rows.some((x, i) => x.length !== 2 || (i > 0 && x[1] !== rows[i - 1]![0]))) return null;
+    return rows.map((x) => x[0]!);
+  }
+
+  /** Whether `a` is `b` or an ancestor of it, in the clone. */
+  private isAncestor(a: string, b: string) {
+    return spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0;
+  }
+
+  /**
+   * Why an unaccounted commit gets no revert PR of its own (null: it gets one). Per trip: the trip has its revert PR(s)
+   * already; the alert names them and the trip's commits, and says so when one of them reverts this commit too (a
+   * range, revert_through). Per day: this instance's main watch opened so many in the last 24 hours. Counted from the
+   * log (`before`), so both hold across a restart.
    */
   private revertCapped(sha: string, trip: Trip, before: StoredEvent[]): string | null {
     const now = this.d.mainWatch?.now?.() ?? Date.now();
     const all = before.map((e) => ({ ts: e.ts, p: e.payload as EventPayload<'main_watch.unaccounted'> }));
     const mine = all.filter((x) => x.p.trip === trip.id).map((x) => x.p);
     const prs = mine.flatMap((p) => (p.revert ? [p.revert] : []));
-    if (prs.length >= trip.perTrip) {
-      const list = [...mine.map((p) => p.sha), sha].map((x) => x.slice(0, 8));
-      const commits = `${list.slice(0, 20).join(', ')}${list.length > 20 ? ` and ${list.length - 20} more` : ''}`;
-      return `the per-trip cap is reached (main_watch.revert_prs_per_trip: ${trip.perTrip}): this trip's revert PR ${prs.join(', ')}; the trip's commits so far: ${commits}`;
-    }
+    const cover = mine.find((p) => p.revert && p.revert_through && this.isAncestor(p.sha, sha) && this.isAncestor(sha, p.revert_through));
+    const covers = cover ? `this trip's revert PR ${cover.revert} reverts this commit too (${cover.sha.slice(0, 8)}..${cover.revert_through!.slice(0, 8)})` : null;
+    const list = [...mine.map((p) => p.sha), sha].map((x) => x.slice(0, 8));
+    const commits = `${list.slice(0, 20).join(', ')}${list.length > 20 ? ` and ${list.length - 20} more` : ''}`;
+    if (prs.length >= trip.perTrip) return `the per-trip cap is reached (main_watch.revert_prs_per_trip: ${trip.perTrip}): ${covers ?? `this trip's revert PR ${prs.join(', ')}`}; the trip's commits so far: ${commits}`;
+    if (covers) return `${covers}; the trip's commits so far: ${commits}`;
     const day = all.filter((x) => x.p.revert && now - Date.parse(x.ts) < 24 * 3600_000).length;
     if (day >= trip.perDay) return `the per-day cap is reached (main_watch.revert_prs_per_day: ${trip.perDay}): the main watch opened ${day} revert PRs in the last 24 hours`;
     return null;

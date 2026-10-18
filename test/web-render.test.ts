@@ -51,6 +51,7 @@ interface Render {
   renderFlaky(f: unknown): string;
   renderHarnessEvals(h: unknown): string;
   renderLearnings(l: unknown): string;
+  renderDelegation(d: unknown): string;
   renderWaiting(w: unknown, now?: number): string;
   renderWaitingPage(state: unknown): string;
   renderRepoConfigForm(c: unknown, o?: { proposed?: string; seen?: string[]; seenNote?: string; seenLoaded?: boolean; starter?: StarterCiView; starterOpen?: boolean }): string;
@@ -1064,6 +1065,11 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(banner, /Unaccounted commit on the default branch[\s\S]*pushed to main directly[\s\S]*pull\/9/);
   assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the clear');
   assert.match(r.renderMainWatchAlert({ ...alert, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  // No revert PR: the banner says why, when the alert carries it (main_watch.unaccounted no_revert).
+  const why = "opening the revert PR failed: git revert of cccccccc on main's tip dddddddd conflicts with later commits: CONFLICT (content): Merge conflict in a.txt";
+  const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
+  assert.match(none, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
+  assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
 });
 
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
@@ -2610,6 +2616,27 @@ test('learnings: each cause with its sightings and stages; Promote only for an o
   const writer = r.renderLearnings({ minSightings: 3, canPromote: false, groups: [g(3, 'a')] });
   assert.doesNotMatch(writer, /learning-promote/);
   assert.match(r.renderLearnings({ minSightings: 3, canPromote: true, groups: [] }), /No failed runs noted yet/);
+});
+
+test("delegation summary: each category's record, time to approve and who approved, every approver's history, and the suggestions; protected ones say never suggested", async () => {
+  const { delegationView } = await import('../src/delegation.js');
+  const ev = (type: string, payload: object) => ({ ts: '2026-10-12T10:00:00.000Z', type, payload });
+  const held = (pr: number, categories: string[], by: string, role: string, waitMs: number) => ev('delegation.observed', { pr, issue: pr + 100, categories, unchanged: true, held: true, approved_by: by, approver_role: role, wait_ms: waitMs });
+  const review = { levels: { L3_human: { when: ['migration'] } }, merge: { wait_categories: ['copy', 'agent-instructions'], loosened: [] } };
+  const view = delegationView(
+    [held(1, ['copy'], 'example-owner', 'owner', 3_600_000), held(2, ['copy', 'agent-instructions'], 'example-collaborator', 'writer', 1_800_000), ev('delegation.suggested', { category: 'copy', direction: 'loosen', decision: 'd-1', receipts: ['r'] })],
+    review,
+  );
+  const html = r.renderDelegation({ enabled: true, minClean: 2, ...view });
+  assert.match(html, /data-testid="delegation-state">suggest-only</);
+  assert.match(html, /data-category="agent-instructions"[\s\S]*?Never suggested/);
+  assert.match(html, /data-category="copy"[\s\S]*?Waits for you[\s\S]*?2 PRs since the last answer: 2 approved unchanged, 0 changed[\s\S]*?2 waited for a person; time to approve: median 45m \(fastest 30m, slowest 1h 0m\)[\s\S]*?approved by @example-collaborator \(writer\) 1 of 1 unchanged, @example-owner \(owner\) 1 of 1 unchanged/);
+  assert.match(html, /data-testid="delegation-approver" data-by="example-collaborator"[\s\S]*?@example-collaborator \(writer\)<\/span>: 1 approved, 1 unchanged · median 30m to approve · agent-instructions, copy/);
+  assert.match(html, /data-testid="delegation-suggestion" data-answer=""[\s\S]*?Stop waiting on[\s\S]*?copy[\s\S]*?href="\/decisions\/d-1"[^>]*>waiting for your answer/);
+  const off = r.renderDelegation({ enabled: false, minClean: null, categories: [], approvers: [], suggestions: [] });
+  assert.match(off, /data-testid="delegation-state">off</);
+  assert.match(off, /Suggestions are off for this instance/);
+  assert.match(off, /data-testid="delegation-empty"/);
 });
 
 test('Tailscale and HTTPS: a machine owner sees the state, the four steps with what each changes and its script, and the login link only while up waits; anyone else nothing', () => {

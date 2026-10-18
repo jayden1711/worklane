@@ -1,14 +1,35 @@
 // Small component set: shadcn/ui's API shape (MIT), styled after Beautiful UI's atoms (MIT,
 // beautifului.dev). Both credited in THIRD_PARTY_NOTICES.md.
-import { useEffect, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from 'react';
 import { avatarSrc, type TaskStatus } from '../api';
 
 export const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
-/** Pill actions: a dark primary, a raised secondary (outline), a quiet ghost, a red danger. */
-export function Button({ variant = 'default', size = 'md', className, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md' }) {
+/** The first reason that holds, else null: a button's `why`, from its checks in order. */
+export const firstWhy =(...reasons: (string | null | false | undefined)[]): string | null => reasons.find((r): r is string => !!r) ?? null;
+
+/** Why a button can't be pressed now, one line next to it (under it on a phone); a button's aria-describedby names it. */
+export function Why({ id, children }: { id: string; children: ReactNode }) {
   return (
+    <span id={id} className="text-[12px] text-ink-3 max-sm:basis-full" data-testid="button-why">
+      {children}
+    </span>
+  );
+}
+
+/**
+ * Pill actions: a dark primary, a raised secondary (outline), a quiet ghost, a red danger.
+ * `why`: the reason it can't be pressed now; set, the button is disabled and says so (its own line, or the `whyAt`
+ * element's when one line already says it for a row of buttons). A bare `disabled` is silent: test/web-buttons.test.ts
+ * holds every one to a list that only shrinks (#587).
+ */
+export function Button({ variant = 'default', size = 'md', className, why, whyAt, disabled, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md'; why?: string | null | false; whyAt?: string }) {
+  const own = useId();
+  const reason = why || null;
+  const button = (
     <button
+      disabled={disabled || !!reason}
+      aria-describedby={reason ? (whyAt ?? own) : undefined}
       {...p}
       className={cx(
         'inline-flex items-center justify-center gap-1.5 rounded-full font-medium transition-[background-color,color,transform] duration-150 active:scale-[0.98] disabled:pointer-events-none disabled:opacity-40',
@@ -21,7 +42,20 @@ export function Button({ variant = 'default', size = 'md', className, ...p }: Bu
       )}
     />
   );
+  if (!reason || whyAt) return button;
+  return (
+    <>
+      {button}
+      <Why id={own}>{reason}</Why>
+    </>
+  );
 }
+
+/**
+ * A value shown, not an action: flat, square-cornered, no ring, no hover (a button is a pill with a ring), so a chip
+ * next to the buttons never reads as one (#587).
+ */
+export const CHIP = 'inline-flex items-center gap-1 whitespace-nowrap rounded-[4px] font-medium';
 
 export function Card({ className, ...p }: HTMLAttributes<HTMLDivElement>) {
   return <div {...p} className={cx('rounded-card bg-surface shadow-card', className)} />;
@@ -33,14 +67,18 @@ export function Kbd({ children }: { children: ReactNode }) {
 
 export function Badge({ tone = 'neutral', children, className }: { tone?: 'neutral' | 'ok' | 'warn' | 'danger' | 'info'; children: ReactNode; className?: string }) {
   const tones = {
-    neutral: 'bg-inset text-ink-2 shadow-hairline',
+    neutral: 'bg-inset text-ink-2',
     ok: 'bg-green-tint text-green',
     warn: 'bg-orange-tint text-orange',
     danger: 'bg-red-tint text-red',
     info: 'bg-blue-tint text-blue-ink',
   };
-  // Beautiful UI's status pill: rounded, tinted, 11.5px.
-  return <span className={cx('inline-flex h-5.5 items-center gap-1 whitespace-nowrap rounded-full px-2 text-[11.5px] font-medium', tones[tone], className)}>{children}</span>;
+  // A status chip: tinted, 11.5px, never pill-shaped (that is a button's).
+  return (
+    <span className={cx(CHIP, 'h-5 px-1.5 text-[11.5px]', tones[tone], className)} data-role="chip">
+      {children}
+    </span>
+  );
 }
 
 export function Avatar({ login, title, size = 20 }: { login: string | null | undefined; title?: string; size?: number }) {

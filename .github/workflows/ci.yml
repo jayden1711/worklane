@@ -66,6 +66,11 @@ jobs:
       - run: npm run typecheck
         if: matrix.shard == 4
       - run: npm run build
+      # The comment policy (#330) on the comments this PR adds, with the base's config: a no-op printing "off" until
+      # .worklane/config.yaml sets comment_policy.enabled. Shard 4 only, beside the typecheck; HEAD^1 is the base.
+      - name: comment policy (new comments in this PR)
+        if: matrix.shard == 4 && github.event_name == 'pull_request'
+        run: node scripts/check-comments.mjs --base HEAD^1 --head HEAD
       # Before the tests, in every shard: the web-UI tests (real Chrome against dist/web) run only on a built UI,
       # and CI_REQUIRE_WEB=1 makes a missing UI or Chrome fail them instead of skipping (test/browser-helpers.ts).
       # About a second (vite), cheaper than one build shared as an artifact.

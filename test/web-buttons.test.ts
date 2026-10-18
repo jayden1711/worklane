@@ -1,0 +1,202 @@
+// Only buttons look like buttons, and a disabled button says why (#587): display chips (ValuePill, Badge) are
+// flat, not pill-shaped; a button held by the server's own check shows that check's reason as its accessible
+// description; a button this person can never use isn't drawn; and every bare `disabled=` in web/src is on a
+// counted list that only shrinks.
+import { before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import ts from 'typescript';
+import { loadConfig } from '../src/config/load.js';
+import { machineView, startDashboard } from '../src/dashboard.js';
+import { EventLog } from '../src/events/log.js';
+import { asPerson, exampleProject, exampleRoles, machineOwnersFile, repoRoot } from './helpers.js';
+
+interface Render {
+  renderChip(kind: 'value' | 'badge', tone?: string): string;
+  renderButton(variant?: string): string;
+  renderDecisionCard(d: unknown, sending?: string): string;
+  renderMachine(data: unknown): string;
+  renderClaudeAccount(data: unknown, now?: number): string;
+}
+let r: Render;
+
+before(async () => {
+  const { build } = await import('vite');
+  const { default: react } = await import('@vitejs/plugin-react');
+  const out = mkdtempSync(join(tmpdir(), 'web-buttons-'));
+  await build({ configFile: false, root: join(repoRoot, 'web'), logLevel: 'silent', plugins: [react()], ssr: { noExternal: true }, build: { ssr: join(repoRoot, 'web', 'src', 'render-check.tsx'), outDir: out, emptyOutDir: true, rollupOptions: { output: { entryFileNames: 'render-check.mjs' } } } });
+  r = (await import(pathToFileURL(join(out, 'render-check.mjs')).href)) as Render;
+  const g = globalThis as Record<string, unknown>;
+  g.window ??= { location: { pathname: '/', search: '', hash: '' }, matchMedia: () => ({ matches: false }) };
+});
+
+/** What makes an element look pressable here: the pill shape, a ring, a hover or press effect, the pointer. */
+const BUTTON_LOOK = [/\brounded-full\b/, /\bshadow-(btn|hairline)\b/, /(^|\s)(hover|active):/, /\bcursor-pointer\b/];
+const classOf = (html: string) => /class="([^"]*)"/.exec(html)?.[1] ?? '';
+
+test('display chips are not button-shaped', () => {
+  // The yardstick: every Button variant has the look.
+  for (const v of ['default', 'outline', 'ghost', 'danger']) assert.ok(BUTTON_LOOK.some((re) => re.test(classOf(r.renderButton(v)))), `a ${v} Button looks pressable`);
+  const chips = { 'ValuePill': r.renderChip('value'), 'ValuePill green': r.renderChip('value', 'green'), ...Object.fromEntries(['neutral', 'ok', 'warn', 'danger', 'info'].map((t) => [`Badge ${t}`, r.renderChip('badge', t)])) };
+  for (const [name, html] of Object.entries(chips)) {
+    assert.match(html, /^<span[^>]*data-role="chip"/, `${name} is a chip: ${html}`);
+    assert.doesNotMatch(html, /role="button"|<button/, `${name} is no button`);
+    for (const re of BUTTON_LOOK) assert.doesNotMatch(classOf(html), re, `${name} has no button look (${re}): ${classOf(html)}`);
+  }
+});
+
+/** The button with this test id, its reason's element, and that element's text. */
+function described(html: string, testId: string) {
+  const tag = new RegExp(`<button[^>]*data-testid="${testId}"[^>]*>`).exec(html)?.[0];
+  assert.ok(tag, `a ${testId} button is drawn`);
+  const id = /aria-describedby="([^"]+)"/.exec(tag)?.[1];
+  const text = id ? new RegExp(`id="${id.replace(/[^\w]/g, '\\$&')}"[^>]*>([\\s\\S]*?)</(p|span)>`).exec(html)?.[1]?.replaceAll('<!-- -->', '') : undefined;
+  return { tag, disabled: /\sdisabled=""/.test(tag), id, text };
+}
+
+function machineSetup() {
+  const dir = mkdtempSync(join(tmpdir(), 'web-buttons-machine-'));
+  const slotsDir = join(dir, 'slots');
+  mkdirSync(slotsDir);
+  const { dir: root } = exampleProject();
+  return { cfg: loadConfig(root), slotsDir, machine: { changesPath: join(dir, 'changes.jsonl'), updatesConfigPath: join(dir, 'updates.json'), updatesLogPath: join(dir, 'updates.jsonl') }, machineOwnersFile: machineOwnersFile('example-owner') };
+}
+
+test("a disabled machine button says the device isn't allowed", () => {
+  const s = machineSetup();
+  // The server's own view for a machine owner whose page didn't come from an allowed device.
+  const away = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: false }))) as { canChange: boolean; why: string | null };
+  assert.equal(away.canChange, true, 'a machine owner: the buttons are drawn');
+  assert.match(away.why ?? '', /allowed devices \(dashboards\.sh --console-devices/, 'the reason is the refusal a change would get');
+  const b = described(r.renderMachine(away), 'machine-setting-review-button');
+  assert.ok(b.disabled, 'held');
+  assert.ok(b.id, `aria-describedby names the reason: ${b.tag}`);
+  assert.match(b.text ?? '', /^A machine change needs one of the console(&#x27;|')s allowed devices \(dashboards\.sh --console-devices/);
+  // From an allowed device the device reason is gone (what is held then is only an unchanged value).
+  const here = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: true })));
+  assert.equal(here.why, null);
+  assert.doesNotMatch(described(r.renderMachine(here), 'machine-setting-review-button').text ?? '', /device/);
+  // A writer can never change the machine: no button at all, not a disabled one.
+  const writer = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-collaborator', role: 'writer', deviceOk: true })));
+  assert.doesNotMatch(r.renderMachine(writer), /<button[^>]*data-testid="machine-setting-(review-button|confirm)"/);
+});
+
+test('busy reason: a decision while its answer is saving says so, once, as every option\'s description', () => {
+  const d = { id: 'd1', kind: 'question', issue: 7, owner: 'example-owner', question: 'Ship it?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [], askedAt: new Date().toISOString(), answer: null, canAnswer: true };
+  const idle = r.renderDecisionCard(d);
+  assert.doesNotMatch(idle, /<button[^>]*disabled=""[^>]*data-testid="decision-option"/, 'nothing held while idle');
+  const html = r.renderDecisionCard(d, 'approve');
+  const opts = [...html.matchAll(/<button[^>]*data-testid="decision-option"[^>]*>/g)].map((m) => m[0]);
+  assert.equal(opts.length, 2);
+  const ids = new Set(opts.map((t) => (assert.match(t, /\sdisabled=""/), /aria-describedby="([^"]+)"/.exec(t)?.[1])));
+  assert.equal(ids.size, 1, 'one reason for the row');
+  assert.equal(described(html, 'decision-option').text, 'Saving…');
+  assert.equal([...html.matchAll(/Saving…/g)].length, 1, 'said once');
+});
+
+test('a button this person can never use is not drawn; one held by the device says why (the Claude account)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'web-buttons-account-'));
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  const eventsDb = join(dir, 'events.db');
+  new EventLog(eventsDb).close();
+  // Both are machine owners; only example-owner owns this instance.
+  const owners = machineOwnersFile('example-owner', 'example-collaborator');
+  const d = await startDashboard({ root, cfg, eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: owners, claudeAccountDir: mkdtempSync(join(tmpdir(), 'web-buttons-acct-')), secretsHome: mkdtempSync(join(tmpdir(), 'web-buttons-home-')), slotsDir: join(dir, 'slots') });
+  try {
+    const base = d.url.split('/?')[0]!;
+    const view = async (login: string) => {
+      const res = await fetch(`${base}/api/claude-account`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(login) } });
+      assert.equal(res.status, 200);
+      return (await res.json()) as { allowed: boolean; everAllowed: boolean };
+    };
+    const writer = await view('example-collaborator');
+    assert.deepEqual([writer.allowed, writer.everAllowed], [false, false], 'a writer here: no device would help');
+    const writerHtml = r.renderClaudeAccount(writer);
+    assert.doesNotMatch(writerHtml, /data-testid="claude-account-(refresh|switch)"/, 'never usable: not drawn');
+    assert.match(writerHtml, /data-testid="claude-account-disabled"[^>]*>Read-only: only an owner of this instance/);
+    const owner = await view('example-owner');
+    assert.deepEqual([owner.allowed, owner.everAllowed], [false, true], 'the owner, from a device that is not allowed');
+    const b = described(r.renderClaudeAccount(owner), 'claude-account-refresh');
+    assert.ok(b.disabled);
+    assert.match(b.text ?? '', /^Read-only: a machine change needs one of the console(&#x27;|')s allowed devices/);
+  } finally {
+    d.close();
+  }
+});
+
+/**
+ * Every `disabled=` in web/src without a `why` (or an aria-describedby) beside it, per file, as of #587. Fixed ones
+ * leave the list: lower the count (or drop the file) in the same change. It never grows; a new held control passes
+ * `why` to Button instead.
+ */
+const SILENT_DISABLED: Record<string, number> = {
+  'web/src/App.tsx': 1,
+  'web/src/components/Automations.tsx': 7,
+  'web/src/components/ChatAttachments.tsx': 1,
+  'web/src/components/ChatPanel.tsx': 4,
+  'web/src/components/ClaudeProfiles.tsx': 11,
+  'web/src/components/ClaudeSignin.tsx': 3,
+  'web/src/components/ConfigPr.tsx': 4,
+  'web/src/components/Conversations.tsx': 3,
+  'web/src/components/DashboardKey.tsx': 1,
+  'web/src/components/DiscordSetup.tsx': 11,
+  'web/src/components/Experiments.tsx': 3,
+  'web/src/components/FirstTask.tsx': 13,
+  'web/src/components/FlakyPanel.tsx': 1,
+  'web/src/components/InstanceSettings.tsx': 3,
+  'web/src/components/LearningsPanel.tsx': 1,
+  'web/src/components/LiveRun.tsx': 4,
+  'web/src/components/Plugins.tsx': 6,
+  'web/src/components/PolicyForm.tsx': 6,
+  'web/src/components/Protection.tsx': 2,
+  'web/src/components/RepoConfigForm.tsx': 10,
+  'web/src/components/SetupConfig.tsx': 11,
+  'web/src/components/SiriDevices.tsx': 1,
+  'web/src/components/SourceSetup.tsx': 10,
+  'web/src/components/UpdaterSetup.tsx': 6,
+  'web/src/components/Usage.tsx': 1,
+  'web/src/components/patterns.tsx': 1,
+  'web/src/pages/Board.tsx': 4,
+  'web/src/pages/FirstRun.tsx': 7,
+  'web/src/pages/Setup.tsx': 14,
+  'web/src/render-check.tsx': 1,
+  'web/src/voice/Mic.tsx': 1,
+  'web/src/voice/VoiceControl.tsx': 1,
+  'web/src/voice/VoiceSettings.tsx': 2,
+};
+/** The list's total when it was made (155); lower it as the list shrinks, never raise it. */
+const SILENT_CEILING = 155;
+
+function silentDisabled(): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.tsx') ? [join(dir, e.name)] : []));
+  for (const file of walk(join(repoRoot, 'web', 'src'))) {
+    const src = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = (n: ts.Node) => {
+      if (ts.isJsxAttribute(n) && n.name.getText(src) === 'disabled') {
+        const siblings = (n.parent as ts.JsxAttributes).properties;
+        if (!siblings.some((p) => ts.isJsxAttribute(p) && ['why', 'aria-describedby'].includes(p.name.getText(src)))) {
+          const key = relative(repoRoot, file).split('\\').join('/');
+          counts[key] = (counts[key] ?? 0) + 1;
+        }
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(src);
+  }
+  return counts;
+}
+
+test('no silently disabled buttons: every disabled= passes a why, or is on the list, which only shrinks', () => {
+  const now = silentDisabled();
+  const grew = Object.entries(now).filter(([f, n]) => n > (SILENT_DISABLED[f] ?? 0));
+  assert.deepEqual(grew, [], 'a disabled control without a why: pass `why` (the reason, from the server where it knows it) to Button');
+  const shrank = Object.entries(SILENT_DISABLED).filter(([f, n]) => n !== (now[f] ?? 0));
+  assert.deepEqual(shrank.map(([f]) => [f, now[f] ?? 0]), [], 'fewer than listed: lower the list to these counts');
+  const total = Object.values(SILENT_DISABLED).reduce((a, b) => a + b, 0);
+  assert.ok(total <= SILENT_CEILING, `the list holds ${total}, over its ceiling ${SILENT_CEILING}: it only shrinks`);
+});
