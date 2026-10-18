@@ -30,6 +30,8 @@ interface Block {
   /** Source line numbers the block covers, each with its text (comment markers removed). */
   lines: { line: number; text: string }[];
   jsdoc: boolean;
+  /** A `/* *\/` comment (where `global a, b` is an ESLint directive). */
+  starred: boolean;
 }
 
 export function languageOf(file: string): Lang | null {
@@ -48,7 +50,7 @@ const stripLine = (s: string) => s.replace(/^\/{2,}/, '').replace(/^ /, '').trim
 
 /** Comments in JS/TS: tracks strings, template literals (with nested `${}`) and regex literals so `//` in them is code. */
 function scanC(src: string): Block[] {
-  const raw: (Block & { own: boolean; kind: 'line' | 'block' })[] = [];
+  const raw: (Omit<Block, 'starred'> & { own: boolean; kind: 'line' | 'block' })[] = [];
   let i = 0;
   let line = 1;
   let lineStart = 0;
@@ -164,7 +166,7 @@ function scanC(src: string): Block[] {
     const last = out[out.length - 1];
     if (prev && last && r.kind === 'line' && r.own && prev.kind === 'line' && prev.own && r.start === last.lines[last.lines.length - 1]!.line + 1) {
       last.lines.push(...r.lines);
-    } else out.push({ start: r.start, lines: [...r.lines], jsdoc: r.jsdoc });
+    } else out.push({ start: r.start, lines: [...r.lines], jsdoc: r.jsdoc, starred: r.kind === 'block' });
     prev = r;
   }
   return out;
@@ -195,7 +197,9 @@ function shScanner() {
         break;
       }
     }
-    const h = quote ? null : /<<(-?)\s*(['"]?)([A-Za-z_]\w*)\2/.exec(text.slice(0, comment === null ? text.length : j));
+    // WHY: `<<<` is a here-string and `<<` inside $(( )) or (( )) a shift; neither starts a heredoc.
+    const code = text.slice(0, comment === null ? text.length : j).replace(/\(\([^]*?\)\)/g, '');
+    const h = quote ? null : /(?<!<)<<(?!<)(-?)\s*\\?(['"]?)([A-Za-z_]\w*)\2/.exec(code);
     if (h) heredoc = { word: h[3]!, tabs: h[1] === '-' };
     return comment;
   };
@@ -210,7 +214,7 @@ function hashBlocks(found: { line: number; text: string; own: boolean }[]): Bloc
   for (const f of found) {
     const last = out[out.length - 1];
     if (last && f.own && lastOwn && f.line === last.lines[last.lines.length - 1]!.line + 1) last.lines.push({ line: f.line, text: stripHash(f.text) });
-    else out.push({ start: f.line, lines: [{ line: f.line, text: stripHash(f.text) }], jsdoc: false });
+    else out.push({ start: f.line, lines: [{ line: f.line, text: stripHash(f.text) }], jsdoc: false, starred: false });
     lastOwn = f.own;
   }
   return out;
@@ -230,11 +234,13 @@ function scanSh(src: string): Block[] {
 /** YAML `#` comments; a `run:` block scalar is scanned as shell (a workflow's script), any other block scalar is text. */
 function scanYaml(src: string): Block[] {
   const found: { line: number; text: string; own: boolean }[] = [];
-  let scalar: { indent: number; sh: ReturnType<typeof shScanner> | null } | null = null;
+  let scalar: { indent: number; body: number | null; sh: ReturnType<typeof shScanner> | null } | null = null;
   src.split('\n').forEach((text, k) => {
     const indent = text.length - text.trimStart().length;
     if (scalar && (text.trim() === '' || indent > scalar.indent)) {
-      const c = scalar.sh?.(text) ?? null;
+      // WHY: the script is the block without its YAML indent; a heredoc's closing word is matched at column 0.
+      if (text.trim() !== '') scalar.body ??= indent;
+      const c = scalar.sh?.(text.slice(Math.min(scalar.body ?? 0, indent))) ?? null;
       if (c !== null) found.push({ line: k + 1, text: c, own: text.trim() === c.trim() });
       return;
     }
@@ -257,7 +263,7 @@ function scanYaml(src: string): Block[] {
     const code = at < 0 ? text : text.slice(0, at);
     if (at >= 0) found.push({ line: k + 1, text: text.slice(at), own: code.trim() === '' });
     const m = /^(\s*(?:-\s+)?)(?:([^\s#'"][^#]*?)\s*:\s+)?[|>][1-9]?[+-]?[1-9]?\s*$/.exec(code);
-    if (m && (m[2] !== undefined || /-\s+$/.test(m[1]!))) scalar = { indent: m[2] !== undefined ? m[1]!.length : indent, sh: m[2] === 'run' ? shScanner() : null };
+    if (m && (m[2] !== undefined || /-\s+$/.test(m[1]!))) scalar = { indent: m[2] !== undefined ? m[1]!.length : indent, body: null, sh: m[2] === 'run' ? shScanner() : null };
   });
   return hashBlocks(found);
 }
@@ -274,7 +280,25 @@ export function commentBlocks(file: string, src: string): Block[] {
 // ---------- the rule ----------
 
 /** Tool directives, not prose: a lint or type-check switch, a license id, a bundler hint, a pinned action's version. */
-const DIRECTIVE = /^(@ts-|eslint[- ]|prettier-ignore|biome-ignore|istanbul ignore|c8 ignore|v8 ignore|shellcheck |<reference |#?region\b|#?endregion\b|SPDX-License-Identifier:|yaml-language-server:|@vite-ignore|[#@]__PURE__|global |jshint |v?\d+(\.\d+)+$)/;
+const DIRECTIVE = new RegExp(
+  [
+    /^@ts-(expect-error|ignore|nocheck|check)\b/,
+    /^eslint-(disable|enable)(-next-line|-line)?(\s|$)/,
+    /^eslint(-env)? [\w@/-]+(:|\s*$|\s*,)/,
+    /^(prettier-ignore|biome-ignore|@vite-ignore|[#@]__PURE__)\b/,
+    /^(istanbul|c8|v8) ignore\b/,
+    /^shellcheck (disable|enable|source|shell|external-sources)=/,
+    /^<reference \w+=/,
+    /^#(end)?region\b/,
+    /^(SPDX-License-Identifier|yaml-language-server):/,
+    /^jshint \w+:/,
+    /^v?\d+(\.\d+)+$/,
+  ]
+    .map((r) => r.source)
+    .join('|'),
+);
+/** ESLint's `/* global a, b: readonly *\/`: only in a block comment, and only a list of names. */
+const GLOBALS = /^globals? [\w$]+(\s*:\s*\w+)?(\s*,\s*[\w$]+(\s*:\s*\w+)?)*,?$/;
 const TAG = /^(WHY|INVARIANT):/;
 /** An issue (#123, .../issues/123, .../pull/123), a decision (D-12) or a design-doc section (docs/design.md §4). */
 const CITES = /(?<![\w&/])#\d+\b|\/(?:issues|pull)\/\d+\b|\bD-\d+\b|[\w./-]+\.md\s*§\s*\d/;
@@ -300,7 +324,7 @@ function narrationIn(text: string, words: string[]): string | null {
 export function checkComments(file: string, src: string, added: ReadonlySet<number>, policy: CommentPolicy): CommentFinding[] {
   const out: CommentFinding[] = [];
   for (const b of commentBlocks(file, src)) {
-    const prose = b.lines.filter((l) => l.text !== '' && !DIRECTIVE.test(l.text));
+    const prose = b.lines.filter((l) => l.text !== '' && !DIRECTIVE.test(l.text) && !(b.starred && GLOBALS.test(l.text)));
     const fresh = prose.filter((l) => added.has(l.line));
     if (!fresh.length) continue;
     if (b.jsdoc && prose.every((l) => JSDOC_API.test(l.text))) continue;
@@ -328,14 +352,22 @@ export function addedLines(diff: string): Map<string, Set<number>> {
   const out = new Map<string, Set<number>>();
   let cur: Set<number> | null = null;
   let next = 0;
+  let header = false;
   for (const l of diff.split('\n')) {
-    if (l.startsWith('+++ ')) {
+    if (l.startsWith('diff --git ')) {
+      header = true;
+      cur = null;
+      continue;
+    }
+    // INVARIANT: a `+++ ` line is a path only in a file's header; in a hunk it is an added line starting "++ ".
+    if (header && l.startsWith('+++ ')) {
       const p = l.slice(4).replace(/^"(.*)"$/, '$1');
       cur = p === '/dev/null' ? null : new Set();
       if (cur) out.set(p.replace(/^b\//, ''), cur);
       continue;
     }
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h) header = false;
     if (h) next = Number(h[1]);
     else if (cur && l.startsWith('+')) cur.add(next++);
     else if (cur && l.startsWith(' ')) next++;
@@ -344,7 +376,8 @@ export function addedLines(diff: string): Map<string, Set<number>> {
 }
 
 const git = (cwd: string, args: string[]) => spawnSync('git', ['-c', 'core.quotePath=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-const DIFF = ['diff', '--no-ext-diff', '--no-color', '--relative', '--find-renames', '-U0'];
+// INVARIANT: the hook and CI parse the same output whatever the user's git config (diff.noprefix, diff.mnemonicPrefix).
+const DIFF = ['-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', 'diff', '--no-ext-diff', '--no-color', '--relative', '--find-renames', '-U0', '--src-prefix=a/', '--dst-prefix=b/'];
 
 function gitOut(cwd: string, args: string[]): string {
   const r = git(cwd, args);

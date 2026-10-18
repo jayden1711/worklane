@@ -5,8 +5,9 @@
 //
 //   node scripts/check-comments.mjs --base <rev> [--head <rev>]     (run from the repo root)
 //
-// INVARIANT: the policy is read from the config committed at --base, never the change's own, so a PR can't switch it
-// off for itself. Off there (the default): prints so and exits 0. Exit 1: findings; exit 2: it couldn't check.
+// INVARIANT: the policy is read from the config committed at --base, so a PR can't switch it off through its own
+// config. (This script, the rule and the CI step are the PR's own: changing them is an owner-merged engine change.)
+// Off at --base (the default): prints so and exits 0. Exit 1: findings; exit 2: it couldn't check.
 import { checkRange, formatFindings, policyAt } from '../dist/src/comment-policy.js';
 
 const args = process.argv.slice(2);
