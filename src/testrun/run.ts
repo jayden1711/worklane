@@ -25,6 +25,7 @@ import { runLockPath } from '../os/system-paths.js';
 import { gpuPlanned, gpuRecord, gpuStopped, gpuSummaryLine, type GpuOptIn } from './gpu.js';
 import { networkRecord, networkSummaryLine, SETUP_TIER } from './network.js';
 import { cacheKey } from './cache.js';
+import { fetchSpec } from './fetch.js';
 
 export interface TestRunRequest {
   repo: string;
@@ -265,13 +266,14 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     let fetchFailed = false;
     for (const [i, f] of (d.config.fetch ?? []).entries()) {
       if (o.signal?.aborted) break;
-      const cache = d.config.caches.find((c) => c.name === f.npm)!;
-      const r = await d.host.fetch(id, 'npm', cache.name, cacheKey(d.repo, req.sha, cache.key), SETUP_TIMEOUT_S * 1000, o.signal);
+      const spec = fetchSpec(f);
+      const cache = d.config.caches.find((c) => c.name === spec.cache)!;
+      const r = await d.host.fetch(id, spec.fetcher, cache.name, cacheKey(d.repo, req.sha, cache.key), SETUP_TIMEOUT_S * 1000, o.signal, spec.files);
       mkdirSync(join(d.logDir, id), { recursive: true, mode: 0o700 });
       writeFileSync(join(d.logDir, id, `fetch-${i + 1}.log`), r.out, { mode: 0o600 });
       if (r.code !== 0) {
         fetchFailed = true;
-        const step = `fetch ${i + 1} (npm, into the ${cache.name} cache)`;
+        const step = `fetch ${i + 1} (${spec.fetcher}, into the ${cache.name} cache)`;
         const why = r.timedOut ? timedOutLine(step, SETUP_TIMEOUT_S, 'the setup steps\' cap') : `${step} failed (exit ${r.code ?? 'killed'})`;
         setup = { step, detail: r.timedOut ? `timed out after ${SETUP_TIMEOUT_S / 60} min` : `exit ${r.code ?? 'killed'}`, stderr: tail(r.err ?? '') };
         failAll(`${why}:\n${tail(r.out)}`);
