@@ -93,6 +93,18 @@ test('heredocs: a run: block\'s heredoc ends at its indented closing word; <<<, 
   assert.deepEqual(verdict('a.sh', "cat <<-'EOF'\n\t# body\n\tEOF\n# after\n"), [untagged(4)]);
 });
 
+test('#628: quoted <<EOF, CRLF terminators and two heredocs on one line leave the rest of the file checked', () => {
+  const untagged = (line: number) => `${line}: no WHY:, INVARIANT: or issue/decision id`;
+  assert.deepEqual(verdict('a.sh', 'echo "use <<EOF here"\n# after a quoted <<\n'), [untagged(2)]);
+  assert.deepEqual(verdict('a.sh', "echo 'x <<EOF'\n# after\n"), [untagged(2)]);
+  assert.deepEqual(verdict('a.sh', 'cat <<EOF\r\n# body\r\nEOF\r\n# after\r\n'), [untagged(4)]);
+  const crlfYaml = ['steps:', '  - run: |', '      cat <<EOF', '      # body', '      EOF', '      # after'].join('\r\n');
+  assert.deepEqual(verdict('ci.yml', crlfYaml), [untagged(6)]);
+  assert.deepEqual(verdict('a.sh', 'cat <<A <<B\n# a body\nA\n# b body\nB\n# after\n'), [untagged(6)]);
+  assert.deepEqual(verdict('a.ts', '// eslint complains\n'), [untagged(1)]);
+  assert.deepEqual(verdict('a.ts', '/* eslint-env node, browser */\n'), [], 'a real eslint-env list stays exempt');
+});
+
 test('directives are exempt only in their real syntax; prose that starts like one is judged', () => {
   for (const ok of ['// @ts-expect-error: upstream type', '// eslint-disable-next-line no-console', '/* eslint-disable */', '/* eslint no-console: off */', '/* global window, document: readonly */', '// #region helpers', '// #endregion', '# shellcheck disable=SC2086', '/* istanbul ignore next */', '// prettier-ignore']) {
     assert.deepEqual(verdict(ok.startsWith('#') ? 'a.sh' : 'a.ts', `${ok}\n`), [], ok);

@@ -3,12 +3,13 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../src/brand.js';
-import { checkRange, formatFindings } from '../src/comment-policy.js';
+import { checkRange, checkWorkingFile, formatFindings, WORKING_CHECK_BUDGET_MS } from '../src/comment-policy.js';
 import { loadConfig } from '../src/config/load.js';
-import { runHook } from '../src/hook.js';
+import { POST_EDIT_TIMEOUT_MS, runHook } from '../src/hook.js';
+import { install } from '../src/install.js';
 import { exampleProject } from './helpers.js';
 
 const script = fileURLToPath(new URL('../../scripts/check-comments.mjs', import.meta.url));
@@ -127,6 +128,38 @@ test('commands from the checkout\'s git config (core.fsmonitor, a textconv drive
   const text = ctx(await hook(dir, 'src/old.ts'));
   assert.deepEqual(findingLines(text), ['src/old.ts:3: no WHY:, INVARIANT: or issue/decision id']);
   assert.equal(existsSync(marker), false, 'the configured command did not run');
+});
+
+test('#628: a clean filter on the file is "could not check", never lines from the filtered text', async () => {
+  const { dir, git } = project();
+  git('config', 'filter.pre.clean', "printf 'one\\ntwo\\n'; cat");
+  git('config', 'filter.pre.smudge', 'cat');
+  writeFileSync(join(dir, '.gitattributes'), '*.ts filter=pre\n');
+  writeFileSync(join(dir, 'src', 'old.ts'), '// an old untagged comment\nexport const a = 1;\n// untagged new\n');
+  const text = ctx(await hook(dir, 'src/old.ts'));
+  assert.match(text, /the comment policy could not check src\/old\.ts \(git filter "pre" rewrites src\/old\.ts.*\); its comments were not judged/);
+  assert.doesNotMatch(text, /src\/old\.ts:1:/);
+});
+
+test('#628: one deadline for all the hook\'s git calls, and it fits the hook\'s timeout beside post_edit', () => {
+  const { dir } = project();
+  writeFileSync(join(dir, 'src', 'old.ts'), '// an old untagged comment\nexport const a = 1;\n// untagged new\n');
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const slow = mkdtempSync(join(tmpdir(), 'slowgit-'));
+  writeFileSync(join(slow, 'git'), `#!/bin/sh\nsleep 0.4\nexec ${JSON.stringify(realGit)} "$@"\n`);
+  chmodSync(join(slow, 'git'), 0o755);
+  const restore = withEnv('PATH', `${slow}${delimiter}${process.env.PATH ?? ''}`);
+  const started = performance.now();
+  try {
+    assert.throws(() => checkWorkingFile(dir, 'src/old.ts', { ...loadConfig(dir).project.comment_policy }, 1000), /longer than 1000 ms|stopped|ETIMEDOUT/);
+  } finally {
+    restore();
+  }
+  assert.ok(performance.now() - started < 1900, 'gave up at the deadline, not after every call');
+  install({ root: dir, engineCli: join(dir, 'node_modules', 'gone', 'cli.js') });
+  const s = JSON.parse(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8')) as { hooks: { PostToolUse: { hooks: { timeout: number }[] }[] } };
+  const hookTimeoutMs = Math.min(...s.hooks.PostToolUse.flatMap((e) => e.hooks.map((h) => h.timeout))) * 1000;
+  assert.ok(WORKING_CHECK_BUDGET_MS + POST_EDIT_TIMEOUT_MS < hookTimeoutMs, `${WORKING_CHECK_BUDGET_MS} + ${POST_EDIT_TIMEOUT_MS} < ${hookTimeoutMs}`);
 });
 
 function withEnv(key: string, value: string): () => void {

@@ -175,15 +175,17 @@ function scanC(src: string): Block[] {
 /** A `#` comment scanner for shell, fed line by line (quotes and heredocs carry across lines). */
 function shScanner() {
   let quote: "'" | '"' | null = null;
-  let heredoc: { word: string; tabs: boolean } | null = null;
-  return (text: string): string | null => {
-    if (heredoc) {
-      if ((heredoc.tabs ? text.replace(/^\t+/, '') : text) === heredoc.word) heredoc = null;
+  // INVARIANT: heredocs open on one line are read in order, each body until its own word (#628: `<<A <<B`).
+  const heredocs: { word: string; tabs: boolean }[] = [];
+  return (raw: string): string | null => {
+    // WHY: a CRLF file's terminator is `EOF\r`; without this the heredoc never ends (#628).
+    const text = raw.replace(/\r$/, '');
+    const open = heredocs[0];
+    if (open) {
+      if ((open.tabs ? text.replace(/^\t+/, '') : text) === open.word) heredocs.shift();
       return null;
     }
-    let comment: string | null = null;
-    let j = 0;
-    for (; j < text.length; j++) {
+    for (let j = 0; j < text.length; j++) {
       const c = text[j]!;
       if (quote === "'") {
         if (c === "'") quote = null;
@@ -192,16 +194,25 @@ function shScanner() {
         else if (c === '"') quote = null;
       } else if (c === '\\') j++;
       else if (c === "'" || c === '"') quote = c;
-      else if (c === '#' && (j === 0 || /\s/.test(text[j - 1]!))) {
-        comment = text.slice(j);
-        break;
+      else if (c === '#' && (j === 0 || /\s/.test(text[j - 1]!))) return text.slice(j);
+      else if (c === '(' && text[j + 1] === '(') {
+        // WHY: `<<` inside $(( )) or (( )) is a shift, not a heredoc (#618 review).
+        const end = text.indexOf('))', j + 2);
+        if (end >= 0) j = end + 1;
+      } else if (c === '<' && text[j + 1] === '<') {
+        // WHY: only an unquoted `<<` starts a heredoc (#628); `<<<` is a here-string.
+        if (text[j + 2] === '<') {
+          j += 2;
+          continue;
+        }
+        const h = /^<<(-?)\s*\\?(['"]?)([A-Za-z_]\w*)\2/.exec(text.slice(j));
+        if (h) {
+          heredocs.push({ word: h[3]!, tabs: h[1] === '-' });
+          j += h[0].length - 1;
+        } else j++;
       }
     }
-    // WHY: `<<<` is a here-string and `<<` inside $(( )) or (( )) a shift; neither starts a heredoc.
-    const code = text.slice(0, comment === null ? text.length : j).replace(/\(\([^]*?\)\)/g, '');
-    const h = quote ? null : /(?<!<)<<(?!<)(-?)\s*\\?(['"]?)([A-Za-z_]\w*)\2/.exec(code);
-    if (h) heredoc = { word: h[3]!, tabs: h[1] === '-' };
-    return comment;
+    return null;
   };
 }
 
@@ -223,7 +234,7 @@ function hashBlocks(found: { line: number; text: string; own: boolean }[]): Bloc
 function scanSh(src: string): Block[] {
   const next = shScanner();
   const found: { line: number; text: string; own: boolean }[] = [];
-  src.split('\n').forEach((text, k) => {
+  src.split(/\r?\n/).forEach((text, k) => {
     if (k === 0 && text.startsWith('#!')) return;
     const c = next(text);
     if (c !== null) found.push({ line: k + 1, text: c, own: text.trim() === c.trim() });
@@ -235,7 +246,7 @@ function scanSh(src: string): Block[] {
 function scanYaml(src: string): Block[] {
   const found: { line: number; text: string; own: boolean }[] = [];
   let scalar: { indent: number; body: number | null; sh: ReturnType<typeof shScanner> | null } | null = null;
-  src.split('\n').forEach((text, k) => {
+  src.split(/\r?\n/).forEach((text, k) => {
     const indent = text.length - text.trimStart().length;
     if (scalar && (text.trim() === '' || indent > scalar.indent)) {
       // WHY: the script is the block without its YAML indent; a heredoc's closing word is matched at column 0.
@@ -284,7 +295,8 @@ const DIRECTIVE = new RegExp(
   [
     /^@ts-(expect-error|ignore|nocheck|check)\b/,
     /^eslint-(disable|enable)(-next-line|-line)?(\s|$)/,
-    /^eslint(-env)? [\w@/-]+(:|\s*$|\s*,)/,
+    /^eslint [\w@/-]+\s*:/,
+    /^eslint-env [\w-]+(\s*,\s*[\w-]+)*\s*$/,
     /^(prettier-ignore|biome-ignore|@vite-ignore|[#@]__PURE__)\b/,
     /^(istanbul|c8|v8) ignore\b/,
     /^shellcheck (disable|enable|source|shell|external-sources)=/,
@@ -384,8 +396,11 @@ const DIFF = [
   ...['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--relative', '--find-renames', '-U0', '--src-prefix=a/', '--dst-prefix=b/'],
   ...['--diff-algorithm=myers', '--indent-heuristic'],
 ];
-/** The hook's git calls give up after this long: a slow git becomes "could not check", never a lost report (#330). */
-export const WORKING_GIT_TIMEOUT_MS = 5000;
+/**
+ * WHY: one deadline for all the hook's git calls (#628), so with post_edit's 20 s it stays inside the hook's 30 s;
+ * past it the hook says "could not check" instead of losing both reports.
+ */
+export const WORKING_CHECK_BUDGET_MS = 8000;
 
 function gitOut(cwd: string, args: string[], timeoutMs?: number): string {
   const r = git(cwd, args, timeoutMs);
@@ -420,14 +435,24 @@ function gitYes(cwd: string, args: string[], timeoutMs: number): boolean {
  * INVARIANT: a git that can't answer throws, so old lines are never reported as new (the hook says it couldn't check).
  * The hook's check: one working-tree file against HEAD (an untracked file, or a repo with no commit, is all new).
  */
-export function checkWorkingFile(root: string, file: string, policy: CommentPolicy, timeoutMs = WORKING_GIT_TIMEOUT_MS): CommentFinding[] {
+export function checkWorkingFile(root: string, file: string, policy: CommentPolicy, budgetMs = WORKING_CHECK_BUDGET_MS): CommentFinding[] {
   if (!languageOf(file)) return [];
   const path = join(root, file);
   if (!existsSync(path)) return [];
   const src = readFileSync(path, 'utf8');
-  const hasHead = gitYes(root, ['rev-parse', '-q', '--verify', 'HEAD'], timeoutMs);
-  const tracked = gitYes(root, ['ls-files', '--error-unmatch', '--', file], timeoutMs);
-  const added = tracked && hasHead ? (addedLines(gitOut(root, [...DIFF, 'HEAD', '--', file], timeoutMs)).get(file) ?? new Set<number>()) : new Set(src.split('\n').map((_, k) => k + 1));
+  const deadline = performance.now() + budgetMs;
+  const left = () => {
+    const ms = Math.floor(deadline - performance.now());
+    if (ms <= 0) throw new Error(`git took longer than ${budgetMs} ms`);
+    return ms;
+  };
+  // WHY: a clean filter (git-lfs, for one) makes git diff number other lines than the file's (#628); don't guess.
+  const attr = gitOut(root, ['check-attr', '-z', 'filter', '--', file], left()).split('\0')[2] ?? '';
+  if (attr !== '' && attr !== 'unspecified' && attr !== 'unset') throw new Error(`git filter "${attr}" rewrites ${file}, so its lines can't be compared with HEAD`);
+  const hasHead = gitYes(root, ['rev-parse', '-q', '--verify', 'HEAD'], left());
+  const tracked = gitYes(root, ['ls-files', '--error-unmatch', '--', file], left());
+  const added = tracked && hasHead ? (addedLines(gitOut(root, [...DIFF, 'HEAD', '--', file], left())).get(file) ?? new Set<number>()) : new Set(src.split('\n').map((_, k) => k + 1));
+  left();
   return checkComments(file, src, added, policy);
 }
 
