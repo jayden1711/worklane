@@ -17,9 +17,10 @@ import { MODEL_TIERS, tierOf } from './model-routing.js';
 import { providerOf } from './providers.js';
 import { effectiveRouting, route } from './routing.js';
 import { CROSS_FAMILY_OFF } from './cross-eval.js';
+import type { Effort } from './roles.js';
 
 /** What --effort may be set to from the chat (claude 2.1.296 also has xhigh and max; not offered: not every model has xhigh, and they cost the most). */
-export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const;
+export const CHAT_EFFORTS = ['low', 'medium', 'high'] as const satisfies readonly Effort[];
 export type ChatEffort = (typeof CHAT_EFFORTS)[number];
 
 /**
