@@ -85,7 +85,7 @@ import { buildReport } from './reports.js';
 import { intakeHealth, intakeReports } from './intake/view.js';
 import { throughput } from './throughput.js';
 import { constraintsView } from './checks-from-feedback.js';
-import { digestMarkdown, waitingOnYou } from './digest.js';
+import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
@@ -1341,6 +1341,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       canReadRuns: mayReadRuns(who.role),
       // Whether this viewer may read what waits on the owner, so the page asks only when it will get it.
       canReadDigest: mayReadDigest(who.role),
+      // How many things /api/waiting lists, and what the Needs you queue keys each by, so the shell's badge is exact
+      // without reading /api/waiting (#633). From the event cache's fold, as /api/waiting is. Only for those who may
+      // read /api/waiting: a viewer's state has no such key (and stateForViewer's allowlist drops it too).
+      ...(mayReadDigest(who.role) ? { waiting: waitingCount(eventCache) } : {}),
       // Whether this viewer may write at all (viewers are read-only), and see the audit log (owners only).
       canWrite: isWriter(who.role),
       canReadAudit: isOwner(who.role),
@@ -1996,7 +2000,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         // (what the daily GitHub comment posts). The owner's and the writers', like runs.
         if (url.pathname === '/api/waiting' && req.method === 'GET') {
           if (!mayReadDigest(who.role)) return json(res, 403, { error: writersOnly('what waits on the owner is', who) });
-          const digest = waitingOnYou(eventCache.all());
+          // From the fold the event cache keeps, stepped through only what was appended (#633), not the whole log.
+          const digest = waitingCached(eventCache);
           return json(res, 200, { ...digest, markdown: digestMarkdown(digest, { project: opts.cfg.project.project.name }) });
         }
         // Usage: the Claude usage-limit pause in force (its reset time, for the banner's countdown) and today's runs and

@@ -1,6 +1,7 @@
 // The event log as one dashboard process keeps it in memory: read whole once, then only what was appended since
 // (`id > last`), so a request costs a query for nothing new rather than reading and parsing the whole log again.
-// Views that are a fold over the events alone are kept per snapshot (memo), so an unchanged log costs nothing.
+// Views that are a fold over the events alone are kept per snapshot (memo), so an unchanged log costs nothing; a
+// fold that can go on from where it was (fold) steps through only what was appended.
 //
 // The log is append-only (triggers refuse UPDATE and DELETE, src/events/log.ts); only a migration (a new
 // user_version) or a different file at the path (a restore, a move) changes what was read, and either reads it whole
@@ -30,6 +31,8 @@ export class EventCache {
   /** What was read: the file (device and inode) and its schema version; a change to either reads it whole again. */
   private identity = '';
   private memos = new Map<string, unknown>();
+  /** Folds carried forward across appends (fold), each with how many events it has seen. */
+  private folds = new Map<string, { s: unknown; n: number }>();
   /** How many times the log was read whole (tests). */
   fullReads = 0;
 
@@ -79,6 +82,28 @@ export class EventCache {
     return v;
   }
 
+  /**
+   * A fold of the events kept across snapshots: `step` sees each event once, in the log's order, as it is appended, so
+   * a read after an append costs the new events only. Read whole again (from `init()`) only when the log is (reset).
+   * The state is the fold's: read it, never change it outside `step`. A `step` that throws drops the fold, so the next
+   * read starts it again rather than going on from a half-applied event.
+   */
+  fold<S>(key: string, init: () => S, step: (s: S, e: StoredEvent) => void): S {
+    const events = this.all();
+    let f = this.folds.get(key) as { s: S; n: number } | undefined;
+    if (!f) {
+      f = { s: init(), n: 0 };
+      this.folds.set(key, f);
+    }
+    try {
+      for (; f.n < events.length; f.n++) step(f.s, events[f.n]!);
+    } catch (e) {
+      this.folds.delete(key);
+      throw e;
+    }
+    return f.s;
+  }
+
   private refresh(): void {
     if (!existsSync(this.path)) {
       if (this.identity !== 'none') this.reset('none');
@@ -118,5 +143,6 @@ export class EventCache {
     this.snap = Object.freeze([]);
     this.last = 0;
     this.memos.clear();
+    this.folds.clear();
   }
 }
