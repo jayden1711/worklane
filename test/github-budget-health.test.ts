@@ -16,6 +16,7 @@ import { BUDGET_HEALTH_LIMITS, githubBudgetHealth } from '../src/github/budget-h
 import { healthView } from '../src/health.js';
 import { tryLock } from '../src/locks.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
+import { testMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 /** A slot directory of this test's own, under the temporary directory: never the machine's. */
@@ -233,9 +234,9 @@ test('the health view carries the budget from the slot directory it is given; by
   assert.equal(v.githubRate?.credentials[0]?.resources[0]?.remaining, 42);
   assert.equal(healthView([], null, { network: null, updates: [], slotsDir: slots() }).githubRate, null, 'no budget: null');
   assert.equal(healthView([], null, { network: null, updates: [], slotsDir: dir, githubRate: null }).githubRate, null, 'given (the superfan wants only the suggestions): not read');
-  // The default is AGENT_SLOTS_DIR, which the test isolation points into a temporary directory.
+  // The default is AGENT_SLOTS_DIR, which the test isolation points inside the test's own machine (test/isolate.ts).
   const isolated = process.env.AGENT_SLOTS_DIR;
-  assert.ok(isolated && !relative(tmpdir(), isolated).startsWith('..'), `the default slot directory ${isolated} is a temporary one`);
+  assert.ok(isolated && !relative(testMachine, isolated).startsWith('..'), `the default slot directory ${isolated} is inside the test machine ${testMachine}`);
   mkdirSync(isolated, { recursive: true });
   window(budgetFor('token-default', isolated), 'core', 7, at(900));
   assert.equal(healthView([], null, { network: null, updates: [] }).githubRate?.credentials.find((c) => c.resources[0]?.remaining === 7)?.resources[0]?.limit, 5000);
