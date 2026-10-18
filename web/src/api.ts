@@ -1952,6 +1952,38 @@ export interface Learnings {
   groups: LearningGroup[];
   canPromote: boolean;
 }
+/** Mirrors DelegationView in src/delegation.ts, with the instance's settings (GET /api/delegation, owners and writers). */
+export interface DelegationApprover {
+  by: string;
+  role: 'owner' | 'writer' | null;
+  approvals: number;
+  unchanged: number;
+  bad: number;
+  medianWaitMs: number | null;
+}
+export interface DelegationCategory {
+  category: string;
+  waits: boolean;
+  loosened: boolean;
+  protected: boolean;
+  prs: number[];
+  clean: number;
+  changed: number;
+  reverted: number;
+  mainRed: number;
+  laterFix: number;
+  held: number;
+  wait: { medianMs: number; fastestMs: number; slowestMs: number; count: number } | null;
+  approvers: DelegationApprover[];
+  evidence: string[];
+}
+export interface Delegation {
+  enabled: boolean;
+  minClean: number | null;
+  categories: DelegationCategory[];
+  approvers: (DelegationApprover & { categories: string[] })[];
+  suggestions: { category: string; direction: 'loosen' | 'tighten'; at: string; decision: string; receipts: string[]; answer: string | null; by: string | null; issue: number | null }[];
+}
 export const promoteLearning = (fingerprint: string, line: string) => api<{ ok: boolean }>('/api/learnings/promote', { method: 'POST', body: JSON.stringify({ fingerprint, line }) });
 
 /** Waiting on you (GET /api/waiting, src/digest.ts): every owner-held state open now, and the digest's Markdown. */

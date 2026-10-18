@@ -92,6 +92,7 @@ import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
 import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
+import { delegationView } from './delegation.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
@@ -1927,6 +1928,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } finally {
             log.close();
           }
+        }
+        // Gradual delegation (src/delegation.ts): each review category's record, who approved and how fast, and the
+        // suggestions with their answers. Read-only: a suggestion is answered in the Inbox and only files a PR. People's
+        // names and approvals, so the owners' and writers', like the learnings.
+        if (url.pathname === '/api/delegation') {
+          if (req.method !== 'GET') return json(res, 405, { error: 'the delegation summary is read-only' });
+          if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the delegation summary is', who) });
+          const review = opts.cfg.review;
+          if (!review) return json(res, 200, { enabled: false, minClean: null, categories: [], approvers: [], suggestions: [] });
+          return json(res, 200, { enabled: review.delegation.enabled, minClean: review.delegation.min_clean, ...delegationView(eventCache.all(), review) });
         }
         // WHY: item 33 (src/learnings.ts). Read like the flaky tests; a promote is the owner's alone, by the same
         // isOwnerHere check as clearing a flaky test, and only records the request: the coordinator files the PR.
