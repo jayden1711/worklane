@@ -4,18 +4,25 @@
 // confirm is the idea's text, or the decision's id, to this dashboard's own server only.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AudioLines } from 'lucide-react';
-import { decide, voiceIntake, type State } from '../api';
+import { decide, voiceIntake, type Decision, type State } from '../api';
 import { checkSupport, Dictation, speechCtor, type RecognitionCtor, type Support } from './speech';
 import { speechLang, type VoicePrefs } from './prefs';
 import { bannerText, CONFIRM_WINDOW_MS, finder, mayUseVoice, tabState, voiceActive, VoiceCommands, type Pending, type Step } from './commands';
 import { mayTalk, useTalkBack } from './TalkBack';
-import { Button, cx } from '../components/ui';
+import { Button, cx, decisionWork } from '../components/ui';
 
 /** What the banner shows: an item waiting for a confirm (with the seconds left), or what just happened. */
 export type BannerView = { pending: Pending; left: number } | { done: string; ok: boolean };
 
-/** The 10-second banner shown for every spoken confirm, with the same confirm and cancel as buttons. */
-export function VoiceBanner({ view, onConfirm, onCancel }: { view: BannerView | null; onConfirm: () => void; onCancel: () => void }) {
+/**
+ * The 10-second banner shown for every spoken confirm, with the same confirm and cancel as buttons. `decisions`: the
+ * open decisions (State.decisions); an approval's Approve says, while paused, what the work its decision's kind does
+ * (decisionWork). Voice reaches only plan decisions, so in practice it says the plan text (the work waits for the
+ * resume). Voice never approves a landing: the server marks every land decision voiceRefused (src/voice.ts
+ * voiceExclusion, NEVER_FROM_CHAT) and approvalFor refuses it. Voice can't reach an intake decision either (the
+ * owner's decision on #664): one is asked with issue null, and approvalFor matches on the spoken issue number.
+ */
+export function VoiceBanner({ view, decisions = [], onConfirm, onCancel }: { view: BannerView | null; decisions?: Pick<Decision, 'id' | 'kind'>[]; onConfirm: () => void; onCancel: () => void }) {
   if (!view) return null;
   const box = 'fixed top-3 left-1/2 z-[60] w-[min(560px,calc(100vw-32px))] -translate-x-1/2 rounded-card bg-surface px-4 py-3 text-[13px] shadow-overlay';
   if ('done' in view)
@@ -25,6 +32,7 @@ export function VoiceBanner({ view, onConfirm, onCancel }: { view: BannerView | 
       </div>
     );
   const p = view.pending;
+  const work = p.kind === 'approve' ? decisionWork(decisions.find((d) => d.id === p.decision)?.kind) : null;
   const pct = Math.max(0, Math.min(100, (view.left / (CONFIRM_WINDOW_MS / 1000)) * 100));
   return (
     <div className={box} role="alertdialog" aria-live="assertive" aria-label="Spoken confirm" data-testid="voice-banner" data-kind={p.kind}>
@@ -55,7 +63,7 @@ export function VoiceBanner({ view, onConfirm, onCancel }: { view: BannerView | 
             Say “confirm” within <span className="tabular-nums">{view.left}</span> s, or click; anything else said cancels.
           </span>
           <div className="ml-auto flex gap-2">
-            <Button size="sm" onClick={onConfirm} data-testid="voice-banner-confirm">
+            <Button size="sm" onClick={onConfirm} work={work} data-testid="voice-banner-confirm">
               {p.kind === 'intake' ? 'Send to intake' : 'Approve'}
             </Button>
             <Button size="sm" variant="outline" onClick={onCancel} data-testid="voice-banner-cancel">
@@ -201,6 +209,7 @@ export function VoiceControl({ state, prefs, ctor }: { state: State; prefs: Voic
       <VoiceButton show={on} support={support} listening={listening} onToggle={toggle} />
       <VoiceBanner
         view={view}
+        decisions={state.decisions}
         onConfirm={() => {
           talk.stop();
           void run(machine.click(voiceActive(role, prefs, tabState())));
