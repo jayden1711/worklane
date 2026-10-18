@@ -668,6 +668,31 @@ test('the off-machine backup on the health panel: not set up with the docs link;
   assert.deepEqual(cells, ['3 h ago', 'not set up', 'never verified']);
 });
 
+test("#392: the provider hosts on the health panel, read-only: root's hosts and their file, or that provider runs are off; a refused file and each provider outside the set in red", () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, offsiteBackup: null, suggestions: ['Nothing to suggest.'] };
+  const file = '/etc/x/providers.json';
+  const allowed = r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: ['api.provider.test', '127.0.0.1:8080'], error: null, refused: [] } });
+  assert.match(allowed, /data-testid="health-provider-hosts">Provider hosts: <code[^>]*>api\.provider\.test, 127\.0\.0\.1:8080<\/code> \(from <code[^>]*>\/etc\/x\/providers\.json<\/code>\)/);
+  assert.doesNotMatch(allowed, /health-provider-refused/, 'no provider refused: no list');
+  assert.doesNotMatch(allowed, /<(?:input|button|form|select|textarea)\b/i, 'nothing on the page changes it');
+  // A configured provider outside the set: named, with why, in red.
+  const outside = r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: 'open.example.com is not an allowed provider host (127.0.0.1:8080, from /etc/x/providers.json)' }] } });
+  assert.match(outside, /data-testid="health-provider-refused"[\s\S]*?<span class="[^"]*text-red[^"]*">Provider <code[^>]*>hosted:glm<\/code> refused:<\/span> <span[^>]*>open\.example\.com is not an allowed provider host \(127\.0\.0\.1:8080, from \/etc\/x\/providers\.json\)<\/span>; its runs take the role(&#x27;|')s normal model/);
+  // An empty list: provider runs are off.
+  assert.match(r.renderHealth({ ...base, providerHosts: { file, state: 'ok', hosts: [], error: null, refused: [] } }), /data-testid="health-provider-hosts">Provider hosts: none, so provider runs are off \(from <code/);
+  // No file: said plainly, with each configured provider it turns off.
+  const missing = r.renderHealth({ ...base, providerHosts: { file, state: 'missing', hosts: [], error: null, refused: [{ provider: 'local', reason: 'no provider host is allowed on this machine' }] } });
+  assert.match(missing, /data-testid="health-provider-hosts-none">No provider hosts: <code[^>]*>\/etc\/x\/providers\.json<\/code> doesn(&#x27;|')t exist, so provider runs are off/);
+  assert.match(missing, /data-testid="health-provider-refused"[\s\S]*?<code[^>]*>local<\/code> refused:[\s\S]*?no provider host is allowed on this machine/);
+  // A refused file: the refusal in red.
+  const refused = r.renderHealth({ ...base, providerHosts: { file, state: 'refused', hosts: [], error: "/etc/x/providers.json: isn't root's; no provider host is allowed", refused: [] } });
+  assert.match(refused, /role="alert"[^>]*data-testid="health-provider-hosts-refused"[\s\S]*?text-red[^>]*>Provider hosts refused:<\/span> <span[^>]*>\/etc\/x\/providers\.json: isn(&#x27;|')t root(&#x27;|')s; no provider host is allowed<\/span>\. Provider runs are off\./);
+  assert.doesNotMatch(refused, /data-testid="health-provider-hosts"/, 'no list of hosts beside a refused file');
+  // Nothing to show (no file and no provider), or a viewer (the server sends null): no line at all.
+  assert.doesNotMatch(r.renderHealth({ ...base, providerHosts: null }), /health-provider/);
+  assert.doesNotMatch(r.renderHealth(base), /health-provider/);
+});
+
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
   const data = {
     owner: 'example-owner',
