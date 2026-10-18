@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { agentSettingsFileOf, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
+import { agentSettingsFileOf, NO_ATTRIBUTION, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -689,11 +689,13 @@ export class CliRunner implements AgentRunner {
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
     const locked = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    // Attribution off in every --settings a run gets, with or without instance guardrails (#576); a run passed none gets none.
     // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
     // reports it before any line but a system one, and never succeeds without it: claude drops a whole --settings
-    // over one invalid value, silently. The check key is spread last, so nothing above can replace it.
+    // over one invalid value, silently. The check key is spread last, so nothing above (NO_ATTRIBUTION included) can
+    // replace it.
     const check = locked ? settingsCheckValue() : null;
-    const settings = locked && check ? { ...locked, [SETTINGS_CHECK_KEY]: check } : undefined;
+    const settings = locked && check ? { ...locked, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check } : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
     const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${laneSettings ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
