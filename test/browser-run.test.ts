@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AppConfig } from '../src/config/schema.js';
 import { findChrome, freePort, launchChrome, portInUse } from '../src/browser/cdp.js';
-import { isLocal, isOnOrigin, runFlow, runFlowAt, stepLabel, type FlowEvidence } from '../src/browser/run.js';
+import { captureShots, isLocal, isOnOrigin, runFlow, runFlowAt, stepLabel, type FlowEvidence } from '../src/browser/run.js';
 import { summarizeTrace } from '../src/browser/trace.js';
 
 test('the browser may only reach the app on this machine (and in-page schemes); everything else is refused', () => {
@@ -28,7 +28,80 @@ test('the trace summary: long tasks on the page\'s main thread only, the longest
   assert.deepEqual(summarizeTrace([]), { longTasks: 0, maxTaskMs: 0, droppedFramePct: null, frames: 0 }, 'no frame events: not measured, not zero');
 });
 
-/** A tiny app: a page whose button logs an error, throws, fetches a missing path, a slow path and another host. */
+/**
+ * A stand-in for Chrome's DevTools, with no Chrome: it records each command, and each "screenshot" it returns says
+ * what was emulated when it was taken (the colour scheme, the width, mobile or not). `fail` makes a command throw.
+ */
+function fakeCdp(fail: (method: string, params: Record<string, unknown>, shots: number) => string | undefined = () => undefined) {
+  const sent: { method: string; params: Record<string, unknown> }[] = [];
+  let scheme = 'light';
+  let view = '1440';
+  let shots = 0;
+  const cdp = {
+    async send<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+      sent.push({ method, params });
+      if (method === 'Page.captureScreenshot') shots++;
+      const why = fail(method, params, shots);
+      if (why) throw new Error(why);
+      if (method === 'Emulation.setEmulatedMedia') scheme = (params.features as { name: string; value: string }[]).find((f) => f.name === 'prefers-color-scheme')?.value || 'light';
+      if (method === 'Emulation.setDeviceMetricsOverride') view = `${String(params.width)}${params.mobile ? ' mobile' : ''}`;
+      if (method === 'Page.captureScreenshot') return { data: Buffer.from(`${scheme} ${view}`).toString('base64') } as T;
+      if (method === 'Runtime.evaluate') return { result: {} } as T;
+      return {} as T;
+    },
+  };
+  return { cdp, sent };
+}
+
+test('where a flow ended is shot three times: at desktop width, in dark mode at that width, then at phone width in light; each of the viewport only', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  const { cdp, sent } = fakeCdp();
+  const r = await captureShots(cdp, join(dir, 'evidence'), 'checkout');
+  const shot = (name: string) => readFileSync(join(dir, 'evidence', name), 'utf8');
+  assert.equal(r.screenshot, join(dir, 'evidence', 'checkout.png'));
+  assert.equal(shot('checkout.png'), 'light 1440', 'the desktop shot is the run\'s own view');
+  assert.deepEqual(r.views, [
+    { view: 'dark', path: join(dir, 'evidence', 'checkout-dark.png') },
+    { view: 'phone', path: join(dir, 'evidence', 'checkout-phone.png') },
+  ]);
+  assert.equal(shot('checkout-dark.png'), 'dark 1440', 'dark mode, at desktop width');
+  assert.equal(shot('checkout-phone.png'), 'light 390 mobile', 'phone width, a mobile viewport, and light again');
+  const captures = sent.filter((s) => s.method === 'Page.captureScreenshot');
+  assert.equal(captures.length, 3, 'three shots, no more');
+  for (const c of captures) assert.deepEqual(c.params, { format: 'png' }, 'the viewport only, never the whole page');
+  assert.deepEqual(sent.find((s) => s.method === 'Emulation.setDeviceMetricsOverride')?.params, { width: 390, height: 844, deviceScaleFactor: 2, mobile: true });
+});
+
+test("a dark or phone shot that fails says why in its place and never fails the run; the phone shot is never left dark; a failed desktop shot fails the run", async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  // The dark mode is set, but its shot fails: the phone shot after it is still light.
+  const lateFail = fakeCdp((method, _p, shots) => (method === 'Page.captureScreenshot' && shots === 2 ? 'Page.captureScreenshot: no answer from Chrome in 30 s\nmore' : undefined));
+  const r = await captureShots(lateFail.cdp, join(dir, 'a'), 'home');
+  assert.deepEqual(r.views, [
+    { view: 'dark', error: 'Page.captureScreenshot: no answer from Chrome in 30 s' },
+    { view: 'phone', path: join(dir, 'a', 'home-phone.png') },
+  ]);
+  assert.equal(readFileSync(join(dir, 'a', 'home-phone.png'), 'utf8'), 'light 390 mobile');
+  assert.equal(existsSync(join(dir, 'a', 'home-dark.png')), false);
+
+  // The phone width can't be set: the dark shot stands, the phone one says why.
+  const noPhone = fakeCdp((method) => (method === 'Emulation.setDeviceMetricsOverride' ? 'Emulation.setDeviceMetricsOverride: the DevTools connection closed' : undefined));
+  const p = await captureShots(noPhone.cdp, join(dir, 'b'), 'home');
+  assert.deepEqual(p.views, [
+    { view: 'dark', path: join(dir, 'b', 'home-dark.png') },
+    { view: 'phone', error: 'Emulation.setDeviceMetricsOverride: the DevTools connection closed' },
+  ]);
+
+  // The desktop shot is the run's evidence, as it always was: without it the run fails.
+  const none = fakeCdp((method) => (method === 'Page.captureScreenshot' ? 'Page.captureScreenshot: the DevTools connection closed' : undefined));
+  await assert.rejects(captureShots(none.cdp, join(dir, 'c'), 'home'), /the DevTools connection closed/);
+  assert.equal(none.sent.some((s) => s.method.startsWith('Emulation.')), false, 'no other view is tried');
+});
+
+/** A PNG's width in pixels (its IHDR chunk). */
+const pngWidth = (path: string) => readFileSync(path).readUInt32BE(16);
+
+/** A tiny app: a page whose button logs an error, throws, fetches a missing path, a slow path and another host; dark in dark mode. */
 function fixtureApp(dir: string) {
   writeFileSync(
     join(dir, 'server.mjs'),
@@ -37,7 +110,7 @@ import { spawn } from 'node:child_process';
 // A child of the app, as a dev server has (a watcher, a bundler): stopping the app must stop it too.
 const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
 import('node:fs').then((fs) => fs.writeFileSync('child.pid', String(child.pid)));
-const page = \`<!doctype html><title>shop</title><button data-testid="go">Go</button><div data-testid="out"></div>
+const page = \`<!doctype html><title>shop</title><style>@media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } }</style><button data-testid="go">Go</button><div data-testid="out"></div>
 <script>
 document.querySelector('[data-testid=go]').onclick = async () => {
   console.error('boom from the page');
@@ -87,6 +160,11 @@ test('a flow against a real app: errors, a failed, a slow and a blocked request,
   assert.ok(!ev.failedRequests.some((r) => r.url.includes('example.com')), 'a refused request is blocked, not failed');
   assert.ok(ev.trace && ev.trace.maxTaskMs >= 0);
   assert.ok(ev.screenshot && statSync(ev.screenshot).size > 1000, 'a screenshot');
+  assert.equal(pngWidth(ev.screenshot), 1440, 'the desktop shot is 1440 px wide');
+  assert.deepEqual(ev.views.map((v) => [v.view, 'path' in v]), [['dark', true], ['phone', true]], JSON.stringify(ev.views));
+  const [dark, phone] = ev.views.map((v) => ('path' in v ? v.path : ''));
+  assert.notDeepEqual(readFileSync(dark!), readFileSync(ev.screenshot), 'the dark shot shows the page in dark mode');
+  assert.equal(pngWidth(phone!), 390 * 2, 'the phone shot is 390 CSS px wide, at 2x');
   // Torn down: the port is free again, and the app's own child is gone.
   assert.equal(await portInUse(port), false, 'the app stopped');
   const childPid = Number(readFileSync(join(dir, 'child.pid'), 'utf8'));

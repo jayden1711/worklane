@@ -1,6 +1,7 @@
 // Run one of a project's browser flows (Track B): start the app in a worktree, wait until it answers on
 // localhost, drive headless Chromium through the flow's steps, and collect what a reviewer needs: console
-// errors, failed and slow requests, a performance-trace summary, and a screenshot. The browser only ever
+// errors, failed and slow requests, a performance-trace summary, and screenshots of where the flow ended (at
+// desktop width, in dark mode and at phone width). The browser only ever
 // reaches the app on localhost: every other request is refused before it leaves, and recorded. The app and
 // the browser are always stopped, whatever happens. With no Chrome or Chromium on the machine, the run is
 // skipped and says so, rather than failing.
@@ -49,7 +50,10 @@ export interface FlowEvidence {
   /** Requests refused because they weren't to the app on localhost. */
   blockedRequests: string[];
   trace: TraceSummary | null;
+  /** Where the flow ended, at the run's own desktop view (1440 px wide, light). */
   screenshot: string | null;
+  /** The same end state in dark mode and at phone width: each shot's file, or why it wasn't taken. */
+  views: ViewShot[];
   durationMs: number;
   /** What went wrong cleaning up (a profile left behind): reported, never judged. */
   notes?: string[];
@@ -57,13 +61,66 @@ export interface FlowEvidence {
 
 export type FlowRun = FlowEvidence | { flow: string; skipped: string };
 
+/** A view of the flow's end state besides the desktop one. */
+export type ShotView = 'dark' | 'phone';
+/** A shot at another view: its file, or why it wasn't taken. */
+export type ViewShot = { view: ShotView; path: string } | { view: ShotView; error: string };
+
+/** The viewport every flow runs in. */
+export const DESKTOP_VIEWPORT = { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false } as const;
+/** A common phone's CSS viewport, for the phone shot: no more pixels than the desktop shot. */
+export const PHONE_VIEWPORT = { width: 390, height: 844, deviceScaleFactor: 2, mobile: true } as const;
+
+/** Two frames (at most 500 ms, should frames not come), then a moment for a theme's transitions to finish. */
+async function settle(cdp: Pick<Cdp, 'send'>) {
+  await evalIn(cdp, 'new Promise((ok) => { requestAnimationFrame(() => requestAnimationFrame(ok)); setTimeout(ok, 500); })');
+  await sleep(250);
+}
+
+/**
+ * Shoot where the flow ended: at the run's desktop view, then in dark mode (prefers-color-scheme: dark, still at
+ * desktop width), then at phone width (light again). The desktop shot failing fails the run, as it always has; a
+ * dark or phone shot that fails says why in its place and is never a reason the run fails.
+ * INVARIANT: three shots at most per run, each of the viewport only (never the whole page), so a run's evidence
+ * stays bounded however long the app's page is.
+ */
+export async function captureShots(cdp: Pick<Cdp, 'send'>, outDir: string, flow: string): Promise<{ screenshot: string; views: ViewShot[] }> {
+  mkdirSync(outDir, { recursive: true });
+  const shoot = async (name: string) => {
+    const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
+    const path = join(outDir, name);
+    writeFileSync(path, Buffer.from(data, 'base64'));
+    return path;
+  };
+  const screenshot = await shoot(`${flow}.png`);
+  const set: Record<ShotView, () => Promise<unknown>> = {
+    dark: () => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }),
+    // WHY: an empty list clears the dark emulation first, so a failed dark shot never leaves the phone shot dark.
+    phone: async () => {
+      await cdp.send('Emulation.setEmulatedMedia', { features: [] });
+      await cdp.send('Emulation.setDeviceMetricsOverride', { ...PHONE_VIEWPORT });
+    },
+  };
+  const views: ViewShot[] = [];
+  for (const view of ['dark', 'phone'] as const) {
+    try {
+      await set[view]();
+      await settle(cdp);
+      views.push({ view, path: await shoot(`${flow}-${view}.png`) });
+    } catch (e) {
+      views.push({ view, error: (e as Error).message.split('\n')[0]!.slice(0, 300) });
+    }
+  }
+  return { screenshot, views };
+}
+
 /** Stop the app and everything it started (a dev server's own children too), through the OS adapter. */
 function stopApp(p: ChildProcess, runAs?: { user: string; home: string }): Promise<boolean> {
   return stopTree(p, () => (runAs ? killTreeAs(runAs.user, p.pid) : killTree(p.pid, () => p.kill('SIGKILL'))));
 }
 
 /**
- * Run `flow` from `app` against the app started in `cwd`. Evidence lands in `outDir` (the screenshot). Throws when
+ * Run `flow` from `app` against the app started in `cwd`. Evidence lands in `outDir` (the screenshots). Throws when
  * the app can't be started or never becomes ready (its output tail in the message), or the browser fails; a failing
  * step is evidence. However it ends, Chrome and the app's whole process tree are stopped first. Chrome's temporary
  * profile goes under `chromeProfileRoot` when given (the system temp folder otherwise).
@@ -149,14 +206,14 @@ async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: 
   try {
     browser = await launchChrome(o.chrome, { ...(o.noSandbox ? { noSandbox: true } : {}), ...(o.chromeProfileRoot ? { profileRoot: o.chromeProfileRoot } : {}) });
     const cdp = browser.cdp;
-    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
+    ev = { flow: o.flow, ok: true, steps: [], consoleErrors: [], failedRequests: [], slowRequests: [], blockedRequests: [], trace: null, screenshot: null, views: [], durationMs: 0, ...(browser.notes.length ? { notes: [...browser.notes] } : {}) };
     watch(cdp, ev, o.app.thresholds.slow_request_ms, o.allow);
     await cdp.send('Page.enable');
     await cdp.send('Runtime.enable');
     await cdp.send('Log.enable');
     await cdp.send('Network.enable');
     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
-    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
+    await cdp.send('Emulation.setDeviceMetricsOverride', { ...DESKTOP_VIEWPORT });
 
     const trace: TraceEvent[] = [];
     cdp.on('Tracing.dataCollected', (p) => trace.push(...((p.value as TraceEvent[]) ?? [])));
@@ -178,10 +235,9 @@ async function drive(o: { app: AppConfig; flow: string; outDir: string; chrome: 
     await cdp.send('Tracing.end');
     await Promise.race([traced, sleep(10_000)]);
     ev.trace = summarizeTrace(trace);
-    mkdirSync(o.outDir, { recursive: true });
-    const { data } = await cdp.send<{ data: string }>('Page.captureScreenshot', { format: 'png' });
-    ev.screenshot = join(o.outDir, `${o.flow}.png`);
-    writeFileSync(ev.screenshot, Buffer.from(data, 'base64'));
+    const shots = await captureShots(cdp, o.outDir, o.flow);
+    ev.screenshot = shots.screenshot;
+    ev.views = shots.views;
     ev.durationMs = Date.now() - t0;
     return ev;
   } finally {
@@ -243,7 +299,7 @@ function watch(cdp: Cdp, ev: FlowEvidence, slowMs: number, allow: (url: string) 
   });
 }
 
-async function evalIn(cdp: Cdp, expr: string): Promise<unknown> {
+async function evalIn(cdp: Pick<Cdp, 'send'>, expr: string): Promise<unknown> {
   const r = await cdp.send<{ result: { value?: unknown }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
   return r.result.value;

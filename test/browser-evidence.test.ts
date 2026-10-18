@@ -21,6 +21,10 @@ const evidence = (over: Partial<FlowEvidence> = {}): FlowEvidence => ({
   blockedRequests: [],
   trace: { longTasks: 1, maxTaskMs: 120, droppedFramePct: 10, frames: 30 },
   screenshot: '/home/example/runs/42/checkout.png',
+  views: [
+    { view: 'dark', path: '/home/example/runs/42/checkout-dark.png' },
+    { view: 'phone', path: '/home/example/runs/42/checkout-phone.png' },
+  ],
   durationMs: 900,
   ...over,
 });
@@ -36,15 +40,21 @@ test('a run in one line: steps held, errors, failed and slow requests, the trace
   assert.match(evidenceSummary(evidence({ trace: { longTasks: 0, maxTaskMs: 0, droppedFramePct: null, frames: 0 } })), /frames not measured$/);
 });
 
-test('a passing flow: why it ran, the files, the result, and the screenshot by name only (not the machine\'s path)', () => {
+test('a passing flow: why it ran, the files, the result, and every screenshot (desktop, dark mode, phone width) by name only (not the machine\'s path)', () => {
   assert.deepEqual(browserEvidenceLines({ gate: touched, runs: [{ result: judged(evidence()) }] }), [
     '### BROWSER CHECKS',
     '- Why: the change touches 1 file(s) under ui_paths, so every flow runs',
     '- UI files touched: `web/cart/Pay.tsx`',
     '- `browser checkout`: pass',
     '  - 2/2 steps held, 0 console error(s), 0 failed request(s), 0 slow, longest task 120 ms, 10% frames dropped',
-    '  - screenshot: `checkout.png` (kept with the run)',
+    '  - screenshots (kept with the run): `checkout.png` (desktop), `checkout-dark.png` (dark mode), `checkout-phone.png` (phone width)',
   ]);
+});
+
+test('a view that could not be shot is listed with why, quoted, so its text never renders', () => {
+  const ev = evidence({ views: [{ view: 'dark', error: 'Emulation.setEmulatedMedia: <b>@owner</b> `no`' }, { view: 'phone', path: '/home/example/runs/42/checkout-phone.png' }] });
+  const lines = browserEvidenceLines({ gate: touched, runs: [{ result: judged(ev) }] });
+  assert.equal(lines.at(-1), "  - screenshots (kept with the run): `checkout.png` (desktop), dark mode not taken: `Emulation.setEmulatedMedia: <b>@owner</b> 'no'`, `checkout-phone.png` (phone width)");
 });
 
 test('a UI fix shows the reproduction before the change beside the run after it', () => {
