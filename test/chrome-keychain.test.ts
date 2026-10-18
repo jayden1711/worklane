@@ -35,7 +35,7 @@ test('every place that starts Chrome itself keeps it off the OS keychain', () =>
       else if (/\.(ts|tsx|mjs|cjs|js|sh)$/.test(n)) files.push(p);
     }
   };
-  for (const d of ['src', 'scripts', 'test', 'web/src', 'desktop']) {
+  for (const d of ['src', 'scripts', 'test', 'web/src']) {
     try {
       walk(join(repoRoot, d));
     } catch {

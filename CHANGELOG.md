@@ -10,10 +10,12 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - An outsider's report filed `ready` on its own GitHub issue (the `<cli>:intake` label) by an older engine, and not started yet, has no checked draft kept, so it is now refused with a comment saying why. Removing `ready` doesn't bring it back to intake: its report stays in the seen ledger for 365 days. To have it worked, a writer opens a new issue with its contract.
   - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
 - Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
+- **The optional desktop window is removed (#744):** `desktop/` (the Tauri shell and its `Cargo.lock`), `npm run build:desktop`, its CI job and its `desktop` required check. Open the dashboard in your browser instead: the same page, sign-in and guards. `dashboard --app` now opens the browser, as it already did when the window wasn't built.
+- **The engine updater and the `desktop` check (#744).** Every install so far has `desktop` in `/etc/worklane/updates.json` `required_checks` (the old default list), and no commit from this release on runs it. The updater in this release stops waiting for it (see Guardrail changes), but an install still on v0.5.2 or older judges commits with its own, older updater, which waits for `desktop` on every newer commit and so installs nothing. On each such machine, drop the name once at a root shell before updating: `sudo cp -p /etc/worklane/updates.json /etc/worklane/updates.json.bak && sudo jq '.required_checks -= ["desktop"]' /etc/worklane/updates.json.bak | sudo tee /etc/worklane/updates.json > /dev/null` (or remove the `"desktop"` line by hand). Until then it stays on its installed engine; nothing else changes. The updater's log shows why: `required check "desktop" hasn't run on this commit`.
 
 ### Guardrail changes
 
-- none in this release
+- **The engine updater no longer waits for the retired `desktop` check (#744).** A required check named in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`: `desktop` only) that has no run on a commit is dropped from that commit's required list; one that ran is judged as before. A list of retired names alone is refused, as an empty list is. The window it tested was never built or installed by the updater.
 
 ## v0.5.2 (2026-10-17)
 

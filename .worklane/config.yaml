@@ -20,7 +20,6 @@ land_mode: pr
 required_checks:
   - test (ubuntu-latest, 22)
   - test (ubuntu-latest, 24)
-  - desktop
   - agentshield
   - push-gate
   - denylist

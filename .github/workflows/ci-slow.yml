@@ -1358,9 +1358,9 @@ jobs:
           grep -qxF 'nothing to add; the file is unchanged' "$RUNNER_TEMP/add2.out"
           # The file's own mode is kept (here 0600), and no dotted temp file is left.
           sudo chmod 0600 "$cfg"
-          sudo bash scripts/setup/updates.sh --add-check desktop > /dev/null
+          sudo bash scripts/setup/updates.sh --add-check push-gate > /dev/null
           [ "$(sudo stat -c '%U %G %a' "$cfg")" = "root root 600" ]
-          sudo jq -e '.required_checks[-1] == "desktop" and (.required_checks | length) == 5' "$cfg"
+          sudo jq -e '.required_checks[-1] == "push-gate" and (.required_checks | length) == 5' "$cfg"
           if sudo ls -A /etc/worklane | grep '^\.updates'; then echo "a temp file was left" >&2; exit 1; fi
           sudo grep -q '"what":"updates.required_checks".*"to":"added \\"wizard end to end (real systemd)\\", \\"dco\\""' /var/lib/worklane/machine-changes.jsonl
           # Refused, with nothing changed: a bad name, another option beside it, an unknown flag, no name.

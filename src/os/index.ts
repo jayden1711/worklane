@@ -1078,11 +1078,6 @@ export function browserRelay(dir: string, urlFile: string): string | null {
   return file;
 }
 
-/** A native executable's file name on this OS. */
-export function executableName(base: string): string {
-  return process.platform === 'win32' ? `${base}.exe` : base;
-}
-
 /** Free disk on the volume holding `path`: percent and GB. */
 export function diskFree(path: string): { freePct: number; freeGb: number; totalGb: number } {
   const st = statfsSync(path);

@@ -39,7 +39,6 @@
     "check:denylist": "node scripts/check-denylist.mjs",
     "check:comments": "node scripts/check-comments.mjs",
     "build:web": "vite build --config web/vite.config.ts --logLevel warn && node scripts/web-licenses.mjs",
-    "build:desktop": "cargo build --release --locked --manifest-path desktop/Cargo.toml",
     "check:push": "node scripts/push-gate-hook.mjs --range origin/main..HEAD",
     "setup:hooks": "node scripts/setup-hooks.mjs"
   },

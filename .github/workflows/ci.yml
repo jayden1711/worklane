@@ -1,5 +1,5 @@
 name: ci
-# The fast checks, on every pull request and every push to main: test, desktop, agentshield, push-gate, denylist,
+# The fast checks, on every pull request and every push to main: test, agentshield, push-gate, denylist,
 # and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. The slow checks (the bootstrap
 # on each OS, the real systemd and real users jobs) are ci-slow.yml's: on main they run in batches, on main's newest
 # commit, one batch at a time (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
@@ -135,28 +135,6 @@ jobs:
         run: |
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
-
-  desktop:
-    # The optional desktop window (desktop/, Tauri): its URL and navigation guards, against the locked crates.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Tauri's Linux build libraries (WebKitGTK)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev
-      # The crates and their build, keyed on the lockfile and the toolchain: a hit rebuilds only the app's own crate.
-      - name: rustc version (part of the cache key)
-        id: rustc
-        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target
-          key: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-
-      - run: cargo test --locked --manifest-path desktop/Cargo.toml
 
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.

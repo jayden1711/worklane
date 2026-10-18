@@ -264,7 +264,7 @@ An air-gapped install needs, each inside the boundary (inferred):
 
 ## 11. Interfaces per deployment mode
 
-**Primary surfaces, in order:** GitHub (issues in, PRs out, the merge decision and reasons posted on the PR); the web dashboard; the CLI (admins); chat intake and notifications (Discord, Slack, Linear). **Secondary:** the desktop app, single machine only.
+**Primary surfaces, in order:** GitHub (issues in, PRs out, the merge decision and reasons posted on the PR); the web dashboard; the CLI (admins); chat intake and notifications (Discord, Slack, Linear). There is no native app: the dashboard runs in the browser (#744).
 
 ### 11.1 What ships, and its auth, per mode
 
@@ -277,7 +277,6 @@ An air-gapped install needs, each inside the boundary (inferred):
 | Slack | Socket Mode, mentions from allowed senders and channels; intake and replies only (`src/intake/slack.ts:1-8`) | Supported | Supported | Supported |
 | Linear | Polled API key, allowed senders' issues only; intake and comments only (`src/intake/linear.ts:1-8`) | Supported | Supported | Supported |
 | Siri | Device token on gateway port 4397, idea or question only (`src/siri/instance.ts:1-16`) | Not shipped (inferred: it depends on the tailnet gateway) | Optional | Supported |
-| Desktop app | A window locked to a loopback dashboard URL, no IPC; asks for the dashboard key (`desktop/src/main.rs:1-47`). It doesn't manage the engine or notify (inferred: that file is its only source). | Not shipped | Not shipped | Supported (secondary) |
 
 ### 11.2 Which surface carries each action today (measured)
 
@@ -297,14 +296,13 @@ An air-gapped install needs, each inside the boundary (inferred):
 
 ### 11.3 Actions on one surface that should be on another
 
-1. **Emergency stop**: CLI only (measured: `src/cli.ts:1128-1138`). Missing on the dashboard (mobile), in Discord and Slack for owners, and in the desktop app. It is also machine-wide only; a per-instance pause exists nowhere (measured: `src/slots.ts:123`).
+1. **Emergency stop**: CLI only (measured: `src/cli.ts:1128-1138`). Missing on the dashboard (mobile), and in Discord and Slack for owners. It is also machine-wide only; a per-instance pause exists nowhere (measured: `src/slots.ts:123`).
 2. **Approve a held change through the engine's merge path**: Discord only (measured: `src/coordinator/merge-flow.ts:606-659`). The dashboard links to GitHub's merge button instead (measured: `src/board.ts:230-236`). Missing as an owner button on the dashboard.
 3. **Auto-merge on or off, and resume after a stop**: dashboard only (measured: `src/policy-edit.ts:13`, `src/dashboard.ts:2750`). Missing in the CLI for admins and CI, and as an owner "stop merging" in chat.
 4. **Cancel a run**: dashboard only (measured: `src/dashboard.ts:1783`). Missing in the CLI.
 5. **Start or stop an instance**: CLI only (measured: `src/cli.ts:771`, `:799`). Missing on the dashboard for machine owners (cloud: scale the coordinator to zero).
 6. **Decisions and hold notices in Slack**: Discord only (measured: no Slack path in `src/coordinator/channel.ts`; `src/intake/slack.ts:1-8`). Missing in Slack.
 7. **One approval gate**: the dashboard's owner-only kinds aren't enforced on GitHub comments or the CLI (§1 item 4).
-8. **The desktop app** doesn't manage the local engine or notify (inferred: `desktop/src/main.rs` is its only source). Missing for single-machine mode.
 
 ## 12. Build plan
 
@@ -360,4 +358,4 @@ Also first: #710 (re-runs never loosen) and a decision on #711 (who can read the
 9. **Image signing keys.** A key held by the owner (works air-gapped), or keyless signing through CI's identity (needs online services). Recommended: key-based, with the signer list from the customer's side.
 10. **Gate fixes first.** Money paths from main and one approval gate on every surface, as S issues before #702; #710 before any migration step. Recommended: yes.
 11. **BYOC control plane.** Not now; record the boundary rules in §8 only. Recommended: yes.
-12. **Siri and the desktop app** ship in single-machine mode only. Recommended: yes.
+12. **Siri** ships in single-machine mode only. Recommended: yes. (#744 amended this decision: the other surface it named was removed, and the dashboard in a browser replaces it.)
