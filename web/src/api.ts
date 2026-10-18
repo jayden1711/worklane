@@ -278,6 +278,12 @@ export interface State {
   canReadRuns?: boolean;
   /** Whether this viewer may read what waits on the owner (the owner or a writer); absent from an older server: yes. */
   canReadDigest?: boolean;
+  /**
+   * How many things Waiting on you lists (/api/waiting's items), and each one's kind, issue and decision: the Needs you
+   * badge's count without a read of /api/waiting (#633). The owners' and writers' only; absent for a viewer (and from
+   * an older server).
+   */
+  waiting?: { count: number; keys: Pick<WaitItem, 'kind' | 'issue' | 'decision'>[] };
   project: { name: string; repo: string; landMode: string; ci?: CiMode };
   /** Who this page is for: the signed-in person's login, or the owner's on the break-glass. */
   user: string;
