@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentSettingsPath, guardrailSettings, HOOK_MARKER, projectSettingsRefusal, readAgentSettings, runSettings, type Settings } from '../src/agent-settings.js';
+import { agentSettingsPath, guardrailSettings, HOOK_MARKER, NO_ATTRIBUTION, projectSettingsRefusal, readAgentSettings, runSettings, SETTINGS_CHECK_KEY, type Settings } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { install, invokedEngine } from '../src/install.js';
@@ -190,6 +190,21 @@ test('a run without instance guardrails still gets attribution off in any --sett
   const c = fakeClaude();
   assert.equal((await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, 'bare'))).reason, 'succeeded');
   assert.equal(c.seen()!.settings, null, 'no --settings is invented for a run that had none');
+});
+
+test("the attribution pin can never replace the run's --settings check value: the check key is spread last (#576, #626)", { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
+  const { dir } = setup(t);
+  const lanes = { default: { settings: { sandbox: { enabled: true } } } };
+  // A pin that grew a value for the check key: the run's own fresh check value must still be the one claude gets.
+  const pin = NO_ATTRIBUTION as unknown as Record<string, unknown>;
+  pin[SETTINGS_CHECK_KEY] = 'from-the-attribution-pin';
+  t.after(() => delete pin[SETTINGS_CHECK_KEY]);
+  const c = fakeClaude();
+  const r = await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir));
+  assert.equal(r.reason, 'succeeded', r.detail);
+  const s = c.seen()!.settings! as Record<string, unknown>;
+  assert.match(String(s[SETTINGS_CHECK_KEY]), /-settings-check-[0-9a-f]{16}$/, "the run's own check value, not the pin's");
+  attributionOff(s as Settings);
 });
 
 test("doctor checks an instance's agent hooks where they now live, and fails an older install's project-level hooks", (t) => {
