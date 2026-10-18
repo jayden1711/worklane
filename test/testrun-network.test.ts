@@ -300,8 +300,14 @@ test('fetch: its own namespace with slirp4netns as a granted run\'s; no run\'s T
     for (const p of NO_NET) assert.ok(props.includes(p), p);
     assert.ok(h.netCalls().length === 1 && h.netCalls()[0]!.argv.includes('--disable-host-loopback'), 'its network is slirp4netns\'s');
     assert.ok(props.includes(`TemporaryFileSystem=${join(h.dir, 't')}:ro`), 'no run\'s TMPDIR, so no database socket');
-    assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-c-1', 'fetch')}`, `ReadWritePaths=${join(h.base, 'shop', 'cache', `npm-${key}`)}`]);
+    assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'cache', `npm-${key}`)}`]);
     assert.ok(argv.includes(`--setenv=npm_config_cache=${join(h.base, 'shop', 'cache', `npm-${key}`)}`));
+    // Its working directory and HOME are in its own private /tmp, which no run's command can reach: never under the
+    // run's directory, which an exec of the run can write (and rewrite what npm reads, or plant a config in HOME).
+    assert.ok(props.includes('PrivateTmp=yes') && props.includes('WorkingDirectory=/tmp') && argv.includes('--setenv=HOME=/tmp/home'), props.join(' | '));
+    assert.ok(!props.some((p) => p.includes(join('fast-c-1', 'fetch'))) && !argv.some((x) => x.includes(join('fast-c-1', 'fetch'))));
+    assert.ok(!existsSync(join(h.base, 'shop', 'runs', 'fast-c-1', 'fetch')), 'the helper makes nothing of the fetch\'s in the run\'s directory');
+    assert.deepEqual(argv.slice(-2), ['fetch', join(h.base, 'shop', 'runs', 'fast-c-1', 'work')], 'the workspace, the script\'s first argument');
     for (const bad of [['pip', 'npm', key, '60'], ['npm', 'npm', 'xyz', '60'], ['npm', '../x', key, '60'], ['npm', 'npm', key, '0']]) assert.equal(h.run('fetch', 'fast-c-1', ...bad).status, 2, bad.join(' '));
   } finally {
     h.done();
@@ -321,11 +327,14 @@ test('pip fetch: the same unit as npm\'s, given PIP_FIND_LINKS; the requirements
     const { argv, props } = h.lastProps();
     assert.ok(argv.some((x) => /^--unit=worklane-test-shop_fast-p-1_fetch_\d+$/.test(x)));
     for (const p of NO_NET) assert.ok(props.includes(p), p);
-    assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${join(h.base, 'shop', 'runs', 'fast-p-1', 'fetch')}`, `ReadWritePaths=${cache}`]);
+    assert.deepEqual(props.filter((p) => p.startsWith('ReadWritePaths=')), [`ReadWritePaths=${cache}`]);
     assert.ok(argv.includes(`--setenv=PIP_FIND_LINKS=${cache}`) && !argv.some((x) => x.startsWith('--setenv=npm_config_cache')));
-    // FETCH_PIP, then $0 and the files (the stub writes one argument a line, so the script's own lines are in between).
-    assert.ok(argv.includes('  python3 -I -m pip download --only-binary=:all: --no-cache-dir --disable-pip-version-check --no-input --progress-bar off --dest "$PIP_FIND_LINKS" -r "$1" || { echo "fetch: pip download failed: the fetch takes wheels only (building an sdist runs its code), so a package with no wheel for this Python and platform is refused; if that is why, grant the setup steps the network instead (docs/test-runs.md, Network)" >&2; exit 4; }'));
-    assert.deepEqual(argv.slice(-3), ['fetch', 'requirements.txt', 'req/dev.txt']);
+    assert.ok(props.includes('PrivateTmp=yes') && props.includes('WorkingDirectory=/tmp') && argv.includes('--setenv=HOME=/tmp/home'), props.join(' | '));
+    assert.ok(!existsSync(join(h.base, 'shop', 'runs', 'fast-p-1', 'fetch')));
+    // FETCH_PIP, then $0, the workspace and the files (the stub writes one argument a line, so the script's own lines
+    // are in between).
+    assert.ok(argv.includes('cache = os.environ.pop("PIP_FIND_LINKS", "")'), 'FETCH_PIP');
+    assert.deepEqual(argv.slice(-4), ['fetch', join(h.base, 'shop', 'runs', 'fast-p-1', 'work'), 'requirements.txt', 'req/dev.txt']);
     // npm takes no file; pip takes 1 to 8, each as requirementsFileProblem allows.
     const nine = Array.from({ length: 9 }, (_, i) => `r${i}.txt`);
     for (const bad of [['pip', 'pip', key, '60'], ['npm', 'pip', key, '60', 'requirements.txt'], ['pip', 'pip', key, '60', ...nine], ['yarn', 'pip', key, '60', 'r.txt']]) {

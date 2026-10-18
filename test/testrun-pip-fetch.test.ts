@@ -46,7 +46,10 @@ test('tests.yaml: a pip fetch names a PIP_FIND_LINKS cache and its requirements 
 function rig(files: Record<string, string> = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'pip-fetch-'));
   const fx = join(dir, 'fx');
-  const made = spawnSync(python!, ['-I', fixtures, fx], { encoding: 'utf8' });
+  const key = 'e'.repeat(32);
+  // The local host's cache directory for this key: the planted wheel names evil's sdist there.
+  const cacheDir = join(dir, 'base', 'cache', `pip-${key}`);
+  const made = spawnSync(python!, ['-I', fixtures, fx, '--planted-url', `file://${join(cacheDir, 'evil-1.0.tar.gz')}`], { encoding: 'utf8' });
   assert.equal(made.status, 0, made.stderr);
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -67,13 +70,16 @@ function rig(files: Record<string, string> = {}) {
     mkdirSync(join(work, f, '..'), { recursive: true });
     writeFileSync(join(work, f), t);
   }
-  const key = 'e'.repeat(32);
   return {
     dir,
     fx,
     work,
     host,
-    cache: () => host.cache('pip', key),
+    cache: async () => {
+      const c = await host.cache('pip', key);
+      assert.equal(c, cacheDir);
+      return c;
+    },
     fetch: async (...reqs: string[]) => {
       const x = await host.fetch('fast-p-1', 'pip', 'pip', key, 120_000, undefined, reqs.length ? reqs : ['requirements.txt']);
       return { ...x, err: x.err ?? '' };
@@ -89,17 +95,19 @@ test('pip fetch: the wheels of the pins and of the repo\'s build requirements la
     const out = await r.fetch();
     assert.equal(out.code, 0, out.out + out.err);
     assert.match(out.out, /^fetch: 1 pinned in requirements\.txt; build requirements: standin-backend>=1$/m);
+    assert.match(out.out, /^fetch: 2 wheels into the cache: standin-1\.0-py3-none-any\.whl, standin_backend-1\.0-py3-none-any\.whl$/m);
     assert.match(out.out, /fetch: every pinned package and build requirement is in the cache, as wheels\n?$/);
     assert.deepEqual(readdirSync(await r.cache()).sort(), ['standin-1.0-py3-none-any.whl', 'standin_backend-1.0-py3-none-any.whl']);
     assert.ok(!existsSync(join(r.work, 'repo-ran')), 'the repo\'s build backend never ran');
     const asked = r.log().split('\n').filter((l) => l.startsWith('ARGS '));
-    assert.equal(asked.length, 2);
+    assert.equal(asked.length, 1);
+    const cache = await r.cache();
     for (const a of asked) {
-      assert.ok(a.includes(' --only-binary=:all: '), a);
-      assert.match(a, / -r (pins|build)\.txt$/, 'never a file of the repo\'s');
+      assert.ok(a.includes(' --only-binary=:all: --no-deps '), a);
+      assert.match(a, / -r round-\d+-(plain|hashed)\.txt$/, 'never a file of the repo\'s');
+      assert.ok(!a.includes(cache), 'never the cache');
     }
-    assert.match(r.log(), /^standin==1\.0\n/m);
-    assert.match(r.log(), /^standin-backend>=1\n/m);
+    assert.match(r.log(), /^standin==1\.0\nstandin-backend>=1\n/m);
     // The probe can tell: pip download of the repo's own file, even with --only-binary=:all:, builds the -e . line.
     const naive = spawnSync(python!, ['-I', '-m', 'pip', 'download', '--only-binary=:all:', '--no-index', '--find-links', join(r.fx, 'index'), '-d', join(r.dir, 'naive'), '-r', 'requirements.txt'], { cwd: r.work, encoding: 'utf8' });
     assert.equal(naive.status, 0, naive.stderr);
@@ -119,8 +127,8 @@ test('pip fetch, then the offline install step: pip install --no-index builds th
     assert.equal(install.code, 0, install.out + install.err);
     assert.match(install.out, /^1 2$/m);
     assert.ok(existsSync(join(r.work, 'repo-ran')), 'the repo\'s build backend ran in the install step');
-    // Nothing asked the index there: the stand-in python3 logs every pip download, and those were the fetch's two.
-    assert.equal(r.log().split('\n').filter((l) => l.startsWith('ARGS ')).length, 2);
+    // Nothing asked the index there: the stand-in python3 logs every pip download, and that was the fetch's one.
+    assert.equal(r.log().split('\n').filter((l) => l.startsWith('ARGS ')).length, 1);
   } finally {
     r.done();
   }
@@ -147,6 +155,53 @@ test('pip fetch: a pin with no wheel (an sdist only) fails the fetch, which neve
   }
 });
 
+test('pip fetch never reads the cache: a wheel a run planted there (standin 1.0+evil, needing evil @ file://<its sdist, planted too>) is never chosen, and evil is never built; pip reading the cache would build it', { skip }, async () => {
+  const r = rig();
+  const evil = join(r.fx, 'markers', 'evil-ran');
+  try {
+    const cache = await r.cache();
+    const planted = 'standin-1.0+evil-py3-none-any.whl';
+    cpSync(join(r.fx, 'planted', planted), join(cache, planted));
+    cpSync(join(r.fx, 'index', 'evil-1.0.tar.gz'), join(cache, 'evil-1.0.tar.gz'));
+    // A run's symlink where a chosen wheel goes is replaced, never written through.
+    writeFileSync(join(r.dir, 'target'), 'not to be written');
+    symlinkSync(join(r.dir, 'target'), join(cache, 'standin_backend-1.0-py3-none-any.whl'));
+    const out = await r.fetch();
+    assert.equal(out.code, 0, out.out + out.err);
+    assert.ok(!existsSync(evil), 'evil\'s build backend never ran');
+    assert.match(out.out, /^fetch: 2 wheels into the cache: standin-1\.0-py3-none-any\.whl, standin_backend-1\.0-py3-none-any\.whl$/m);
+    assert.equal(readFileSync(join(r.dir, 'target'), 'utf8'), 'not to be written');
+    const genuine = readFileSync(join(r.fx, 'index', 'standin-1.0-py3-none-any.whl'));
+    assert.ok(readFileSync(join(cache, 'standin-1.0-py3-none-any.whl')).equals(genuine), 'the index\'s standin, copied in');
+    // The probe can tell: pip download with the cache as a find-links source (as this fetch's first version ran it)
+    // chooses the planted wheel and builds evil from its direct reference, --only-binary=:all: or not.
+    const naive = spawnSync(python!, ['-I', '-m', 'pip', 'download', '--only-binary=:all:', '--no-index', '--find-links', join(r.fx, 'index'), '--find-links', cache, '-d', join(r.dir, 'naive'), 'standin==1.0'], { cwd: r.dir, encoding: 'utf8' });
+    assert.ok(existsSync(evil), `pip reading the cache built evil: ${naive.stdout}${naive.stderr}`);
+  } finally {
+    r.done();
+  }
+});
+
+test('pip fetch follows dependencies itself, from each wheel\'s METADATA (an extra\'s too), and refuses a dependency that is a direct reference, before pip could build it', { skip }, async () => {
+  const r = rig();
+  const evil = join(r.fx, 'markers', 'evil-ran');
+  try {
+    const tool = await r.fetch('requirements-tool.txt');
+    assert.equal(tool.code, 0, tool.out + tool.err);
+    assert.deepEqual(readdirSync(await r.cache()).sort(), ['standin-1.0-py3-none-any.whl', 'standin_backend-1.0-py3-none-any.whl', 'standin_tool-1.0-py3-none-any.whl']);
+    for (const a of r.log().split('\n').filter((l) => l.startsWith('ARGS '))) assert.ok(a.includes(' --no-deps '), a);
+    const direct = await r.fetch('requirements-direct.txt');
+    assert.equal(direct.code, 3, direct.out + direct.err);
+    assert.match(direct.err, /fetch: standin_direct-1\.0-py3-none-any\.whl depends on evil @ file:\/\/\S+evil-1\.0\.tar\.gz: a direct reference, which pip would build: the fetch takes packages from the index only/);
+    assert.ok(!existsSync(evil), 'evil\'s build backend never ran');
+    // The probe can tell: pip resolving the dependencies itself builds evil, --only-binary=:all: or not.
+    const naive = spawnSync(python!, ['-I', '-m', 'pip', 'download', '--only-binary=:all:', '--no-index', '--find-links', join(r.fx, 'index'), '-d', join(r.dir, 'naive'), 'standin-direct==1.0'], { cwd: r.dir, encoding: 'utf8' });
+    assert.ok(existsSync(evil), `pip following the dependency built evil: ${naive.stdout}${naive.stderr}`);
+  } finally {
+    r.done();
+  }
+});
+
 test('pip fetch refuses, before pip runs, anything but a pin, -r and the repo\'s own directory: options, URLs, direct references, ranges, paths outside the repo, symlinks', { skip }, async () => {
   // Each: a requirements file's line, and what the fetch says of it.
   const cases: Array<[string, string]> = [
@@ -168,7 +223,7 @@ test('pip fetch refuses, before pip runs, anything but a pin, -r and the repo\'s
     ['-e ../outside', 'r.txt line 1: ../outside: not a path inside the repo'],
     ['-e ./missing', 'r.txt line 1: ./missing: no such directory in the repo'],
     ['/etc/evil', 'r.txt line 1: /etc/evil: a URL, path or direct reference'],
-    ['evil-1.0.tar.gz', 'r.txt line 1: evil-1.0.tar.gz: not a pin'],
+    ['evil-1.0.tar.gz', 'r.txt line 1: evil-1.0.tar.gz: pip would read it as an archive file'],
     ['standin==${V}', 'r.txt line 1: standin==${V}: a URL, path or direct reference'],
     ['standin==1.0 --config-settings=x=y', 'r.txt line 1: --config-settings=x=y: the only option a pin may have is --hash'],
     ['standin==1.0 --global-option=x', 'r.txt line 1: --global-option=x: the only option a pin may have is --hash'],
@@ -178,6 +233,10 @@ test('pip fetch refuses, before pip runs, anything but a pin, -r and the repo\'s
     ['-r missing.txt', 'missing.txt: no such file in the repo'],
     ['-r nested/bad.txt', 'nested/bad.txt line 2: --index-url: an option'],
     ['-r', 'r.txt line 1: -r takes one path'],
+    // Names and versions pip reads as a local archive file, relative to its working directory.
+    ['standin==1.0+x.tar.gz', 'r.txt line 1: standin==1.0+x.tar.gz: pip would read it as an archive file'],
+    ['evil.whl', 'r.txt line 1: evil.whl: pip would read it as an archive file'],
+    ['standin==1.0\x01', 'r.txt line 1: a control character'],
   ];
   const r = rig({ 'nested/bad.txt': '# fine so far\n--index-url https://example.com/simple\n' });
   try {
@@ -205,6 +264,18 @@ test('pip fetch refuses, before pip runs, anything but a pin, -r and the repo\'s
     const direct = await r.fetch('r.txt');
     assert.equal(direct.code, 3);
     assert.match(direct.err, /fetch: pyproject\.toml: build requirement evil @ https:\/\/example\.com\/evil-1\.0\.tar\.gz: the fetch takes a name and version ranges from the index only/);
+    // Build requirements pip would read as an archive file, and one with a newline (two lines of a requirements file).
+    for (const [x, why] of [
+      ['"evil.tar.gz"', /build requirement evil\.tar\.gz: the fetch takes a name and version ranges from the index only \(no URL, direct reference or archive file\)/],
+      ['"x.whl"', /build requirement x\.whl: the fetch takes/],
+      ['"setuptools>=1.0+x.zip"', /build requirement setuptools>=1\.0\+x\.zip: the fetch takes/],
+      ['"setuptools\\n>=1"', /build requirement 'setuptools\\n>=1': a control character/],
+    ] as const) {
+      writeFileSync(join(r.work, 'pyproject.toml'), `[build-system]\nrequires = [${x}]\nbuild-backend = "x"\n`);
+      const got = await r.fetch('r.txt');
+      assert.equal(got.code, 3, `${x}: ${got.out}${got.err}`);
+      assert.match(got.err, why, x);
+    }
     assert.equal(r.log(), '', 'pip never ran');
     assert.ok(!existsSync(join(r.work, 'repo-ran')) && !existsSync(join(r.fx, 'markers', 'evil-ran')));
   } finally {
@@ -222,8 +293,10 @@ test('pip fetch takes pins as pip-compile and pip freeze write them: extras, mar
     const out = await r.fetch();
     assert.equal(out.code, 0, out.out + out.err);
     assert.match(out.out, /^fetch: 2 pinned in requirements\.txt; build requirements: standin-backend>=1$/m);
-    // The fetch's own file: one canonical line per pin, nothing else of the repo's (evil's marker excludes it here).
-    assert.ok(r.log().includes(`evil===1.0 ; python_version < "3"\nstandin[extra]==1.0 ; python_version >= '3' and os_name != "nt" --hash=sha256:${sha}\n`), r.log());
+    // The fetch's own files: one canonical line per pin, nothing else of the repo's; evil's marker excludes it here,
+    // so it is never asked for.
+    assert.ok(r.log().includes(`\nstandin[extra]==1.0 ; python_version >= '3' and os_name != "nt" --hash=sha256:${sha}\n`), r.log());
+    assert.ok(!r.log().includes('evil'), r.log());
     assert.ok(!existsSync(join(r.work, 'repo-ran')) && !existsSync(join(r.fx, 'markers', 'evil-ran')));
     assert.deepEqual(readdirSync(await r.cache()).sort(), ['standin-1.0-py3-none-any.whl', 'standin_backend-1.0-py3-none-any.whl']);
     // A hash that doesn't match the wheel fails the download (pip checks it).

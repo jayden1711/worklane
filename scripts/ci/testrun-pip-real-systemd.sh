@@ -11,12 +11,19 @@
 #   install:      in the same run, pip install --no-index -r requirements.txt (its -e . line) with no network: the
 #                 repo is built from the cache alone; its canary ran there and couldn't connect; the index saw nothing.
 #   sdist:        a pin with only an sdist: the fetch fails, naming why; the index saw it look, never evil's canary.
+#   planted:      a run's command plants in the cache a wheel standin 1.0+evil that needs evil @ file://<the cache's
+#                 evil sdist, planted too>: the fetch never reads the cache, so it takes the index's standin and evil's
+#                 canary never runs. The helper of this PR's first commit ($OLD: the cache was a find-links source)
+#                 built evil there (fail-without).
+#   direct:       a pin whose wheel needs evil @ <its sdist's URL on the index>: refused before pip sees it, evil's
+#                 canary never runs; $OLD's fetch built it (fail-without).
 #   fail-without: the old way, a setup step root grants the network running pip download: the index saw the repo's
 #                 canary (pip download -r requirements.txt builds -e ., even with --only-binary=:all:) and evil's
 #                 (without it), so this probe can tell.
 # Usage: bash scripts/ci/testrun-pip-real-systemd.sh   (as the runner user, with sudo; after test-user.sh install ci)
 set -euo pipefail
 H=/usr/local/libexec/worklane-testrun
+OLD=a51a0d01ba547bcfa2cf42d5262fcdec2f55d05e
 PUB=203.0.113.7
 PORT=8080
 t="$(mktemp -d)"
@@ -26,6 +33,7 @@ if [ -e /etc/pip.conf ]; then sudo cp /etc/pip.conf "$t/pip.conf.was"; conf_was=
 etc_was=0; [ -d /etc/worklane ] && etc_was=1
 cleanup() {
   sudo pkill -f "http.server $PORT --bind $PUB" 2>/dev/null || true
+  sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
   if [ "$conf_was" = 1 ]; then sudo cp "$t/pip.conf.was" /etc/pip.conf; else sudo rm -f /etc/pip.conf; fi
   sudo rm -f /etc/worklane/testrun-network.json
   [ "$etc_was" = 1 ] || sudo rmdir /etc/worklane 2>/dev/null || true
@@ -37,7 +45,7 @@ trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 echo "== the index: the fixtures on $PUB:$PORT, named in root's /etc/pip.conf"
-python3 -I scripts/ci/testrun-pip-fixtures.py "$t/fx" --canary "$PUB:$PORT" > /dev/null
+python3 -I scripts/ci/testrun-pip-fixtures.py "$t/fx" --canary "$PUB:$PORT" --direct-url "http://$PUB:$PORT/simple/evil/evil-1.0.tar.gz" > /dev/null
 chmod -R a+rX "$t/fx"
 sudo ip netns add wlpip
 sudo ip link add wlq0 type veth peer name wlq1
@@ -114,6 +122,68 @@ echo "  the index saw: $s"
 [[ "$s" == *"/simple/evil/ "* ]] || fail "the fetch didn't look for evil: $s"
 case "$s" in *canary*) fail "a canary reached the index: $s" ;; esac
 as_ ci wipe pip-sdist > /dev/null
+
+# A run of <id> (the fixtures' repo, with a planted/ directory holding standin 1.0+evil, needing evil @ file://<its
+# cache's evil sdist>, and that sdist), and its cache, which the run's own command fills from planted/ as an attacker's
+# would. Prints the cache's directory.
+planted_run() {
+  local id="$1" k c
+  k="$(newkey "$id")"
+  c="$(as_ ci cache pip "$k")"
+  rm -rf "$t/repo-$id" "$t/fx-$id"
+  cp -r "$t/fx/repo" "$t/repo-$id"
+  python3 -I scripts/ci/testrun-pip-fixtures.py "$t/fx-$id" --canary "$PUB:$PORT" --planted-url "file://$c/evil-1.0.tar.gz" > /dev/null
+  mkdir "$t/repo-$id/planted"
+  cp "$t/fx-$id/planted/standin-1.0+evil-py3-none-any.whl" "$t/fx/index/evil-1.0.tar.gz" "$t/repo-$id/planted/"
+  mkrun ci "$id" "$t/repo-$id"
+  printf 'PIP_FIND_LINKS=%s\0' "$c" | as_ ci exec "$id" 60 -- 'cp planted/* "$PIP_FIND_LINKS"/ && ls "$PIP_FIND_LINKS"' > "$t/$id.plant" 2>&1 || { cat "$t/$id.plant" >&2; fail "$id: planting the cache"; }
+  grep -qx 'standin-1.0+evil-py3-none-any.whl' "$t/$id.plant" || { cat "$t/$id.plant" >&2; fail "$id: the planted wheel isn't in the cache"; }
+  printf '%s\n' "$c"
+}
+
+echo "== planted: a run plants standin 1.0+evil (needing evil @ file://<the cache's sdist>) in the cache; the fetch never reads it"
+c="$(planted_run pip-planted)"
+m="$(mark)"
+as_ ci fetch pip-planted pip pip "$(newkey pip-planted)" 300 requirements.txt < /dev/null > "$t/planted.out" 2>&1 || { cat "$t/planted.out" >&2; fail "the fetch with a planted cache failed"; }
+s="$(since "$m")"
+echo "  the index saw: $s"
+case "$s" in *canary*) fail "a canary reached the index during the fetch: $s" ;; esac
+sudo cmp -s "$c/standin-1.0-py3-none-any.whl" "$t/fx/index/standin-1.0-py3-none-any.whl" || fail "the cache's standin isn't the index's"
+as_ ci wipe pip-planted > /dev/null
+
+echo "== direct: a pin whose wheel needs evil @ <the index's sdist URL>: refused before pip sees it"
+mkrun ci pip-direct "$t/fx/repo"
+key="$(newkey pip-direct)"
+as_ ci cache pip "$key" > /dev/null
+m="$(mark)"
+if as_ ci fetch pip-direct pip pip "$key" 300 requirements-direct.txt < /dev/null > "$t/direct.out" 2>&1; then cat "$t/direct.out" >&2; fail "the fetch of a direct reference passed"; fi
+grep -q "^fetch: standin_direct-1.0-py3-none-any.whl depends on evil @ http://$PUB:$PORT/simple/evil/evil-1.0.tar.gz: a direct reference" "$t/direct.out" || { cat "$t/direct.out" >&2; fail "the direct reference's refusal"; }
+s="$(since "$m")"
+echo "  the index saw: $s"
+case "$s" in *canary*|*evil-1.0.tar.gz*) fail "the fetch went on to evil: $s" ;; esac
+as_ ci wipe pip-direct > /dev/null
+
+echo "== fail-without: the helper of this PR's first commit ($OLD) built evil in both"
+git fetch -q --depth=1 origin "$OLD"
+git show "$OLD:scripts/machine/worklane-testrun.sh" > "$t/helper-old.sh"
+sudo install -o root -g root -m 0755 "$t/helper-old.sh" "$H"
+c="$(planted_run pip-planted-old)"
+m="$(mark)"
+as_ ci fetch pip-planted-old pip pip "$(newkey pip-planted-old)" 300 requirements.txt < /dev/null > "$t/planted-old.out" 2>&1 || true
+s="$(since "$m")"
+echo "  planted, the index saw: $s"
+[[ "$s" == *"/canary-evil "* ]] || { cat "$t/planted-old.out" >&2; fail "the old helper's fetch didn't build the planted evil: this probe can't tell ($s)"; }
+as_ ci wipe pip-planted-old > /dev/null
+mkrun ci pip-direct-old "$t/fx/repo"
+key="$(newkey pip-direct-old)"
+as_ ci cache pip "$key" > /dev/null
+m="$(mark)"
+as_ ci fetch pip-direct-old pip pip "$key" 300 requirements-direct.txt < /dev/null > "$t/direct-old.out" 2>&1 || true
+s="$(since "$m")"
+echo "  direct, the index saw: $s"
+[[ "$s" == *"/canary-evil "* ]] || { cat "$t/direct-old.out" >&2; fail "the old helper's fetch didn't build the direct reference: this probe can't tell ($s)"; }
+as_ ci wipe pip-direct-old > /dev/null
+sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
 
 echo "== fail-without: the old way, a setup step granted the network, running pip download: the builds reach the index"
 sudo bash scripts/setup/testrun-network.sh enable ci --tiers setup > /dev/null

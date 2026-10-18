@@ -3,16 +3,21 @@ systemd, scripts/ci/testrun-pip-real-systemd.sh. No network and no tool beyond P
 and the sdist are made here, and the build backend is a stand-in of a few lines (no setuptools).
 
   <out>/index/             a flat find-links directory: standin 1.0 and standin-backend 1.0 (wheels), evil 1.0 (an
-                           sdist only)
+                           sdist only), standin-tool 1.0 (needs standin, and standin-backend for its extra x),
+                           standin-direct 1.0 (needs evil @ <--direct-url, default evil's file:// URL>)
   <out>/simple/<name>/     the same files as a simple index (PEP 503) for a plain HTTP server's directory listing
   <out>/repo/              a repo under test: pyproject.toml whose build backend is in the repo (build_hook.py, the
                            repo's own code) and needs standin-backend; requirements.txt (standin==1.0, then -e .);
-                           requirements-sdist.txt (evil==1.0)
+                           requirements-sdist.txt (evil==1.0), -tool.txt (standin-tool[x]==1.0), -direct.txt
+                           (standin-direct==1.0)
+  <out>/planted/           with --planted-url URL: standin 1.0+evil, needing evil @ URL (what a run could plant in
+                           the cache)
 
 Canaries: the repo's build_hook.py and evil's evil_hook.py run only when something builds them. Each appends "ran" to
 its marker (build_hook: repo-ran beside itself; evil: <out>/markers/evil-ran, or --markers), and with --canary HOST:PORT it
 sends "GET /canary-repo" (or /canary-evil) to that address and appends "<label> reached" or "<label> <error> <errno>"
 to canary.txt beside itself. Usage: python3 -I testrun-pip-fixtures.py <out> [--canary HOST:PORT] [--markers DIR]
+[--direct-url URL] [--planted-url URL]
 """
 import base64
 import hashlib
@@ -26,15 +31,21 @@ args = sys.argv[1:]
 out = os.path.abspath(args.pop(0))
 canary = ""
 markers = os.path.join(out, "markers")
+index = os.path.join(out, "index")
+direct_url = "file://" + os.path.join(index, "evil-1.0.tar.gz")
+planted_url = ""
 while args:
     flag = args.pop(0)
     if flag == "--canary":
         canary = args.pop(0)
     elif flag == "--markers":
         markers = os.path.abspath(args.pop(0))
+    elif flag == "--direct-url":
+        direct_url = args.pop(0)
+    elif flag == "--planted-url":
+        planted_url = args.pop(0)
     else:
         sys.exit("unknown argument " + flag)
-index = os.path.join(out, "index")
 repo = os.path.join(out, "repo")
 for d in (index, repo, markers, os.path.join(repo, "standin_repo")):
     os.makedirs(d, exist_ok=True)
@@ -132,11 +143,11 @@ def pyproject(name, version, backend):
 FIXED = (1980, 1, 1, 0, 0, 0)
 
 
-def wheel(name, version, files):
+def wheel(name, version, files, requires=(), into=None):
     n = name.replace("-", "_")
     dist = f"{n}-{version}.dist-info"
     entries = dict(files)
-    entries[f"{dist}/METADATA"] = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    entries[f"{dist}/METADATA"] = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n" + "".join(f"Requires-Dist: {r}\n" for r in requires)
     entries[f"{dist}/WHEEL"] = "Wheel-Version: 1.0\nGenerator: standin\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     record = []
     for p, t in entries.items():
@@ -144,7 +155,7 @@ def wheel(name, version, files):
         record.append(f"{p},sha256={d},{len(t.encode())}")
     record.append(f"{dist}/RECORD,,")
     entries[f"{dist}/RECORD"] = "\n".join(record) + "\n"
-    path = os.path.join(index, f"{n}-{version}-py3-none-any.whl")
+    path = os.path.join(into or index, f"{n}-{version}-py3-none-any.whl")
     with zipfile.ZipFile(path, "w") as z:
         for p, t in entries.items():
             z.writestr(zipfile.ZipInfo(p, FIXED), t)
@@ -170,6 +181,10 @@ def write(path, text):
 simple = {
     "standin": wheel("standin", "1.0", {"standin/__init__.py": "X = 1\n"}),
     "standin-backend": wheel("standin-backend", "1.0", {"standin_backend/__init__.py": BACKEND}),
+    # A dependency by name, and one only its extra x needs.
+    "standin-tool": wheel("standin-tool", "1.0", {"standin_tool/__init__.py": ""}, ["standin>=1", 'standin-backend>=1; extra == "x"']),
+    # A dependency that is a direct reference to evil's sdist: pip would build it.
+    "standin-direct": wheel("standin-direct", "1.0", {"standin_direct/__init__.py": ""}, [f"evil @ {direct_url}"]),
     "evil": sdist("evil", "1.0", {
         "PKG-INFO": "Metadata-Version: 2.1\nName: evil\nVersion: 1.0\n",
         "pyproject.toml": pyproject("evil", "1.0", "evil_hook"),
@@ -188,4 +203,11 @@ write(os.path.join(repo, "build_hook.py"), hook("repo", None))
 write(os.path.join(repo, "standin_repo", "__init__.py"), "Y = 2\n")
 write(os.path.join(repo, "requirements.txt"), "standin==1.0\n-e .\n")
 write(os.path.join(repo, "requirements-sdist.txt"), "evil==1.0\n")
+write(os.path.join(repo, "requirements-tool.txt"), "standin-tool[x]==1.0\n")
+write(os.path.join(repo, "requirements-direct.txt"), "standin-direct==1.0\n")
+# A wheel a run's command could plant in the cache: standin 1.0+evil (a pin of standin==1.0 matches it, and it sorts
+# above 1.0), which depends on evil's sdist by a direct reference.
+if planted_url:
+    os.makedirs(os.path.join(out, "planted"), exist_ok=True)
+    wheel("standin", "1.0+evil", {"standin/__init__.py": "X = 666\n"}, [f"evil @ {planted_url}"], into=os.path.join(out, "planted"))
 print(out)

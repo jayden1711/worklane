@@ -593,10 +593,11 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const fd = join(dir, 'fetch');
       rmSync(fd, { recursive: true, force: true });
       mkdirSync(join(fd, 'home'), { recursive: true, mode: 0o700 });
-      // The requirements files are the script's arguments ($1...), as the helper passes them.
+      // The workspace, then the requirements files, are the script's arguments, as the helper passes them. (The helper
+      // runs it in its unit's private /tmp; the local host has no sandbox, and uses a directory of the run's.)
       const [file, args] = shellCommand(fetchScript(fetcher));
       const full = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', [FETCH_CACHE_ENV[fetcher]]: await this.cache(cache, key) };
-      const r = await run(file, [...args, 'fetch', ...files], { cwd: fd, env: full, timeoutMs, signal });
+      const r = await run(file, [...args, 'fetch', join(dir, 'work'), ...files], { cwd: fd, env: full, timeoutMs, signal });
       rmSync(fd, { recursive: true, force: true });
       return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
     },
