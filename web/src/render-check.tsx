@@ -33,6 +33,8 @@ import { MetricsPanel, MetricsView } from './components/MetricsPanel';
 import { FlakyView } from './components/FlakyPanel';
 import { HarnessEvalsView } from './components/HarnessEvalsPanel';
 import { LearningsView } from './components/LearningsPanel';
+import { DelegationView } from './components/DelegationPanel';
+import type { Delegation } from './api';
 import { InstanceSettingsView, type InstanceSettingsData } from './components/InstanceSettings';
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
@@ -174,6 +176,7 @@ export const renderMetricsPanel = (state: State) => renderToStaticMarkup(<Metric
 export const renderFlaky = (f: Flaky) => renderToStaticMarkup(<FlakyView f={f} />);
 export const renderHarnessEvals = (h: HarnessEvals) => renderToStaticMarkup(<HarnessEvalsView h={h} />);
 export const renderLearnings = (l: Learnings) => renderToStaticMarkup(<LearningsView l={l} />);
+export const renderDelegation = (d: Delegation) => renderToStaticMarkup(<DelegationView d={d} />);
 export const renderRunsRefused = (message: string) => renderToStaticMarkup(<RunsRefused message={message} />);
 export { runsRefusal, runsRefused } from './pages/RunDetail';
 export const renderRunResearch = (data: RunResearchData) => renderToStaticMarkup(<RunResearchView data={data} />);

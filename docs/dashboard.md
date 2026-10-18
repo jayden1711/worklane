@@ -572,6 +572,14 @@ last seen. For a cause seen 3 times or more, an owner may edit the suggested lin
 (`POST /api/learnings/promote`, owners only, audited): the coordinator opens a PR adding the line to `AGENTS.md`,
 labelled `review:L3`, which waits for the owner. Agents never write `AGENTS.md` themselves.
 
+Under it, **Delegation** (owners and writers; `GET /api/delegation`, src/delegation.ts), read-only: each review
+category's record since the owner's last answer on it (PRs approved unchanged, changed, or gone wrong after: reverted,
+main red, a later fix), how many waited for a person, the time to approve (median, fastest, slowest) and who approved
+(owner or writer); each approver's history across categories; and each suggestion with its answer. The same evidence
+goes with a suggestion to stop waiting on a category in the Inbox. Nothing loosens without the owner's answer, which
+only files a `review.yaml` PR they review; high-risk, safety-floor and agent-instructions categories are never
+suggested.
+
 - **Change failure rate**: of the merges in the window, those that failed: within 7 days the default branch went red
   on it or auto-merge stopped on it, a revert named it (its commit, `#number` or quoted title), or a fix PR (a `bug`
   issue, or a title starting "fix") changed one of its files; or a production report was traced to it.

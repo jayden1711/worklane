@@ -6,6 +6,7 @@ import { TrustPanel } from '../components/TrustPanel';
 import { FlakyPanel } from '../components/FlakyPanel';
 import { HarnessEvalsPanel } from '../components/HarnessEvalsPanel';
 import { LearningsPanel } from '../components/LearningsPanel';
+import { DelegationPanel } from '../components/DelegationPanel';
 import { Card } from '../components/ui';
 import { Header } from '../components/Header';
 
@@ -27,6 +28,7 @@ export function Reports({ state, pulse }: { state: State; pulse: number }) {
         <MetricsPanel state={state} />
         <FlakyPanel state={state} />
         <LearningsPanel state={state} />
+        <DelegationPanel state={state} />
       </div>
       <div className="px-6 pt-6">
         <HarnessEvalsPanel state={state} />

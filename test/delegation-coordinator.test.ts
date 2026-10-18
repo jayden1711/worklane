@@ -38,8 +38,11 @@ function fixture(edit: (cfg: ReturnType<typeof loadConfig>) => void) {
   const log = new EventLog(join(base, 'events.db'));
   const c = new Coordinator({ cfg, log, backlog, runner: new FakeRunner(() => ({})), repo, instance: 'alice', stateDir: join(base, 'state'), slotsDir, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
   let n = 0;
-  /** A harness PR that changed `file`, merged; `corrected`: a writer requested changes on it first. */
-  const merged = (file: string, o: { corrected?: boolean } = {}) => {
+  /**
+   * A harness PR that changed `file`, merged; `corrected`: a writer requested changes on it first. `pr`: its number
+   * (a PR the backlog has); `before`: what happened to it before it merged.
+   */
+  const merged = (file: string, o: { corrected?: boolean; pr?: number; before?: (p: { issue: number; pr: number; head: string }) => void } = {}) => {
     n++;
     const baseSha = git(repo, 'rev-parse', 'HEAD');
     mkdirSync(join(repo, file, '..'), { recursive: true });
@@ -48,10 +51,11 @@ function fixture(edit: (cfg: ReturnType<typeof loadConfig>) => void) {
     git(repo, '-c', 'user.email=c@example.com', '-c', 'user.name=c', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', `change ${n}`);
     const head = git(repo, 'rev-parse', 'HEAD');
     const issue = 100 + n;
-    const pr = 200 + n;
+    const pr = o.pr ?? 200 + n;
     log.append('issue.claimed', { issue, instance: 'alice', lease: head, base: baseSha, owner: 'example-owner' }, 'test');
     log.append('pr.opened', { issue, number: pr, url: 'u', head, draft: false }, 'test');
     if (o.corrected) log.append('correction.recorded', { key: `review:${pr}`, kind: 'review_changes', issue, pr, by: 'example-owner', text: 't' }, 'test');
+    o.before?.({ issue, pr, head });
     log.append('pr.closed', { issue, number: pr, merged: true }, 'test');
     return pr;
   };
@@ -120,6 +124,70 @@ test('a loosened category whose PR was reverted is proposed for tightening; keep
   await t.c.checkDelegation();
   assert.deepEqual(t.of('delegation.decided').map((p) => [p.answer, p.issue]), [['keep', null]]);
   assert.equal((await t.backlog.list('ready')).length, 0);
+});
+
+test('each merged PR records whether it waited for a person, who approved it (and as what) and how long that took; the suggestion carries it; nothing is loosened', async () => {
+  const t = fixture((cfg) => void (cfg.review!.merge.wait_categories = ['copy']));
+  const waits = (p: { issue: number; pr: number; head: string }) => t.log.append('merge.decided', { issue: p.issue, number: p.pr, head: p.head, auto: false, reasons: ['copy waits for the owner'] }, 'test');
+  const later = (ms: number) => new Date(Date.now() + ms).toISOString();
+  // A writer's approving review on GitHub, 90 minutes after it started waiting (a changes-requested review before it doesn't count).
+  const reviewed = (await t.backlog.openPr('b1', 'main', 'copy a', 'b')).number;
+  t.merged('copy/a.md', {
+    pr: reviewed,
+    before: (p) => {
+      waits(p);
+      t.backlog.addReview(reviewed, { author: 'example-owner', state: 'COMMENTED', body: 'hm', at: later(10 * 60_000) });
+      t.backlog.addReview(reviewed, { author: 'example-collaborator', state: 'APPROVED', body: 'ok', at: later(90 * 60_000) });
+    },
+  });
+  // The owner's approval from Discord.
+  t.merged('copy/b.md', { before: (p) => (waits(p), t.log.append('merge.approved', { issue: p.issue, number: p.pr, head: p.head, by: 'example-owner', via: 'discord' }, 'test')) });
+  // Merged by hand on GitHub with no review: whoever merged it approved it.
+  const byHand = (await t.backlog.openPr('b3', 'main', 'copy c', 'b')).number;
+  t.backlog.setPr(byHand, { merged: true, closedBy: 'example-owner' });
+  t.merged('copy/c.md', { pr: byHand, before: waits });
+  // Auto-merged: it waited for nobody.
+  t.merged('copy/d.md', { before: (p) => void t.log.append('merge.decided', { issue: p.issue, number: p.pr, head: p.head, auto: true, reasons: [] }, 'test') });
+  // Held at an earlier head, then auto-merged at the head that merged: nobody approved it.
+  t.merged('copy/e.md', {
+    before: (p) => {
+      waits({ ...p, head: 'b'.repeat(40) });
+      t.log.append('merge.decided', { issue: p.issue, number: p.pr, head: p.head, auto: true, reasons: [] }, 'test');
+    },
+  });
+  // Its landing was asked and a writer approved it on the dashboard; then the harness merged it.
+  t.merged('copy/f.md', {
+    before: (p) => {
+      t.log.append('decision.asked', { id: 'land-1', kind: 'land', issue: p.issue, owner: 'example-owner', question: 'Approve landing?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }, 'test');
+      t.log.append('decision.answered', { id: 'land-1', by: 'example-collaborator', answer: 'approve', role: 'writer' }, 'test');
+      t.log.append('merge.decided', { issue: p.issue, number: p.pr, head: p.head, auto: true, reasons: [] }, 'test');
+      t.log.append('merge.done', { issue: p.issue, number: p.pr, head: p.head, sha: p.head, url: 'u', title: 't' }, 'test');
+    },
+  });
+  await t.c.checkDelegation();
+  const o = t.of('delegation.observed');
+  assert.deepEqual(
+    o.map((p) => [p.held, p.approved_by, p.approver_role]),
+    [
+      [true, 'example-collaborator', 'writer'],
+      [true, 'example-owner', 'owner'],
+      [true, 'example-owner', 'owner'],
+      [false, null, null],
+      [false, null, null],
+      [true, 'example-collaborator', 'writer'],
+    ],
+  );
+  assert.ok(Math.abs((o[0]!.wait_ms as number) - 90 * 60_000) < 60_000, `${o[0]!.wait_ms}`);
+  assert.equal(typeof o[1]!.wait_ms, 'number');
+  assert.equal(o[3]!.wait_ms, null);
+  const asked = t.of('decision.asked').at(-1)!;
+  assert.equal(asked.kind, 'delegation');
+  const receipts = asked.receipts as string[];
+  assert.ok(receipts.some((r) => /^Time to approve: median .* over the 4 PRs that waited for a person/.test(r)), receipts.join('\n'));
+  assert.ok(receipts.includes('Approved unchanged, by who approved: @example-collaborator (writer) 2 of 2, @example-owner (owner) 2 of 2'), receipts.join('\n'));
+  assert.ok(receipts.some((r) => /^PR #\d+ \(#101\): clean, approved by @example-collaborator \(writer\) after 1h 30m$/.test(r)), receipts.join('\n'));
+  assert.deepEqual(t.cfg.review!.merge.wait_categories, ['copy'], 'never loosened automatically');
+  assert.deepEqual(t.cfg.review!.merge.loosened ?? [], []);
 });
 
 test('the tick checks delegation', async () => {

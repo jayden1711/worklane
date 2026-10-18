@@ -3,7 +3,7 @@
 // answer as a review.yaml change they review. See src/delegation.ts.
 import { BRAND } from '../brand.js';
 import { categoryRecords, delegationIssue, suggestions } from '../delegation.js';
-import type { EventPayload } from '../events/types.js';
+import type { EventPayload, EventType } from '../events/types.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import { Corrections } from './corrections.js';
 
@@ -11,7 +11,7 @@ export abstract class Delegation extends Corrections {
   async checkDelegation(): Promise<void> {
     const review = this.d.cfg.review;
     if (!review?.delegation.enabled) return;
-    this.observeMerged();
+    await this.observeMerged();
     await this.answerDelegation();
     const open = new Set<string>();
     const decided = new Set(this.d.log.read(0, ['delegation.decided']).map((e) => (e.payload as { decision: string }).decision));
@@ -27,9 +27,12 @@ export abstract class Delegation extends Corrections {
   }
 
   /** Each harness PR merged since the last look: its review categories (from its own diff) and whether it merged as proposed. */
-  private observeMerged(): void {
+  private async observeMerged(): Promise<void> {
     const seen = new Set(this.d.log.read(0, ['delegation.observed']).map((e) => (e.payload as { pr: number }).pr));
-    const merged = this.d.log.read(0, ['pr.closed']).map((e) => e.payload as EventPayload<'pr.closed'>).filter((p) => p.merged && !seen.has(p.number));
+    const merged = this.d.log
+      .read(0, ['pr.closed'])
+      .map((e) => ({ ...(e.payload as EventPayload<'pr.closed'>), ts: e.ts }))
+      .filter((p) => p.merged && !seen.has(p.number));
     if (!merged.length) return;
     const review = this.d.cfg.review!;
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
@@ -55,8 +58,55 @@ export abstract class Delegation extends Corrections {
         const p = e.payload as EventPayload<'merge.decided'>;
         return p.number === m.number && p.reasons.some((r) => /someone other than the harness pushed/.test(r));
       });
-      this.emit('delegation.observed', { pr: m.number, issue: m.issue, categories, unchanged: !corrected.has(m.number) && !foreign });
+      const approval = await this.approvalOf(m.number, m.issue, m.ts);
+      // Observed once, even if another pass got there while this one asked GitHub.
+      if (this.d.log.read(0, ['delegation.observed']).some((e) => (e.payload as { pr: number }).pr === m.number)) continue;
+      this.emit('delegation.observed', { pr: m.number, issue: m.issue, categories, unchanged: !corrected.has(m.number) && !foreign, ...approval });
     }
+  }
+
+  /**
+   * Whether a merged PR waited for a person (the merge policy left it to one, or its landing was asked), who approved
+   * it and how long after it started waiting. The approval, first found: an owner's from Discord, the latest approving
+   * review on GitHub, whoever merged it by hand, the answer on its landing. Read only; nothing here decides anything.
+   */
+  private async approvalOf(pr: number, issue: number, closedAt: string): Promise<{ held: boolean; approved_by: string | null; approver_role: 'owner' | 'writer' | null; wait_ms: number | null }> {
+    const read = <T extends EventType>(type: T) => this.d.log.read(0, [type]).map((e) => ({ ts: e.ts, p: e.payload as EventPayload<T> }));
+    // Left to a person at the head that merged (a hold at an earlier head that then merged on its own doesn't count).
+    const decided = read('merge.decided').filter((e) => e.p.number === pr);
+    const last = decided.at(-1);
+    const left = last && !last.p.auto ? decided.find((e) => e.p.head === last.p.head && !e.p.auto) : undefined;
+    const land = read('decision.asked').find((e) => e.p.kind === 'land' && e.p.issue === issue);
+    const since = [left?.ts, land?.ts].filter((t): t is string => !!t).sort()[0];
+    if (!since) return { held: false, approved_by: null, approver_role: null, wait_ms: null };
+    let got: { by: string; at: string; role: 'owner' | 'writer' | null } | null = null;
+    const discord = read('merge.approved').filter((e) => e.p.number === pr).at(-1);
+    if (discord) got = { by: discord.p.by, at: discord.ts, role: 'owner' };
+    if (!got) {
+      const reviews = await this.d.backlog.reviews(pr).catch(() => []);
+      const r = reviews.filter((x) => x.state === 'APPROVED').sort((a, b) => a.at.localeCompare(b.at)).at(-1);
+      if (r) got = { by: r.author, at: r.at, role: null };
+    }
+    if (!got && !read('merge.done').some((e) => e.p.number === pr)) {
+      const by = await this.d.backlog.closedBy(pr).catch(() => null);
+      if (by) got = { by, at: closedAt, role: null };
+    }
+    if (!got && land) {
+      const a = read('decision.answered').find((e) => e.p.id === land.p.id && e.p.answer === 'approve');
+      if (a) got = { by: a.p.by, at: a.ts, role: a.p.role ?? null };
+    }
+    if (!got) return { held: true, approved_by: null, approver_role: null, wait_ms: null };
+    const ms = Date.parse(got.at) - Date.parse(since);
+    return { held: true, approved_by: got.by, approver_role: got.role ?? (await this.roleFor(got.by)), wait_ms: Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : null };
+  }
+
+  /** A person's role on the instance: the default owner, else as the repo says (when asked), else the config's writers. */
+  private async roleFor(login: string): Promise<'owner' | 'writer' | null> {
+    const owners = this.d.cfg.project.owners;
+    if (login === owners.default) return 'owner';
+    const role = this.d.roleOf ? await this.d.roleOf(login).catch(() => null) : null;
+    if (role === 'owner' || role === 'writer') return role;
+    return owners.writers.includes(login) ? 'writer' : null;
   }
 
   /** The owner's answers: loosen or tighten files the review.yaml change as an issue; keep changes nothing. */
