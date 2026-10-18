@@ -21,6 +21,7 @@ interface Render {
   renderMachine(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
   renderUnderUsage(usage: unknown[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: unknown }): string;
+  renderPausedWork(usage: unknown[], current: string | null): string;
 }
 let r: Render;
 
@@ -129,9 +130,11 @@ test('a button this person can never use is not drawn; one held by the device sa
   }
 });
 
-/** The owner's words (#587): an action that starts or lands work, while its instance is paused on the usage limit. */
+/** The owner's words (#587): an action that starts work, while its instance is paused on the usage limit. */
 const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
-/** The actions that start or land work in renderUnderUsage: File it, Add ready, an automation's Run now, a study's Start. */
+/** The owner's words (#664): an action that lands work while paused. Landing has no usage-pause check; agent runs wait. */
+const LANDS_HINT = 'lands now; only agent runs wait';
+/** The actions that start work in renderUnderUsage: File it, Add ready, an automation's Run now, a study's Start. */
 const STARTS = ['first-task-file', 'issue-ignored-add-ready', 'automation-run', 'experiment-start'];
 const usageOf = (instance: string, paused: boolean) => ({ instance, paused: paused ? { since: '2026-10-18T09:00:00Z', resetAt: '2026-10-18T14:00:00Z', source: 'claude', kind: 'five_hour' } : null, today: { runs: 3, limitHits: paused ? 1 : 0 }, lastHit: null });
 const starters = {
@@ -141,7 +144,7 @@ const starters = {
   study: { id: 's1', goal: 'lower loss', kind: 'ml_train', screen: { margin: 0, seeds: 1 }, ladder: [], metric: { name: 'loss', direction: 'min', min_delta: 0 }, job: { max_minutes: 10, gpus: 1, output_gb: 1 }, budget: { gpu_hours_per_day: 1, agent_usd_per_day: 1, agent_usd_total: 1, max_jobs: 1 }, exploration: { share: 0.1, near_miss: 0 }, editable: ['train.py'], started: false, startRefused: null },
 };
 
-test('paused reason: a paused instance\'s start and land actions are not refused; each says it takes effect when the instance resumes', () => {
+test('paused reason: a paused instance\'s start actions are not refused; each says it takes effect when the instance resumes', () => {
   // The owner's decision on #587: no new refusals while paused; the action stays usable and says when it takes effect.
   const html = r.renderUnderUsage([usageOf('example', true)], null, starters);
   for (const id of STARTS) {
@@ -150,7 +153,7 @@ test('paused reason: a paused instance\'s start and land actions are not refused
     assert.ok(b.id, `${id}'s aria-describedby names the hint: ${b.tag}`);
     assert.equal(b.text, PAUSED_HINT, id);
   }
-  assert.equal(html.split(PAUSED_HINT).length - 1, STARTS.length, 'only the actions that start or land work say it, once each');
+  assert.equal(html.split(PAUSED_HINT).length - 1, STARTS.length, 'only the actions that start work say it, once each');
   // Running: nothing said, nothing held (as before).
   const running = r.renderUnderUsage([usageOf('example', false)], null, starters);
   for (const id of STARTS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
@@ -159,6 +162,22 @@ test('paused reason: a paused instance\'s start and land actions are not refused
   const hub = [usageOf('a', false), usageOf('b', true)];
   assert.doesNotMatch(r.renderUnderUsage(hub, 'a', starters), /takes effect when the instance resumes/, 'a is running; b is paused');
   assert.equal(described(r.renderUnderUsage(hub, 'b', starters), 'automation-run').text, PAUSED_HINT);
+});
+
+test('paused reason: a land action says it lands now and only agent runs wait; a start action says it waits for the resume', () => {
+  // The owner's decision on #664: landing has no usage-pause check, so a land button must not say it waits.
+  const html = r.renderPausedWork([usageOf('example', true)], null);
+  const land = described(html, 'paused-lands');
+  assert.equal(land.disabled, false, `a land action is not refused while paused: ${land.tag}`);
+  assert.equal(land.text, LANDS_HINT, `the land action's aria-describedby names the land text: ${land.tag}`);
+  const start = described(html, 'paused-starts');
+  assert.equal(start.disabled, false, `a start action is not refused while paused: ${start.tag}`);
+  assert.equal(start.text, PAUSED_HINT, `the start action's aria-describedby names the resume text: ${start.tag}`);
+  assert.equal(html.split(LANDS_HINT).length - 1, 1, 'the land text once, on the land action only');
+  assert.equal(html.split(PAUSED_HINT).length - 1, 1, 'the resume text once, on the start action only');
+  // Running: neither says anything.
+  const running = r.renderPausedWork([usageOf('example', false)], null);
+  for (const id of ['paused-lands', 'paused-starts']) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
 });
 
 test('emergency stop is unchanged: its banner still says the coordinator halted and starts none, and it adds no pause hint or hold', () => {

@@ -95,7 +95,7 @@ export function pausedHere(usage: UsageInfo[], current: string | null): boolean 
   return !!here?.paused;
 }
 
-/** Its children's actions that start or land work say PAUSED_HINT while this page's instance is paused (#587). */
+/** Its children's actions that start or land work say PAUSED_SAYS[work] while this page's instance is paused (#587). */
 export function PausedScope({ usage, current, children }: { usage: UsageInfo[]; current: string | null; children: ReactNode }) {
   return <InstancePaused.Provider value={pausedHere(usage, current)}>{children}</InstancePaused.Provider>;
 }

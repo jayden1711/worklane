@@ -237,8 +237,22 @@ export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToSta
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
 /**
- * #587: the actions that start or land work (Your first task's File it, Not picked up's Add ready, an automation's Run
- * now, a study's Start) and the emergency stop's banner (when `state` is given), under a page's usage view.
+ * #664: a button of each kind of work (one that lands, one that starts) under a page's usage view. Every land button
+ * is in a file held by another PR (Board, Decisions, DecisionDetail), so this stands in for them.
+ */
+export const renderPausedWork = (usage: UsageInfo[], current: string | null) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      {(['lands', 'starts'] as const).map((w) => (
+        <Button key={w} size="sm" work={w} data-testid={`paused-${w}`}>
+          {w === 'lands' ? 'Approve' : 'Run now'}
+        </Button>
+      ))}
+    </PausedScope>,
+  );
+/**
+ * #587: the actions that start work (Your first task's File it, Not picked up's Add ready, an automation's Run now, a
+ * study's Start) and the emergency stop's banner (when `state` is given), under a page's usage view.
  */
 export const renderUnderUsage = (usage: UsageInfo[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: State }) =>
   renderToStaticMarkup(

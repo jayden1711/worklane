@@ -249,7 +249,7 @@ function ActionBar({ a, actions, digest, onEdit }: { a: AutomationItem; actions:
     <div className="space-y-2">
       <div className="flex flex-wrap gap-2" data-testid="automation-actions">
         {actions.map((x) => (
-          <Button key={x} size="sm" variant={x === 'delete' ? 'danger' : 'outline'} starts={x === 'run'} disabled={busy} onClick={() => void review(x)} data-testid={`automation-${x}`}>
+          <Button key={x} size="sm" variant={x === 'delete' ? 'danger' : 'outline'} work={x === 'run' ? 'starts' : null} disabled={busy} onClick={() => void review(x)} data-testid={`automation-${x}`}>
             {ACTION_LABEL[x]}
           </Button>
         ))}
@@ -304,7 +304,7 @@ function Review({ plan, busy, onConfirm, onCancel }: { plan: AutomationPlan; bus
         <li className="text-ink-2">Logged in the audit as you.</li>
       </ul>
       <div className="flex flex-wrap gap-2">
-        <Button size="sm" starts={plan.action === 'run'} disabled={busy} onClick={onConfirm} data-testid="automation-confirm">
+        <Button size="sm" work={plan.action === 'run' ? 'starts' : null} disabled={busy} onClick={onConfirm} data-testid="automation-confirm">
           {busy ? 'Working…' : 'Confirm'}
         </Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={onCancel} data-testid="automation-cancel">

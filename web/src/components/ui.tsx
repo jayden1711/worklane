@@ -18,11 +18,18 @@ export function Why({ id, children }: { id: string; children: ReactNode }) {
 }
 
 /**
- * What an action that starts or lands work says while the instance it acts on is paused on the Claude usage limit.
- * The owner's decision on #587: nothing new is refused while paused (switching the Claude account is how a usage
- * pause is fixed, so machine and account writes stay allowed); the action stays usable and says when it takes effect.
+ * What an action says while the instance it acts on is paused on the Claude usage limit, by the work it does. The
+ * owner's decision on #587: nothing new is refused while paused (switching the Claude account is how a usage pause is
+ * fixed, so machine and account writes stay allowed); the action stays usable and says when it takes effect. Work it
+ * starts waits for the resume. On #664: landing has no usage-pause check (src/coordinator.ts's tick lands every pass),
+ * so a land action lands now and only the agent runs it needs (an evaluator, a CI or conflict fix) wait.
  */
-export const PAUSED_HINT = 'paused: this takes effect when the instance resumes';
+export const PAUSED_SAYS = {
+  starts: 'paused: this takes effect when the instance resumes',
+  lands: 'lands now; only agent runs wait',
+} as const;
+/** The work a Button does, for what it says while paused: one key of PAUSED_SAYS, so a button says exactly one. */
+export type Work = keyof typeof PAUSED_SAYS;
 /** Whether the instance this page acts on is paused on the Claude usage limit (App provides it, from /api/usage). */
 export const InstancePaused = createContext(false);
 
@@ -31,15 +38,15 @@ export const InstancePaused = createContext(false);
  * `why`: the reason it can't be pressed now; set, the button is disabled and says so (its own line, or the `whyAt`
  * element's when one line already says it for a row of buttons). A bare `disabled` is silent: test/web-buttons.test.ts
  * holds every one to a list that only shrinks (#587).
- * `starts`: the action starts or lands work. While the instance is paused it stays usable and says PAUSED_HINT
+ * `work`: the action starts or lands work. While the instance is paused it stays usable and says PAUSED_SAYS[work]
  * beside it, as its description (a `why` that holds says that instead). An emergency stop is no pause here: it is
  * shown on every page and halts the coordinator itself.
  */
-export function Button({ variant = 'default', size = 'md', className, why, whyAt, starts, disabled, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md'; why?: string | null | false; whyAt?: string; starts?: boolean }) {
+export function Button({ variant = 'default', size = 'md', className, why, whyAt, work, disabled, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'default' | 'outline' | 'ghost' | 'danger'; size?: 'sm' | 'md'; why?: string | null | false; whyAt?: string; work?: Work | null }) {
   const own = useId();
   const paused = useContext(InstancePaused);
   const reason = why || null;
-  const hint = !reason && starts && paused ? PAUSED_HINT : null;
+  const hint = !reason && work && paused ? PAUSED_SAYS[work] : null;
   const button = (
     <button
       disabled={disabled || !!reason}

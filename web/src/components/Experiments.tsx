@@ -159,7 +159,7 @@ export function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] })
         {s.started && <span className="text-[12px] text-ink-3">version {s.version.slice(0, 8)} · {Math.round(s.exploration.share * 100)}% of runs explore</span>}
         <div className="flex w-full flex-wrap gap-1.5 sm:ml-auto sm:w-auto" data-testid="experiment-actions">
           {shown.map((a) => (
-            <Button key={a} size="sm" variant={a === 'start' || a === 'approve' || a === 'resume' ? 'default' : 'outline'} className={cx((a === 'stop_job' || a === 'decline') && 'text-red')} starts={a === 'start'} disabled={busy} onClick={() => void review(a)} data-testid={`experiment-${a}`}>
+            <Button key={a} size="sm" variant={a === 'start' || a === 'approve' || a === 'resume' ? 'default' : 'outline'} className={cx((a === 'stop_job' || a === 'decline') && 'text-red')} work={a === 'start' ? 'starts' : null} disabled={busy} onClick={() => void review(a)} data-testid={`experiment-${a}`}>
               {s.started && s.held && a === 'approve' ? 'Accept result' : s.started && s.held && a === 'decline' ? 'Reject result' : ACTION_LABEL[a]}
             </Button>
           ))}
@@ -192,7 +192,7 @@ export function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] })
             <Button size="sm" variant="ghost" onClick={() => setPlan(null)} disabled={busy}>
               Cancel
             </Button>
-            <Button size="sm" starts={plan.action === 'start'} onClick={() => void confirm()} disabled={busy} data-testid="experiment-confirm">
+            <Button size="sm" work={plan.action === 'start' ? 'starts' : null} onClick={() => void confirm()} disabled={busy} data-testid="experiment-confirm">
               Confirm {planLabel(plan)}
             </Button>
           </div>
