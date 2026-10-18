@@ -18,7 +18,7 @@
 import { fork } from 'node:child_process';
 import { createServer } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -54,8 +54,45 @@ function timed(server, sink) {
   return () => connections;
 }
 
+/**
+ * The environment this run's engine processes get: a machine of their own inside `dir` (removed with the run's work
+ * dir unless --keep). Home, the XDG directories, the state, held-out, machine-init and slot directories and the tool
+ * prefix all move there, and every other engine setting the shell had (`<PREFIX>_*`, `AGENT_SLOTS_*`) is dropped but
+ * the browser timeout scale, which only tunes speed (as test/isolate.ts keeps it).
+ * WHY (#625, owner rule A): `cli demo` and the instance dashboards ran with the person's real home and shell settings,
+ * so a dev perf run could read or write their real state.
+ */
+export function devMachine(dir, env, envPrefix) {
+  const keep = (k) => k === `${envPrefix}_BROWSER_TIMEOUT_SCALE` || (!k.startsWith(`${envPrefix}_`) && !k.startsWith('AGENT_SLOTS_'));
+  const out = Object.fromEntries(Object.entries(env).filter(([k]) => keep(k)));
+  const home = join(dir, 'home');
+  return {
+    ...out,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: join(home, '.config'),
+    XDG_STATE_HOME: join(home, '.local', 'state'),
+    XDG_DATA_HOME: join(home, '.local', 'share'),
+    XDG_CACHE_HOME: join(home, '.cache'),
+    [`${envPrefix}_PREFIX`]: join(home, '.local'),
+    [`${envPrefix}_STATE_DIR`]: join(dir, 'state'),
+    [`${envPrefix}_HELD_OUT_DIR`]: join(dir, 'held-out'),
+    [`${envPrefix}_MACHINE_INIT_DIR`]: join(dir, 'machine-init'),
+    AGENT_SLOTS_DIR: join(dir, 'agent-slots'),
+  };
+}
+
+// Run only as a program, not when a test imports devMachine.
+const isMain = (() => {
+  try {
+    return realpathSync(process.argv[1] ?? '') === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+
 // ---- an instance's dashboard, in a process of its own (forked below with --serve) ----
-if (argv[0] === '--serve') {
+if (isMain && argv[0] === '--serve') {
   const o = JSON.parse(argv[1]);
   const { startDashboard } = await load('src/dashboard.js');
   const { loadConfig } = await load('src/config/load.js');
@@ -70,7 +107,7 @@ if (argv[0] === '--serve') {
     if (m === 'stop') void d.close().then(() => process.exit(0));
   });
   process.send({ url: d.url, token: d.token, engine });
-} else {
+} else if (isMain) {
   await main();
 }
 
@@ -95,9 +132,17 @@ async function main() {
   let gh = null;
   let hub = null;
   try {
+    // Every engine process here runs on a machine of its own inside the work dir (devMachine). This process keeps
+    // its home, which only Chrome (its own temporary profile) reads: a fresh home stalls headless Chrome on macOS
+    // (test/isolate.ts homeMoved); the engine settings move here too.
+    const machine = devMachine(join(work, 'machine'), process.env, BRAND.envPrefix);
+    for (const k of Object.keys(process.env)) if (!(k in machine)) delete process.env[k];
+    for (const [k, v] of Object.entries(machine)) {
+      if (k !== 'HOME' && k !== 'USERPROFILE') process.env[k] = v;
+    }
+    for (const k of ['HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', `${BRAND.envPrefix}_STATE_DIR`, `${BRAND.envPrefix}_HELD_OUT_DIR`, `${BRAND.envPrefix}_MACHINE_INIT_DIR`, 'AGENT_SLOTS_DIR']) mkdirSync(machine[k], { recursive: true });
     // A demo project for the config the instances run with; their logs are synthetic.
-    process.env[`${BRAND.envPrefix}_STATE_DIR`] = join(work, 'demo-state');
-    const seeded = spawnSync(process.execPath, [join(engine, 'dist', 'src', 'cli.js'), 'demo', join(work, 'demo')], { encoding: 'utf8', env: process.env });
+    const seeded = spawnSync(process.execPath, [join(engine, 'dist', 'src', 'cli.js'), 'demo', join(work, 'demo')], { encoding: 'utf8', env: machine });
     const root = seeded.stdout.match(/project (.+)/)?.[1]?.trim();
     if (seeded.status !== 0 || !root) throw new Error(`seeding the demo failed:\n${seeded.stdout}${seeded.stderr}`);
 
@@ -135,7 +180,7 @@ async function main() {
       const t = performance.now();
       writeSyntheticLog(eventsDb, { count: sizes[i], seed: seed + i, instance: name, end: new Date() });
       process.stderr.write(`perf: ${name}: ${sizes[i]} events written in ${Math.round(performance.now() - t)} ms\n`);
-      const child = fork(fileURLToPath(import.meta.url), ['--serve', JSON.stringify({ name, root, eventsDb, stateDir, slotsDir: join(work, 'slots'), gh: ghUrl }), '--engine', engine], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+      const child = fork(fileURLToPath(import.meta.url), ['--serve', JSON.stringify({ name, root, eventsDb, stateDir, slotsDir: join(work, 'slots'), gh: ghUrl }), '--engine', engine], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'], env: machine });
       children.push(child);
       const ready = await new Promise((r, f) => (child.once('message', r), child.once('exit', (c) => f(new Error(`${name}'s dashboard exited ${c}`)))));
       // WHY: the instances must run the engine measured, not this script's checkout.
@@ -265,8 +310,22 @@ async function main() {
       return 0;
     };
     const click = (testid) => async () => evaluate(`(() => { const t = performance.now(); document.querySelector('[data-testid="${testid}"]').click(); return t; })()`);
-    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview.
-    const pages = [['board', 'nav-board'], ['prs', 'nav-prs'], ['health', 'nav-health'], ['overview', 'nav-overview']];
+    // In the page, as a sidebar row or tab does (web/src/App.tsx navigate): a new address, no new document.
+    const go = (path) => async () => evaluate(`(() => { const t = performance.now(); history.pushState(null, '', ${JSON.stringify(path)}); dispatchEvent(new PopStateEvent('popstate')); return t; })()`);
+    // From the Overview a load lands on: Board, PRs, Health, and back to the Overview, each one person's step from the
+    // page before: the Work row (it opens the Board), the Pull requests tab, Health by its address and the Overview
+    // row. Health goes by address in both passes, the same step either way: on a hub no control on a Work page links
+    // to it (off a hub the status dot by the project name does; `g h` is a key, not a click). Each page is measured
+    // until its root shows.
+    // WHY: test/perf-dashboard-ids.test.ts holds every id and address here to docs/feature-map.md (#625: the sidebar's
+    // ids changed under this script and nothing noticed).
+    const pages = [
+      { page: 'board', root: 'page-board', click: 'nav-work' },
+      { page: 'prs', root: 'page-prs', click: 'tab-prs' },
+      { page: 'health', root: 'page-health', path: '/machine/health' },
+      { page: 'overview', root: 'page-overview', click: 'nav-overview' },
+    ];
+    const pageSwitch = (p) => (p.click ? click(p.click) : go(p.path));
 
     // Bundle evaluation: from a trace of the cold load.
     let bundle = null;
@@ -303,14 +362,14 @@ async function main() {
       };
       await step(`instance switch -> ${names[1]} (${sizes[1]} events)`, 'hub', switchTo(names[1]), 'page-overview');
       await step(`instance switch -> ${names[0]} (${sizes[0]} events)`, 'hub', switchTo(names[0]), 'page-overview');
-      for (const [page, nav] of pages) await step(`page switch -> ${page}`, 'hub', click(nav), `page-${page}`);
+      for (const p of pages) await step(`page switch -> ${p.page}`, 'hub', pageSwitch(p), p.root);
 
       // Straight to the busy instance's own dashboard (its break-glass key), for the hub's own cost.
       const direct = instances[0];
       await cdp.send('Page.navigate', { url: `${direct.url}/` });
       await evaluate(`sessionStorage.setItem('dash-token', ${JSON.stringify(direct.token)})`);
       await step(n ? 'reload (warm cache)' : 'first load (cold cache)', 'direct', () => navigate(`${direct.url}/overview`), 'page-overview');
-      for (const [page, nav] of pages) await step(`page switch -> ${page}`, 'direct', click(nav), `page-${page}`);
+      for (const p of pages) await step(`page switch -> ${p.page}`, 'direct', pageSwitch(p), p.root);
       await cdp.send('Page.navigate', { url: `${hubBase}/overview` });
       await sleep(500);
     }
