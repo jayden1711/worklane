@@ -13,9 +13,12 @@ import { DeployGateConfig, deployGateProblems } from '../deploy-gate/config.js';
 import { PreviewConfig } from '../preview/config.js';
 import { SparseExclude } from '../checkout.js';
 import { BenchmarksConfig, OptimizeConfig } from '../optimize.js';
+import { EFFORTS } from '../roles.js';
 
 const handle = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, 'must be a GitHub handle');
 const model = z.string().min(1);
+/** claude --effort for a role's runs (#579): one of EFFORTS; unset, no flag (the CLI's default). */
+const effort = z.enum(EFFORTS);
 
 /** An open-model provider (src/providers.ts): an Anthropic-compatible endpoint, a credential by name, its model id. */
 const provider = z.strictObject({
@@ -310,7 +313,12 @@ const role = z.strictObject({
   budget_usd: z.number().positive().optional(),
   /** chief_of_staff only: one chat conversation's spend cap, all its answers together (src/chat-pick.ts). */
   conversation_budget_usd: z.number().positive().max(1000).optional(),
+  /** workers and evaluator only (EFFORT_ROLES): claude --effort for their runs; unset, none (#579). */
+  effort: effort.optional(),
 });
+
+/** The roles whose runs read `effort` (the worker's build; the evaluator's verdict, either tier, and repro). */
+const EFFORT_ROLES: readonly string[] = ['workers', 'evaluator'];
 
 export const RoleNames = [
   'chief_of_staff',
@@ -373,7 +381,8 @@ export const AgentsConfig = z
      * Which model each task type uses, and the evaluator's tiering (src/routing.ts: every key, its default and its
      * task); each key overrides its default. `model_routing` and `eval_routing` are older names for the same keys.
      */
-    routing: z.strictObject(routingShape).optional(),
+    // planner_effort is not a routing key (src/routing.ts): it has no default in code, and it names no model.
+    routing: z.strictObject({ ...routingShape, planner_effort: effort.optional() }).optional(),
     /** INVARIANT: an alias of `routing` (same key names); a key set in both is an error. */
     model_routing: z.strictObject(modelRoutingShape).optional(),
     /**
@@ -407,6 +416,7 @@ export const AgentsConfig = z
   })
   .transform((c, ctx) => {
     const { routing, model_routing, eval_routing, ...rest } = c;
+    const { planner_effort, ...routed } = routing ?? {};
     const merged: Partial<Routing> = {};
     const from: Partial<Record<RoutingKey, string>> = {};
     const take = (section: 'routing' | keyof typeof ROUTING_ALIASES, values: Record<string, unknown> | undefined) => {
@@ -417,10 +427,11 @@ export const AgentsConfig = z
         else Object.assign(merged, { [key]: v }), (from[key] = `${section}.${k}`);
       }
     };
-    take('routing', routing);
+    take('routing', routed);
     take('model_routing', model_routing);
     take('eval_routing', eval_routing);
-    return { ...rest, routing: merged, routing_from: from };
+    // The planner's runs (plan, plan review, goal split) at this effort; unset: no key, so no flag (#579).
+    return { ...rest, routing: merged, routing_from: from, ...(planner_effort ? { planner_effort } : {}) };
   })
   .superRefine((c, ctx) => {
     const w = c.roles.workers;
@@ -458,6 +469,7 @@ export const AgentsConfig = z
       if (why) ctx.addIssue({ code: 'custom', path: at('eval_cross_family'), message: why });
       else if (cross !== CROSS_FAMILY_OFF && !c.providers?.hosted?.[providerOf(cross)!.name]) ctx.addIssue({ code: 'custom', path: at('eval_cross_family'), message: `${cross} is not configured under providers` });
     }
+    for (const [r, cfg] of Object.entries(c.roles)) if (!EFFORT_ROLES.includes(r) && cfg?.effort !== undefined) ctx.addIssue({ code: 'custom', path: ['roles', r, 'effort'], message: `only ${EFFORT_ROLES.join(' and ')} take an effort (the planner's is routing.planner_effort)` });
     for (const [r, cfg] of Object.entries(c.roles)) if (r !== 'chief_of_staff' && cfg?.conversation_budget_usd !== undefined) ctx.addIssue({ code: 'custom', path: ['roles', r, 'conversation_budget_usd'], message: 'only chief_of_staff (the chat) has conversations' });
     plain(['instruction_evals', 'model'], c.instruction_evals.model);
     plain(['instruction_evals', 'judge'], c.instruction_evals.judge);
