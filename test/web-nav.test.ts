@@ -15,8 +15,13 @@ interface Nav {
   navFor(state: unknown): Page[];
   pagesFor(state: unknown): Page[];
   placeOf(path: string): { row: Page; tab: Page | null } | null;
-  navCounts(state: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
   navigate(to: string): void;
+  needsYou(state: unknown, waiting?: unknown): { key: string; kind: string; blocking: boolean; since: string; issue: number | null; href: string | null }[];
+  ORDER: string;
+  WAITING_EVERY_MS: number;
+  waitingDelay(keptAt: number | undefined, live: boolean, now: number): number;
+  KIND: Record<string, { label: string; holds: string | null }>;
 }
 interface Redirects {
   redirectFor(path: string): string | null;
@@ -75,7 +80,7 @@ test('the sidebar groups', () => {
   // Each group's tabs, in order.
   const tabs = Object.fromEntries(nav.NAV.filter((n) => n.tabs).map((n) => [n.label, n.tabs!.map((t) => t.label)]));
   assert.deepEqual(tabs, {
-    'Needs you': ['Inbox', 'Waiting on you', 'Decisions'],
+    'Needs you': ['Needs you', 'Inbox', 'Waiting on you', 'Decisions'],
     Work: ['Board', 'Issues', 'Intake', 'Pull requests'],
     Shipping: ['Land queue', 'Deploys'],
     Agents: ['Agents', 'Activity'],
@@ -90,6 +95,8 @@ test('the sidebar groups', () => {
     return p && [p.row.label, p.tab?.label ?? null];
   };
   assert.deepEqual(at('/'), ['Work', 'Board']);
+  assert.deepEqual(at('/needs-you'), ['Needs you', 'Needs you']);
+  assert.deepEqual(at('/needs-you/inbox'), ['Needs you', 'Inbox']);
   assert.deepEqual(at('/work/issues/12'), ['Work', 'Issues']);
   assert.deepEqual(at('/needs-you/decisions/pr-7'), ['Needs you', 'Decisions']);
   assert.deepEqual(at('/agents'), ['Agents', 'Agents']);
@@ -102,7 +109,7 @@ test('the sidebar groups', () => {
 });
 
 test('Needs you has one badge: each open decision and each of your blocked tasks, once', () => {
-  const d = (id: string, answered = false) => ({ id, answer: answered ? { by: 'x', answer: 'y', at: '' } : null });
+  const d = (id: string, answered = false) => ({ id, question: `Question ${id}?`, answer: answered ? { by: 'x', answer: 'y', at: '' } : null });
   const state = {
     ...owner,
     // The Inbox's decisions (yours) are among the open ones: each counted once.
@@ -119,6 +126,77 @@ test('Needs you has one badge: each open decision and each of your blocked tasks
   assert.equal(nav.navCounts(null)['nav-needs-you'], 0);
 });
 
+test('Needs you is one queue, urgency-sorted', () => {
+  const t0 = Date.parse('2026-10-01T00:00:00Z');
+  const hoursAgo = (h: number) => new Date(t0 - h * 3_600_000).toISOString();
+  const d = (id: string, h: number, o: object = {}) => ({ id, kind: 'triage', issue: null, owner: 'example-owner', question: `Question ${id}?\nmore`, askedAt: hoursAgo(h), answer: null, ...o });
+  const decisions = [d('a', 5, { issue: 1 }), d('b', 30), d('c', 99, { answer: { by: 'x', answer: 'y', at: '' } }), d('p', 50, { kind: 'plan', issue: 2 })];
+  const blocked = [{ issue: 4, title: 'four', lastActivity: hoursAgo(3), blockedReason: 'needs a key\nmore' }, { issue: 5, title: 'five', lastActivity: hoursAgo(1), blockedReason: null }];
+  const state = { ...owner, decisions, inbox: { decisions: [decisions[0]], blocked, notify: [{ issue: 6 }] }, tasks: [{ issue: 1, title: 'one' }], landQueue: [] };
+  const w = (kind: string, h: number, o: object = {}) => ({ kind, since: hoursAgo(h), issue: null, pr: null, title: null, detail: kind, ...o });
+  const waiting = {
+    items: [
+      w('emergency_halt', 2),
+      // Decision a and plan p, as Waiting on you lists them: the same things as the Decisions tab's.
+      w('awaiting_decision', 5, { issue: 1, decision: 'a' }),
+      w('plan_held', 50, { issue: 2, decision: 'p' }),
+      w('needs_owner', 10, { issue: 7, pr: 70 }),
+      // Your blocked #4 (the Inbox's), blocked since 8 h ago; #9 is someone else's.
+      w('blocked', 8, { issue: 4 }),
+      w('blocked', 6, { issue: 9 }),
+      // The oldest of all, but nothing waits on them but you; two holds on one issue are two things.
+      w('hotspot_held', 200, { issue: 10 }),
+      w('hotspot_held', 150, { issue: 10, detail: 'Depends on #3' }),
+      w('deploy_failed', 40, { sha: 'abc' }),
+    ],
+  };
+  const q = nav.needsYou(state, waiting);
+  const shown = (i: { kind: string; issue: number | null }) => `${i.kind}${i.issue !== null ? ` #${i.issue}` : ''}`;
+  // What holds an agent or a merge first, the oldest first; then the rest, the oldest first. Each thing once.
+  assert.deepEqual(q.map(shown), [
+    'plan_held #2', 'awaiting_decision', 'needs_owner #7', 'blocked #4', 'blocked #9', 'awaiting_decision #1', 'emergency_halt', 'blocked #5',
+    'hotspot_held #10', 'hotspot_held #10', 'deploy_failed',
+  ]);
+  assert.deepEqual(q.map((i) => i.blocking), [true, true, true, true, true, true, true, true, false, false, false]);
+  assert.equal(new Set(q.map((i) => i.key)).size, q.length, 'no thing twice');
+  // A blocked task the Inbox and Waiting on you both list waits since it was blocked (Waiting on you's).
+  assert.equal(q.find((i) => i.issue === 4)!.since, hoursAgo(8));
+  // Each opens its own page.
+  assert.deepEqual(q.slice(0, 4).map((i) => i.href), ['/needs-you/decisions/p', '/needs-you/decisions/b', '/needs-you/decisions/pr-70', '/work/issues/4']);
+  // The one badge counts the queue: inbox, waiting and decisions, each thing once (the Inbox's L2 landings aside).
+  const c = nav.navCounts(state, waiting);
+  assert.equal(c['nav-needs-you'], 11);
+  assert.equal(c['/needs-you'], 11);
+  // Before Waiting on you answers, or for a viewer it is refused to: the decisions and your blocked tasks.
+  assert.deepEqual(nav.needsYou(state).map(shown), ['plan_held #2', 'awaiting_decision', 'awaiting_decision #1', 'blocked #4', 'blocked #5']);
+  assert.equal(nav.navCounts(state)['nav-needs-you'], 5);
+  // The answer the shell kept can be up to a minute old; the live state is newer. Once it shows decision a and plan p
+  // answered and #4 moving again, they are not counted, though the kept answer still lists them.
+  const answer = { by: 'example-owner', answer: 'yes', at: hoursAgo(0) };
+  const later = {
+    ...state,
+    decisions: decisions.map((x) => (x.id === 'a' || x.id === 'p' ? { ...x, answer } : x)),
+    inbox: { decisions: [], blocked: [blocked[1]], notify: [] },
+    tasks: [{ issue: 1, title: 'one', status: 'building' }, { issue: 4, title: 'four', status: 'building' }, { issue: 9, title: 'nine', status: 'blocked' }],
+  };
+  assert.deepEqual(nav.needsYou(later, waiting).map(shown), [
+    'awaiting_decision', 'needs_owner #7', 'blocked #9', 'emergency_halt', 'blocked #5', 'hotspot_held #10', 'hotspot_held #10', 'deploy_failed',
+  ]);
+  assert.equal(nav.navCounts(later, waiting)['nav-needs-you'], 8);
+  // The page states the order, from the same table the sort reads: every kind is named, and which side it is on.
+  for (const [kind, k] of Object.entries(nav.KIND)) assert.ok(nav.ORDER.includes(k.label), `the order names ${kind}`);
+  // WHY: /api/waiting is computed from the whole log on each read (about 350 ms on a 200 000-event log), and reading it
+  // for the badge on every change and every instance switch loaded a busy instance on each. Off
+  // the queue the shell reads it at most once a minute; on the queue, or with nothing kept for the instance, at once.
+  const t = 1_000_000;
+  assert.equal(nav.WAITING_EVERY_MS, 60_000);
+  assert.equal(nav.waitingDelay(undefined, false, t), 0, 'nothing kept for this instance: read it');
+  assert.equal(nav.waitingDelay(t - 10_000, false, t), 50_000, 'kept 10 s ago: an instance switch shows it, read again in 50 s');
+  assert.equal(nav.waitingDelay(t - 90_000, false, t), 0, 'kept over a minute ago: read it');
+  assert.equal(nav.waitingDelay(t - 10_000, true, t), 0, 'on the queue: every change');
+  assert.ok(nav.ORDER.indexOf(nav.KIND.blocked!.label) < nav.ORDER.indexOf('then the rest') && nav.ORDER.indexOf('then the rest') < nav.ORDER.indexOf(nav.KIND.deploy_failed!.label));
+});
+
 test('old routes redirect', () => {
   for (const [from, to] of Object.entries(MOVED)) {
     assert.equal(moved.redirectFor(from), to, from);
@@ -130,6 +208,10 @@ test('old routes redirect', () => {
   assert.equal(moved.redirectFor('/decisions/d-1'), '/needs-you/decisions/d-1');
   assert.equal(moved.redirectFor('/decisions/pr-7'), '/needs-you/decisions/pr-7');
   assert.equal(moved.redirectFor('/issues/12'), '/work/issues/12');
+  // A group's own address opens it: Work and Shipping at their first tab; Needs you is the queue itself.
+  assert.equal(moved.redirectFor('/work'), '/');
+  assert.equal(moved.redirectFor('/shipping'), '/shipping/land');
+  assert.equal(moved.redirectFor('/needs-you'), null);
   // #581's stays.
   assert.equal(moved.redirectFor('/extend/experiments/example-speed'), '/experiments/example-speed');
   // Current addresses, and a name that only starts like an old one, are left alone.
@@ -157,7 +239,8 @@ test('old routes redirect', () => {
 
 test('roles and setup mode keep their pages', () => {
   const now = (s: unknown) => nav.pagesFor(s).map((p) => `${p.label} ${p.to} g${p.chord}`).sort();
-  const before = (viewerToo: boolean) => BEFORE.filter(([, , , v]) => v || !viewerToo).map(([to, label, chord]) => `${label} ${moved.redirectFor(to) ?? to} g${chord}`).sort();
+  // The one page #585 adds, for every role: the Needs you queue.
+  const before = (viewerToo: boolean) => [...BEFORE.filter(([, , , v]) => v || !viewerToo).map(([to, label, chord]) => `${label} ${moved.redirectFor(to) ?? to} g${chord}`), 'Needs you /needs-you gq'].sort();
   // The same pages, each at its new address, on the same `g` key (the chords and the command menu read this list).
   assert.deepEqual(now(owner), before(false));
   assert.deepEqual(now(writer), before(false));

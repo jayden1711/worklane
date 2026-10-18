@@ -57,7 +57,8 @@ echo "sudo $*" >> "$T/calls"
 [ "$1" = -H ] && shift
 [ "$1" = -u ] || exit 64
 user="$2"; shift 2
-[ "$1" = timeout ] && shift 2
+# A leading \`timeout [-k <k>] <n>\` dropped (#613's bounds carry a kill-after).
+if [ "$1" = timeout ]; then shift; [ "$1" = -k ] && shift 2; shift; fi
 HOME="$T/homes/$user" USER="$user" exec "$@"
 `);
   // claude: its login from $CLAUDE_CONFIG_DIR (else ~/.claude). -p (the real call) is refused when refuse-new exists
