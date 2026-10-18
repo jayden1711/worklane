@@ -206,7 +206,7 @@ export function suggestions(records: CategoryRecord[], o: { minClean: number; op
           ...(r.wait ? [`Time to approve: median ${waitText(r.wait.medianMs)} over the ${r.wait.count} PRs that waited for a person (fastest ${waitText(r.wait.fastestMs)}, slowest ${waitText(r.wait.slowestMs)})`] : []),
           ...(byWho.length ? [`Approved unchanged, by who approved: ${byWho.map((a) => `${who(a)} ${a.unchanged} of ${a.approvals}`).join(', ')}`] : []),
           ...r.evidence.slice(-20),
-          'loosen:files a review.yaml change (out of merge.wait_categories, into merge.loosened) as a PR you review; keep: nothing changes, asked again after as many more clean PRs'],
+          'loosen: files a review.yaml change (out of merge.wait_categories, into merge.loosened) as a PR you review; keep: nothing changes, asked again after as many more clean PRs'],
       });
     } else if (r.loosened && !r.waits && bad > 0) {
       out.push({

@@ -112,6 +112,7 @@ test('a category approved unchanged N times with no reverts is suggested with th
   assert.ok(s!.receipts.includes('Time to approve: median 1h 0m over the 3 PRs that waited for a person (fastest 30m, slowest 3h 0m)'), s!.receipts.join('\n'));
   assert.ok(s!.receipts.includes('Approved unchanged, by who approved: @example-owner (owner) 2 of 2, @example-collaborator (writer) 1 of 1'), s!.receipts.join('\n'));
   assert.ok(s!.receipts.includes('PR #3 (#103): clean, approved by @example-owner (owner) after 3h 0m'));
+  assert.match(s!.receipts.at(-1)!, /^loosen: files a review\.yaml change \(out of merge\.wait_categories, into merge\.loosened\) as a PR you review; keep: nothing changes/);
   const noTimes = suggestions(categoryRecords([obs(1, ['copy']), obs(2, ['copy'])], review()), { minClean: 2, open: new Set() })[0]!;
   assert.equal(noTimes.question, 'Stop waiting for you on copy changes? 2 PRs in a row were approved unchanged', 'no approvals recorded: no figures made up');
   assert.ok(!noTimes.receipts.some((x) => /Time to approve|by who approved/.test(x)));

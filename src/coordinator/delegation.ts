@@ -58,7 +58,7 @@ export abstract class Delegation extends Corrections {
         const p = e.payload as EventPayload<'merge.decided'>;
         return p.number === m.number && p.reasons.some((r) => /someone other than the harness pushed/.test(r));
       });
-      const approval = await this.approvalOf(m.number, m.issue, m.ts);
+      const approval = await this.approvalOf(m.number, m.issue, head, m.ts);
       // Observed once, even if another pass got there while this one asked GitHub.
       if (this.d.log.read(0, ['delegation.observed']).some((e) => (e.payload as { pr: number }).pr === m.number)) continue;
       this.emit('delegation.observed', { pr: m.number, issue: m.issue, categories, unchanged: !corrected.has(m.number) && !foreign, ...approval });
@@ -66,38 +66,68 @@ export abstract class Delegation extends Corrections {
   }
 
   /**
-   * Whether a merged PR waited for a person (the merge policy left it to one, or its landing was asked), who approved
-   * it and how long after it started waiting. The approval, first found: an owner's from Discord, the latest approving
-   * review on GitHub, whoever merged it by hand, the answer on its landing. Read only; nothing here decides anything.
+   * Whether a merged PR waited for a person at the head that merged (the merge policy left it to one at that head, or
+   * that head's landing was asked), who approved it and how long after it started waiting. The approval, the first of:
+   * an owner's from Discord at that head (as mergeApproval, src/decide.ts); the latest approving GitHub review since the
+   * hold by an owner or writer here; an owner or writer who merged it by hand; the approve answer on its landing. Only
+   * someone with a role here counts (never a bot, an outsider or the harness's own account), and nothing given before
+   * the hold. Read only: this is evidence for the owner, and nothing here decides anything.
    */
-  private async approvalOf(pr: number, issue: number, closedAt: string): Promise<{ held: boolean; approved_by: string | null; approver_role: 'owner' | 'writer' | null; wait_ms: number | null }> {
+  private async approvalOf(pr: number, issue: number, mergedHead: string | undefined, closedAt: string): Promise<{ held: boolean; approved_by: string | null; approver_role: 'owner' | 'writer' | null; wait_ms: number | null }> {
     const read = <T extends EventType>(type: T) => this.d.log.read(0, [type]).map((e) => ({ ts: e.ts, p: e.payload as EventPayload<T> }));
-    // Left to a person at the head that merged (a hold at an earlier head that then merged on its own doesn't count).
     const decided = read('merge.decided').filter((e) => e.p.number === pr);
-    const last = decided.at(-1);
-    const left = last && !last.p.auto ? decided.find((e) => e.p.head === last.p.head && !e.p.auto) : undefined;
-    const land = read('decision.asked').find((e) => e.p.kind === 'land' && e.p.issue === issue);
+    const head = mergedHead ?? decided.at(-1)?.p.head;
+    // Left to a person at the head that merged, and still so (a hold at an earlier head, or one decided auto after, doesn't count).
+    const atHead = decided.filter((e) => e.p.head === head);
+    const left = atHead.at(-1)?.p.auto === false ? atHead.find((e) => !e.p.auto) : undefined;
+    // That head's landing: the one asked at this head; an older decision recorded no head, so the issue's latest.
+    const lands = read('decision.asked').filter((e) => e.p.kind === 'land' && e.p.issue === issue);
+    const land = lands.filter((e) => e.p.context?.head === head).at(-1) ?? lands.filter((e) => !e.p.context?.head).at(-1);
     const since = [left?.ts, land?.ts].filter((t): t is string => !!t).sort()[0];
-    if (!since) return { held: false, approved_by: null, approver_role: null, wait_ms: null };
-    let got: { by: string; at: string; role: 'owner' | 'writer' | null } | null = null;
-    const discord = read('merge.approved').filter((e) => e.p.number === pr).at(-1);
-    if (discord) got = { by: discord.p.by, at: discord.ts, role: 'owner' };
+    if (!head || !since) return { held: false, approved_by: null, approver_role: null, wait_ms: null };
+    const after = (at: string) => Date.parse(at) >= Date.parse(since);
+    let own: Set<string> | null = null;
+    const role = async (login: string) => {
+      if (login.endsWith('[bot]')) return null;
+      own ??= await this.ownAccount(pr);
+      return own.has(login) ? null : await this.roleFor(login);
+    };
+    let got: { by: string; at: string; role: 'owner' | 'writer' } | null = null;
+    // Discord approves only an owner, only at a head waiting for one (approveMerge); the first at a head stands.
+    const discord = left ? read('merge.approved').find((e) => e.p.number === pr && e.p.head === head) : undefined;
+    if (discord && after(discord.ts)) got = { by: discord.p.by, at: discord.ts, role: 'owner' };
     if (!got) {
-      const reviews = await this.d.backlog.reviews(pr).catch(() => []);
-      const r = reviews.filter((x) => x.state === 'APPROVED').sort((a, b) => a.at.localeCompare(b.at)).at(-1);
-      if (r) got = { by: r.author, at: r.at, role: null };
+      // Each reviewer's latest say since the hold (as the merge policy's adminApproved): approved, by a role here.
+      const latest = new Map<string, { state: string; at: string }>();
+      for (const r of [...(await this.d.backlog.reviews(pr).catch(() => []))].sort((a, b) => a.at.localeCompare(b.at))) if (r.state !== 'COMMENTED' && after(r.at)) latest.set(r.author, r);
+      for (const [by, r] of [...latest].sort(([, a], [, b]) => b.at.localeCompare(a.at))) {
+        const as = r.state === 'APPROVED' ? await role(by) : null;
+        if (as) {
+          got = { by, at: r.at, role: as };
+          break;
+        }
+      }
     }
     if (!got && !read('merge.done').some((e) => e.p.number === pr)) {
       const by = await this.d.backlog.closedBy(pr).catch(() => null);
-      if (by) got = { by, at: closedAt, role: null };
+      const as = by && after(closedAt) ? await role(by) : null;
+      if (by && as) got = { by, at: closedAt, role: as };
     }
     if (!got && land) {
       const a = read('decision.answered').find((e) => e.p.id === land.p.id && e.p.answer === 'approve');
-      if (a) got = { by: a.p.by, at: a.ts, role: a.p.role ?? null };
+      // The dashboard recorded the role it read (an owner or a writer); a voice or chat answer without one is looked up.
+      const as = a ? (a.p.role ?? (await role(a.p.by))) : null;
+      if (a && as && after(a.ts)) got = { by: a.p.by, at: a.ts, role: as };
     }
     if (!got) return { held: true, approved_by: null, approver_role: null, wait_ms: null };
     const ms = Date.parse(got.at) - Date.parse(since);
-    return { held: true, approved_by: got.by, approver_role: got.role ?? (await this.roleFor(got.by)), wait_ms: Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : null };
+    return { held: true, approved_by: got.by, approver_role: got.role, wait_ms: Number.isFinite(ms) ? Math.round(ms) : null };
+  }
+
+  /** The harness's own account(s) on a PR: who posted its tagged comments there (it opened the PR; it never approves). */
+  private async ownAccount(pr: number): Promise<Set<string>> {
+    const tag = `[${BRAND.cli}]`;
+    return new Set((await this.d.backlog.comments(pr).catch(() => [])).filter((c) => c.body.startsWith(tag)).map((c) => c.author));
   }
 
   /** A person's role on the instance: the default owner, else as the repo says (when asked), else the config's writers. */

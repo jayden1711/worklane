@@ -5,6 +5,7 @@ import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
+import { BRAND } from '../src/brand.js';
 import { checkDraftedIssue } from '../src/backlog/types.js';
 import { loadConfig } from '../src/config/load.js';
 import { Coordinator } from '../src/coordinator.js';
@@ -188,6 +189,61 @@ test('each merged PR records whether it waited for a person, who approved it (an
   assert.ok(receipts.some((r) => /^PR #\d+ \(#101\): clean, approved by @example-collaborator \(writer\) after 1h 30m$/.test(r)), receipts.join('\n'));
   assert.deepEqual(t.cfg.review!.merge.wait_categories, ['copy'], 'never loosened automatically');
   assert.deepEqual(t.cfg.review!.merge.loosened ?? [], []);
+});
+
+test('only someone with a role here, approving the hold at the merged head, is the approver: never an outsider, a bot, the harness, an earlier head or an approval from before the hold', async () => {
+  const t = fixture((cfg) => {
+    cfg.review!.merge.wait_categories = ['copy'];
+    // The harness's own account (the file backlog's actor) even has a role here: still never the approver.
+    cfg.project.owners.writers = [...cfg.project.owners.writers, 'coordinator'];
+  });
+  const waits = (p: { issue: number; pr: number; head: string }) => t.log.append('merge.decided', { issue: p.issue, number: p.pr, head: p.head, auto: false, reasons: ['copy waits for the owner'] }, 'test');
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  const pr = async (b: string, closedBy: string) => {
+    const n = (await t.backlog.openPr(b, 'main', b, 'b')).number;
+    t.backlog.setPr(n, { merged: true, closedBy });
+    return n;
+  };
+  // An outsider's and a bot's approving reviews; a writer merged it by hand.
+  const drive = await pr('b1', 'example-collaborator');
+  t.merged('copy/a.md', {
+    pr: drive,
+    before: (p) => {
+      waits(p);
+      t.backlog.addReview(drive, { author: 'drive-by-outsider', state: 'APPROVED', body: 'lgtm', at: at(60_000) });
+      t.backlog.addReview(drive, { author: 'some-app[bot]', state: 'APPROVED', body: 'lgtm', at: at(120_000) });
+    },
+  });
+  // The owner approved an earlier head on Discord; held again at the merged head, a writer merged it by hand.
+  const moved = await pr('b2', 'example-collaborator');
+  t.merged('copy/b.md', {
+    pr: moved,
+    before: (p) => {
+      waits({ ...p, head: 'b'.repeat(40) });
+      t.log.append('merge.approved', { issue: p.issue, number: p.pr, head: 'b'.repeat(40), by: 'example-owner', via: 'discord' }, 'test');
+      waits(p);
+    },
+  });
+  // The owner approved an hour before the hold; a writer merged it by hand.
+  const early = await pr('b3', 'example-collaborator');
+  t.backlog.addReview(early, { author: 'example-owner', state: 'APPROVED', body: 'ok', at: at(-3_600_000) });
+  t.merged('copy/c.md', { pr: early, before: waits });
+  // Merged by the harness's own account with no merge.done logged (a crash between the merge and the record).
+  const own = await pr('b4', 'coordinator');
+  await t.backlog.comment(own, `[${BRAND.cli}] @example-owner ready, and waits for you to review and merge`);
+  t.merged('copy/d.md', { pr: own, before: waits });
+  await t.c.checkDelegation();
+  const o = t.of('delegation.observed');
+  assert.deepEqual(
+    o.map((p) => [p.held, p.approved_by, p.approver_role]),
+    [
+      [true, 'example-collaborator', 'writer'],
+      [true, 'example-collaborator', 'writer'],
+      [true, 'example-collaborator', 'writer'],
+      [true, null, null],
+    ],
+  );
+  assert.ok(o.slice(0, 3).every((p) => typeof p.wait_ms === 'number' && p.wait_ms >= 0 && p.wait_ms < 60_000), JSON.stringify(o.map((p) => p.wait_ms)));
 });
 
 test('the tick checks delegation', async () => {
