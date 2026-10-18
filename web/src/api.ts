@@ -198,8 +198,10 @@ export interface HealthView {
   providerHosts?: { file: string; state: 'missing' | 'ok' | 'refused'; hosts: string[]; error: string | null; refused: { provider: string; reason: string }[] } | null;
   /** The machine's shared GitHub API budget (src/github/budget-health.ts): per credential (numbered, never named by its token), what is left and when it resets, a back-off in force, the top consumers; null when none yet (or for a viewer). */
   githubRate?: {
-    credentials: { id: string; resources: { resource: string; limit: number | null; remaining: number | null; resetAt: string | null }[]; backoff: { kind: 'rate_limited' | 'secondary_rate_limited'; until: string } | null; top: { consumer: string; calls: number }[]; calls: number; updatedAt: string }[];
+    credentials: { id: string; resources: { resource: string; limit: number | null; remaining: number | null; resetAt: string | null }[]; backoff: { kind: 'rate_limited' | 'secondary_rate_limited'; until: string } | null; top: { consumer: string; calls: number | null }[]; calls: number | null; updatedAt: string | null }[];
     notShown: number;
+    /** Why no budget is shown, when reading them failed. */
+    error?: string | null;
   } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };

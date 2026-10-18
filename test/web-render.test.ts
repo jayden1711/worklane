@@ -722,6 +722,23 @@ test('#198: the GitHub API budget on the health panel, read-only: per credential
   assert.match(hub, /data-testid="health-github-budget"/);
 });
 
+test('#198 round 1: the GitHub budget section renders whatever numbers arrive (null, NaN, a bad time) and says when the budgets could not be read', () => {
+  const base = { instance: 'shop@box', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: '' }, offsiteBackup: null, suggestions: ['Nothing to suggest.'] };
+  // What a planted 1e308 count looked like after JSON before the fix (Infinity → null), and other non-numbers.
+  const bad = { credentials: [{ id: 'credential 1', resources: [{ resource: 'core', limit: null, remaining: Number.NaN, resetAt: 'not a time' }, { resource: 'graphql', limit: 5000, remaining: null, resetAt: null }], backoff: { kind: 'secondary_rate_limited', until: 'not a time' }, top: [{ consumer: 'backlog', calls: null }], calls: null, updatedAt: null }], notShown: 0, error: null };
+  let html = '';
+  assert.doesNotThrow(() => (html = r.renderHealth({ ...base, githubRate: bad })));
+  const row = html.match(/data-testid="health-github-budget-row"[\s\S]*?<\/tr>/)?.[0] ?? '';
+  assert.match(row, /core – left/);
+  assert.match(row, /core –</);
+  assert.match(row, /paused until –/);
+  assert.match(row, /backlog –/);
+  // A fault while reading: said, with no table.
+  const failed = r.renderHealth({ ...base, githubRate: { credentials: [], notShown: 0, error: "the budget files couldn't be read (RangeError)" } });
+  assert.match(failed, /data-testid="health-github-budget-error"[^>]*>GitHub API budget not shown: the budget files couldn(&#x27;|')t be read \(RangeError\)/);
+  assert.doesNotMatch(failed, /health-github-budget-row/);
+});
+
 test('the instance settings: the owner gets a new-value input and a review step per setting; anyone else sees who can change them', () => {
   const data = {
     owner: 'example-owner',

@@ -212,8 +212,11 @@ export function ProviderHosts({ hosts: p }: { hosts: NonNullable<HealthView['pro
   );
 }
 
-const count = (n: number) => n.toLocaleString('en-US');
-const utc = (iso: string) => `${new Date(iso).toISOString().slice(11, 16)} UTC`;
+// Total: the budget files are written by anyone who can write the slot directory, so a number may arrive as null or
+// NaN, and a time as anything; each shows as "–" rather than throwing (there is no error boundary to catch a throw).
+const count = (n: unknown) => (typeof n === 'number' && Number.isFinite(n) ? n.toLocaleString('en-US') : '–');
+const validTime = (iso: unknown): iso is string => typeof iso === 'string' && Number.isFinite(Date.parse(iso)) && Math.abs(Date.parse(iso)) <= 8.64e15;
+const utc = (iso: unknown) => (validTime(iso) ? `${new Date(iso).toISOString().slice(11, 16)} UTC` : '–');
 const inMin = (iso: string) => {
   const min = Math.round((Date.parse(iso) - Date.now()) / 60_000);
   return min < 1 ? 'in under a minute' : `in ${min} min`;
@@ -229,11 +232,16 @@ export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githu
   return (
     <section className="space-y-1.5" aria-label="GitHub API budget" data-testid="health-github-budget">
       <div className="text-[13px] font-medium text-ink">GitHub API budget</div>
+      {budget.error && (
+        <div className="text-[12.5px] text-ink-2" data-testid="health-github-budget-error">
+          GitHub API budget not shown: {budget.error}
+        </div>
+      )}
       {budget.credentials.length > 0 && (
         <RecordsTable testId="health-github-budget-table" head={['Credential', 'Left', 'Resets', 'Back-off', 'Top consumers']} className="[&_th:nth-child(1)]:w-28">
           {budget.credentials.map((c) => (
             <tr key={c.id} className="border-b border-line last:border-0 align-top" data-testid="health-github-budget-row">
-              <td className="primitive-table-cell text-[13px] text-ink" title={`changed ${ago(c.updatedAt)}`}>
+              <td className="primitive-table-cell text-[13px] text-ink" title={validTime(c.updatedAt) ? `changed ${ago(c.updatedAt)}` : 'changed at a time not known'}>
                 {c.id}
               </td>
               <td className={cell}>
@@ -241,7 +249,7 @@ export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githu
                   ? c.resources.map((r) => <div key={r.resource}>{r.remaining === null ? `${r.resource} not known yet` : `${r.resource} ${count(r.remaining)}${r.limit ? ` of ${count(r.limit)}` : ''} left`}</div>)
                   : 'not known yet'}
               </td>
-              <td className={cell}>{c.resources.length ? c.resources.map((r) => <div key={r.resource}>{r.resetAt ? `${r.resource} ${utc(r.resetAt)} (${inMin(r.resetAt)})` : `${r.resource} –`}</div>) : '–'}</td>
+              <td className={cell}>{c.resources.length ? c.resources.map((r) => <div key={r.resource}>{validTime(r.resetAt) ? `${r.resource} ${utc(r.resetAt)} (${inMin(r.resetAt)})` : `${r.resource} –`}</div>) : '–'}</td>
               <td className="primitive-table-cell text-[12.5px] text-ink-2" data-testid="health-github-budget-backoff">
                 {c.backoff ? <span className="font-medium text-red">{`${c.backoff.kind === 'secondary_rate_limited' ? 'secondary limit' : 'rate limit'}: paused until ${utc(c.backoff.until)}`}</span> : 'none'}
               </td>
@@ -252,7 +260,7 @@ export function GitHubBudget({ budget }: { budget: NonNullable<HealthView['githu
       )}
       {budget.notShown > 0 && (
         <div className="text-[12px] text-ink-3" data-testid="health-github-budget-not-shown">
-          {budget.notShown} more budget {budget.notShown === 1 ? 'file' : 'files'} not shown (past the most recent few, or not readable as one)
+          {budget.notShown} more budget {budget.notShown === 1 ? 'file' : 'files'} not shown (past the newest readable few, or not readable as one)
         </div>
       )}
       <div className="text-[11.5px] text-ink-3">Shared by every process on this machine that calls GitHub with the same token; a back-off pauses all of them. Credentials are numbered here, never named by their token.</div>

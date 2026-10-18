@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
@@ -78,7 +78,7 @@ test('per credential: what is left and when it resets per resource, the back-off
     { consumer: 'updates', calls: 1 },
   ]);
   assert.equal(second!.calls, 9);
-  assert.ok(Number.isFinite(Date.parse(second!.updatedAt)));
+  assert.ok(Number.isFinite(Date.parse(second!.updatedAt ?? '')));
   // Nothing derived from a token: not the token, not the file's key (a hash of it), not the file's name or path.
   const json = JSON.stringify(v);
   for (const t of ['ghs_secret-token-busy', 'ghp_secret-token-limited']) {
@@ -162,12 +162,77 @@ test('bounded: a FIFO, a symlink, an oversized or malformed file is not shown, n
   assert.equal(m.notShown, 3);
 });
 
+test('round 1: a planted state never yields a number JSON cannot carry: counts are safe integers, sums stay finite, an implausible change time is unknown', () => {
+  const dir = slots();
+  const f = stateFile(dir, 'f'.repeat(16), {
+    resources: {
+      core: { limit: 1e308, remaining: 1e308, reset: at(600), used: { backlog: 1e308, 'pr-watch': 1.5, negative: -3, text: 'x', merge: 2 } },
+      graphql: { limit: 5000, remaining: 9, reset: at(600), used: { backlog: 1e308, merge: 3 } },
+    },
+    pausedUntil: 0,
+  });
+  // A far-future change time (as a 64-bit-seconds file system could store one): not a time the view can trust.
+  utimesSync(f, new Date(), new Date('2400-01-01T00:00:00Z'));
+  const v = githubBudgetHealth(dir)!;
+  const c = v.credentials[0]!;
+  assert.deepEqual(c.top, [{ consumer: 'merge', calls: 5 }], 'only safe, positive whole counts are counted');
+  assert.equal(c.calls, 5);
+  assert.deepEqual(c.resources.map((r) => [r.resource, r.limit, r.remaining]), [['core', null, null], ['graphql', 5000, 9]], 'a limit or remaining past a safe integer is not known');
+  assert.equal(c.updatedAt, null, 'a change time in the far future is not known');
+  // Every number survives JSON as a number (Infinity and NaN would come back as null).
+  const back = JSON.parse(JSON.stringify(v)) as typeof v;
+  assert.deepEqual(back, v, 'nothing changes through JSON');
+
+  // Two safe counts whose sum is past a safe integer: the sum is capped, never Infinity.
+  const sums = slots();
+  stateFile(sums, 'f'.repeat(16), { resources: { core: { limit: 5000, remaining: 1, reset: at(600), used: { backlog: Number.MAX_SAFE_INTEGER } }, graphql: { limit: 5000, remaining: 1, reset: at(600), used: { backlog: Number.MAX_SAFE_INTEGER } } }, pausedUntil: 0 });
+  const s = githubBudgetHealth(sums)!.credentials[0]!;
+  assert.deepEqual(s.top, [{ consumer: 'backlog', calls: Number.MAX_SAFE_INTEGER }]);
+  assert.equal(s.calls, Number.MAX_SAFE_INTEGER);
+});
+
+test('round 1: a fault while reading the budgets gives a view that says so, never a throw that would take /api/health down', (t) => {
+  const dir = slots();
+  window(budgetFor('token-fault', dir), 'core', 10, at(600));
+  // What an unbounded time did before (new Date(1e16).toISOString()): a RangeError while the view is built.
+  t.mock.method(Date.prototype, 'toISOString', () => {
+    throw new RangeError('Invalid time value');
+  });
+  let v: ReturnType<typeof githubBudgetHealth> = null;
+  assert.doesNotThrow(() => (v = githubBudgetHealth(dir)));
+  t.mock.restoreAll();
+  assert.deepEqual(v, { credentials: [], notShown: 0, error: "the budget files couldn't be read (RangeError)" });
+});
+
+test('round 1: unreadable files never hide the readable ones: the newest readable budgets are shown', { skip: !posix && 'FIFOs are POSIX' }, () => {
+  const dir = slots();
+  const good = stateFile(dir, '0'.repeat(16), { resources: { core: { limit: 5000, remaining: 77, reset: at(600), used: { backlog: 1 } } }, pausedUntil: 0 });
+  utimesSync(good, new Date(), new Date(Date.now() - 60_000)); // older than every FIFO below
+  const fifos = BUDGET_HEALTH_LIMITS.credentials + 1;
+  for (let i = 1; i <= fifos; i++) execFileSync('mkfifo', [join(dir, `github-budget-${String(i).padStart(16, '0')}.json`)]);
+  const v = githubBudgetHealth(dir)!;
+  assert.deepEqual(v.credentials.map((c) => c.resources[0]?.remaining), [77], 'the real budget is shown');
+  assert.equal(v.notShown, fifos);
+});
+
+test('round 1: a consumer is shown by name only when it looks like the engine\'s own (lower-case words), never a repo, URL, token or hex run', () => {
+  const dir = slots();
+  const odd = { 'pr-watch': 1, backlog: 2, ['ghp_' + 'A1'.repeat(18)]: 4, 'pr-watch:owner/repo': 8, 'https://x/y': 16, deadbeefdeadbeefdead: 32 };
+  stateFile(dir, '1'.repeat(16), { resources: { core: { limit: 5000, remaining: 1, reset: at(600), used: odd } }, pausedUntil: 0 });
+  assert.deepEqual(githubBudgetHealth(dir)!.credentials[0]!.top, [
+    { consumer: '(other)', calls: 60 },
+    { consumer: 'backlog', calls: 2 },
+    { consumer: 'pr-watch', calls: 1 },
+  ]);
+});
+
 test('the health view carries the budget from the slot directory it is given; by default the isolated one, never the machine\'s', () => {
   const dir = slots();
   window(budgetFor('token-view', dir), 'core', 42, at(900));
   const v = healthView([], null, { network: null, updates: [], slotsDir: dir });
   assert.equal(v.githubRate?.credentials[0]?.resources[0]?.remaining, 42);
   assert.equal(healthView([], null, { network: null, updates: [], slotsDir: slots() }).githubRate, null, 'no budget: null');
+  assert.equal(healthView([], null, { network: null, updates: [], slotsDir: dir, githubRate: null }).githubRate, null, 'given (the superfan wants only the suggestions): not read');
   // The default is AGENT_SLOTS_DIR, which the test isolation points into a temporary directory.
   const isolated = process.env.AGENT_SLOTS_DIR;
   assert.ok(isolated && !relative(tmpdir(), isolated).startsWith('..'), `the default slot directory ${isolated} is a temporary one`);
