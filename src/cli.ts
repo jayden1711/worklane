@@ -27,6 +27,7 @@ import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
+import { runCommentCheck } from './comment-policy.js';
 import { checkVacuity } from './vacuity.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
@@ -105,6 +106,9 @@ usage: ${BRAND.cli} <command> [options]
   vacuity [files...]               flag tests that assert nothing or touch no app code
                                    (default: test files changed vs the default branch)
   scan transcripts [dir]           secret-scan Claude Code transcripts for this project
+  check-comments --base <rev> [--head <rev>]
+                                   the comment policy over base...head, with the policy committed at base
+                                   (config.yaml comment_policy; off: exits 0). Exit 1: findings
   baseline record --log <file> --sha <sha>
                                    record main's failing set from a full run's output
   baseline record --queue          queue a full run on the tip of main; records the baseline when done
@@ -570,6 +574,19 @@ async function main(argv: string[]): Promise<number> {
       }
       console.log(`${files.length} transcript(s) scanned, ${leaks} finding(s)`);
       return leaks ? 1 : 0;
+    }
+
+    case 'check-comments': {
+      // WHY: a managed repo's CI has no scripts/ (not in the package), so it runs the PR check through the CLI (#330).
+      const base = option(args, '--base');
+      if (!base) {
+        console.error(`usage: ${BRAND.cli} check-comments --base <rev> [--head <rev>]`);
+        return 2;
+      }
+      const r = runCommentCheck(root, base, option(args, '--head') ?? 'HEAD');
+      process.stdout.write(r.stdout);
+      process.stderr.write(r.stderr);
+      return r.code;
     }
 
     case 'queue': {

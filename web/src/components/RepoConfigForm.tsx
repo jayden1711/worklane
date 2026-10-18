@@ -8,7 +8,7 @@ import { checksSeenSlot, type ChecksSeenAnswer } from '../checks-seen';
 import { StarterCi } from './StarterCi';
 import { Button, cx } from './ui';
 
-const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
 const show = (v: unknown) => (Array.isArray(v) ? (v.length ? v.join(', ') : 'none') : v === undefined || v === null ? 'not set' : String(v));
 const list = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
 

@@ -161,7 +161,7 @@ export function DecisionDetailView({ d, prBody, diff }: { d: DecisionDetail; prB
 
       <Section id="summary" testId="decision-summary" title="In short" state="shown">
         {options.length ? (
-          <DecisionLines happened={d.summary?.happened ?? d.question} recommendation={d.recommendation} prose={prose} options={options} answerable={!d.answer && d.canAnswer} ans={ans} testId="decision-detail-option" />
+          <DecisionLines happened={d.summary?.happened ?? d.question} recommendation={d.recommendation} prose={prose} options={options} answerable={!d.answer && d.canAnswer} ans={ans} testId="decision-detail-option" kind={d.kind} />
         ) : (
           <>
             <p className="text-[14px] font-medium leading-snug text-ink" data-line="happened" data-testid="decision-happened">

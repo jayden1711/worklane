@@ -9,7 +9,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { VoiceControl } from './voice/VoiceControl';
 import { useVoicePrefs } from './voice/prefs';
 import { MainWatchAlert } from './components/Protection';
-import { UsageBanner, useNow, useUsage } from './components/Usage';
+import { PausedScope, UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
 import { Header } from './components/Header';
 import { StatusDot } from './components/StatusDot';
@@ -625,29 +625,32 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   const sidebar = { state, all: !!scope?.all, path, counts, health, live, theme, toggleTheme, openSearch: () => (setNav(false), setMenu(true)), switcher: <InstanceSwitcher status={health?.status ?? {}} why={health?.why} live={health?.hub} /> };
   return (
     <NavMenu.Provider value={{ open: nav, setOpen: setNav }}>
-      <div className="flex h-full">
-        <aside className="flex w-56 shrink-0 flex-col bg-canvas max-md:hidden">
-          <SidebarBody {...sidebar} />
-        </aside>
-        <main className="min-w-0 flex-1 scroll-pt-14 overflow-y-auto max-md:pb-20">
-          {state && <StopBanner state={state} />}
-          <UsageBanner usage={usage} now={now} />
-          {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
-          <GroupTabs.Provider value={tabsAt(path, state, counts)}>
-            <Entrances key={path}>
-              <Suspense fallback={<Loading />}>{page}</Suspense>
-            </Entrances>
-          </GroupTabs.Provider>
-        </main>
-        <UpdatingMark />
-        <NavDrawer open={nav} setOpen={setNav}>
-          <SidebarBody {...sidebar} />
-        </NavDrawer>
-        <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
-        {state && <ChatPanel cli={state.brand.cli} role={state.role} user={state.user} />}
-        {state && <WakeWord role={state.role} brand={state.brand.name} />}
-        {state && <VoiceControl state={state} prefs={voice} />}
-      </div>
+      {/* While this instance is paused on the usage limit, its start and land actions say so (#587). */}
+      <PausedScope usage={usage} current={scope?.current ?? null}>
+        <div className="flex h-full">
+          <aside className="flex w-56 shrink-0 flex-col bg-canvas max-md:hidden">
+            <SidebarBody {...sidebar} />
+          </aside>
+          <main className="min-w-0 flex-1 scroll-pt-14 overflow-y-auto max-md:pb-20">
+            {state && <StopBanner state={state} />}
+            <UsageBanner usage={usage} now={now} />
+            {state && <MainWatchAlert protection={state.protection} onCleared={() => void refresh()} />}
+            <GroupTabs.Provider value={tabsAt(path, state, counts)}>
+              <Entrances key={path}>
+                <Suspense fallback={<Loading />}>{page}</Suspense>
+              </Entrances>
+            </GroupTabs.Provider>
+          </main>
+          <UpdatingMark />
+          <NavDrawer open={nav} setOpen={setNav}>
+            <SidebarBody {...sidebar} />
+          </NavDrawer>
+          <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
+          {state && <ChatPanel cli={state.brand.cli} role={state.role} user={state.user} />}
+          {state && <WakeWord role={state.role} brand={state.brand.name} />}
+          {state && <VoiceControl state={state} prefs={voice} />}
+        </div>
+      </PausedScope>
     </NavMenu.Provider>
   );
 }

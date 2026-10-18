@@ -41,7 +41,7 @@ export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; o
         void send();
       }}
     >
-      <input ref={field} type="password" autoComplete="off" spellCheck={false} name={`secret-${a.credential}`} aria-label={`Value of ${a.credential}`} placeholder={`${a.credential} (not shown)`} className="min-w-64 flex-1 rounded-control border border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="ask-secret" />
+      <input ref={field} type="password" autoComplete="off" spellCheck={false} name={`secret-${a.credential}`} aria-label={`Value of ${a.credential}`} placeholder={`${a.credential} (not shown)`} className="min-w-64 flex-1 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="ask-secret" />
       <Button type="submit" size="sm" disabled={busy}>
         {busy ? 'Storing…' : 'Store'}
       </Button>
@@ -203,7 +203,7 @@ function AddProjectRunCard({ run, onChanged }: { run: AddProjectRun; onChanged?:
  * The App's install link then preselects the repo picked, and the installation is checked to reach it alone.
  */
 function RepoPicker({ picker, repo, disabled, onPick, onAccount }: { picker: RepoPickerData | null; repo: string; disabled: boolean; onPick: (fullName: string) => void; onAccount: (owner: string) => void }) {
-  const select = 'h-8 rounded-control bg-field px-2 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+  const select = 'h-8 rounded-control bg-field px-2 text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
   const [account, setAccount] = useState(picker?.owner ?? '');
   useEffect(() => setAccount(picker?.owner ?? ''), [picker?.owner]);
   if (!picker) return <p className="text-[12px] text-ink-3" data-testid="add-project-picker-loading">Listing your repos on GitHub…</p>;
@@ -286,7 +286,7 @@ export function AddProjectView({ data, onChanged, picker: initialPicker }: { dat
       setBusy(false);
     }
   };
-  const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+  const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
   return (
     <Card className="space-y-3 p-4" data-testid="add-project" data-enabled={data.allowed ? 'yes' : 'no'}>
       <div>
@@ -440,7 +440,7 @@ function Terminal({ instance }: { instance: string }) {
         <pre
           ref={screen}
           tabIndex={0}
-          className={cx('mt-3 h-96 overflow-auto rounded-control bg-inset p-2 font-mono text-[12px] leading-snug text-ink outline-none focus:ring-2 focus:ring-blue')}
+          className={cx('mt-3 h-96 overflow-auto rounded-control bg-inset p-2 font-mono text-[12px] leading-snug text-ink outline-none focus:ring-2 focus:ring-ring')}
           onKeyDown={(e) => {
             const d = keyData(e);
             if (d === null) return;
