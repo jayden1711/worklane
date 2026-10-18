@@ -21,7 +21,7 @@ const where = (x: Incident) => (x.instance ? x.instance : 'machine');
 function OpenIncident({ x, targeted }: { x: Incident; targeted: boolean }) {
   const shown = x.detail !== undefined;
   return (
-    <Card id={`incident-${x.id}`} data-testid="incident" data-severity={x.severity} data-targeted={targeted || undefined} className={cx('primitive-card-pad scroll-mt-16', targeted && 'ring-2 ring-blue')}>
+    <Card id={`incident-${x.id}`} data-testid="incident" data-severity={x.severity} data-targeted={targeted || undefined} className={cx('primitive-card-pad scroll-mt-16', targeted && 'ring-2 ring-ring')}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <StatusDot status={x.severity === 'info' ? 'green' : x.severity} />
         <span className="text-[13.5px] font-medium text-ink" data-testid="incident-title">

@@ -57,7 +57,8 @@ sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
 - **Exact match:** a `base_url`'s host and port must equal an entry: the same host name or address, and the same
   port. An entry without a port means the scheme's default port (443 for `https://`), so `api.provider.example`
   doesn't allow `https://api.provider.example:8443`. No wildcards, no suffixes. Write each entry the way a URL
-  normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`).
+  normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`). A name is letters,
+  digits, dots and hyphens only (no `_`, `&`, `=` or other punctuation), so a refusal never shows a mistyped `key=value`.
 - **The URL's shape, whatever the list says:**
   - `https://`. Plain `http://` is allowed only to a loopback address (`127.x.x.x`, `[::1]`), never to a name: not
     even `localhost`, so it doesn't depend on name resolution.
@@ -75,6 +76,10 @@ sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
   the role's normal model, with a `provider.fallback` event); and by the runner again right before it would set
   `ANTHROPIC_BASE_URL` (a host refused since the run was resolved: the run doesn't start). Each refusal is logged once
   per provider and reason. The file is read each time, so a change applies without a restart.
+- **On the Machine page** (its Machine health section), read-only, to owners and writers: "Provider hosts: a, b (from
+  /etc/worklane/providers.json)", or that provider runs are off because there is no file or no host, or the file's
+  refusal in red; and each configured provider whose `base_url` is outside the set, in red, with why. A viewer gets
+  none of it. Nothing on the page can change the list.
 
 ## Hosted models and the instance's model cap
 

@@ -124,7 +124,7 @@ export function Overview({ state, pulse, usage = [], now = Date.now() }: { state
               </span>
             </div>
             <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-hover-2" role="progressbar" aria-valuenow={Math.round(budgetPct)} aria-valuemin={0} aria-valuemax={100}>
-              <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-red' : budgetPct > 70 ? 'bg-orange' : 'bg-blue')} style={{ width: `${budgetPct}%` }} />
+              <div className={cx('h-full rounded-full', budgetPct > 90 ? 'bg-red' : budgetPct > 70 ? 'bg-orange' : 'bg-ring')} style={{ width: `${budgetPct}%` }} />
             </div>
             <div className="mt-3 space-y-1">
               {Object.entries(spend.byRole)

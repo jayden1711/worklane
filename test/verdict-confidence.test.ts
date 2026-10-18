@@ -73,7 +73,7 @@ function clean(over: Partial<MergeInput> = {}): MergeInput {
     policyOn: true,
     repoOn: true,
     stopped: null,
-    level: computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [] }, review),
+    level: computeLevel({ files: [{ path: 'src/price.js', added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, review),
     waitCategories: [...review.levels.L3_human.when, 'ci-config'],
     limits: { max_lines: 400, max_files: 10 },
     lines: 2,

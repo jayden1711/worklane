@@ -65,6 +65,7 @@ const ITEMS = [
   { kind: 'shared', rename: 'rekey', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
   { kind: 'shared', rename: 'rekey', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
   { kind: 'shared', rename: 'drop', note: "staged plugin approvals aren't moved: stage them again for the new name", what: 'plugin-pending', by: "the machine helper's plugin-stage" },
+  { kind: 'shared', rename: 'drop', note: "root's word that its repo is a managed app isn't moved: every self-modification lock applies to the new name until root runs managed-apps.sh add <new> <owner/repo>", what: 'managed-apps', by: 'managed-apps.sh add' },
   { kind: 'path', rename: 'drop', note: "the new name's coordinator writes its own when its chat bot connects", what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/etc/worklane/plugins/<name>.json', by: 'plugins.sh confirm (the allowlist)' },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/var/lib/worklane/plugins/previews/<name>', by: "the machine helper's plugin-fetch" },
@@ -126,6 +127,7 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane-test', item: '/var/lib/worklane-test/<name>' },
   { at: '/etc/worklane/plugins', item: '/etc/worklane/plugins/<name>.json' },
   { at: '/var/lib/worklane/plugins', item: 'plugin-pending (pending.json), previews/<name>, store/<name>, fetch-status/<name>.json (fetches.jsonl: a log, kept)' },
+  { at: '/etc/worklane/managed-apps.json', item: 'managed-apps' },
   { at: '/etc/worklane/plugin-hosts.json', why: 'the hosts any plugin may come from: the machine\'s, no instance in it' },
   { at: '/etc/worklane/mcp-registries.json', why: 'the npm registries any MCP server may come from: the machine\'s, no instance in it' },
   { at: '/var/lib/worklane-mcp', item: "/var/lib/worklane-mcp-<name>: each instance's MCP broker's StateDirectory" },
@@ -333,6 +335,7 @@ const P = {
   paused: '/var/lib/worklane/claude-account/paused',
   slots: '/var/lib/worklane/agent-slots',
   pending: '/var/lib/worklane/pending-signers.json',
+  managedApps: '/etc/worklane/managed-apps.json',
 };
 const INCIDENTS = 'incidents.json';
 const INCIDENTS_LOCK = 'incidents.lock';
@@ -595,6 +598,23 @@ const SHARED = {
       const mine = j && Array.isArray(j.pending) ? j.pending.filter((e) => e && e.instance === name) : [];
       if (!mine.length) return null;
       j.pending = j.pending.filter((e) => !(e && e.instance === name));
+      writeKeeping(f, JSON.stringify(j) + '\n');
+      return mine;
+    },
+  },
+  // Root's word on which instances' repos are managed apps (managed-apps.sh): this instance's entry, its repo.
+  'managed-apps': {
+    file: P.managedApps,
+    get: (prefix, name) => {
+      const j = readJson(at(prefix, P.managedApps));
+      return j && j.apps && typeof j.apps === 'object' && Object.hasOwn(j.apps, name) ? { [name]: j.apps[name] } : null;
+    },
+    drop: (prefix, name) => {
+      const f = at(prefix, P.managedApps);
+      const j = readJson(f);
+      if (!(j && j.apps && typeof j.apps === 'object' && Object.hasOwn(j.apps, name))) return null;
+      const mine = { [name]: j.apps[name] };
+      delete j.apps[name];
       writeKeeping(f, JSON.stringify(j) + '\n');
       return mine;
     },

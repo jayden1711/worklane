@@ -19,7 +19,7 @@ import { fullRunLock } from '../slots.js';
 import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
-import { sh, evalLines, pushRefusal, DEFAULT_REVIEW } from './shared.js';
+import { sh, evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
@@ -310,7 +310,7 @@ export abstract class Landing extends Decisions {
     // raised (never lowered) by the worker's own claim. A body without both is refused: no PR opens.
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const files = this.changeFiles(this.d.repo, claimedBase, q.head);
-    const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source) }, review);
+    const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
     const claims = last<EventPayload<'worker.claims'>>('worker.claims');
     const cls = effectiveClass(computed.cls, claims?.risk_class);

@@ -1,4 +1,5 @@
-// Claude Code hook entry points: `<cli> hook pre-tool-use|stop|session-end`.
+// Claude Code hook entry points: `node <engine>/dist/src/hook-main.js pre-tool-use|session-start|session-end|post-tool-use`
+// (src/hook-main.ts), and `<cli> hook <event>` for installs before #665.
 // Hooks read one JSON object on stdin. Every failure inside a hook fails
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
@@ -270,4 +271,24 @@ export async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const c of process.stdin) chunks.push(c as Buffer);
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * One hook process: the event's JSON from stdin, the decision to stdout and stderr, and the exit code to end with.
+ * The guard's own entry (src/hook-main.ts, what the installed hook commands run) and the CLI's `hook` command (what
+ * installs before #665 run) both run this, so the two decide the same.
+ */
+export async function hookProcess(event: string): Promise<number> {
+  const raw = await readStdin();
+  let input: HookInput = {};
+  try {
+    input = raw.trim() ? (JSON.parse(raw) as HookInput) : {};
+  } catch {
+    process.stderr.write(`[${BRAND.cli}] hook input is not JSON\n`);
+    return 2;
+  }
+  const out = await runHook(event, input);
+  if (out.stdout) process.stdout.write(out.stdout);
+  if (out.stderr) process.stderr.write(out.stderr);
+  return out.exitCode;
 }

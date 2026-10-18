@@ -14,7 +14,7 @@ import { markUpdating, peek } from '../cache';
 import { LiveFeedView, type FeedItem } from '../components/LiveRun';
 import { DotPill, Loading } from '../components/patterns';
 import { TestRunsPanel } from '../components/TestRuns';
-import { ago, Badge, Button, cx, Empty, LevelBadge } from '../components/ui';
+import { ago, Badge, Button, cx, decisionWork, Empty, LevelBadge } from '../components/ui';
 import { Header } from '../components/Header';
 
 /** One instance's board as the page holds it: `name` is the hub's name for it (null on an instance's own dashboard). */
@@ -110,8 +110,8 @@ function WatchFeed({ instance, run }: { instance: string | null; run: string }) 
 type Panel = 'watch' | 'steer' | 'answer' | 'approve' | null;
 
 /** One card: what it is, how big, how long, its checks, what its run uses; and the actions this person may take. */
-export function BoardCardView({ card, instance, showInstance, now, onChanged = () => {} }: { card: BoardCard; instance: string | null; showInstance: boolean; now: number; onChanged?: () => void }) {
-  const [panel, setPanel] = useState<Panel>(null);
+export function BoardCardView({ card, instance, showInstance, now, onChanged = () => {}, initialPanel = null }: { card: BoardCard; instance: string | null; showInstance: boolean; now: number; onChanged?: () => void; initialPanel?: Panel }) {
+  const [panel, setPanel] = useState<Panel>(initialPanel);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -246,7 +246,7 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
                 <GitMerge className="size-3.5" /> Merge on GitHub
               </a>
             ) : (
-              <Button size="sm" variant={panel === 'approve' ? 'default' : 'outline'} onClick={() => toggle('approve')} data-testid="board-approve">
+              <Button size="sm" variant={panel === 'approve' ? 'default' : 'outline'} onClick={() => toggle('approve')} work={decisionWork(card.decision?.kind)} data-testid="board-approve">
                 <GitMerge className="size-3.5" /> Approve…
               </Button>
             ))}
@@ -289,7 +289,7 @@ export function BoardCardView({ card, instance, showInstance, now, onChanged = (
         <div className="mt-2 space-y-1.5" data-testid="board-approve-panel">
           <div className="text-[12px] leading-snug text-ink-2">{card.decision?.question ?? `Approve landing #${card.issue}?`}</div>
           <div className="flex gap-1.5">
-            <Button size="sm" disabled={busy} onClick={() => void decide((a.approve as { decision: string }).decision, 'approve')} data-testid="board-approve-confirm">
+            <Button size="sm" disabled={busy} onClick={() => void decide((a.approve as { decision: string }).decision, 'approve')} work={decisionWork(card.decision?.kind)} data-testid="board-approve-confirm">
               Approve and land
             </Button>
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPanel(null)} data-testid="board-approve-cancel">
