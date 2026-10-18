@@ -1028,7 +1028,9 @@ jobs:
           jq -se 'map(select(.state=="failed")) | length == 0' "$F/run2.jsonl"
           jq -se 'map(select(.step=="app" and .state=="ask" and .ask.kind=="approve_link")) | length == 2' "$F/run2.jsonl"
           jq -se 'map(select(.step=="app" and .state=="done" and (.detail|test("made through the manifest flow$")))) | length == 1' "$F/run2.jsonl"
-          jq -se 'map(select(.step=="claude-token" and .state=="ask" and .ask.kind=="paste_secret")) | length == 1' "$F/run2.jsonl"
+          # Issue #711: the claude-token step never asks a dashboard for the token; here it comes from root's stdin.
+          jq -se 'map(select(.step=="claude-token" and .state=="ask")) | length == 0' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="claude-token" and .state=="done")) | length == 1' "$F/run2.jsonl"
           jq -se 'map(select(.step=="policy" and .state=="done" and (.detail|startswith("auto_merge off, $20/day, 2 workers")))) | length == 1' "$F/run2.jsonl"
           if grep -qFf "$F/claude-token" "$F/run1.jsonl" "$F/run1.err" "$F/run2.jsonl" "$F/run2.err"; then echo "the token was echoed" >&2; exit 1; fi
           # The App came through the manifest flow: its key and secrets the coordinator's own 0400 files, nothing by hand.
