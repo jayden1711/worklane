@@ -1,11 +1,13 @@
 // Replaying a fixed past task through the real coordinator: a scratch instance (its own event log, a file backlog,
 // its own state and slots) on a scratch clone whose default branch is the task's base commit, pushed to a local bare
 // remote, so nothing reaches GitHub. The agents are the real ones (the runner given), within the run's budget. A
-// scratch clone is deleted when its replay ends.
+// scratch clone is deleted when its replay ends. The engine is the one running the replay (the harness under test);
+// the task's project config is its own at the base, except the harness config taken from the harness under test
+// (HARNESS_CONFIG_PATHS), so a change to that config is what the replay measures.
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from '../brand.js';
 import { FileBacklog } from '../backlog/file.js';
@@ -24,6 +26,8 @@ import { issueBody, type LoadedTask } from './tasks.js';
  */
 export class BudgetRunner implements AgentRunner {
   spent = 0;
+  /** Every run's reported turns. */
+  turns = 0;
   hit = false;
   constructor(
     private inner: AgentRunner,
@@ -44,6 +48,7 @@ export class BudgetRunner implements AgentRunner {
     const cap = Math.min(req.maxBudgetUsd, this.left);
     const r = await this.inner.run({ ...req, maxBudgetUsd: cap });
     this.spent = round(this.spent + r.costUsd);
+    this.turns += r.turns;
     if (r.reason === 'budget_exhausted' && cap < req.maxBudgetUsd) this.hit = true;
     if (this.left < 0.01) this.hit = true;
     return r;
@@ -90,8 +95,62 @@ export function scratchConfig(root: string, budgetUsd: number): void {
   });
 }
 
+/**
+ * The config folder's paths a replay takes from the harness under test instead of the task's base: the base predates
+ * the harness config being measured, so without this a replay never sees it. Only rules for agents, never project
+ * history: lessons, checks, runbooks and skills are left out, since they record what the project learned later,
+ * possibly from the task's own fix (its future).
+ */
+export const HARNESS_CONFIG_PATHS = ['principles'] as const;
+
+/** A snapshot of the harness under test's harness config: each file under HARNESS_CONFIG_PATHS, relative to the config folder. */
+export interface HarnessConfig {
+  from: string;
+  files: { path: string; content: Buffer }[];
+}
+
+/**
+ * Read the harness config of a checkout (the harness under test), once per run, so every replay sees the same
+ * snapshot however the checkout changes meanwhile. Fails closed: a checkout without a config folder, or anything in
+ * those paths but plain files and folders (a link could bring in what lies outside them), refuses the run.
+ */
+export function readHarnessConfig(from: string): HarnessConfig {
+  const dir = join(from, BRAND.configDir);
+  const stat = (f: string) => {
+    try {
+      return lstatSync(f);
+    } catch {
+      return null;
+    }
+  };
+  if (!stat(dir)?.isDirectory()) throw new Error(`${from} has no ${BRAND.configDir} folder: not a project checkout to take the harness config under test from`);
+  const files: HarnessConfig['files'] = [];
+  const walk = (f: string) => {
+    const st = stat(f);
+    if (!st) return;
+    if (st.isDirectory()) for (const e of readdirSync(f).sort()) walk(join(f, e));
+    else if (st.isFile()) files.push({ path: relative(dir, f), content: readFileSync(f) });
+    else throw new Error(`${BRAND.configDir}/${relative(dir, f)} in the harness under test is not a regular file or folder (a link?): refused, so nothing outside its harness config reaches a replay`);
+  };
+  for (const p of HARNESS_CONFIG_PATHS) walk(join(dir, p));
+  return { from, files };
+}
+
+/** Replace the task's own harness config with the snapshot's: the replay sees exactly the harness under test's (none if it has none). */
+export function overlayHarnessConfig(root: string, h: HarnessConfig): void {
+  const dir = join(root, BRAND.configDir);
+  for (const p of HARNESS_CONFIG_PATHS) rmSync(join(dir, p), { recursive: true, force: true });
+  for (const f of h.files) {
+    const to = join(dir, f.path);
+    mkdirSync(dirname(to), { recursive: true });
+    writeFileSync(to, f.content);
+  }
+}
+
 export interface ReplayOptions {
   runner: BudgetRunner;
+  /** The harness under test's harness config, in place of the task's own (readHarnessConfig); none: the task's own. */
+  harness?: HarnessConfig;
   /** Where scratch clones go (each in its own new directory, deleted after). */
   workDir: string;
   /** Where to fetch the task's base from: a local clone that has it, or the repository's URL. */
@@ -140,7 +199,8 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
     git(dir, 'clone', '-q', remote, root);
     for (const [k, v] of [['user.email', 'coordinator@example.com'], ['user.name', 'coordinator'], ['commit.gpgsign', 'false'], ['maintenance.auto', 'false'], ['gc.auto', '0']] as const) git(root, 'config', k, v);
     scratchConfig(root, o.runner.budgetUsd);
-    git(root, 'add', '--', BRAND.configDir);
+    if (o.harness) overlayHarnessConfig(root, o.harness);
+    git(root, 'add', '-A', '--', BRAND.configDir);
     commit(root, `${BRAND.cli} harness eval: scratch instance config`);
     // The remote takes it by fetching from the clone: the engine pushes only through checkedPush (push-check.ts).
     git(remote, 'fetch', '-q', root, `+refs/heads/${branch}:refs/heads/${branch}`);
@@ -183,8 +243,10 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
   }
 }
 
-export interface SuiteOptions extends Omit<ReplayOptions, 'sample' | 'runner'> {
+export interface SuiteOptions extends Omit<ReplayOptions, 'sample' | 'runner' | 'harness'> {
   tasks: LoadedTask[];
+  /** A checkout of the harness under test: every replay runs with its harness config (HARNESS_CONFIG_PATHS), read once at the start. */
+  harnessConfig?: string;
   samples: number;
   budgetUsd: number;
   /** The agents (the instance's runner, or a CLI runner); wrapped in the run's budget. */
@@ -209,26 +271,35 @@ export async function runSuite(o: SuiteOptions): Promise<EventPayload<'harness_e
   const replay = o.replay ?? replayTask;
   const done: EventPayload<'harness_eval.task'>[] = [];
   let error: string | undefined;
-  outer: for (const t of o.tasks) {
+  let harness: HarnessConfig | undefined;
+  try {
+    if (o.harnessConfig) {
+      harness = readHarnessConfig(o.harnessConfig);
+      o.say?.(`harness config under test: ${harness.files.length} file(s) under ${HARNESS_CONFIG_PATHS.map((p) => `${BRAND.configDir}/${p}`).join(', ')} from ${o.harnessConfig}`);
+    }
+  } catch (e) {
+    error = (e as Error).message.slice(0, 500);
+  }
+  outer: for (const t of error ? [] : o.tasks) {
     for (let s = 1; s <= o.samples; s++) {
       if (runner.exhausted || o.signal?.aborted) break outer;
       o.say?.(`replaying ${t.id} (sample ${s} of ${o.samples}; $${runner.left.toFixed(2)} of $${o.budgetUsd} left)`);
-      const before = runner.spent;
+      const before = { spent: runner.spent, turns: runner.turns };
       let r: ReplayResult;
       try {
-        r = await replay(t, { ...o, runner, sample: s });
+        r = await replay(t, { ...o, runner, sample: s, ...(harness ? { harness } : {}) });
       } catch (e) {
-        const spent = round(runner.spent - before);
-        r = { success: false, doneWhen: null, verdict: null, outcome: 'error', costUsd: spent, interventions: 0, detail: (e as Error).message.slice(0, 500), wallMs: 0 };
+        const spent = round(runner.spent - before.spent);
+        r = { success: false, doneWhen: null, verdict: null, outcome: 'error', costUsd: spent, turns: runner.turns - before.turns, interventions: 0, detail: (e as Error).message.slice(0, 500), wallMs: 0 };
       }
-      const p: EventPayload<'harness_eval.task'> = { run: id, task: t.id, held_out: t.heldOut, sample: s, success: r.success, done_when: r.doneWhen, verdict: r.verdict, outcome: r.outcome, cost_usd: r.costUsd, wall_ms: r.wallMs, interventions: r.interventions, detail: r.detail };
+      const p: EventPayload<'harness_eval.task'> = { run: id, task: t.id, held_out: t.heldOut, sample: s, success: r.success, done_when: r.doneWhen, verdict: r.verdict, outcome: r.outcome, cost_usd: r.costUsd, wall_ms: r.wallMs, interventions: r.interventions, turns: r.turns, detail: r.detail };
       o.emit('harness_eval.task', p);
-      if (r.costUsd > 0) o.emit('run.cost', { issue: null, role: 'harness-eval', model: 'mixed', usd: r.costUsd, turns: 0 });
+      if (r.costUsd > 0) o.emit('run.cost', { issue: null, role: 'harness-eval', model: 'mixed', usd: r.costUsd, turns: r.turns });
       done.push(p);
-      o.say?.(`  ${t.id}: ${r.success ? 'pass' : 'FAIL'} (${r.outcome}) $${r.costUsd.toFixed(2)}, ${(r.wallMs / 60_000).toFixed(1)} min, ${r.interventions} intervention(s)${r.detail ? `: ${r.detail.slice(0, 200)}` : ''}`);
+      o.say?.(`  ${t.id}: ${r.success ? 'pass' : 'FAIL'} (${r.outcome}) $${r.costUsd.toFixed(2)}, ${(r.wallMs / 60_000).toFixed(1)} min, ${r.turns} turn(s), ${r.interventions} intervention(s)${r.detail ? `: ${r.detail.slice(0, 200)}` : ''}`);
     }
   }
-  if (!o.tasks.length) error = 'no tasks';
+  if (!error && !o.tasks.length) error = 'no tasks';
   const tot = totals(done);
   const run: EventPayload<'harness_eval.run'> = {
     id,
@@ -242,6 +313,7 @@ export async function runSuite(o: SuiteOptions): Promise<EventPayload<'harness_e
     cost_usd: tot.costUsd,
     wall_ms: tot.wallMs,
     interventions: tot.interventions,
+    turns: tot.turns,
     budget_usd: o.budgetUsd,
     stopped: runner.exhausted && done.length < o.tasks.length * o.samples ? 'budget' : runner.hit ? 'budget' : null,
     ...(error ? { error } : {}),

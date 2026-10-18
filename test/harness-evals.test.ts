@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
@@ -36,7 +36,7 @@ test('the scorer: success is the done_when checks passing and the evaluator appr
     ],
     1,
   );
-  assert.deepEqual({ ...good }, { success: true, doneWhen: true, verdict: true, outcome: 'asked', costUsd: 0.6, interventions: 1, detail: '' });
+  assert.deepEqual({ ...good }, { success: true, doneWhen: true, verdict: true, outcome: 'asked', costUsd: 0.6, turns: 4, interventions: 1, detail: '' });
 
   const red = scoreReplay(
     [
@@ -71,7 +71,7 @@ test('the PR comment: this run beside the last finished baseline, with the chang
     runEv('r-stopped', { passed: 0, runs: 1, stopped: 'budget' }, '2026-10-05T03:00:00.000Z'),
     taskEv('r2', 'repo-1', true),
     taskEv('r2', 'secret-task', false, true),
-    runEv('r2', { passed: 1, cost_usd: 3, interventions: 1, pr: 7 }, '2026-10-08T03:00:00.000Z'),
+    runEv('r2', { passed: 1, cost_usd: 3, interventions: 1, pr: 7, turns: 30 }, '2026-10-08T03:00:00.000Z'),
   ];
   const runs = evalRuns(events);
   const cur = runs.find((r) => r.run.id === 'r2')!;
@@ -83,6 +83,9 @@ test('the PR comment: this run beside the last finished baseline, with the chang
   assert.match(md, /\| success rate \| 50% \| 100% \| −50% \(worse\) \|/);
   assert.match(md, /\| cost per replay \| \$1\.50 \| \$1\.00 \| \+\$0\.50 \(worse\) \|/);
   assert.match(md, /\| human interventions per replay \| 0\.50 \| 0\.00 \| \+0\.50 \(worse\) \|/);
+  assert.match(md, /\| turns per replay \| 15\.0 \| – \| – \|/, 'a baseline recorded before turns were counted has none to compare');
+  const withTurns = evalRuns([...events, runEv('r3', { turns: 40 }, '2026-10-09T03:00:00.000Z')]);
+  assert.match(commentMarkdown(withTurns.at(-1)!, baselineFor(withTurns, 'r3'), 'Brand'), /\| turns per replay \| 20\.0 \| 15\.0 \| \+5\.0 \(worse\) \|/);
   assert.match(md, /\| repo-1 \| 1\/1 \|/);
   assert.doesNotMatch(md, /secret-task/);
   assert.match(md, /Held-out tasks \(private, not named\): 0\/1/);
@@ -121,14 +124,18 @@ function seedRepo() {
   return { base, seed, task, work };
 }
 
-/** Agents for the example task: the worker fixes it, the evaluator approves what it read. */
-function agents(o: { fix?: boolean } = {}) {
+/**
+ * Agents for the example task: the worker fixes it, the evaluator approves what it read. `turns`: what each run
+ * reports (the stand-in's turn counts); `onWorker` sees the worker's workspace before it changes anything.
+ */
+function agents(o: { fix?: boolean; turns?: { worker: number; evaluator: number }; onWorker?: (req: RunRequest) => void } = {}) {
   return new FakeRunner((req: RunRequest) => {
     if (req.role === 'evaluator-verdict') {
       const b = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
       const files_reviewed = b ? git(req.cwd, 'diff', '--name-only', `${b}..HEAD`).split('\n').filter(Boolean) : [];
-      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed }, costUsd: 0.18 };
+      return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed }, costUsd: 0.18, ...(o.turns ? { turns: o.turns.evaluator } : {}) };
     }
+    o.onWorker?.(req);
     if (o.fix !== false) {
       const p = join(req.cwd, 'src', 'price.js');
       writeFileSync(p, readFileSync(p, 'utf8').replace('sum + cents * qty', 'sum + (qty > 0 ? cents * qty : 0)'));
@@ -136,7 +143,7 @@ function agents(o: { fix?: boolean } = {}) {
       // As a real agent session commits: with the harness identity its environment sets.
       if (git(req.cwd, 'status', '--porcelain')) git(req.cwd, '-c', `user.email=${DEFAULT_COMMIT_IDENTITY.email}`, '-c', `user.name=${DEFAULT_COMMIT_IDENTITY.name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'Ignore non-positive quantities');
     }
-    return { structured: { summary: 'Guarded qty.' }, costUsd: 0.42 };
+    return { structured: { summary: 'Guarded qty.' }, costUsd: 0.42, ...(o.turns ? { turns: o.turns.worker } : {}) };
   });
 }
 
@@ -182,6 +189,111 @@ test('the budget stops the run: every agent run is capped at what is left, and o
   await b.run({ role: 'worker', prompt: '', cwd: '.', model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 5, stallMs: 1, timeoutMs: 1 });
   const refused = await b.run({ role: 'worker', prompt: '', cwd: '.', model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 5, stallMs: 1, timeoutMs: 1 });
   assert.equal(refused.reason, 'budget_exhausted');
+});
+
+test("a replay's score counts the turns its agents reported (not 0), per replay, in its spend and in the run's total", async () => {
+  const s = seedRepo();
+  const runner = agents({ turns: { worker: 7, evaluator: 2 } });
+  const t = suite(s, runner);
+  const run = await t.run();
+  const reported = runner.calls.reduce((n, c) => n + (c.role === 'evaluator-verdict' ? 2 : 7), 0);
+  assert.ok(reported >= 9, `a worker and an evaluator ran (${runner.calls.map((c) => c.role).join(', ')})`);
+  const [task] = t.of('harness_eval.task');
+  assert.equal(task?.success, true, task?.detail);
+  assert.equal(task?.turns, reported, "the replay's turns are its agents' reported turns");
+  assert.equal(run.turns, reported, "the run's total");
+  assert.deepEqual(t.of('run.cost').map((c) => [c.role, c.turns]), [['harness-eval', reported]], 'the spend recorded with its turns');
+});
+
+/** A checkout of the harness under test: its own principles, and project history that must never reach a replay. */
+function harnessUnderTest(o: { principles?: boolean } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'harness-head-'));
+  const dir = join(root, BRAND.configDir);
+  mkdirSync(join(dir, 'lessons'), { recursive: true });
+  writeFileSync(join(dir, 'config.yaml'), 'project: { name: head }\n');
+  writeFileSync(join(dir, 'lessons', 'from-the-merged-fix.md'), 'qty <= 0 is guarded in price.js\n');
+  if (o.principles !== false) {
+    mkdirSync(join(dir, 'principles', 'nested'), { recursive: true });
+    writeFileSync(join(dir, 'principles', 'fail-closed.md'), '# fail-closed\nA missing input refuses.\n');
+    writeFileSync(join(dir, 'principles', 'nested', 'index.md'), 'fail-closed: refuse on missing input\n');
+  }
+  return root;
+}
+
+/** The seed's base with principles of its own (the task's era), as a task's base commit. */
+function withOwnPrinciples(s: ReturnType<typeof seedRepo>) {
+  const dir = join(s.seed, BRAND.configDir, 'principles');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'task-era.md'), '# task-era\nan older rule\n');
+  git(s.seed, 'add', '-A');
+  git(s.seed, '-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'principles of its era');
+  return { ...s, task: { ...s.task, base: git(s.seed, 'rev-parse', 'HEAD') } };
+}
+
+test("a replay runs with the harness under test's principles in place of the task's own, at the task's base; the task's repo is otherwise unchanged and nothing else of the present comes in", async () => {
+  const s = withOwnPrinciples(seedRepo());
+  const head = harnessUnderTest();
+  const seen: Record<string, unknown>[] = [];
+  const runner = agents({
+    onWorker: (req) => {
+      const cfg = join(req.cwd, BRAND.configDir);
+      seen.push({
+        principle: readFileSync(join(cfg, 'principles', 'fail-closed.md'), 'utf8'),
+        nested: readFileSync(join(cfg, 'principles', 'nested', 'index.md'), 'utf8'),
+        committed: git(req.cwd, 'show', `HEAD:${BRAND.configDir}/principles/fail-closed.md`),
+        taskEra: existsSync(join(cfg, 'principles', 'task-era.md')),
+        lessons: existsSync(join(cfg, 'lessons', 'from-the-merged-fix.md')),
+        parent: git(req.cwd, 'rev-parse', 'HEAD~1'),
+        outsideConfig: git(req.cwd, 'diff', '--name-only', s.task.base, 'HEAD', '--', '.', `:!${BRAND.configDir}`),
+        config: git(req.cwd, 'diff', '--name-only', s.task.base, 'HEAD', '--', BRAND.configDir).split('\n').filter(Boolean).sort(),
+      });
+    },
+  });
+  const t = suite(s, runner, { harnessConfig: head });
+  await t.run();
+  const [task] = t.of('harness_eval.task');
+  assert.equal(task?.success, true, task?.detail);
+  assert.ok(seen.length >= 1, 'the worker ran');
+  const w = seen[0]!;
+  assert.equal(w.principle, '# fail-closed\nA missing input refuses.\n', "the harness under test's principle is in the replay's workspace");
+  assert.equal(w.nested, 'fail-closed: refuse on missing input\n');
+  assert.equal(w.committed, '# fail-closed\nA missing input refuses.', 'committed on the default branch the agents start from, not just on disk');
+  assert.equal(w.taskEra, false, "the task's own principles are replaced, not merged: the replay sees exactly the harness under test's");
+  assert.equal(w.lessons, false, "only harness config comes in: the present's lessons (which may describe the task's fix) never do");
+  assert.equal(w.parent, s.task.base, "the scratch config commit sits directly on the task's base: no later history");
+  assert.equal(w.outsideConfig, '', "the task's repo content outside the config folder is the base's, unchanged");
+  const cfgChanged = (w.config as string[]).map((f) => f.slice(BRAND.configDir.length + 1));
+  assert.deepEqual(cfgChanged.filter((f) => f.startsWith('principles/')), ['principles/fail-closed.md', 'principles/nested/index.md', 'principles/task-era.md']);
+  assert.deepEqual(cfgChanged.filter((f) => !f.startsWith('principles/') && !['config.yaml', 'tests.yaml', 'agents.yaml'].includes(f)), [], 'in the config folder only the scratch config and the principles differ from the base');
+  assert.equal(readFileSync(join(head, BRAND.configDir, 'principles', 'fail-closed.md'), 'utf8'), '# fail-closed\nA missing input refuses.\n', 'the harness checkout is only read');
+});
+
+test('a harness under test without principles: the replay runs with none (base and head compare like for like); one that is not a project, or holds a link, refuses the run before any replay or agent', async () => {
+  const s = withOwnPrinciples(seedRepo());
+  let taskEra: boolean | null = null;
+  const t = suite(s, agents({ onWorker: (req) => void (taskEra = existsSync(join(req.cwd, BRAND.configDir, 'principles', 'task-era.md'))) }), { harnessConfig: harnessUnderTest({ principles: false }) });
+  await t.run();
+  assert.equal(taskEra, false, "the task's own principles are not what is under test");
+
+  const none = mkdtempSync(join(tmpdir(), 'harness-none-'));
+  const r1 = agents();
+  const t1 = suite(s, r1, { harnessConfig: none });
+  const run1 = await t1.run();
+  assert.match(run1.error ?? '', /has no \S+ folder/);
+  assert.equal(run1.runs, 0);
+  assert.equal(t1.of('harness_eval.task').length, 0, 'no replay');
+  assert.equal(r1.calls.length, 0, 'no agent ran');
+
+  const linked = harnessUnderTest();
+  const outside = mkdtempSync(join(tmpdir(), 'harness-outside-'));
+  writeFileSync(join(outside, 'secret.txt'), 'not harness config\n');
+  symlinkSync(join(outside, 'secret.txt'), join(linked, BRAND.configDir, 'principles', 'linked.md'));
+  const r2 = agents();
+  const t2 = suite(s, r2, { harnessConfig: linked });
+  const run2 = await t2.run();
+  assert.match(run2.error ?? '', /principles\/linked\.md .* not a regular file/);
+  assert.equal(t2.of('harness_eval.task').length, 0, 'no replay');
+  assert.equal(r2.calls.length, 0, 'no agent ran');
 });
 
 function coordinatorFixture(enabled: boolean, replay = false) {
