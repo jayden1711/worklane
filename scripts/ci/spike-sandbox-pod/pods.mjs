@@ -7,6 +7,8 @@ const restrictedPod = { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, s
 const restrictedCtr = { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, readOnlyRootFilesystem: true };
 // Docker's default seccomp profile plus clone/unshare with namespace flags, mount, umount2 and pivot_root (run.sh).
 const nsSeccomp = { type: 'Localhost', localhostProfile: 'profiles/spike-ns.json' };
+// containerd's default AppArmor profile with mount, pivot_root and userns allowed (spike-bwrap.apparmor).
+const aaBwrap = { type: 'Localhost', localhostProfile: 'spike-bwrap' };
 
 /** name -> { ns: namespaces to try in order (the first that admits it), pod, ctr, spec extras } */
 const PROFILES = {
@@ -31,11 +33,31 @@ const PROFILES = {
   },
   // restricted under gVisor (only when run.sh installed it: GVISOR=1).
   'restricted+gvisor': { ns: ['restricted'], pod: restrictedPod, ctr: restrictedCtr, spec: { runtimeClassName: 'gvisor' }, gvisor: true },
+  // On a node with AppArmor (APPARMOR=1, run.sh loaded spike-bwrap.apparmor): the runtime's default AppArmor profile
+  // denies every mount, so the same pods with a Localhost profile that allows mount, pivot_root and userns.
+  'restricted+ns-seccomp+aa-bwrap': { ns: ['restricted'], pod: { ...restrictedPod, seccompProfile: nsSeccomp, appArmorProfile: aaBwrap }, ctr: restrictedCtr, apparmor: true },
+  'restricted+ns-seccomp+aa-bwrap+userns': {
+    ns: ['restricted'],
+    pod: { ...restrictedPod, seccompProfile: nsSeccomp, appArmorProfile: aaBwrap },
+    ctr: restrictedCtr,
+    spec: { hostUsers: false },
+    apparmor: true,
+  },
+  'ns-seccomp+aa-bwrap+userns+unmasked-proc': {
+    ns: ['restricted', 'baseline', 'privileged'],
+    pod: { ...restrictedPod, seccompProfile: nsSeccomp, appArmorProfile: aaBwrap },
+    ctr: { ...restrictedCtr, procMount: 'Unmasked' },
+    spec: { hostUsers: false },
+    apparmor: true,
+  },
 };
 
 const [cmd, profile, ns, name] = process.argv.slice(2);
 if (cmd === 'list') {
-  for (const [n, p] of Object.entries(PROFILES)) if (!p.gvisor || process.env.GVISOR === '1') console.log(`${n} ${p.ns.join(',')}`);
+  for (const [n, p] of Object.entries(PROFILES)) {
+    if ((p.gvisor && process.env.GVISOR !== '1') || (p.apparmor && process.env.APPARMOR !== '1')) continue;
+    console.log(`${n} ${p.ns.join(',')}`);
+  }
 } else if (cmd === 'pod') {
   const p = PROFILES[profile];
   if (!p) throw new Error(`no profile ${profile}`);

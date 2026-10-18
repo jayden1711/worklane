@@ -1,0 +1,38 @@
+# SPIKE (do not merge), #698 decision 5: containerd's default container profile (cri-containerd.apparmor.d, from
+# containerd's contrib/apparmor template, Apache-2.0) with its "deny mount," replaced by the mount, umount,
+# pivot_root and userns rules bubblewrap needs. Loaded on the k3s node by run.sh; a pod opts in with
+# appArmorProfile: {type: Localhost, localhostProfile: spike-bwrap}. Everything else is the default's.
+abi <abi/4.0>,
+#include <tunables/global>
+
+profile spike-bwrap flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+  mount,
+  pivot_root,
+  userns,
+  signal (receive) peer=unconfined,
+  signal (receive) peer=spike-bwrap,
+  signal (send,receive) peer=spike-bwrap,
+
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+
+  ptrace (trace,read,tracedby,readby) peer=spike-bwrap,
+}

@@ -120,6 +120,17 @@ cluster() {
   diff <(jq -S . "$OUT/moby-default.json") <(jq -S . "$OUT/spike-ns.json") || true
   node_sh 'mkdir -p /var/lib/kubelet/seccomp/profiles'
   node_cp "$OUT/spike-ns.json" /var/lib/kubelet/seccomp/profiles/spike-ns.json
+
+  # The Localhost AppArmor profile, where the node enforces AppArmor (k3s on the runner; kind's kubelet says AppArmor
+  # isn't enabled on its node). Printed against containerd's own default, which is what pods get without it.
+  if [ "$CLUSTER" = k3s ] && command -v apparmor_parser > /dev/null; then
+    if sudo apparmor_parser -r -W "$here/spike-bwrap.apparmor"; then
+      touch "$OUT/apparmor-installed"
+    else
+      echo "the spike-bwrap AppArmor profile didn't load: its profiles are skipped"
+    fi
+    sudo grep -E '^(cri-containerd|spike-bwrap)' /sys/kernel/security/apparmor/profiles || true
+  fi
 }
 
 gvisor() {
@@ -163,9 +174,10 @@ warning_of() { k get events -n "$1" --field-selector "involvedObject.name=$2,typ
 probe() {
   local pass="$1" out="$OUT/$1" i=0 profile nss ns name admitted denials msg phase line warn t
   mkdir -p "$out"
-  local gv=0
+  local gv=0 aa=0
   [ -e "$OUT/gvisor-installed" ] && gv=1
-  mapfile -t list < <(GVISOR="$gv" node "$here/pods.mjs" list)
+  [ -e "$OUT/apparmor-installed" ] && aa=1
+  mapfile -t list < <(GVISOR="$gv" APPARMOR="$aa" node "$here/pods.mjs" list)
   for line in "${list[@]}"; do
     profile="${line% *}"
     nss="${line##* }"
