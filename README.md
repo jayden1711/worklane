@@ -6,9 +6,23 @@
 
 **Know who's on every task.**
 
-Worklane is an open-source harness that runs a crew of Claude agents on a real codebase. Workers run in parallel, each in its own git worktree, and take `ready` issues from your GitHub backlog. An independent evaluator checks each change against the issue's `done_when` contract. A plain-code coordinator (not a model) claims the work, enforces budgets and lands each change, as a PR or straight to main. A live dashboard shows who owns every task, and what's waiting for you.
+Worklane is an open-source harness that runs a crew of Claude agents on a real codebase. Workers run in parallel, each in its own git worktree, and take `ready` issues from your GitHub backlog. An independent evaluator checks each change against the issue's `done_when` contract. A plain-code coordinator (not a model) claims the work, enforces budgets and opens a PR for each change, which it merges only when the merge rules allow. A live dashboard shows who owns every task, and what's waiting for you.
 
 > **Status: pre-1.0.** Expect breaking changes between releases.
+
+## What it's for
+
+Agents write code faster than people review it. In LinearB's 2026 Software Engineering Benchmarks Report (8.1 million PRs), "AI agent pull requests wait 17.6 hours before review versus 3.4 hours for unassisted work, a 5.25x gap": that is pickup time, the wait before a reviewer starts. And "AI pull requests merge within 30 days 32.7% of the time versus 84.4% for unassisted work" ([LinearB](https://linearb.io/library/ai-in-software-development)). Worklane's answer is to let code, not a person or a model, decide which agent changes merge on their own:
+
+- **Code decides the merge.** The merge decision is plain code, following rules read from the default branch that no agent can loosen: agents can't write the config folder, and a change to the review rules, the merge policy or the engine's other controls always waits for a person. Anything the code won't merge waits for a person too. Auto-merge is off until the owner turns it on.
+- **A model can only hold a merge, never approve one alone.** The evaluator's approval is required, but never enough. Each reason the code finds still holds the merge: required checks not green on the exact commit the evaluator approved, a high-risk or protected area, a change too big, auto-merge turned off. The evaluator's doubts can only add reasons.
+- **A red main stops merging.** If the default branch goes red after a merge, only a fix for it may merge until it's green again. If no fix is green within two attempts, or the change touched the money path, auth or secrets, a revert PR opens for a person to merge and auto-merge stops until an admin turns it back on.
+
+What sets it apart is the combination, not any one part: deterministic merge rules; locks that know what an agent could change to loosen its own gate (a change to the engine's own controls always waits for a person; making that hold for a file renamed out of a locked path is in review); a model that can only hold; and the whole control plane on infrastructure you own. Rule-based merging alone isn't new: Mergify merges on deterministic rules, without the agent-aware part.
+
+**Direct land is outside these guarantees.** With `land_mode: direct`, the coordinator pushes a change straight to main after its tests and secret scan, without the merge decision above. It is off by default (`land_mode: pr` is the default), and the policy is that it stays an explicit opt-in by the owner, on a single machine only.
+
+**Where it runs.** On your own machine or your own server today; your own cloud account is the next deployment mode being built. The single machine is and stays a first-class mode, with the same guarantees.
 
 ## Install
 

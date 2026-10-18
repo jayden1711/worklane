@@ -2,6 +2,8 @@
 
 Worklane runs on your machine, against a repo you have checked out, with the Claude Code CLI you sign in to yourself. You install it from npm and run one command in your repo. That command prints one URL, and every setup step after that happens on the page it opens: the dashboard's first-run wizard.
 
+What it guarantees: plain code decides which agent changes merge, by rules read from your default branch that no agent can loosen, and a model's verdict can only hold a merge, never approve one alone. The [README](../README.md#what-its-for) says how, and what falls outside it.
+
 You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
 - git, and Node.js 22.13 or newer with npm (on a server, the install script installs Node for you);
@@ -10,7 +12,7 @@ You need:
 
 ## Local or server
 
-You choose where it runs.
+You choose where it runs. Both are a single machine, which is and stays a first-class mode with the same guarantees, not a trial version of a cloud install. Running in your own cloud account is the next mode being built.
 
 | | local | server |
 |---|---|---|
@@ -173,7 +175,7 @@ Some steps have no button, because they can't be one:
    - the `ready` label.
 
    The harness picks up only issues opened or labelled by the repo's writers (`owners.writers` in `.worklane/config.yaml`).
-3. Watch it on the Board. A worker takes the issue in its own worktree, and an independent evaluator checks the change. It then lands or opens a PR, depending on `land_mode`.
+3. Watch it on the Board. A worker takes the issue in its own worktree, and an independent evaluator checks the change. It then opens a PR, which merges on its own only when the merge rules allow (and auto-merge is on); otherwise it waits for you. With `land_mode: direct` it lands straight on main instead, outside those guarantees.
 
 To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
@@ -296,7 +298,7 @@ That command mounts your Claude login.
    - `project.repo` is the repo's `owner/name` on GitHub;
    - `owners.default` is you;
    - `owners.writers` lists the accounts whose issues the harness will work on;
-   - `land_mode` is `pr` (the default) or `direct`. `direct` needs branch protection on the default branch; without it, the coordinator refuses to start.
+   - `land_mode` is `pr` (the default) or `direct`. `direct` needs branch protection on the default branch; without it, the coordinator refuses to start. `direct` is outside the merge guarantees: a change lands after its tests and secret scan, without the merge decision. The policy is that it stays an explicit opt-in by the owner, on a single machine only.
    - `protection.strict` is `false` (the default). Set it to `true` only to opt this repo in to strict.
 2. In **`.worklane/tests.yaml`**, `runner.changed`, `runner.full` and `runner.one` are your real test commands, and `vacuity.test_globs` matches your test files.
 3. Run `worklane doctor --root <repo>` until it passes, and commit `.worklane/`.
