@@ -130,7 +130,9 @@ interface Render {
   renderNavDrawer(state: State, o?: { open?: boolean; hub?: unknown; status?: Record<string, string> }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
-  navCounts(state: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  renderNeedsYou(state: State, waiting: unknown, now?: number, error?: string | null): string;
+  NEEDS_YOU_ORDER: string;
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
@@ -1809,8 +1811,44 @@ test('#585 a grouped page\'s header draws its group\'s tabs with the counts thei
     g.window = stub;
   }
   assert.ok(c['nav-needs-you']! > 0, 'the demo has open decisions');
-  assert.match(drawer, new RegExp(`<a href="/needs-you/inbox"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
+  assert.match(drawer, new RegExp(`<a href="/needs-you"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
   assert.doesNotMatch(drawer, /data-testid="nav-(inbox|decisions|waiting)"/);
+});
+
+test('#585 Needs you is one queue: what the three tabs list, each once, blocking first then the oldest, the order stated', () => {
+  const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const hoursAgo = (h: number) => new Date(now - h * 3_600_000).toISOString();
+  const open = asOwner.decisions.filter((d) => !d.answer) as unknown as { id: string; question: string; kind: string }[];
+  assert.ok(open.length >= 2, 'the demo has open decisions');
+  const asked = open.find((d) => d.kind !== 'plan')!;
+  const w = {
+    at: new Date(now).toISOString(), markdown: '', mergedSince: new Date(now).toISOString(), merged: [],
+    items: [
+      // Waiting on you's own line for a decision the Decisions tab shows too: one row.
+      { kind: 'awaiting_decision', since: hoursAgo(1), issue: null, pr: null, title: null, detail: 'the same decision', decision: asked.id },
+      { kind: 'hotspot_held', since: hoursAgo(9_000), issue: 3, pr: null, title: 'Held one', detail: 'behind #2, on src/a.ts' },
+      { kind: 'needs_owner', since: hoursAgo(2), issue: 3, pr: 31, title: 'Held one', detail: 'left to you' },
+    ],
+  };
+  const html = r.renderNeedsYou(asOwner, w, now);
+  assert.match(html, /data-testid="page-needs-you"[\s\S]*<h1[^>]*>Needs you</);
+  assert.ok(html.includes(`data-testid="needs-you-order">${esc(r.NEEDS_YOU_ORDER)}<`), 'the page states the order');
+  const rows = [...html.matchAll(/data-testid="needs-you-item" data-kind="([a-z_]+)" data-blocking="(yes|no)"/g)].map((m) => `${m[1]} ${m[2]}`);
+  // Blocking first; the hotspot hold is the oldest of all, but nothing waits on it but you, so it is last.
+  assert.equal(rows.at(-1), 'hotspot_held no');
+  assert.ok(rows.slice(0, -1).every((x) => x.endsWith(' yes')), rows.join(', '));
+  assert.equal(rows.length, r.navCounts(asOwner, w)['nav-needs-you'], 'the badge counts the queue');
+  // Every open decision is in it once, the one Waiting on you lists too among them.
+  for (const d of open) assert.equal(html.split(`href="/needs-you/decisions/${d.id}"`).length - 1, 1, d.id);
+  assert.match(html, /href="\/needs-you\/decisions\/pr-31"/);
+  // Before Waiting on you answers: no list yet. A viewer, refused it up front: the decisions and their blocked tasks, saying so.
+  assert.match(r.renderNeedsYou(asOwner, null), /Reading what waits on you/);
+  const viewer = r.renderNeedsYou(asOther, null);
+  assert.match(viewer, /What waits on the owner is for the instance(&#x27;|')s owners and writers[^<]*: this queue has the decisions and your blocked tasks\./);
+  assert.equal([...viewer.matchAll(/data-testid="needs-you-item"/g)].length, r.navCounts(asOther)['nav-needs-you']);
+  // The queue is the group's first tab, on its own address.
+  assert.match(r.renderAt('/needs-you', asOwner), /<a href="\/needs-you"[^>]*aria-current="page"[^>]*data-testid="tab-needs-you"/);
 });
 
 test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {

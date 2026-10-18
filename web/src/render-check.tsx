@@ -41,6 +41,7 @@ import { Agents } from './pages/Agents';
 import { Decisions } from './pages/Decisions';
 import { Deploys } from './pages/Deploys';
 import { InboxPage } from './pages/Inbox';
+import { NeedsYouPage } from './pages/NeedsYou';
 import { IntakeHealthSection, IntakePage, IntakeReports, IntakeSources } from './pages/Intake';
 import { WaitingPage, WaitingView } from './pages/Waiting';
 import { FirstRunPage, FirstRunView } from './pages/FirstRun';
@@ -83,6 +84,7 @@ import type { UsageInfo } from './api';
 
 export const pages = {
   overview: (s: State) => <Overview state={s} pulse={0} />,
+  'needs-you': (s: State) => <NeedsYouPage state={s} waiting={{ data: null, error: null }} />,
   inbox: (s: State) => <InboxPage state={s} />,
   decisions: (s: State) => <Decisions state={s} />,
   issues: (s: State) => <Issues state={s} />,
@@ -247,6 +249,9 @@ export { navFor } from './App';
 /** #585: a page's header at a path, as the dashboard draws it there: with its sidebar group's tabs and their counts. */
 export const renderAt = (path: string, state: State, title = 'Page') => renderToStaticMarkup(<GroupTabs.Provider value={tabsAt(path, state, navCounts(state))}><Header title={title} /></GroupTabs.Provider>);
 export { navCounts } from './App';
+/** #585: the Needs you queue, from the state and what /api/waiting answered (null: not yet, or refused). */
+export const renderNeedsYou = (state: State, waiting: Waiting | null, now?: number, error: string | null = null) => renderToStaticMarkup(<NeedsYouPage state={state} waiting={{ data: waiting, error }} {...(now !== undefined ? { now } : {})} />);
+export { ORDER as NEEDS_YOU_ORDER } from './needs-you';
 export { landOn, redirectFor } from './redirects';
 export { EXTEND_TABS } from './pages/Extend';
 
