@@ -34,7 +34,7 @@ import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from '
 import { FixRuns } from './fix-runs.js';
 import { FlakyGate } from './flaky.js';
 import { FixForward } from './fix-forward.js';
-import { reviewPacket, type PacketInput } from './review-packet.js';
+import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 
@@ -683,7 +683,16 @@ export abstract class MergeFlow extends FixRuns {
     const ask = this.prBatching()
       ? `waits for your review: approve it and ${BRAND.name} merges it onto exactly the ${this.branch} its full run tested (testing it again first if ${this.branch} moved). Merging it by hand skips that`
       : 'waits for you to review and merge';
-    await this.d.backlog.comment(w.number, reviewPacket({ owner, ask, head, reasons, advice, ...this.packetFacts(w, head) }));
+    // The packet never costs the owner the comment or the review request: if building it throws, the plain comment
+    // (every reason and the advice, still literal text), and the error is recorded.
+    let body: string;
+    try {
+      body = reviewPacket({ owner, ask, head, reasons, advice, ...this.packetFacts(w, head) });
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: `review packet #${w.number}`, kind: 'error', message: String((e as Error)?.message ?? e).slice(0, 500) });
+      body = `[${BRAND.cli}] @${owner} ready, and ${ask} (\`${head.slice(0, 8)}\`):\n${reasons.map((r) => `- ${lit(r)}`).join('\n')}${advice ? `\n\n**Evaluator's advice:** ${lit(advice, 1500)}` : ''}`;
+    }
+    await this.d.backlog.comment(w.number, body);
     try {
       await this.d.backlog.requestReview(w.number, [owner]);
     } catch (e) {
