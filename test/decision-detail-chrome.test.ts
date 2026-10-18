@@ -45,7 +45,8 @@ test('in a real Chrome: Details opens every section; the PR body answering last 
     await until('the landing decision card', () => js<boolean>(cdp, `!!${q('[data-decision="d-land"] [data-testid="decision-details"]')}`), 20_000);
     await pressSteady(cdp, q('[data-decision="d-land"] [data-testid="decision-details"]'), 'Details');
     await until('the detail page', () => js<boolean>(cdp, `location.pathname === '/needs-you/decisions/d-land' && !!${q('[data-testid="decision-detail"]')}`), 20_000);
-    assert.equal((await js<string[]>(cdp, SECTIONS)).length, 13, 'every section');
+    // Every section the landing has: no PR yet, so no CI and no PR body (test/decision-detail.test.ts lists them).
+    assert.equal((await js<string[]>(cdp, SECTIONS)).length, 11, 'every section it has');
     assert.match(await js<string>(cdp, `${q('[data-section="if-nothing"]')}.innerText`), /No timeout: it waits/);
 
     // The owner's diff, on a click.
@@ -68,7 +69,7 @@ test('in a real Chrome: Details opens every section; the PR body answering last 
     assert.deepEqual(await js<string[]>(cdp, MOVED), [], 'the PR body answering last moved what was on the page');
     assert.match(await js<string>(cdp, `${q('[data-testid="decision-never"]')}.innerText`), /It never refunds twice/);
     // In page order, the PR body last: nothing is below the one part that answers late.
-    assert.deepEqual(await js<string[]>(cdp, SECTIONS), ['summary', 'options', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body']);
+    assert.deepEqual(await js<string[]>(cdp, SECTIONS), ['summary', 'asked', 'impact', 'if-nothing', 'findings', 'change', 'verdict', 'tests', 'ci', 'runs', 'links', 'diff', 'pr-body']);
   } finally {
     await b.close();
     await f.d.close();

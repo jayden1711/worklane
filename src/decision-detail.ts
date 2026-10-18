@@ -2,7 +2,8 @@
 // to decide from the dashboard alone. That covers what happened, what each option does, the findings, the change
 // with its level and why, the evaluator's verdict, the tests, the PR's CI, the runs, the impact flags, and what
 // happens if nothing is picked. It is built from the event log when asked, never stored. A field the log doesn't have
-// is null, and the page says "not recorded"; nothing is made up.
+// is null, and the page leaves it out; nothing is made up. What happened and what each option does are in plain words
+// from src/decision-effects.ts, which the decision cards' state uses too.
 //
 // Who gets what (roles from src/dashboard-auth.ts, never a new rule):
 //   - a viewer gets only the fields VIEWER_DECISION_FIELDS allows (src/viewer-events.ts), never the context;
@@ -13,6 +14,7 @@ import { BRAND } from './brand.js';
 import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { DecisionContext } from './decision-context.js';
+import { happened, isInvestigation, optionEffects, type DetailKind } from './decision-effects.js';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import type { PrView } from './projection.js';
@@ -31,7 +33,7 @@ export const PR_DECISION = /^pr-([1-9]\d{0,8})$/;
 export const DECISION_ID = /^[A-Za-z0-9._-]{1,200}$/;
 const SHA = /^[0-9a-f]{7,40}$/;
 
-export type DetailKind = EventPayload<'decision.asked'>['kind'] | 'pr';
+export { optionEffect, type DetailKind } from './decision-effects.js';
 
 export interface OptionView {
   option: string;
@@ -104,46 +106,6 @@ export interface DecisionDetail {
   prBody?: boolean;
   /** For a writer: the parts that are the owners' alone. */
   ownerOnly?: string | null;
-}
-
-/** What each answer does, by kind and option, in plain words; and what it can't do. */
-export function optionEffect(kind: DetailKind, option: string, o: { investigation?: boolean } = {}): { does: string; cannot: string } {
-  const cli = BRAND.cli;
-  if (kind === 'land') {
-    if (option === 'approve') return { does: 'Queues the change, at the commit that was reviewed, to land on the default branch. The land queue runs the checks again before it lands.', cannot: "It can't land any other commit: a later push needs its own review." };
-    if (option === 'reject') return { does: "Doesn't land it. The issue gets a comment saying so and the task is released.", cannot: "It doesn't close the issue or delete the branch." };
-  }
-  if (kind === 'question' && o.investigation) {
-    if (option === 'approve-fix') return { does: 'Comments on the issue that a fix is approved. The fix needs its own done_when contract (in this issue or a new one) before anything is built.', cannot: 'It never writes code by itself: investigations never turn into code changes on their own.' };
-    if (option === 'investigate-more') return { does: 'Releases the task and requeues it: the next run gets your answer in its brief.', cannot: "It doesn't say what to look at: comment on the issue for that." };
-    if (option === 'close') return { does: 'Comments that you closed the investigation, and closes the issue.', cannot: 'Nothing is fixed: no code changes.' };
-  }
-  if (kind === 'question') return { does: `Releases the task and requeues it, marked ready: the next run gets "${option}" in its brief.`, cannot: "It doesn't change code itself: the next run decides how to act on your answer." };
-  if (kind === 'domain') {
-    if (option === 'allow-repo') return { does: "Proposes a config change (a PR you review) that allows this host for the repo's agents.", cannot: "Nothing is allowed until you merge that PR." };
-    if (option === 'allow-once') return { does: "The task's next run may reach the host.", cannot: 'Later runs may not: it is refused again after that run.' };
-    if (option === 'deny') return { does: 'Nothing changes: the host stays refused.', cannot: "The agent can't reach it; it works without it or asks again." };
-  }
-  if (kind === 'plan') {
-    if (option === 'approve') return { does: 'The plan is built: the task goes on to its workers.', cannot: "It doesn't approve the code: the change is reviewed again at its own level." };
-    if (option === 'revise') return { does: 'The planner plans again, with your note (comment `/' + cli + ' revise <note>` on the issue to give one).', cannot: 'Nothing is built until a plan is approved.' };
-    if (option === 'reject') return { does: 'Stops the task: nothing is built.', cannot: "It doesn't close the issue." };
-  }
-  if (kind === 'intake') {
-    if (option === 'approve') return { does: 'Files the report as an issue, marked ready, so it is built.', cannot: "It doesn't trust the sender for later reports." };
-    if (option === 'edit') return { does: 'Files the report as an issue without ready, for you to edit first.', cannot: 'Nothing is built until you mark it ready.' };
-    if (option === 'reject') return { does: 'Drops the report, and the sender is told it was declined.', cannot: 'No issue is filed.' };
-    if (option === 'answered') return { does: 'Marks the question answered.', cannot: "It doesn't send your answer: reply to the sender yourself." };
-  }
-  if (kind === 'automation') {
-    if (option === 'approve') return { does: "Runs the automation once for this trigger, if its caps and budgets still allow it now (they are checked again).", cannot: "It doesn't approve later triggers: each run asks again." };
-    if (option === 'reject') return { does: "Doesn't run it for this trigger.", cannot: "It doesn't pause the automation: pause it on Extend." };
-  }
-  if (kind === 'delegation') {
-    if (option === 'loosen' || option === 'tighten') return { does: `Files the review.yaml change as an issue: the harness then ${option === 'loosen' ? 'stops waiting for you on' : 'waits for you again on'} that category, once its PR is merged.`, cannot: 'Nothing changes before that PR is reviewed and merged.' };
-    if (option === 'keep') return { does: 'Nothing changes.', cannot: "It won't be suggested again until the record changes." };
-  }
-  return { does: 'Recorded as your answer: the coordinator acts on it at its next tick.', cannot: "It can't do anything the coordinator wasn't built to do with this answer." };
 }
 
 /** What happens if nobody picks anything: nothing times out. */
@@ -229,31 +191,6 @@ function impactOf(categories: Record<string, string[]> | null, files: string[] |
   };
 }
 
-/** The plain line on what happened, by kind. */
-function happened(kind: DetailKind, issue: number | null, ctx: DecisionContext | undefined, o: { investigation: boolean; level: string | null; pr?: PrView | null }): string {
-  const on = issue !== null ? ` on #${issue}` : '';
-  switch (kind) {
-    case 'land':
-      return `An agent's change${on} passed its checks and the evaluator, and its review level (${o.level ?? 'level not recorded'}) needs your approval before it lands.`;
-    case 'question':
-      return o.investigation
-        ? `An investigation${on} finished with ${ctx?.findings ? `${ctx.findings.length} finding(s)` : 'findings not recorded'}${ctx?.confidence ? ` (confidence ${ctx.confidence})` : ''}. It asks how to go on: nothing is changed until you say.`
-        : `The agent working${on} stopped to ask you, rather than guess.`;
-    case 'domain':
-      return `An agent's run${on} tried to reach a host outside its allowlist, and was refused.`;
-    case 'plan':
-      return `The plan${on} is held for your approval: nothing is built before it.`;
-    case 'intake':
-      return 'A report came in from outside, from a sender who is not trusted: it needs your OK before it becomes an issue.';
-    case 'automation':
-      return "An automation was triggered and is set to wait for its owner's approval before each run (a webhook's always is).";
-    case 'delegation':
-      return "The review history of a category of changes suggests changing whether it waits for you.";
-    case 'pr':
-      return `PR #${o.pr?.number ?? '?'}${on} was left to a person by the merge policy${o.pr?.waitReasons.length ? `: ${o.pr.waitReasons.join('; ')}` : ''}.`;
-  }
-}
-
 /** The instance's held Claude logins now (#473): a claude_auth.failed with no later recovered for its key. */
 function heldLogin(events: readonly StoredEvent[]): { login: string; detail: string; since: string } | null {
   const held = new Map<string, { login: string; detail: string; since: string }>();
@@ -304,14 +241,14 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   const issue = asked ? asked.issue : pr!.issue;
   const options = asked ? asked.options : [];
   const recommendation = asked ? asked.recommendation : '';
-  const investigation = kind === 'question' && ['approve-fix', 'investigate-more', 'close'].every((o) => options.includes(o));
+  const investigation = isInvestigation(kind, options);
   const base: DecisionDetail = {
     id,
     kind,
     issue,
     owner: asked ? asked.owner : '',
     question: asked ? asked.question : `Review and merge PR #${pr!.number}?`,
-    options: options.map((option) => ({ option, ...optionEffect(kind, option, { investigation }), recommended: option === recommendation })),
+    options: optionEffects(kind, options).map((o) => ({ ...o, recommended: o.option === recommendation })),
     recommendation,
     askedAt: asked ? asked.ts : (pr!.decision?.at ?? pr!.openedAt),
     answer: answer ?? (pr && kind === 'pr' && pr.state !== 'open' ? { by: '', answer: pr.state, at: pr.merged?.at ?? '' } : null),
@@ -383,7 +320,7 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   return {
     ...base,
     title,
-    summary: { happened: happened(kind, issue, ctx, { investigation, level: change?.level ?? null, pr }), agent: ctx?.summary ?? null },
+    summary: { happened: happened(kind, issue, base.question, { investigation, pr }), agent: ctx?.summary ?? null },
     reasoning,
     receipts: detail.filter((r) => !r.startsWith(RECOMMENDATION_PREFIX)),
     findings: ctx?.findings ? { list: ctx.findings, confidence: ctx.confidence ?? null, unverified: ctx.unverified ?? [] } : null,

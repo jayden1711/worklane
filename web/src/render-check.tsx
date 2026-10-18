@@ -130,8 +130,9 @@ export const renderMachine = (data: MachineData) => renderToStaticMarkup(<Machin
 export const renderChip = (kind: 'value' | 'badge', tone?: string) =>
   renderToStaticMarkup(kind === 'value' ? <ValuePill {...(tone === 'green' ? { tone } : {})}>approve</ValuePill> : <Badge {...(tone ? { tone: tone as 'ok' } : {})}>landed</Badge>);
 export const renderButton = (variant?: 'default' | 'outline' | 'ghost' | 'danger') => renderToStaticMarkup(<Button {...(variant ? { variant } : {})}>Go</Button>);
-/** One decision card; `sending`: the answer on its way as it draws. */
-export const renderDecisionCard = (d: Decision, sending?: string) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} />);
+/** One decision card; `sending`: the answer on its way as it draws; `evidence`: its detail as read when Details opens. */
+export const renderDecisionCard = (d: Decision, sending?: string, evidence?: DecisionDetail) => renderToStaticMarkup(<DecisionCard d={d} selected={false} sending={sending ?? null} {...(evidence ? { evidence } : {})} />);
+export { plainTerms, termMeaning } from './pages/Decisions';
 /** The Updater setup steps alone; `review` opens one step's review as the server answered it. */
 export const renderUpdaterSetup = (data: MachineData, review: Parameters<typeof UpdaterSetupView>[0]['initialReview'] = null) => renderToStaticMarkup(<UpdaterSetupView data={data} initialReview={review} />);
 export const renderUpdatesPanel = (data: UpdatesPanelData) => renderToStaticMarkup(<UpdatesPanelView data={data} />);
