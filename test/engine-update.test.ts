@@ -14,6 +14,7 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   repoFromUrl(url: string): { owner: string; repo: string } | null;
   fastForward(c: unknown): { ok: boolean; reason?: string };
   evaluateChecks(runs: Run[], required: string[]): { ok: boolean; final?: boolean; reason?: string };
+  RETIRED_CHECKS: readonly string[];
   quiet(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { quiet: boolean; why?: string };
   inFlight(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { tests: unknown[]; agents: unknown[] };
   slotPid(v: unknown): number | null;
@@ -68,6 +69,21 @@ test('checks: every one complete and green, every required one present and succe
   // A rerun that passed supersedes the earlier failure of the same check.
   assert.equal(u.evaluateChecks([ok('test', { conclusion: 'failure', started_at: '2026-01-01T00:00:00Z' }), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req).ok, true);
   assert.deepEqual(u.evaluateChecks([ok('test')], []), { ok: false, final: true, reason: 'no required checks configured in updates.json' });
+});
+
+test('a retired check (desktop, #744) an existing updates.json still requires: not waited for when absent, as strict as ever when it ran', () => {
+  // Every install made before #744 has "desktop" in required_checks (the old UPDATE_DEFAULT_CHECKS), and no main
+  // commit after it runs that job: without this, such an install would never take another update.
+  const req = ['test', 'desktop'];
+  assert.deepEqual(u.evaluateChecks([ok('test')], req), { ok: true }, 'absent: no longer waited for');
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], req), { ok: false, final: true, reason: 'required check "desktop" ended failure' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'skipped' })], req), { ok: false, final: true, reason: 'required check "desktop" was skipped' }, 'it ran: skipped still refuses');
+  assert.equal(u.evaluateChecks([ok('test'), ok('desktop', { status: 'in_progress', conclusion: null })], req).final, false, 'it is running: waited for');
+  // The other required checks lose nothing.
+  assert.match(u.evaluateChecks([ok('desktop')], req).reason!, /"test" hasn't run/);
+  // Retired names alone are no gate: refused as an empty list is, never installed on nothing.
+  assert.deepEqual(u.evaluateChecks([ok('test')], ['desktop']), { ok: false, final: true, reason: 'no required checks configured in updates.json but retired ones (desktop): add the checks to require at a root shell (updates.sh --add-check)' });
+  assert.deepEqual(u.RETIRED_CHECKS, ['desktop'], 'a fixed list in the installed updater, never read from the commit it judges');
 });
 
 test('quiet only with no live agent or full-run lock and no emergency stop', () => {
