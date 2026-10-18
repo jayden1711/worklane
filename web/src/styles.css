@@ -29,13 +29,14 @@
   --blue: #d97757;
   --blue-ink: #8a412a;
   --blue-tint: rgb(217 119 87 / 0.12);
-  /* Status colours, dark enough to be text on every light background. */
-  --green: #2d6235;
-  --green-tint: rgb(45 98 53 / 0.12);
-  --orange: #8a4600;
-  --orange-tint: rgb(138 70 0 / 0.12);
-  --red: #a12f24;
-  --red-tint: rgb(161 47 36 / 0.1);
+  /* Status colours, dark enough to be text on every light background, and on their own tint over the darkest hover
+     (the active sidebar row's warn count, a hovered tool row's badge). */
+  --green: #2c5f33;
+  --green-tint: rgb(44 95 51 / 0.12);
+  --orange: #854300;
+  --orange-tint: rgb(133 67 0 / 0.12);
+  --red: #9e2e23;
+  --red-tint: rgb(158 46 35 / 0.1);
   --shadow-xs: 0 0 4px 0 #0000000a;
   --shadow-sm: 0 18px 47px 0 #00000008, 0 7.5px 19px 0 #00000005, 0 4px 10.5px 0 #00000005, 0 2.3px 5.8px 0 #00000003, 0 1.2px 3.1px 0 #00000003, 0 0.5px 1.3px 0 #00000003;
   --shadow-md: 0 17.54px 23.39px 0 #0000000a, 0 9.4px 12.5px 0 #00000008, 0 5.25px 7px 0 #00000005, 0 2.79px 3.72px -2px #00000003, 0 1.16px 1.5px 0 #00000003;

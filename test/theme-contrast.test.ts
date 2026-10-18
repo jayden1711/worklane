@@ -3,7 +3,8 @@
 // dependency), checked against WCAG 2's contrast ratio. The pairs come from the code: every text-* colour class used
 // under web/src is a text token, so a new one can't be missed. A text token used anywhere on its own (no fill of its
 // own beside it) can sit on any light background, so it must reach 4.5:1 on all of them; a text token beside a tint
-// is checked on that tint laid over each resting background; one only ever used on a fill (text-surface on bg-ink,
+// is checked on that tint laid over every light background, hover ones included (the active sidebar row is hover-2,
+// and a tool row hovers to it); one only ever used on a fill (text-surface on bg-ink,
 // text-white on bg-green) is checked on that fill. A control's edge reaches 3:1 (WCAG 1.4.11) on the resting
 // backgrounds; dividers don't need to. Dark mode's block is pinned byte for byte.
 import { test } from 'node:test';
@@ -206,7 +207,7 @@ function pairs(): { pairs: Pair[]; textTokens: Set<string> } {
         if (f.alpha !== undefined) fill.a = f.alpha;
         const label = f.alpha === undefined ? f.name : `${f.name}/${Math.round(f.alpha * 100)}`;
         if (fill.a >= 1) add({ text: name, on: label, ratio: contrast(colour(name), fill), need: 4.5, where });
-        else for (const under of OVER[label] ? [OVER[label]] : RESTING) add({ text: name, on: `${label} over ${under}`, ratio: contrast(colour(name), over(fill, colour(under))), need: 4.5, where });
+        else for (const under of OVER[label] ? [OVER[label]] : BACKGROUNDS) add({ text: name, on: `${label} over ${under}`, ratio: contrast(colour(name), over(fill, colour(under))), need: 4.5, where });
       }
     }
   }
