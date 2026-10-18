@@ -292,6 +292,51 @@ test("the health view carries the line, read from root's file now against the in
   }
 });
 
+/** Entries root might mistype with a credential in them: each must refuse the file without the credential in the refusal. */
+const SECRET_ENTRIES = ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', '*.h?token=s3cret', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', `s3cret${'a'.repeat(300)}`];
+
+test('a refused entry is named by its position, never quoted while it could hold a credential: not in the refusal, nor at start', { skip: !posix && 'root-owned files are POSIX' }, () => {
+  const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  for (const entry of SECRET_ENTRIES) {
+    const r = readProviderHosts(hostsFile({ hosts: ['ok.example.com', entry] }), { ownerUid: me });
+    assert.equal(r.state, 'refused', entry);
+    assert.doesNotMatch(r.error!, /s3cret/, entry);
+    assert.match(r.error!, /hosts entry 2\b/, entry);
+    assert.doesNotMatch(providerHostsAtStart(agents, r).join('\n'), /s3cret/, entry);
+  }
+  // A key that isn't a plain word isn't quoted either; one that is, still is.
+  const key = readProviderHosts(hostsFile({ hosts: ['ok.example.com'], 'https://alice:s3cret@h/': true }), { ownerUid: me });
+  assert.match(key.error!, /an unknown key, not shown/);
+  assert.doesNotMatch(key.error!, /s3cret/);
+  // Once an entry is host[:port] it can't hold a user, query or fragment: it is quoted, to say what to write instead.
+  assert.match(readProviderHosts(hostsFile({ hosts: ['API.example.com'] }), { ownerUid: me }).error!, /hosts entry 1 \("API\.example\.com"\) must be written as a URL normalises it: "api\.example\.com"/);
+});
+
+test("GET /api/health: a writer is never sent a credential from a mistyped entry in root's file", { skip: !posix && 'root-owned files are POSIX' }, async () => {
+  const saved = { ...machineProviderHosts };
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  cfg.agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  const stateDir = mkdtempSync(join(tmpdir(), 'prov-health-'));
+  const db = join(stateDir, 'events.db');
+  new EventLog(db).close();
+  const d = await startDashboard({ root, cfg, eventsDb: db, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(stateDir, 'slots'), pollMs: 50 });
+  try {
+    const url = `${d.url.split('/?')[0]!}/api/health`;
+    for (const entry of SECRET_ENTRIES) {
+      allowProviderHosts('ok.example.com', entry);
+      for (const who of ['example-collaborator', 'example-owner']) {
+        const text = await (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).text();
+        assert.doesNotMatch(text, /s3cret/, `${who}: ${entry}`);
+        assert.match(text, /hosts entry 2/, `${who}: the refusal is there (${entry})`);
+      }
+    }
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+    await d.close();
+  }
+});
+
 test('GET /api/health: the owners and writers get the provider hosts line; a viewer gets none of it, nor any host in it', { skip: !posix && 'root-owned files are POSIX' }, async () => {
   const saved = { ...machineProviderHosts };
   const { dir: root } = exampleProject();

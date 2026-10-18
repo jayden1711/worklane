@@ -70,24 +70,32 @@ export function baseUrlProblem(raw: unknown): string | null {
   return null;
 }
 
-/** One allowlist entry: host[:port], in the form WHATWG URL gives the host; or why it isn't one. */
-function entryOf(raw: unknown): { host: string; port: string | null } | string {
-  if (typeof raw !== 'string' || !raw) return 'each host must be a non-empty string';
-  const show = JSON.stringify(raw.slice(0, 80));
-  if (raw.length > PROVIDER_HOSTS_LIMITS.entry) return `host ${show} is longer than ${PROVIDER_HOSTS_LIMITS.entry} characters`;
-  if (raw.includes('*')) return `host ${show}: no wildcards; name each host`;
+/**
+ * One allowlist entry: host[:port], in the form WHATWG URL gives the host; or why it isn't one. `at`: its position in
+ * "hosts", from 1.
+ *
+ * INVARIANT (#392): a refusal names the entry by position and never quotes what root wrote until it has matched
+ * host[:port], which can't hold a user, password, query or fragment. The refusal reaches the start-up log and writers
+ * on the Health page, and a mistyped entry (`user:secret@host`, `https://user:secret@host/`, `host?key=secret`) may
+ * hold a credential. As src/network.ts does for the proxy.
+ */
+function entryOf(raw: unknown, at: number): { host: string; port: string | null } | string {
+  const name = `hosts entry ${at}`;
+  if (typeof raw !== 'string' || !raw) return `${name} must be a non-empty string`;
+  if (raw.length > PROVIDER_HOSTS_LIMITS.entry) return `${name} is longer than ${PROVIDER_HOSTS_LIMITS.entry} characters`;
+  if (raw.includes('*')) return `${name}: no wildcards; name each host`;
   const m = /^(\[[0-9a-f:.]+\]|[^\s:/?#@[\]\\]+)(?::(\d{1,5}))?$/.exec(raw);
-  if (!m) return `host ${show} must be host or host:port (no scheme, user, path or query)`;
+  if (!m) return `${name} must be host or host:port (no scheme, user, path, query or fragment); not shown, as it may hold a credential`;
   const [, host, port] = m as unknown as [string, string, string | undefined];
   let canonical: string;
   try {
     canonical = new URL(`https://${host}/`).hostname;
   } catch {
-    return `host ${show} is not a host name or address`;
+    return `${name} (${JSON.stringify(host)}) is not a host name or address`;
   }
   // WHY: matched exactly against what WHATWG URL makes of a base_url, so the entry must already be in that form.
-  if (canonical !== host) return `host ${show} must be written as a URL normalises it: ${JSON.stringify(canonical)}`;
-  if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return `host ${show} has a bad port`;
+  if (canonical !== host) return `${name} (${JSON.stringify(host)}) must be written as a URL normalises it: ${JSON.stringify(canonical)}`;
+  if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return `${name} (${JSON.stringify(host)}) has a bad port`;
   return { host, port: port ?? null };
 }
 
@@ -111,12 +119,13 @@ export function readProviderHosts(file = PROVIDER_HOSTS_FILE, o: { ownerUid?: nu
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return no('expected {"hosts": ["<host>", "<host>:<port>", ...]}');
   const extra = Object.keys(raw).filter((k) => k !== 'hosts');
-  if (extra.length) return no(`unknown key ${JSON.stringify(extra[0])} (only "hosts")`);
+  // WHY (#392): a key is quoted only when it is a plain word, which can't hold a user, password, query or fragment.
+  if (extra.length) return no(/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(extra[0]!) ? `unknown key ${JSON.stringify(extra[0])} (only "hosts")` : 'an unknown key, not shown (only "hosts")');
   const list = (raw as { hosts?: unknown }).hosts;
   if (!Array.isArray(list)) return no('expected {"hosts": ["<host>", "<host>:<port>", ...]}');
   if (list.length > PROVIDER_HOSTS_LIMITS.hosts) return no(`more than ${PROVIDER_HOSTS_LIMITS.hosts} hosts`);
-  for (const h of list) {
-    const e = entryOf(h);
+  for (const [i, h] of list.entries()) {
+    const e = entryOf(h, i + 1);
     if (typeof e === 'string') return no(e);
   }
   return { file, state: 'ok', hosts: [...new Set(list as string[])], error: null };
@@ -139,8 +148,8 @@ export function providerHostRefusal(baseUrl: string, h: ProviderHosts = machineP
   if (h.state === 'refused') return h.error!;
   const u = new URL(baseUrl);
   const port = u.port || (u.protocol === 'https:' ? '443' : '80');
-  const ok = h.hosts.some((raw) => {
-    const e = entryOf(raw);
+  const ok = h.hosts.some((raw, i) => {
+    const e = entryOf(raw, i + 1);
     return typeof e !== 'string' && e.host === u.hostname && (e.port === null ? u.port === '' : e.port === port);
   });
   return ok ? null : `${u.host} is not an allowed provider host (${h.hosts.join(', ') || 'none'}, from ${h.file})`;
