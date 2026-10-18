@@ -72,7 +72,7 @@ import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
 import { RunDetail, RunList, RunResearchView, RunsRefused, RunWhy, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
-import { BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
+import { BoardCardView, BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
 import { MainWatchAlert, ProtectionStatus } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
@@ -237,17 +237,37 @@ export const renderUsageLines = (usage: UsageInfo[], now: number) => renderToSta
 export const renderOverviewWithUsage = (state: State, usage: UsageInfo[], now: number) => renderToStaticMarkup(<Overview state={state} pulse={0} usage={usage} now={now} />);
 export { countdown } from './components/Usage';
 /**
- * #664: a button of each kind of work (one that lands, one that starts) under a page's usage view. Every land button
- * is in a file held by another PR (Board, Decisions, DecisionDetail), so this stands in for them.
+ * #664: the Button mechanism alone, a button of each kind of work (one that lands, one that starts) under a page's
+ * usage view; with `why`, both are held by it (a `why` wins over `work`).
  */
-export const renderPausedWork = (usage: UsageInfo[], current: string | null) =>
+export const renderPausedWork = (usage: UsageInfo[], current: string | null, why?: string) =>
   renderToStaticMarkup(
     <PausedScope usage={usage} current={current}>
       {(['lands', 'starts'] as const).map((w) => (
-        <Button key={w} size="sm" work={w} data-testid={`paused-${w}`}>
+        <Button key={w} size="sm" work={w} why={why} data-testid={`paused-${w}`}>
           {w === 'lands' ? 'Approve' : 'Run now'}
         </Button>
       ))}
+    </PausedScope>,
+  );
+/**
+ * #664: the real land buttons under a page's usage view: a Board card's Approve and, its approve panel open, Approve
+ * and land; and a config PR's Confirm merge (its plan shown).
+ */
+export const renderLandsUnderUsage = (usage: UsageInfo[], current: string | null, o: { card: unknown; configPr: ConfigPr }) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      <BoardCardView card={o.card as never} instance={null} showInstance={false} now={0} initialPanel="approve" />
+      <ul>
+        <ConfigPrRow pr={o.configPr} canAct initialPlan={{ command: 'gh pr merge 7', then: 'then this checkout is fast-forwarded' }} onDone={() => {}} />
+      </ul>
+    </PausedScope>,
+  );
+/** #664: the voice banner for `view`, with these open decisions, under a page's usage view. */
+export const renderVoiceBannerUnderUsage = (usage: UsageInfo[], current: string | null, view: BannerView, decisions: Pick<Decision, 'id' | 'kind'>[]) =>
+  renderToStaticMarkup(
+    <PausedScope usage={usage} current={current}>
+      <VoiceBanner view={view} decisions={decisions} onConfirm={() => {}} onCancel={() => {}} />
     </PausedScope>,
   );
 /**

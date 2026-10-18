@@ -21,7 +21,9 @@ interface Render {
   renderMachine(data: unknown): string;
   renderClaudeAccount(data: unknown, now?: number): string;
   renderUnderUsage(usage: unknown[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: unknown }): string;
-  renderPausedWork(usage: unknown[], current: string | null): string;
+  renderPausedWork(usage: unknown[], current: string | null, why?: string): string;
+  renderLandsUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; configPr: unknown }): string;
+  renderVoiceBannerUnderUsage(usage: unknown[], current: string | null, view: unknown, decisions: { id: string; kind: string }[]): string;
 }
 let r: Render;
 
@@ -178,6 +180,54 @@ test('paused reason: a land action says it lands now and only agent runs wait; a
   // Running: neither says anything.
   const running = r.renderPausedWork([usageOf('example', false)], null);
   for (const id of ['paused-lands', 'paused-starts']) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+});
+
+/** A Board card waiting for the owner's landing approval, as src/board.ts builds it (approve only on a 'land' decision). */
+const landCard = { instance: 'example', issue: 12, title: 'Migrate', column: 'waiting', status: 'in-review', pr: null, startedAt: '2026-10-18T08:00:00Z', since: '2026-10-18T08:30:00Z', waiting: null, decision: { id: 'land-12', kind: 'land', question: 'Approve landing #12 (L3)?', options: ['approve', 'reject'], recommendation: 'approve' }, level: 'L3', highRisk: true, actions: { watch: null, steer: false, answer: false, approve: { decision: 'land-12', options: ['approve', 'reject'] } } };
+const openConfigPr = { number: 7, url: 'https://github.com/o/r/pull/7', kind: 'config', base: 'main', state: 'open', mergedBy: null, mergedAt: null, synced: false, sha: null, why: null, retry: false, command: null };
+/** The real land buttons: the Board's Approve and Approve and land (decide, then landNext), a config PR's Confirm merge (gh pr merge, at once). */
+const LANDS = ['board-approve', 'board-approve-confirm', 'config-pr-merge-confirm'];
+
+test('paused reason: the real land buttons (Board approve, config PR merge) say they land now, not that they wait', () => {
+  const html = r.renderLandsUnderUsage([usageOf('example', true)], null, { card: landCard, configPr: openConfigPr });
+  for (const id of LANDS) {
+    const b = described(html, id);
+    assert.equal(b.disabled, false, `${id} is not refused while paused: ${b.tag}`);
+    assert.equal(b.text, LANDS_HINT, `${id}'s aria-describedby names the land text: ${b.tag}`);
+  }
+  assert.equal(html.split(LANDS_HINT).length - 1, LANDS.length, 'once per land button');
+  assert.doesNotMatch(html, /takes effect when the instance resumes/, 'no land button says it waits for the resume');
+  const running = r.renderLandsUnderUsage([usageOf('example', false)], null, { card: landCard, configPr: openConfigPr });
+  for (const id of LANDS) assert.deepEqual([described(running, id).disabled, described(running, id).id], [false, undefined], id);
+});
+
+test("paused reason: the voice banner's Approve says what its decision's kind does: a landing lands now, an intake waits", () => {
+  const pending = (decision: string) => ({ pending: { kind: 'approve', issue: 12, decision, title: 'T', effect: 'e', until: Date.now() + 10_000 }, left: 10 });
+  const decisions = [
+    { id: 'land-12', kind: 'land' },
+    { id: 'intake-12', kind: 'intake' },
+    { id: 'plan-12', kind: 'plan' },
+    { id: 'q-12', kind: 'question' },
+  ];
+  const paused = [usageOf('example', true)];
+  const say = (decision: string) => described(r.renderVoiceBannerUnderUsage(paused, null, pending(decision), decisions), 'voice-banner-confirm');
+  assert.equal(say('land-12').text, LANDS_HINT, 'a merge decision lands now');
+  assert.equal(say('intake-12').text, PAUSED_HINT, 'an intake decision starts work: it waits for the resume');
+  assert.equal(say('plan-12').text, PAUSED_HINT, 'a plan decision starts work: it waits for the resume');
+  assert.equal(say('q-12').id, undefined, 'any other kind says nothing');
+  for (const d of ['land-12', 'intake-12']) assert.equal(say(d).disabled, false, `${d}: not refused while paused`);
+  // Running: nothing said.
+  assert.equal(described(r.renderVoiceBannerUnderUsage([usageOf('example', false)], null, pending('land-12'), decisions), 'voice-banner-confirm').id, undefined);
+});
+
+test('paused reason: a `why` that holds wins over `work` while paused, for both kinds of work', () => {
+  const html = r.renderPausedWork([usageOf('example', true)], null, 'Saving…');
+  for (const id of ['paused-lands', 'paused-starts']) {
+    const b = described(html, id);
+    assert.equal(b.disabled, true, `${id} is held by its why: ${b.tag}`);
+    assert.equal(b.text, 'Saving…', `${id} says its why, not the pause`);
+  }
+  assert.doesNotMatch(html, /lands now|takes effect when the instance resumes/, 'neither pause text is said');
 });
 
 test('emergency stop is unchanged: its banner still says the coordinator halted and starts none, and it adds no pause hint or hold', () => {

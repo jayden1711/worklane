@@ -85,7 +85,7 @@ export function ConfigPrRow({ pr, canAct, initialPlan = null, onDone }: { pr: Co
             <code className={code}>{plan.command}</code>
             <p className="text-[12.5px] text-ink-2">{plan.then}.</p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" disabled={busy} onClick={() => void merge(true)} data-testid="config-pr-merge-confirm">
+              <Button size="sm" disabled={busy} onClick={() => void merge(true)} work="lands" data-testid="config-pr-merge-confirm">
                 {busy ? 'Merging…' : 'Confirm merge'}
               </Button>
               <Button size="sm" variant="ghost" disabled={busy} onClick={() => setPlan(null)} data-testid="config-pr-merge-cancel">

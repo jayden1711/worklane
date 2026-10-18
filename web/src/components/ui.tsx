@@ -30,6 +30,14 @@ export const PAUSED_SAYS = {
 } as const;
 /** The work a Button does, for what it says while paused: one key of PAUSED_SAYS, so a button says exactly one. */
 export type Work = keyof typeof PAUSED_SAYS;
+/**
+ * The work approving a decision does, by its kind (Decision.kind, as the projection records it from decision.asked;
+ * the Board's approve reads the same field): a landing ('land') is queued and landed on the coordinator's next pass
+ * (src/coordinator/decisions.ts, then landing.ts's landNext, neither with a usage-pause check); an intake or a plan
+ * approval starts agent work, which waits for the resume. Any other kind says nothing.
+ */
+const DECISION_WORK: Readonly<Record<string, Work>> = { land: 'lands', intake: 'starts', plan: 'starts' };
+export const decisionWork = (kind: string | null | undefined): Work | null => (kind && Object.hasOwn(DECISION_WORK, kind) ? DECISION_WORK[kind]! : null);
 /** Whether the instance this page acts on is paused on the Claude usage limit (App provides it, from /api/usage). */
 export const InstancePaused = createContext(false);
 
