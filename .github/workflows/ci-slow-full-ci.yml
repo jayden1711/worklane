@@ -1,0 +1,17 @@
+# The label doesn't rerun ci.yml's fast suite until the next push; close and reopen the PR for that (docs/test-runs.md).
+name: ci slow full-ci
+# Adding the full-ci label to an open pull request runs every slow job on it: this calls ci-slow.yml (workflow_call),
+# whose scope job reads the label from the event and selects them all. Its own workflow, not a `labeled` type in
+# ci-slow.yml (#615): GitHub can't filter labeled by name, so there every label started a run that cancelled the PR's
+# run in progress. Here any other label (needs-owner, added by the merge flow) skips the one job below: no slow job
+# starts, nothing is cancelled, and the skipped check is "full-ci", named apart from every check of the PR's own run.
+# The called run's concurrency group is its own (ci-slow.yml): it never cancels the PR's run either.
+on:
+  pull_request:
+    types: [labeled]
+permissions:
+  contents: read
+jobs:
+  full-ci:
+    if: github.event.label.name == 'full-ci'
+    uses: ./.github/workflows/ci-slow.yml

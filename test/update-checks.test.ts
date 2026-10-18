@@ -113,10 +113,12 @@ function checks(): Check[] {
     const wf = parse(readFileSync(join(dir, f), 'utf8')) as { on?: unknown; jobs?: Record<string, Job> };
     const on = wf.on as Record<string, { branches?: string[] } | null> | string[] | undefined;
     const push = pushRunsOn(wf.on);
-    // Every pull request: a pull_request trigger without a paths filter (one with paths runs on some PRs only).
+    // Every pull request: a pull_request trigger without a paths filter (one with paths runs on some PRs only), on
+    // each push to it (synchronize; GitHub's default types include it). One on labeled alone (ci-slow-full-ci.yml,
+    // for the full-ci label) runs on some PRs only.
     const prOn = Array.isArray(on) ? on.includes('pull_request') : !!on && 'pull_request' in on;
-    const prFilter = !Array.isArray(on) && on && typeof on === 'object' ? (on as Record<string, { paths?: string[] } | null>).pull_request : null;
-    const pr = prOn && !prFilter?.paths;
+    const prFilter = !Array.isArray(on) && on && typeof on === 'object' ? (on as Record<string, { paths?: string[]; types?: string[] } | null>).pull_request : null;
+    const pr = prOn && !prFilter?.paths && (prFilter?.types ?? ['opened', 'synchronize', 'reopened']).includes('synchronize');
     // A batch: the workflow ci-batch.yml dispatches on main (test/ci-batch.test.ts: only ever on the default branch).
     const batched = f === batch.SLOW_WORKFLOW && !Array.isArray(on) && !!on && 'workflow_dispatch' in on;
     // A workflow that runs neither on a push to main, nor on every PR, nor as a batch (tags only, paths-filtered PRs,
