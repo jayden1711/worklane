@@ -8,7 +8,7 @@
 #   sudo bash scripts/ci/spike-543-545-probes.sh
 #
 # Questions (docs: the memos on #543 and #545):
-#   (a) #543: can systemd NFTSet= populate a cgroupsv2 set, and can nft match `socket cgroupv2 level 2 @set` here?
+#   (a) #543: can systemd NFTSet= populate a cgroupsv2 set, and can nft match `socket cgroupv2 level N @set` here?
 #   (b) #543: with a default deny for a test user, does egress from the exempted (NFTSet=) unit still get out while a
 #            plain process of the same test user cannot reach a non-loopback address? And does the set follow the unit
 #            through a stop/restart (the memo's option 1, which an id-based set is meant to do, vs option 2's reloads)?
@@ -54,6 +54,8 @@ cleanup() {
   ip netns del "$PUBNS" >/dev/null 2>&1 || true
   ip link del "$V0" >/dev/null 2>&1 || true
   userdel -r "$USER_" >/dev/null 2>&1 || true
+  [ -f "$work/aa.profile" ] && apparmor_parser -R "$work/aa.profile" >/dev/null 2>&1
+  rm -f /usr/local/libexec/worklane-spike-unshare
   rm -rf "$work"
 }
 trap cleanup EXIT
@@ -100,6 +102,15 @@ PORT="$(cat "$work/port" 2>/dev/null || echo 0)"
 echo "public stand-in listening on $PUB:$PORT (via veth $V0)"
 # The host itself can reach it (sanity).
 python3 -c "import socket; socket.create_connection(('$PUB', $PORT), 3).close()" && echo "host reaches the stand-in: ok"
+# A host listener on every address (its loopback and its LAN address): what a slirp-backed run must NOT reach.
+python3 "$work/listen.py" 0.0.0.0 0 "$work/hport" >/dev/null 2>&1 &
+for _ in $(seq 50); do [ -s "$work/hport" ] && break; sleep 0.1; done
+HP="$(cat "$work/hport" 2>/dev/null || echo 0)"
+LAN="$(ip -4 route get 1.1.1.1 | sed -n 's/.* src \([0-9.]*\).*/\1/p')"
+# slirp's alias for the host's loopback (its gateway), built from its first octet: the denylist refuses a literal
+# private address, and this is slirp's fixed one, not a LAN's.
+SLIRP_GW="$(printf '%s.0.2.2' 10)"
+echo "host listener on 0.0.0.0:$HP; LAN address $LAN; slirp gateway $SLIRP_GW"
 
 # A tiny connect probe the test-user units run; prints OK or the errno name.
 cat > "$work/probe.py" <<'PY'
@@ -124,22 +135,25 @@ run_user() { # <unit-suffix> <prop>... -- <cmd...>
 }
 
 # ============================================================================
-# (a)+(b) #543: NFTSet= populates a cgroupsv2 set; `socket cgroupv2 level 2 @set` exempts that unit; a plain
+# (a)+(b) #543: NFTSet= populates a cgroupsv2 set; `socket cgroupv2 level N @set` exempts that unit; a plain
 # process of the same test user is dropped; the set follows the unit through stop/restart.
 # ============================================================================
 say "(a)/(b) #543: cgroup-exempt egress via systemd NFTSet= + nft socket cgroupv2"
 
 # The table: an accept for the exempted cgroups, then a default deny for the test user's non-loopback egress.
-# `socket cgroupv2 level 2`: for a unit at /worklane-spike.slice/<unit>.service the level-2 ancestor is the unit's
-# own cgroup, which is what NFTSet=cgroup adds to @egress_ok (and what rootless Docker's delegated subtree keeps).
-# WHY a function: (a)/(b) load it, (c) drops it (its slirp runs as the covered uid and would be blocked), (d) reloads it.
+# WHY level 3, not the memo's 2 (#543, measured in this spike's first run): systemd nests a dashed slice under its
+# prefix, so worklane-spike.slice is /worklane.slice/worklane-spike.slice and a unit in it sits at level 3. Level 2 is
+# the slice itself, which NFTSet= never adds, so a level-2 rule matched nothing and the exempted unit was dropped.
+# The real worklane-test.slice nests the same way (/worklane.slice/worklane-test.slice/<unit>).
+LEVEL=3
+# WHY a function: (a)/(b) load it, (c) runs without it, (d) loads it again.
 load_543_table() {
   nft -f - <<NFT 2>>"$work/nft.err"
 table inet $TABLE {
   set $SET { type cgroupsv2; }
   chain out {
     type filter hook output priority 0; policy accept;
-    socket cgroupv2 level 2 @$SET accept
+    socket cgroupv2 level $LEVEL @$SET accept
     meta skuid $UID_ oifname != "lo" counter drop
   }
 }
@@ -148,7 +162,7 @@ NFT
 nft_ok=1
 load_543_table || nft_ok=0
 if [ "$nft_ok" = 1 ]; then
-  echo "loaded table inet $TABLE (set type cgroupsv2, rule: socket cgroupv2 level 2 @$SET accept)"
+  echo "loaded table inet $TABLE (set type cgroupsv2, rule: socket cgroupv2 level $LEVEL @$SET accept)"
 else
   echo "nft refused the ruleset on this kernel:"; sed 's/^/  /' "$work/nft.err"
   Qa="FAIL (a): nft would not load a cgroupsv2 set or the socket-cgroupv2 rule on this kernel (see above)"
@@ -171,6 +185,7 @@ socket.create_connection(s.getsockname(),3).close(); print("OK")')"
   sleep 1
   set_up="$(nft list set inet "$TABLE" "$SET" 2>/dev/null | tr -s ' \n' ' ')"
   echo "while the exempted holder unit is up, the set: $set_up"
+  echo "the holder unit's cgroup: $(systemctl show -p ControlGroup --value worklane-spike-dockerlike.service)"
 
   # A fresh exempted unit that actually probes egress (its own cgroup is added on start): it must reach the stand-in.
   exempt="$(run_user dockerlike-egress -p NFTSet=cgroup:inet:$TABLE:$SET -- python3 "$work/probe.py" "$PUB" "$PORT")"
@@ -191,7 +206,7 @@ socket.create_connection(s.getsockname(),3).close(); print("OK")')"
 
   # Verdicts.
   if [ "$exempt" = OK ] && echo "$set_up" | grep -q 'elements'; then
-    Qa="PASS (a): systemd NFTSet=cgroup populated a cgroupsv2 set and nft matched socket cgroupv2 level 2 @set (the exempted unit's egress got out)"
+    Qa="PASS (a): systemd NFTSet=cgroup populated a cgroupsv2 set and nft matched socket cgroupv2 level $LEVEL @set (the exempted unit's egress got out)"
   else
     Qa="FAIL (a): exempted egress=$exempt; set-while-up=[$set_up] (expected OK and a populated set)"
   fi
@@ -210,89 +225,109 @@ fi
 # ============================================================================
 say "(c) #545: unprivileged slirp4netns joins a run-created user+net namespace"
 
-# WHY drop the #543 table here: (c)'s slirp runs as the covered test user, so the skuid drop would block its data
-# path and conflate the join measurement. (c) is about #545's join mechanism alone; (d) reloads the rule.
+# WHY no #543 table during (c): its slirp runs as the covered test user, so the skuid drop would block the data path
+# and blur the join measurement. (d) measures the two together.
 nft delete table inet "$TABLE" 2>/dev/null || true
 
-# Whether an unprivileged user namespace can be created here at all (Ubuntu 24.04 restricts it by default).
-userns_plain=no
-if runuser -u "$USER_" -- unshare --user --map-root-user true >/dev/null 2>>"$work/userns.err"; then userns_plain=yes; fi
-echo "plain unprivileged unshare --user as $USER_: $userns_plain"
-
-# The "run": as the test user, create a user+net namespace and hold it open; expose /proc/<pid>/ns/{user,net}.
-# WHY a helper script: it must print its own pid, then sleep so slirp can attach to its namespaces.
-cat > "$work/run-ns.sh" <<'PY'
+# The "run": it writes its own pid, then idles so a sibling slirp unit can join its namespaces by path (#545).
+cat > "$work/run-ns.sh" <<'SH'
 #!/bin/sh
-# #545: the run unshares its own user+net namespace, then idles so a sibling slirp unit can join via the ns paths.
 echo "$$" > "$1"
 exec sleep 600
-PY
+SH
 chmod 0755 "$work/run-ns.sh"
-chmod 0777 "$work"   # the test user writes its pid file here
+chmod 0777 "$work"   # the test user's run writes its pid file here
+journal() { journalctl --no-pager -o cat -n 6 -u "$1" 2>/dev/null | sed 's/^/    /'; }
 
+# start_run <unshare binary>: the run as the test user in its own unit, sandboxed as a real run is on the points that
+# bear on this (PrivateNetwork=yes, NoNewPrivileges=yes), unsharing a user+net namespace of its own. Sets runpid.
 runpid=""
-start_run() { # <unshare-cmd...>
-  "$@" "$work/run-ns.sh" "$work/runpid" >>"$work/run.out" 2>>"$work/run.err" &
+start_run() {
+  runpid=""
+  : > "$work/runpid"
+  systemctl stop worklane-spike-run.service >/dev/null 2>&1 || true
+  systemd-run --quiet --collect --unit=worklane-spike-run --slice="$SLICE" --uid="$USER_" --gid="$USER_" \
+    -p PrivateNetwork=yes -p NoNewPrivileges=yes \
+    "$1" --user --net --map-root-user "$work/run-ns.sh" "$work/runpid" 2>>"$work/run.err" || true
   for _ in $(seq 50); do [ -s "$work/runpid" ] && break; sleep 0.1; done
   runpid="$(cat "$work/runpid" 2>/dev/null || true)"
+  [ -n "$runpid" ] && [ -e "/proc/$runpid/ns/net" ]
 }
 
-# Try the plain route first; if the kernel restricts it, try the AppArmor allowance the pinned rootlesskit uses
-# (#545 memo): a profile that permits `userns,` for one binary. Here we allow /usr/bin/unshare under such a profile.
-: > "$work/runpid"
-start_run runuser -u "$USER_" -- unshare --user --net --map-root-user
-aa_used=no
-if [ -z "$runpid" ] && command -v apparmor_parser >/dev/null 2>&1 && [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
-  echo "plain unshare blocked; trying the rootlesskit-style AppArmor allowance for unshare"
-  cat > "$work/aa.profile" <<AA
-abi <abi/4.0>,
-include <tunables/global>
-profile worklane-spike-unshare /usr/bin/unshare flags=(unconfined) {
-  userns,
-  include if exists <local/worklane-spike-unshare>
-}
-AA
-  apparmor_parser -Q "$work/aa.profile" 2>>"$work/userns.err" || true
-  aa_used=yes
-  : > "$work/runpid"
-  start_run runuser -u "$USER_" -- unshare --user --net --map-root-user
-fi
-
-if [ -n "$runpid" ] && [ -e "/proc/$runpid/ns/net" ]; then
-  echo "run namespace up: pid $runpid (userns $(readlink /proc/$runpid/ns/user), netns $(readlink /proc/$runpid/ns/net)); apparmor allowance used: $aa_used"
-  # slirp4netns as the SAME test user, from its own process, joining by path (the #545 option-1 invocation).
-  runuser -u "$USER_" -- slirp4netns --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp \
-    --userns-path="/proc/$runpid/ns/user" --netns-type=path "/proc/$runpid/ns/net" tap0 \
-    >>"$work/slirp.out" 2>>"$work/slirp.err" &
-  slpid=$!
-  # Wait for tap0 and a default route inside the run's netns.
-  joined=no
-  for _ in $(seq 100); do
-    if nsenter --target "$runpid" --net ip -o link show tap0 >/dev/null 2>&1; then joined=yes; break; fi
-    kill -0 "$slpid" 2>/dev/null || break
+# slirp_case <label> <extra systemd-run props...>: slirp4netns as the test user in a unit of its own, joining the run's
+# namespaces by path, with no capability today's root slirp unit keeps; its IPAddressDeny= refuses the host's loopback,
+# its LAN address and the host's veth address. Then, from inside the run's netns: the public stand-in, slirp's
+# gateway (the host's loopback), the LAN address and the veth address. Sets CJ CPUB CGW CLAN CHV.
+slirp_case() {
+  local label="$1" i; shift
+  CJ=no CPUB=- CGW=- CLAN=- CHV=-
+  systemd-run --quiet --collect --unit="worklane-spike-slirp-$label" --slice="$SLICE" --uid="$USER_" --gid="$USER_" \
+    -p NoNewPrivileges=yes \
+    -p "CapabilityBoundingSet=~CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE" \
+    -p "IPAddressDeny=127.0.0.0/8 ::1/128 $LAN/32 $HOSTV/32" "$@" \
+    /usr/bin/slirp4netns --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp \
+    --userns-path="/proc/$runpid/ns/user" --netns-type=path "/proc/$runpid/ns/net" tap0 2>>"$work/slirp.err" || true
+  for i in $(seq 100); do
+    if nsenter --target "$runpid" --net ip -o link show tap0 >/dev/null 2>&1; then CJ=yes; break; fi
+    systemctl is-active -q "worklane-spike-slirp-$label.service" || break
     sleep 0.1
   done
-  echo "slirp joined (tap0 present in the run's netns): $joined"
-  if [ "$joined" = yes ]; then
-    nsenter --target "$runpid" --net ip -o addr show tap0 2>/dev/null | sed 's/^/  /'
-    # slirp's namespace gets its default route via slirp's own gateway; a public fetch is NATed out through the host.
-    pub_c="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$PUB" "$PORT" 2>/dev/null)"
-    lo_c="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$HOSTV" "$PORT" 2>/dev/null)"
-    echo "from inside the run's netns -> public stand-in $PUB: $pub_c ; -> host veth addr $HOSTV: $lo_c"
-    if [ "$pub_c" = OK ]; then
-      Qc="PASS (c): slirp4netns, run as $USER_ (no root), joined the run-created user+net namespace and carried traffic out (apparmor allowance used: $aa_used)"
-    else
-      Qc="FAIL (c): slirp joined tap0 but the public fetch was $pub_c"
-    fi
+  if [ "$CJ" = yes ]; then
+    sleep 0.5
+    CPUB="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$PUB" "$PORT" 2>/dev/null)"
+    CGW="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$SLIRP_GW" "$HP" 2>/dev/null)"
+    CLAN="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$LAN" "$HP" 2>/dev/null)"
+    CHV="$(nsenter --target "$runpid" --net python3 "$work/probe.py" "$HOSTV" "$HP" 2>/dev/null)"
   else
-    Qc="FAIL (c): slirp4netns did not bring up tap0 in the run's namespace (see slirp.err)"
+    echo "  slirp unit $label never brought up tap0; its journal:"; journal "worklane-spike-slirp-$label.service"
   fi
-  kill "$slpid" 2>/dev/null || true
+  echo "  [$label] joined=$CJ public=$CPUB host-loopback-via-gateway=$CGW LAN=$CLAN host-veth=$CHV"
+  systemctl stop "worklane-spike-slirp-$label.service" >/dev/null 2>&1 || true
+  for i in $(seq 50); do nsenter --target "$runpid" --net ip -o link show tap0 >/dev/null 2>&1 || break; sleep 0.1; done
+}
+
+restricted="$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)"
+userns_how=""
+unshare_bin=/usr/bin/unshare
+if start_run /usr/bin/unshare; then
+  userns_how="plain /usr/bin/unshare"
 else
-  echo "could not create the run's user+net namespace as the test user:"; sed 's/^/  /' "$work/userns.err" 2>/dev/null | tail -5
-  Qc="FAIL (c): the test user could not create an unprivileged user+net namespace here (plain=$userns_plain, apparmor-allowance tried=$aa_used); #545 option 1 needs a working allowance on this kernel"
+  echo "plain /usr/bin/unshare in the run unit: refused; its journal:"; journal worklane-spike-run.service
+  if [ "$restricted" = 1 ] && command -v apparmor_parser >/dev/null 2>&1; then
+    # #545 memo: the allowance the pinned rootlesskit has, for one fixed wrapper instead: a root-owned copy of unshare
+    # with a profile granting `userns,`, loaded for real (-r; -Q only parses). The system's own unshare is untouched.
+    install -o root -g root -m 0755 /usr/bin/unshare /usr/local/libexec/worklane-spike-unshare
+    cat > "$work/aa.profile" <<AA
+abi <abi/4.0>,
+include <tunables/global>
+
+profile worklane-spike-unshare /usr/local/libexec/worklane-spike-unshare flags=(unconfined) {
+  userns,
+}
+AA
+    if apparmor_parser -r "$work/aa.profile" 2>>"$work/userns.err"; then
+      echo "loaded AppArmor profile worklane-spike-unshare for /usr/local/libexec/worklane-spike-unshare"
+      unshare_bin=/usr/local/libexec/worklane-spike-unshare
+      if start_run "$unshare_bin"; then userns_how="a wrapper with an AppArmor userns allowance"
+      else echo "the wrapper under its profile was refused too; its journal:"; journal worklane-spike-run.service; fi
+    else
+      echo "apparmor_parser refused the profile:"; sed 's/^/    /' "$work/userns.err"
+    fi
+  fi
 fi
-kill "$(cat "$work/runpid" 2>/dev/null)" 2>/dev/null || true
+
+if [ -n "$userns_how" ]; then
+  echo "run namespace up via $userns_how (NoNewPrivileges=yes, PrivateNetwork=yes): pid $runpid"
+  slirp_case c
+  c_join="$CJ" c_pub="$CPUB"
+  if [ "$CJ" = yes ] && [ "$CPUB" = OK ] && [ "$CGW" != OK ] && [ "$CLAN" != OK ] && [ "$CHV" != OK ]; then
+    Qc="PASS (c): slirp4netns as $USER_ in its own unit (no root, none of today's slirp capabilities) joined the run's user+net namespace (made via $userns_how): public OK; host loopback, LAN and host address refused"
+  else
+    Qc="FAIL (c): userns via $userns_how; joined=$CJ public=$CPUB (want OK) gateway=$CGW LAN=$CLAN host=$CHV (want refused)"
+  fi
+else
+  Qc="FAIL (c): the test user's run unit could not create a user+net namespace (restriction=$restricted; plain unshare and the AppArmor-allowed wrapper both refused; see above)"
+fi
 
 # ============================================================================
 # (d) #545+#543: granted-tier networking (root-started slirp giving a namespace a route out) still works while the
@@ -303,12 +338,23 @@ say "(d) granted-tier networking under the #543 default-deny rule"
 if [ "$nft_ok" != 1 ]; then
   Qd="FAIL (d): the #543 rule did not load, so this interaction can't be measured here"
 else
-  # Reload the #543 default-deny table (dropped for (c)) so granted networking is measured with it in force.
   load_543_table || true
-  # A root-created netns (today's granted path is root-started), slirp as root attaches, then a child reaches out.
-  # The slirp process is placed in an exempted unit so the default-deny skuid rule (if it owned it) wouldn't block it;
-  # here slirp runs as root (uid 0, not the covered uid), so the skuid rule never matches it, which is itself the
-  # measurement: today's root slirp is already outside the uid rule.
+  # 1. The #545 design under #543: the test user's slirp unit, without and with NFTSet= (the memos' combined plan).
+  d545="not measured: (c) made no run namespace"
+  if [ -n "$userns_how" ] && start_run "$unshare_bin"; then
+    slirp_case d-plain
+    d_plain_pub="$CPUB"
+    slirp_case d-exempt -p "NFTSet=cgroup:inet:$TABLE:$SET"
+    d_ex_pub="$CPUB" d_ex_gw="$CGW" d_ex_lan="$CLAN" d_ex_hv="$CHV"
+    if [ "$d_ex_pub" = OK ] && [ "$d_plain_pub" != OK ] && [ "$d_ex_gw" != OK ] && [ "$d_ex_lan" != OK ] && [ "$d_ex_hv" != OK ]; then
+      d545="ok (test-user slirp without NFTSet= blocked: $d_plain_pub; with NFTSet=: public OK, host loopback/LAN/host refused)"
+    else
+      d545="NOT ok (without NFTSet= public=$d_plain_pub, want blocked; with NFTSet= public=$d_ex_pub want OK, gateway=$d_ex_gw LAN=$d_ex_lan host=$d_ex_hv want refused)"
+    fi
+  fi
+  systemctl stop worklane-spike-run.service >/dev/null 2>&1 || true
+  echo "#545 design under the #543 rule: $d545"
+  # 2. Today's granted path: slirp started by root (uid 0, outside the uid rule) for a root-made netns.
   ip netns add wlspikerun 2>>"$work/d.err" || true
   slirp4netns --configure --mtu=65520 --disable-host-loopback --netns-type=path "/var/run/netns/wlspikerun" tap0 \
     >>"$work/d-slirp.out" 2>>"$work/d-slirp.err" &
@@ -323,14 +369,14 @@ else
   if [ "$djoined" = yes ]; then
     dpub="$(ip netns exec wlspikerun python3 "$work/probe.py" "$PUB" "$PORT" 2>/dev/null)"
     echo "granted-style run (root slirp) -> public stand-in: $dpub (the #543 skuid=$UID_ rule is loaded)"
-    if [ "$dpub" = OK ]; then
-      Qd="PASS (d): a slirp-backed namespace reached the public stand-in while the #543 default-deny (skuid $UID_) rule was loaded (today's root slirp is uid 0, outside the uid rule; a test-user slirp would need the NFTSet= exemption proven in (a)/(b))"
-    else
-      Qd="FAIL (d): the granted-style run reached the stand-in as $dpub with the #543 rule loaded"
-    fi
   else
-    Qd="FAIL (d): root-started slirp did not bring up tap0 (see d-slirp.err)"
+    dpub="no tap0"
   fi
+  case "$d545" in
+    ok*) if [ "$dpub" = OK ]; then Qd="PASS (d): granted networking works under the #543 rule both ways: #545 design $d545; today's root slirp: public $dpub"
+         else Qd="FAIL (d): #545 design $d545, but today's root slirp: $dpub"; fi ;;
+    *) Qd="FAIL (d): #545 design $d545; today's root slirp under the #543 rule: public $dpub" ;;
+  esac
   kill "$dslpid" 2>/dev/null || true
   ip netns del wlspikerun 2>/dev/null || true
 fi
