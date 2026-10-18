@@ -33,6 +33,8 @@ export function evalRolesOptions(argv: string[]): EvalRolesOptions {
   };
   const samples = Number(arg('samples', String(DEFAULT_SAMPLES)));
   if (!Number.isInteger(samples) || samples < 1) throw new Error(`--samples must be a whole number of at least 1, not ${arg('samples', '')}`);
+  // A bare --runs (no number after it) is refused, not read as the default.
+  if (argv.includes('--runs') && !arg('runs', '')) throw new Error('--runs needs a number: --runs N');
   const runs = Number(arg('runs', String(DEFAULT_RUNS)));
   if (!Number.isInteger(runs) || runs < 1) throw new Error(`--runs must be a whole number of at least 1, not ${arg('runs', '')}`);
   const scoreOnly = argv.includes('--score');
@@ -137,9 +139,11 @@ export function runsReport(r: RoleRuns): { lines: string[]; fails: boolean } {
     return `${name} mean ${side(s.base, s.total)} → ${side(s.head, s.total)}${s.dropped ? " (lower: the head's mean dropped by more than the base's spread)" : ''}`;
   };
   const pass = runsPass(r);
-  const capped = r.runs.length < r.requested || r.runs.some((c) => c.incomplete || c.heldOut?.incomplete);
+  const cut = r.runs.findIndex((c) => c.incomplete || Boolean(c.heldOut?.incomplete));
   const samples = `${r.samples} sample(s) per case${r.samples < DEFAULT_SAMPLES ? ` (below the default ${DEFAULT_SAMPLES}, asked for explicitly)` : ''}`;
-  const incomplete = capped ? `; incomplete: the $${r.capUsd.toFixed(2)} cost cap (total across the runs) was reached after ${r.runs.length} of ${r.requested} run(s)` : '';
+  // The cap either cut a run short (during it) or left nothing for the next one (after the last that ran).
+  const when = cut >= 0 ? `during run ${cut + 1} of ${r.requested}` : `after ${r.runs.length} of ${r.requested} run(s)`;
+  const incomplete = cut >= 0 || r.runs.length < r.requested ? `; incomplete: the $${r.capUsd.toFixed(2)} cost cap (total across the runs) was reached ${when}` : '';
   const head = `${r.target}: ${part('visible', visibleSet)}; ${part('held-out', heldOutSet)}; ${r.runs.length} run(s) of ${samples} (~$${r.costUsd.toFixed(2)}, the CLI's estimate)${incomplete}${pass ? '' : '; does not pass'}`;
   const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
   const one = (name: string, s: ScoreComparison | null) => (s ? `${name} ${score(s.base)} → ${score(s.head)}${s.incomplete ? ' (incomplete)' : ''}` : `${name}: no cases`);

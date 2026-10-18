@@ -70,6 +70,8 @@ test('options (#550): 3 runs per side by default, distinct from samples per case
   assert.deepEqual([evalRolesOptions(['--samples', '1']).runs, evalRolesOptions(['--samples', '1']).samples], [3, 1], '--samples leaves the runs alone');
   for (const bad of ['0', '-1', '2.5', 'three']) assert.throws(() => evalRolesOptions(['--runs', bad]), /--runs/);
   assert.throws(() => evalRolesOptions(['--score', '--runs', '2']), /--score/, '--score stays one head-only run');
+  assert.throws(() => evalRolesOptions(['--runs']), /--runs needs a number/, 'a bare --runs is not the default');
+  assert.throws(() => evalRolesOptions(['--runs', '--score']), /--runs needs a number/);
   assert.equal(evalRolesOptions(['--score']).scoreOnly, true);
 });
 
@@ -134,7 +136,29 @@ test('cap (#550): --cap bounds the total across the N runs; reaching it stops th
   assert.equal(runsPass(capped), false);
   const r = runsReport(capped);
   assert.equal(r.fails, true);
-  assert.match(r.lines[0]!, /incomplete: the \$4\.50 cost cap \(total across the runs\) was reached after 2 of 3 run\(s\)/);
+  assert.match(r.lines[0]!, /incomplete: the \$4\.50 cost cap \(total across the runs\) was reached during run 2 of 3/);
+  // A cap spent exactly by whole runs: the next run never starts.
+  calls = 0;
+  const even = await evalRoleRuns({ target: 'role worker', runs: 3, capUsd: 3, samples: 3, compare });
+  assert.deepEqual([even.runs.length, calls, runsPass(even)], [1, 24, false]);
+  assert.match(runsReport(even).lines[0]!, /was reached after 1 of 3 run\(s\); does not pass$/);
+});
+
+test('gate (#550, owner decision): a held-out case lost in every run, with the item count unchanged, passes at --runs 1 and --runs 3', async () => {
+  // Held-out case 1 goes pass → fail and case 2 fail → pass: 2/4 items at both ends. The single-run rule
+  // (comparisonPasses) failed this on the lost case; the issue's gate is the mean against base's spread only.
+  const swap = parseCases('## 1. Read first\n**Situation**\n- An alert fires.\n\n**Correct**\n- Reads the row first.\n\n**Wrong**\n- Acts before reading.\n\n## 2. A note\n**Situation**\n- A run ends.\n\n**Correct**\n- Writes a note.\n\n**Wrong**\n- Edits the ledger.\n');
+  const compare = (capUsd: number) => compareInstructions({ target: 'role worker', baseText: 'OLD', headText: 'NEW', cases: VISIBLE, heldOut: swap, model: 'sonnet', judge: 'opus', capUsd, ask: scripted() });
+  const one = await compare(100);
+  assert.deepEqual([one.heldOut?.base, one.heldOut?.head, one.heldOut?.dropped], [{ passed: 2, total: 4 }, { passed: 2, total: 4 }, true]);
+  assert.equal(comparisonPasses(one), false, 'the single-run rule fails it on the lost case');
+  for (const runs of [1, 3]) {
+    const r = await evalRoleRuns({ target: 'role worker', runs, capUsd: 100, samples: 3, compare });
+    assert.equal(r.runs.length, runs);
+    assert.ok(r.runs.every((c) => c.heldOut?.changes.some((x) => x.id === '1' && x.base === 'pass' && x.head === 'fail')), 'case 1 is lost in every run');
+    assert.equal(runsPass(r), true, `--runs ${runs}: passes on the mean`);
+    assert.ok(runsReport(r).lines.includes('    held-out case 1: pass → fail'), 'the loss is still printed per run');
+  }
 });
 
 test('costs: every model call of the eval is recorded as run.cost, under its role; both roles count as evaluator spend', async () => {
