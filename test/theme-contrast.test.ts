@@ -8,7 +8,8 @@
 // text-white on bg-green) is checked on that fill. No text is drawn in the accent, and placeholder text passes too.
 // A control's edge reaches 3:1 (WCAG 1.4.11) on the resting backgrounds, and no field or button draws its own edge
 // with the divider colour; dividers don't need 3:1. The focus ring reaches 3:1 on every light background, and no
-// focus or selection style draws the accent instead of the ring. Dark mode's block is pinned byte for byte.
+// focus or selection style draws the accent instead of the ring.
+// Every colour class names a theme colour (a typo'd one draws nothing). Dark mode's block is pinned byte for byte.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -138,6 +139,19 @@ const hexOf = (c: Rgba) => '#' + [c.r, c.g, c.b].map((x) => Math.round(clamp(x) 
 const BUILT_IN: Record<string, string> = { white: '#fff', black: '#000' };
 const THEME = new Set([...(block('@theme inline') ?? new Map()).keys()].filter((k) => k.startsWith('--color-')).map((k) => k.slice('--color-'.length)));
 const TAILWIND_PALETTE = /^(slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}$/;
+
+/** A class split into its variants (`dark:focus:`) and its utility, with `:` inside `[...]` or `(...)` not a split. */
+function splitClass(tok: string): [string, string] {
+  let depth = 0;
+  let cut = -1;
+  for (let i = 0; i < tok.length; i++) {
+    const c = tok[i];
+    if (c === '[' || c === '(') depth++;
+    else if (c === ']' || c === ')') depth--;
+    else if (c === ':' && depth === 0) cut = i;
+  }
+  return [tok.slice(0, cut + 1), tok.slice(cut + 1).replace(/^!/, '')];
+}
 
 type Use = { kind: 'text' | 'bg'; variant: string; name: string; alpha: number | undefined };
 /** A text class where it's used: the classes in its own string, and the fills on the same line in strings that set no
@@ -343,12 +357,60 @@ function controlTags(): { file: string; line: number; text: string }[] {
 test("a field's or button's own edge class is the control edge, not the divider", () => {
   // `border-line` is a divider (2.11:1 on the page, 1.78:1 on a card); a control's edge is `border-line-strong`.
   // Dark mode keeps its own edge (`dark:border-line`), so a dark: variant is not light mode's edge.
+  // Any other `border-line…` (a typo such as `dark:border-linebg-surface`) matches no rule, so it draws nothing.
   const found = new Set<string>();
   for (const tag of controlTags())
-    for (const m of tag.text.matchAll(/(?<![\w-])((?:[\w-]+:)*)border-line(?![\w-])/g))
-      if (!m[1]?.split(':').includes('dark')) found.add(`${tag.file}:${tag.line}: ${m[0]}`);
+    for (const m of tag.text.matchAll(/(?<![\w-])((?:[\w-]+:)*)border-line[\w-]*/g)) {
+      const utility = m[0].slice((m[1] ?? '').length);
+      if (utility !== 'border-line' && utility !== 'border-line-strong') found.add(`${tag.file}:${tag.line}: ${m[0]} (not a class)`);
+      else if (utility === 'border-line' && !m[1]?.split(':').includes('dark')) found.add(`${tag.file}:${tag.line}: ${m[0]}`);
+    }
   assert.ok(controlTags().length > 50, 'the control scan finds the native controls (else it is broken)');
   assert.deepEqual([...found], [], 'a control draws its edge with the divider colour: use border-line-strong');
+});
+
+/** What may follow a colour utility's prefix besides a colour: Tailwind's other utilities on the same prefix. */
+const NOT_A_COLOUR: Record<string, RegExp> = {
+  text: /^(xs|sm|base|lg|[2-9]?xl|left|right|center|justify|start|end|wrap|nowrap|balance|pretty|ellipsis|clip)$/,
+  bg: /^(none|fixed|local|scroll|auto|cover|contain|center|top|bottom|left|right|(left|right)-(top|bottom)|repeat(-x|-y|-round|-space)?|no-repeat|(clip|origin|blend|linear|radial|conic|gradient)(-.+)?)$/,
+  border: /^(\d+|[xytrblse](-\d+)?|solid|dashed|dotted|double|hidden|none|collapse|separate|spacing(-.+)?)$/,
+  divide: /^([xy](-\d+|-reverse)?|solid|dashed|dotted|double|none)$/,
+  ring: /^(\d+|inset)$/,
+  'ring-offset': /^\d+$/,
+  outline: /^(none|hidden|solid|dashed|dotted|double|\d+|offset-\d+)$/,
+  decoration: /^(solid|double|dotted|dashed|wavy|auto|from-font|clone|slice|\d+)$/,
+  fill: /^none$/,
+  stroke: /^(none|\d+)$/,
+  caret: /^auto$/,
+};
+const COLOUR_UTILITY = /^-?(text|bg|border(?:-[xytrblse])?|divide|ring(?:-offset)?|outline|decoration|fill|stroke|caret)-(.+?)(?:\/(?:\d+|\[[^\]]*\]))?$/;
+
+test('every colour class in web/src names a theme colour, and every var() names a custom property', () => {
+  // A class whose colour isn't a theme colour matches no rule and draws nothing: `dark:border-linebg-surface` (a missing
+  // space) dropped both `dark:border-line` and `bg-surface` from five fields, and every other check here passed.
+  const defined = new Set([...css.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1]));
+  const bad: string[] = [];
+  let seen = 0;
+  for (const file of files(webSrc)) {
+    const rel = file.slice(repoRoot.length);
+    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      for (const lit of line.matchAll(/(['"`])((?:(?!\1).)*)\1/g))
+        // A quote or brace ends a class even inside a "literal" that an apostrophe in JSX text opened (`hub's`).
+        for (const tok of (lit[2] ?? '').split(/[\s"'`{}]+/)) {
+          for (const v of tok.matchAll(/var\((--[\w-]+)/g)) if (!defined.has(v[1])) bad.push(`${rel}:${i + 1}: ${tok} (${v[1]} is not set in styles.css)`);
+          const m = COLOUR_UTILITY.exec(splitClass(tok)[1]);
+          if (!m) continue;
+          const [, prefix = '', name = ''] = m;
+          seen++;
+          if (name.startsWith('[') || name.startsWith('(')) continue; // arbitrary: its var()s are checked above
+          if (THEME.has(name) || name in BUILT_IN || /^(transparent|current|inherit)$/.test(name)) continue;
+          if (NOT_A_COLOUR[prefix.replace(/^border-[xytrblse]$/, 'border')]?.test(name)) continue;
+          bad.push(`${rel}:${i + 1}: ${tok}`);
+        }
+    });
+  }
+  assert.ok(seen > 500, `the scan finds the colour classes (${seen}; else it is broken)`);
+  assert.deepEqual(bad, [], 'a colour class or var() that names no theme colour or custom property');
 });
 
 test('dark mode is unchanged', () => {
