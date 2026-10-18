@@ -1,4 +1,4 @@
-// Extend -> Experiments on the dashboard's server: a viewer gets nothing; a writer reads, pauses and stops a running
+// The Experiments page on the dashboard's server: a viewer gets nothing; a writer reads, pauses and stops a running
 // job; only an owner starts, resumes, approves, declines or archives; every change is reviewed first (nothing written)
 // and confirmed against what the review saw; every attempt is audited.
 import { test } from 'node:test';
@@ -10,11 +10,12 @@ import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
-import { startDashboard } from '../src/dashboard.js';
+import { dashboardSite, siteOptions, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { loadPins } from '../src/experiments/store.js';
-import type { RootState } from '../src/experiments/root-file.js';
-import { asPerson, exampleRoles, repoRoot } from './helpers.js';
+import { rootCommands, type RootState } from '../src/experiments/root-file.js';
+import { initInstance } from '../src/instance.js';
+import { agentIsSelf, asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const study = {
@@ -28,7 +29,7 @@ const study = {
 };
 const root: RootState = { state: 'on', file: { devices: [0], max_minutes: 20, gpu_hours_per_day: 8, output_gb: 50, env_network: false, tasks_max: 1024, memory_gb: 16, cpu_cores: 4, sources: { 'train-set': { sha256: 'a'.repeat(64), visibility: 'job' }, 'eval-inputs': { sha256: 'b'.repeat(64), visibility: 'job' }, 'eval-labels': { sha256: 'c'.repeat(64), visibility: 'scorer' } } } };
 
-async function serve() {
+async function serve(rootState: RootState = root) {
   const base = mkdtempSync(join(tmpdir(), 'exp-dash-'));
   const seed = join(base, 'seed');
   cpSync(join(repoRoot, 'examples', 'basic'), seed, { recursive: true });
@@ -46,7 +47,7 @@ async function serve() {
   mkdirSync(stateDir);
   const pinsFile = join(base, 'experiments.yaml');
   const eventsDb = join(stateDir, 'events.db');
-  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb, stateDir, user: 'example-owner', roleOf: exampleRoles, instance: 'shop', experiments: { repo: dir, branch: 'main', instance: 'ex', pinsFile, root: () => root }, slotsDir: mkdtempSync(join(tmpdir(), 'exp-slots-')) });
+  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb, stateDir, user: 'example-owner', roleOf: exampleRoles, instance: 'shop', experiments: { repo: dir, branch: 'main', instance: 'ex', pinsFile, root: () => rootState }, slotsDir: mkdtempSync(join(tmpdir(), 'exp-slots-')) });
   const url = d.url.split('/?')[0]!;
   const h = (user: string) => ({ authorization: `Bearer ${d.token}`, ...asPerson(user), 'content-type': 'application/json' });
   const get = async (user: string) => {
@@ -73,7 +74,8 @@ async function serve() {
       log.close();
     }
   };
-  return { d, get, post, events, append, pinsFile };
+  const state = async (user: string) => (await (await fetch(`${url}/api/state`, { headers: h(user) })).json()) as Record<string, unknown>;
+  return { d, get, post, events, append, pinsFile, state };
 }
 
 test('experiments-dashboard: a viewer gets nothing; a writer reads and pauses but never starts; review writes nothing; a stale review is refused', async () => {
@@ -153,5 +155,86 @@ test('experiments-dashboard: a held result is the owner\'s to accept or reject, 
     assert.deepEqual(s.events('experiment.verdict').map((e) => [e.n, e.answer]), [[2, 'accept']]);
   } finally {
     await s.d.close();
+  }
+});
+
+test('#581 experiments-dashboard: /api/state says whether experiments are on, to owners and writers only', async () => {
+  const on = await serve();
+  try {
+    assert.equal((await on.state('example-owner')).experiments, true);
+    assert.equal((await on.state('example-collaborator')).experiments, true);
+    assert.ok(!('experiments' in (await on.state('someone-else'))), 'a viewer gets no experiments key at all');
+  } finally {
+    await on.d.close();
+  }
+  for (const rootState of [{ state: 'off', why: 'no root file' }, { state: 'unknown', why: "can't be read" }] as RootState[]) {
+    const off = await serve(rootState);
+    try {
+      assert.equal((await off.state('example-collaborator')).experiments, false, `${rootState.state}: off`);
+      assert.ok(!('experiments' in (await off.state('someone-else'))));
+    } finally {
+      await off.d.close();
+    }
+  }
+});
+
+/** A dashboard on a checkout: `experiments` and `instance` as given. */
+async function plain(o: { instance?: string } = {}) {
+  const { dir } = exampleProject();
+  const stateDir = mkdtempSync(join(tmpdir(), 'exp-plain-'));
+  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, ...o, slotsDir: mkdtempSync(join(tmpdir(), 'exp-slots-')) });
+  const url = d.url.split('/?')[0]!;
+  const h = { authorization: `Bearer ${d.token}`, ...asPerson('example-owner'), 'content-type': 'application/json' };
+  return {
+    d,
+    get: async () => (await (await fetch(`${url}/api/experiments`, { headers: h })).json()) as { unavailable?: string },
+    post: async () => (await (await fetch(`${url}/api/experiments`, { method: 'POST', headers: h, body: JSON.stringify({ action: 'pause', study: 'x' }) })).json()) as { error?: string },
+    state: async () => (await (await fetch(`${url}/api/state`, { headers: h })).json()) as Record<string, unknown>,
+  };
+}
+
+test('#563 experiments-dashboard: started the way `dashboard --instance` starts it, an instance answers a view: not set up yet, with the root commands', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'exp-instances-'));
+  const { dir: repo } = exampleProject();
+  const home = initInstance('shop', repo, 'example-org/example-shop', dir);
+  agentIsSelf(home);
+  writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: pr\n');
+  const site = dashboardSite(repo, 'shop', dir);
+  // As cli.ts `dashboard` starts it (the break-glass owner: no person named, so no role is asked of GitHub).
+  const d = await startDashboard({ ...siteOptions(site), cfg: site.cfg, user: 'example-owner', instance: 'shop', slotsDir: mkdtempSync(join(tmpdir(), 'exp-slots-')) });
+  try {
+    const url = d.url.split('/?')[0]!;
+    const h = { authorization: `Bearer ${d.token}` };
+    const view = (await (await fetch(`${url}/api/experiments`, { headers: h })).json()) as { unavailable?: string; setup?: { state: string; why: string | null; commands: unknown } };
+    assert.equal(view.unavailable, undefined, `a view, not: ${view.unavailable}`);
+    // The test machine has no root file (test/isolate.ts moves /etc): missing setup, not a refusal.
+    assert.equal(view.setup!.state, 'off');
+    assert.match(view.setup!.why!, /^experiments are not set up yet for shop on this machine \(no root file\): root sets them up with `sudo bash scripts\/setup\/experiments\.sh install shop`$/);
+    assert.deepEqual(view.setup!.commands, rootCommands('shop'));
+    assert.equal(((await (await fetch(`${url}/api/state`, { headers: h })).json()) as { experiments?: boolean }).experiments, false, 'not set up: no sidebar item');
+  } finally {
+    await d.close();
+  }
+});
+
+test('#563 experiments-dashboard: only a checkout or a same-user instance has none, and it says which', async () => {
+  const checkout = await plain();
+  try {
+    const why = (await checkout.get()).unavailable ?? '';
+    assert.match(why, /this dashboard serves a checkout$/);
+    assert.doesNotMatch(why, /local instance/);
+    assert.match((await checkout.post()).error ?? '', /this dashboard serves a checkout$/);
+    assert.equal((await checkout.state()).experiments, false);
+  } finally {
+    await checkout.d.close();
+  }
+  const local = await plain({ instance: 'shop' });
+  try {
+    const why = (await local.get()).unavailable ?? '';
+    assert.match(why, /the instance shop runs as this dashboard's user/);
+    assert.doesNotMatch(why, /checkout/);
+    assert.match((await local.post()).error ?? '', /the instance shop runs as this dashboard's user/);
+  } finally {
+    await local.d.close();
   }
 });
