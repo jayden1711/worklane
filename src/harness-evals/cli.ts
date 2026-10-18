@@ -9,6 +9,7 @@ import { projectStateDir } from '../guardrails/context.js';
 import { loadInstance } from '../instance.js';
 import { CliRunner } from '../runner.js';
 import { instanceId } from '../service.js';
+import { HELD_OUT_FROM_STATE_FLAG, HELD_OUT_NOT_ASKED, heldOutAllowed, SPEND_FLAG, spendFromArgs, spendRefusal, SPEND_REFUSED } from '../spend-gate.js';
 import { publicAllowed, saveTask, taskFromPr } from './add-task.js';
 import { runSuite } from './replay.js';
 import { engineSha } from './schedule.js';
@@ -19,6 +20,8 @@ interface Helpers {
   option: (args: string[], name: string) => string | undefined;
   flag: (args: string[], name: string) => boolean;
   usage: string;
+  /** The suite runner (tests); runSuite otherwise. */
+  suite?: typeof runSuite;
 }
 
 export async function harnessEvalCommand(root: string, sub: string | undefined, rest: string[], h: Helpers): Promise<number> {
@@ -61,6 +64,18 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
     console.error(h.usage);
     return 2;
   }
+  // The spend gate (#612, src/spend-gate.ts): --spend is the caller's ceiling, never config's; held-out tasks only
+  // from a store named on purpose. The coordinator's scheduled run doesn't come through here.
+  let spend: number | null;
+  try {
+    spend = spendFromArgs(rest);
+  } catch (e) {
+    console.error((e as Error).message);
+    return 2;
+  }
+  h.option(rest, SPEND_FLAG);
+  const heldOut = heldOutAllowed(rest);
+  h.flag(rest, HELD_OUT_FROM_STATE_FLAG);
   const only: string[] = [];
   for (let id = h.option(rest, '--task'); id; id = h.option(rest, '--task')) only.push(id);
   const he = site.cfg?.project.harness_evals;
@@ -74,8 +89,25 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
     return 2;
   }
   const extra = he?.tasks ? [resolve(root, he.tasks)] : [];
-  const { tasks: all, notes } = loadSuite({ publicDirs: [PUBLIC_TASKS_DIR], projectDirs: extra, heldOutDir: heldOutTasksDir(site.stateDir) });
+  // The held-out store is read only after the gate passes, even when it was named.
+  const suiteOf = (withHeldOut: boolean) => loadSuite({ publicDirs: [PUBLIC_TASKS_DIR], projectDirs: extra, heldOutDir: withHeldOut ? heldOutTasksDir(site.stateDir) : null });
+  if (spend === null) {
+    const { tasks: known, notes } = suiteOf(false);
+    for (const n of notes) console.error(n);
+    const tasks = only.length ? known.filter((t) => only.includes(t.id)) : known;
+    // Project task ids are never printed (src/harness-evals/tasks.ts): only how many.
+    const shown = tasks.filter((t) => !t.heldOut).map((t) => t.id);
+    const plan = [
+      `would replay ${tasks.length} task(s) × ${samples} sample(s) with real agents: ${shown.join(', ') || 'none public'}${tasks.length > shown.length ? ` and ${tasks.length - shown.length} project task(s)` : ''}`,
+      `  ${heldOut ? `plus the held-out tasks in the named store (not read without ${SPEND_FLAG})` : HELD_OUT_NOT_ASKED}`,
+      `  budget $${budget} (--budget, else harness_evals.budget_usd, else 20)`,
+    ];
+    console.error(spendRefusal(plan, budget));
+    return SPEND_REFUSED;
+  }
+  const { tasks: all, notes } = suiteOf(heldOut);
   for (const n of notes) console.error(n);
+  if (!heldOut) console.error(HELD_OUT_NOT_ASKED);
   const tasks = only.length ? all.filter((t) => only.includes(t.id)) : all;
   const missing = only.filter((id) => !all.some((t) => t.id === id));
   if (missing.length) {
@@ -86,10 +118,10 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
   const log = record ? new EventLog(site.eventsDb) : null;
   const actor = instanceId();
   try {
-    const run = await runSuite({
+    const run = await (h.suite ?? runSuite)({
       tasks,
       samples,
-      budgetUsd: budget,
+      budgetUsd: Math.min(budget, spend),
       runner: new CliRunner(site.cfg?.project.agent_runtime.kind ?? 'cli'),
       trigger: 'manual',
       engine: engineSha(),

@@ -58,8 +58,13 @@ test('options: 3 samples by default; a lower number is taken only when asked, an
   const d = evalRolesOptions([]);
   assert.deepEqual([d.samples, d.cap, d.base, d.model, d.judge, d.writeHeldOut, d.scoreOnly], [3, 10, 'origin/main', 'sonnet', 'opus', false, false]);
   assert.equal(evalRolesOptions(['--samples', '1']).samples, 1);
-  assert.deepEqual(evalRolesOptions(['--roles', 'worker,planner', '--write-held-out', '--score']).roles, ['worker', 'planner']);
-  assert.equal(evalRolesOptions(['--write-held-out', '--score']).writeHeldOut, true);
+  assert.deepEqual(evalRolesOptions(['--roles', 'worker,planner', '--write-held-out', '--held-out-from-state', '--score']).roles, ['worker', 'planner']);
+  assert.equal(evalRolesOptions(['--write-held-out', '--held-out-from-state', '--score']).writeHeldOut, true);
+  // #612: the held-out store is written only when one is named on purpose; nothing is spent without --spend.
+  assert.throws(() => evalRolesOptions(['--write-held-out', '--score'], {}), /--write-held-out writes into a held-out store/);
+  assert.equal(evalRolesOptions(['--write-held-out', '--score'], { [HELD_OUT_ENV]: '/x' }).writeHeldOut, true);
+  assert.deepEqual([d.spend, d.heldOutFromState, evalRolesOptions(['--spend', '4']).spend], [null, false, 4]);
+  assert.throws(() => evalRolesOptions(['--spend', '0']), /--spend takes/);
   for (const bad of ['0', '-2', '1.5', 'three']) assert.throws(() => evalRolesOptions(['--samples', bad]), /--samples/);
 });
 
