@@ -7,14 +7,18 @@
 #
 # The engine's self-modification locks (src/review.ts) name its own source paths: src/, scripts/, test/ and docs/. In
 # a managed app's repo those are the app's own files, so for an instance named here, working exactly the repo named
-# with it (its instance.yaml), they stand aside; the config folder's, CI's, the push gate's and the agents'
-# instructions' locks hold in every repo. Which repo is the engine is never the repo's to say: nothing inside a repo
-# (a file, its name, its remote, a package field) changes this.
+# with it (its instance.yaml), they stand aside: that includes the push gate's and release-tag check's scripts under
+# scripts/. What holds in every repo: the config folder's review.yaml, guardrails.yaml and experiments.yaml, CI
+# (.github/workflows/**, .github/release-signers), the hooks folder and secret-scan files (.githooks/**, .denylist*,
+# .gitleaks*), and the agents' instructions. Which repo is the engine is never the repo's to say: nothing inside a
+# repo (a file, its name, its remote, a package field) changes this.
 #
 # Only at a root shell: no sudoers rule or machine helper command runs it, the dashboard has no button for it, and it
-# refuses a coordinator's sudo (SUDO_USER=wl-*). It refuses to add the repo this machine's engine updates from
-# (/etc/worklane/updates.json repo_url). Writes /etc/worklane/managed-apps.json whole, root:root 0644. No file, or an
-# instance it doesn't name: every lock applies. A running coordinator reads it before each review level.
+# refuses a coordinator's sudo (SUDO_USER=wl-*). It refuses to add the engine's own repo: the repository.url of the
+# package.json two folders up (the engine it ships with) and the repo /etc/worklane/updates.json's repo_url names.
+# When either can't be told (no updates.json, or no GitHub repo named), it refuses to add anything. The engine checks
+# the same two again each time it reads the file. Writes /etc/worklane/managed-apps.json whole, root:root 0644. No
+# file, or an instance it doesn't name: every lock applies. A running coordinator reads it before each review level.
 source "$(dirname "$0")/lib.sh"
 usage() { sed -n '4,6p' "$0" | sed 's/^#   //' >&2; exit 2; }
 cmd="${1:-}"
@@ -28,7 +32,7 @@ case "$cmd" in
     [[ "${SUDO_USER:-}" != wl-* ]] || { echo "managed-apps.sh is an admin's, at a root shell: a coordinator may not say which repo is the engine" >&2; exit 1; }
     if [ "$cmd" = add ]; then
       [ "$#" -eq 3 ] || usage
-      install_managed_apps "$MANAGED_APPS" add "$2" "$3" "$UPDATES_JSON"
+      install_managed_apps "$MANAGED_APPS" add "$2" "$3" "$UPDATES_JSON" "$(cd "$(dirname "$0")/../.." && pwd)/package.json"
       echo "instance $2 ($3) is a managed app: the locks on the engine's own source paths don't apply to it"
     else
       [ "$#" -eq 2 ] || usage

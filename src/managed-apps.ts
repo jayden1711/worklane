@@ -13,6 +13,7 @@
 // INVARIANT: fails closed. No file; one that isn't root's regular file alone (a symlink, another owner, writable by its
 // group or others, too big, unreadable); one not in exactly the script's form; or one that doesn't name this instance
 // with this repo: the engine's scope, and every lock applies.
+import { existsSync, readFileSync } from 'node:fs';
 import { instanceNameOk } from './instance-name.js';
 import { readRegularFile } from './os/index.js';
 import { etcPath } from './os/system-paths.js';
@@ -45,18 +46,68 @@ export function readManagedApps(file = MANAGED_APPS_FILE(), rootUid = 0): { apps
   return { apps: apps as Record<string, string>, problem: null };
 }
 
+/** A GitHub owner/name from a repo URL (https or ssh; with or without .git or a trailing slash), or null. */
+export function githubRepoOf(url: string): string | null {
+  const m = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url);
+  return m && REPO.test(m[1]!) ? m[1]! : null;
+}
+
+/** The installed engine's package.json (dist/src/ -> the package root): root installs it, no repo's content says it. */
+const ENGINE_PACKAGE = new URL('../../package.json', import.meta.url);
+/** The file root's updater follows (scripts/setup/updates.sh writes it). */
+const UPDATES_FILE = () => etcPath('updates.json');
+
+/**
+ * The repos that are the engine on this machine: the installed package.json's repository.url, and the repo_url of
+ * updates.json when there is one. Each read can only add a repo held as the engine (more locks, never fewer), so
+ * when either can't be told (no repository URL, or an updates.json that isn't JSON or doesn't name a GitHub repo)
+ * `problem` says so and the caller holds every lock.
+ */
+export function engineRepos(): { repos: string[]; problem: string | null } {
+  let pkg: unknown;
+  try {
+    pkg = JSON.parse(readFileSync(ENGINE_PACKAGE, 'utf8'));
+  } catch (e) {
+    return { repos: [], problem: `the engine's package.json can't be read (${(e as Error).message})` };
+  }
+  const r = (pkg as { repository?: unknown } | null)?.repository;
+  const url = typeof r === 'string' ? r : typeof (r as { url?: unknown } | null)?.url === 'string' ? (r as { url: string }).url : '';
+  const own = githubRepoOf(url);
+  if (!own) return { repos: [], problem: `the engine's package.json names no GitHub repository (${JSON.stringify(url)})` };
+  const updates = UPDATES_FILE();
+  if (!existsSync(updates)) return { repos: [own], problem: null };
+  let u: unknown;
+  try {
+    u = JSON.parse(readFileSync(updates, 'utf8'));
+  } catch (e) {
+    return { repos: [own], problem: `${updates} can't be read as JSON (${(e as Error).message})` };
+  }
+  const followed = githubRepoOf(String((u as { repo_url?: unknown } | null)?.repo_url ?? ''));
+  if (!followed) return { repos: [own], problem: `${updates} doesn't name the GitHub repo the engine updates from` };
+  return { repos: [own, followed], problem: null };
+}
+
 /**
  * Whose repo this instance works, for the self-modification locks: a managed app's only when root's file names this
- * instance with exactly this repo (GitHub names compare without case); otherwise the engine's. `why` says which, for
- * the coordinator's start-up line.
+ * instance with exactly this repo (GitHub names compare without case), and that repo isn't the engine's own
+ * (engineRepos); otherwise the engine's. `why` says which, for the coordinator's start-up line.
+ * INVARIANT: never throws; any error is the engine's scope.
  */
 export function readLockScope(instance: string, repo: string, o: { file?: string; rootUid?: number } = {}): { scope: LockScope; why: string } {
-  const file = o.file ?? MANAGED_APPS_FILE();
-  const { apps, problem } = readManagedApps(file, o.rootUid ?? 0);
   const engine = (why: string) => ({ scope: 'engine' as const, why: `every self-modification lock applies: ${why}` });
-  if (problem) return engine(problem);
-  const named = Object.hasOwn(apps, instance) ? apps[instance] : undefined;
-  if (named === undefined) return engine(`${file} doesn't name instance ${instance} as a managed app`);
-  if (named.toLowerCase() !== repo.toLowerCase()) return engine(`${file} names instance ${instance} for ${named}, not ${repo}`);
-  return { scope: 'managed-app', why: `root's ${file} says ${repo} is a managed app, not the engine: the locks on the engine's own source paths don't apply` };
+  try {
+    const file = o.file ?? MANAGED_APPS_FILE();
+    const { apps, problem } = readManagedApps(file, o.rootUid ?? 0);
+    if (problem) return engine(problem);
+    const named = Object.hasOwn(apps, instance) ? apps[instance] : undefined;
+    if (named === undefined) return engine(`${file} doesn't name instance ${instance} as a managed app`);
+    if (named.toLowerCase() !== repo.toLowerCase()) return engine(`${file} names instance ${instance} for ${named}, not ${repo}`);
+    // WHY: root marking the engine's own repo as an app by mistake (or by hand) would turn its source locks off.
+    const eng = engineRepos();
+    if (eng.problem) return engine(`which repo is the engine can't be told: ${eng.problem}`);
+    if (eng.repos.some((e) => e.toLowerCase() === repo.toLowerCase())) return engine(`${repo} is the engine's own repo (its package.json or updates.json), never a managed app`);
+    return { scope: 'managed-app', why: `root's ${file} says ${repo} is a managed app, not the engine: the locks on the engine's own source paths don't apply` };
+  } catch (e) {
+    return engine(`root's managed apps file couldn't be read (${(e as Error)?.message ?? String(e)})`);
+  }
 }
