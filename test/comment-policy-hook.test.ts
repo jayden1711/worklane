@@ -130,6 +130,21 @@ test('commands from the checkout\'s git config (core.fsmonitor, a textconv drive
   assert.equal(existsSync(marker), false, 'the configured command did not run');
 });
 
+test('#634: a binary or -diff attribute hides nothing: the hook and CI both judge the new comment', async () => {
+  for (const attr of ['binary', '-diff']) {
+    const { dir, git, base } = project();
+    writeFileSync(join(dir, '.gitattributes'), `*.ts ${attr}\n`);
+    writeFileSync(join(dir, 'src', 'old.ts'), '// an old untagged comment\nexport const a = 1;\n// untagged new\n');
+    const atWrite = findingLines(ctx(await hook(dir, 'src/old.ts')));
+    git('add', '-A');
+    git('commit', '-q', '-m', 'attr and a comment');
+    const ci = spawnSync('node', [script, '--base', base, '--head', 'HEAD'], { cwd: dir, encoding: 'utf8' });
+    assert.equal(ci.status, 1, `${attr}: ${ci.stdout}`);
+    assert.deepEqual(atWrite, ['src/old.ts:3: no WHY:, INVARIANT: or issue/decision id'], attr);
+    assert.deepEqual(findingLines(ci.stderr), atWrite, attr);
+  }
+});
+
 test('#628: a clean filter on the file is "could not check", never lines from the filtered text', async () => {
   const { dir, git } = project();
   git('config', 'filter.pre.clean', "printf 'one\\ntwo\\n'; cat");

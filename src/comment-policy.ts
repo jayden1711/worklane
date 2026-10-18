@@ -172,12 +172,43 @@ function scanC(src: string): Block[] {
   return out;
 }
 
-/** A `#` comment scanner for shell, fed line by line (quotes and heredocs carry across lines). */
-function shScanner() {
-  let quote: "'" | '"' | null = null;
+/** WHY: bash's heredoc delimiter is the whole shell word after `<<`, quotes removed (#634: `<<END-X`, `<<EOF.txt`). */
+function heredocWord(text: string, from: number): { word: string; end: number } | null {
+  let j = from;
+  while (text[j] === ' ' || text[j] === '\t') j++;
+  let word = '';
+  for (; j < text.length && !/[\s;&|<>()]/.test(text[j]!); j++) {
+    const c = text[j]!;
+    if (c === '\\') word += text[++j] ?? '';
+    else if (c === "'" || c === '"') {
+      const close = text.indexOf(c, j + 1);
+      if (close < 0) return null;
+      word += text.slice(j + 1, close);
+      j = close;
+    } else word += c;
+  }
+  return word ? { word, end: j } : null;
+}
+
+/** WHY: nesting counts (#634: `$(( $((a)) << b ))`): the index past the bracket closing the one at `from`, else -1. */
+function closing(text: string, from: number, open: string, close: string): number {
+  let depth = 0;
+  for (let j = from; j < text.length; j++) {
+    if (text[j] === open) depth++;
+    else if (text[j] === close && --depth === 0) return j + 1;
+  }
+  return -1;
+}
+
+/**
+ * INVARIANT: an opener whose `line:column` key is in `ignored` is read as plain code (scanShLines' rescan, #634).
+ * A `#` comment scanner for shell, fed line by line (quotes and heredocs carry across lines).
+ */
+function shScanner(ignored: ReadonlySet<string>) {
+  let quote: { kind: "'" | '"' | "$'"; key: string } | null = null;
   // INVARIANT: heredocs open on one line are read in order, each body until its own word (#628: `<<A <<B`).
-  const heredocs: { word: string; tabs: boolean }[] = [];
-  return (raw: string): string | null => {
+  const heredocs: { word: string; tabs: boolean; key: string }[] = [];
+  const next = (raw: string, line: number): string | null => {
     // WHY: a CRLF file's terminator is `EOF\r`; without this the heredoc never ends (#628).
     const text = raw.replace(/\r$/, '');
     const open = heredocs[0];
@@ -187,33 +218,61 @@ function shScanner() {
     }
     for (let j = 0; j < text.length; j++) {
       const c = text[j]!;
-      if (quote === "'") {
-        if (c === "'") quote = null;
-      } else if (quote === '"') {
-        if (c === '\\') j++;
-        else if (c === '"') quote = null;
+      const key = `${line}:${j}`;
+      if (quote) {
+        // WHY: `\'` is an escaped quote inside bash's $'…' but not inside '…' (#634).
+        if (c === '\\' && quote.kind !== "'") j++;
+        else if (c === quote.kind.slice(-1)) quote = null;
       } else if (c === '\\') j++;
-      else if (c === "'" || c === '"') quote = c;
+      else if (c === '$' && text[j + 1] === "'" && !ignored.has(key)) {
+        quote = { kind: "$'", key };
+        j++;
+      } else if ((c === "'" || c === '"') && !ignored.has(key)) quote = { kind: c, key };
       else if (c === '#' && (j === 0 || /\s/.test(text[j - 1]!))) return text.slice(j);
-      else if (c === '(' && text[j + 1] === '(') {
-        // WHY: `<<` inside $(( )) or (( )) is a shift, not a heredoc (#618 review).
-        const end = text.indexOf('))', j + 2);
-        if (end >= 0) j = end + 1;
+      else if ((c === '(' && text[j + 1] === '(') || (c === '$' && text[j + 1] === '{')) {
+        // WHY: `<<` inside (( )), $(( )) or ${…} is a shift or text, never a heredoc (#618, #634).
+        const end = c === '$' ? closing(text, j + 1, '{', '}') : closing(text, j, '(', ')');
+        if (end > 0) j = end - 1;
       } else if (c === '<' && text[j + 1] === '<') {
         // WHY: only an unquoted `<<` starts a heredoc (#628); `<<<` is a here-string.
         if (text[j + 2] === '<') {
           j += 2;
           continue;
         }
-        const h = /^<<(-?)\s*\\?(['"]?)([A-Za-z_]\w*)\2/.exec(text.slice(j));
+        const tabs = text[j + 2] === '-';
+        const h = ignored.has(key) ? null : heredocWord(text, j + (tabs ? 3 : 2));
         if (h) {
-          heredocs.push({ word: h[3]!, tabs: h[1] === '-' });
-          j += h[0].length - 1;
+          heredocs.push({ word: h.word, tabs, key });
+          j = h.end - 1;
         } else j++;
       }
     }
     return null;
   };
+  /** WHY: what the rescan must ignore (#634): the quote, or the heredoc whose word never came, still open at the end. */
+  const unclosed = () => quote?.key ?? heredocs[0]?.key ?? null;
+  return { next, unclosed };
+}
+
+type Found = { line: number; text: string; own: boolean };
+
+/**
+ * INVARIANT: fails closed (#634): when a quote or heredoc never closes, the scan is redone with that opener read as
+ * code, so a misread construct can't leave the rest of the script unchecked.
+ */
+function scanShLines(lines: { line: number; text: string }[]): Found[] {
+  const ignored = new Set<string>();
+  for (;;) {
+    const sh = shScanner(ignored);
+    const found: Found[] = [];
+    for (const l of lines) {
+      const c = sh.next(l.text, l.line);
+      if (c !== null) found.push({ line: l.line, text: c, own: l.text.trim() === c.trim() });
+    }
+    const open = sh.unclosed();
+    if (open === null || ignored.has(open) || ignored.size >= 100) return found;
+    ignored.add(open);
+  }
 }
 
 const stripHash = (s: string) => s.replace(/^#+/, '').replace(/^ /, '').trimEnd();
@@ -232,30 +291,27 @@ function hashBlocks(found: { line: number; text: string; own: boolean }[]): Bloc
 }
 
 function scanSh(src: string): Block[] {
-  const next = shScanner();
-  const found: { line: number; text: string; own: boolean }[] = [];
-  src.split(/\r?\n/).forEach((text, k) => {
-    if (k === 0 && text.startsWith('#!')) return;
-    const c = next(text);
-    if (c !== null) found.push({ line: k + 1, text: c, own: text.trim() === c.trim() });
-  });
-  return hashBlocks(found);
+  const lines = src.split(/\r?\n/).map((text, k) => ({ line: k + 1, text }));
+  return hashBlocks(scanShLines(lines[0]?.text.startsWith('#!') ? lines.slice(1) : lines));
 }
 
 /** YAML `#` comments; a `run:` block scalar is scanned as shell (a workflow's script), any other block scalar is text. */
 function scanYaml(src: string): Block[] {
-  const found: { line: number; text: string; own: boolean }[] = [];
-  let scalar: { indent: number; body: number | null; sh: ReturnType<typeof shScanner> | null } | null = null;
+  const found: Found[] = [];
+  let scalar: { indent: number; body: number | null; script: { line: number; text: string }[] | null } | null = null;
+  const endScalar = () => {
+    if (scalar?.script) found.push(...scanShLines(scalar.script));
+    scalar = null;
+  };
   src.split(/\r?\n/).forEach((text, k) => {
     const indent = text.length - text.trimStart().length;
     if (scalar && (text.trim() === '' || indent > scalar.indent)) {
       // WHY: the script is the block without its YAML indent; a heredoc's closing word is matched at column 0.
       if (text.trim() !== '') scalar.body ??= indent;
-      const c = scalar.sh?.(text.slice(Math.min(scalar.body ?? 0, indent))) ?? null;
-      if (c !== null) found.push({ line: k + 1, text: c, own: text.trim() === c.trim() });
+      scalar.script?.push({ line: k + 1, text: text.slice(Math.min(scalar.body ?? 0, indent)) });
       return;
     }
-    scalar = null;
+    endScalar();
     let quote: "'" | '"' | null = null;
     let at = -1;
     for (let j = 0; j < text.length; j++) {
@@ -274,9 +330,10 @@ function scanYaml(src: string): Block[] {
     const code = at < 0 ? text : text.slice(0, at);
     if (at >= 0) found.push({ line: k + 1, text: text.slice(at), own: code.trim() === '' });
     const m = /^(\s*(?:-\s+)?)(?:([^\s#'"][^#]*?)\s*:\s+)?[|>][1-9]?[+-]?[1-9]?\s*$/.exec(code);
-    if (m && (m[2] !== undefined || /-\s+$/.test(m[1]!))) scalar = { indent: m[2] !== undefined ? m[1]!.length : indent, body: null, sh: m[2] === 'run' ? shScanner() : null };
+    if (m && (m[2] !== undefined || /-\s+$/.test(m[1]!))) scalar = { indent: m[2] !== undefined ? m[1]!.length : indent, body: null, script: m[2] === 'run' ? [] : null };
   });
-  return hashBlocks(found);
+  endScalar();
+  return hashBlocks(found.sort((a, b) => a.line - b.line));
 }
 
 /** Every comment block in a file, or [] for a language the policy doesn't know. */
@@ -295,7 +352,7 @@ const DIRECTIVE = new RegExp(
   [
     /^@ts-(expect-error|ignore|nocheck|check)\b/,
     /^eslint-(disable|enable)(-next-line|-line)?(\s|$)/,
-    /^eslint [\w@/-]+\s*:/,
+    /^eslint [\w@/-]+\s*:\s*(off|warn|error|[012]|\[)/,
     /^eslint-env [\w-]+(\s*,\s*[\w-]+)*\s*$/,
     /^(prettier-ignore|biome-ignore|@vite-ignore|[#@]__PURE__)\b/,
     /^(istanbul|c8|v8) ignore\b/,
@@ -395,6 +452,8 @@ const DIFF = [
   ...['-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.suppressBlankEmpty=false'],
   ...['diff', '--no-ext-diff', '--no-textconv', '--no-color', '--relative', '--find-renames', '-U0', '--src-prefix=a/', '--dst-prefix=b/'],
   ...['--diff-algorithm=myers', '--indent-heuristic'],
+  // WHY: a `binary` or `-diff` attribute would print "Binary files differ" and judge nothing, in CI too (#634).
+  '--text',
 ];
 /**
  * WHY: one deadline for all the hook's git calls (#628), so with post_edit's 20 s it stays inside the hook's 30 s;

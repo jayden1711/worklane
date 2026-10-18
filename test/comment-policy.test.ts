@@ -105,6 +105,31 @@ test('#628: quoted <<EOF, CRLF terminators and two heredocs on one line leave th
   assert.deepEqual(verdict('a.ts', '/* eslint-env node, browser */\n'), [], 'a real eslint-env list stays exempt');
 });
 
+test('#634: $\'…\' escapes, whole-word heredoc delimiters, ${…} and nested $(( )) leave the rest checked; an unclosed opener fails closed', () => {
+  const untagged = (...lines: number[]) => lines.map((l) => `${l}: no WHY:, INVARIANT: or issue/decision id`);
+  const cases: [string, number[]][] = [
+    ["echo $'it\\'s'\n# a\necho ok\n# b\n", [2, 4]],
+    ['cat <<END-X\n# body\nEND-X\n# after\n', [4]],
+    ['cat <<EOF.txt\n# body\nEOF.txt\n# after\n', [4]],
+    ["cat <<'END X'\n# body\nEND X\n# after\n", [4]],
+    ['echo ${v:-<<x}\n# after\n', [2]],
+    ['y=$(( $((a)) << b ))\n# after\n', [2]],
+    ['echo "never closed\n# after\n', [2]],
+    ['cat <<NEVER\n# after\n', [2]],
+  ];
+  for (const [sh, lines] of cases) {
+    assert.deepEqual(verdict('a.sh', sh), untagged(...lines), sh);
+    const yaml = `steps:\n  - run: |\n${sh
+      .trimEnd()
+      .split('\n')
+      .map((l) => `      ${l}`)
+      .join('\n')}\n  - name: next\n`;
+    assert.deepEqual(verdict('ci.yml', yaml), untagged(...lines.map((l) => l + 2)), `run: ${sh}`);
+  }
+  assert.deepEqual(verdict('a.ts', '// eslint warns: unused var\n'), untagged(1));
+  assert.deepEqual(verdict('a.ts', '/* eslint quotes: [2, "double"] */\n'), []);
+});
+
 test('directives are exempt only in their real syntax; prose that starts like one is judged', () => {
   for (const ok of ['// @ts-expect-error: upstream type', '// eslint-disable-next-line no-console', '/* eslint-disable */', '/* eslint no-console: off */', '/* global window, document: readonly */', '// #region helpers', '// #endregion', '# shellcheck disable=SC2086', '/* istanbul ignore next */', '// prettier-ignore']) {
     assert.deepEqual(verdict(ok.startsWith('#') ? 'a.sh' : 'a.ts', `${ok}\n`), [], ok);
