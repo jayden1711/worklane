@@ -445,14 +445,18 @@ const edit = (w: ReturnType<typeof world>, file: string, text: string) => {
   return git(w.person, 'rev-parse', 'HEAD');
 };
 
-/** PR #n rebased onto main as `shas` (oldest first), merged by an owner with its required check never run. */
-const rebaseMerged = (w: ReturnType<typeof world>, n: number, shas: string[]) => {
+/**
+ * PR #n rebased onto main as `shas` (first-parent commits, oldest first), merged by an owner with its required check
+ * never run. `commits`: the PR's commit count as GitHub gives it (default: as many as `shas`); compare's answers
+ * agree with it, so a smaller count is GitHub saying fewer than git shows.
+ */
+const rebaseMerged = (w: ReturnType<typeof world>, n: number, shas: string[], commits = shas.length) => {
   const at = new Date(w.clock.t).toISOString();
   const last = shas.at(-1)!;
-  const pr: MergedPull = { number: n, url: `https://github.com/x/y/pull/${n}`, mergedAt: at, mergeCommit: last, mergedBy: 'example-owner', mergedByBot: false, head: 'e'.repeat(40), base: 'main', commits: shas.length };
+  const pr: MergedPull = { number: n, url: `https://github.com/x/y/pull/${n}`, mergedAt: at, mergeCommit: last, mergedBy: 'example-owner', mergedByBot: false, head: 'e'.repeat(40), base: 'main', commits };
   for (const c of shas) w.gh.pulls.set(c, [pr]);
   w.gh.mergedAt.set(last, at);
-  shas.forEach((c, i) => c !== last && w.gh.compares.set(`${c}...${last}`, { status: 'ahead', aheadBy: shas.length - 1 - i, behindBy: 0 }));
+  shas.forEach((c, i) => c !== last && w.gh.compares.set(`${c}...${last}`, { status: 'ahead', aheadBy: Math.min(shas.length - 1 - i, commits - 1), behindBy: 0 }));
   w.gh.roles.set('example-owner', 'owner');
 };
 
@@ -520,7 +524,82 @@ test('main watch revert: when a revert PR can\'t be opened (a conflict with a la
   assert.notEqual(w.c.autoMergeStopped(), null);
 });
 
-test('main watch dead check:a required check with no run for dead_check_days is posted to the ops channel once and shown on the dashboard, and cleared when it runs again', async () => {
+/** The files that differ between two commits, as git's name-status lines. */
+const changed = (f: Fixture, a: string, b: string) => git(f.remote, 'diff', '--name-status', a, b).split('\n');
+
+test('main watch revert: a rebased PR whose last commit is reached through a merge commit (not one straight line) gets its first commit reverted alone, with no revert_through', async () => {
+  const w = world();
+  await w.watch(2);
+  const c1 = edit(w, 'a1.txt', 'one\n');
+  git(w.person, 'checkout', '-q', '-b', 'side');
+  edit(w, 's.txt', 'side\n');
+  git(w.person, 'checkout', '-q', 'main');
+  git(w.person, ...ident, 'merge', '-q', '--no-ff', '-m', 'merge side', 'side');
+  const m = git(w.person, 'rev-parse', 'HEAD');
+  const c3 = edit(w, 'a3.txt', 'three\n');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  // GitHub counts all 4 commits (c1, the side one, the merge, c3), so only git's straight-line check can refuse the range.
+  rebaseMerged(w, 45, [c1, m, c3], 4);
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, m, c3]);
+  const branch = `${BRAND.cli}/revert-${c1.slice(0, 12)}`;
+  const opened = reverts(w.f);
+  assert.deepEqual(opened.map((p) => p.head), [branch]);
+  assert.equal(alerts[0]!.revert, opened[0]!.url);
+  assert.equal(alerts[0]!.revert_through, undefined, 'not a range');
+  assert.match(opened[0]!.title, new RegExp(`^Revert ${c1.slice(0, 8)} \\(unaccounted on main\\)$`));
+  // c1 alone, on the tip: its file goes, the side commit's and c3's stay.
+  assert.equal(git(w.f.remote, 'rev-parse', `${branch}^`), c3);
+  assert.deepEqual(changed(w.f, c3, branch), ['D\ta1.txt']);
+});
+
+test('main watch revert: a range with more commits than GitHub says the PR has is never reverted as one; the first commit is reverted alone', async () => {
+  const w = world();
+  await w.watch(2);
+  const c1 = w.commit('g1.txt');
+  const c2 = w.commit('g2.txt');
+  const c3 = w.commit('g3.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  // GitHub says the PR has 2 commits, but git shows 3 from c1 through its merge commit.
+  rebaseMerged(w, 47, [c1, c2, c3], 2);
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, c2, c3]);
+  const branch = `${BRAND.cli}/revert-${c1.slice(0, 12)}`;
+  assert.deepEqual(reverts(w.f).map((p) => p.head), [branch]);
+  assert.equal(alerts[0]!.revert_through, undefined, 'not a range');
+  assert.deepEqual(changed(w.f, c3, branch), ['D\tg1.txt']);
+});
+
+test('main watch revert: below the per-trip cap, a later commit the trip\'s range revert covers opens no PR of its own, and its alert says that PR reverts it too', async () => {
+  const w = world();
+  // revert_prs_per_trip: 2, committed before the pass (so the trip may open a second PR, but needs none).
+  appendFileSync(join(w.person, CONFIG_PATH), '\nmain_watch:\n  revert_prs_per_trip: 2\n');
+  git(w.person, 'add', CONFIG_PATH);
+  git(w.person, ...ident, 'commit', '-q', '-m', 'revert_prs_per_trip: 2');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(2);
+  const c1 = edit(w, 'b.txt', 'one\n');
+  const c2 = edit(w, 'b.txt', 'two\n');
+  const c3 = edit(w, 'b.txt', 'three\n');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  rebaseMerged(w, 46, [c1, c2, c3]);
+  await w.watch(30);
+  const alerts = of<EventPayload<'main_watch.unaccounted'>>(w.f, 'main_watch.unaccounted');
+  assert.deepEqual(alerts.map((a) => a.sha), [c1, c2, c3]);
+  const opened = reverts(w.f);
+  assert.deepEqual(opened.map((p) => p.head), [`${BRAND.cli}/revert-${c1.slice(0, 12)}`], 'one revert PR: no second one for a covered commit');
+  assert.equal(alerts[0]!.revert_through, c3);
+  for (const a of alerts.slice(1)) {
+    assert.equal(a.revert, null);
+    // Not the cap's words: the cap (2) isn't reached.
+    assert.match(a.no_revert ?? '', new RegExp(`^this trip's revert PR ${opened[0]!.url} reverts this commit too \\(${c1.slice(0, 8)}\\.\\.${c3.slice(0, 8)}\\); the trip's commits so far: `));
+  }
+  assert.equal(of(w.f, 'merge.stopped').length, 3);
+});
+
+test('main watch dead check: a required check with no run for dead_check_days is posted to the ops channel once and shown on the dashboard, and cleared when it runs again', async () => {
   const chat = fakeChat();
   const w = world({ chat });
   await w.watch(2);

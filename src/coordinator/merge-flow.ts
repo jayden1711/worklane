@@ -948,7 +948,7 @@ export abstract class MergeFlow extends FixRuns {
     if (o.revert && !capped) {
       try {
         // A rebase-merged PR's commits: one revert of them all, so a later one that edits the same files can't conflict.
-        const range = o.through ? this.revertRange(o.sha, o.through) : null;
+        const range = o.through ? this.revertRange(o.sha, o.through.sha, o.through.commits) : null;
         const what = range ? `the ${range.length} commits${o.number ? ` of #${o.number}` : ''} from \`${o.sha.slice(0, 8)}\` through \`${range.at(-1)!.slice(0, 8)}\`` : `\`${o.sha.slice(0, 8)}\``;
         const title = range ? `Revert ${o.sha.slice(0, 8)}..${range.at(-1)!.slice(0, 8)} (${o.number ? `#${o.number}, ` : ''}${range.length} commits, unaccounted on ${this.branch})` : `Revert ${o.sha.slice(0, 8)} (unaccounted on ${this.branch})`;
         const body = `Reverts ${what} on ${this.branch} (${url}): ${o.reason}.\n\nOpened by ${BRAND.name}'s main watch, which guards ${this.branch} where GitHub doesn't. It never merges this; a human approves and merges it. Auto-merge is stopped on this instance until an admin clears it on the dashboard.`;
@@ -973,16 +973,17 @@ export abstract class MergeFlow extends FixRuns {
 
   /**
    * The commits from `sha` through `through`, oldest first, when they are one straight line of single-parent commits
-   * on the default branch's tip, at most 250 (GitHub's limit on a rebase merge): a rebase-merged PR's. Null otherwise,
-   * and the revert is of `sha` alone, as before.
+   * on the default branch's tip, no more than the PR has (`commits`) and at most 250 (GitHub's limit on a rebase
+   * merge): a rebase-merged PR's. Null otherwise, and the revert is of `sha` alone, as before.
    */
-  private revertRange(sha: string, through: string): string[] | null {
+  private revertRange(sha: string, through: string, commits: number): string[] | null {
     const tip = `${this.remote}/${this.branch}`;
     if (spawnSync('git', ['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
-    const r = spawnSync('git', ['rev-list', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
+    // Parents before children whatever the commit dates say, so only the checks below decide.
+    const r = spawnSync('git', ['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
     if (r.status !== 0) return null;
     const rows = r.stdout.split('\n').filter(Boolean).map((l) => l.split(' '));
-    if (rows.length < 2 || rows.length > 250 || rows[0]![0] !== sha || rows.at(-1)![0] !== through) return null;
+    if (rows.length < 2 || rows.length > Math.min(commits, 250) || rows[0]![0] !== sha || rows.at(-1)![0] !== through) return null;
     if (rows.some((x, i) => x.length !== 2 || (i > 0 && x[1] !== rows[i - 1]![0]))) return null;
     return rows.map((x) => x[0]!);
   }
