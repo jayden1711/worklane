@@ -100,10 +100,11 @@ test("a run's settings: the instance's hooks and rules, the lane's sandbox, the 
   assert.equal(s.disableAllHooks, false);
 });
 
-// The setting names are Claude Code's own (its settings schema, CLI 2.1.302): `attribution.commit` / `attribution.pr`,
-// where an empty string hides it, and the deprecated `includeCoAuthoredBy` that older versions read.
+// The setting names are Claude Code's own (its settings schema in the pinned CLI, 2.1.296): `attribution.commit` /
+// `attribution.pr`, where an empty string hides it, `attribution.sessionUrl: false` (no session trailer or PR-body
+// link), and the deprecated `includeCoAuthoredBy` that older versions read.
 const attributionOff = (s: Settings) => {
-  assert.deepEqual(s.attribution, { commit: '', pr: '' }, 'no attribution in commits or PR bodies');
+  assert.deepEqual(s.attribution, { commit: '', pr: '', sessionUrl: false }, 'no attribution or session link in commits or PR bodies');
   assert.equal(s.includeCoAuthoredBy, false);
 };
 
@@ -173,6 +174,20 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(r.reason, 'failed');
   assert.match(r.detail, /could loosen agent runs: it sets env/);
   assert.equal(c.seen(), null, 'claude never ran');
+});
+
+test('a run without instance guardrails still gets attribution off in any --settings it is passed, and none when it is passed none (#576)', { skip: isWindows && 'POSIX stand-in claude' }, async (t) => {
+  const { dir } = setup(t);
+  const lanes = { default: { settings: { sandbox: { enabled: true } } }, research: { ownHooks: true, settings: { permissions: { deny: ['Read(//x/**)'] } } }, bare: { ownHooks: true } };
+  for (const lane of ['default', 'research']) {
+    const c = fakeClaude();
+    const r = await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, lane));
+    assert.equal(r.reason, 'succeeded', r.detail);
+    attributionOff(c.seen()!.settings!);
+  }
+  const c = fakeClaude();
+  assert.equal((await new CliRunner('cli', childEnv(), c.bin, undefined, lanes).run(req(dir, 'bare'))).reason, 'succeeded');
+  assert.equal(c.seen()!.settings, null, 'no --settings is invented for a run that had none');
 });
 
 test("doctor checks an instance's agent hooks where they now live, and fails an older install's project-level hooks", (t) => {

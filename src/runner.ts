@@ -8,7 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
+import { NO_ATTRIBUTION, projectSettingsRefusal, runSettings, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { safeProjectEnv } from './project-env.js';
@@ -677,7 +677,9 @@ export class CliRunner implements AgentRunner {
         : pinned;
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
-    const settings = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    const locked = this.plugins ? { ...(keyed ?? {}), ...PLUGIN_LOCKS, ...(mcpArgs ? { allowedMcpServers: mcpArgs.allowedMcpServers } : {}) } : keyed;
+    // Attribution off in every --settings a run gets, with or without instance guardrails (#576); a run passed none gets none.
+    const settings = locked && { ...locked, ...NO_ATTRIBUTION };
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
