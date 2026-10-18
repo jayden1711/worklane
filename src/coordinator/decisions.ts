@@ -93,6 +93,7 @@ export abstract class Decisions extends Recovery {
       prompt: issueBrief(issue, doneWhen, extra),
       cwd: path,
       model,
+      ...(this.d.cfg.agents.planner_effort ? { effort: this.d.cfg.agents.planner_effort } : {}),
       allowedTools: PLAN_TOOLS,
       disallowedTools: PLAN_DISALLOWED,
       maxTurns: 60,
