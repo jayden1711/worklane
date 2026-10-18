@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { createServer, type Server } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { HUB_BREAK_GLASS_PORT, HUB_PORT } from '../src/dashboard-hub.js';
@@ -173,6 +173,22 @@ test('in a test process, the temporary directory is inside the test machine: os.
   for (const [what, p] of seen) assert.ok(p !== undefined && inside(p), `${what} is ${p}, outside ${testMachine}`);
   // Short enough for a Unix socket under it: Chrome's, the deepest one a test binds there.
   assert.ok(Buffer.byteLength(tmpdir() + CHROME_SOCKET) < SUN_PATH_MAX, `${tmpdir()}${CHROME_SOCKET} is ${Buffer.byteLength(tmpdir() + CHROME_SOCKET)} bytes`);
+});
+
+test("another user reaches what a test makes under tmpdir(), as under /tmp, but never this test's home, state, slots or system root (#604)", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  // The separate-users tests (test/frozen-guard.test.ts) have the agent user read a task file a test made under
+  // tmpdir(): every directory from the test machine down to tmpdir() lets others through (o+x).
+  const others = (p: string) => (statSync(p).mode & 0o001) !== 0;
+  const toTmp: string[] = [];
+  for (let d = tmpdir(); d !== dirname(testMachine); d = dirname(d)) toTmp.push(d);
+  assert.deepEqual(toTmp.filter((d) => !others(d)), [], `others can pass through each of ${toTmp.join(', ')}`);
+  // What the whole machine kept to this user before (mkdtemp's 0700), a directory inside it still does.
+  const closed = (p: string) => {
+    for (let d = p; d !== testMachine; d = dirname(d)) if (!others(d)) return true;
+    return false;
+  };
+  const open = Object.entries(isolatedEnv).filter(([k, p]) => !['TMPDIR', 'TMP', 'TEMP'].includes(k) && !closed(p));
+  assert.deepEqual(open, [], 'each is behind a directory of this user\'s alone');
 });
 
 test("a test run a test starts (a preloaded runner and its file, two levels down) gets its temporary directory inside this test's, still short enough for a socket (#604)", async () => {
