@@ -333,11 +333,11 @@ test('a prose recommendation is wrapped text, whole, clamped with Show more; onl
     assert.match(prose, /<p[^>]*class="[^"]*\bline-clamp-4\b[^"]*\bbreak-words\b|<p[^>]*class="[^"]*\bbreak-words\b[^"]*\bline-clamp-4\b/, `${page}: wrapped and clamped by CSS`);
     assert.match(prose, /data-testid="decision-recommendation-toggle"[^>]*>Show more</, `${page}: Show more`);
     assert.doesNotMatch(prose, /…|\.\.\./, `${page}: not truncated in the string`);
-    // Every option recommendation is the pill; no other card has one.
+    // Every option recommendation is named in its line (#586: in words, not a pill); no other card has that line.
     for (const d of open) {
       const card = cardOf(html, d.id);
-      if (d.options.includes(d.recommendation)) assert.match(card, new RegExp(`data-testid="decision-recommended"[^>]*>Recommended: <span[^>]*>${esc(d.recommendation).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`), `${page}: ${d.id}'s option is a pill`);
-      else assert.doesNotMatch(card, /data-testid="decision-recommended"/, `${page}: ${d.id} recommends no option: no pill`);
+      if (d.options.includes(d.recommendation)) assert.match(card, new RegExp(`data-testid="decision-recommended"[^>]*>Recommended: <strong[^>]*>${esc(d.recommendation).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</strong>`), `${page}: ${d.id}'s option is named`);
+      else assert.doesNotMatch(card, /data-testid="decision-recommended"/, `${page}: ${d.id} recommends no option: no option named`);
       // A reasoning line in the detail is shown as prose too, not as a one-line receipt.
       for (const x of d.receipts.filter((x) => x.startsWith('Recommendation: '))) {
         assert.ok(card.includes(esc(x.slice('Recommendation: '.length))), `${page}: ${d.id}'s reasoning is shown`);
@@ -1397,8 +1397,11 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   // Merged since yesterday, for sampling: each PR (linked, rel=noopener) with its review level and the evaluator's confidence.
   assert.equal((html.match(/data-testid="merged-item"/g) ?? []).length, 2);
   assert.match(html, /data-testid="merged-since"[\s\S]*?Merged since yesterday[\s\S]*?>2<[\s\S]*?2026-10-14 12:00 UTC/);
-  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/21" target="_blank" rel="noopener noreferrer"[^>]*data-testid="merged-pr"[^>]*>PR #21<[\s\S]*?Round totals to the cent[\s\S]*?data-testid="merged-level"[\s\S]*?>L0<[\s\S]*?data-testid="merged-confidence"[\s\S]*?>evaluator confidence high</);
-  assert.match(html, /PR #31[\s\S]*?level not recorded[\s\S]*?confidence not recorded/);
+  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/21" target="_blank" rel="noopener noreferrer"[^>]*data-testid="merged-pr"[^>]*>PR #21<[\s\S]*?Round totals to the cent[\s\S]*?data-testid="merged-level"[\s\S]*?>L0: lands once its checks pass<[\s\S]*?data-testid="merged-confidence"[\s\S]*?>evaluator confidence high</);
+  // Neither recorded for PR #31: no badge for either, rather than one saying "not recorded" (#586).
+  const pr31 = /data-testid="merged-item"(?:(?!data-testid="merged-item")[\s\S])*?PR #31(?:(?!data-testid="merged-item")[\s\S])*/.exec(html)?.[0] ?? '';
+  assert.match(pr31, /Document the rounding rule/);
+  assert.doesNotMatch(pr31, /merged-level|merged-confidence|not recorded/);
   assert.match(r.renderWaiting({ ...w, items: [] }, now), /data-testid="merged-item"/, 'shown even when nothing waits');
   assert.match(r.renderWaiting({ ...w, merged: [] }, now), /Nothing merged on its own/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
