@@ -31,6 +31,7 @@ import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
 import type { StarterCiView } from '../src/starter-ci.js';
+import { ACCOUNT, ACCOUNT_TEXT, accountDashboard } from './account-fixture.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -75,6 +76,7 @@ interface Render {
   renderSetup(data: unknown): string;
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number, scope?: { current: string | null; all: boolean; instances: (string | null)[] } | null): string;
+  renderClaudeAccountSet(state: unknown): string;
   renderTailscaleSetup(data: unknown, o?: { confirming?: string }): string;
   tailscaleBusy(d: unknown, now?: number): boolean;
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
@@ -135,7 +137,9 @@ interface Render {
   renderSidebar(state: State, o: { hub: unknown; scope: { current: string | null; all: boolean; instances: (string | null)[] } }): string;
   renderSetupModeHidden(path: string): string;
   renderAt(path: string, state: State, title?: string): string;
-  navCounts(state: unknown): Record<string, number | undefined>;
+  navCounts(state: unknown, waiting?: unknown): Record<string, number | undefined>;
+  renderNeedsYou(state: State, waiting: unknown, now?: number, error?: string | null): string;
+  NEEDS_YOU_ORDER: string;
   nextStep(f: unknown): { id: string } | null;
   renderHeader(title: string): string;
   navRows: { to: string; label: string; testId: string }[];
@@ -329,11 +333,11 @@ test('a prose recommendation is wrapped text, whole, clamped with Show more; onl
     assert.match(prose, /<p[^>]*class="[^"]*\bline-clamp-4\b[^"]*\bbreak-words\b|<p[^>]*class="[^"]*\bbreak-words\b[^"]*\bline-clamp-4\b/, `${page}: wrapped and clamped by CSS`);
     assert.match(prose, /data-testid="decision-recommendation-toggle"[^>]*>Show more</, `${page}: Show more`);
     assert.doesNotMatch(prose, /…|\.\.\./, `${page}: not truncated in the string`);
-    // Every option recommendation is the pill; no other card has one.
+    // Every option recommendation is named in its line (#586: in words, not a pill); no other card has that line.
     for (const d of open) {
       const card = cardOf(html, d.id);
-      if (d.options.includes(d.recommendation)) assert.match(card, new RegExp(`data-testid="decision-recommended"[^>]*>Recommended: <span[^>]*>${esc(d.recommendation).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</span>`), `${page}: ${d.id}'s option is a pill`);
-      else assert.doesNotMatch(card, /data-testid="decision-recommended"/, `${page}: ${d.id} recommends no option: no pill`);
+      if (d.options.includes(d.recommendation)) assert.match(card, new RegExp(`data-testid="decision-recommended"[^>]*>Recommended: <strong[^>]*>${esc(d.recommendation).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}</strong>`), `${page}: ${d.id}'s option is named`);
+      else assert.doesNotMatch(card, /data-testid="decision-recommended"/, `${page}: ${d.id} recommends no option: no option named`);
       // A reasoning line in the detail is shown as prose too, not as a one-line receipt.
       for (const x of d.receipts.filter((x) => x.startsWith('Recommendation: '))) {
         assert.ok(card.includes(esc(x.slice('Recommendation: '.length))), `${page}: ${d.id}'s reasoning is shown`);
@@ -1418,8 +1422,11 @@ test('waiting on you: every owner-held state grouped in the digest\'s order, eac
   // Merged since yesterday, for sampling: each PR (linked, rel=noopener) with its review level and the evaluator's confidence.
   assert.equal((html.match(/data-testid="merged-item"/g) ?? []).length, 2);
   assert.match(html, /data-testid="merged-since"[\s\S]*?Merged since yesterday[\s\S]*?>2<[\s\S]*?2026-10-14 12:00 UTC/);
-  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/21" target="_blank" rel="noopener noreferrer"[^>]*data-testid="merged-pr"[^>]*>PR #21<[\s\S]*?Round totals to the cent[\s\S]*?data-testid="merged-level"[\s\S]*?>L0<[\s\S]*?data-testid="merged-confidence"[\s\S]*?>evaluator confidence high</);
-  assert.match(html, /PR #31[\s\S]*?level not recorded[\s\S]*?confidence not recorded/);
+  assert.match(html, /href="https:\/\/github\.com\/example-org\/example-shop\/pull\/21" target="_blank" rel="noopener noreferrer"[^>]*data-testid="merged-pr"[^>]*>PR #21<[\s\S]*?Round totals to the cent[\s\S]*?data-testid="merged-level"[\s\S]*?>L0: lands once its checks pass<[\s\S]*?data-testid="merged-confidence"[\s\S]*?>evaluator confidence high</);
+  // Neither recorded for PR #31: no badge for either, rather than one saying "not recorded" (#586).
+  const pr31 = /data-testid="merged-item"(?:(?!data-testid="merged-item")[\s\S])*?PR #31(?:(?!data-testid="merged-item")[\s\S])*/.exec(html)?.[0] ?? '';
+  assert.match(pr31, /Document the rounding rule/);
+  assert.doesNotMatch(pr31, /merged-level|merged-confidence|not recorded/);
   assert.match(r.renderWaiting({ ...w, items: [] }, now), /data-testid="merged-item"/, 'shown even when nothing waits');
   assert.match(r.renderWaiting({ ...w, merged: [] }, now), /Nothing merged on its own/);
   // Anyone but the owner and the writers: told, not asked (the demo's dashboard for someone else).
@@ -1866,8 +1873,50 @@ test('#585 a grouped page\'s header draws its group\'s tabs with the counts thei
     g.window = stub;
   }
   assert.ok(c['nav-needs-you']! > 0, 'the demo has open decisions');
-  assert.match(drawer, new RegExp(`<a href="/needs-you/inbox"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
+  assert.match(drawer, new RegExp(`<a href="/needs-you"[^>]*data-testid="nav-needs-you"[^>]*>(?:(?!</a>).)*>${c['nav-needs-you']}</span></a>`));
   assert.doesNotMatch(drawer, /data-testid="nav-(inbox|decisions|waiting)"/);
+});
+
+test('#585 Needs you is one queue: what the three tabs list, each once, blocking first then the oldest, the order stated', () => {
+  const esc = (x: string) => x.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+  const now = Date.parse('2026-10-15T12:00:00Z');
+  const hoursAgo = (h: number) => new Date(now - h * 3_600_000).toISOString();
+  const open = asOwner.decisions.filter((d) => !d.answer) as unknown as { id: string; question: string; kind: string }[];
+  assert.ok(open.length >= 2, 'the demo has open decisions');
+  const asked = open.find((d) => d.kind !== 'plan')!;
+  const w = {
+    at: new Date(now).toISOString(), markdown: '', mergedSince: new Date(now).toISOString(), merged: [],
+    items: [
+      // Waiting on you's own line for a decision the Decisions tab shows too: one row.
+      { kind: 'awaiting_decision', since: hoursAgo(1), issue: null, pr: null, title: null, detail: 'the same decision', decision: asked.id },
+      { kind: 'hotspot_held', since: hoursAgo(9_000), issue: 3, pr: null, title: 'Held one', detail: 'behind #2, on src/a.ts' },
+      { kind: 'needs_owner', since: hoursAgo(2), issue: 3, pr: 31, title: 'Held one', detail: 'left to you' },
+    ],
+  };
+  const html = r.renderNeedsYou(asOwner, w, now);
+  assert.match(html, /data-testid="page-needs-you"[\s\S]*<h1[^>]*>Needs you</);
+  assert.ok(html.includes(`data-testid="needs-you-order">${esc(r.NEEDS_YOU_ORDER)}<`), 'the page states the order');
+  const rows = [...html.matchAll(/data-testid="needs-you-item" data-kind="([a-z_]+)" data-blocking="(yes|no)"/g)].map((m) => `${m[1]} ${m[2]}`);
+  // Blocking first; the hotspot hold is the oldest of all, but nothing waits on it but you, so it is last.
+  assert.equal(rows.at(-1), 'hotspot_held no');
+  assert.ok(rows.slice(0, -1).every((x) => x.endsWith(' yes')), rows.join(', '));
+  assert.equal(rows.length, r.navCounts(asOwner, w)['nav-needs-you'], 'the badge counts the queue');
+  // Every open decision is in it once, the one Waiting on you lists too among them.
+  for (const d of open) assert.equal(html.split(`href="/needs-you/decisions/${d.id}"`).length - 1, 1, d.id);
+  assert.match(html, /href="\/needs-you\/decisions\/pr-31"/);
+  // Before Waiting on you answers: no list yet. A viewer, refused it up front: the decisions and their blocked tasks, saying so.
+  assert.match(r.renderNeedsYou(asOwner, null), /Reading what waits on you/);
+  const viewer = r.renderNeedsYou(asOther, null);
+  assert.match(viewer, /What waits on the owner is for the instance(&#x27;|')s owners and writers[^<]*: this queue has the decisions and your blocked tasks\./);
+  assert.equal([...viewer.matchAll(/data-testid="needs-you-item"/g)].length, r.navCounts(asOther)['nav-needs-you']);
+  // The Inbox's L2 landings are not in the queue (nothing waits on them): a line counts them, with the way to the Inbox.
+  const landed = asOwner.tasks.slice(0, 2);
+  const withLanded = r.renderNeedsYou({ ...asOwner, inbox: { ...(asOwner as unknown as { inbox: object }).inbox, notify: landed } } as never, w, now);
+  assert.match(withLanded, /Not in the queue: 2 L2 changes landed for you to look over, on the <a href="\/needs-you\/inbox"[^>]*>Inbox<\/a>/);
+  assert.equal([...withLanded.matchAll(/data-testid="needs-you-item"/g)].length, rows.length, 'the landings add no row');
+  assert.doesNotMatch(r.renderNeedsYou({ ...asOwner, inbox: { ...(asOwner as unknown as { inbox: object }).inbox, notify: [] } } as never, w, now), /Not in the queue/);
+  // The queue is the group's first tab, on its own address.
+  assert.match(r.renderAt('/needs-you', asOwner), /<a href="\/needs-you"[^>]*aria-current="page"[^>]*data-testid="tab-needs-you"/);
 });
 
 test('#581 the app loads in a browser at an old address: its first page preload asks where the address moved', async () => {
@@ -2442,6 +2491,45 @@ test("#566: the accounts table shows the usage-limit badge and its reset time on
   assert.equal(cells(free).length, 4);
   assert.doesNotMatch(free, /data-testid="claude-profile-limit"/);
   for (const c of cells(free)) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
+});
+
+test("#567: each role's Machine page and sign-in banner, from what the server sent that role: a viewer sees that an account is set and nothing naming it", { skip: process.platform === 'win32' }, async () => {
+  const { d, get } = await accountDashboard();
+  try {
+    const now = Date.parse('2026-10-18T10:00:00Z');
+    const seen = async (login: string) => {
+      const state = JSON.parse((await get('/api/state', asPerson(login))).text) as { claudeAccount?: unknown };
+      const usage = JSON.parse((await get('/api/usage', asPerson(login))).text) as unknown;
+      // The Machine page's account part: the full panel for a machine owner, else whether an account is set.
+      const panel = await get('/api/claude-account', asPerson(login));
+      const machine = panel.status === 200 ? r.renderClaudeAccount(JSON.parse(panel.text), now) : r.renderClaudeAccountSet(state);
+      return { machine, banner: r.renderUsageBanner([usage], now), state };
+    };
+    const viewer = await seen('someone-else');
+    assert.match(viewer.machine, /data-testid="claude-account-set" data-set="true"/);
+    assert.match(viewer.machine, /An account is set for this instance&#x27;s agents\./);
+    assert.match(viewer.banner, /data-testid="signin-banner"/, 'a viewer still sees that runs are held on a refused login');
+    assert.match(viewer.banner, /Claude refused this instance&#x27;s Claude login/);
+    assert.doesNotMatch(viewer.banner, /Claude said|signin-recheck/);
+    for (const html of [viewer.machine, viewer.banner]) assert.doesNotMatch(html, ACCOUNT_TEXT);
+    const writer = await seen('example-collaborator');
+    assert.match(writer.machine, /data-testid="claude-account-set" data-set="true"/);
+    assert.doesNotMatch(writer.machine, ACCOUNT_TEXT, 'the accounts are the machine owners');
+    assert.match(writer.banner, new RegExp(`Claude refused the login <span[^>]*>${ACCOUNT.email.replace(/[.]/g, '\\.')}</span>`));
+    assert.match(writer.banner, /Claude said: .*OAuth token has expired/);
+    const owner = await seen('example-owner');
+    assert.match(owner.machine, /data-testid="claude-account"/);
+    assert.doesNotMatch(owner.machine, /claude-account-set/);
+    assert.match(owner.machine, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
+    assert.match(owner.machine, new RegExp(ACCOUNT.profile));
+    assert.match(owner.banner, /data-testid="signin-recheck"/);
+    // What the line says when no account is signed in, when the machine hasn't said, and with no answer at all.
+    assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: false } }), /data-set="false"[\s\S]*No account is signed in/);
+    assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: null } }), /data-set="unknown"[\s\S]*Not known yet/);
+    assert.equal(r.renderClaudeAccountSet({ claudeAccount: null }), '');
+  } finally {
+    await d.close();
+  }
 });
 
 test('Health: open incidents with what broke, since when, what was tried and the fix; resolved ones folded into a history; a viewer sees no detail; each instance has its dot', async () => {

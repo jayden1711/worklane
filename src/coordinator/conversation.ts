@@ -12,14 +12,14 @@ import { redactString } from '../events/redact.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
 import { CONFIRM_TEXT, draftPosts, progressText, questionText, readConfirm, VAGUE_TEXT, type IdeaStage } from '../intake/channel.js';
-import { NEEDS_INFO_REPLY, excerpt } from '../intake/decide.js';
+import { NEEDS_INFO_REPLY, excerpt, fileableDraft } from '../intake/decide.js';
 import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { mayAddIdea, mayFileReady, personOf, type ChatPerson } from '../intake/people.js';
 import { redactPii } from '../intake/redact.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
 import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
 import { IntakeMeter, readRaw, reportId, storeRaw } from '../intake/store.js';
-import { acceptTriage, checkDraft } from '../intake/triage.js';
+import { acceptTriage } from '../intake/triage.js';
 import { Channel } from './channel.js';
 import { runRoute } from './model-routing.js';
 
@@ -211,14 +211,16 @@ export abstract class Conversation extends Channel {
     const dup = t.duplicate_of !== undefined && shown.some((c) => c.issue === t.duplicate_of) ? t.duplicate_of : undefined;
     if (dup !== undefined) return ask(`This looks like #${dup}, already open: https://github.com/${this.d.cfg.project.project.repo}/issues/${dup}. Tell me what's different, or reply no to leave it.`);
     if (t.draft && (t.kind === 'bug' || t.kind === 'feature')) {
-      const check = checkDraft(t.draft);
-      if (!check.ok) return ask(questionText(t.reply, NEEDS_INFO_REPLY));
+      // #333: the same rules as a report's draft (a bug carries `- repro: true`), so what is shown is what is filed.
+      const f = fileableDraft(t);
+      if (!f.ok) return ask(questionText(t.reply, NEEDS_INFO_REPLY));
+      const draft = { title: t.draft.title, body: f.body };
       // Only a draft in the private store until an explicit yes.
       ownerOnlyDir(join(this.d.stateDir, 'intake'));
       ownerOnlyDir(join(this.d.stateDir, 'intake', 'drafts'));
-      writeOwnerOnly(this.draftFile(id), JSON.stringify({ title: t.draft.title, body: t.draft.body, labels: KIND_LABEL[t.kind] ? [KIND_LABEL[t.kind]!] : [] }));
+      writeOwnerOnly(this.draftFile(id), JSON.stringify({ ...draft, labels: f.labels }));
       this.emit('discord.idea', { id, stage: 'drafted', by: null, msg: null, issue: null, detail: t.draft.title.slice(0, 200) });
-      const posts = draftPosts(t.draft);
+      const posts = draftPosts(draft);
       for (const [i, text] of posts.entries()) await this.say(src, thread, `idea:${id}:draft:${turn}:${i}`, text);
       return;
     }

@@ -10,10 +10,16 @@ name: ci slow
 #     (job=<key>, sha=<commit>), dispatched on a ci-bisect/<commit> branch so the check runs land on that commit,
 #     not on main's tip.
 #   - on a pull request that touches what they exercise, or one labelled full-ci (the scope job decides).
+#   - adding the full-ci label to an open PR: ci-slow-full-ci.yml calls this workflow (workflow_call) for that
+#     labeled event, and the scope job runs every slow job. Its checks are named "full-ci / <job>".
+# WHY: no `labeled` here (#615). GitHub can't filter labeled by name, so any label (needs-owner, which the merge flow
+# adds seconds after a PR opens) started a run here. That run cancelled the PR's run in progress, and its jobs, had they
+# been skipped instead, would have replaced the PR's real results under the same check names. A label now reaches only
+# ci-slow-full-ci.yml, whose one job runs for full-ci alone and is named apart from these.
 on:
   pull_request:
-    # labeled: adding full-ci to a PR reruns it with every slow job.
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened]
+  workflow_call:
   workflow_dispatch:
     inputs:
       job:
@@ -27,9 +33,10 @@ on:
         default: ''
 # One batch at a time on main (a second waits; ci-batch.yml never queues a third), and one per bisect branch. A new
 # push to a PR cancels that PR's run in progress; nothing else is ever cancelled (the updater refuses a commit with a
-# cancelled check).
+# cancelled check). The full-ci label's run (called for a labeled event) has a group of its own: it cancels nothing of
+# the PR's own run, and a second full-ci run replaces only the first.
 concurrency:
-  group: ci-slow-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  group: ci-slow-${{ github.event_name == 'pull_request' && format('pr-{0}{1}', github.event.pull_request.number, github.event.action == 'labeled' && '-full-ci' || '') || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 permissions:
   contents: read
@@ -2264,7 +2271,9 @@ jobs:
           for u in worklane-dashboard-hub worklane-dashboard-ci worklane-ci; do systemctl is-active "$u.service"; done
       - name: "plugins: through the helper as ci's coordinator, a throwaway user fetches this commit's fixture and root keeps a preview; a stage grants nothing; the coordinator can't confirm or write the allowlist; root confirms only with the id typed back; remove only deletes"
         env:
-          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The commit this job checked out and runs (on a PR, its merge into main), never the PR head: a PR branched
+          # before a fixture change would run main's steps against its old fixture (#631).
+          FIXTURE_SHA: ${{ github.sha }}
         run: |
           url="https://github.com/${{ github.repository }}.git"
           st=/var/lib/worklane/plugins/fetch-status/ci.json
@@ -2326,7 +2335,8 @@ jobs:
           test -d "$s"   # runs in flight keep their copy
       - name: "MCP broker: wl-ci-mcp alone reads the server's secret; the server is snapshotted in quarantine, approved by root, and reached by the agent only through the broker with its run's ticket; a rug pull blocks it; a real claude admits only the connector"
         env:
-          FIXTURE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          # The commit under test, as in the plugins step (#631).
+          FIXTURE_SHA: ${{ github.sha }}
         run: |
           url="https://github.com/${{ github.repository }}.git"
           st=/var/lib/worklane/plugins/fetch-status/ci.json

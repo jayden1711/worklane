@@ -10,6 +10,8 @@ export interface TaskScore {
   verdict: boolean | null;
   outcome: EventPayload<'harness_eval.task'>['outcome'];
   costUsd: number;
+  /** The turns every agent run reported (their run.cost events). */
+  turns: number;
   /** Decisions asked of the owner, and every time the task waited for the owner (blocked, held from merging). */
   interventions: number;
   detail: string;
@@ -17,7 +19,7 @@ export interface TaskScore {
 
 /**
  * Score one replay from its scratch instance's event log. Success: the last verify of the issue passed every
- * done_when check and the last evaluator verdict on it approved the patch and the test. Cost: every run.cost.
+ * done_when check and the last evaluator verdict on it approved the patch and the test. Cost and turns: every run.cost.
  */
 export function scoreReplay(events: StoredEvent[], issue: number, o: { budgetHit?: boolean; error?: string } = {}): TaskScore {
   const of = <T extends StoredEvent['type']>(type: T) => events.filter((e) => e.type === type).map((e) => e.payload as EventPayload<T>);
@@ -30,10 +32,11 @@ export function scoreReplay(events: StoredEvent[], issue: number, o: { budgetHit
   const blocked = mine(of('issue.blocked'));
   const held = of('merge.decided').filter((m) => m.issue === issue && !m.auto).length;
   const costUsd = round(of('run.cost').reduce((s, c) => s + c.usd, 0));
+  const turns = of('run.cost').reduce((s, c) => s + c.turns, 0);
   const queued = mine(of('land.queued')).length > 0;
   const outcome: TaskScore['outcome'] = o.error ? 'error' : o.budgetHit ? 'budget' : blocked.length ? 'blocked' : asked ? 'asked' : queued ? 'queued' : 'unfinished';
   const detail = o.error ?? (blocked.at(-1)?.why ?? (verify && !doneWhen ? `failed: ${verify.checks.filter((c) => c.status !== 'pass' && c.status !== 'skipped').map((c) => c.check).join(', ')}` : v && !verdict ? `evaluator: ${v.advice}` : '')).slice(0, 500);
-  return { success: doneWhen === true && verdict === true, doneWhen, verdict, outcome, costUsd, interventions: asked + blocked.length + held, detail };
+  return { success: doneWhen === true && verdict === true, doneWhen, verdict, outcome, costUsd, turns, interventions: asked + blocked.length + held, detail };
 }
 
 export const round = (x: number) => Math.round(x * 10000) / 10000;
@@ -44,15 +47,17 @@ export interface RunTotals {
   costUsd: number;
   wallMs: number;
   interventions: number;
+  turns: number;
 }
 
-export function totals(scores: { success: boolean; cost_usd: number; wall_ms: number; interventions: number }[]): RunTotals {
+export function totals(scores: { success: boolean; cost_usd: number; wall_ms: number; interventions: number; turns?: number | undefined }[]): RunTotals {
   return {
     runs: scores.length,
     passed: scores.filter((s) => s.success).length,
     costUsd: round(scores.reduce((s, x) => s + x.cost_usd, 0)),
     wallMs: scores.reduce((s, x) => s + x.wall_ms, 0),
     interventions: scores.reduce((s, x) => s + x.interventions, 0),
+    turns: scores.reduce((s, x) => s + (x.turns ?? 0), 0),
   };
 }
 
@@ -108,6 +113,8 @@ export function commentMarkdown(cur: EvalRun, base: EvalRun | null, brand: strin
     row('cost per replay', per(c.cost_usd, c), b ? per(b.cost_usd, b) : null, usd, 'down'),
     row('wall-clock per replay', per(c.wall_ms, c), b ? per(b.wall_ms, b) : null, mins, 'down'),
     row('human interventions per replay', per(c.interventions, c), b ? per(b.interventions, b) : null, (x) => x.toFixed(2), 'down'),
+    // A run recorded before turns were counted has none: never compared as if it were 0.
+    ...(c.turns === undefined ? [] : [row('turns per replay', per(c.turns, c), b && b.turns !== undefined ? per(b.turns, b) : null, (x) => x.toFixed(1), 'down')]),
   ];
   const pub = cur.tasks.filter((t) => !t.held_out);
   const held = cur.tasks.filter((t) => t.held_out);

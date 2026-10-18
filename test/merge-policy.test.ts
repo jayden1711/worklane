@@ -370,3 +370,27 @@ test("the engine's own review.yaml already holds every self-modification file, w
   const unheld = engineFiles.filter((f) => SELF_MODIFICATION_PARTS.some((p) => p.globs.some((g) => globToRegExp(g).test(f))) && !waiting.some((c) => globs(c).some((re) => re.test(f))));
   assert.deepEqual(unheld, [], 'files the code locks that this repo\'s review.yaml leaves to auto-merge: list them in a category under L3_human and merge.wait_categories');
 });
+
+test("regression: a tests-only change to the tests' own machine, the slot-write check or a tool-guard denial test waits for the owner in the engine's own review.yaml (engine-guards)", () => {
+  const own = loadConfig(repoRoot).review!;
+  for (const path of [
+    'test/isolate.ts',
+    'test/isolate.test.ts',
+    'test/slot-dir-writes.test.ts',
+    'test/eval-roles.test.ts',
+    'test/research.test.ts',
+    'test/discord-chat.test.ts',
+    'test/experiments-coordinator.test.ts',
+    'test/intake-coordinator.test.ts',
+    'test/domain-runner.test.ts',
+  ]) {
+    // Every entry is a real file, so a rename can't leave a dead entry.
+    assert.ok(engineFiles.includes(path), `${path} is a real file`);
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [] }, own);
+    assert.equal(lvl.level, 'L3', `${path}: ${lvl.reasons.join(' | ')}`);
+    assert.deepEqual(lvl.categories['engine-guards'], [path], path);
+    const d = mergeDecision(clean({ level: lvl, lines: 1, files: 1, waitCategories: waitCategoriesOf(own) }));
+    assert.equal(d.auto, false, path);
+    assert.ok(d.reasons.includes(`high-risk: engine-guards (${path})`), `${path}: ${d.reasons.join(' | ')}`);
+  }
+});
