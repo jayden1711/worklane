@@ -125,7 +125,7 @@ async function spawnsDuring(fn: () => Promise<void>): Promise<string[]> {
   for (const n of names) {
     const orig = saved.get(n)!;
     cp[n] = (...a: unknown[]) => {
-      seen.push(`${n} ${String(a[0])}`);
+      seen.push([n, String(a[0]), ...(Array.isArray(a[1]) ? a[1].map(String) : [])].join(' '));
       return orig(...a);
     };
   }
@@ -141,7 +141,7 @@ async function spawnsDuring(fn: () => Promise<void>): Promise<string[]> {
 
 test('intake (#333): a bug is filed with `- repro: true`, labelled when not reproduced, and no code runs for the report: only the read-only triage run', async () => {
   const t = setup({ batches: [[report(), report({ from: STRANGER_ID, text: 'bug: the export button does nothing' })]], triage: () => ({ kind: 'bug', draft: DRAFT, reproduction: { result: 'not_reproduced', detail: 'the totals code applies discounts' } }) });
-  assert.deepEqual(await spawnsDuring(async () => void git(t.repo, 'status')), ['execFileSync git'], 'the spy sees a spawn through an ESM import');
+  assert.deepEqual(await spawnsDuring(async () => void git(t.repo, 'status')), ['execFileSync git status'], 'the spy sees a spawn through an ESM import');
   const spawned = await spawnsDuring(() => t.c.checkIntake());
   assert.deepEqual(spawned, [], 'nothing is spawned at intake time: the report is read, never run');
   assert.deepEqual(t.runner.calls.map((r) => r.role), ['intake', 'intake'], 'only the triage runs, no reproduction run');
@@ -160,15 +160,26 @@ test('intake (#333): a bug is filed with `- repro: true`, labelled when not repr
   assert.ok(filed.every((i) => /^- repro: true$/m.test(i.body)));
 });
 
-test('intake (#333): a bug already fixed on main is answered with the fixing commit and files nothing; a feature is filed as drafted', async () => {
+test('intake (#333): a bug already fixed on main is answered naming the fixing commit only when git confirms it is on main; nothing else runs; a feature is filed as drafted', async () => {
+  let onMain = '';
   const t = setup({
-    batches: [[report(), report({ text: 'please add dark mode' })]],
-    triage: (req) => (/dark mode/.test(readFileSync(join(req.cwd, 'report.md'), 'utf8')) ? { kind: 'feature', draft: DRAFT } : { kind: 'bug', draft: DRAFT, reproduction: { result: 'fixed_on_main', detail: 'fixed by the totals rewrite', commit: '0a1b2c3d4e5f' } }),
+    batches: [[report(), report({ text: 'bug: the totals were wrong last week' }), report({ text: 'please add dark mode' })]],
+    triage: (req) => {
+      const text = readFileSync(join(req.cwd, 'report.md'), 'utf8');
+      if (/dark mode/.test(text)) return { kind: 'feature', draft: DRAFT };
+      return { kind: 'bug', draft: DRAFT, reproduction: { result: 'fixed_on_main', detail: 'fixed by the totals rewrite', commit: /last week/.test(text) ? '0a1b2c3d4e5f' : onMain } };
+    },
   });
+  // The checkout's last fetch of the default branch: its one commit.
+  onMain = git(t.repo, 'rev-parse', 'HEAD');
+  git(t.repo, 'update-ref', 'refs/remotes/origin/main', onMain);
   const spawned = await spawnsDuring(() => t.c.checkIntake());
-  assert.deepEqual(spawned, []);
-  assert.equal(t.discord.replies.length, 2);
-  assert.match(t.discord.replies[0]!.text, /already fixed.*\b0a1b2c3d4e5f\b/);
+  const check = (id: string) => `execFileSync git merge-base --is-ancestor ${id} refs/remotes/origin/main`;
+  assert.deepEqual(spawned, [check(onMain), check('0a1b2c3d4e5f')], 'the only process: one read-only git check per fixing commit, on the trusted checkout');
+  assert.equal(t.discord.replies.length, 3);
+  assert.match(t.discord.replies[0]!.text, new RegExp(`already fixed.*\\b${onMain}\\b`), 'confirmed on main: named');
+  assert.match(t.discord.replies[1]!.text, /already fixed/);
+  assert.doesNotMatch(t.discord.replies[1]!.text, /0a1b2c3d4e5f|commit/, 'not on main: not named');
   const issues = await t.backlog.list('ready');
   assert.deepEqual(issues.map((i) => i.labels), [['ready', 'enhancement']], 'only the feature is filed');
   assert.ok(issues[0]!.body.startsWith(DRAFT.body.trim()), 'with its body as drafted');

@@ -61,7 +61,25 @@ export function withRepro(body: string): string | null {
   return repro.length === 1 && repro[0]!.repro === true && others(after.done_when) === others(before.done_when) ? out : null;
 }
 
-export const NEEDS_INFO_REPLY = 'Thanks for the report. Could you tell us a bit more: what you were doing, what you expected, and what happened instead?';
+/**
+ * A bug or feature draft as intake files it, from a report (decide) or a conversation (src/coordinator/conversation.ts),
+ * so both take the same rules (#333): checkDraft passes; a bug's done_when gets `- repro: true` (withRepro), and a bug
+ * the agent couldn't reproduce gets the couldnt-reproduce label. Its labels are the kind's and that one only.
+ * Not ok: it can't be filed as written (why, for the log).
+ */
+export function fileableDraft(triage: Pick<Triage, 'kind' | 'draft' | 'reproduction'>): { ok: true; body: string; labels: string[] } | { ok: false; why: string } {
+  if (!triage.draft) return { ok: false, why: 'no draft' };
+  const check = checkDraft(triage.draft);
+  if (!check.ok) return check;
+  const bug = triage.kind === 'bug';
+  const body = bug ? withRepro(triage.draft.body) : triage.draft.body;
+  if (body === null) return { ok: false, why: "a bug's done_when must take `- repro: true`, and this one can't as written" };
+  const kindLabel = KIND_LABEL[triage.kind];
+  const notReproduced = bug && triage.reproduction?.result === 'not_reproduced';
+  return { ok: true, body, labels: [...(kindLabel ? [kindLabel] : []), ...(notReproduced ? [NOT_REPRODUCED_LABEL] : [])] };
+}
+
+export const NEEDS_INFO_REPLY ='Thanks for the report. Could you tell us a bit more: what you were doing, what you expected, and what happened instead?';
 export const NOT_ACTIONABLE_REPLY = "Thanks for writing in. We couldn't turn this into something to fix yet; if it's a problem with the product, could you describe what happened?";
 export const QUESTION_REPLY = "Thanks, we've passed your question on and someone will get back to you.";
 
@@ -111,19 +129,14 @@ export function decide(o: { report: IncomingReport; redacted: string; triage: Tr
   if (triage.kind === 'question') return { action: 'ask_owner', text: excerpt(redacted, 1000), reply: QUESTION_REPLY };
   if (triage.reproduction?.result === 'fixed_on_main') return { action: 'reply', text: fixedReply(triage.reproduction.commit) };
   if (!triage.draft) return { action: 'reply', text: NEEDS_INFO_REPLY };
-  const check = checkDraft(triage.draft);
+  const f = fileableDraft(triage);
   // A draft that can't be filed as written is a report we need more about, never an issue or a silent drop.
-  if (!check.ok) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: check.why };
-  // A bug always asks for its failing test at task time (#333); one whose contract can't carry that isn't filed.
-  const drafted = triage.kind === 'bug' ? withRepro(triage.draft.body) : triage.draft.body;
-  if (drafted === null) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: "a bug's done_when must take `- repro: true`, and this one can't as written" };
+  if (!f.ok) return { action: 'reply', text: NEEDS_INFO_REPLY, refused: f.why };
   // A draft whose Sources name a money-path file is high-risk: the money-path label takes its work to L3 (review.ts).
-  const money = moneyPathFiles(drafted, o.moneyPaths ?? []);
-  const risk = money.length ? `\n\n**High risk:** names money-path files (${money.slice(0, 5).map((f) => `\`${f}\``).join(', ')}), so its work waits for the owner (L3).` : '';
-  const body = `${drafted.trim()}\n\n---\n${reportSection(report, redacted, triage)}${risk}`;
-  const kindLabel = KIND_LABEL[triage.kind];
-  const notReproduced = triage.kind === 'bug' && triage.reproduction?.result === 'not_reproduced';
-  const labels = [...(kindLabel ? [kindLabel] : []), ...(money.length ? ['money-path'] : []), ...(notReproduced ? [NOT_REPRODUCED_LABEL] : [])];
+  const money = moneyPathFiles(f.body, o.moneyPaths ?? []);
+  const risk = money.length ? `\n\n**High risk:** names money-path files (${money.slice(0, 5).map((p) => `\`${p}\``).join(', ')}), so its work waits for the owner (L3).` : '';
+  const body = `${f.body.trim()}\n\n---\n${reportSection(report, redacted, triage)}${risk}`;
+  const labels = [...f.labels, ...(money.length ? ['money-path'] : [])];
   if (trusted) return { action: 'file', title: triage.draft.title, body, labels: ['ready', ...labels] };
   return { action: 'decision', title: triage.draft.title, body, options: ['approve', 'edit', 'reject'], labels };
 }
