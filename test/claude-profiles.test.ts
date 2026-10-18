@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_PROFILE_CREDENTIAL, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
+import { accountSwitchedAt, CLAUDE_PROFILE_CREDENTIAL, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep, profileStepOk } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -19,6 +19,7 @@ import { EventLog } from '../src/events/log.js';
 import { MachineRequestError, machineRequests } from '../src/machine-requests.js';
 import { CliRunner } from '../src/runner.js';
 import { withDeniedReads, sandboxSettings } from '../src/sandbox.js';
+import { pauseOf, resetWords } from '../src/usage-limit.js';
 import { asDevicePerson, asPerson, exampleProject, exampleRoles, machineOwnersFile, ownerRequester, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -166,6 +167,122 @@ test('the accounts × instances table: each instance on its active profile, the 
   assert.deepEqual([cell('work', 'alpha').active, cell('work', 'alpha').apiOk, cell('work', 'alpha').account], [true, true, 'work@example.com']);
   assert.deepEqual([cell('default', 'beta').active, cell('default', 'beta').apiOk, cell('default', 'beta').apiError], [true, false, 'HTTP 401']);
   assert.equal(cell('personal', 'beta').apiOk, null, 'never checked');
+});
+
+// #566: the usage-limit pause, as the log records it (usage.paused / usage.resumed), on the table's cells.
+const STATUS_AB = { at: '2026-10-14T00:00:00Z', users: [{ instance: 'alpha', kind: 'agent', user: 'wl-alpha-agent', logged_in: true, api_ok: true }, { instance: 'beta', kind: 'agent', user: 'wl-beta-agent', logged_in: true, api_ok: true }] };
+const pausedAt = (log: EventLog, instance: string, reset: string) => log.append('usage.paused', { reset_at: reset, source: 'claude', kind: 'five_hour', issue: 7, role: 'worker', detail: 'usage limit' }, instance, 'coordinator');
+const limitsIn = (t: ReturnType<typeof profilesTable>) => t.profiles.flatMap((p) => p.cells.filter((c) => c.limit !== null).map((c) => [p.name, c.instance, c.limit]));
+
+test('#566: profilesTable marks the active cell of a paused instance with its reset time, and no other cell', () => {
+  const dir = accountDir(twoProfiles({ alpha: { profile: 'work', since: 'x' } }));
+  writeFileSync(join(dir, 'status.json'), JSON.stringify(STATUS_AB));
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'cp-usage-')), 'e.db'));
+  try {
+    const now = Date.parse('2026-10-18T12:00:00Z');
+    const reset = '2026-10-18T14:05:00.000Z';
+    pausedAt(log, 'alpha', reset);
+    const t = profilesTable({ dir, now, usage: { instance: 'alpha', pause: pauseOf(log.read(0)) } });
+    // Only alpha's active account (work): not default or personal for alpha, nothing for beta.
+    assert.deepEqual(limitsIn(t), [['work', 'alpha', { resetAt: reset, resets: resetWords(reset, now) }]]);
+    assert.equal(resetWords(reset, now), '2026-10-18 14:05 UTC (in 2 h 5 min)', 'the reset as the usage-limit notices word it');
+    assert.equal(t.limitsOf, 'alpha', "the table says whose pause it read: beta's column is not shown here");
+  } finally {
+    log.close();
+  }
+});
+
+test('#566: an unpaused instance has no limit on any cell: no pause, after usage.resumed, after its reset, or after a profile switch since it began', () => {
+  const dir = accountDir(twoProfiles({ alpha: { profile: 'work', since: 'x' } }));
+  writeFileSync(join(dir, 'status.json'), JSON.stringify(STATUS_AB));
+  const log = new EventLog(join(mkdtempSync(join(tmpdir(), 'cp-usage-')), 'e.db'));
+  try {
+    const now = Date.parse('2026-10-18T12:00:00Z');
+    const reset = '2026-10-18T14:05:00.000Z';
+    const table = (o: { now?: number; dir?: string } = {}) => profilesTable({ dir: o.dir ?? dir, now: o.now ?? now, usage: { instance: 'alpha', pause: pauseOf(log.read(0)) } });
+    const cells = (t: ReturnType<typeof profilesTable>) => t.profiles.flatMap((p) => p.cells);
+    // No pause in the log.
+    const none = table();
+    assert.equal(cells(none).length, 6);
+    assert.ok(cells(none).every((c) => c.limit === null), JSON.stringify(cells(none).map((c) => c.limit)));
+    assert.equal(none.limitsOf, 'alpha');
+    // Paused, then resumed: none again.
+    pausedAt(log, 'alpha', reset);
+    assert.equal(limitsIn(table()).length, 1, 'paused: the active cell');
+    log.append('usage.resumed', { reset_at: reset, paused_ms: 60_000, reason: 'reset' }, 'alpha', 'coordinator');
+    assert.deepEqual(limitsIn(table()), [], 'after usage.resumed');
+    // Paused again: its reset come (the coordinator resumes at its next tick), or a profile switch since it began
+    // (a switch ends the pause: src/coordinator/base.ts resumeIfDue), shows none.
+    pausedAt(log, 'alpha', reset);
+    assert.deepEqual(limitsIn(table({ now: Date.parse(reset) + 1000 })), [], 'its reset has come');
+    const switched = accountDir({ ...twoProfiles({ alpha: { profile: 'work', since: 'x' } }), switched_at: { alpha: new Date(now + 1000).toISOString() } });
+    writeFileSync(join(switched, 'status.json'), JSON.stringify(STATUS_AB));
+    assert.deepEqual(limitsIn(table({ dir: switched })), [], 'switched since the pause began');
+    // No usage given (an older caller): nothing is marked, and no instance's limit is claimed as read.
+    const unread = profilesTable({ dir, now });
+    assert.ok(cells(unread).every((c) => c.limit === null));
+    assert.equal(unread.limitsOf, null);
+  } finally {
+    log.close();
+  }
+});
+
+test("#566: a whole-login switch (switch.jsonl) completed after the pause began ends the table's limit, as it ends the coordinator's pause; a failed or not-yet-resumed one doesn't", () => {
+  const now = Date.parse('2026-10-18T12:00:00Z');
+  const reset = '2026-10-18T14:00:00.000Z';
+  const pause = { since: '2026-10-18T11:00:00.000Z', resetAt: reset, source: 'claude' as const, kind: 'five_hour', issue: 7, role: 'worker', id: 1 };
+  // A claude-account switch for alpha at 11:30: the token, alpha's agent user installed and checked, alpha resumed.
+  const switchDir = (end: object[]) => {
+    const d = accountDir(twoProfiles());
+    writeFileSync(join(d, 'status.json'), JSON.stringify(STATUS_AB));
+    const lines = [{ step: 'switch', state: 'started', detail: '1 instance(s): alpha' }, { step: 'pause', state: 'done', instance: 'alpha', detail: 'starts no more runs' }, { step: 'token', state: 'done', detail: 'received' }, { step: 'install', state: 'done', instance: 'alpha', user: 'wl-alpha-agent', detail: 'stored' }, ...end];
+    writeFileSync(join(d, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at: '2026-10-18T11:30:00.000Z', ...l })).join('\n') + '\n');
+    return d;
+  };
+  const check = (state: string) => ({ step: 'check', state, instance: 'alpha', user: 'wl-alpha-agent', detail: state });
+  const done = switchDir([check('done'), { step: 'resume', state: 'done', instance: 'alpha', detail: 'running again' }, { step: 'switch', state: 'done', detail: 'done' }]);
+  const failed = switchDir([check('failed'), { step: 'resume', state: 'failed', instance: 'alpha', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: alpha' }]);
+  const running = switchDir([check('done')]);
+  const limits = (dir: string) => limitsIn(profilesTable({ dir, now, usage: { instance: 'alpha', pause } }));
+  assert.deepEqual(limits(done), [], 'completed after the pause began: the coordinator ends the pause, so no limit');
+  assert.deepEqual(limits(failed).map(([p, i]) => `${p}/${i}`), ['default/alpha'], 'its check failed: alpha stays on its old login, limit and all');
+  assert.deepEqual(limits(running).map(([p, i]) => `${p}/${i}`), ['default/alpha'], 'not resumed yet: still limited');
+  // The coordinator's switch time (src/service.ts accountSwitched) is this same helper.
+  assert.equal(accountSwitchedAt('alpha', done), '2026-10-18T11:30:00.000Z');
+  assert.equal(accountSwitchedAt('alpha', failed), null);
+  assert.equal(accountSwitchedAt('alpha', running), null);
+});
+
+test("#566: the dashboard's account view carries this instance's pause on its active account's cell; another instance's column is not read", { skip: !posix }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cp-usage-dash-'));
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  const instance = cfg.project.project.name;
+  const eventsDb = join(dir, 'events.db');
+  const reset = new Date(Date.now() + 3 * 3600_000).toISOString();
+  const log = new EventLog(eventsDb);
+  pausedAt(log, instance, reset);
+  log.close();
+  const owners = machineOwnersFile('example-owner');
+  const acct = accountDir(twoProfiles({ beta: { profile: 'work', since: 'x' } }));
+  writeFileSync(join(acct, 'status.json'), JSON.stringify({ at: '2026-10-14T00:00:00Z', users: [{ instance, kind: 'agent', user: `wl-${instance}-agent`, logged_in: true, api_ok: true }, { instance: 'beta', kind: 'agent', user: 'wl-beta-agent', logged_in: true, api_ok: true }] }));
+  const home = mkdtempSync(join(tmpdir(), 'cp-usage-dash-home-'));
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  const d = await startDashboard({ root, cfg, eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: owners, claudeAccountDir: acct, secretsHome: home, slotsDir: join(dir, 'slots') });
+  try {
+    const base = d.url.split('/?')[0]!;
+    const view = await fetch(`${base}/api/claude-account`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-owner') } });
+    assert.equal(view.status, 200);
+    const v = (await view.json()) as { profiles: ReturnType<typeof profilesTable> };
+    assert.deepEqual(limitsIn(v.profiles).map(([p, i, l]) => [p, i, (l as { resetAt: string }).resetAt]), [['default', instance, reset]], "this instance's active account only");
+    assert.equal(v.profiles.limitsOf, instance);
+    // The gate is as it was: anyone not a machine owner gets nothing, the limit included.
+    const other = await fetch(`${base}/api/claude-account`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-collaborator') } });
+    assert.equal(other.status, 403);
+    assert.doesNotMatch(await other.text(), /resetAt|limit/);
+  } finally {
+    await d.close();
+  }
 });
 
 test('the dashboard: only a machine owner on an allowed device starts a profile step; every other request is refused (403), audited, and starts nothing', { skip: !posix }, async () => {
