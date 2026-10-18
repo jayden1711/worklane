@@ -108,9 +108,16 @@ EOF
 
 # The host's egress rule (egress-firewall.sh) covers the test user; this unit's cgroup is its one exception, so Docker
 # can pull a run's database image: systemd puts the cgroup in the rule's set while the unit runs (systemd 255 or later;
-# on an older one the rule covers test users only with --with-test-users, and then Docker can't pull).
+# on an older one the rule covers test users only with --with-test-users, and then Docker can't pull). Never where the
+# rule's record says dropped: that install's rule covered the test user with all of Docker's traffic dropped before, and
+# the exception would reopen routes out through Docker that it had closed (lib.sh egress_docker_mode).
 docker_egress() {
-  if [ "$(systemd_major)" -ge "$EGRESS_NFTSET_SYSTEMD" ]; then
+  local rec="$EGRESS_RECORD"
+  # --print changes nothing, so a test may point it at a record of its own.
+  [ -z "$print" ] || rec="${EGRESS_RECORD_PRINT:-$rec}"
+  if [ "$(egress_docker_mode "$rec")" = dropped ]; then
+    printf '# No NFTSet=: the host egress rule (egress-firewall.sh) drops all traffic of the test user, Docker included, as the rule of this install did before (its record, %s).\n' "$rec"
+  elif [ "$(systemd_major)" -ge "$EGRESS_NFTSET_SYSTEMD" ]; then
     printf '# Its image pulls get past the host egress rule for the test user (egress-firewall.sh): this cgroup only.\nNFTSet=cgroup:inet:%s:%s\n' "$EGRESS_TABLE" "$EGRESS_SET"
   else
     printf '# No NFTSet= (systemd %s; it needs %s): the host egress rule leaves the test user out unless --with-test-users.\n' "$(systemd_major)" "$EGRESS_NFTSET_SYSTEMD"
@@ -401,11 +408,17 @@ install_cmd() {
 
   # The host egress rule names users by uid: where it is in use, load it again so it covers this test user too (with
   # the flags it was applied with, as experiments.sh install does).
-  if [ -f /etc/worklane/egress.users ]; then
+  if [ -f "$EGRESS_RECORD" ]; then
     say "the host egress rule (egress-firewall.sh), now with $user in it"
     egress_flags=""
-    if grep -qx '# --with-test-users' /etc/worklane/egress.users; then egress_flags=--with-test-users; fi
-    bash "$here/egress-firewall.sh" apply $egress_flags || { echo "the egress rule didn't load; fix that, then run install again" >&2; exit 1; }
+    if grep -qx '# --with-test-users' "$EGRESS_RECORD"; then egress_flags=--with-test-users; fi
+    egress_rc=0
+    bash "$here/egress-firewall.sh" apply $egress_flags || egress_rc=$?
+    case "$egress_rc" in
+      0) ;;
+      3) echo "the egress rule is loaded, with $user in it, but its check failed: fix its FAIL lines above (they may be another instance's), then run install again" >&2; exit 1 ;;
+      *) echo "the egress rule didn't load (egress-firewall.sh apply exited $egress_rc); fix that, then run install again" >&2; exit 1 ;;
+    esac
   fi
 
   say "sudoers: $coord may run $helper $name ..., nothing else"

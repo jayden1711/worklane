@@ -16,6 +16,27 @@ EGRESS_TABLE=worklane_egress
 EGRESS_SET=egress_ok
 # NFTSet= is in systemd 255 and later; on an older one nothing can fill the set, so test users stay opt-in there.
 EGRESS_NFTSET_SYSTEMD=255
+# The rule's record: the uids it covers, its flags, and whether test users' Docker may be exempt. Root's: /etc/worklane
+# is root's, 0755, and no sandbox user may enter it (test-user.sh denies it to the test user).
+EGRESS_RECORD=/etc/worklane/egress.users
+# Whether test users' Docker may be exempt from the host egress rule (the set, #543), from the rule's record $1:
+# "exempt", or "dropped" once a rule this install loaded covered test users with no exception for their Docker.
+#   - the record's "# docker: dropped" or "# docker: exempt" line (apply writes one; dropped wins);
+#   - else a record from before #543: "# --with-test-users" in it means dropped; none, exempt (test users weren't covered);
+#   - no record (no rule was ever applied, or revert removed it): exempt. A record it can't read: dropped.
+# WHY: where a rule covered test users and their Docker had no exception (apply --with-test-users before #543, or on a
+# systemd older than 255), all of Docker's traffic was dropped, and so was every route out through it: a run that joins
+# Docker's namespaces got nowhere. The exception reopens that route (docs/test-runs.md, "Known gap"), and nothing may
+# reopen a route an install had closed. Such an install keeps dropping Docker's traffic, whatever the flags, until revert.
+egress_docker_mode() {
+  local rec
+  [ -e "$1" ] || { echo exempt; return 0; }
+  rec="$(cat "$1" 2>/dev/null)" || { echo dropped; return 0; }
+  if grep -qx '# docker: dropped' <<<"$rec"; then echo dropped
+  elif grep -qx '# docker: exempt' <<<"$rec"; then echo exempt
+  elif grep -qx '# --with-test-users' <<<"$rec"; then echo dropped
+  else echo exempt; fi
+}
 # systemd's major version (systemctl's first line, "systemd 255 (...)"); 0 when it can't be read.
 systemd_major() {
   local v

@@ -16,9 +16,15 @@ const posix = process.platform !== 'win32';
 const setup = join(repoRoot, 'scripts', 'setup');
 const script = join(setup, 'egress-firewall.sh');
 
-/** A bin dir first on PATH: getent lists a machine's users, systemctl --version says `systemd`. */
-function machine(systemd: number) {
+/**
+ * A bin dir first on PATH: getent lists a machine's users, systemctl --version says `systemd`. The rule's record, which
+ * --print reads, is a file of the test's own (EGRESS_RECORD_PRINT, honoured with --print only), absent unless `record`
+ * is given: never the machine's /etc/worklane/egress.users.
+ */
+function machine(systemd: number, record?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'egress-'));
+  const rec = join(dir, 'egress.users');
+  if (record !== undefined) writeFileSync(rec, record);
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const stub = (n: string, body: string) => {
@@ -28,7 +34,7 @@ function machine(systemd: number) {
   const users = ['root:x:0:0::/root:/bin/bash', 'wl-shop:x:1000:1000::/srv/home-shop:/bin/bash', 'wl-exp-shop:x:1001:1001::/:/usr/sbin/nologin', 'wl-score-shop:x:1002:1002::/:/usr/sbin/nologin', 'wl-test-shop:x:1003:1003::/var/lib/worklane-test/shop:/usr/sbin/nologin', 'wl-test-a-b:x:1004:1004::/:/usr/sbin/nologin'];
   stub('getent', `[ "$1" = passwd ] && printf '%s\\n' ${users.map((u) => `'${u}'`).join(' ')}`);
   stub('systemctl', `[ "$1" = --version ] && { echo "systemd ${systemd} (${systemd}.4-1ubuntu8)"; echo "+PAM +AUDIT"; exit 0; }; exit 0`);
-  const run = (cmd: string, args: string[]) => spawnSync('bash', [cmd, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
+  const run = (cmd: string, args: string[]) => spawnSync('bash', [cmd, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, EGRESS_RECORD_PRINT: rec } });
   return { dir, run, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -160,24 +166,28 @@ ${body}`;
 const OURS = 'cgroup:inet:worklane_egress:egress_ok';
 const dockerCg = (n: string) => `/worklane.slice/worklane-test.slice/worklane-test-${n}-docker.service`;
 
-test('apply puts each running unit whose NFTSet= names the set in it, as systemd would; no other unit', { skip: !posix && 'bash' }, () => {
+test('apply puts each running test-user Docker unit whose NFTSet= names the set in it, as systemd would; no other unit, whatever its NFTSet=', { skip: !posix && 'bash' }, () => {
   // A Docker unit started before the set existed (test-user.sh install before the first apply) found nothing to join.
+  // Only worklane-test-<name>-docker.service may join: another unit's text naming the set (a continuation line, a key in
+  // the wrong section that systemd ignores) is never read.
   const r = withFunctions(['in_set_by_unit', 'exempt_units', 'join_running'], {
     'worklane-test-shop-docker.service': { nftset: OURS, cg: dockerCg('shop') },
-    'other-set.service': { nftset: 'cgroup:inet:other_table:egress_ok', cg: '/system.slice/other-set.service' },
+    'worklane-test-a-b-docker.service': { nftset: `cgroup:inet:other_table:x ${OURS}`, cg: dockerCg('a-b') },
+    'worklane-test-other-docker.service': { nftset: 'cgroup:inet:other_table:egress_ok', cg: dockerCg('other') },
     'longer-name.service': { nftset: 'cgroup:inet:worklane_egress:egress_ok_too', cg: '/system.slice/longer-name.service' },
-    'two-sets.service': { nftset: 'cgroup:inet:other_table:x cgroup:inet:worklane_egress:egress_ok', cg: '/worklane.slice/worklane-test.slice/two-sets.service' },
+    'two-sets.service': { nftset: `cgroup:inet:other_table:x ${OURS}`, cg: '/worklane.slice/worklane-test.slice/two-sets.service' },
+    'worklane-test-shop-run.service': { nftset: OURS, cg: '/worklane.slice/worklane-test.slice/worklane-test-shop-run.service' },
     'plain.service': { cg: '/system.slice/plain.service' },
   }, 'join_running');
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.nft, [
     'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/worklane-test-shop-docker.service" }',
-    'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/two-sets.service" }',
+    'nft add element inet worklane_egress egress_ok { "worklane.slice/worklane-test.slice/worklane-test-a-b-docker.service" }',
     '',
   ].join('\n'));
   assert.equal(r.stdout, [
     `exempt: worklane-test-shop-docker.service (NFTSet=): its cgroup ${dockerCg('shop')} may send out`,
-    'exempt: two-sets.service (NFTSet=): its cgroup /worklane.slice/worklane-test.slice/two-sets.service may send out',
+    `exempt: worklane-test-a-b-docker.service (NFTSet=): its cgroup ${dockerCg('a-b')} may send out`,
     '',
   ].join('\n'));
 });
@@ -229,10 +239,109 @@ test('test-user.sh: the Docker unit joins the egress rule\'s set (the same table
 test('test-user.sh install loads the egress rule again where it is in use, with its flags, so a new test user is covered', { skip: !posix && 'bash' }, () => {
   const sh = readFileSync(join(setup, 'test-user.sh'), 'utf8');
   const install = sh.slice(sh.indexOf('install_cmd() {'), sh.indexOf('\n}\n', sh.indexOf('install_cmd() {')));
-  assert.match(install, /if \[ -f \/etc\/worklane\/egress\.users \]; then[\s\S]*?grep -qx '# --with-test-users' \/etc\/worklane\/egress\.users[\s\S]*?bash "\$here\/egress-firewall\.sh" apply \$egress_flags \|\| \{[^}]*exit 1; \}/);
+  assert.match(install, /if \[ -f "\$EGRESS_RECORD" \]; then[\s\S]*?grep -qx '# --with-test-users' "\$EGRESS_RECORD"[\s\S]*?bash "\$here\/egress-firewall\.sh" apply \$egress_flags \|\| egress_rc=\$\?/);
   // After Docker is up (so apply finds it running and puts it in the set), before the final check.
   assert.ok(install.indexOf('is active"') < install.indexOf('egress-firewall.sh" apply'));
   assert.ok(install.indexOf('egress-firewall.sh" apply') < install.indexOf('check_cmd ||'));
+  // Regression: a failed check after the rule loaded (exit 3: e.g. another instance's old Docker unit) was reported as
+  // "the egress rule didn't load". Each case says what happened.
+  assert.match(install, /3\) echo "the egress rule is loaded, with \$user in it, but its check failed: [^"]*" >&2; exit 1 ;;/);
+  assert.match(install, /\*\) echo "the egress rule didn't load \(egress-firewall\.sh apply exited \$egress_rc\)[^"]*" >&2; exit 1 ;;/);
+  const ef = readFileSync(script, 'utf8');
+  const apply = ef.slice(ef.indexOf('apply_cmd() {'), ef.indexOf('\n}\n', ef.indexOf('apply_cmd() {')));
+  assert.match(apply, /nft -f "\$RULES"[\s\S]*check_cmd \|\| exit 3$/, 'apply exits 3 when its check fails after the rule loaded');
+});
+
+/** egress-firewall.sh's decide and record, with lib.sh sourced: the mode, coverage and record for a run with these inputs. */
+function decide(systemd: number, withTestUsers: boolean, record: string | null) {
+  const dir = mkdtempSync(join(tmpdir(), 'egress-decide-'));
+  try {
+    const sh = readFileSync(script, 'utf8');
+    const fn = (f: string) => {
+      const from = sh.indexOf(`\n${f}() {`);
+      assert.ok(from >= 0, `${f} is defined`);
+      return sh.slice(from, sh.indexOf('\n}\n', from) + 3);
+    };
+    const mark = join(dir, 'egress.users');
+    if (record !== null) writeFileSync(mark, record);
+    const prog = `set -euo pipefail
+source '${join(setup, 'lib.sh')}'
+${fn('decide')}
+${fn('record')}
+covered() { echo 1001; [ -z "$with_tests" ] || echo 1003; }
+MARK='${mark}' sysd=${systemd} tests='${withTestUsers ? 1 : ''}'
+decide
+echo "mode=$mode with_tests=$with_tests nftset=$nftset"
+record`;
+    const r = spawnSync('bash', ['-c', prog], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const [state, ...rec] = r.stdout.split('\n');
+    return { state, record: rec.join('\n') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('upgrade: an install whose rule covered test users before #543 (--with-test-users) keeps dropping their Docker; one that didn\'t gets the exception', { skip: !posix && 'bash' }, () => {
+  // Owner rule: nothing reopens a route an existing install had closed. With --with-test-users before #543 all of the
+  // test user's traffic was dropped, Docker's too, so a run joining Docker's namespaces got nowhere. The exception would
+  // reopen that there. The rule's record (root's /etc/worklane/egress.users) tells the two installs apart.
+  const legacyOptIn = '# --with-test-users\n1001\n1002\n1003\n1004\n';
+  for (const [rec, flags, why] of [
+    [legacyOptIn, ['--with-test-users'], 'before #543 with the flag, applied with it again (what test-user.sh, experiments.sh and instance-remove.sh pass)'],
+    [legacyOptIn, [], 'before #543 with the flag, applied without it'],
+    ['# docker: dropped\n1001\n1002\n1003\n1004\n', [], 'a record that says dropped'],
+    ['# --with-test-users\n# docker: dropped\n1001\n', ['--with-test-users'], 'a record that says dropped, with the flag'],
+  ] as const) {
+    const m = machine(255, rec);
+    try {
+      const r = m.run(script, ['--print', ...flags]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.doesNotMatch(r.stdout, /egress_ok|cgroupv2/, `no set and no exception: ${why}`);
+      assert.match(r.stdout, /meta skuid \{ 1001, 1002, 1003, 1004 \} oifname != "lo" counter drop/, `test users still covered: ${why}`);
+      assert.match(r.stderr, /^note: test users \(wl-test-\*\) are covered, and their Docker gets no exception, so it can't pull images .*this install's rule covered them before with all of their Docker's traffic dropped \(its record, .*egress\.users\), and the exception would reopen routes out through Docker that it had closed/m, why);
+      // test-user.sh's Docker unit gets no NFTSet= there either.
+      const t = m.run(join(setup, 'test-user.sh'), ['--print', 'install', 'shop']);
+      assert.equal(t.status, 0, t.stderr);
+      assert.doesNotMatch(t.stdout, /^NFTSet=/m, `no NFTSet= on the Docker unit: ${why}`);
+      assert.match(t.stdout, /^# No NFTSet=: the host egress rule \(egress-firewall\.sh\) drops all traffic of the test user, Docker included/m);
+    } finally {
+      m.done();
+    }
+  }
+  // Test users weren't covered before (no record, a record from before #543 without the flag, or one that says exempt):
+  // the new default, with the exception.
+  for (const rec of [undefined, '1001\n1002\n', '# --with-test-users\n# docker: exempt\n1001\n1002\n1003\n1004\n']) {
+    const m = machine(255, rec);
+    try {
+      assert.equal(m.run(script, ['--print']).stdout, RULE_255, String(rec));
+      assert.match(m.run(join(setup, 'test-user.sh'), ['--print', 'install', 'shop']).stdout, /^NFTSet=cgroup:inet:worklane_egress:egress_ok$/m);
+    } finally {
+      m.done();
+    }
+  }
+});
+
+test('the record: once a rule covers test users with no exception for their Docker, every later apply keeps it so, whatever its flags or systemd', { skip: !posix && 'bash' }, () => {
+  // A fresh install on systemd 255: the exception; the flag changes nothing.
+  assert.deepEqual(decide(255, false, null), { state: 'mode=exempt with_tests=1 nftset=1', record: '# docker: exempt\n1001\n1003\n' });
+  assert.deepEqual(decide(255, true, null), { state: 'mode=exempt with_tests=1 nftset=1', record: '# --with-test-users\n# docker: exempt\n1001\n1003\n' });
+  assert.equal(decide(255, false, '# --with-test-users\n# docker: exempt\n1001\n1003\n').state, 'mode=exempt with_tests=1 nftset=1');
+  // On systemd 252 without the flag test users aren't covered, so nothing was closed for them: later, the default.
+  const old = decide(252, false, null);
+  assert.deepEqual(old, { state: 'mode=exempt with_tests= nftset=', record: '# docker: exempt\n1001\n' });
+  assert.equal(decide(255, false, old.record).state, 'mode=exempt with_tests=1 nftset=1');
+  // On systemd 252 with the flag test users are covered and Docker dropped: recorded, and kept after an upgrade to 255,
+  // without the flag too (test users stay covered).
+  const closed = decide(252, true, null);
+  assert.deepEqual(closed, { state: 'mode=dropped with_tests=1 nftset=', record: '# --with-test-users\n# docker: dropped\n1001\n1003\n' });
+  assert.deepEqual(decide(255, false, closed.record), { state: 'mode=dropped with_tests=1 nftset=', record: '# docker: dropped\n1001\n1003\n' });
+  assert.deepEqual(decide(252, false, closed.record), { state: 'mode=dropped with_tests=1 nftset=', record: '# docker: dropped\n1001\n1003\n' });
+  // A record from before #543: the flag in it means test users were covered, Docker included.
+  assert.equal(decide(255, false, '# --with-test-users\n1001\n1003\n').state, 'mode=dropped with_tests=1 nftset=');
+  assert.equal(decide(255, false, '1001\n').state, 'mode=exempt with_tests=1 nftset=1');
+  // dropped wins over exempt.
+  assert.equal(decide(255, false, '# docker: exempt\n# docker: dropped\n').state, 'mode=dropped with_tests=1 nftset=');
 });
 
 test('egress-firewall.sh refuses bad arguments', { skip: !posix && 'bash' }, () => {
