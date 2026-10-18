@@ -15,6 +15,7 @@ import { hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
+import { providerHostsAtStart } from './provider-hosts.js';
 import { GITHUB_API } from './github-hosts.js';
 import { switchedOnto } from './claude-account.js';
 import { latestSwitch, profileLogin, profileSwitchedAt } from './claude-profiles.js';
@@ -221,6 +222,8 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const start = startConfig({ repo: i.repo.path, remote: 'origin', fallback: i.config, check });
   if (start.note) console.error(start.note);
   i = { ...i, config: start.cfg };
+  // WHY (#392): root's provider hosts, or that there are none (provider runs off), and each configured provider they refuse.
+  for (const line of providerHostsAtStart(i.config.agents)) console.error(line);
   writeInstanceHooks(i);
   const liveConfig = { tree: start.tree, check };
   const gh = i.credentials.github;

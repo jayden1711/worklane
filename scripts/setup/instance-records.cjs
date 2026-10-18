@@ -139,6 +139,7 @@ const SHARED_FILES = [
   { at: '/etc/worklane/helper-rules.json', why: "which helper rules this machine's sudo can take" },
   { at: '/etc/worklane/limits.json', why: "the machine's bounds on every instance's settings" },
   { at: '/etc/worklane/network.json', why: "the machine's proxy and CA" },
+  { at: '/etc/worklane/providers.json', why: "the provider hosts any instance's provider runs may use: the machine's, no instance in it" },
   { at: '/etc/worklane/watchdog.json', why: "the machine watchdog's settings" },
   { at: '/var/lib/worklane/machine-changes.jsonl', why: 'the machine change log: history, kept (a removal adds its own line)' },
   { at: '/var/lib/worklane/updates.jsonl', why: "the updater's log: history, kept" },
