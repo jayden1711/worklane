@@ -325,17 +325,19 @@ archive_dirs() {
 #      their user slices (user-<uid>.slice, user@<uid>.service) killed and stopped: the cgroup takes the whole tree;
 #   4. what is left outside those cgroups: pkill -KILL by uid (real and effective, never a name), pass after pass
 #      until one finds none, at most STOP_PASSES (20) passes, 0.5 s apart;
-#   5. the last listing, as $PROC_DIR names them: a pid listed then gone before its command is read is not named, but
-#      it never lets the removal go on by itself (#614): the listing runs again, up to STOP_RECHECKS (5) times,
-#      0.2 s apart, and only one that lists no pid at all passes. Each listed pid gone, every time (a process that
-#      forks and exits over and over, its next pid born after each listing): refused, naming the uids.
+#   5. the last check, failing closed (#614): STOP_RECHECKS (5) listings, 0.2 s apart, as $PROC_DIR names them. Every
+#      pid any of them lists counts as left and refuses the removal, named with its command ("?" when it can't be
+#      read). One gone before its command is read (it ended, or a fork loop moved on to a new pid, its next one born
+#      after the scan) is named "(gone before its command could be read)", with a line saying a process was seen and
+#      to run the removal again once the instance is stopped. Only when no listing lists any pid does it go on: a
+#      single empty listing never passes by itself, since a scan can miss a process that forks and exits fast.
 # INSTANCE_REMOVE_TEST_NO_KILL=1 (CI's proof that a process left refuses the removal): steps 3 and 4 are skipped, so
 # the check only ever finds more; it never lets a removal go on.
 #   stop_uids <name> <user>...
 STOP_PASSES=20
 STOP_RECHECKS=5
 stop_uids() {
-  local name="$1" u uid uids=() names=() unit owner pass left pid cmd round listed hopping
+  local name="$1" u uid uids=() names=() unit owner pass left pid cmd round gone
   shift
   for u in "$@"; do user_exists "$u" && { names+=("$u"); uids+=("$(id -u "$u")"); }; done
   [ "${#uids[@]}" -gt 0 ] || return 0
@@ -372,34 +374,32 @@ stop_uids() {
     done
   fi
   for ((round = 0; round < STOP_RECHECKS; round++)); do
-    left="" listed="" hopping=""
+    [ "$round" -eq 0 ] || sleep 0.2
+    left="" gone=""
     for uid in "${uids[@]}"; do
       while read -r pid; do
         [ -n "$pid" ] || continue
-        listed=1
-        # A pid that exits between pgrep and this read (its /proc dir gone: a fork loop's short-lived child) is not
-        # named; one whose read fails while it is still there is, its command "?" (#614, as instance_in_flight, #592).
+        # Every pid listed counts as left, whatever its read finds (#614, failing closed). The read only names it:
         # stderr is redirected before the input, so a vanished file's open says nothing, and no pipe hides the read's
-        # status.
+        # status. A failed read with the /proc dir still there: "?"; with it gone: the process was seen, then ended.
         if ! cmd="$(tr '\0' ' ' 2>/dev/null < "$PROC_DIR/$pid/cmdline")"; then
-          if [ ! -d "$PROC_DIR/$pid" ]; then
-            [[ " $hopping " == *" $uid "* ]] || hopping="${hopping:+$hopping }$uid"
-            continue
+          if [ -d "$PROC_DIR/$pid" ]; then
+            cmd="?"
+          else
+            cmd="(gone before its command could be read)"
+            [[ " $gone " == *" $uid "* ]] || gone="${gone:+$gone }$uid"
           fi
-          cmd="?"
         fi
         printf '%s %s %s\n' "$pid" "$uid" "${cmd:0:200}"
         left=1
       done < <({ pgrep -U "$uid"; pgrep -u "$uid"; } 2>/dev/null | sort -un)
     done
-    [ -z "$left" ] || return 1
-    # Nothing listed at all: none left. Only pids gone before they could be read: list again, as their successors
-    # (if any) were born after this listing.
-    [ -n "$listed" ] || return 0
-    if [ "$((round + 1))" -lt "$STOP_RECHECKS" ]; then sleep 0.2; fi
+    if [ -n "$left" ]; then
+      [ -z "$gone" ] || echo "uid $gone: a process was seen, then was gone before its command could be read (it ended, or a fork loop moved on to a new pid): it counts as still running; stop the instance, then run the removal again"
+      return 1
+    fi
   done
-  echo "uid $hopping: its processes keep changing pid (each pid listed was gone before its command could be read, in $STOP_RECHECKS listings): a process that forks and exits over and over"
-  return 1
+  return 0
 }
 
 # Files the removed users <uid>... own in the engine's own places, given to root: in each <tree> (find -P, -xdev: a
