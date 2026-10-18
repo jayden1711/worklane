@@ -706,7 +706,12 @@ export function protectionState(o: { stateDir: string; repo: string; events: Sto
   const stop = readStopFile(o.stateDir);
   const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
   const p = last?.payload as EventPayload<'main_watch.unaccounted'> | undefined;
-  const alert = stop && stop.by === 'main_watch' && p ? { at: last!.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert } : null;
+  // A commit with no revert PR of its own: why (a cap, no_revert), and its trip's revert PR when the trip has one.
+  const tripRevert = p && !p.revert && p.trip ? (o.events
+          .filter((e) => e.type === 'main_watch.unaccounted')
+          .map((e) => e.payload as EventPayload<'main_watch.unaccounted'>)
+          .find((x) => x.trip === p.trip && x.revert)?.revert ?? null) : null;
+  const alert = stop && stop.by === 'main_watch' && p ? { at: last!.ts, sha: p.sha, url: p.url, reason: p.reason, number: p.number, revert: p.revert, no_revert: p.no_revert ?? null, trip_revert: tripRevert } : null;
   // Each acceptance, and the commit the watch applied it to (main_watch.accepted), if it has yet.
   const applied = new Map(o.events.filter((e) => e.type === 'main_watch.accepted').map((e) => [(e.payload as EventPayload<'main_watch.accepted'>).id, (e.payload as EventPayload<'main_watch.accepted'>).sha]));
   const accepted = view.accepted.map((a) => ({ id: a.id, sha: a.sha, pr: a.pr, head: a.head, by: a.by, reason: a.reason, at: a.at, appliedTo: applied.get(a.id) ?? null }));

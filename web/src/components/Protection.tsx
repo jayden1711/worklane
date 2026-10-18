@@ -189,14 +189,16 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
           {a.sha.slice(0, 8)}
         </a>
         . {a.reason}. Auto-merge is stopped on this instance until an admin clears it.{' '}
-        {a.revert ? (
+        {a.revert || a.trip_revert ? (
           <>
-            A revert PR waits for a human:{' '}
-            <a className="underline-offset-2 hover:underline" href={a.revert} target="_blank" rel="noreferrer">
-              {a.revert}
+            {a.revert ? 'A revert PR waits for a human: ' : "No revert PR of its own; its trip's revert PR waits for a human: "}
+            <a className="underline-offset-2 hover:underline" href={a.revert ?? a.trip_revert ?? ''} target="_blank" rel="noreferrer" data-testid="main-watch-alert-revert">
+              {a.revert ?? a.trip_revert}
             </a>
-            .
+            .{!a.revert && a.no_revert ? <span data-testid="main-watch-alert-no-revert"> Why: {a.no_revert}.</span> : null}
           </>
+        ) : a.no_revert ? (
+          <span data-testid="main-watch-alert-no-revert">No revert PR was opened: {a.no_revert}.</span>
         ) : (
           'No revert PR was opened.'
         )}
