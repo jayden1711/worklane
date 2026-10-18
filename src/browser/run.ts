@@ -129,11 +129,12 @@ export async function captureShots(
   };
   // The desktop shot: through `cdp` itself, so with the usual command timeout and no budget.
   const screenshot = await shoot(cdp, shotName(flow));
-  const start = Date.now();
-  // WHY the flag: a timer may fire a millisecond before Date.now() says the budget is gone; once it has cut a
+  // The monotonic clock: an NTP step can't stretch or shrink the budget.
+  const start = performance.now();
+  // WHY the flag: a timer may fire a millisecond before the clock says the budget is gone; once it has cut a
   // command off, the budget is spent, whatever the clock reads.
   let cutOff = false;
-  const left = () => (cutOff ? 0 : budgetMs - (Date.now() - start));
+  const left = () => (cutOff ? 0 : budgetMs - (performance.now() - start));
   // INVARIANT: no extra command outlives the shared budget. Each waits for its answer (commandMs at most) or for the
   // budget's end, whichever comes first, so the dark and phone views together never take longer than budgetMs.
   const extra: Pick<Cdp, 'send'> = {

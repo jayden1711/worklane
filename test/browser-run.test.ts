@@ -187,9 +187,9 @@ test('the dark and phone shots never take longer than their budget together, how
     if (method.startsWith('Emulation.') || method === 'Page.captureScreenshot') await new Promise((r) => setTimeout(r, 390));
   });
   const ev = blankEvidence();
-  const t0 = Date.now();
+  const t0 = performance.now();
   const shots = await captureShots(cdp, dir, 'home', { commandMs: 400, budgetMs: 1100 });
-  const took = Date.now() - t0; // the desktop shot answers at once, so this is the extra shots' time
+  const took = Math.round(performance.now() - t0); // the desktop shot answers at once, so this is the extra shots' time
   assert.ok(took < 1100 + 250, `the extra shots took ${took} ms, past their 1100 ms budget`);
   assert.deepEqual(shots.views, [
     { view: 'dark', path: join(dir, 'home.dark.png') },
@@ -200,13 +200,16 @@ test('the dark and phone shots never take longer than their budget together, how
   const verdict = judgeFlow(ev, thresholds);
   assert.equal(verdict.pass, true, `a view the budget cut off is never a reason: ${verdict.reasons.join('; ')}`);
 
-  // The frame wait answers just before the budget ends: the pause after it is cut short too, not a full 250 ms.
+  // The frame wait answers just before the budget ends: the pause after it is cut short too, not a full 250 ms (and
+  // the dark shot, slow here, is cut off at the budget's end).
+  let lateCaptures = 0;
   const late = fakeCdp(undefined, async (method) => {
     if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 590));
+    if (method === 'Page.captureScreenshot' && ++lateCaptures > 1) await new Promise((r) => setTimeout(r, 300));
   });
-  const t1 = Date.now();
+  const t1 = performance.now();
   const lateShots = await captureShots(late.cdp, join(dir, 'late'), 'home', { commandMs: 1000, budgetMs: 600 });
-  const lateTook = Date.now() - t1;
+  const lateTook = Math.round(performance.now() - t1);
   assert.ok(lateTook < 600 + 120, `the extra shots took ${lateTook} ms, past their 600 ms budget`);
   assert.deepEqual(lateShots.views.map((v) => ('error' in v ? v.error.split(':')[0] : 'taken')), ['skipped', 'not tried']);
 });
