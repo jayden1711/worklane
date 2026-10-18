@@ -79,6 +79,12 @@ const ALWAYS = /^\$\{\{ always\(\) \}\}$/;
  */
 const HELPERS: Record<string, string> = { 'ci-slow.yml': 'scope', 'ci-batch.yml': 'batch' };
 /**
+ * Temporary #543/#545 CI spike job (ci-slow.yml): runs only on its own branch's PR or a spike=true dispatch, is not a
+ * batch job and must never become a required check. Exempted here so the updater's lists stay exactly the real checks.
+ * Removed with the spike once #543/#545 are built.
+ */
+const SPIKE: Record<string, string> = { 'ci-slow.yml': 'spike-543-545' };
+/**
  * ci.yml's unit test shards, each with the summary job that gates them. The shards are left out of the updater's
  * list and the required checks on purpose: the summary, under the required name test (ubuntu-latest, <node>), is
  * green only when all of its shards are, so requiring the shards as well would add names to keep in step and no gate.
@@ -124,6 +130,7 @@ function checks(): Check[] {
     if (!push && !pr && !batched) continue;
     for (const [key, job] of Object.entries(wf.jobs ?? {})) {
       if (HELPERS[f] === key) continue;
+      if (SPIKE[f] === key) continue;
       const t = tier(f, key, job);
       const name = job.name ?? key;
       const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k]) => k !== 'include' && k !== 'exclude');

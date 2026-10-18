@@ -25,6 +25,12 @@ on:
         description: The commit to test; empty for the commit the run is on. A bisect step names it, and the run refuses any other.
         type: string
         default: ''
+      # #543/#545 CI spike: the temporary spike-543-545 job runs only on its own branch, or on a dispatch with this on.
+      # A batch or bisect leaves it off (its inputs are job/sha only), so the spike never runs in a batch.
+      spike:
+        description: 'Run the #543/#545 probe job (temporary spike, not a batch job)'
+        type: boolean
+        default: false
 # One batch at a time on main (a second waits; ci-batch.yml never queues a third), and one per bisect branch. A new
 # push to a PR cancels that PR's run in progress; nothing else is ever cancelled (the updater refuses a commit with a
 # cancelled check).
@@ -3288,3 +3294,21 @@ jobs:
           name: wizard-e2e-screenshots
           path: ${{ runner.temp }}/wiz/browser/*.png
           if-no-files-found: ignore
+
+  spike-543-545:
+    # TEMPORARY #543/#545 CI SPIKE (owner-merged; removed once the two issues are built). It measures, on real systemd,
+    # whether the kernel and systemd support the two memos' mechanisms, and installs/builds nothing of the product.
+    # It is NOT in the scope job, NOT a batch job, and NOT a required check (test/update-checks.test.ts exempts it): it
+    # runs ONLY on the spike-543-545 branch's PR, or a workflow_dispatch with spike=true. Its own ephemeral runner and
+    # its own worklane-spike-* / wl-test-spike names keep it from touching any other run. See the memos on #543 and #545.
+    name: spike probes (#543/#545, real systemd)
+    if: ${{ (github.event_name == 'pull_request' && github.head_ref == 'spike-543-545') || (github.event_name == 'workflow_dispatch' && inputs.spike) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: the host, and what systemd + nft + slirp can do for #543/#545
+        run: sudo bash scripts/ci/spike-543-545-probes.sh
