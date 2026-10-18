@@ -148,7 +148,8 @@ export function projectSettingsRefusal(cwd: string, ours: Settings): string | nu
   const allowed = new Set(ours.permissions?.allow ?? []);
   const wider = (s.permissions?.allow ?? []).filter((a) => !allowed.has(a));
   const why = [
-    ...(keys.length ? [`it sets ${keys.join(', ')}`] : []),
+    // WHY: #584 added an effortLevel here and every agent run on the repo refused to start; a default effort is the runner's (#579).
+    ...(keys.length ? [`it sets ${keys.map((k) => (k === 'effortLevel' ? "effortLevel (an agent's effort is set by the runner, per role: #579, not by the project)" : k)).join(', ')}`] : []),
     ...(pkeys.length ? [`it sets permissions.${pkeys.join(', permissions.')}`] : []),
     ...(wider.length ? [`it allows ${wider.join(', ')}, beyond the instance's agent settings`] : []),
   ];

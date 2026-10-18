@@ -80,6 +80,8 @@ test('a project .claude/settings.json that could loosen agent runs refuses them;
   // Claude Code applies a project's env over the process environment, also to hooks: it could unset the agent flag.
   assert.match(project({ env: { [`${BRAND.envPrefix}_AGENT`]: '0' } }) ?? '', /it sets env/);
   assert.match(project({ disableAllHooks: true }) ?? '', /it sets disableAllHooks/);
+  // A project's default effort refuses the run too, and says where it belongs (#584 shipped one and no agent run could start).
+  assert.match(project({ effortLevel: 'high' }) ?? '', /it sets effortLevel \(an agent's effort is set by the runner, per role: #579/);
   assert.match(project({ sandbox: { network: { allowedDomains: ['*'] } } }) ?? '', /it sets sandbox/);
   assert.match(project({ permissions: { additionalDirectories: ['/'] } }) ?? '', /permissions\.additionalDirectories/);
   assert.match(project({ permissions: { allow: ['Bash(npm test:*)', 'Bash(curl:*)'] } }) ?? '', /it allows Bash\(curl:\*\), beyond/);
