@@ -323,12 +323,24 @@ export class GitHubBacklog implements Backlog {
   async checkApps(branch: string): Promise<GithubCheckApps> {
     const b = encodeURIComponent(branch);
     const protection = await this.req<unknown>('GET', `/repos/${this.repo}/branches/${b}`);
-    let rules: unknown = [];
-    try {
-      rules = await this.req<unknown>('GET', `/repos/${this.repo}/rules/branches/${b}?per_page=100`);
-    } catch (e) {
-      // No rulesets on this plan (403), or none to read (404): classic protection alone names the Apps.
-      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+    const rules: unknown[] = [];
+    // Every page while a page is full (#727: a rule on an unread page could pin a check); past 10, not an answer.
+    for (let page = 1; ; page++) {
+      if (page > 10) throw new Error(`more than 10 pages of branch rules for ${branch}: not read`);
+      let list: unknown;
+      try {
+        list = await this.req<unknown>('GET', `/repos/${this.repo}/rules/branches/${b}?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+      } catch (e) {
+        // A first page refused for permission (no rulesets on this plan) or 404 (none to read): classic protection
+        // alone names the Apps. A rate-limited 403, or any refusal of a later page, is not that answer (#727, round 9):
+        // it throws, so the last answer is kept (or the rules stay unknown), never "no rulesets", which would drop a
+        // ruleset's pin.
+        if (page === 1 && e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited'))) break;
+        throw e;
+      }
+      if (!Array.isArray(list)) break;
+      rules.push(...list);
+      if (list.length < 100) break;
     }
     return githubCheckApps(protection, rules);
   }
