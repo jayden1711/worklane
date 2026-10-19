@@ -103,6 +103,56 @@ test("pinning never turns a check that wasn't a pass into one: another App's fai
   assert.deepEqual((await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }] }), pin)).failed, [{ name: 'test', outcome: 'fail', id: 2, url: 'https://github.example/o/r/runs/2' }]);
 });
 
+test("owner rule: a pinned check is its source's latest run on the head; any non-pass of its name from another source blocks it", async () => {
+  const pin = { test: { app_id: CI_APP } };
+  // 3. A passed pinned check plus a failed same-name check from another App, listed after it: blocked.
+  const r = await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }, { id: 1, name: 'test', app: SPOOF_APP, suite: 10, conclusion: 'failure' }] }), pin);
+  assert.deepEqual(outcomes(r), ['test fail']);
+  assert.equal(r.ready, false);
+  // The pinned workflow ran twice on this head: run 700 (suite 70) and the later run 710 (suite 71).
+  const wfPin = { test: { workflow: '.github/workflows/ci.yml' } };
+  const twoRuns = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml')];
+  const wf = async (runs: Run[], workflowRuns: unknown[] = twoRuns) => outcomes(await judged(github({ runs, workflowRuns }), wfPin));
+  // 1. Cancelled, then passed in the later run: ready. 2. Failed, then passed: ready. Whatever the list order.
+  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+  assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71 }, { id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test pass']);
+  // The later run decides, by the runs' own order, not the list's: passed first, cancelled in the later run: not ready.
+  assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'cancelled' }, { id: 1, name: 'test', app: ACTIONS, suite: 70 }]), ['test cancelled']);
+  // A re-run attempt of a job in the same workflow run (a newer check run, same suite) counts as the newer.
+  assert.deepEqual(await wf([{ id: 9, name: 'test', app: ACTIONS, suite: 70 }, { id: 3, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test pass']);
+  assert.deepEqual(await wf([{ id: 3, name: 'test', app: ACTIONS, suite: 70 }, { id: 9, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
+  // A later run of the pinned file for ANOTHER head never supersedes: it isn't the pinned source here, so it can only block.
+  const otherHead = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { sha: OTHER })];
+  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], otherHead), ['test fail']);
+  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }], otherHead), ['test fail']);
+  // An App pin: its later check run supersedes its earlier one.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test pass']);
+  // A same-name commit status that isn't success (fail closed), or one still pending.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'failure' }] }), pin)), ['test fail']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'pending' }] }), pin)), ['test pending']);
+  // Every one passing: it passes.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }, { id: 1, name: 'test', app: SPOOF_APP, suite: 10 }], statuses: [{ context: 'test', state: 'success' }] }), pin)), ['test pass']);
+});
+
+test('option (c) unchanged: an unpinned check is judged exactly by name, over every subset and order of its checks', async () => {
+  const pool: CommitCheck[] = [
+    { name: 'test', source: 'check_run', status: 'completed', conclusion: 'success', id: 1, app: CI_APP },
+    { name: 'test', source: 'check_run', status: 'completed', conclusion: 'failure', id: 2, app: SPOOF_APP },
+    { name: 'test', source: 'status', status: 'completed', conclusion: 'success' },
+    { name: 'test', source: 'status', status: 'completed', conclusion: 'failure' },
+  ];
+  const orders: CommitCheck[][] = [[]];
+  for (let k = 0; k < pool.length; k++) for (const o of [...orders]) for (const c of pool) if (!o.includes(c) && o.length === k) orders.push([...o, c]);
+  let same = 0;
+  for (const checks of orders) {
+    const pinned = new PinnedChecks({ backlog: { checks: async () => checks, checkApps: async () => ({}) }, branch: () => 'main', repo: () => 'o/r', configured: () => ({ other: { app_id: CI_APP } }) });
+    const a = readiness({ required: ['test'], checks: await pinned.of(HEAD), head: HEAD, evaluated: approved });
+    assert.deepEqual(a, readiness({ required: ['test'], checks: asJudged(checks), head: HEAD, evaluated: approved }), JSON.stringify(checks));
+    same++;
+  }
+  assert.equal(same, 65, 'every subset in every order (sum of P(4,k))');
+});
+
 test("a check with no recorded source takes the App GitHub's protection or ruleset requires; with neither, it is judged by name as before", async () => {
   const runs = [{ id: 1, name: 'test', app: SPOOF_APP, suite: 10 }, { id: 2, name: 'lint', app: CI_APP, suite: 11 }];
   const classic = { protection: { enabled: true, required_status_checks: { checks: [{ context: 'test', app_id: CI_APP }, { context: 'lint', app_id: CI_APP }] } } };
@@ -309,6 +359,30 @@ test('every way around the JudgedChecks brand in src/ is caught: a cast into it,
   // A src/ import from test/ (asJudged lives there), static, re-export or dynamic.
   const imports = { 'src/zz-imp.ts': "import { asJudged } from '../test/helpers.js';\nexport { repoRoot } from '../test/helpers.js';\nexport const m = () => import('../test/raw-check-reads.js');\nexport { asJudged };\n", 'src/zz-ok.ts': "import { BRAND } from './brand.js';\nexport { BRAND };\n" };
   assert.deepEqual(testImports(imports).map((h) => `${h.file} ${h.spec}`), ['src/zz-imp.ts ../test/helpers.js', 'src/zz-imp.ts ../test/helpers.js', 'src/zz-imp.ts ../test/raw-check-reads.js']);
+});
+
+// The reviewer's round-3 ways in with `any` or `never` (n1 to n10), each a src/ file, fed as data.
+const R3 = "  return readiness({ required: ['ci'], checks: raw, head: sha, evaluated: null });";
+const ANY_FIXTURES: Record<string, string> = {
+  'n1 backlog as any, read, pass': "  const raw = await (backlog as any).checks(sha);\n" + R3,
+  'n2 backlog into an any var, read, pass': "  const b: any = backlog;\n  const raw = await b.checks(sha);\n" + R3,
+  'n3 structural alias via a parameter': "  const g = (b: { checks(s: string): Promise<any> }) => b.checks(sha);\n  const raw = await g(backlog);\n" + R3,
+  'n4 raw read into an unannotated as-never const': "  const raw0 = await backlog.checks(sha);\n  const raw = raw0 as never;\n" + R3,
+  'n5 other data into an unannotated as-never const': "  const raw0 = await other.list();\n  const raw = raw0 as never;\n" + R3,
+  'n6 other data via JSON.parse (any), no cast': "  const raw = JSON.parse(JSON.stringify(await other.list()));\n" + R3,
+  'n7 other data via a generic identity cast': "  const id = <T,>(x: unknown): T => x as T;\n  const raw = id<JudgedChecks>(await other.list());\n" + R3,
+  'n8 other data via a type predicate': "  const raw: unknown = await other.list();\n  const isJ = (x: unknown): x is JudgedChecks => true;\n  if (!isJ(raw)) return null;\n" + R3,
+  'n9 Object.entries over backlog': "  const fns = Object.entries(backlog).find(([k]) => k === 'che' + 'cks');\n  const raw = await (fns![1] as any)(sha);\n" + R3,
+  'n10 backlog as unknown as structural': "  const b = backlog as unknown as { checks(s: string): Promise<any> };\n  const raw = await b.checks(sha);\n" + R3,
+};
+
+test('a value typed any or never never reaches a judging call unseen: the reviewer\'s n1 to n10, each caught (fixtures)', () => {
+  for (const [name, body] of Object.entries(ANY_FIXTURES)) {
+    const file = `src/zz-any-${name.replace(/\W+/g, '-')}.ts`;
+    const files = { [file]: `${CAST_PRELUDE}\n${body}\n}\n` };
+    const hits = rawCheckReads(files).length + judgedCasts(files).length;
+    assert.ok(hits > 0, `caught: ${name}`);
+  }
 });
 
 test('src/ casts into JudgedChecks only in check-source.ts, and imports nothing from test/', () => {
