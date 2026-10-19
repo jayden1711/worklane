@@ -1,8 +1,8 @@
 // writeSlotFile (#661), the one way to write a file in the slot dir: whole or not at all, over a 0444 file, and
-// nothing left behind. test/slot-dir-writes.test.ts checks that nothing else writes there, and records every fs call
-// the helper makes.
+// nothing left behind. test/slot-dir-writes.test.ts checks that nothing else writes there, records the helper's
+// synchronous fs calls, and checks that its temp names are random (a taken name is skipped).
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -81,22 +81,6 @@ test('exactMode sets the mode through its own descriptor: a temp file swapped fo
   assert.equal(swapped, 1, 'the temp file was swapped before its mode was set');
   assert.equal((statSync(own).mode & 0o777).toString(8), '600', "the writer's own file keeps its mode");
   assert.equal(readFileSync(own, 'utf8'), 'secret', 'and its content');
-});
-
-test('a temp name that is taken (here a planted symlink) is skipped: never opened, written or removed', { skip }, () => {
-  const dir = slotDir();
-  const own = ownFile();
-  const fixed = Buffer.alloc(8, 0xab);
-  const planted = join(dir, `f.json.${process.pid}.${fixed.toString('hex')}.tmp`);
-  symlinkSync(own, planted);
-  let calls = 0;
-  patched('node:crypto', { randomBytes: (real) => (...a: never[]) => (calls++ === 0 ? Buffer.from(fixed) : real(...a)) }, () => writeSlotFile(join(dir, 'f.json'), 'new'));
-  assert.equal(calls, 2, 'a second name was drawn');
-  assert.equal(readFileSync(join(dir, 'f.json'), 'utf8'), 'new');
-  assert.equal(lstatSync(join(dir, 'f.json')).isSymbolicLink(), false);
-  assert.equal(lstatSync(planted).isSymbolicLink(), true, 'the planted link is left where it is');
-  assert.equal(readFileSync(own, 'utf8'), 'secret', 'and what it points at is not written');
-  assert.deepEqual(temps(dir), [planted.slice(dir.length + 1)], 'no temp file of its own left');
 });
 
 test('a failed rename or link leaves no temp file', { skip }, () => {

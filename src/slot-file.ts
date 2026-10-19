@@ -44,7 +44,7 @@ function tempWith(file: string, data: string, mode: number, exact: number | unde
     const tmp = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
     let created = false;
     try {
-      // test/slot-dir-writes.test.ts records every fs call made here: one exclusive open, the rest on its descriptor.
+      // test/slot-dir-writes.test.ts records the fs calls made here: one exclusive open, the rest on its descriptor.
       const fd = openSync(tmp, 'wx', mode);
       created = true;
       try {

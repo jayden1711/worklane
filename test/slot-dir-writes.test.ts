@@ -7,8 +7,9 @@
 //
 // Three checks:
 // - A lint over src/. Every module that names a slot-dir path, or hands one to another module, is reviewed in
-//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes; the lint doesn't
-//   judge the helper's own fs calls (the last check does). A writer, and a module that only reads there or hands
+//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes, and in the helper
+//   the lint reports a chmod by name, a whole-file write or open without `wx` (but `writeFileSync` to the const its
+//   exclusive open returned), and a call of a repo writer, anywhere in the file. A writer, and a module that only reads there or hands
 //   the path on, writes no file but through it, whatever the path: no fs write under the names this lint resolves
 //   (an fs import, renamed or destructured; `fs['...']`; `const w = fs.writeFileSync`), and no direct call of a
 //   function or method that writes a file named from one of its parameters. A module that also writes files
@@ -26,16 +27,20 @@
 //   `ftruncateSync`, `fchmodSync`) on a descriptor the module didn't open (only the open is a write call here).
 // - Each writer, run against a temp slot dir in which every file is 0444 (what a removal leaves): it still succeeds,
 //   and the file's content is replaced. A 0444 temp file at the pid-only name a writer used before doesn't stop it.
-// - The helper, by what it does: every fs call writeSlotFile makes, in each mode and on each failure, recorded
-//   through wrappers on node:fs and node:fs/promises, with the exact sequence asserted (one exclusive create, every
-//   descriptor op on the descriptor it returned, nothing by name before the rename or link, nothing after the close
-//   but the rename, link or cleanup), and the check itself failed against wrong helpers. It sees each call of a
-//   function of those modules, however the helper got it (the helper is loaded with the wrappers in place). Not
-//   caught: fs reached past those modules (process.binding), and anything on a path the cases don't drive (another
-//   export of the helper, a branch none of them takes). The helper is in the hook import tree, so a change to it
-//   waits for the owner.
+// - The helper, by what it does: the fs calls writeSlotFile makes synchronously, at top level, through node:fs and
+//   node:fs/promises, in each mode and on each failure, recorded through wrappers on those modules, with the exact
+//   sequence asserted (one exclusive create, every descriptor op on the descriptor it returned, nothing by name
+//   before the rename or link, nothing after the close but the rename, link or cleanup), and the check itself
+//   failed against wrong helpers. The helper is loaded with the wrappers in place, so fs functions it takes at its
+//   own load time are wrappers too. And a taken temp name is skipped for a second random one (randomBytes).
+//   Not caught by the call check (Known gap in #766, and #772): a call deferred past the write's return (a microtask,
+//   process.nextTick, setImmediate, `import().then`, a FileHandle method); a call made inside another fs call (an
+//   options getter), which is skipped as fs's own; child_process; an fs function another module kept before the
+//   wrappers went on; fs past those modules (process.binding); a helper that tells the wrappers from the real
+//   functions; anything on a path the cases don't drive (another export, a branch none of them takes). The helper is
+//   in the hook import tree, so a change to it waits for the owner.
 import assert from 'node:assert/strict';
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, lstatSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
@@ -238,6 +243,59 @@ function fsWrites(call: ts.CallExpression, name: string): boolean {
 
 /** Which argument an fs write call writes: the destination for a copy, else the first. */
 const baseTarget = (name: string) => (/^(copyFile|cp)(Sync)?$/.test(name) ? 1 : 0);
+
+const exclusive = (f: string | null | undefined) => typeof f === 'string' && f.includes('x');
+
+/**
+ * Why a write in the helper is not a new temp file of its own, created exclusively, or null. A whole-file write to
+ * a descriptor (`writeFileSync(fd, …)`) is one when `fd` is the helper's own exclusive descriptor (`own`).
+ */
+function helperWrite(call: ts.CallExpression, name: string, own: (a: ts.Expression | undefined) => boolean): string | null {
+  const a = call.arguments;
+  if (name === 'writeFileSync' && own(a[0])) return null;
+  const flag = /^writeFile(Sync)?$/.test(name) ? flagOf(a[2]) : /^(open(Sync)?|createWriteStream)$/.test(name) ? flagOf(a[1]) : undefined;
+  return exclusive(flag) ? null : `${name}(${a[baseTarget(name)]?.getText()}) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')`;
+}
+
+/** Calls that set a file's mode by its name: they follow a symlink. */
+const CHMOD_BY_NAME = new Set(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
+
+/** Every declaration of `name` in a function (or the module), its parameters included, outside nested functions. */
+function declarationsIn(scope: ts.Node, name: string): ts.Node[] {
+  const out: ts.Node[] = [];
+  const visit = (x: ts.Node) => {
+    if ((ts.isVariableDeclaration(x) || ts.isParameter(x) || ts.isBindingElement(x)) && ts.isIdentifier(x.name) && x.name.text === name) out.push(x);
+    if (x === scope || !ts.isFunctionLike(x)) ts.forEachChild(x, visit);
+  };
+  visit(scope);
+  return out;
+}
+
+/**
+ * Whether an argument is the helper's own exclusive descriptor: a name whose one binding in the function it is used
+ * in is a `const` initialised straight from an exclusive open (`const fd = openSync(tmp, 'wx', mode)`) and never
+ * assigned. A parameter, a for-of variable, a destructured binding, a `let`, or a const of an outer function never is.
+ * Only `helperWrite` uses it, to let `writeFileSync(fd, …)` through; the round-3 review's binding evasions of it
+ * (B6d, B6e, B7c to B7e) are listed in #766's Known gap, and the fs-call check below covers them on the paths it drives.
+ */
+function exclusiveFd(m: Mod, writers: Writers, a: ts.Expression | undefined): boolean {
+  if (!a || !ts.isIdentifier(a)) return false;
+  const scope = scopeOf(a);
+  const decls = declarationsIn(scope, a.text);
+  const d = decls[0];
+  if (decls.length !== 1 || !d || !ts.isVariableDeclaration(d) || !ts.isVariableDeclarationList(d.parent) || !(d.parent.flags & ts.NodeFlags.Const)) return false;
+  if (ts.isForOfStatement(d.parent.parent) || ts.isForInStatement(d.parent.parent) || !d.initializer || !ts.isCallExpression(d.initializer)) return false;
+  const w = writeOf(m, d.initializer, writers);
+  if (!w || w.via || w.name !== 'openSync' || !exclusive(flagOf(d.initializer.arguments[1]))) return false;
+  let assigned = false;
+  const visit = (x: ts.Node) => {
+    const target = ts.isBinaryExpression(x) && x.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && x.operatorToken.kind <= ts.SyntaxKind.LastAssignment ? x.left : (ts.isPrefixUnaryExpression(x) || ts.isPostfixUnaryExpression(x)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(x.operator) ? x.operand : null;
+    if (target && ts.isIdentifier(target) && target.text === a.text) assigned = true;
+    if (x === scope || !ts.isFunctionLike(x)) ts.forEachChild(x, visit);
+  };
+  visit(scope);
+  return !assigned;
+}
 
 /** The src/ module a relative import names, as a REVIEWED key. */
 function resolveImport(from: string, spec: string): string | null {
@@ -552,6 +610,7 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
     const at = (n: ts.Node, what: string) => out.push({ file, line: src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1, what });
     /** In a mixed module: how many times each listed write was found so far. */
     const seen = new Map<string, number>();
+    const own = (a: ts.Expression | undefined) => exclusiveFd(m, writers, a);
     let slot = false;
     const visit = (n: ts.Node) => {
       if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && SLOT_NAMES.has(n.text.replace(/^#/, ''))) slot = true;
@@ -572,14 +631,20 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
             }
           }
         }
+        if (file === HELPER && ts.isCallExpression(n)) {
+          const name = calleeName(n.expression) ?? '';
+          const fsName = ts.isIdentifier(n.expression) ? m.fsAlias.get(name) : name;
+          if (fsName && CHMOD_BY_NAME.has(fsName)) at(n, `${fsName}(${n.arguments[0]?.getText() ?? ''}) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name`);
+        }
         if (w && ts.isCallExpression(n)) {
           const t = targetOf(n, w);
           const what = `${w.name}(${t?.getText() ?? ''})`;
           const key = `${ownerName(n)}: ${what}`;
           if (file === HELPER) {
-            // Not judged by its syntax: the last check in this file records every fs call writeSlotFile makes, in
-            // each mode and on each failure, and asserts the exact sequence. The helper is in the hook import tree, so
-            // a change to it waits for the owner.
+            // A second layer next to the fs-call check at the end of this file: these match code anywhere in the
+            // helper, off the paths that check drives included.
+            const why = w.via ? `${what} in the helper: it writes only through fs, a new temp file of its own` : helperWrite(n, w.name, own);
+            if (why) at(n, why);
           } else if (t && mentionsSlot(t, m)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
           else if (review?.kind === 'mixed') {
             const listed = review.elsewhere[key]?.[0] ?? 0;
@@ -799,6 +864,99 @@ test('lint: a write in a module that writes elsewhere is counted: one more than 
   ]);
 });
 
+test('lint: in the helper, an append, an open for write and a stream are reported; an exclusive create and a read are not', () => {
+  const files = srcFiles();
+  const body = [
+    "import { appendFileSync, createWriteStream, openSync, writeFileSync } from 'node:fs';",
+    'export function w(file: string) {',
+    "  appendFileSync(file, 'x');",
+    "  openSync(file, 'r+');",
+    '  createWriteStream(file);',
+    "  writeFileSync(file, 'x');",
+    "  writeFileSync(file, 'x', { flag: 'wx' });",
+    "  openSync(file, 'wx');",
+    '  openSync(file);',
+    '}',
+    '',
+  ].join('\n');
+  files.set(HELPER, `${files.get(HELPER)!}\n${body}`);
+  const found = lines(lintSlotWrites(files), HELPER);
+  assert.equal(found.length, 4, found.join('\n'));
+  assert.match(found[0]!, /appendFileSync\(file\) in the helper/);
+  assert.match(found[1]!, /openSync\(file\) in the helper/);
+  assert.match(found[2]!, /createWriteStream\(file\) in the helper/);
+  assert.match(found[3]!, /writeFileSync\(file\) in the helper/);
+});
+
+test('lint: in the helper, a write to the descriptor of its own exclusive open is allowed; a chmod by name, and a whole-file write to any other descriptor, are reported', () => {
+  const files = srcFiles();
+  const body = [
+    "import { chmodSync as cm, fchmodSync, openSync as op, writeFileSync as wf } from 'node:fs';",
+    'export function v(file: string, other: number) {',
+    "  const fd = op(file, 'wx', 0o600);",
+    '  fchmodSync(fd, 0o600);',
+    "  wf(fd, 'x');",
+    "  let g = op(file, 'wx');",
+    '  g = other;',
+    "  wf(g, 'x');",
+    "  wf(other, 'x');",
+    '  cm(file, 0o660);',
+    '}',
+    '',
+  ].join('\n');
+  files.set(HELPER, `${files.get(HELPER)!}\n${body}`);
+  const found = lines(lintSlotWrites(files), HELPER).map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(found, [
+    "writeFileSync(g) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
+    "writeFileSync(other) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
+    'chmodSync(file) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name',
+  ]);
+});
+
+/** What the lint reports in the helper with `body` appended to it (fixture text: no file is written), lines dropped. */
+function inHelper(...body: string[]): string[] {
+  const files = srcFiles();
+  const imports = [
+    "import { appendFileSync as afs, chmodSync as cms, copyFileSync as cfs, openSync as op, truncateSync as tfs, writeFileSync as wf } from 'node:fs';",
+    "import { writeGroupOnly as wgo } from './os/index.js';",
+  ].join('\n');
+  files.set(HELPER, `${files.get(HELPER)!}\n${imports}\n${body.join('\n')}\n`);
+  return lines(lintSlotWrites(files), HELPER).map((l) => l.replace(/^\d+: /, ''));
+}
+const wholeWrite = (w: string) => `${w} in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')`;
+
+test("lint: in the helper, a parameter named like tempWith's exclusive fd is not its own descriptor (#766 review, H1)", () => {
+  assert.deepEqual(inHelper('export function h1(fd: number) {', "  wf(fd, 'x');", '}'), [wholeWrite('writeFileSync(fd)')]);
+});
+
+test('lint: in the helper, a non-exclusive open and a write to its descriptor are reported (#766 review, H3, a control)', () => {
+  assert.deepEqual(inHelper('export function h3(file: string) {', "  const g = op(file, 'r+');", "  wf(g, 'x');", '}'), [wholeWrite('openSync(file)'), wholeWrite('writeFileSync(g)')]);
+});
+
+test('lint: in the helper, a for-of variable named fd is not its own descriptor (#766 review, H4)', () => {
+  assert.deepEqual(inHelper('export function h4(fds: number[]) {', "  for (const fd of fds) wf(fd, 'x');", '}'), [wholeWrite('writeFileSync(fd)')]);
+});
+
+// The round-4 review's L1 to L7: code anywhere in the helper, off the paths the fs-call check drives included.
+test('lint: in the helper, a chmod by name in another export is reported (#766 review, L1)', () => {
+  assert.deepEqual(inHelper('export function chmodSlot(f: string) { cms(f, 0o666); }'), ['chmodSync(f) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name']);
+});
+
+test('lint: in the helper, an in-place write on a branch no fs-call case takes is reported (#766 review, L2)', () => {
+  assert.deepEqual(inHelper('export function big(file: string, data: string) { if (data.length > 1e6) wf(file, data); }'), [wholeWrite('writeFileSync(file)')]);
+});
+
+test('lint: in the helper, an append, an open for write, a truncate and a copy onto a name are reported (#766 review, L3, L4, L6, L7)', () => {
+  assert.deepEqual(inHelper("export function l3(file: string) { afs(file, 'x'); }"), [wholeWrite('appendFileSync(file)')]);
+  assert.deepEqual(inHelper("export function l4(file: string) { return op(file, 'r+'); }"), [wholeWrite('openSync(file)')]);
+  assert.deepEqual(inHelper('export function l6(file: string) { tfs(file, 0); }'), [wholeWrite('truncateSync(file)')]);
+  assert.deepEqual(inHelper('export function l7(a: string, file: string) { cfs(a, file); }'), [wholeWrite('copyFileSync(file)')]);
+});
+
+test("lint: in the helper, a call of the repo's own writers is reported (#766 review, L5)", () => {
+  assert.deepEqual(inHelper("export function l5(file: string) { wgo(file, 'x'); }"), ['writeGroupOnly(file) in the helper: it writes only through fs, a new temp file of its own']);
+});
+
 // ---------------------------------------------------------------------------------------------------------------
 // The writers, against what a removal leaves: every existing file 0444, the directory writable.
 
@@ -945,8 +1103,9 @@ test("a token's GitHub budget is replaced when it is 0444", { skip }, async () =
 });
 
 // ---------------------------------------------------------------------------------------------------------------
-// The helper, by what it does: every fs call writeSlotFile makes (#766 review, round 4: this replaced the lint's
-// syntax rule for the helper). It lives here, in an engine-guards file, so weakening it waits for the owner too.
+// The helper, by what it does: the synchronous, top-level fs calls writeSlotFile makes (#766 review, round 4; the
+// lint's helper checks above stay as a second layer, round 5). It lives here, in an engine-guards file, so weakening
+// it waits for the owner too. What it doesn't see is in the header's "Not caught by the call check".
 
 type SlotWriter = typeof writeSlotFile;
 type Fns = Record<string, (...a: never[]) => unknown>;
@@ -971,8 +1130,9 @@ let recording: { calls: Call[]; depth: number; fail: Fail | undefined; failed: n
 /**
  * Every function of node:fs and node:fs/promises, with a wrapper that records its calls while `recording` is set and
  * otherwise just calls it. Classes (Stats, ReadStream, ...) are left as they are. A call made inside another fs call
- * (writeFileSync calling writeSync) is fs's own, not the caller's, and is not recorded. The wrappers are made once:
- * a module loaded while they are in place keeps them in anything it took from fs then (`const w = writeFileSync`).
+ * is not recorded: that is how writeFileSync calling writeSync stays out, but it also hides anything the helper runs
+ * from inside one (an options getter; Known gap). The wrappers are made once: a module loaded while they are in place
+ * keeps them in anything it took from fs then (`const w = writeFileSync`); a module loaded before does not.
  */
 const WRAPPERS = (() => {
   const req = createRequire(import.meta.url);
@@ -1185,4 +1345,48 @@ test('the fs-call check fails a helper that keeps an fs function from load time 
     ['fchmodSync(fd, exact);', '{ fchmodSync(fd, exact); Reflect.apply(keptChmod, undefined, [tmp, exact]); }'],
   ]);
   assert.throws(() => checkAll(w), /chmodSync\(TMP, 0o660\): touches a file by name before the rename or link/);
+});
+
+// The temp name is random (moved here from test/slot-file.test.ts in round 5, so it is under engine-guards): with
+// predictable names another coordinator could take all three ahead of time, and every write (STOP included) would
+// fail with EEXIST, #616's failure under another name.
+
+/**
+ * Plant a symlink at the first temp name `write` will draw (randomBytes patched to return fixed bytes once), then
+ * write: the planted name must be skipped (never opened, written or removed) and a second random name drawn.
+ */
+function takenNameSkipped(write: SlotWriter): void {
+  const dir = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'taken-'));
+  const own = join(mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'own-')), 'secret');
+  writeFileSync(own, 'secret', { mode: 0o600 });
+  chmodSync(own, 0o600);
+  const fixed = Buffer.alloc(8, 0xab);
+  const planted = join(dir, `f.json.${process.pid}.${fixed.toString('hex')}.tmp`);
+  symlinkSync(own, planted);
+  const crypto = createRequire(import.meta.url)('node:crypto') as Fns;
+  const real = crypto['randomBytes']!;
+  let calls = 0;
+  crypto['randomBytes'] = (...a: never[]) => (calls++ === 0 ? Buffer.from(fixed) : Reflect.apply(real, crypto, a));
+  syncBuiltinESMExports();
+  try {
+    write(join(dir, 'f.json'), 'new');
+  } finally {
+    crypto['randomBytes'] = real;
+    syncBuiltinESMExports();
+  }
+  assert.equal(calls, 2, 'a second name was drawn, from randomBytes');
+  assert.equal(readFileSync(join(dir, 'f.json'), 'utf8'), 'new');
+  assert.equal(lstatSync(join(dir, 'f.json')).isSymbolicLink(), false);
+  assert.equal(lstatSync(planted).isSymbolicLink(), true, 'the planted link is left where it is');
+  assert.equal(readFileSync(own, 'utf8'), 'secret', 'and what it points at is not written');
+  assert.deepEqual(temps(dir), [planted.slice(dir.length + 1)], 'no temp file of its own left');
+}
+
+test('a temp name that is taken (here a planted symlink) is skipped: never opened, written or removed; the next name is random', { skip }, () => {
+  takenNameSkipped(underTest);
+});
+
+test('the taken-name check fails a helper with predictable temp names (a counter, no randomBytes; #766 review, F10)', { skip }, async () => {
+  const w = await variant('counter-names', [["randomBytes(8).toString('hex')", "String(attempt).padStart(16, '0')"]]);
+  assert.throws(() => takenNameSkipped(w), /a second name was drawn, from randomBytes/);
 });
