@@ -5,7 +5,7 @@
 // step that removes it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createConnection, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,14 +27,18 @@ const TAB = { focused: true, visible: true };
 const OLD_INTAKE = 'version: 1\nvoice:\n  enabled: true\nsiri:\n  enabled: true\n  ask_model: haiku\n  ask_max_usd_per_day: 1\n';
 
 /** An instance's dashboard as an older install with voice and Siri on left it: the intake.yaml, the Siri token store and gateway token. */
-async function olderInstance() {
+async function olderInstance(o: { siriLink?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'voice-removed-'));
   const db = join(dir, 'events.db');
   const log = new EventLog(db);
   const { dir: root } = exampleProject();
   const stateDir = join(dir, 'state');
-  mkdirSync(join(stateDir, 'siri'), { recursive: true });
-  writeFileSync(join(stateDir, 'siri', 'devices.json'), JSON.stringify({ devices: [{ id: 'd1', name: 'phone', hash: 'x', createdAt: '2026-10-01T00:00:00Z', createdBy: OWNER }] }), { mode: 0o600 });
+  mkdirSync(stateDir, { recursive: true });
+  if (o.siriLink) symlinkSync(o.siriLink, join(stateDir, 'siri'));
+  else {
+    mkdirSync(join(stateDir, 'siri'));
+    writeFileSync(join(stateDir, 'siri', 'devices.json'), JSON.stringify({ devices: [{ id: 'd1', name: 'phone', hash: 'x', createdAt: '2026-10-01T00:00:00Z', createdBy: OWNER }] }), { mode: 0o600 });
+  }
   const gatewayToken = 'old-siri-gateway-token-0123456789abcdef';
   writeFileSync(join(stateDir, 'siri-gateway-token'), gatewayToken, { mode: 0o600 });
   const intakeFile = join(dir, 'intake.yaml');
@@ -98,6 +102,47 @@ test('upgrade: the old voice intake and Siri routes take nothing, with the old g
   }
 });
 
+test("upgrade: an instance's own dashboard deletes its leftover Siri gateway token and device store when it starts, so an install that never used Siri has nothing to do", async () => {
+  // Every server instance had a gateway token (an older dashboard made one on every start); the store only with Siri used.
+  const s = await olderInstance();
+  try {
+    for (const f of ['siri-gateway-token', 'siri']) assert.ok(!existsSync(join(s.stateDir, f)), `${f} deleted on start`);
+  } finally {
+    await s.close();
+  }
+  // A store that is a link (made by hand, or by anything else as this user): the link goes, what it points at stays.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'voice-removed-elsewhere-'));
+  writeFileSync(join(elsewhere, 'keep.txt'), 'not Siri');
+  const l = await olderInstance({ siriLink: elsewhere });
+  try {
+    assert.ok(!existsSync(join(l.stateDir, 'siri')), 'the link is gone');
+    assert.ok(existsSync(join(elsewhere, 'keep.txt')), 'what it pointed at is untouched');
+  } finally {
+    await l.close();
+  }
+});
+
+test("doctor: names spoken ideas still waiting in the voice inbox, and finds an instance's Siri files when the hub doesn't list it", async () => {
+  const { voiceSiriLeftoverCheck } = await import('../src/doctor-voice-removed.js');
+  const T = mkdtempSync(join(tmpdir(), 'voice-removed-doctor2-'));
+  const uid = process.getuid?.() ?? 0;
+  const none = join(T, 'none.service');
+  // Ideas spoken before the upgrade, never taken now: data, named so they aren't lost silently.
+  const state = join(T, 'state');
+  mkdirSync(join(state, 'voice', 'inbox'), { recursive: true });
+  writeFileSync(join(state, 'voice', 'inbox', 'v1.json'), '{}');
+  writeFileSync(join(state, 'voice', 'inbox', 'v2.json'), '{}');
+  const inbox = voiceSiriLeftoverCheck({ instances: ['alpha'], intakeFile: () => join(T, 'no-intake.yaml'), stateDirOf: () => state, hubUnitFile: none, tailnetSiri: () => false, rootUid: uid });
+  assert.equal(inbox?.level, 'fail', JSON.stringify(inbox));
+  assert.ok(inbox!.detail.includes(`${join(state, 'voice', 'inbox')} holds 2 spoken idea(s) that are never taken now`), inbox!.detail);
+  // An instance the hub doesn't serve (no hub at all here): its own state is checked too.
+  const other = join(T, 'other-state');
+  mkdirSync(join(other, 'siri'), { recursive: true });
+  const off = voiceSiriLeftoverCheck({ instances: ['beta'], intakeFile: () => join(T, 'no-intake.yaml'), stateDirOf: (n) => (n === 'beta' ? other : null), hubUnitFile: none, tailnetSiri: () => false, rootUid: uid });
+  assert.equal(off?.level, 'fail', JSON.stringify(off));
+  assert.ok(off!.detail.includes(`${join(other, 'siri')} is still there (the Siri device token store)`), off!.detail);
+});
+
 test("upgrade: intake.yaml's voice and siri keys still load (intake stays on), are ignored with a warning, and wire no source", () => {
   const home = mkdtempSync(join(tmpdir(), 'voice-removed-home-'));
   const file = join(home, 'intake.yaml');
@@ -153,23 +198,26 @@ test('upgrade: no Siri gateway listens, whatever the hub is given (the option an
   assert.match(SIRI_PORT_IGNORED, /^warning: --siri-port is ignored: Siri was removed, so no gateway starts/);
 });
 
-test("upgrade: an older export's Siri token store is never imported (its gateway token was never exported)", () => {
+test("export and import: the Siri device store and gateway token are never exported (live devices stay out of every bundle, for an older engine too) and never imported", () => {
   const from = mkdtempSync(join(tmpdir(), 'voice-removed-from-'));
   new EventLog(join(from, 'events.db')).close();
   mkdirSync(join(from, 'siri'));
-  writeFileSync(join(from, 'siri', 'devices.json'), '{"devices":[]}');
+  // A store an older engine would still honour: an active device, never revoked.
+  writeFileSync(join(from, 'siri', 'devices.json'), JSON.stringify({ devices: [{ id: 'd1', name: 'phone', hash: 'x', createdAt: '2026-10-01T00:00:00Z', createdBy: OWNER }] }));
   writeFileSync(join(from, 'siri-gateway-token'), 'x');
   const out = join(mkdtempSync(join(tmpdir(), 'voice-removed-bundle-')), 'b.bundle');
   const e = exportBundle({ stateDir: from, root: null, repo: null, host: 'old', out });
-  assert.ok(e.files.includes('state/siri/devices.json'), 'the old bundle has the store');
-  assert.ok(!e.files.includes('state/siri-gateway-token'), 'a token is never exported');
+  assert.deepEqual(e.files.filter((f) => /siri/.test(f)), [], `nothing of Siri exported: ${e.files.join(', ')}`);
+  assert.deepEqual(readBundle(out).files.filter((f) => /siri/.test(f.path)), [], 'nor in the bundle file');
+  assert.ok(e.left.some((l) => l.path === 'state/siri/devices.json' && /removed with Siri/.test(l.why)), JSON.stringify(e.left));
+  assert.ok(e.left.some((l) => l.path === 'state/siri-gateway-token'), 'the token is left out too');
   const to = mkdtempSync(join(tmpdir(), 'voice-removed-to-'));
-  const r = importBundle({ file: out, stateDir: to, root: null, instance: true });
+  importBundle({ file: out, stateDir: to, root: null, instance: true });
   for (const f of ['siri', 'siri-gateway-token']) assert.ok(!existsSync(join(to, f)), `${f} not imported`);
-  assert.deepEqual(r.skipped.filter((s) => /Siri was removed/.test(s.why)).map((s) => s.path), ['state/siri/devices.json']);
   assert.ok(existsSync(join(to, 'events.db')), 'the history is');
-  // A bundle made by hand with the gateway token in it: skipped all the same.
+  // A bundle an older engine made, or one made by hand, with both in it: skipped all the same.
   const b = readBundle(out);
+  b.files.push({ path: 'state/siri/devices.json', data: Buffer.from('{"devices":[]}').toString('base64') });
   b.files.push({ path: 'state/siri-gateway-token', data: Buffer.from('x').toString('base64') });
   const crafted = join(mkdtempSync(join(tmpdir(), 'voice-removed-crafted-')), 'c.bundle');
   writeFileSync(crafted, gzipSync(JSON.stringify(b)).toString('base64'), { mode: 0o600 });

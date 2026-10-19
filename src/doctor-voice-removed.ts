@@ -3,13 +3,13 @@
 // --siri-port, and the tailnet's 8443 forward to the old gateway. Nothing reads or serves any of them now; doctor
 // fails until they are gone, and names the step that removes each.
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { OWNER_TERMINAL_RERUN, ownerTerminalRerun } from './console/owner-terminal-removed.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { REMOVED_INTAKE_KEYS } from './intake/report.js';
-import { instancesDir } from './instance.js';
+import { instancesDir, loadInstance } from './instance.js';
 import { asRoot, unitPath } from './os/system-paths.js';
 import { TAILSCALE_SCRIPT } from './tailscale-setup.js';
 
@@ -25,6 +25,8 @@ export interface SiriLeftoverPaths {
   instances?: readonly string[];
   /** Each instance's intake.yaml (tests); default: instancesDir()/<name>/intake.yaml. */
   intakeFile?: (instance: string) => string;
+  /** Each instance's state directory (tests); default: its instance record's, null when it can't be read. */
+  stateDirOf?: (instance: string) => string | null;
   /** The hub's unit: its ExecStart names --siri-port and each instance's state directory. */
   hubUnitFile?: string;
   /** Whether tailscale serve still forwards the tailnet's 8443 to the old gateway; null when it can't be told. */
@@ -89,7 +91,24 @@ export function voiceSiriLeftoverCheck(o: SiriLeftoverPaths = {}): { name: strin
     found.push(`the hub's unit (${unitFile}) still has ${SIRI_PORT_OPTION} (ignored: no gateway starts)`);
     rerun = true;
   }
-  for (const state of unit.states) {
+  // Every instance's state: the hub's list, and each instance doctor checks (one not on the hub included).
+  const stateDirOf = o.stateDirOf ?? ((name: string) => {
+    try {
+      return loadInstance(name).stateDir;
+    } catch {
+      return null;
+    }
+  });
+  const states = [...new Set([...unit.states, ...(o.instances ?? []).map(stateDirOf).filter((s): s is string => !!s)])];
+  for (const state of states) {
+    // Ideas spoken before the upgrade wait here, and nothing takes them now: named, so they aren't lost unseen.
+    const inbox = join(state, 'voice', 'inbox');
+    try {
+      const n = readdirSync(inbox).filter((f) => f.endsWith('.json')).length;
+      if (n) found.push(`${inbox} holds ${n} spoken idea(s) that are never taken now: read them (file any you want as issues), then delete ${join(state, 'voice')}`);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EACCES') unseen.push(inbox);
+    }
     for (const f of SIRI_STATE_FILES) {
       const p = join(state, f);
       try {
@@ -110,6 +129,8 @@ export function voiceSiriLeftoverCheck(o: SiriLeftoverPaths = {}): { name: strin
     const r = ownerTerminalRerun({ hubUnitFile: unitFile, ...(o.rootUid !== undefined ? { rootUid: o.rootUid } : {}) });
     const command = 'command' in r ? r.command : `${OWNER_TERMINAL_RERUN} (each <...> and [...] filled in from the hub unit's ExecStart; the exact command can't be built here: ${r.error})`;
     steps.push(`as root, rerun dashboards.sh once: it drops ${SIRI_PORT_OPTION} and deletes each instance's Siri token store and gateway token: ${command}`);
+    // Not the only way for the files: an instance's dashboard deletes its own when it starts.
+    if (!unit.siriPort) steps.push(`(an instance's Siri files also go when its dashboard restarts: it deletes them when it starts)`);
   }
   if (tailnet) steps.push(`as root, remove the 8443 forward: ${UNSERVE_SIRI}`);
   return {

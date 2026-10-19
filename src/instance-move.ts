@@ -27,6 +27,8 @@ const LEAVE_OUT: [RegExp, string][] = [
   [/\.log(\.\d+)?$/, 'a log'],
   [/(^|\/)(worktrees|slots|tasks|dep-cache|chat\/pending)\//, "this machine's working files"],
   [/\.tmp$|-wal$|-shm$|-journal$/, 'a temporary file'],
+  // Removed with Siri (#743): its device store is never carried, so no bundle brings a live device to an older engine.
+  [/^siri(\/|$)|^siri-gateway-token$/, 'removed with Siri (#743)'],
 ];
 
 export interface BundleFile {

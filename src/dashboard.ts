@@ -50,7 +50,7 @@ import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor,
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, approvalsAt, auditWrite } from './decide.js';
-import { VOICE_REMOVED, voiceRequestRefusal } from './voice-removed.js';
+import { removeSiriLeftovers, VOICE_REMOVED, voiceRequestRefusal } from './voice-removed.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
@@ -1037,6 +1037,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
+  if (opts.instance) removeSiriLeftovers(opts.stateDir);
   // Webhook automations (src/automations/webhook.ts): the instance's own hooks gateway token, for the hub's hooks
   // gateway only; never the dashboard's token.
   // Made for every instance (dashboards.sh waits for it), whether or not it has automations yet.

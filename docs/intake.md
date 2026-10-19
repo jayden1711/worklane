@@ -509,6 +509,8 @@ still holds gets less access, never more:
   spoken approval never counts, not even as a click. `POST /api/voice/intake` is a 410 too, and nothing under
   `/api/siri` or `/api/siri-devices` answers.
 - Every approval voice could give is a click on the dashboard, under the ordinary rules.
+- Ideas spoken before the upgrade and not yet taken stay in the instance's `state/voice/inbox/`; nothing takes them now.
+  `doctor` names them, so they can be read, filed by hand, and the directory deleted.
 
 ### 2.7 Slack
 

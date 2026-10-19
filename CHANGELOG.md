@@ -6,11 +6,12 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Removals
 
-- **Voice intake, spoken approvals, the Ask panel's dictation, read-aloud and wake word, and Siri Shortcuts are removed (#743).** Every approval voice could give is a click on the dashboard, under the ordinary rules. Once this installs, nothing listens on the Siri gateway's port 4397, no Siri token works, and no spoken approval counts: a tab still running the old page gets a 410, never a click's approval. An `intake.yaml` with `voice:` or `siri:` still loads (intake stays on), and each key is ignored with a warning. **If you never turned voice or Siri on, there is nothing to do.** If you did, `worklane doctor` fails under "voice and Siri removed" and names each leftover until it is gone. Do these once, as root, in this order:
+- **Voice intake, spoken approvals, the Ask panel's dictation, read-aloud and wake word, and Siri Shortcuts are removed (#743).** Every approval voice could give is a click on the dashboard, under the ordinary rules. Once this installs, nothing listens on the Siri gateway's port 4397, no Siri token works, and no spoken approval counts: a tab still running the old page gets a 410, never a click's approval. An `intake.yaml` with `voice:` or `siri:` still loads (intake stays on), and each key is ignored with a warning. Every server instance had a Siri gateway token, Siri on or not: each instance's dashboard deletes its own token and Siri device store (`state/siri-gateway-token`, `state/siri/`) when it starts on this version, and an export never carries either. After the install, run `worklane doctor` as root. It fails under "voice and Siri removed" and names each leftover until it is gone; on an install that never turned voice or Siri on, it finds nothing once each instance's dashboard has restarted. If you did use them, do these once, as root:
   1. `sudo bash /opt/worklane/current/scripts/setup/tailscale.sh unserve-siri` takes the tailnet's 8443 forward away and leaves 443 and 8444 as they are.
-  2. Rerun `dashboards.sh` with the command doctor prints. It drops `--siri-port` from the hub's unit and deletes each instance's Siri device token store (`state/siri/`) and gateway token (`state/siri-gateway-token`). The `--siri` it passes is accepted and ignored.
+  2. If the hub's unit has `--siri-port`, rerun `dashboards.sh` with the command doctor prints. It drops the option, and deletes any Siri files an instance still has. The `--siri` it passes is accepted and ignored.
   3. Delete the `voice:` and `siri:` sections from each instance's `intake.yaml`.
-  4. In the Tailscale admin console, delete the ACL rule for port 8443. Remove the two Shortcuts from your phone.
+  4. Ideas spoken before the upgrade and not yet taken stay in an instance's `state/voice/inbox/`, and nothing takes them now (doctor names them): read them, file any you want as issues, then delete `state/voice/`.
+  5. In the Tailscale admin console, delete the ACL rule for port 8443. Remove the two Shortcuts from your phone.
 
 ## v0.5.3 (2026-10-19)
 

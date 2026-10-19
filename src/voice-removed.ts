@@ -7,7 +7,26 @@
 //   is a warning (src/intake/report.ts);
 // - the hub's --siri-port and dashboards.sh's --siri are accepted and ignored: no gateway listens (src/cli.ts,
 //   scripts/setup/dashboards.sh);
+// - an instance's dashboard deletes its own Siri gateway token and device store when it starts (here);
 // - doctor fails while the machine still has anything of them, and says how to remove each (src/doctor-voice-removed.ts).
+import { rmSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * An instance's own Siri leftovers in its state: its gateway token (an older dashboard made one for every server
+ * instance, Siri on or not) and its device store. Its dashboard deletes them when it starts, as the instance's own
+ * user, so an install that never used Siri has nothing to do, and no device record outlives the upgrade. A link is
+ * removed, never followed. A failure is left for doctor to name.
+ */
+export function removeSiriLeftovers(stateDir: string): void {
+  for (const f of ['siri-gateway-token', 'siri']) {
+    try {
+      rmSync(join(stateDir, f), { recursive: true, force: true });
+    } catch {
+      // doctor names what is still there
+    }
+  }
+}
 
 /** What the hub says when its unit still has --siri-port: it starts, with no gateway. */
 export const SIRI_PORT_IGNORED = 'warning: --siri-port is ignored: Siri was removed, so no gateway starts. Rerun dashboards.sh as root to drop it from the hub unit (doctor prints the command)';

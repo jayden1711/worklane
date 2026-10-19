@@ -165,8 +165,9 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 ### Siri Shortcuts (removed)
 
 Siri was removed (#743). `dashboards.sh --siri` and the hub's `--siri-port` are accepted and ignored, so an older
-command line or unit still runs, and no gateway listens. Every `dashboards.sh` run drops `--siri-port` from the hub's
-unit and deletes each instance's Siri device token store and gateway token; `tailscale.sh unserve-siri` takes away the
+command line or unit still runs, and no gateway listens. Each instance's dashboard deletes its own Siri device token
+store and gateway token when it starts, and an export never carries them. Every `dashboards.sh` run drops
+`--siri-port` from the hub's unit and deletes any Siri files left; `tailscale.sh unserve-siri` takes away the
 tailnet's 8443 forward. Until both have run, `doctor` fails under "voice and Siri removed" and names each leftover.
 
 ## Machine devices
