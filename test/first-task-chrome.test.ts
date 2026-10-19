@@ -21,7 +21,7 @@ import { exampleProject } from './helpers.js';
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
 
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
+const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 async function js<T>(cdp: Cdp, expression: string): Promise<T> {
   const r = await cdp.send<{ result: { value: T }; exceptionDetails?: { text: string; exception?: { description?: string } } }>('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });

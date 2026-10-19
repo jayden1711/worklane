@@ -24,7 +24,7 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, nodePathProblem, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
+import { lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
@@ -83,10 +83,14 @@ export interface SetupProbe {
   serviceProgram?(label: string): { file: string; node: string } | null;
   /** Whether a path exists (the service's node); the real file system when absent. */
   exists?(path: string): boolean;
-  serviceManagerEnv?(): { env: Record<string, string> } | { error: string };
+  /** The login variables the user's service manager gives the coordinator's service; required: no default (#738). */
+  serviceManagerEnv(): ManagerEnv;
 }
 
-export function systemProbe(): SetupProbe {
+export type ManagerEnv = { env: Record<string, string> } | { error: string };
+
+/** The real probe; `managerEnv`: a given service-manager reading instead of asking the manager (tests, the worker's). */
+export function systemProbe(o: { managerEnv?: ManagerEnv } = {}): SetupProbe {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, o = {}) => {
@@ -97,7 +101,7 @@ export function systemProbe(): SetupProbe {
     systemUnitActive,
     linger: () => lingerEnabled(),
     serviceProgram: (label) => serviceProgram(label),
-    serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),
+    serviceManagerEnv: () => o.managerEnv ?? serviceManagerEnv(MANAGER_LOGIN_VARS),
   };
 }
 
@@ -434,8 +438,9 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'service
   if (!p.which('claude')) return no('claude is not installed (the tools step)');
   if ('error' in runtime) return no(runtime.error);
   // The service inherits its manager's environment (#738); unreadable means unknown: not done.
-  const mgr = p.serviceManagerEnv ? p.serviceManagerEnv() : { env: {} };
-  if ('error' in mgr) return { ...no(`can't tell which login the coordinator's service gets: its service manager can't be read (${mgr.error})`), mismatch: true as const };
+  const mgr = p.serviceManagerEnv();
+  // Unreadable: a fix for that cause, never Sign in (no login fixes it).
+  if ('error' in mgr) return { ...no(`can't tell which login the coordinator's service gets: its service manager can't be read (${mgr.error})`), mismatch: true as const, fix: { kind: 'terminal', command: serviceManagerCheck(), why: "this user's service manager couldn't be read; this shows why" } };
   const fromManager = Object.keys(mgr.env).sort();
   const managerNote = fromManager.length ? `; with ${fromManager.join(', ')} from the service manager` : '';
   const as = { agentRuntime: runtime.kind, managerEnv: mgr.env };
@@ -1387,9 +1392,9 @@ export const groupLevel = (g: Pick<GroupView, 'ready' | 'optional'>): 'ok' | 'wa
  * answering while the commands run. The context must be plain data (no instanceFacts function: the worker loads
  * the instance itself). The cache comes back updated.
  */
-export function checkSetupOffThread(c: Omit<SetupContext, 'instanceFacts'>, o: { cache: DetectCache; fresh?: boolean; localMs?: number; netMs?: number }): Promise<SetupView> {
+export function checkSetupOffThread(c: Omit<SetupContext, 'instanceFacts'>, o: { cache: DetectCache; fresh?: boolean; localMs?: number; netMs?: number; managerEnv?: ManagerEnv }): Promise<SetupView> {
   return new Promise((resolve, reject) => {
-    const w = new Worker(new URL('./setup-worker.js', import.meta.url), { workerData: { ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0 } });
+    const w = new Worker(new URL('./setup-worker.js', import.meta.url), { workerData: { ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0, ...(o.managerEnv ? { managerEnv: o.managerEnv } : {}) } });
     w.once('message', (m: { view: SetupView; cache: DetectCache }) => {
       o.cache.clear();
       for (const [k, v] of m.cache) o.cache.set(k, v);

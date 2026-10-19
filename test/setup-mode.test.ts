@@ -88,6 +88,7 @@ function ghStandIn(bare: string, o: { admin?: boolean; refuse?: string } = {}) {
 function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | null = () => null, interactive: string[][] = []): InitIo {
   return {
     which: (c) => `/stand-in/${c}`,
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
@@ -112,6 +113,7 @@ function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | 
 
 const probe = (gh: (args: string[]) => RunResult): SetupProbe => ({
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {
     if (cmd === 'git') {
       const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });

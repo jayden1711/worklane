@@ -5,6 +5,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { agentRecordWarning } from './setup-steps.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
@@ -23,7 +24,7 @@ import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
-import { agentRecordWarning, checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
+import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 
@@ -306,7 +307,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   const state = readInitState(file);
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
-  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run } : {}) };
+  // #738: the manager's reading comes from initIo too, never from the real probe behind a stand-in io.
+  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run, serviceManagerEnv: opts.initIo.serviceManagerEnv } : {}) };
   const s = state?.mode === mode ? state : null;
   // A server instance's own clone, state and policy; a checkout's own state.
   let site = { root, stateDir: projectStateDir(root), policyFile: null as string | null };

@@ -20,7 +20,8 @@ import { doctor, setupChecks } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunLiveView, initCommand, localInitFile, newState, readInitState, setupContext, type InitArgs, type InitIo } from '../src/init.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
-import { checkSetup, systemProbe, type SetupProbe } from '../src/setup-steps.js';
+import { checkSetup, checkSetupOffThread, MANAGER_LOGIN_VARS, systemProbe, type SetupProbe } from '../src/setup-steps.js';
+import { serviceManagerEnv } from '../src/os/index.js';
 import { exampleProject } from './helpers.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX stand-ins and file modes';
@@ -73,7 +74,7 @@ function keyFile(): { file: string; canary: string } {
  * A world of stand-ins for init: tools present, `claude auth status` reporting `method` (null: signed out), the
  * login's proof answered, gh signed in with push, and a stand-in gh for auto-config's calls, recorded.
  */
-function world(o: { method: string | null; ask?: string[] }) {
+function world(o: { method: string | null; ask?: string[]; manager?: { env: Record<string, string> } | { error: string } }) {
   const w = { method: o.method };
   const said: string[] = [];
   const gh: string[][] = [];
@@ -82,6 +83,7 @@ function world(o: { method: string | null; ask?: string[] }) {
   const claudeCalls: { args: string[]; opt: unknown }[] = [];
   const io: InitIo = {
     which: (c) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
+    serviceManagerEnv: () => o.manager ?? { env: {} },
     run: (cmd, args, opt = {}) => {
       const cwd = (opt as { cwd?: string }).cwd;
       if (cmd === 'git') {
@@ -115,7 +117,7 @@ function world(o: { method: string | null; ask?: string[] }) {
     plan: () => null,
     addProject: async () => ({ code: 1, steps: {}, last: '' }),
   };
-  const probe: SetupProbe = { which: io.which, run: io.run, serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
+  const probe: SetupProbe = { which: io.which, run: io.run, serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: io.serviceManagerEnv };
   const prefix = mkdtempSync(join(tmpdir(), 'cr-prefix-'));
   const args = (root: string, a: Partial<InitArgs> = {}): InitArgs => ({ target: root, mode: 'local', instance: undefined, yes: false, reset: false, cwd: root, prefix, interactive: false, ...a });
   const runtimes = () => claudeCalls.map((c) => (c.opt as { agentRuntime?: string } | undefined)?.agentRuntime);
@@ -378,19 +380,55 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
   }
 }
 
-test("#738 round 3: when the user service manager can't be read, the step is not done and says why (no proof call)", { skip: posixOnly }, () => {
-  const fake = fakeClaude();
-  const home = mkdtempSync(join(tmpdir(), 'cr-home-'));
-  mkdirSync(join(home, '.fake-claude'));
-  writeFileSync(join(home, '.fake-claude', 'method'), 'claude.ai');
-  mkdirSync(join(home, '.fake-manager'));
-  writeFileSync(join(home, '.fake-manager', 'down'), '');
+/** What the OS adapter reads from a user manager with no bus (a stand-in `run`; never the real systemctl). */
+const managerDown = () =>
+  serviceManagerEnv(MANAGER_LOGIN_VARS, {
+    platform: 'linux',
+    run: () => {
+      throw Object.assign(new Error('Command failed'), { stderr: 'Failed to connect to bus: No medium found\n' });
+    },
+  });
+
+test("#738: when the user service manager can't be read, the step is not done, says why, and its fix is the check that shows why: never Sign in", () => {
+  // A subscription project, and an API-key project (init's choice): neither gets Sign in, which can't fix this.
+  const cli = existingProject('cli');
+  const keyed = newProject();
+  const state = newState('local', keyed.root, REPO, null);
+  state.agentRuntime = { kind: 'api_key', keyFile: keyFile().file } as never;
+  for (const [what, root, s] of [['subscription', cli, null], ['API key', keyed.root, state]] as const) {
+    const t = world({ method: 'claude.ai', manager: managerDown() });
+    const step = checkSetup(setupContext(s, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), t.probe).groups.flatMap((g) => g.steps).find((x) => x.id === 'claude-login')!;
+    assert.equal(step.done, false, `${what}: ${step.detail}`);
+    assert.match(step.detail, /can't tell which login the coordinator's service gets: its service manager can't be read \(systemctl --user show-environment failed: Failed to connect to bus: No medium found\)/);
+    assert.deepEqual(step.fix, { kind: 'terminal', command: process.platform === 'darwin' ? 'launchctl getenv CLAUDE_CONFIG_DIR' : 'systemctl --user show-environment', why: "this user's service manager couldn't be read; this shows why" }, `${what}: ${JSON.stringify(step.fix)}`);
+    assert.ok(!t.claudeCalls.some((c) => c.args[0] === '-p'), `${what}: no real call made`);
+  }
+});
+
+test('#738: a test process never reaches this machine\'s service manager: a recording systemctl first on PATH sees no call from any entry point', { skip: posixOnly }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cr-recording-'));
+  const record = join(dir, 'calls.log');
+  writeFileSync(record, '');
+  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(record)}\nexit 1\n`);
+  chmodSync(join(dir, 'systemctl'), 0o755);
   const root = existingProject('cli');
-  const step = withEnv({ PATH: [fake.dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local') }, () =>
-    checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe()).groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!,
-  );
-  assert.equal(step.done, false, step.detail);
-  assert.match(step.detail, /can't tell which login the coordinator's service gets: its service manager can't be read \(systemctl --user show-environment failed: Failed to connect to bus: No medium found\)/);
+  const ctx = setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null });
+  const env = { PATH: [dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter) };
+  // The OS adapter itself, the real probe, doctor (with a stand-in io and without), and the dashboard's worker.
+  const direct = withEnv(env, () => serviceManagerEnv(MANAGER_LOGIN_VARS));
+  assert.ok('error' in direct && /a test run never reads this machine's user service manager/.test(direct.error), JSON.stringify(direct));
+  const step = withEnv(env, () => checkSetup(ctx, systemProbe()).groups.flatMap((g) => g.steps).find((x) => x.id === 'claude-login')!);
+  assert.equal(step.done, false, 'unknown fails closed');
+  withEnv(env, () => setupChecks(root, { mode: 'local', initIo: world({ method: 'claude.ai' }).io }));
+  withEnv(env, () => setupChecks(root, { mode: 'local' }));
+  const saved = process.env.PATH;
+  process.env.PATH = env.PATH;
+  try {
+    await checkSetupOffThread(ctx, { cache: new Map() });
+  } finally {
+    process.env.PATH = saved;
+  }
+  assert.equal(readFileSync(record, 'utf8'), '', 'no systemctl call of any kind');
 });
 
 test('#738 round 3: server mode while the setup PR waits (the checkout has no valid config): a matching record reads as on main, read from credentials.yaml alone', () => {
@@ -484,24 +522,6 @@ setTimeout(() => process.exit(0), 200);
 `,
   );
   chmodSync(bin, 0o755);
-  // A stand-in systemd user manager: `--user show-environment` prints what $HOME/.fake-manager/env sets (a
-  // manager's environment.d or set-environment), or fails as with no bus when $HOME/.fake-manager/down exists.
-  writeFileSync(
-    join(dir, 'systemctl'),
-    `#!/bin/sh
-m="\${HOME:-/nonexistent}/.fake-manager"
-if [ "$1 $2" = "--user show-environment" ]; then
-  if [ -e "$m/down" ]; then echo "Failed to connect to bus: No medium found" >&2; exit 1; fi
-  echo "PATH=/usr/local/bin:/usr/bin:/bin"
-  echo "HOME=$HOME"
-  if [ -f "$m/env" ]; then cat "$m/env"; fi
-  exit 0
-fi
-echo "systemctl stand-in: $* is not something it does" >&2
-exit 1
-`,
-  );
-  chmodSync(join(dir, 'systemctl'), 0o755);
   return { dir, bin };
 }
 
@@ -551,8 +571,6 @@ test("#738: the step is done exactly when the local service's runs would start o
           managerEnv[k] = d;
         }
       }
-      mkdirSync(join(home, '.fake-manager'));
-      writeFileSync(join(home, '.fake-manager', 'env'), Object.entries(managerEnv).map(([k, v]) => `${k}=${v}\n`).join(''));
       const shellOnly: Record<string, string> = {};
       if (login === 'cfgdir') {
         // claude.ai only under a CLAUDE_CONFIG_DIR the shell has; the service never gets that variable.
@@ -566,7 +584,7 @@ test("#738: the step is done exactly when the local service's runs would start o
       for (const k of Object.keys(process.env)) if (/^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDE_CONFIG_DIR$)/.test(k)) delete process.env[k];
       Object.assign(process.env, env);
       const root = existingProject(kind);
-      const view = checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe());
+      const view = checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe({ managerEnv: { env: managerEnv } }));
       const step = view.groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!;
       const unit = localServiceSpec(root, loadConfig(root)).env!;
       assert.deepEqual(Object.keys(unit).sort(), ['HOME', 'PATH'], "the unit's own Environment= lines");

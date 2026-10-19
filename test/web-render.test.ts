@@ -1507,6 +1507,7 @@ function firstRun(file: string, o: { root: string; repo: string; instance: strin
     serviceRunning: () => false,
     systemUnitActive: () => false,
     linger: () => null,
+    serviceManagerEnv: () => ({ env: {} }),
   };
   const setup = checkSetup({ mode: o.instance ? 'server' : 'local', root: o.root, repo: o.repo, instance: o.instance, stateDir: mkdtempSync(join(tmpdir(), 'web-render-fr-')), policyFile: null, openQuestions: 0, setupPr: null, instanceFacts: () => ({ error: 'no instance here' }) }, probe);
   const view = firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, has: () => false, setup });

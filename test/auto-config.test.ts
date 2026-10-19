@@ -285,6 +285,7 @@ test('init: the questions in the checklist and on the First-run page with their 
   const said: string[] = [];
   const io: InitIo = {
     which: (c) => (['git', 'gitleaks', 'claude', 'gh'].includes(c) ? `/stand-in/${c}` : null),
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });

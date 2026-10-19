@@ -3,6 +3,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -1030,12 +1031,18 @@ export function serviceRunning(label: string): boolean | null {
   return null;
 }
 
+/** The command that shows why this user's service manager can't be read (the Claude step's fix, #738). */
+export const serviceManagerCheck = (platform: NodeJS.Platform = process.platform): string => (platform === 'darwin' ? 'launchctl getenv CLAUDE_CONFIG_DIR' : 'systemctl --user show-environment');
+
 /**
  * Which of `names` this user's service manager gives every service it starts (#738): systemd's user manager on Linux,
  * launchd on macOS. An error when it can't be read; an error never carries a value (these can be credentials).
  */
 export function serviceManagerEnv(names: readonly string[], o: { platform?: NodeJS.Platform; run?: (cmd: string, args: string[]) => string } = {}): { env: Record<string, string> } | { error: string } {
   const platform = o.platform ?? process.platform;
+  // INVARIANT (#738): a test run never reads this machine's manager; a test gives its own `run`, or gets unknown.
+  const sign = o.run ? null : testRunSign();
+  if (sign) return { error: `a test run never reads this machine's user service manager (${sign})` };
   const run = o.run ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }));
   const env: Record<string, string> = {};
   const failed = (what: string, e: unknown) => ({ error: `${what} failed: ${((e as { stderr?: unknown }).stderr ? String((e as { stderr: unknown }).stderr) : (e as Error).message).trim().split('\n')[0]?.slice(0, 200) ?? ''}` });
@@ -1078,6 +1085,8 @@ export function systemUnitActive(unit: string): boolean | null {
 }
 
 function unitActive(args: string[]): boolean {
+  // INVARIANT (#738): a test run never asks this machine's service manager; as when it doesn't answer: not active.
+  if (testRunSign()) return false;
   try {
     return execFileSync('systemctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'active';
   } catch {
