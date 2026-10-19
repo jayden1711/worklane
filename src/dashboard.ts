@@ -88,6 +88,7 @@ import { throughput } from './throughput.js';
 import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
+import { prsForViewer } from './prs-viewer.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
@@ -1900,7 +1901,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
         }
         // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
+        // A viewer (or any role not owner or writer) gets each PR's state only, never why (src/prs-viewer.ts, #821).
         if (url.pathname === '/api/prs' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 200, prsForViewer(prsView(eventCache.all())));
           return json(res, 200, { ...prsView(eventCache.all()), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
