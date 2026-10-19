@@ -14,7 +14,7 @@ import { BRAND } from './brand.js';
 import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, normalHome, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -43,6 +43,12 @@ const path = z
   .min(1)
   .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
   .refine((p) => !isAbsolute(p) || normalAbsolute(p), { message: `${NOT_NORMAL_ABSOLUTE}: name the real path` });
+/** A home: the same rule, but `/` is allowed (some users' home; never hidden). */
+const homePath = z
+  .string()
+  .min(1)
+  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
+  .refine((p) => !isAbsolute(p) || normalHome(p), { message: `${NOT_NORMAL_ABSOLUTE}: name the real path` });
 
 export const InstanceFile = z.strictObject({
   version: z.literal(1),
@@ -55,12 +61,12 @@ export const InstanceFile = z.strictObject({
   run_as: z
     .strictObject({
       agent_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name'),
-      agent_home: path,
+      agent_home: homePath,
       claude_config_dir: path.optional(),
       /** A second unprivileged user for lanes that run as `eval`: the only one able to read the eval key. */
       eval_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name').optional(),
       /** Resolved from the system's user database when left out; required where it can't be. */
-      eval_home: path.optional(),
+      eval_home: homePath.optional(),
       /**
        * PATH for project commands run as the agent users (tests, checks, setup steps). The instance's owner sets it;
        * a repo's tests.yaml never can. Default: the system directories, plus Homebrew's on macOS.
@@ -316,7 +322,7 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
     const evalHome = inst.run_as.eval_home ?? resolveHome(inst.run_as.eval_user);
     if (!evalHome) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `can't find ${inst.run_as.eval_user}'s home on this machine; set eval_home` }]);
     // The user database's answer is held to the same rule as a configured home: refused, never rewritten.
-    if (!normalAbsolute(evalHome)) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `${inst.run_as.eval_user}'s home ${JSON.stringify(evalHome)} ${NOT_NORMAL_ABSOLUTE}; set eval_home to its real path` }]);
+    if (!normalHome(evalHome)) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `${inst.run_as.eval_user}'s home ${JSON.stringify(evalHome)} ${NOT_NORMAL_ABSOLUTE}; set eval_home to its real path` }]);
     evalAs = { user: inst.run_as.eval_user, home: evalHome, path };
   }
   return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs, ...(inst.commit_identity ? { commitIdentity: inst.commit_identity } : {}) };

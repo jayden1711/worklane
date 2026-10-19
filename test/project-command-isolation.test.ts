@@ -258,6 +258,7 @@ test('instance.yaml run_as paths are held to the same rule: absolute, in normal 
   const base = { version: 1, name: 'shop', repos: [{ path: '/srv/shop/repo', repo: 'acme/shop' }] };
   const runAs = (extra: Record<string, string>) => instance.InstanceFile.safeParse({ ...base, run_as: { agent_user: 'shop-agent', agent_home: '/srv/agents/shop', ...extra } });
   assert.equal(runAs({}).success, true);
+  assert.equal(runAs({ agent_home: '/' }).success, true, '`/` is a home some users have');
   for (const [key, value] of [
     ['agent_home', '/srv/link/../agent'],
     ['agent_home', '/srv/agents/shop/'],
@@ -421,6 +422,10 @@ test('a hide path not in normal form is refused; a `..` can\'t be emptied by one
   }
   // The agent's home too (round 7): refused, never rewritten. A trailing slash included.
   for (const h of [`${home}/`, `${home}/../agent`, `${root}//agent`]) assert.ok(refusedOrRun('echo "$HOME"', { user: 'shop-agent', home: h, hide: [] }, root).refused, h);
+  // `/` is a home some users have (separate-users' git regression runs as nobody with it): accepted as a home, never as
+  // a path to hide.
+  assert.doesNotThrow(() => projectCommand('true', { user: 'nobody', home: '/', hide: [] }));
+  assert.throws(() => projectCommand('true', { user: 'nobody', home: '/', hide: ['/'] }), /normal form/);
 });
 
 // The reviewer's round-4 layouts (#787): a symlink the agent could still change by another route. Each is followed and

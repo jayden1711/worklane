@@ -749,7 +749,9 @@ const LINUX_SANDBOX = [
  */
 export const normalAbsolute = (p: string): boolean =>
   p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/') && !/[\0\n]/.test(p) && Buffer.byteLength(p) < 4096 && p.split('/').every((c) => Buffer.byteLength(c) <= 255);
-export const NOT_NORMAL_ABSOLUTE = 'must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
+/** A user's home: the same rule, but `/` is a home some users have (it is never a path to hide). */
+export const normalHome = (p: string): boolean => p === '/' || normalAbsolute(p);
+export const NOT_NORMAL_ABSOLUTE ='must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
 
 /** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
 export function seatbeltProfile(home: string, hide: readonly string[]): string {
@@ -781,7 +783,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   const hide = [...runAs.hide];
   // The home too: refused, never rewritten. A lexical rewrite of `..` after a symlink names a directory the kernel
   // never reaches, and the masks would miss the real one (#787 round 6).
-  if (!normalAbsolute(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
+  if (!normalHome(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
   const home = runAs.home;
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
