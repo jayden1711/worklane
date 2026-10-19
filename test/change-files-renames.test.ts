@@ -814,7 +814,7 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
     // One pin per allowed line (#797): rewording one of them can't free its count for a new header reader.
     must: [
       /^ \* INVARIANT: a `\+\+\+ ` line is a file name only right after its file's `--- ` line, outside any hunk \(#797\)\.$/m,
-      /^ {4}return !h && l\.startsWith\('\+'\) && !\(nameLine && l\.startsWith\('\+\+\+ '\)\);$/m,
+      /^ {4}return !h && l\.startsWith\('\+'\) && !\(nameLine && l\.startsWith\('\+\+\+ '\) && l\.slice\(4\)\.trim\(\) !== ''\);$/m,
     ],
   },
   'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },

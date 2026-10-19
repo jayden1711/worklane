@@ -727,6 +727,29 @@ test('stdin: a test-patch run with an added line starting "++ " is refused, appl
   assert.equal(stdinSends(row, STDIN_BASE, withFile('tests/test_render.py', `${run.slice(0, 2).join('\n')}\n`)), true, 'two of its lines: sent');
 });
 
+test('stdin: an open import paren goes on only through names or its `)`; a "++ " line or code ends it, so the run after is refused (#804)', () => {
+  const run = ['EXPECTED = """', 'counter one two three four five', 'counter six seven eight nine'];
+  const applied = withFile('tests/test_render.py', `${run.join('\n')}\n`);
+  for (const [what, added] of [
+    ['a stray "(" in an import\'s comment, then a "++ " line', ['from mod import helper  # wraps render(', PLUS_LINE, ...run]],
+    ['an open "from mod import (", then a "++ " line', ['from mod import (', PLUS_LINE, ...run]],
+    ['a stray "(" in an import\'s comment, then code', ['from mod import helper  # wraps render(', ...run]],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch: testPatch(added.map((l) => `+${l}`)) };
+    assert.equal(stdinSends(row, STDIN_BASE, applied), false, `${what}: refused`);
+  }
+  // The names of an open paren still count as import lines: an agent's own file with the same imports is sent.
+  const imports = ['from price.models import (', '    ItemWithDiscount,', '    BasketOfItems as Basket,  # the two kinds', ')'];
+  const rowImports: TaskRow = { ...ROW, test_patch: testPatch(imports.map((l) => `+${l}`)) };
+  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n`)), true, 'names in an open paren: sent');
+});
+
+test('stdin: a `+++ ` line with no name after `--- ` is an added line, as before #797 (#804)', () => {
+  const two = ['counter one two three four five', 'counter six seven eight nine'];
+  const row: TaskRow = { ...ROW, test_patch: ['diff --git a/t b/t', '--- a/t', '+++ ', ...two.map((l) => `+${l}`), ''].join('\n') };
+  assert.equal(stdinSends(row, STDIN_BASE, withFile('tests/t.txt', `++\n${two.join('\n')}\n`)), false, 'refused');
+});
+
 test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', () => {
   // A real ustar stream: the file's last line would otherwise run into the next header's name.
   const header = (name: string, size: number) => {

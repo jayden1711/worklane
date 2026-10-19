@@ -68,6 +68,7 @@ const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
  * Which lines of a patch are added lines (`+x`).
  * INVARIANT: a `+++ ` line is a file name only right after its file's `--- ` line, outside any hunk (#797).
  * In a hunk it is an added line starting "++ ". A hunk ends where its counts say, so a `--- ` line in it opens no header.
+ * One with no name after it is added too, as it was before (#804): git never writes it, so treating it as added fails closed.
  */
 function addedLines(lines: readonly string[]): boolean[] {
   let old = 0;
@@ -88,7 +89,7 @@ function addedLines(lines: readonly string[]): boolean[] {
     const h = HUNK.exec(l);
     if (h) [old, neu] = [Number(h[1] ?? 1), Number(h[2] ?? 1)];
     else if (l.startsWith('--- ')) afterOldName = true;
-    return !h && l.startsWith('+') && !(nameLine && l.startsWith('+++ '));
+    return !h && l.startsWith('+') && !(nameLine && l.startsWith('+++ ') && l.slice(4).trim() !== '');
   });
 }
 
@@ -179,10 +180,14 @@ function windows(lines: readonly string[], imports?: readonly boolean[]): string
 const IMPORT = /^(import\s+\S|from\s+\S+\s+import\b)/;
 /** Whether an import statement is still open: inside `from a import (` until its `)`, or after a trailing `\`. */
 type ImportOpen = 'paren' | 'slash' | undefined;
+/** A line inside an open `from a import (`: names (`a`, `a as b`) and commas, maybe its `)`, maybe a comment. */
+const NAME = String.raw`[A-Za-z_]\w*(?:\s+as\s+[A-Za-z_]\w*)?`;
+const PAREN_NAMES = new RegExp(String.raw`^(?:${NAME}\s*,\s*)*(?:${NAME}\s*)?\)?\s*(?:#.*)?$`);
 /** Whether `line` is part of an import statement, given what is open above it; and what is open after it. */
 function importStep(line: string, open: ImportOpen): [boolean, ImportOpen] {
   const t = line.trim();
-  if (open === 'paren') return [true, t.includes(')') ? undefined : 'paren'];
+  // WHY: only names or the `)` go on in an open paren; any other line (code, a stray "(" in a comment) ends it (#804).
+  if (open === 'paren' && PAREN_NAMES.test(t)) return [true, t.includes(')') ? undefined : 'paren'];
   if (open !== 'slash' && !IMPORT.test(t)) return [false, undefined];
   return [true, t.endsWith('\\') ? 'slash' : t.includes('(') && !t.includes(')') ? 'paren' : undefined];
 }
