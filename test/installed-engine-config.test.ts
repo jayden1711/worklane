@@ -97,7 +97,7 @@ function fixture() {
     return { code: r.status, out: r.stdout + r.stderr };
   };
   const done = () => rmSync(dir, { recursive: true, force: true });
-  return { owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runStep, done };
+  return { repo, owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runStep, done };
 }
 
 const workflow = () => readFileSync(join(repoRoot, '.github', 'workflows', 'installed-engine-config.yml'), 'utf8');
@@ -147,7 +147,7 @@ test("installed-engine-config judges by the base's pin: a PR can't move it, and 
   f.done();
 });
 
-test("installed-engine-config fails closed: unsigned, another key, a PR's own signer, a moved pin, a malformed pin, no engine", { skip }, () => {
+test("installed-engine-config fails closed: unsigned, another key, a PR's own signer, a moved pin, a malformed pin, no or broken engine", { skip }, () => {
   const f = fixture();
   const change = { '.worklane/config.yaml': 'name: other\n' };
   // Unsigned, and signed by a key main doesn't list.
@@ -169,6 +169,27 @@ test("installed-engine-config fails closed: unsigned, another key, a PR's own si
   f.sh('git', ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${f.owner}`, 'tag', '-s', 'v1.0.4', '-m', 'v1.0.4', 'main']);
   f.pin('v1.0.4', f.sh('git', ['rev-parse', 'v1.0.4^{commit}']));
   refused(f.run(f.pr(change)), /the installed engine v1\.0\.4 .* carries no dist\/src\/config\/load\.js/);
+  // A release whose loader exports no configFrom, one whose loader throws on import, and one with runtime
+  // dependencies but no lockfile to install them as released.
+  const signedRelease = (tag: string, files: Record<string, string>) => {
+    const c = f.release(tag, ['name'], f.owner);
+    f.sh('git', ['tag', '-d', tag]);
+    f.sh('git', ['checkout', '-q', '--detach', c]);
+    for (const [p, body] of Object.entries(files)) {
+      mkdirSync(join(f.repo, p, '..'), { recursive: true });
+      writeFileSync(join(f.repo, p), body);
+      f.sh('git', ['add', '-f', p]);
+    }
+    f.sh('git', ['commit', '-q', '--amend', '-m', `Release ${tag}`]);
+    f.sh('git', ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${f.owner}`, 'tag', '-s', tag, '-m', tag]);
+    f.pin(tag, f.sh('git', ['rev-parse', 'HEAD']));
+  };
+  signedRelease('v1.0.5', { 'dist/src/config/load.js': 'export const loadConfig = () => ({});\n' });
+  refused(f.run(f.pr(change)), /v1\.0\.5 \(.*\)'s dist\/src\/config\/load\.js exports no configFrom/);
+  signedRelease('v1.0.6', { 'dist/src/config/load.js': "throw new Error('broken engine');\n" });
+  refused(f.run(f.pr(change)), /can't load the installed engine v1\.0\.6 .*'s config loader: broken engine/);
+  signedRelease('v1.0.7', { 'package.json': JSON.stringify({ version: '1.0.7', dependencies: { yaml: '2.0.0' } }) });
+  refused(f.run(f.pr(change)), /v1\.0\.7 .* has runtime dependencies but no package-lock\.json/);
   f.done();
 });
 
