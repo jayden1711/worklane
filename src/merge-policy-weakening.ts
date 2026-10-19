@@ -101,6 +101,8 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'src/merge-policy-weakening.ts', table: 'TEST_PATHS', kind: 'never-shrink' },
   { path: 'src/merge-policy-weakening.ts', table: 'SUPPRESSION', kind: 'never-shrink' },
   { path: 'src/merge-policy-weakening.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
+  { path: 'src/merge-policy-weakening.ts', table: 'LINT_TESTS', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'SIZE_CAP', kind: 'never-shrink' },
 ];
 
 /**
@@ -113,6 +115,32 @@ export const NOT_A_CHECK: readonly { path: string; table: string; why: string }[
   { path: 'test/decision-fixture.ts', table: 'WRITERS_ONLY', why: 'marker strings a decision card shows writers; no rule' },
   { path: 'test/loop-control.test.ts', table: 'WORDS', why: 'words a scripted agent writes; no rule' },
 ];
+
+/**
+ * Lint tests whose rules live in their code, not (only) in a registered table: any code line removed from one, outside
+ * its registered tables, holds. Every one must read as lint-shaped (lintShaped), which test/merge-policy.test.ts
+ * checks. Beyond this list, a removed or changed regex line in any lint-shaped test file holds too.
+ */
+export const LINT_TESTS: readonly string[] = [
+  'test/pipefail.test.ts',
+  'test/boundaries.test.ts',
+  'test/web-key-in-url.test.ts',
+  'test/self-hosted-guard.test.ts',
+  'test/package-deps.test.ts',
+  'test/no-clock-helpers.test.ts',
+  'test/no-wall-clock-durations.test.ts',
+  'test/change-files-renames.test.ts',
+  'test/slot-dir-writes.test.ts',
+  'test/slot-path.test.ts',
+];
+
+/**
+ * Whether a test file's text reads as a lint: it walks the repo's own tree (`readdirSync`, `globSync`) from its root
+ * into a source folder. A word list, not a proof: a lint that reads one file by name gets past it (register it in
+ * LINT_TESTS).
+ */
+export const lintShaped = (text: string): boolean =>
+  /\b(?:readdir|opendir|glob)(?:Sync)?\s*\(|\bwalk\w*\s*\(/.test(text) && /\b(?:repoRoot|repoDir)\b/.test(text) && /['"`/](?:src|scripts|web|test)['"`/]/.test(text);
 
 /** The words in a table's name that say it allows, exempts, skips or rules something. */
 const CHECK_TABLE_NAME = /ALLOW|EXEMPT|EXCEPT|SKIP|OUTSIDE|IGNORE|KNOWN|REVIEWED|PERMIT|BASELINE|LEGACY|WAIVE|NOT_YET|ONLY|GOOD|BAD|RULES|WORDS|PATTERNS|DENY|BANNED|FORBIDDEN|NEVER|GUARD/;
@@ -133,6 +161,9 @@ export const checkShapedTables = (text: string): string[] => [...text.matchAll(T
 export const GUARD_FILES: readonly string[] = [
   `${BRAND.configDir}/review.yaml`,
   `${BRAND.configDir}/guardrails.yaml`,
+  // The required checks (`required_checks`) and the test-run tiers a land or merge waits on.
+  `${BRAND.configDir}/config.yaml`,
+  `${BRAND.configDir}/tests.yaml`,
   '.github/workflows/**',
   '.githooks/**',
   '.denylist.json',
@@ -159,6 +190,15 @@ export const GUARD_FILES: readonly string[] = [
   '**/.c8rc*',
   '**/codecov.y*ml',
   '**/.codecov.y*ml',
+  // Git hook managers and other linters' configs.
+  '.husky/**',
+  '**/.pre-commit-config.y*ml',
+  '**/lefthook.y*ml',
+  '**/.pylintrc',
+  '**/mypy.ini',
+  '**/.mypy.ini',
+  '**/.stylelintrc*',
+  '**/.markdownlint*',
   'src/merge-policy*',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
@@ -188,9 +228,16 @@ export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleak
 export const TEST_PATHS: readonly string[] = ['test/**', 'tests/**', 'spec/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/test_*.py', '**/*_test.py', '**/*_test.go'];
 
 /** Inline marks that turn a lint or type check off for a line or a file. */
+/**
+ * The most characters of a file the hold parses. Over it, the file holds unread (fail closed), so a huge test file
+ * can't keep the merge decision busy on every poll. Measured: the parse of a file at the cap takes well under a second.
+ */
+export const SIZE_CAP = 500_000;
+
 export const SUPPRESSION: readonly string[] = [
   '@ts-ignore', '@ts-expect-error', '@ts-nocheck', 'eslint-disable', 'biome-ignore', 'istanbul ignore', 'c8 ignore', 'v8 ignore',
   'noqa', 'type: ignore', 'pragma: no cover', 'nosec', 'NOLINT', 'gitleaks:allow', 'nolint',
+  'pylint: disable', 'mypy: ignore', 'rubocop:disable', 'phpcs:ignore', 'shellcheck disable', 'deno-lint-ignore', '#[allow(',
 ];
 
 /** Globs that name the engine's own source: they hold only in the engine's repo (as review.ts engineSourceGlob). */
@@ -220,6 +267,8 @@ interface Scanned {
   code: string;
   /** 1 where src is a comment. */
   comment: Uint8Array;
+  /** How many regex literals it has. */
+  regexes: number;
   /** False when a string, template, regex or comment never ends. */
   ok: boolean;
 }
@@ -234,6 +283,7 @@ function scan(src: string): Scanned {
   const templates: number[] = [];
   let i = 0;
   let ok = true;
+  let regexes = 0;
   let last = '';
   const template = (): void => {
     // In a template's text, from i (after ` or }): to its end, or into a `${`.
@@ -297,6 +347,7 @@ function scan(src: string): Scanned {
       i++;
       while (i < src.length && /[a-z]/.test(src[i]!)) i++;
       last = '/x';
+      regexes++;
     } else {
       if (templates.length && c === '{') templates[templates.length - 1]!++;
       else if (templates.length && c === '}') {
@@ -314,7 +365,7 @@ function scan(src: string): Scanned {
     }
   }
   if (templates.length) ok = false;
-  return { src, code: code.join(''), comment, ok };
+  return { src, code: code.join(''), comment, regexes, ok };
 }
 
 const OPEN: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
@@ -377,6 +428,12 @@ const ASSERT_CALL = /(?<![\w$.])(?:[A-Za-z_$][\w$]*\s*\.\s*)*?(?:assert|expect)(
 const TITLE_CALL = /(?<![\w$.])(?:(?:t|s|ctx|context)\s*\.\s*)?(?:test|it|describe|suite)\b(?:\s*\.\s*(?:only|skip|todo))?\s*\(/g;
 const SKIP_MARK = /(?<![\w$])(?:test|it|describe|suite|context|t|s|ctx)\s*\.\s*(?:skip|todo|only)\b|(?<![\w$.])(?:xit|xtest|xdescribe|fit|fdescribe)\s*\(|(?<![\w$.])(?:skip|todo|only)\s*:/g;
 const EXIT = /(?<![\w$.])(?:return|continue|break|throw)(?![\w$])/g;
+/** How many characters of a header, a lead or a first argument go into an assertion's key. */
+const HEAD = 400;
+/** A skip or todo called in a test's body: `t.skip()`, `t.todo('x')`, `this.skip()`, `context.skip()`. */
+const BODY_SKIP = /(?<![\w$.])[A-Za-z_$][\w$]*\s*\.\s*(?:skip|todo)\s*\(/g;
+/** A block or call header that makes what's inside it conditional: an `if`, a loop, a `try`, `&&`, `||`, `?`. */
+const CONTROL = /(?<![\w$.])(?:if|else|for|while|do|switch|case|try|catch|finally)(?![\w$])|&&|\|\||\?\?|\?/;
 
 /** Local functions whose body asserts: a call to one counts as an assertion. */
 function assertingFunctions(s: Scanned, asserts: RegExp): Set<string> {
@@ -476,11 +533,48 @@ export function testFacts(text: string): TestFacts {
   if (!s.ok) return facts;
   const { code } = s;
   const { roots, bindings } = assertionNames(s);
+  // The names the file declares (`const X = ...`), and what each holds (read once, bounded): an assertion or a loop
+  // around a test that names one carries its value, so changing `const EXPECTED = 2` or shrinking `const CASES = [...]`
+  // changes the assertion or the test.
+  // Which one a name means is scoped: the last declaration of it before the use inside the same top-level statement
+  // (a const in the test itself), else one at the top level of the file; never another test's.
+  const depth = new Int32Array(code.length + 1);
+  for (let k = 0, d = 0; k < code.length; k++) {
+    const c = code[k]!;
+    if (c === ')' || c === ']' || c === '}') d = Math.max(0, d - 1);
+    depth[k] = d;
+    if (OPEN[c]) d++;
+  }
+  const declarations = new Map<string, number[]>();
+  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=/g)) (declarations.get(m[1]!) ?? declarations.set(m[1]!, []).get(m[1]!)!).push(m.index);
+  const values = new Map<number, string>();
+  const valueAt = (at: number) => {
+    let v = values.get(at);
+    if (v === undefined) {
+      // A literal only (an expected value, a case table): a module, a client or a call's result is no expectation.
+      const span = spanFrom(s, at);
+      const text = span ? textOf(s, span[0], Math.min(span[1], span[0] + HEAD)) : '';
+      values.set(at, (v = /^(?:[[{'"`/\d]|-\d|true\b|false\b|null\b|undefined\b|new (?:Set|Map)\()/.test(text) ? text : ''));
+    }
+    return v;
+  };
+  const uses = (text: string, at: number, top: number) => {
+    const out: string[] = [];
+    for (const n of new Set(text.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? [])) {
+      if (roots.has(n)) continue;
+      const all = declarations.get(n) ?? [];
+      const local = all.filter((p) => p < at && p > top).at(-1);
+      const decl = local ?? all.find((p) => depth[p] === 0);
+      if (decl !== undefined && valueAt(decl)) out.push(`${n}=${valueAt(decl)}`);
+    }
+    return out.length ? ` | uses ${out.join(' ')}` : '';
+  };
   facts.bindings = bindings;
   facts.aborts = [...code.matchAll(ABORT)].length;
-  // Each test call: where its `(` is, its title, and how it runs: the call's modifiers and every argument after the
-  // title that isn't its function (an options object, or a const holding one).
-  const calls = new Map<number, { title: string; runs: string }>();
+  // Each test call: where its `(` is, its title, and how it runs: the call's modifiers, every argument after the title
+  // that isn't its function (an options object; a same-file const holding one, read as its value), whether its
+  // function is a generator (never run), and the skip or todo calls in its body (`t.skip()`, `this.skip()`).
+  const calls = new Map<number, { start: number; title: string; runs: string }>();
   const headers: [number, number][] = [];
   for (const m of code.matchAll(TITLE_CALL)) {
     const open = m.index + m[0].length - 1;
@@ -497,11 +591,16 @@ export function testFacts(text: string): TestFacts {
         fnAt = Math.min(fnAt, at);
         break;
       }
-      args.push(textOf(s, at, end));
+      const arg = textOf(s, at, end);
+      const ref = args.length && /^[A-Za-z_$][\w$]*$/.test(arg) ? tableSpan(s, arg) : null;
+      args.push(ref ? `${arg}=${textOf(s, ref[0], ref[1])}` : arg);
       at = end + 1;
     }
     const mods = /\.\s*(only|skip|todo)\b/.exec(m[0])?.[1] ?? '';
-    calls.set(open, { title: args[0] ?? '', runs: [mods, ...args.slice(1)].filter(Boolean).join(' ') });
+    const body = code.slice(fnAt, close);
+    const generator = /^\s*(?:async\s+)?function\s*\*/.test(body) ? 'generator' : '';
+    const bodySkips = [...body.matchAll(BODY_SKIP)].length;
+    calls.set(open, { start: m.index, title: args[0] ?? '', runs: [mods, ...args.slice(1), generator, bodySkips ? `body skips ${bodySkips}` : ''].filter(Boolean).join(' ') });
     headers.push([m.index, fnAt]);
   }
   // A `skip:` key counts only in an object (`{ skip: ... }`), not as a parameter's type (`(only: number)`).
@@ -530,17 +629,41 @@ export function testFacts(text: string): TestFacts {
     }
   }
   starts.sort((a, b) => a - b);
+  // Where each return/break/continue/throw is, to count those before a position by binary search (linear time).
+  const exitAt = [...code.matchAll(EXIT)].map((m) => m.index);
+  const exitsBefore = (to: number) => {
+    let lo = 0;
+    let hi = exitAt.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (exitAt[mid]! < to) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  // Each open `(`'s first argument ends at its first comma at depth 0 (or its end): found once per bracket.
+  const firstComma = new Map<number, number>();
+  const firstArgEnd = (at: number, upTo: number) => {
+    let end = firstComma.get(at);
+    if (end === undefined) firstComma.set(at, (end = depthZero(code, at + 1, code.length, ',')));
+    return Math.min(end, upTo);
+  };
   // One pass: the brackets open at each start, each with the text before it (its header).
-  const stack: { at: number; header: string; seg: number }[] = [];
+  // A bracket's header is read only when something inside it needs it, once.
+  const stack: { at: number; seg: number; text?: string }[] = [];
+  const headerOf = (b: { at: number; seg: number; text?: string }) => (b.text ??= textOf(s, Math.max(b.seg, b.at - HEAD), b.at).slice(-200));
   let seg = 0;
   let next = 0;
   let coveredTo = -1;
   for (let i = 0; i < code.length; i++) {
     const call = calls.get(i);
     if (call) {
-      // A test inside a skipped describe is skipped too: how the tests around it run is part of how it runs.
-      const around = stack.map((b) => calls.get(b.at)?.runs).filter(Boolean);
-      facts.tests.push({ title: call.title, runs: [...around, call.runs].join(' > ') });
+      // A test inside a skipped describe is skipped too, and one inside an `if`, a loop, a `try` or a condition runs
+      // only as that allows; so does one led into by `x &&` or `cond ?`: all of that is part of how it runs.
+      const top = stack[0]?.at ?? -1;
+      const around = stack.map((b) => calls.get(b.at)?.runs ?? (CONTROL.test(headerOf(b)) ? `${headerOf(b)}${uses(headerOf(b), b.at, top)}` : '')).filter(Boolean);
+      const lead = textOf(s, Math.max(seg, call.start - HEAD), call.start);
+      facts.tests.push({ title: call.title, runs: [...around, lead ? `lead ${lead}` : '', call.runs].filter(Boolean).join(' > ') });
     }
     while (next < starts.length && starts[next] === i) {
       next++;
@@ -553,16 +676,18 @@ export function testFacts(text: string): TestFacts {
         return facts;
       }
       coveredTo = end;
-      const where = stack.map((b) => (code[b.at] === '(' ? `${b.header}(${textOf(s, b.at + 1, depthZero(code, b.at + 1, i, ','))}` : `${b.header}${code[b.at]}`));
+      // Each text read here is bounded (HEAD characters), so a huge argument or segment can't make this quadratic.
+      const where = stack.map((b) => (code[b.at] === '(' ? `${headerOf(b)}(${textOf(s, b.at + 1, Math.min(firstArgEnd(b.at, i), b.at + 1 + HEAD))}` : `${headerOf(b)}${code[b.at]}`));
       const from = stack[0]?.at ?? 0;
-      const exits = [...code.slice(from, i).matchAll(EXIT)].length;
+      const exits = exitsBefore(i) - exitsBefore(from);
       // What leads into it within its own statement: `await`, `void`, `if (x)`, `x &&`, `const later = () =>`.
-      const lead = textOf(s, seg, i).slice(-200);
-      facts.assertions.push(`${where.join(' > ')} | exits ${exits} | ${lead ? `${lead} ` : ''}${textOf(s, i, end)}`);
+      const lead = textOf(s, Math.max(seg, i - HEAD), i).slice(-200);
+      const text = textOf(s, i, end);
+      facts.assertions.push(`${where.join(' > ')} | exits ${exits} | ${lead ? `${lead} ` : ''}${text}${uses(text, i, stack[0]?.at ?? -1)}`);
     }
     const c = code[i]!;
     if (OPEN[c]) {
-      stack.push({ at: i, header: textOf(s, seg, i).slice(-200), seg });
+      stack.push({ at: i, seg });
       seg = i + 1;
     } else if (c === ')' || c === ']' || c === '}') {
       const b = stack.pop();
@@ -581,10 +706,16 @@ export function testFacts(text: string): TestFacts {
 /** The text of `const NAME ... = <value>` up to its end, as [from, to) in s, or null when there is none. */
 function tableSpan(s: Scanned, name: string): [number, number] | null {
   const m = new RegExp(`(?<![\\w$.])(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}(?![\\w$])`).exec(s.code);
+  return m ? spanFrom(s, m.index) : null;
+}
+
+/** The value of the declaration (`const NAME ... =`) that starts at `at`, as tableSpan reads it. */
+function spanFrom(s: Scanned, at: number): [number, number] | null {
+  const m = /^(?:const|let|var)\s+[A-Za-z_$][\w$]*/.exec(s.code.slice(at, at + 300));
   if (!m) return null;
   // The `=` at depth 0 after the name (a type annotation's brackets and `=>` skipped).
   let depth = 0;
-  let i = m.index + m[0].length;
+  let i = at + m[0].length;
   for (; i < s.code.length; i++) {
     const c = s.code[i]!;
     if (OPEN[c] || c === '<') depth++;
@@ -599,6 +730,9 @@ function tableSpan(s: Scanned, name: string): [number, number] | null {
   const close = s.code[start] === '[' || s.code[start] === '{' ? closeOf(s.code, start) : -1;
   if (close === -1) return [start, depthZero(s.code, start, s.code.length, ';')];
   const tail = /^\s*(?:as\s+const|satisfies\s+[\w$.<>[\], ]+)?/.exec(s.code.slice(close + 1, close + 200))!;
+  // The literal goes on into a call or an operator (`[...].slice(1)`, `[...].filter(f)`, `[...] || []`): the whole
+  // statement is the value, one entry, so changing what follows the literal changes the table.
+  if (/^\s*(?:[.[(?|&+*/%-])/.test(s.code.slice(close + 1 + tail[0].length, close + 220))) return [start, depthZero(s.code, start, s.code.length, ';')];
   return [start, close + 1 + tail[0].length];
 }
 
@@ -708,6 +842,7 @@ const KINDS = {
   'table-gone': "removes or renames a check's or guard's table",
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
+  'table-touched': "narrows, changes or declares again a check's or guard's table where it is used",
   'allow-file': 'adds an entry to an allowlist file',
   'guard-lines': 'removes or changes code in a guard or lint',
   suppression: 'adds an inline lint or type-check suppression',
@@ -757,6 +892,8 @@ function marksIn(path: string, line: string): string[] {
 }
 const isRunnerTest = (p: string) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p) || p.includes('__tests__/');
 const dir = (p: string) => p.slice(0, p.lastIndexOf('/') + 1);
+/** A test file's name from its first `.test.`/`.spec.` on (`.test.ts`), or its extension: what a runner selects it by. */
+const runnerSuffix = (p: string) => /(\.(?:test|spec)\..*|\.[^./]*)$/.exec(p.slice(p.lastIndexOf('/') + 1))?.[1] ?? '';
 const TOKEN = /[A-Za-z_$][\w$]*|\d[\w.]*|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|\S/g;
 const IDENT = /^[A-Za-z_$][\w$]*$/;
 /** Names an assertion is made of: never a rename (`equal` to `ok` changes what it checks). */
@@ -767,7 +904,8 @@ const MATCHER = /^(?:to|is|has)[A-Z]\w*$/;
 
 /** The identifier renames code made: names gone from its removed lines paired with names new in its added lines. */
 function codeRenames(files: ChangeFile[]): { gone: Set<string>; came: Set<string> } {
-  const ids = (ls: string[] | undefined) => new Set((ls ?? []).flatMap((l) => l.match(TOKEN) ?? []).filter((t) => IDENT.test(t)));
+  // Code tokens only: a word in a comment or a string is no rename (`// wanted` to `// got`).
+  const ids = (ls: string[] | undefined) => new Set((ls ?? []).flatMap((l) => scan(l).code.match(TOKEN) ?? []).filter((t) => IDENT.test(t)));
   const removed = new Set(files.flatMap((f) => [...ids(f.removedLines)]));
   const added = new Set(files.flatMap((f) => [...ids(f.addedLines)]));
   return { gone: new Set([...removed].filter((x) => !added.has(x))), came: new Set([...added].filter((x) => !removed.has(x))) };
@@ -778,10 +916,14 @@ function codeRenames(files: ChangeFile[]): { gone: Set<string>; came: Set<string
  * gone from the code, its new one new there), the same old name always to the same new one, and never an assertion's
  * own name. Literals, punctuation and shape are the same.
  */
-function renamedOnly(a: string, b: string, r: { gone: Set<string>; came: Set<string> }): boolean {
+function renamedOnly(a: string, b: string, r: { gone: Set<string>; came: Set<string> }, stillUsed: (name: string) => boolean): boolean {
   const ta = a.match(TOKEN) ?? [];
   const tb = b.match(TOKEN) ?? [];
   if (ta.length !== tb.length || !r.gone.size) return false;
+  // Never a name the old assertion already had (`equal(got, wanted)` to `equal(got, got)`), nor one the test still
+  // uses after the change (a real rename leaves no old name behind).
+  const before = new Set(ta);
+  for (let k = 0; k < ta.length; k++) if (ta[k] !== tb[k] && (before.has(tb[k]!) || stillUsed(ta[k]!))) return false;
   const map = new Map<string, string>();
   let renamed = false;
   for (let k = 0; k < ta.length; k++) {
@@ -814,11 +956,21 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   // Whether the change also changes code (not only tests and docs): then a changed assertion holds too, not only a
   // lost one (the issue's "when the PR also touches src/", widened to any code: a fixture, a config, a script).
   const codeChanged = i.files.some((f) => !isTest(f.path) && !isDoc(f.path));
+  // Whether a changed (not only a lost) assertion or test title holds. With code changed, as the issue scopes it. Holding
+  // it in a tests-only change too (a reworded or swapped assertion, the counts kept) is an open owner decision: this
+  // one line is where it goes.
+  const changedHolds = codeChanged;
   const isAllowFile = matcher(NEVER_GROW_FILES, i.scope);
   const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
+  // A file over SIZE_CAP isn't parsed (reading it is slow, on the merge decision's path): it holds as unread.
   const read = (side: 'before' | 'after', path: string): string | null | undefined => {
     try {
-      return i[side](path);
+      const text = i[side](path);
+      if (text !== null && text.length > SIZE_CAP) {
+        hit('unreadable', path, `over ${SIZE_CAP} characters: not read`);
+        return undefined;
+      }
+      return text;
     } catch {
       hit('unreadable', path);
       return undefined;
@@ -838,9 +990,9 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       hit('unreadable', f.path);
       continue;
     }
-    // Suppressions, in any file: more marks added than removed.
+    // Suppressions, in any file but docs (a doc may name one): more marks added than removed.
     const marks = (ls: string[] | undefined) => (ls ?? []).flatMap((l) => marksIn(f.path, l));
-    const newMarks = missing(marks(lines.added), marks(lines.removed));
+    const newMarks = isDoc(f.path) ? [] : missing(marks(lines.added), marks(lines.removed));
     if (newMarks.length) hit('suppression', f.path, newMarks[0]);
 
     if (isAllowFile(f.path)) {
@@ -851,7 +1003,8 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     // A guard or lint file: a code line removed and not put back, or one added that can skip or switch something off
     // (an early return, `if (process.env.X)`, `"rule": "off"`, `continue-on-error`). A lint test that holds a
     // registered table: a line removed (its logic changed beside its table).
-    const lintTest = isTest(f.path) && tables.some((t) => t.path === f.path);
+    // A lint test that is new in this change has no rule to loosen yet.
+    const lintTest = isTest(f.path) && (tables.some((t) => t.path === f.path) || (holds(f.path, i.scope) && LINT_TESTS.includes(f.path))) && read('before', f.path) != null;
     if (isGuard(f.path) || lintTest) {
       if (!linesKnown) hit('unreadable', f.path);
       else {
@@ -859,11 +1012,28 @@ export function weakeningReasons(i: WeakeningInput): string[] {
         // out is a tightening).
         const inTables = lintTest ? tableLines(f.path, read('before', f.path) ?? null, tables) : new Set<string>();
         const removed = missing((lines.removed ?? []).flatMap(codeLine), (lines.added ?? []).flatMap(codeLine)).filter((l) => !inTables.has(l));
-        const bypasses = isGuard(f.path) ? missing((lines.added ?? []).flatMap(codeLine), (lines.removed ?? []).flatMap(codeLine)).filter((l) => BYPASS.test(l)) : [];
+        // A guard's source (src/, scripts/, test/): an added line with an exit or an off switch. Any other guard file
+        // (a config, a workflow, a hook): any added line, since an exclude, an ignore pattern, an allowlist path or an
+        // `if:` loosens with no word a list could name (fail closed).
+        const newLines = missing((lines.added ?? []).flatMap(codeLine), (lines.removed ?? []).flatMap(codeLine));
+        // A lint test: an added line with an exit or an off switch too (`if (f.includes('legacy')) continue;`).
+        const bypasses = isGuard(f.path) && !engineSourceGlob(f.path) ? newLines : newLines.filter((l) => BYPASS.test(l));
         for (const l of [...removed, ...bypasses].slice(0, 3)) hit('guard-lines', f.path, l);
       }
     }
     for (const t of tables.filter((x) => x.path === f.path)) {
+      // The table narrowed, changed or declared again where it's used (`NAME.slice(1)`, `[...NAME].filter(...)`,
+      // `NAME.push(x)`, `NAME[k] = v`, `Object.assign(NAME, ...)`, a second `const NAME`), in a line the change adds or
+      // removes.
+      const n = t.table;
+      const touches = new RegExp(
+        `(?<![\\w$.])${n}\\b[\\s\\])]*\\.\\s*(?:slice|filter|splice|pop|shift|unshift|push|add|set|delete|clear|fill|sort|reverse|copyWithin)\\s*\\(|(?<![\\w$.])${n}\\s*(?:\\.\\s*length|\\[[^\\]]*\\])\\s*=(?!=)|\\bObject\\s*\\.\\s*(?:assign|defineProperty|setPrototypeOf)\\s*\\(\\s*${n}\\b`,
+      );
+      for (const l of [...missing(lines.added ?? [], lines.removed ?? []), ...missing(lines.removed ?? [], lines.added ?? [])].filter((x) => touches.test(x)).slice(0, 3)) hit('table-touched', f.path, `${n}: ${l.trim()}`);
+      // Declared again (a shadow the code then reads instead): more declarations of its name than before.
+      const declarations = (text: string | null | undefined) => (text ? [...scan(text).code.matchAll(new RegExp(`(?<![\\w$.])(?:const|let|var|function|class)\\s+${n}(?![\\w$])`, 'g'))].length : 0);
+      const declaredBefore = declarations(read('before', f.path));
+      if (declaredBefore && declarations(read('after', f.path)) > declaredBefore) hit('table-touched', f.path, `${n}: declared again`);
       const b = read('before', f.path);
       const a = read('after', f.path);
       if (b === undefined || a === undefined || b === null) continue;
@@ -895,6 +1065,11 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       hit('unreadable', f.path);
       continue;
     }
+    // A lint by its shape that isn't registered: a regex line removed or changed (its rule loosened) holds.
+    if (!lintTest && b !== null && linesKnown && lintShaped(b)) {
+      const regexLines = missing((lines.removed ?? []).flatMap(codeLine), (lines.added ?? []).flatMap(codeLine)).filter((l) => scan(l).regexes > 0 || /\bRegExp\s*\(/.test(l));
+      for (const l of regexLines.slice(0, 3)) hit('guard-lines', f.path, l);
+    }
     for (const side of ['before', 'after'] as const) {
       for (const x of facts[side]?.assertions ?? []) {
         pools[side].assertions.push(`${runner} | ${x}`);
@@ -921,7 +1096,9 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     if (b === null && a !== null && isRunnerTest(f.path)) added.push({ path: f.path, text: a });
   }
   // A test file deleted: unless the change adds the same text as another test file in the same folder (a rename).
-  for (const d of deleted) if (!added.some((x) => x.text === d.text && dir(x.path) === dir(d.path))) hit('test-file-deleted', d.path);
+  // Only its stem may change: the runner picks files by their suffix and extension (`.test.ts` built to `.test.js`),
+  // so moving it under `.spec.ts`, `.test.mts` or `.test.tsx` can take it out of the run.
+  for (const d of deleted) if (!added.some((x) => x.text === d.text && dir(x.path) === dir(d.path) && runnerSuffix(x.path) === runnerSuffix(d.path))) hit('test-file-deleted', d.path);
   // A test gone (no test of its title after), or one that now runs differently (skipped, todo, only, other options).
   // With code changed, a test whose title is gone and an assertion gone or changed each hold. In a change of tests
   // only, there is no code a loosened test could hide: they hold when there are fewer tests or fewer assertions.
@@ -932,18 +1109,27 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const title = k.slice(0, k.indexOf(' | runs '));
     const shown = title.slice(title.indexOf(' | ') + 3);
     if (titlesAfter.has(title)) hit('test-skip', where.get(`title ${title}`) ?? '?', shown);
-    else if (codeChanged || fewerTests) hit('test-removed', where.get(`title ${title}`) ?? '?', shown);
+    else if (changedHolds || fewerTests) hit('test-removed', where.get(`title ${title}`) ?? '?', shown);
   }
-  if (codeChanged || pools.after.assertions.length < pools.before.assertions.length) {
+  if (changedHolds || pools.after.assertions.length < pools.before.assertions.length) {
     // An assertion whose only change is a rename the change also makes in its code (`totalCents` to `totalInCents`
     // in src/ and in the test) is the same assertion: its expectation, literals and shape are as they were.
     const renames = codeRenames(i.files.filter((f) => !isTest(f.path) && !isDoc(f.path)));
     const gone = missing(pools.before.assertions, pools.after.assertions);
     const left = missing(pools.after.assertions, pools.before.assertions);
+    // Each test file's code words after the change (strings and comments out), for "is the old name still used".
+    const after = new Map<string, Set<string>>();
+    const usedAfter = (path: string) => {
+      let ids = after.get(path);
+      if (!ids) after.set(path, (ids = new Set((scan(read('after', path) ?? '').code.match(TOKEN) ?? []).filter((t) => IDENT.test(t)))));
+      return ids;
+    };
     for (const x of gone) {
-      const same = left.findIndex((y) => renamedOnly(x, y, renames));
+      const path = where.get(x) ?? '';
+      const same = left.findIndex((y) => renamedOnly(x, y, renames, (name) => usedAfter(path).has(name)));
       if (same !== -1) left.splice(same, 1);
-      else hit('test-assertion', where.get(x) ?? '?', x.slice(x.lastIndexOf(' | ') + 3));
+      // Shown as the assertion itself: `runner | where | exits n | <assertion>[ | uses ...]`.
+      else hit('test-assertion', where.get(x) ?? '?', x.split(' | ')[3] ?? x);
     }
   }
 
