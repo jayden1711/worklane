@@ -18,7 +18,7 @@ import { BRAND } from './brand.js';
 import type { DoneWhenList } from './backlog/types.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
-import { computeLevel } from './review.js';
+import { computeLevel, type LockScope } from './review.js';
 import { defaultRolePrompt } from './roles.js';
 import { checkDecisions, decisionsLines, DECISIONS_FORMAT, indexLines, NOTHING_RECORDED, resolveRef, type DecisionEntry, type DecisionsSection } from './plan-decisions.js';
 
@@ -202,9 +202,9 @@ export function objection(comments: { author: string; body: string }[], after: n
  * design-level checks, over the files the plan expects to change, plus its own design flag. Empty: post and
  * proceed. `existsAtBase` tells a new top-level module from an existing one.
  */
-export function planHoldReasons(plan: Plan, o: { review: ReviewConfig; moneyPaths: RegExp[]; existsAtBase: (path: string) => boolean }): string[] {
+export function planHoldReasons(plan: Plan, o: { review: ReviewConfig; moneyPaths: RegExp[]; existsAtBase: (path: string) => boolean; scope: LockScope | undefined }): string[] {
   const files = plan.files.map((path) => ({ path: path.replace(/^\.\//, ''), added: 0, removed: 0 }));
-  const level = computeLevel({ files, labels: [], moneyPaths: o.moneyPaths }, o.review);
+  const level = computeLevel({ files, labels: [], moneyPaths: o.moneyPaths, scope: o.scope }, o.review);
   const tops = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))];
   const newTopLevel = tops.filter((d) => !o.existsAtBase(d)).map((d) => `${d}/`);
   const reasons = riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(o.review), design: { flag: plan.design_change, reason: plan.design_reason, by: 'the plan' }, newTopLevel });

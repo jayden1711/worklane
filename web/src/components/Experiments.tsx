@@ -110,7 +110,7 @@ export function ExperimentsPanel({ state, id }: { state: State; id: string | nul
   );
 }
 
-function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
+export function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
   const [plan, setPlan] = useState<ExpPlan | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -159,7 +159,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
         {s.started && <span className="text-[12px] text-ink-3">version {s.version.slice(0, 8)} · {Math.round(s.exploration.share * 100)}% of runs explore</span>}
         <div className="flex w-full flex-wrap gap-1.5 sm:ml-auto sm:w-auto" data-testid="experiment-actions">
           {shown.map((a) => (
-            <Button key={a} size="sm" variant={a === 'start' || a === 'approve' || a === 'resume' ? 'default' : 'outline'} className={cx((a === 'stop_job' || a === 'decline') && 'text-red')} disabled={busy} onClick={() => void review(a)} data-testid={`experiment-${a}`}>
+            <Button key={a} size="sm" variant={a === 'start' || a === 'approve' || a === 'resume' ? 'default' : 'outline'} className={cx((a === 'stop_job' || a === 'decline') && 'text-red')} work={a === 'start' ? 'starts' : null} disabled={busy} onClick={() => void review(a)} data-testid={`experiment-${a}`}>
               {s.started && s.held && a === 'approve' ? 'Accept result' : s.started && s.held && a === 'decline' ? 'Reject result' : ACTION_LABEL[a]}
             </Button>
           ))}
@@ -192,7 +192,7 @@ function StudyPage({ s, actions }: { s: ExpStudy; actions: ExpAction[] }) {
             <Button size="sm" variant="ghost" onClick={() => setPlan(null)} disabled={busy}>
               Cancel
             </Button>
-            <Button size="sm" onClick={() => void confirm()} disabled={busy} data-testid="experiment-confirm">
+            <Button size="sm" work={plan.action === 'start' ? 'starts' : null} onClick={() => void confirm()} disabled={busy} data-testid="experiment-confirm">
               Confirm {planLabel(plan)}
             </Button>
           </div>
@@ -293,7 +293,7 @@ function Meter({ label, value, max, text }: { label: string; value: number; max:
         <b className="font-medium tabular-nums text-ink">{text}</b>
       </div>
       <div className="mt-0.5 h-1.5 overflow-hidden rounded bg-hover-2" aria-hidden="true">
-        <i className={cx('block h-full rounded', pct >= 90 ? 'bg-orange' : 'bg-blue')} style={{ width: `${pct}%` }} />
+        <i className={cx('block h-full rounded', pct >= 90 ? 'bg-orange' : 'bg-ring')} style={{ width: `${pct}%` }} />
       </div>
     </div>
   );
@@ -319,8 +319,8 @@ function BestChart({ points, direction }: { points: { n: number; value: number |
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="mt-1 h-auto w-full" role="img" aria-label={`Best ${direction === 'min' ? 'lowest' : 'highest'} result over ${ps.length} scored jobs`} data-testid="experiment-chart">
       {ps.map((p, i) => !p.kept && <circle key={p.n} cx={x(i)} cy={H - y(p.value)} r="1.8" fill="var(--ink-3)" opacity="0.45" />)}
-      <path d={steps.join(' ')} fill="none" stroke="var(--blue)" strokeWidth="2" />
-      {ps.map((p, i) => p.kept && <circle key={`k${p.n}`} cx={x(i)} cy={H - y(p.value)} r="2.4" fill="var(--blue)" />)}
+      <path d={steps.join(' ')} fill="none" stroke="var(--ring)" strokeWidth="2" />
+      {ps.map((p, i) => p.kept && <circle key={`k${p.n}`} cx={x(i)} cy={H - y(p.value)} r="2.4" fill="var(--ring)" />)}
     </svg>
   );
 }

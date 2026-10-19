@@ -61,7 +61,7 @@ export interface UpdaterPlan {
 type Input = { step: 'install' } | { step: 'release' } | { step: 'stage'; principal: string; key: string } | { step: 'discard'; principal: string; key: string };
 
 const code = 'block overflow-x-auto whitespace-pre rounded-lg bg-inset px-3 py-2 font-mono text-[12px] text-ink shadow-hairline';
-const field = 'h-8 w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)]';
+const field = 'h-8 w-full rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]';
 const CONFIRM: Record<UpdaterPlan['step'], string> = { install: 'Install the updater', release: 'Follow releases', stage: 'Stage this signer', discard: 'Discard it' };
 
 /** What a reviewed step will run and change; for a signer, exactly what is staged and what would then confirm it. Then the confirming click. */

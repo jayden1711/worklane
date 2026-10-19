@@ -68,7 +68,7 @@ function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max
     probeTimeoutMin: () => 90,
     testRuns: o.testRuns ?? null,
     tiers: () => [{ name: 'unit', kind: 'fast' }],
-    categories: (files) => computeLevel({ files: files.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [/^src\/ledger\//] }, DEFAULT_REVIEW).categories,
+    categories: (files) => computeLevel({ files: files.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [/^src\/ledger\//], scope: undefined }, DEFAULT_REVIEW).categories,
     revert: async (r) => {
       reverts.push({ culprit: r.culprit, number: r.number, title: r.title, evidence: r.evidence });
       const pr = await backlog.openPr(`wl/revert-${r.number}`, 'main', `Revert #${r.number}`, r.evidence);
@@ -130,7 +130,7 @@ test("a candidate's verdict from its own checks: bad on a failure, good when all
 });
 
 test('revert first: the configured globs, the money path, auth and secrets; anything else is fixed forward', () => {
-  const cats = (files: string[]) => computeLevel({ files: files.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [/^src\/ledger\//] }, DEFAULT_REVIEW).categories;
+  const cats = (files: string[]) => computeLevel({ files: files.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [/^src\/ledger\//], scope: undefined }, DEFAULT_REVIEW).categories;
   const r = (files: string[], globs: string[] = []) => revertFirstReasons({ files, globs, categories: cats(files) });
   assert.deepEqual(r(['src/report.js']), []);
   assert.match(r(['src/ledger/post.js']).join(), /money-path: src\/ledger\/post\.js/);

@@ -17,7 +17,7 @@ import { exampleProject } from './helpers.js';
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 const review = loadConfig(exampleProject().dir).review!;
-const level = (paths: string[]) => computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [] }, review);
+const level = (paths: string[]) => computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths: [], scope: undefined }, review);
 
 test('outside the plan: a high-risk or design path the plan did not list is named; planned ones and ordinary ones are not', () => {
   const changed = ['src/a.ts', 'migrations/001.sql', 'src/b.ts', 'package.json', 'plugins/x.ts'];

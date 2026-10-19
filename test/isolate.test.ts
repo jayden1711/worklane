@@ -27,7 +27,9 @@ import { NETWORK_FILE } from '../src/network.js';
 import { PROVIDER_HOSTS_FILE } from '../src/provider-hosts.js';
 import { SYSTEM_SLOTS, UPDATE_DRAIN_FILE } from '../src/os/index.js';
 import { gpuFilePath, gpuLockPath } from '../src/testrun/gpu.js';
-import { devSlotsPath, serviceModeRefusal, SYSTEM_ROOT_VAR, systemRootRefusal, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+import { devSlotsPath, markTestRun, serviceModeRefusal, SYSTEM_ROOT_VAR, systemRootRefusal, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_RUN_VAR, testRunSign, testSlotsRefusal, TestSlotsRefused, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+import { budgetFor, GitHubBudget } from '../src/github/budget.js';
+import { emergencyStop, stopAll } from '../src/slots.js';
 import { LIMITS_PATH } from '../src/settings.js';
 import { MACHINE_PATHS } from '../src/setup-steps.js';
 import { TAILSCALE_DIR, TAILSCALE_SCRIPT } from '../src/tailscale-setup.js';
@@ -39,7 +41,7 @@ import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
 import { ephemeralStart, refusedPort } from './held-port.js';
 import { exampleProject, MARKS, repoRoot } from './helpers.js';
-import { homeMoved, isolatedEnv, onRealMachine, TEST_PRELOAD, testMachine } from './isolate.js';
+import { homeMoved, isolatedEnv, onRealMachine, restoreIsolated, TEST_PRELOAD, testMachine } from './isolate.js';
 
 const testDir = join(repoRoot, 'test');
 const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
@@ -130,6 +132,176 @@ test('a test file run without the isolation stops at once, before any test', asy
   assert.equal(preloaded.code, 0, preloaded.out);
 });
 
+/** The shell of a machine that runs the engine, as a test file sees it without the preload: none of the test machine. */
+function unisolatedEnv(live: { home: string; slots: string }): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...childEnv(), HOME: live.home, AGENT_SLOTS_DIR: live.slots };
+  for (const k of Object.keys(env)) if (k.startsWith(`${BRAND.envPrefix}_`)) delete env[k];
+  return env;
+}
+
+test("regression (#669): a test that makes a GitHub call without the isolation fails before it touches any slot directory: the machine's budget stays as it was", async () => {
+  // Stand-ins for the machine's own home and slot directory, so the check below can see what the test wrote there.
+  const live = { home: mkdtempSync(join(tmpdir(), 'live-home-')), slots: mkdtempSync(join(tmpdir(), 'live-slots-')) };
+  const github = pathToFileURL(join(repoRoot, 'dist', 'src', 'backlog', 'github.js')).href;
+  const issue = JSON.stringify({ number: 1, title: 't', body: '', labels: [], state: 'open', html_url: 'https://example.invalid/1' });
+  const file = fixtureTest(
+    'github-call.test.js',
+    [
+      "import { test } from 'node:test';",
+      `import { GitHubBacklog } from ${JSON.stringify(github)};`,
+      `const fake = async () => new Response(${JSON.stringify(issue)}, { status: 200, headers: { 'content-type': 'application/json' } });`,
+      "test('a GitHub call', async () => { await new GitHubBacklog('o/r', () => 'tok', fake).get(1); console.log('GITHUB CALL MADE'); });",
+    ].join('\n'),
+  );
+  const bare = await runTests(['--test', '--test-reporter=tap', file], unisolatedEnv(live));
+  assert.deepEqual(readdirSync(live.slots), [], `nothing written to the machine's slot directory:\n${bare.out}`);
+  assert.deepEqual(readdirSync(live.home), [], `nor its home:\n${bare.out}`);
+  assert.notEqual(bare.code, 0, bare.out);
+  assert.match(bare.out, /isn't the test machine's/);
+  assert.doesNotMatch(bare.out, /GITHUB CALL MADE/);
+  // Preloaded, the same file runs, on the test machine's own slot directory.
+  const preloaded = await runTests([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], unisolatedEnv(live));
+  assert.equal(preloaded.code, 0, preloaded.out);
+  assert.match(preloaded.out, /GITHUB CALL MADE/);
+  assert.deepEqual(readdirSync(live.slots), []);
+});
+
+test('regression (#669): a test that stops every agent without the isolation fails before it writes STOP into the machine\'s slot directory', async () => {
+  const live = { home: mkdtempSync(join(tmpdir(), 'live-home-')), slots: mkdtempSync(join(tmpdir(), 'live-slots-')) };
+  const slots = pathToFileURL(join(repoRoot, 'dist', 'src', 'slots.js')).href;
+  const file = fixtureTest('stop-all.test.js', ["import { test } from 'node:test';", `import { stopAll } from ${JSON.stringify(slots)};`, "test('stop all', () => { stopAll('t', 'a test'); console.log('STOP WRITTEN'); });"].join('\n'));
+  const bare = await runTests(['--test', '--test-reporter=tap', file], unisolatedEnv(live));
+  assert.deepEqual(readdirSync(live.slots), [], `no STOP in the machine's slot directory:\n${bare.out}`);
+  assert.notEqual(bare.code, 0, bare.out);
+  assert.match(bare.out, /TestSlotsRefused/);
+  assert.match(bare.out, /isn't the test machine's/);
+  assert.doesNotMatch(bare.out, /STOP WRITTEN/);
+});
+
+test('regression (#669): a process an unisolated test starts, with its environment or the engine\'s childEnv(), is a test run too: it never reaches the machine\'s slot directory', async () => {
+  const live = { home: mkdtempSync(join(tmpdir(), 'live-home-')), slots: mkdtempSync(join(tmpdir(), 'live-slots-')) };
+  const dist = (p: string) => JSON.stringify(pathToFileURL(join(repoRoot, 'dist', 'src', p)).href);
+  const file = fixtureTest(
+    'starts-engine.test.js',
+    [
+      "import { test } from 'node:test';",
+      "import { spawnSync } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      `import { childEnv } from ${dist('os/index.js')};`,
+      // An engine-shaped child: not a test file, not started by node's runner; it stops every agent.
+      "const child = new URL('./engine.mjs', import.meta.url).pathname;",
+      `writeFileSync(child, ${JSON.stringify(`import { stopAll } from ${dist('slots.js')}; stopAll('t', 'a child'); console.log('STOP WRITTEN');`)});`,
+      "test('start the engine', () => {",
+      "  for (const [how, env] of [['childEnv', childEnv()], ['inherited', undefined]]) {",
+      "    const r = spawnSync(process.execPath, [child], { env, encoding: 'utf8' });",
+      '    console.log(`CHILD ${how} status=${r.status}`, r.stdout, r.stderr);',
+      '  }',
+      '});',
+    ].join('\n'),
+  );
+  // node --test: the file's process has NODE_TEST_CONTEXT (childEnv drops it); run directly, no child inherits a sign.
+  for (const args of [['--test', '--test-reporter=tap', file], [file]]) {
+    const r = await runTests(args, unisolatedEnv(live));
+    assert.deepEqual(readdirSync(live.slots), [], `no STOP in the machine's slot directory (${args.join(' ')}):\n${r.out}`);
+    for (const how of ['childEnv', 'inherited']) assert.match(r.out, new RegExp(`CHILD ${how} status=1`), r.out);
+    assert.match(r.out, new RegExp(`TestSlotsRefused: this is a test run \\(${TEST_RUN_VAR} is set\\)`), r.out);
+    assert.doesNotMatch(r.out, /STOP WRITTEN/);
+  }
+});
+
+test('the engine started outside a test run is never one: no sign, no mark on what it starts, its slot directory as given (#669)', () => {
+  const live = { home: mkdtempSync(join(tmpdir(), 'live-home-')), slots: mkdtempSync(join(tmpdir(), 'live-slots-')) };
+  // A service's environment: built from scratch, nothing of a test run in it (as `up` writes one).
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: live.home, AGENT_SLOTS_DIR: live.slots };
+  const dist = (p: string) => JSON.stringify(pathToFileURL(join(repoRoot, 'dist', 'src', p)).href);
+  const probe = fixtureTest(
+    'engine.mjs',
+    [
+      `import { childEnv, slotsDir } from ${dist('os/index.js')};`,
+      `import { testRunSign, TEST_RUN_VAR } from ${dist('os/system-paths.js')};`,
+      'console.log(JSON.stringify({ sign: testRunSign(), own: process.env[TEST_RUN_VAR] ?? null, child: childEnv()[TEST_RUN_VAR] ?? null, slots: slotsDir() }));',
+    ].join('\n'),
+  );
+  const r = spawnSync(process.execPath, [probe], { cwd: live.home, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { sign: null, own: null, child: null, slots: live.slots });
+  // The CLI itself, on a command that reads the slot directory.
+  const cli = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'slots'], { cwd: live.home, env, encoding: 'utf8' });
+  assert.equal(cli.status, 0, `${cli.stdout}\n${cli.stderr}`);
+  assert.match(cli.stdout, /agents running on this machine: 0 of \d+/);
+  assert.doesNotMatch(cli.stderr, /TestSlotsRefused/);
+});
+
+test("in a test process every slot-directory default is the test machine's slot directory, and nothing outside it (#669)", () => {
+  assert.equal(process.env[TEST_MACHINE_VAR], testMachine);
+  assert.equal(slotsDir(), isolatedEnv.AGENT_SLOTS_DIR);
+  assert.equal(budgetFor('tok').dir, isolatedEnv.AGENT_SLOTS_DIR);
+  assert.equal(new GitHubBudget('0123456789abcdef').dir, isolatedEnv.AGENT_SLOTS_DIR);
+  assert.equal(emergencyStop(), null);
+  const elsewhere = join(dirname(testMachine), `not-the-test-machine-${randomBytes(4).toString('hex')}`);
+  try {
+    process.env.AGENT_SLOTS_DIR = elsewhere;
+    assert.throws(() => slotsDir(), (e: Error) => e instanceof TestSlotsRefused && e.message.includes(`${elsewhere} is outside ${testMachine}`));
+    assert.throws(() => stopAll('t', 'a test'), TestSlotsRefused);
+    assert.throws(() => emergencyStop(), TestSlotsRefused);
+    assert.throws(() => budgetFor('tok'), TestSlotsRefused);
+    assert.throws(() => new GitHubBudget('0123456789abcdef'), TestSlotsRefused);
+    process.env.AGENT_SLOTS_DIR = testMachine;
+    assert.throws(() => slotsDir(), TestSlotsRefused, 'the machine directory itself is not a slot directory inside it');
+  } finally {
+    restoreIsolated('AGENT_SLOTS_DIR');
+  }
+  assert.equal(existsSync(elsewhere), false, 'refused before anything was made there');
+  // A directory given outright is the caller's: the tests' own.
+  assert.equal(budgetFor('tok', elsewhere).dir, elsewhere);
+  // What this process starts is a test run too, however it is started.
+  assert.equal(childEnv()[TEST_RUN_VAR], '1');
+});
+
+test('a test run is told apart from the engine by how node started it, never by the shell alone; outside one the slot directory is never refused (#669)', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const engine: { argv: string[]; execArgv: string[] } = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] };
+  const clean: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/example', AGENT_SLOTS_DIR: '/var/lib/agent-slots' };
+  assert.equal(testRunSign(clean, engine), null);
+  assert.equal(testSlotsRefusal('/var/lib/agent-slots', clean, engine), null, "the engine's own slot directory, as before");
+  assert.equal(testSlotsRefusal(undefined, clean, engine), null);
+  const runs: [string, NodeJS.ProcessEnv, typeof engine][] = [
+    ["a test file's process under node --test", { ...clean, NODE_TEST_CONTEXT: 'child-v8' }, engine],
+    ['node --test without isolation between files', clean, { ...engine, execArgv: ['--test'] }],
+    ['a test file run directly', clean, { ...engine, argv: [process.execPath, '/x/dist/test/backlog.test.js'] }],
+    ['the preload mark alone', { ...clean, [TEST_TOKEN_VAR]: 'a'.repeat(64) }, engine],
+  ];
+  for (const [what, env, proc] of runs) {
+    assert.notEqual(testRunSign(env, proc), null, what);
+    assert.match(testSlotsRefusal('/var/lib/agent-slots', env, proc) ?? '', new RegExp(`${TEST_MACHINE_VAR} is unset`), what);
+  }
+  // Only a test run marks what it starts (childEnv, and its own environment on load).
+  assert.deepEqual(markTestRun({ ...clean }, testRunSign(clean, engine)), clean);
+  assert.equal(markTestRun({ ...clean }, testRunSign(runs[0]![1], engine))[TEST_RUN_VAR], '1');
+  assert.notEqual(testRunSign({ ...clean, [TEST_RUN_VAR]: '1' }, engine), null, 'a child a test run started');
+  const uid = process.getuid!();
+  const inTest = { ...clean, NODE_TEST_CONTEXT: 'child-v8' };
+  // The machine counts only with the preload's system root inside it and its mark for this run's token.
+  const marked = { ...inTest, [TEST_MACHINE_VAR]: testMachine, [SYSTEM_ROOT_VAR]: isolatedEnv[SYSTEM_ROOT_VAR], [TEST_TOKEN_VAR]: process.env[TEST_TOKEN_VAR] };
+  const slots = join(testMachine, 'u', 'agent-slots');
+  assert.equal(testSlotsRefusal(slots, marked, engine, uid), null);
+  assert.match(testSlotsRefusal(undefined, marked, engine, uid) ?? '', /AGENT_SLOTS_DIR is unset/);
+  assert.match(testSlotsRefusal(join(testMachine, '..', 'x'), marked, engine, uid) ?? '', /is outside/);
+  assert.match(testSlotsRefusal(slots, { ...marked, [TEST_TOKEN_VAR]: 'b'.repeat(64) }, engine, uid) ?? '', /isn't this run's test machine: .*doesn't match its test mark/);
+  assert.match(testSlotsRefusal(slots, { ...marked, [SYSTEM_ROOT_VAR]: undefined }, engine, uid) ?? '', /doesn't hold the test preload's system root/);
+  // A stray value naming a directory of this user's alone (as a home is) without the preload's mark is no machine.
+  const stray = mkdtempSync(join(tmpdir(), 'stray-machine-'));
+  chmodSync(stray, 0o700);
+  assert.match(testSlotsRefusal(join(stray, 'slots'), { ...inTest, [TEST_MACHINE_VAR]: stray }, engine, uid) ?? '', /doesn't hold the test preload's system root/);
+  assert.match(testSlotsRefusal(join(stray, 'slots'), { ...marked, [TEST_MACHINE_VAR]: stray }, engine, uid) ?? '', /doesn't hold the test preload's system root/);
+  assert.match(testSlotsRefusal(slots, { ...inTest, [TEST_MACHINE_VAR]: 'relative/dir' }, engine, uid) ?? '', /not an absolute path/);
+  assert.match(testSlotsRefusal(slots, { ...inTest, [TEST_MACHINE_VAR]: join(testMachine, 'missing') }, engine, uid) ?? '', /doesn't exist/);
+  // A machine that isn't this user's alone (the filesystem root, another user's, a shared one) is no test machine.
+  assert.match(testSlotsRefusal('/var/lib/agent-slots', { ...inTest, [TEST_MACHINE_VAR]: '/' }, engine, uid + 1) ?? '', /isn't a directory of this user's alone/);
+  const shared = mkdtempSync(join(tmpdir(), 'shared-machine-'));
+  chmodSync(shared, 0o777);
+  assert.match(testSlotsRefusal(join(shared, 'slots'), { ...inTest, [TEST_MACHINE_VAR]: shared }, engine, uid) ?? '', /isn't a directory of this user's alone/);
+});
+
 /** The bodies of a file's finally blocks: where a test puts things back. */
 function finallyBlocks(text: string): string[] {
   const out: string[] = [];
@@ -159,7 +331,7 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
   // macOS keeps the real HOME (test/isolate.ts homeMoved); everything above, derived from it, is still temporary.
   if (homeMoved) derived.push(['homedir()', homedir()], ["a child's HOME", childEnv().HOME!]);
   for (const [what, p] of derived) assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);
-  const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE` && k !== TEST_TOKEN_VAR);
+  const leaked = Object.keys(process.env).filter((k) => k.startsWith(`${BRAND.envPrefix}_`) && !(k in isolatedEnv) && k !== `${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE` && k !== TEST_TOKEN_VAR && k !== TEST_MACHINE_VAR);
   assert.deepEqual(leaked, [], 'no engine setting from the shell');
 });
 

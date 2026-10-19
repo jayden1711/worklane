@@ -25,6 +25,7 @@ categories:
     - test/denylist.test.ts
     - test/dco.test.ts
     - test/package-files.test.ts
+    - test/managed-apps.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place, and the tests that assert the agents' tool guard denies a call.
     - test/isolate.ts
@@ -41,6 +42,7 @@ categories:
     - .githooks/**
     - docs/releasing.md
     - docs/design.md
+    - docs/design/**  # the architecture docs (#698): listed here only, not locked in code
 levels:
   L0_auto:      { when: [docs-only, tests-only, comments, copy], max_lines: 200 }
   L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }

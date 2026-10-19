@@ -544,7 +544,7 @@ export function ChatPanel({ cli, role, user }: { cli: string; role?: string | un
               rows={3}
               placeholder="Why is issue 12 stuck?"
               aria-label="Question"
-              className="w-full resize-none rounded-control bg-field px-2.5 py-2 text-[13px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--blue)]"
+              className="w-full resize-none rounded-control bg-field px-2.5 py-2 text-[13px] text-ink shadow-hairline outline-none placeholder:text-ink-3 focus:shadow-[0_0_0_1px_var(--ring)]"
               data-testid="chat-input"
             />
             <MicInterim listening={mic.listening} interim={mic.interim} error={mic.error} />
