@@ -212,8 +212,11 @@ const HUB = { devices: 'tag:owner-laptop,box', clientId: 'Iv1.signin0001', siri:
 /**
  * A shown command with each <...> and [...] filled in from the hub's settings, the way its own words say to: a
  * [--flag ...] is kept when the unit has that setting, each <...> becomes its value. Anything it can't fill throws.
+ * The URL is filled in only where the command names a new one (https://<...>), so a command that should give the new
+ * URL but keeps the unit's (<its --public-url>) throws; `keepsUnitUrl`: the command is meant to keep the unit's, and
+ * `url` is that one (credentials.sh's).
  */
-function fillIn(shown: string, url: string): string {
+function fillIn(shown: string, url: string, o: { keepsUnitUrl?: boolean } = {}): string {
   const q = (v: string) => `'${v}'`;
   const filled = shown
     .replace(/\[(--[a-z-]+)[^\]]*\]/g, (_, flag: string) => {
@@ -223,7 +226,7 @@ function fillIn(shown: string, url: string): string {
       throw new Error(`a [...] this test can't fill: ${flag}`);
     })
     .replace(/--client-id <[^>]*>/, `--client-id ${q(HUB.clientId)}`)
-    .replace(/--public-url (?:https:\/\/)?<[^>]*>/, `--public-url ${q(url)}`)
+    .replace(o.keepsUnitUrl ? /--public-url <its --public-url>/ : /--public-url https:\/\/<[^>]*>/, `--public-url ${q(url)}`)
     .replace(/<[^>]*instance[^>]*>\.\.\./, HUB.instances.map(q).join(' '));
   assert.ok(!/[<>[\]]/.test(filled), `everything filled in: ${filled}`);
   return filled;
@@ -285,6 +288,8 @@ test("the Tailscale screen's by-hand public-url command keeps the Siri and hooks
   // A unit it may not read exactly (not root's): the placeholder, which names --siri, --hooks and the devices.
   const other = hubMachine();
   assertKeepsEverything(other, fillIn(shownOn(other, uid + 1), `https://${TAILNET}`), 'the placeholder');
+  // A fallback that kept the unit's URL (<its --public-url>) instead of naming the new one isn't filled in: it fails.
+  assert.throws(() => fillIn(OWNER_TERMINAL_RERUN, `https://${TAILNET}`), /everything filled in/);
 });
 
 test('one placeholder for every hub rerun: the Tailscale one is the owner-terminal one with the new URL, and tailscale.sh and the docs hold it verbatim', async () => {
@@ -319,7 +324,7 @@ test("credentials.sh's rerun for a hub already set up, filled in from the unit a
   // What dashboard-signin prints last when $HUB_UNIT exists: the line under "then, as root, ...:".
   const shown = /\n\s+if \[ -f "\$HUB_UNIT" \]; then\n[\s\S]*?\n\s+echo " +(sudo bash \S*dashboards\.sh [^"]*)"\n/.exec(sh)?.[1];
   assert.ok(shown, 'credentials.sh dashboard-signin shows a dashboards.sh rerun for a hub already set up');
-  assertKeepsEverything(hubMachine(), fillIn(shown, 'https://hub.example.test'), 'credentials.sh', 'https://hub.example.test');
+  assertKeepsEverything(hubMachine(), fillIn(shown, 'https://hub.example.test', { keepsUnitUrl: true }), 'credentials.sh', 'https://hub.example.test');
 });
 
 test("the Tailscale screen's fallback writes the URL only when dashboards.sh would take it: a status that skipped the parser can't put $(...) or a backtick in the command", () => {
