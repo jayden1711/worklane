@@ -31,6 +31,7 @@
 // (failed-run notes for the Learnings panel on Reports: one cause seen 3 times, one seen once), --with-stage-labels
 // (earliest-failed-stage labels for the report preview's stage section on Reports, plan and review among them), --with-goal
 // (two goals split into the demo's tasks for the task graph: #900, and #901 whose two other tasks form a dependency cycle),
+// --with-auto-merge-stop (auto-merge stopped by a red default branch: its banner, resume and acknowledgement form),
 // --viewport <w>x<h> (default 1440x1000; under
 // 768 wide, e.g. 390x844, a phone), --keep (leave the temporary directory),
 // --no-chrome-sandbox (for nested sandboxes; see the skill), --user <login> (whom the dashboard serves; default the
@@ -144,6 +145,7 @@ async function start() {
     if (flag('--with-learnings')) await seedLearnings(root, state.tasks.map((t) => t.issue));
     if (flag('--with-stage-labels')) await seedStageLabels(root, state.tasks.map((t) => t.issue));
     if (flag('--with-goal')) await seedGoals(root, state.tasks.map((t) => t.issue));
+    if (flag('--with-auto-merge-stop')) await seedAutoMergeStop(root);
 
     // Chrome started the way the engine starts it for its own browser checks (src/browser/cdp.ts launchChrome):
     // its launch wait (scaled on a loaded machine by <PREFIX>_BROWSER_TIMEOUT_SCALE) and one more start when the
@@ -341,6 +343,29 @@ async function seedSigninFailed(root, issue) {
     log.append('claude_auth.checked', { key: 'claude', login: 'agents@example.com', ok: false, by: 'timer', detail: SIGNIN_DETAIL, cost_usd: 0 }, 'demo');
   } catch (e) {
     console.error(`--with-signin-failed: not recorded (${e.message.split('\n')[0]})`);
+  }
+}
+
+/**
+ * --with-auto-merge-stop: auto-merge stopped by a red default branch after an auto-merge (#776), in the demo's own
+ * state directory: the stop file and its merge.stopped. The demo has no remote, so its main can't be measured green
+ * and a resume asks for the acknowledgement.
+ */
+async function seedAutoMergeStop(root) {
+  const logMod = join(engine, 'dist', 'src', 'events', 'log.js');
+  const svc = join(engine, 'dist', 'src', 'service.js');
+  const ctx = join(engine, 'dist', 'src', 'guardrails', 'context.js');
+  if (!existsSync(logMod) || !existsSync(svc) || !existsSync(ctx)) return;
+  const { EventLog } = await import(pathToFileURL(logMod).href);
+  const { logPath } = await import(pathToFileURL(svc).href);
+  const { projectStateDir } = await import(pathToFileURL(ctx).href);
+  const reason = "main's required checks failed (ci) on `cccccccc` after auto-merging #12, but the revert can't be opened";
+  try {
+    new EventLog(logPath(root)).append('merge.stopped', { reason, number: 12, sha: 'c'.repeat(40), revert: null, by: 'red_main' }, 'demo');
+    mkdirSync(projectStateDir(root), { recursive: true });
+    writeFileSync(join(projectStateDir(root), 'auto-merge-stopped.json'), JSON.stringify({ reason, by: 'red_main', number: 12, sha: 'c'.repeat(40), revert: null }));
+  } catch (e) {
+    console.error(`--with-auto-merge-stop: not recorded (${e.message.split('\n')[0]})`);
   }
 }
 
