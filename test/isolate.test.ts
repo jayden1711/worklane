@@ -786,6 +786,18 @@ async function pollutedUnset<T>(vars: Record<string, string>, f: () => Promise<T
   }
 }
 
+/** polluted() across awaits, leaving this process's own environment as it is. */
+async function pollutedAsync<T>(vars: Record<string, string>, f: () => Promise<T>): Promise<T> {
+  const proto = Object.prototype as Record<string, unknown>;
+  for (const k of Object.keys(vars)) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  try {
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return await f();
+  } finally {
+    for (const k of Object.keys(vars)) delete proto[k];
+  }
+}
+
 test('regression (#786): with Object.prototype polluted, an unset variable reads as unset: the system root, the test-run marks, the service modes, the held-out store, the tool prefix', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
   const uid = process.getuid!();
   const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] as string[] };
@@ -904,4 +916,41 @@ test("regression (#786 round 2): an agent user's run gets none of Object.prototy
     ...(out.login === join(homedir(), '.claude') ? [] : [`loginOf is ${out.login}`]),
   ];
   assert.deepEqual(leaks, []);
+});
+
+test("regression (#786 round 3): CliRunner, an instance's agent route, puts none of Object.prototype's variables in its run's or auth probe's env -i list", { skip: process.platform === 'win32' && 'agent users: POSIX' }, async () => {
+  // A stand-in sudo, the only one on the run's PATH (test/separate-users.test.ts's pattern), records each call's
+  // env -i list and the PATH sudo itself got, and plays claude. Nothing runs as another user.
+  const dir = mkdtempSync(join(tmpdir(), 'sudo-786-'));
+  const calls = join(dir, 'calls.jsonl');
+  writeFileSync(
+    join(dir, 'sudo'),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const i = a.indexOf('-i');
+const env = {};
+let j = i + 1;
+for (; j < a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[j]); j++) env[a[j].slice(0, a[j].indexOf('='))] = a[j].slice(a[j].indexOf('=') + 1);
+const probe = a[j + 1] === 'auth' && a[j + 2] === 'status';
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ probe, env, sudoPath: process.env.PATH }) + '\\n');
+if (probe) console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }));
+else console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 0, total_cost_usd: 0 }));
+`,
+  );
+  chmodSync(join(dir, 'sudo'), 0o755);
+  const CANARY = '/canary-786-r3';
+  const NAMES = ['TZ', 'LC_ALL', 'LANG', 'TERM', 'TMPDIR', 'SHELL', 'XDG_RUNTIME_DIR', 'ComSpec', 'ProgramData'];
+  const runAs = { user: 'shop-agent', home: '/home/example/agent' };
+  // The coordinator's environment, as the service hands it: a plain object, PATH reaching only the stand-in sudo.
+  const coord = { PATH: dir, HOME: '/home/example' };
+  const run = await pollutedAsync(Object.fromEntries(NAMES.map((k) => [k, `${CANARY}/${k}`])), () =>
+    new CliRunner('cli', coord, 'claude', runAs).run({ prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, role: 'worker' }),
+  );
+  assert.equal(run.reason, 'succeeded', run.detail);
+  const seen = readFileSync(calls, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { probe: boolean; env: Record<string, string>; sudoPath: string });
+  assert.deepEqual([seen.some((c) => c.probe), seen.some((c) => !c.probe)], [true, true], 'the auth probe and the run both went through sudo');
+  const leaks = seen.flatMap((c) => Object.entries(c.env).filter(([, v]) => v.startsWith(CANARY)).map(([k]) => `${c.probe ? 'probe' : 'run'}: ${k}`));
+  assert.deepEqual(leaks, [], 'no variable from Object.prototype crosses the user switch');
+  assert.deepEqual([...new Set(seen.map((c) => c.sudoPath))], [dir], "sudo's own PATH is the coordinator's own");
 });
