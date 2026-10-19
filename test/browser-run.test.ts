@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { REAL_CHROME_TIMEOUT, oneChromeAtATime, realChromeTests, unscaled } from './browser-helpers.js';
 import { spawn, spawnSync } from 'node:child_process';
@@ -157,14 +157,47 @@ test('what the page does during the dark and phone shots is listed per view and 
   assert.equal(ev.viewErrors.length, VIEW_ERRORS_MAX);
 });
 
-test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', async () => {
+/**
+ * The extra shots' budget, on node:test's mock clock (#720): setTimeout and Date are pinned, and performance.now
+ * (captureShots' monotonic clock) reads the pinned Date. So how long the extra shots take is what their timers say,
+ * never how fast the runner is: on CI a loaded runner took 768 ms for a 600 ms budget measured on the wall clock.
+ * `run` moves the clock 1 ms at a time, once everything due by then has run (setImmediate stays real), and returns
+ * the result with the mock time it took.
+ */
+function mockClock(t: TestContext) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
+  t.mock.method(performance, 'now', () => Date.now());
+  return async <T>(work: () => Promise<T>): Promise<{ value: T; ms: number }> => {
+    const t0 = Date.now();
+    let settled = false;
+    const running = work().finally(() => (settled = true));
+    running.catch(() => {}); // surfaced by the await below
+    for (let i = 0; !settled; i++) {
+      await new Promise((r) => setImmediate(r));
+      if (settled) break;
+      if (i > 60_000) throw new Error('the extra shots still ran after a minute of mock time');
+      t.mock.timers.tick(1);
+    }
+    const value = await running;
+    return { value, ms: Date.now() - t0 };
+  };
+}
+
+/** A slow runner, simulated in the stand-ins: the event loop blocked for `ms` of real time, which the mock clock never sees. */
+const SLOW_RUNNER_MS = 40;
+const stall = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SLOW_RUNNER_MS);
+
+test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  const run = mockClock(t);
   // The page answers the dark view's frame wait late: the budget ends while it waits, so the dark view is cut off
   // there and the phone view is never started.
   const { cdp, sent } = fakeCdp(undefined, async (method) => {
+    stall();
     if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 80));
   });
-  const r = await captureShots(cdp, dir, 'home', { commandMs: 1234, budgetMs: 50 });
+  const { value: r, ms } = await run(() => captureShots(cdp, dir, 'home', { commandMs: 1234, budgetMs: 50 }));
+  assert.ok(ms <= 50, `the extra shots took ${ms} ms, past their 50 ms budget`);
   assert.deepEqual(r.views, [
     { view: 'dark', error: "skipped: the extra shots' 0.05 s ran out while it was being taken" },
     { view: 'phone', error: "not tried: the extra shots' 0.05 s were spent" },
@@ -176,21 +209,22 @@ test('the dark and phone shots share a short budget: a page that stalls them cos
   assert.ok(extra.length > 0 && extra.every((s) => s.ms === 1234), JSON.stringify(extra));
 });
 
-test('the dark and phone shots never take longer than their budget together, however slow each command is: one cut off is listed as skipped and never fails the run', async () => {
+test('the dark and phone shots never take longer than their budget together, however slow each command is: one cut off is listed as skipped and never fails the run', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
+  const run = mockClock(t);
   // Chrome answers each extra emulation and screenshot just inside the per-command timeout (the frame wait is quick).
   // Checked per view only, this budget lets the phone view start after the dark one and run its four commands to
   // the end: about 2.5 s for a 1.1 s budget.
   let captures = 0;
   const { cdp } = fakeCdp(undefined, async (method) => {
     if (method === 'Page.captureScreenshot' && ++captures === 1) return; // the desktop shot, which keeps its own timeout
+    stall();
     if (method.startsWith('Emulation.') || method === 'Page.captureScreenshot') await new Promise((r) => setTimeout(r, 390));
   });
   const ev = blankEvidence();
-  const t0 = performance.now();
-  const shots = await captureShots(cdp, dir, 'home', { commandMs: 400, budgetMs: 1100 });
-  const took = Math.round(performance.now() - t0); // the desktop shot answers at once, so this is the extra shots' time
-  assert.ok(took < 1100 + 250, `the extra shots took ${took} ms, past their 1100 ms budget`);
+  // The desktop shot answers at once, so this is the extra shots' time.
+  const { value: shots, ms: took } = await run(() => captureShots(cdp, dir, 'home', { commandMs: 400, budgetMs: 1100 }));
+  assert.ok(took <= 1100, `the extra shots took ${took} ms, past their 1100 ms budget`);
   assert.deepEqual(shots.views, [
     { view: 'dark', path: join(dir, 'home.dark.png') },
     { view: 'phone', error: "skipped: the extra shots' 1.1 s ran out while it was being taken" },
@@ -204,13 +238,12 @@ test('the dark and phone shots never take longer than their budget together, how
   // the dark shot, slow here, is cut off at the budget's end).
   let lateCaptures = 0;
   const late = fakeCdp(undefined, async (method) => {
+    stall();
     if (method === 'Runtime.evaluate') await new Promise((r) => setTimeout(r, 590));
     if (method === 'Page.captureScreenshot' && ++lateCaptures > 1) await new Promise((r) => setTimeout(r, 300));
   });
-  const t1 = performance.now();
-  const lateShots = await captureShots(late.cdp, join(dir, 'late'), 'home', { commandMs: 1000, budgetMs: 600 });
-  const lateTook = Math.round(performance.now() - t1);
-  assert.ok(lateTook < 600 + 120, `the extra shots took ${lateTook} ms, past their 600 ms budget`);
+  const { value: lateShots, ms: lateTook } = await run(() => captureShots(late.cdp, join(dir, 'late'), 'home', { commandMs: 1000, budgetMs: 600 }));
+  assert.ok(lateTook <= 600, `the extra shots took ${lateTook} ms, past their 600 ms budget`);
   assert.deepEqual(lateShots.views.map((v) => ('error' in v ? v.error.split(':')[0] : 'taken')), ['skipped', 'not tried']);
 });
 
