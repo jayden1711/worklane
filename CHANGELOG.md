@@ -134,7 +134,9 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **Instance removal:** its last check, after stopping the instance's users, refuses the removal for any process it lists, even one gone before its command could be read (#666); a removed instance's files in a shared engine group lose group write (#601). The in-flight check before a removal no longer counts a process that exited while it was being read (#592): a narrower refusal, for a process that is no longer there.
 - **pip test-run setups get a fetch step (#609)** like npm's: with network, before any setup step, it downloads wheels only, by name, and runs no repo code; the install then runs with no network and no grant. Building anything during the fetch, a repo-chosen index, and a package with no wheel are refused.
 
-### Guardrail changes
+### Release tooling
+
+- **The changelog step keeps an unreleased section whole (#811).** `release.mjs changelog X.Y.Z` keeps every line of `## vX.Y.Z (unreleased)` (any case or spacing, or `## Unreleased`), whatever its headings are called, dates its heading and writes the generated lists after it; a rerun keeps the notes too. The notes no longer need to end with an empty generated heading. Two unreleased sections for the version, or one beside a dated one, are refused.
 
 ## v0.5.2 (2026-10-17)
 
