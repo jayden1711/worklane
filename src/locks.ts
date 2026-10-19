@@ -1,10 +1,11 @@
 // Crash-safe file locks: a lock is a file, created atomically, holding the
 // owner's pid. A lock whose owner is dead is stale and can be taken over.
 // Liveness, not a timeout, decides staleness (precedent: claude-code-merge-queue).
-import { createHash, randomBytes } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { pidAlive } from './os/index.js';
+import { writeSlotFile } from './slot-file.js';
 
 export interface LockInfo {
   pid: number;
@@ -38,8 +39,8 @@ export const CLAIM_ABANDONED_MS = 60_000;
  * Try once. Returns the lock, or the current holder if it's busy.
  *
  * The lock's contents are written to a private temp file and hard-linked
- * into place, so the lock appears whole or not at all (link fails if the
- * lock exists). A competitor never reads a half-written lock and mistakes
+ * into place (writeSlotFile, replace: false), so the lock appears whole or
+ * not at all (link fails if the lock exists). A competitor never reads a half-written lock and mistakes
  * it for a stale one.
  *
  * Taking over a stale lock (its owner is dead) never removes a lock this
@@ -68,54 +69,44 @@ export interface TakeoverHooks {
 export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
   mkdirSync(dirname(path), { recursive: true });
   const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString(), ...extra };
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify(info));
-  try {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        linkSync(tmp, path);
-        return {
-          lock: {
-            path,
-            release() {
-              const cur = readLock(path);
-              if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) unlinkSync(path);
-            },
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeSlotFile(path, JSON.stringify(info), { replace: false });
+      return {
+        lock: {
+          path,
+          release() {
+            const cur = readLock(path);
+            if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) unlinkSync(path);
           },
-        };
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      }
-      const seen = readFileSafe(path);
-      if (seen === null) continue; // released in between: try again
-      const holder = parseLock(seen);
-      if (holder && pidAlive(holder.pid)) return { holder };
-      // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
-      hooks.inspected?.();
-      const claim = `${path}.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`;
-      const mine = `${tmp}.claim`;
-      writeFileSync(mine, JSON.stringify({ pid: process.pid, at: Date.now() }));
-      try {
-        linkSync(mine, claim);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-        if (claimAbandoned(claim)) unlinkQuiet(claim); // its taker died or stalled; the next try claims it afresh
-        continue; // another process is taking over this same stale lock
-      } finally {
-        unlinkQuiet(mine);
-      }
-      hooks.taking?.();
-      try {
-        // Ours alone to remove now: if the lock is still the stale one we read, nothing can replace it before this.
-        if (readFileSafe(path) === seen) unlinkQuiet(path);
-      } finally {
-        unlinkQuiet(claim);
-      }
+        },
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
-    return { holder: readLock(path) };
-  } finally {
-    unlinkSync(tmp);
+    const seen = readFileSafe(path);
+    if (seen === null) continue; // released in between: try again
+    const holder = parseLock(seen);
+    if (holder && pidAlive(holder.pid)) return { holder };
+    // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
+    hooks.inspected?.();
+    const claim = `${path}.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`;
+    try {
+      writeSlotFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), { replace: false });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (claimAbandoned(claim)) unlinkQuiet(claim); // its taker died or stalled; the next try claims it afresh
+      continue; // another process is taking over this same stale lock
+    }
+    hooks.taking?.();
+    try {
+      // Ours alone to remove now: if the lock is still the stale one we read, nothing can replace it before this.
+      if (readFileSafe(path) === seen) unlinkQuiet(path);
+    } finally {
+      unlinkQuiet(claim);
+    }
   }
+  return { holder: readLock(path) };
 }
 
 function claimAbandoned(claim: string): boolean {
