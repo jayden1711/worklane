@@ -11,11 +11,12 @@
 // Never a secret: every text is redacted before it is stored, and again before it is posted. A title is fixed per
 // kind (no data in it), so what a viewer is shown of an incident (viewer-events.ts) can't carry any either.
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { redactString } from '../events/redact.js';
 import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { writeSlotFile } from '../slot-file.js';
 import { FAILOVER_INCIDENT, USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
 import { DEPLOY_GATE_INCIDENT, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT } from '../deploy-gate/config.js';
@@ -152,14 +153,7 @@ export function readIncidents(dir?: string): IncidentFile {
 function writeIncidents(dir: string, f: IncidentFile): void {
   const file = join(dir, INCIDENTS_FILE);
   // Whole or not at all: a reader never sees half a file.
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(f), { mode: 0o660 });
-    renameSync(tmp, file);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeSlotFile(file, JSON.stringify(f), { mode: 0o660 });
 }
 
 const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);

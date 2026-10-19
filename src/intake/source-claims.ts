@@ -7,11 +7,12 @@
 // when the source starts and removed when it stops; a dead process's claim doesn't count. It holds only a hash: the
 // shared directory names no workspace, app, team, label or person. Checked and written under one lock, so two
 // instances starting at once can't both pass.
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryLock } from '../locks.js';
 import { pidAlive } from '../os/index.js';
+import { writeSlotFile } from '../slot-file.js';
 
 export type ClaimKind = 'slack' | 'linear';
 const INSTANCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -66,9 +67,7 @@ export async function claimSource(o: { kind: ClaimKind; instance: string; key: s
       if (other) return { error: `instance "${other.instance}" (its running ${o.kind} source) already takes ${WHAT[o.kind]}` };
       if (!INSTANCE_NAME.test(o.instance)) return { release: () => {} };
       const file = join(o.claimsDir, `${prefix(o.kind)}${o.instance}.json`);
-      const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ instance: o.instance, pid: process.pid, key: o.key } satisfies Claim));
-      renameSync(tmp, file);
+      writeSlotFile(file, JSON.stringify({ instance: o.instance, pid: process.pid, key: o.key } satisfies Claim));
       return {
         release: () => {
           try {

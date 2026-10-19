@@ -8,6 +8,7 @@
 // (the full tier too) again. Otherwise the PR merges at once. The full tier
 // keeps running on main after every merge, with revert-on-red behind it.
 import { posix } from 'node:path';
+import { shownPaths } from './path-text.js';
 
 export type LightPlan = { action: 'merge-now'; why: string } | { action: 'verify-combined'; overlap: string[]; why: string };
 
@@ -23,7 +24,7 @@ export function lightCheckPlan(o: { enabled: boolean; mainChanged: string[]; prF
   for (const f of o.prFiles) for (const i of o.imports[f] ?? []) reach.add(i);
   const overlap = [...new Set(o.mainChanged.filter((f) => reach.has(f)))].sort();
   if (!overlap.length) return { action: 'merge-now', why: `main moved, but its ${o.mainChanged.length} changed file(s) don't touch this PR's files or their imports` };
-  return { action: 'verify-combined', overlap, why: `main changed ${overlap.slice(0, 3).join(', ')}${overlap.length > 3 ? ` and ${overlap.length - 3} more` : ''}, which this PR touches or imports` };
+  return { action: 'verify-combined', overlap, why: `main changed ${shownPaths(overlap.slice(0, 3))}${overlap.length > 3 ? ` and ${overlap.length - 3} more` : ''}, which this PR touches or imports` };
 }
 
 const JS = /\.(m|c)?(j|t)sx?$/;

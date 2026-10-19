@@ -5,13 +5,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { HELD_OUT_ENV } from '../src/held-out-paths.js';
 import { CliRunner, type RetryOptions, type RunRequest } from '../src/runner.js';
-import { BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
+import { sandboxSettings } from '../src/sandbox.js';
+import { benchClaude, benchDenied, benchLane } from '../scripts/bench/agent.js';
+import { sandboxProbe, type ProbeReport } from '../scripts/bench/probe.js';
+import { agentBase, BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
 import { capsFromArgs, type Caps } from '../scripts/bench/caps.js';
-import { benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
+import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, STDIN_REFUSED, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
+import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
+import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
 import { STDIN_LINE } from './helpers.js';
 
@@ -288,6 +293,431 @@ test('the bench root is checked where it really is: a symlink into a credential 
   const data = realpathSync(mkdtempSync(join(tmpdir(), 'data-')));
   symlinkSync(data, join(home, 'bench-data'));
   assert.equal(benchRoot({ [BENCH_ROOT_ENV]: join(home, 'bench-data', 'b') }, home).root, join(data, 'b'));
+});
+
+/** A row whose hidden fields carry markers no visible text has. */
+const ROW: TaskRow = {
+  instance_id: 'example__proj-4242',
+  repo: 'example/proj',
+  base_commit: 'a'.repeat(40),
+  problem_statement: 'Totals are wrong for negative quantities\n\nCalling total() with a negative qty returns a negative sum.',
+  patch: 'diff --git a/src/price.py b/src/price.py\n-    return sum(c * q for c, q in items)\n+    return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731\n',
+  test_patch: 'diff --git a/tests/test_price.py b/tests/test_price.py\n+def test_negative_quantities_are_skipped_TESTMARK():\n+    assert total([(5, -1)]) == 0\n',
+  FAIL_TO_PASS: JSON.stringify(['tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']),
+  PASS_TO_PASS: JSON.stringify(['tests/test_price.py::test_plain_totals_PASSMARK']),
+  hints_text: 'HINTMARK: look at the generator in price.py',
+  difficulty: '<15 min fix',
+};
+const MARKS = ['GOLDMARK_7731', 'TESTMARK', 'PASSMARK', 'HINTMARK', 'example__proj-4242'];
+const HOST = { cpus: 16, memoryBytes: 39 * 1024 ** 3 };
+const LIMITS: Limits = limitsFrom({}, HOST);
+const C = { name: 'bench-r1-t01', image: 'swebench/example:latest' };
+
+interface FakeDocker {
+  rootless?: boolean;
+  /** Which limit the daemon (inspect) or the kernel (the cgroup files) didn't apply. */
+  dropped?: 'inspect-memory' | 'inspect-cpu' | 'cgroup-memory' | 'cgroup-swap' | 'cgroup-pids';
+}
+
+/** An in-process docker that records every command and answers info, inspect and the cgroup files. */
+function fakeDocker(o: FakeDocker = {}) {
+  const sent: { args: string[]; input: string; env: NodeJS.ProcessEnv }[] = [];
+  const call: DockerCall = (_bin, args, opt) => {
+    sent.push({ args: [...args], input: opt.input?.toString('utf8') ?? '', env: opt.env });
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    if (args[0] === 'info') return ok(JSON.stringify(['name=seccomp,profile=builtin', ...(o.rootless === false ? [] : ['name=rootless']), 'name=cgroupns']));
+    if (args[0] === 'inspect') {
+      const mem = o.dropped === 'inspect-memory' ? 0 : LIMITS.memoryBytes;
+      return ok(JSON.stringify({ Memory: mem, MemorySwap: mem, NanoCpus: o.dropped === 'inspect-cpu' ? 0 : LIMITS.cpus * 1e9, PidsLimit: LIMITS.pids, NetworkMode: 'none' }));
+    }
+    if (args[0] === 'exec' && args.includes('/sys/fs/cgroup/memory.max')) {
+      // What `cat` prints for each file it was asked for, in order (an older reader asked for three).
+      const file = (f: string) => ({ 'memory.max': `${o.dropped === 'cgroup-memory' ? 'max' : LIMITS.memoryBytes}`, 'memory.swap.max': o.dropped === 'cgroup-swap' ? 'max' : '0', 'cpu.max': `${LIMITS.cpus * 100000} 100000`, 'pids.max': `${o.dropped === 'cgroup-pids' ? 'max' : LIMITS.pids}` })[f.replace('/sys/fs/cgroup/', '')];
+      return ok(args.filter((a) => a.startsWith('/sys/fs/cgroup/')).map(file).join('\n') + '\n');
+    }
+    return ok();
+  };
+  return { sent, opts: { docker: 'docker', call } };
+}
+
+test("an agent gets neither the Docker socket nor the daemon's or bus's variables, and its CLI never updates", posix, async () => {
+  const c = fakeClaude();
+  const runtime = join(c.base, 'run-user');
+  const layout = benchLayout(join(c.base, 'bench'));
+  // The bench user's shell as the README sets it up: the daemon and the user bus are reachable from it.
+  const env = { ...c.env, XDG_RUNTIME_DIR: runtime, DOCKER_HOST: `unix://${runtime}/docker.sock`, DOCKER_CONFIG: join(c.base, 'docker'), DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime}/bus` };
+  const agents = benchClaude(env, c.bin, benchLane({ home: process.env.HOME!, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state, dockerHost: env.DOCKER_HOST, dataHome: undefined }));
+  assert.equal((await agents.run({ ...runReq(c.base), env: { DOCKER_HOST: 'unix:///elsewhere' } })).reason, 'succeeded');
+  requireSubscription(env, c.bin, c.home);
+  requireClaudePin(env, c.bin);
+  assert.deepEqual(c.calls().map((x) => x.kind).sort(), ['auth', 'auth', 'run', 'version']);
+  for (const x of c.calls()) {
+    for (const k of ['DOCKER_HOST', 'DOCKER_CONFIG', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']) assert.equal(x.env[k], undefined, `${x.kind}: ${k}`);
+    assert.equal(x.env.DISABLE_UPDATES, '1', `${x.kind}: DISABLE_UPDATES`);
+  }
+  const deny = c.calls('run')[0]!.settings.sandbox?.filesystem?.denyRead ?? [];
+  for (const p of [runtime, join(runtime, 'docker.sock'), '/run/docker.sock', '/var/run/docker.sock', join(process.env.HOME!, '.claude'), join(process.env.HOME!, '.claude.json'), layout.heldOut]) assert.ok(deny.includes(p), `sandbox denies ${p}`);
+  assert.equal(agentBase(env).XDG_RUNTIME_DIR, undefined);
+});
+
+test("the Read tool is denied each credential file itself, the daemon's data root and a DOCKER_HOST socket", () => {
+  const home = '/home/u';
+  const lane = benchLane({ home, runtimeDir: '/run/user/1001', heldOut: '/srv/b/held', state: '/srv/b/state', dockerHost: 'unix:///srv/docker/alt.sock', dataHome: '/srv/data' });
+  const deny = lane.settings.permissions.deny;
+  // A file matches only the exact rule: `p/**` is what is inside a folder p.
+  for (const f of ['.claude.json', '.netrc', '.npmrc', '.pypirc', '.docker/config.json']) assert.ok(deny.includes(`Read(/${home}/${f})`), `Read(/${home}/${f})`);
+  for (const d of ['.claude', '.ssh', '.local/share/docker']) assert.ok(deny.includes(`Read(/${home}/${d}/**)`), `Read(/${home}/${d}/**)`);
+  const denyRead = lane.settings.sandbox.filesystem.denyRead;
+  for (const p of ['/srv/docker/alt.sock', `${home}/.local/share/docker`, '/srv/data/docker', '/run/user/1001/docker.sock']) assert.ok(denyRead.includes(p), `commands denied ${p}`);
+  assert.ok(deny.includes('Read(//srv/docker/alt.sock)'));
+  // A tcp DOCKER_HOST names no socket.
+  assert.ok(!benchLane({ home, runtimeDir: '/run/user/1001', heldOut: '/h', state: '/s', dockerHost: 'tcp://127.0.0.1:2375', dataHome: undefined }).settings.sandbox.filesystem.denyRead.some((p) => p.includes('2375')));
+});
+
+test("the driver's docker always names its daemon: never a docker context, never a relative unix socket", () => {
+  const lane = (dockerHost: string) => benchLane({ home: '/home/u', runtimeDir: '/run/user/1001', heldOut: '/h', state: '/s', dockerHost, dataHome: undefined });
+  // A relative unix:// socket is relative to wherever docker runs: no deny rule can name it.
+  for (const rel of ['unix://docker.sock', 'unix://./run/alt.sock']) {
+    assert.throws(() => lane(rel), /absolute path/, `the lane: ${rel}`);
+    assert.throws(() => new Docker({ ...fakeDocker().opts, env: { DOCKER_HOST: rel } }, LIMITS).preflight(), /absolute path/, `the driver's docker: ${rel}`);
+  }
+  // No DOCKER_HOST: the rootless socket in the runtime dir, set explicitly, so a docker context never picks the daemon.
+  const d = fakeDocker();
+  new Docker({ ...d.opts, env: { PATH: '/usr/bin', XDG_RUNTIME_DIR: '/run/user/1001', DOCKER_CONFIG: '/home/u/.docker', GH_TOKEN: 'x' } }, LIMITS).preflight();
+  assert.equal(d.sent[0]!.env.DOCKER_HOST, 'unix:///run/user/1001/docker.sock');
+  assert.equal(d.sent[0]!.env.DOCKER_CONFIG, undefined);
+  assert.equal(d.sent[0]!.env.GH_TOKEN, undefined);
+  const alt = fakeDocker();
+  new Docker({ ...alt.opts, env: { DOCKER_HOST: 'unix:///srv/docker/alt.sock' } }, LIMITS).preflight();
+  assert.equal(alt.sent[0]!.env.DOCKER_HOST, 'unix:///srv/docker/alt.sock', 'the bench user DOCKER_HOST, the one the lane denies');
+  assert.ok(lane('unix:///srv/docker/alt.sock').settings.sandbox.filesystem.denyRead.includes('/srv/docker/alt.sock'));
+  // DOCKER_CONTEXT would pick a context's daemon: refused, nothing sent.
+  const ctx = fakeDocker();
+  assert.throws(() => new Docker({ ...ctx.opts, env: { DOCKER_CONTEXT: 'elsewhere' } }, LIMITS).preflight(), /DOCKER_CONTEXT elsewhere refused/);
+  assert.equal(ctx.sent.length, 0);
+});
+
+test('acceptance: the bench never retries a run: a 429 at startup is one session, reported, not waited out', posix, async () => {
+  const c = fakeClaude({ run: '429' });
+  const lane = benchLane({ home: c.home, runtimeDir: join(c.base, 'run-user'), heldOut: join(c.base, 'held'), state: join(c.base, 'state'), dockerHost: undefined, dataHome: undefined });
+  let retried = 0;
+  const started = performance.now();
+  // Bounded: an engine retry would wait a minute first; this stops it after 20 s.
+  const r = await benchClaude(c.env, c.bin, lane).run({ ...runReq(c.base, AbortSignal.timeout(20_000)), onTransientRetry: () => retried++ });
+  assert.equal(retried, 0, 'no transient wait started');
+  assert.equal(r.reason, 'failed');
+  assert.equal(r.transient, true);
+  assert.match(r.detail, /429/);
+  assert.equal(c.calls('run').length, 1, 'one claude session');
+  assert.ok(performance.now() - started < 15_000, 'reported at once');
+});
+
+test('the task runner sends docker exec into its own container only, with no mount flag; containers mount nothing', () => {
+  checkDockerArgs(['exec', '--workdir', '/work/t', 'bench-r1-t01', 'python', '-m', 'pytest', '-v', 'x.py'], ['exec']);
+  for (const bad of [
+    ['run', '--network', 'none', 'img'],
+    ['create', '--network', 'none', 'img'],
+    ['cp', 'x', 'bench-r1-t01:/x'],
+    ['rm', '--force', 'bench-r1-t01'],
+    ['exec', '-v', '/home:/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--volume', '/home:/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--mount', 'type=bind,src=/,dst=/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--privileged', 'bench-r1-t01', 'ls'],
+    ['exec', '--user', '0', 'bench-r1-t01', 'ls'],
+    ['exec', '--env', 'DOCKER_HOST=unix:///x', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/work', 'someone-else', 'ls'],
+    ['exec', '--env', 'HOME', 'bench-r1-t01', 'ls'],
+    ['exec', '--env=PATH', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir=/work/../etc', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/work/t/../../etc', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/work//t', 'bench-r1-t01', 'ls'],
+    ['exec', '--constructor', 'x', 'bench-r1-t01', 'ls'],
+  ]) assert.throws(() => checkDockerArgs(bad, ['exec']), /refused|only/, bad.join(' '));
+  checkDockerArgs(['exec', '--env', 'PYTHONHASHSEED=0', '--env=EMPTY=', 'bench-r1-t01', 'ls'], ['exec']);
+  for (const verb of ['create', 'run'] as const) {
+    const make = makeArgs(verb, C, LIMITS);
+    checkDockerArgs(make);
+    assert.ok(make.join(' ').includes('--network none'));
+    assert.ok(!make.some((a) => /^(-v|--volume|--mount|--privileged|--device|--cap-add)/.test(a)), 'no mount, device or privilege');
+    for (const extra of [['--mount', 'type=bind,src=/home,dst=/h'], ['-v', '/home:/h'], ['--privileged'], ['--network', 'host'], ['--network=bridge']]) {
+      assert.throws(() => checkDockerArgs([make[0]!, ...extra, ...make.slice(1)]), /refused/, extra.join(' '));
+    }
+    for (const limit of ['--memory', '--memory-swap', '--cpus', '--pids-limit']) {
+      const i = make.indexOf(limit);
+      assert.throws(() => checkDockerArgs([...make.slice(0, i), ...make.slice(i + 2)]), new RegExp(`without ${limit}`));
+    }
+    // A value never stands in for a flag: the real flag dropped, its name given as --name's value.
+    for (const flag of ['--network', '--cap-drop', '--security-opt']) {
+      const i = make.indexOf(flag);
+      const forged = [...make.slice(0, i), ...make.slice(i + 2)];
+      const n = forged.indexOf('--name');
+      forged.splice(n, 2, '--name', flag);
+      assert.throws(() => checkDockerArgs(forged), /refused/, `--name ${flag}`);
+    }
+    const n = make.indexOf('--name');
+    assert.throws(() => checkDockerArgs([...make.slice(0, n + 1), 'victim', ...make.slice(n + 2)]), /--name victim refused/);
+    assert.throws(() => checkDockerArgs([...make.slice(0, n), ...make.slice(n + 2)]), /without --name/);
+  }
+  const d = fakeDocker();
+  new TaskRunner(d.opts, C, ROW, Buffer.from('')).syncTree('/work/t', Buffer.from('tar'));
+  assert.deepEqual(d.sent[0]!.args.slice(0, 5), ['exec', '--interactive', '--workdir', '/work', 'bench-r1-t01']);
+});
+
+test('the Docker daemon must be rootless', () => {
+  assert.throws(() => new Docker(fakeDocker({ rootless: false }).opts, LIMITS).preflight(), /not rootless/);
+  new Docker(fakeDocker().opts, LIMITS).preflight();
+});
+
+test('every container gets memory (no extra swap), CPU and pids limits, read back from the daemon and its own cgroup', () => {
+  assert.deepEqual(LIMITS, { memoryBytes: 8 * 1024 ** 3, cpus: 4, pids: 4096 });
+  const d = fakeDocker();
+  const docker = new Docker(d.opts, LIMITS);
+  docker.probe({ ...C, name: 'bench-r1-probe' });
+  assert.deepEqual(d.sent.map((s) => s.args[0]), ['create', 'inspect', 'start', 'inspect', 'exec', 'rm'], 'created, read back, started, read back from its cgroup, removed');
+  docker.start(C, ROW);
+  assert.deepEqual(d.sent.slice(6).map((s) => s.args[0]), ['run', 'inspect', 'exec'], "a task's container is read back before anything runs in it");
+  for (const s of d.sent.filter((x) => x.args[0] === 'create' || x.args[0] === 'run')) {
+    const a = s.args.join(' ');
+    for (const f of [`--memory ${LIMITS.memoryBytes}b`, `--memory-swap ${LIMITS.memoryBytes}b`, '--cpus 4', '--pids-limit 4096']) assert.ok(a.includes(f), `${s.args[0]} has ${f}`);
+  }
+});
+
+test('a limit that did not apply refuses, naming the controller; the limits are required', () => {
+  for (const [dropped, controller] of [['inspect-memory', 'memory'], ['inspect-cpu', 'cpu'], ['cgroup-memory', 'memory \\(memory.max\\)'], ['cgroup-swap', 'memory \\(memory.swap.max\\)'], ['cgroup-pids', 'pids \\(pids.max\\)']] as const) {
+    const d = fakeDocker({ dropped });
+    const docker = new Docker(d.opts, LIMITS);
+    assert.throws(() => docker.probe({ ...C, name: 'bench-r1-probe' }), (e: Error) => e instanceof LimitsNotApplied && new RegExp(`${controller}.*limit did not apply.*Delegate= drop-in`).test(e.message), dropped);
+    assert.equal(d.sent.at(-1)!.args[0], 'rm', `${dropped}: the probe container is removed`);
+    assert.throws(() => docker.start(C, ROW), LimitsNotApplied, `${dropped}: a task's container too`);
+  }
+  for (const [k, v, why] of [['memory', '0', /memory limit/], ['cpus', '0', /CPU limit/], ['pids', '', /pids limit/], ['cpus', '17', /over this machine's 16 CPUs/], ['memory', '32g', /over 75%/], ['memory', '100000000', /not a multiple of 4096/]] as const) {
+    assert.throws(() => limitsFrom({ [LIMIT_ENV[k]]: v }, HOST), why);
+  }
+  assert.deepEqual(limitsFrom({ [LIMIT_ENV.memory]: '4g', [LIMIT_ENV.cpus]: '2', [LIMIT_ENV.pids]: '512' }, HOST), { memoryBytes: 4 * 1024 ** 3, cpus: 2, pids: 512 });
+});
+
+test('acceptance: the hidden fields never reach a container', () => {
+  const view = JSON.stringify(taskView(ROW, 't01'));
+  for (const mark of MARKS) assert.ok(!view.includes(mark), `the task view has no ${mark}`);
+  const d = fakeDocker();
+  const docker = new Docker(d.opts, LIMITS);
+  docker.start(C, ROW);
+  const r = new TaskRunner(d.opts, C, ROW, Buffer.from(''));
+  // A buggy caller that hands the container a hidden test name, or the gold line in a variable: refused, nothing sent.
+  const before = d.sent.length;
+  assert.throws(() => r.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']), /hidden FAIL_TO_PASS/);
+  assert.throws(() => r.exec('/work/t', ['true'], { FIX: 'return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731' }), /hidden patch/);
+  assert.throws(() => r.exec('/work/t', ['echo', 'example__proj-4242']), /hidden instance_id/);
+  assert.equal(d.sent.length, before, 'nothing reached docker');
+  r.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
+  assert.equal(d.sent.length, before + 1, 'the honest command went through');
+  const seen = JSON.stringify(d.sent);
+  for (const mark of MARKS) assert.ok(!seen.includes(mark), `no docker command carried ${mark}`);
+});
+
+/**
+ * A stand-in srt. `none`: no sandbox at all (runs the command as is); `honors`: reports what sandbox-runtime does for
+ * a path its settings deny (a denied file masked with /dev/null, a denied socket refused) and what an unsandboxed
+ * attempt would see for anything else. `version`: what --version prints. `none` never touches a path outside `confine`
+ * (this machine's own docker sockets): an attempt there is pointed at a missing path under it instead.
+ */
+function fakeSrt(kind: 'none' | 'honors', version = '0.0.79', confine = tmpdir()): string {
+  const dir = mkdtempSync(join(tmpdir(), 'srt-'));
+  const bin = join(dir, 'srt');
+  writeFileSync(
+    bin,
+    [
+      `#!${process.execPath}`,
+      "const fs = require('node:fs'), { spawnSync } = require('node:child_process');",
+      'const a = process.argv.slice(2);',
+      `if (a[0] === '--version') { console.log(${JSON.stringify(version)}); process.exit(0); }`,
+      "if (a[0] !== '--settings' || a[2] !== '--') { console.error('usage: srt --settings <file> -- <command...>'); process.exit(2); }",
+      `fs.appendFileSync(${JSON.stringify(join(dir, 'settings-files'))}, a[1] + '\\n');`,
+      'const cfg = JSON.parse(fs.readFileSync(a[1], "utf8"));',
+      'const cmd = a.slice(3);',
+      kind === 'none'
+        ? [
+            `const confine = ${JSON.stringify(confine)};`,
+            'const attempts = JSON.parse(cmd.at(-1)).map((x) => x.target.startsWith(confine + "/") ? x : { ...x, target: confine + "/not-here.sock" });',
+            'process.exit(spawnSync(cmd[0], [...cmd.slice(1, -1), JSON.stringify(attempts)], { stdio: "inherit" }).status ?? 1);',
+          ].join('\n')
+        : [
+            'const denied = (p) => cfg.filesystem.denyRead.some((d) => p === d || p.startsWith(d + "/"));',
+            'const out = JSON.parse(cmd.at(-1)).map((x) => denied(x.target) ? (x.kind === "read" ? "opened char-device" : "ECONNREFUSED") : x.kind === "read" ? (fs.existsSync(x.target) ? "opened file" : "ENOENT") : "connected");',
+            'console.log(JSON.stringify(out));',
+          ].join('\n'),
+    ].join('\n') + '\n',
+  );
+  chmodSync(bin, 0o755);
+  return bin;
+}
+
+test('acceptance: the sandbox probe refuses the run unless every attempt from inside the sandbox is refused', { skip: process.platform !== 'linux' && 'Linux only' }, async () => {
+  const base = mkdtempSync(join(tmpdir(), 'probe-'));
+  const home = join(base, 'u');
+  const runtime = join(base, 'run-user');
+  mkdirSync(home);
+  mkdirSync(runtime);
+  writeFileSync(join(home, '.claude.json'), '{"oauthAccount":"PROBE_SENTINEL"}');
+  const o = { home, runtimeDir: runtime, heldOut: join(base, 'held'), state: join(base, 'state'), dockerHost: undefined, dataHome: undefined };
+  const lane = benchLane(o);
+  // srt missing, or another release: refused before any attempt.
+  assert.throws(() => sandboxProbe({ ...o, settings: lane.settings, srt: join(base, 'no-srt') }), /srt --version is unreadable/);
+  assert.throws(() => sandboxProbe({ ...o, settings: lane.settings, srt: fakeSrt('honors', '0.0.78') }), /srt --version is 0\.0\.78, not 0\.0\.79/);
+  // Every attempt refused: the run may start, and the report says what each saw.
+  const honors = fakeSrt('honors');
+  const report = sandboxProbe({ ...o, settings: lane.settings, srt: honors });
+  assert.equal(report.ok, true);
+  assert.match(report.runner, /^sandbox-runtime 0\.0\.79: close to, not identical with, the build bundled in Claude Code 2\.1\.303$/);
+  // The settings file srt was given is gone once the probe returns, and so is its folder.
+  const given = readFileSync(join(dirname(honors), 'settings-files'), 'utf8').trim().split('\n');
+  assert.equal(given.length, 1);
+  assert.equal(existsSync(given[0]!), false, 'the settings file is removed');
+  assert.equal(existsSync(dirname(given[0]!)), false, 'and its folder');
+  assert.deepEqual(report.results.map((r) => [r.kind, r.target.replace(base, '~'), r.seen, r.refused]), [
+    ['connect', '~/run-user/docker.sock', 'ECONNREFUSED', true],
+    ['connect', '~/run-user/bus', 'ECONNREFUSED', true],
+    ['connect', '~/run-user/docker/containerd/containerd.sock', 'ECONNREFUSED', true],
+    ['connect', '/run/docker.sock', 'ECONNREFUSED', true],
+    ['connect', '/var/run/docker.sock', 'ECONNREFUSED', true],
+    ['read', '~/u/.claude.json', 'opened char-device', true],
+    ['read', '~/u/.netrc', 'opened char-device', true],
+    ['read', '~/u/.npmrc', 'opened char-device', true],
+    ['read', '~/u/.pypirc', 'opened char-device', true],
+  ]);
+  assert.deepEqual(report.results.filter((r) => !r.on_host && r.kind === 'read').map((r) => [r.target.replace(home, '~'), r.deny_rule]), [['~/.netrc', true], ['~/.npmrc', true], ['~/.pypirc', true]], 'a missing file counts as refused only with its deny rule in place');
+  // A lane whose Read rules lack the files' exact form (sandboxSettings alone): no deny rule, refused.
+  const loose = sandboxSettings({ lane: { allowedDomains: [] }, denyRead: benchDenied(o) });
+  assert.throws(() => sandboxProbe({ ...o, settings: loose, srt: fakeSrt('honors') }), (e: Error & { report?: ProbeReport }) => /read .*\.claude\.json: no deny rule/.test(e.message) && e.report?.ok === false);
+  // No sandbox at all: the login file opens and the daemon's socket answers. Refused, naming both.
+  const { createServer } = await import('node:net');
+  const server = createServer((s) => s.end());
+  await new Promise<void>((r) => server.listen(join(runtime, 'docker.sock'), r));
+  try {
+    assert.throws(() => sandboxProbe({ ...o, settings: lane.settings, srt: fakeSrt('none', '0.0.79', base) }), (e: Error & { report?: ProbeReport }) => {
+      const seen = Object.fromEntries((e.report?.results ?? []).map((r) => [r.target.replace(base, '~'), r.seen]));
+      return /connect .*docker\.sock: connected/.test(e.message) && /read .*\.claude\.json: opened file/.test(e.message) && seen['~/u/.claude.json'] === 'opened file' && !e.message.includes('PROBE_SENTINEL');
+    });
+  } finally {
+    server.close();
+  }
+});
+
+test("acceptance: a tree's tar stream is refused only for the instance id, the hints or an applied test-patch run, and never says which", () => {
+  // The test patch: a context line, a 3-line helper the base tree already holds (moved, say), and the new test.
+  const helper = ['def helper_rows_SHAREDRUN():', '    return [(2, 3), (4, 1), (7, 0)]', '    # the rows every total test starts from'];
+  const hunk = ['def test_negative_quantities_are_skipped_TESTMARK():', '    items = [(5, -1), (3, 2)]', '    assert total(items) == 6'];
+  const test_patch = ['diff --git a/tests/test_price.py b/tests/test_price.py', '--- a/tests/test_price.py', '+++ b/tests/test_price.py', '@@ -1,2 +1,9 @@', ' def test_plain_totals_PASSMARK():', ...helper.map((l) => `+${l}`), '+', ...hunk.map((l) => `+${l}`), ''].join('\n');
+  const row: TaskRow = { ...ROW, test_patch };
+  const base = Buffer.from(`tests/test_price.py\0def test_plain_totals_PASSMARK():\n    pass\n\0\0tests/helpers.py\0${helper.join('\n')}\n`);
+  const d = fakeDocker();
+  const r = new TaskRunner(d.opts, C, row, base);
+  const tar = (file: string, text: string) => Buffer.concat([base, Buffer.from(`${file}\0${text}`)]);
+  // What an agent may well write itself goes through.
+  for (const [what, file, text] of [
+    ['an honest change', 'src/price.py', 'def total(items):\n    return 0\n'],
+    ['its own fix, identical to the gold line', 'src/price.py', 'def total(items):\n    return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731\n'],
+    ["its own test, with the upstream test's name", 'tests/test_neg.py', 'def test_negative_quantities_are_skipped_TESTMARK():\n    assert total([(5, -1)]) == 0\n'],
+    ['two of the test patch lines in a row, then its own', 'tests/test_neg.py', `${hunk[0]}\n${hunk[1]}\n    assert total(items) == 5\n`],
+    ['a FAIL_TO_PASS id in a comment', 'tests/notes.py', '# tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK\n'],
+    ['the 3-line helper the base tree already holds', 'tests/test_price.py', `${helper.join('\n')}\n`],
+  ] as const) {
+    const before = d.sent.length;
+    r.syncTree('/work/t', tar(file, text));
+    assert.equal(d.sent.length, before + 1, `${what}: sent`);
+  }
+  // What only a driver bug would carry: refused, nothing sent, and the same words whatever matched.
+  const said = new Set<string>();
+  for (const [what, file, text] of [
+    ['the applied test-patch hunk', 'tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n\n${hunk.join('\n')}\n`],
+    ['the hunk as the first lines of a new file', 'tests/test_new.py', `${hunk.join('\n')}\n`],
+    ['the hunk with CRLF line ends', 'tests/test_new.py', `${hunk.join('\r\n')}\r\n`],
+    ['the hints', 'NOTES.txt', 'HINTMARK: look at the generator in price.py\n'],
+    ['the instance id', 'src/price.py', '# from example__proj-4242\n'],
+  ] as const) {
+    const before = d.sent.length;
+    assert.throws(() => r.syncTree('/work/t', tar(file, text)), (e: Error) => (said.add(e.message), /input carries hidden task content/.test(e.message)), what);
+    assert.equal(d.sent.length, before, `${what}: nothing sent`);
+  }
+  assert.equal(said.size, 1, 'one message for every refusal');
+  for (const field of ['patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints', 'instance', 'test']) assert.ok(![...said][0]!.includes(field), `the refusal names no field (${field})`);
+  // No base tree: a task's input is refused outright.
+  assert.throws(() => new TaskRunner(d.opts, C, row, undefined as unknown as Buffer).syncTree('/work/t', base), /checked against its base tree, and there is none/);
+});
+
+/** Whether a task's syncTree of `stream` was sent (true) or refused with STDIN_REFUSED and nothing sent (false). */
+function stdinSends(row: TaskRow, base: Buffer, stream: Buffer): boolean {
+  const d = fakeDocker();
+  try {
+    new TaskRunner(d.opts, C, row, base).syncTree('/work/t', stream);
+  } catch (e) {
+    assert.equal((e as Error).message, STDIN_REFUSED);
+    assert.equal(d.sent.length, 0, 'nothing sent');
+    return false;
+  }
+  assert.equal(d.sent.length, 1);
+  return true;
+}
+const STDIN_BASE = Buffer.from('tests/test_price.py\0def test_plain_totals_PASSMARK():\n    pass\n');
+/** The base tree's stream plus one more file, in the stand-in's form: name, NUL, text. */
+const withFile = (file: string, text: string) => Buffer.concat([STDIN_BASE, Buffer.from(`\0\0${file}\0${text}`)]);
+const STDIN_HUNK = ['def test_negative_quantities_are_skipped_TESTMARK():', '    items = [(5, -1), (3, 2)]', '    assert total(items) == 6'];
+/** A test patch that adds `added` after the base's first test. */
+const testPatch = (added: readonly string[]) => ['diff --git a/tests/test_price.py b/tests/test_price.py', '--- a/tests/test_price.py', '+++ b/tests/test_price.py', `@@ -1,2 +1,${added.length + 2} @@`, ' def test_plain_totals_PASSMARK():', ...added, ''].join('\n');
+const HUNK_ROW: TaskRow = { ...ROW, test_patch: testPatch(['+', ...STDIN_HUNK.map((l) => `+${l}`)]) };
+
+test('stdin: the test patch written into the tree as a .diff file (LF) is refused', () => {
+  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch)), false);
+  // The base exemption holds for the diff form too: a base tree that already ships that .diff file.
+  const base = Buffer.concat([STDIN_BASE, Buffer.from(`\0\0docs/example.diff\0${HUNK_ROW.test_patch}`)]);
+  assert.equal(stdinSends(HUNK_ROW, base, Buffer.concat([base, Buffer.from(`\0\0hidden/test.diff\0${HUNK_ROW.test_patch}`)])), true);
+});
+
+test('stdin: the test patch written into the tree as a .diff file with CRLF line ends is refused', () => {
+  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch.replace(/\n/g, '\r\n'))), false);
+});
+
+test("stdin: an agent's own test file that starts with a new test file's imports is sent; imports with code are refused", () => {
+  // A new upstream test file whose first lines are imports, one of them in parentheses.
+  const imports = ['import pytest', 'from price import total, subtotal', 'from price.models import (', '    ItemWithDiscount,', '    BasketOfItems,', ')'];
+  const tests = ['def test_items_are_counted_TESTMARK():', '    assert subtotal([ItemWithDiscount(1)]) == 1'];
+  const newFile = ['diff --git a/tests/test_items.py b/tests/test_items.py', 'new file mode 100644', '--- /dev/null', '+++ b/tests/test_items.py', '@@ -0,0 +1,9 @@', ...[...imports, '', ...tests].map((l) => `+${l}`), ''].join('\n');
+  const rowImports: TaskRow = { ...ROW, test_patch: newFile };
+  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n\n\ndef test_mine():\n    assert total([]) == 0\n`)), true, "the agent's own test file, with the same imports: sent");
+  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_items.py', `${imports.join('\n')}\n\n${tests.join('\n')}\n`)), false, 'the applied file, imports and its test: refused');
+  // A 3-line hunk of an import and code is still the test patch.
+  const mixed = ['from price import subtotal', 'def test_subtotal_of_nothing_TESTMARK():', '    assert subtotal([]) == 0'];
+  const rowMixed: TaskRow = { ...ROW, test_patch: testPatch(mixed.map((l) => `+${l}`)) };
+  assert.equal(stdinSends(rowMixed, STDIN_BASE, withFile('tests/test_sub.py', `${mixed.join('\n')}\n`)), false, 'an import then code: refused');
+});
+
+test("stdin: a blank context line in the test patch doesn't end a run", () => {
+  // Two 2-line blocks split by a blank context line (written as a space, or stripped to nothing): one run once applied.
+  const two = ['def test_a_new_case_one():', '    assert total([(1, 1)]) == 1', 'def test_b_new_case_two():', '    assert total([(2, 2)]) == 4'];
+  for (const blank of [' ', '']) {
+    const rowBlank: TaskRow = { ...ROW, test_patch: testPatch([`+${two[0]}`, `+${two[1]}`, blank, `+${two[2]}`, `+${two[3]}`]) };
+    assert.equal(stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
+  }
+});
+
+test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', () => {
+  // A real ustar stream: the file's last line would otherwise run into the next header's name.
+  const header = (name: string, size: number) => {
+    const h = Buffer.alloc(512);
+    h.write(name, 0);
+    h.write(`${size.toString(8).padStart(11, '0')}\0`, 124);
+    h.write('ustar\x0000', 257);
+    return h;
+  };
+  const block = (text: string) => Buffer.concat([Buffer.from(text), Buffer.alloc((512 - (Buffer.byteLength(text) % 512)) % 512)]);
+  const ustar = (files: readonly (readonly [string, string])[]) => Buffer.concat([...files.flatMap(([n, t]) => [header(n, Buffer.byteLength(t)), block(t)]), Buffer.alloc(1024)]);
+  const tail = STDIN_HUNK.join('\n');
+  const full = `${'#'.repeat(512 - tail.length - 1)}\n${tail}`;
+  assert.equal(Buffer.byteLength(full), 512);
+  const base = ustar([['tests/test_price.py', 'def test_plain_totals_PASSMARK():\n    pass\n']]);
+  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', full], ['tests/b.py', 'x\n']])), false, 'a run ending a 512-byte file, then a header: refused');
+  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', `${STDIN_HUNK[0]}\n${STDIN_HUNK[1]}\n`], ['tests/b.py', 'x\n']])), true, 'two of its lines, then a header: sent');
 });
 
 test("a bench root through a link that doesn't resolve is refused; a dangling link at a credential place is followed", { skip: process.platform !== 'linux' && 'Linux only' }, () => {
