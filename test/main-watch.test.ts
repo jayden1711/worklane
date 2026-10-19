@@ -231,6 +231,42 @@ test("main watch (#727): pinning never turns a check that wasn't a pass into one
   assert.match(s.unaccounted[0]?.reason ?? '', /: ci fail$/);
 });
 
+test("main watch (#727, owner rule): a pinned check is its source's latest run on the head; any non-pass of its name from another source blocks it", async () => {
+  const repo = 'example-org/example-shop';
+  const pins = { sources: () => ({}), github: async () => ({}), repo };
+  const config = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n';
+  // ci.yml ran twice on the head: run 100 (suite 1), then run 200 (suite 2); run 300 (suite 3) is ci.yml for another head.
+  const page = (run: number) => `https://github.com/${repo}/actions/runs/${run}`;
+  const job = (suite: number, id: number) => ({ app: 15368, suite, id, url: `${page(suite * 100)}/job/${id}` });
+  const verdict = async (runs: CheckRunAt[], statuses: StatusAt[] = []) => {
+    const s = await started({ pins, config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, runs);
+    s.gh.statuses.set(m.head, statuses);
+    s.gh.sources.set(m.head, { '1': { run: 100, url: page(100), path: '.github/workflows/ci.yml', repo, sha: m.head }, '2': { run: 200, url: page(200), path: '.github/workflows/ci.yml', repo, sha: m.head }, '3': { run: 300, url: page(300), path: '.github/workflows/ci.yml', repo, sha: 'f'.repeat(40) } });
+    await run(s.gh, s.watch, 8);
+    return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
+  };
+  // Started later in time but in the earlier run: ordering is by the runs' own order, not by start time or list order.
+  const early = { startedAt: iso(T - 20 * 60_000), completedAt: iso(T - 15 * 60_000) };
+  // 1. Cancelled, then passed in the later run: accounted. 2. Failed, then passed: accounted.
+  assert.equal(await verdict([ci({ ...job(1, 11), conclusion: 'cancelled' }), ci({ ...job(2, 21), ...early })]), 'accounted');
+  assert.equal(await verdict([ci({ ...job(2, 21), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
+  // Passed, then cancelled in the later run: the later run decides.
+  assert.equal(await verdict([ci(job(1, 11)), ci({ ...job(2, 21), conclusion: 'cancelled', ...early })]), 'ci fail');
+  // A re-run attempt in the same workflow run (a newer check run, same suite) counts as the newer.
+  assert.equal(await verdict([ci({ ...job(1, 19), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
+  // 3. The pinned run passed, and another App's same-name check failed: unaccounted.
+  assert.equal(await verdict([ci(job(2, 21)), ci({ app: 2222, suite: 9, conclusion: 'failure', ...early })]), 'ci fail');
+  // A later ci.yml run for ANOTHER head never supersedes; its failure blocks, its pass never rescues.
+  assert.equal(await verdict([ci(job(2, 21)), ci({ ...job(3, 31), conclusion: 'failure' })]), 'ci fail');
+  assert.equal(await verdict([ci({ ...job(2, 21), conclusion: 'failure' }), ci(job(3, 31))]), 'ci fail');
+  // A same-name commit status that isn't success blocks.
+  assert.equal(await verdict([ci(job(2, 21))], [{ context: 'ci', state: 'failure', createdAt: iso(T - 60_000) }]), 'ci fail');
+});
+
 test("main watch (#727): while GitHub's rules have never answered, a merge waits to be judged: never by name, never unaccounted", async () => {
   let rules: Record<string, number> | null = null;
   const s = await started({ pins: { sources: () => ({}), github: async () => rules, repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });
