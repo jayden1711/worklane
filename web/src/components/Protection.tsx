@@ -180,16 +180,22 @@ export function AcceptedMerges({ protection }: { protection: Protection }) {
 export function MainWatchAlert({ protection, onCleared }: { protection: Protection | undefined; onCleared?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Refused because the default branch isn't green (409): a separate confirm with a typed reason, recorded (#776).
+  const [needsAck, setNeedsAck] = useState(false);
+  const [ack, setAck] = useState('');
   const a = protection?.alert;
   if (!a) return null;
-  const clear = async () => {
+  const clear = async (acknowledge?: { reason: string }) => {
     setBusy(true);
     setError(null);
     try {
-      await clearAutoMergeStop();
+      await clearAutoMergeStop(acknowledge);
+      setNeedsAck(false);
+      setAck('');
       onCleared?.();
     } catch (e) {
       setError((e as Error).message);
+      if ((e as { status?: number }).status === 409) setNeedsAck(true);
     } finally {
       setBusy(false);
     }
@@ -225,6 +231,28 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
           </Button>
           {error && <span className="text-[12px] text-red">{error}</span>}
         </div>
+      )}
+      {protection?.canClear && needsAck && (
+        <form
+          className="mt-2 flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void clear({ reason: ack });
+          }}
+          data-testid="main-watch-ack"
+        >
+          <input
+            value={ack}
+            onChange={(e) => setAck(e.target.value)}
+            placeholder="why resume while the default branch isn't green (recorded)"
+            aria-label="reason to resume while the default branch isn't green"
+            className="h-7 min-w-0 flex-1 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]"
+            data-testid="main-watch-ack-reason"
+          />
+          <Button size="sm" variant="outline" type="submit" disabled={busy || ack.trim().length < 10} data-testid="main-watch-ack-submit">
+            Acknowledge and resume anyway
+          </Button>
+        </form>
       )}
     </div>
   );

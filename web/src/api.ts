@@ -420,7 +420,8 @@ export interface AcceptedMerge {
 }
 
 /** An admin resumes auto-merge (the stop file goes; audited). */
-export const clearAutoMergeStop = () => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: '{}' });
+/** Resume auto-merge; a stop the default branch caused needs it green, or `acknowledge` with a typed reason (recorded). */
+export const clearAutoMergeStop = (acknowledge?: { reason: string }) => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: JSON.stringify(acknowledge ? { acknowledge } : {}) });
 
 /** What the accept field names: `#22` or `22` is a PR (a sha is at least 7 hex characters), anything else a sha. */
 export function acceptTarget(text: string): { pr: number } | { sha: string } {

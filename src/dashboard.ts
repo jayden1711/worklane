@@ -22,7 +22,8 @@ import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { starterCiView } from './starter-ci.js';
-import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+import { CI_NONE_MEANS, ciIsNone, headChecks, requiredFor } from './ci-none.js';
+import { acknowledgement, measureMain, mayResume, stopWaitsForGreen, type MainState, type ResumeVerdict } from './auto-merge-resume.js';
 
 /** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
 const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
@@ -772,29 +773,50 @@ export function acceptTarget(body: { sha?: unknown; pr?: unknown }): AcceptTarge
   return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
 }
 
-function readStopFile(stateDir: string): { reason: string; by: string | null } | null {
+function readStopFile(stateDir: string): { reason: string; by: string | null; raw: string } | null {
   const file = join(stateDir, 'auto-merge-stopped.json');
   if (!existsSync(file)) return null;
+  let raw = '';
   try {
-    const j = JSON.parse(readFileSync(file, 'utf8')) as { reason?: unknown; by?: unknown };
-    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null };
+    raw = readFileSync(file, 'utf8');
+    const j = JSON.parse(raw) as { reason?: unknown; by?: unknown };
+    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null, raw };
   } catch {
-    return { reason: 'the stop file is unreadable', by: null };
+    return { reason: 'the stop file is unreadable', by: null, raw };
   }
 }
 
-/** An admin resumes auto-merge from the dashboard: the stop file goes, and merge.resumed records who did. */
-export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string }): { ok: true; reason: string } | { ok: false; error: string } {
+export type ClearResult = { ok: true; reason: string; how: Extract<ResumeVerdict, { ok: true }>['how']; main: MainState | null } | { ok: false; status: 409; error: string; needsAck?: true; main?: MainState };
+
+/**
+ * An admin resumes auto-merge from the dashboard: the stop file goes, and merge.resumed records who did. A stop the
+ * default branch caused (src/auto-merge-resume.ts) goes only once main is measured green now, or with `ack`, a typed
+ * reason recorded with who and what main was. Fail closed: the stop file's `by` and the last merge.stopped both count.
+ */
+export async function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string; ack?: string | null; measure: () => Promise<MainState> }): Promise<ClearResult> {
   const stop = readStopFile(o.stateDir);
-  if (!stop) return { ok: false, error: 'auto-merge is not stopped' };
-  rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+  if (!stop) return { ok: false, status: 409, error: 'auto-merge is not stopped' };
   const log = new EventLog(o.eventsDb);
   try {
-    log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+    const last = log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    const gated = stopWaitsForGreen(stop.by) || (last?.type === 'merge.stopped' && stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by));
+    const v = await mayResume({ gated, ack: o.ack ?? null, measure: o.measure });
+    if (!v.ok) return { ok: false, status: 409, error: v.error, needsAck: true, main: v.main };
+    // A stop written (or rewritten) while main was measured is a new stop: it isn't the one this resume judged.
+    if (readStopFile(o.stateDir)?.raw !== stop.raw) return { ok: false, status: 409, error: 'the stop changed while the default branch was being measured; look again before resuming' };
+    rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+    const main = v.main;
+    const how =
+      v.how === 'acknowledged' && main && !main.green
+        ? `, acknowledging the default branch isn't green (${main.why.slice(0, 300)}): "${(o.ack ?? '').slice(0, 500)}"`
+        : v.how === 'green' && main?.green
+          ? `, with the default branch green on ${main.tip.slice(0, 8)}`
+          : '';
+    log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard${how} (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+    return { ok: true, reason: stop.reason, how: v.how, main };
   } finally {
     log.close();
   }
-  return { ok: true, reason: stop.reason };
 }
 
 /** Where the coordinator's service output is:its systemd unit's journal and/or the log file a launchd or user service writes. */
@@ -2761,13 +2783,32 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return;
         }
         // Clear the auto-merge stop (a red main after an auto-merge, or the main watch's unaccounted commit): an admin's
-        // only, audited, and the one way auto-merge resumes from the dashboard.
+        // only, audited, and the one way auto-merge resumes from the dashboard. A stop the default branch caused waits
+        // for it to be green on its tip, measured now, or for an acknowledgement with a typed reason (#776).
         if (url.pathname === '/api/auto-merge/clear' && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may resume auto-merge; @${who.login} is a ${who.role}` });
-          const r = clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login });
-          if (!r.ok) return json(res, 409, { error: r.error });
-          audit(who, 'auto_merge.cleared', { reason: r.reason });
-          return json(res, 200, { ok: true });
+          const ack = acknowledgement(await readBody(req));
+          if ('error' in ack) return json(res, 400, { error: ack.error });
+          const branch = opts.cfg.project.project.default_branch;
+          const git = opts.acceptGit ?? acceptGit(opts.root, 'origin', branch);
+          const measure = () =>
+            measureMain({
+              branch,
+              required: requiredFor(opts.cfg.project, opts.cfg.tests),
+              tip: () => git.tip(),
+              checks: async (sha) => {
+                if (!opts.backlog) throw new Error('this dashboard has no backlog to read checks from');
+                return headChecks({ project: opts.cfg.project, tests: opts.cfg.tests, github: await opts.backlog().checks(sha), events: () => eventCache.all(), sha });
+              },
+            });
+          const r = await clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login, ack: ack.reason, measure });
+          const main = (m: MainState | null | undefined) => (m ? { tip: m.tip, green: m.green, ...(m.green ? {} : { why: m.why }) } : null);
+          if (!r.ok) {
+            if (r.needsAck) audit(who, 'auto_merge.resume_refused', { why: r.error, main: main(r.main) });
+            return json(res, r.status, { error: r.error, ...(r.needsAck ? { needsAck: true } : {}) });
+          }
+          audit(who, 'auto_merge.cleared', { reason: r.reason, how: r.how, main: main(r.main), ...(r.how === 'acknowledged' ? { acknowledged: ack.reason } : {}) });
+          return json(res, 200, { ok: true, how: r.how });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
           const body = (await readBody(req)) as { id?: string; answer?: string; voice?: unknown };

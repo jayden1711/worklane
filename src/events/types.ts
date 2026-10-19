@@ -665,8 +665,11 @@ export const EventSchemas = {
   'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()), flaky: z.array(z.string()).optional(), quarantined: z.array(z.string()).optional() }),
   /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
   'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
-  /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
-  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
+  /**
+   * Auto-merge stopped for this instance (until an admin resumes it); `revert` is the revert PR, if one was opened. `by`:
+   * what stopped it (src/auto-merge-resume.ts; absent on older events, which wait for green main as these do).
+   */
+  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /**
    * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;

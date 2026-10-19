@@ -2559,7 +2559,7 @@ test('auto-merge stop: main red after an auto-merge (green before it) stops auto
   assert.doesNotMatch(git(t.f.repo, 'show', `${revert.headSha}:src/price.js`), /qty > 0/, 'the revert undoes the change');
   assert.ok(revert.labels.includes('needs-owner'));
   assert.deepEqual(revert.reviewers, ['example-owner']);
-  assert.ok(t.pr().comments.some((x) => /@example-owner main's required checks failed \(ci\).*Auto-merge is stopped on this instance until the operator deletes/.test(x.body)));
+  assert.ok(t.pr().comments.some((x) => /@example-owner main's required checks failed \(ci\).*Auto-merge is stopped on this instance until an admin resumes it on the dashboard, once main's required checks are green on its tip/.test(x.body)));
   assert.ok(!t.c.watchedPrs().some((w) => w.number === revert.number), 'the revert PR is never watched, so never auto-merged (and never reverted)');
   // A new PR now waits, however clean.
   assert.match(String(t.c.autoMergeStopped()), /after auto-merging/);

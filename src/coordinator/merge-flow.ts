@@ -902,7 +902,7 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   private get stopResume() {
-    return `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
+    return `Auto-merge is stopped on this instance until an admin resumes it on the dashboard, once ${this.branch}'s required checks are green on its tip (or with an acknowledgement there, recorded); until then every PR waits for you.`;
   }
 
   /** Who is told about a red default branch: the owner of the issue behind one of `shas` (a harness merge), else the default owner. */
@@ -912,8 +912,8 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason, number, sha, revert, at: new Date().toISOString() }, null, 2));
-    this.emit('merge.stopped', { reason, number, sha, revert });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
+    this.emit('merge.stopped', { reason, number, sha, revert, by: 'red_main' });
   }
 
   /**
@@ -1074,7 +1074,7 @@ export abstract class MergeFlow extends FixRuns {
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
     if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
-    this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null });
+    this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null, by: 'main_watch' });
     // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
     if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;
