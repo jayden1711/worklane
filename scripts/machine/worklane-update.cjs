@@ -410,6 +410,8 @@ const ENGINE_CHECK_SOURCES = Object.freeze({
   'test-run sandbox (real systemd)': 'ci-slow.yml',
   'wizard end to end (real systemd)': 'ci-slow.yml',
 });
+/** GitHub Actions' App id (its check runs' app.id): a pin to it is judged per workflow file. */
+const ACTIONS_APP_ID = 15368;
 const hasOwn = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
 const WORKFLOW_PIN = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
@@ -499,23 +501,50 @@ async function checkPins(deps, cfg, api) {
     rulesUnread = !branch || !Array.isArray(ruleset);
     rules = ruleApps(branch, ruleset);
   }
-  if (rulesUnread) return { forSha: async () => null, rulesUnread };
+  if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread };
   const pinOf = (n) => checkPinOf(n, own, rules);
-  const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}));
+  // WHY: an Actions-App pin needs the workflow runs too: its runs are judged per workflow file (evaluateChecks), so one
+  // file never supersedes another.
+  const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}) || (pinOf(n) || {}).app_id === ACTIONS_APP_ID);
+  const pinned = required.some((n) => pinOf(n));
   return {
+    // The pins on `sha`, or { noAnswer: what GitHub didn't answer } (the commit waits).
     forSha: async (sha) => {
       const suites = new Map();
       if (needRuns) {
         await deps.sleep(CHECKS_SPACING_MS);
         const data = await deps.fetchJson(`${api}/actions/runs?head_sha=${sha}&per_page=100`);
-        if (!data || !Array.isArray(data.workflow_runs)) return null;
+        if (!data || !Array.isArray(data.workflow_runs)) return { noAnswer: 'its workflow runs' };
         for (const w of data.workflow_runs) {
           if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
         }
       }
-      return { pinOf, suites, repo, sha };
+      // The commit's statuses: a same-name status that isn't success refuses a pinned check (the owner's rule).
+      let statuses = [];
+      if (pinned) {
+        statuses = await statusesOf(deps, api, sha);
+        if (!statuses) return { noAnswer: 'its commit statuses' };
+      }
+      return { pinOf, suites, repo, sha, statuses };
     },
   };
+}
+
+/**
+ * #727: the commit's statuses, the latest per context (GET /commits/{sha}/status, the combined status), as
+ * [{ context, state }], pages of 100 while total_count says there are more; null when GitHub gives no answer for a
+ * page or there are more than CHECK_PAGES_MAX pages (a status unread could be the failing one).
+ */
+async function statusesOf(deps, api, sha) {
+  const all = [];
+  for (let page = 1; page <= CHECK_PAGES_MAX; page++) {
+    await deps.sleep(CHECKS_SPACING_MS);
+    const data = await deps.fetchJson(`${api}/commits/${sha}/status?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+    if (!data || !Array.isArray(data.statuses)) return null;
+    all.push(...data.statuses.filter((s) => s && typeof s.context === 'string'));
+    if (data.statuses.length < 100 || !(data.total_count > all.length)) return all;
+  }
+  return null;
 }
 
 /** `a0685ce: required check "push-gate" ended failure; …` */
@@ -558,7 +587,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
       const data = await checkRunsOf(deps, api, c.sha);
       const pins = data && pinning ? await pinning.forSha(c.sha) : undefined;
       if (!data) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
-      else if (pins === null) v = { ok: false, final: false, noAnswer: true, reason: pinning.rulesUnread ? "GitHub gave no answer for the branch's rules" : 'GitHub gave no answer for its workflow runs' };
+      else if (pins && pins.noAnswer) v = { ok: false, final: false, noAnswer: true, reason: `GitHub gave no answer for ${pins.noAnswer}` };
       else v = evaluateChecks(data.check_runs, cfg.required_checks, pins);
       // WHY: idle only once the commit has been on main a while: just landed, its checks may not have appeared yet.
       if (v.idle && !(now - Date.parse(c.date || '') >= IDLE_AFTER_MS)) v = { ...v, idle: false };
@@ -603,15 +632,45 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
  */
 const RETIRED_CHECKS = Object.freeze(['desktop']);
 /**
+ * #727, the owner's rule: the run that decides a pinned check, from its own source's runs `own` on the commit. They
+ * are grouped by workflow file (an Actions run: its suite's workflow run's path, or a group of its own when that run
+ * wasn't read; one group for any other App). In each group the latest run (the later workflow run, then the later
+ * check run, as a re-run attempt is) and the newest check run (the highest id: GitHub numbers check runs as it makes
+ * them, a re-run's jobs included) must both pass: the first one in any group that doesn't is returned. So one file
+ * never supersedes another, and a re-run of an older run that failed after a newer run passed still refuses. Else
+ * the latest run of all.
+ */
+function ownVerdict(own, pins) {
+  const suite = (r) => pins.suites.get(r.check_suite && r.check_suite.id);
+  const order = (r) => [(suite(r) || {}).run ?? -1, r.id ?? -1];
+  const later = (a, b) => order(a)[0] > order(b)[0] || (order(a)[0] === order(b)[0] && order(a)[1] > order(b)[1]);
+  const groups = new Map();
+  own.forEach((r, i) => {
+    const actions = r.app && r.app.slug === 'github-actions';
+    const key = !actions ? 'app' : suite(r) ? `file ${suite(r).path}` : `unread ${r.id ?? `#${i}`}`;
+    groups.set(key, [...(groups.get(key) || []), r]);
+  });
+  const ok = (r) => r.status === 'completed' && r.conclusion === 'success';
+  for (const g of groups.values()) {
+    const latest = g.reduce((a, b) => (later(b, a) ? b : a));
+    const newest = g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a));
+    if (!ok(latest)) return latest;
+    if (!ok(newest)) return newest;
+  }
+  return own.reduce((a, b) => (later(b, a) ? b : a));
+}
+
+/**
  * Every check on the commit complete and green, and every required check present and successful (a retired one only
  * when it ran: RETIRED_CHECKS).
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
- * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is the latest run from its pinned
- * source on this commit (a later run of that source supersedes its earlier or cancelled ones), and every run of its
- * name from any other source must be a pass too. One nothing pins is judged by name, as before, and every other name's
- * latest run must still be green. Absent: by name alone (tests' stand-ins only).
+ * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is judged by its pinned source's runs
+ * on this commit (ownVerdict: per workflow file, the latest run and the newest check run must pass), and every run of
+ * its name from any other source, and every commit status of its name, must be a pass too. One nothing pins is judged
+ * by name, as before, and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins
+ * only).
  */
 function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -628,17 +687,16 @@ function evaluateChecks(runs, required, pins) {
   if (pins) {
     const invalid = required.filter((name) => (pins.pinOf(name) || {}).invalid);
     if (invalid.length) return { ok: false, final: true, reason: `updates.json required_check_sources has an invalid pin for ${invalid.map((n) => `"${n}"`).join(', ')} ({ "app_id": N } or { "workflow": ".github/workflows/<file>" }): refused` };
-    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: the latest run from its
-    // pinned source on this commit, by the runs' own order (the later workflow run, then the later check run, as a
-    // re-run attempt is), so a later run of that source supersedes its earlier or cancelled ones (the owner's rule).
+    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: its pinned source's
+    // runs on this commit (ownVerdict), so a later run of a workflow file supersedes that file's earlier or cancelled
+    // ones (the owner's rule), and nothing else does.
     judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name)));
-    const order = (r) => [(pins.suites.get(r.check_suite && r.check_suite.id) || {}).run ?? -1, r.id ?? -1];
+    const own = new Map();
     for (const r of runs || []) {
       if (!pins.pinOf(r.name) || !fromPinnedSource(r, pins.pinOf(r.name), pins)) continue;
-      const prev = judged.get(r.name);
-      const [a, b] = [order(r), prev ? order(prev) : null];
-      if (!b || a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) judged.set(r.name, r);
+      own.set(r.name, [...(own.get(r.name) || []), r]);
     }
+    for (const [name, list] of own) judged.set(name, ownVerdict(list, pins));
   }
   // A pinned required check: any run of its name from any OTHER source that isn't a pass blocks it.
   const isOwn = (r) => !!pins && !!pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins);
@@ -657,6 +715,11 @@ function evaluateChecks(runs, required, pins) {
     for (const o of (runs || []).filter((x) => x.name === name && !isOwn(x))) {
       if (o.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" from another source is ${o.status}` };
       if (o.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" from another source ended ${o.conclusion}` };
+    }
+    // A commit status of its name that isn't success refuses it too (pending: wait).
+    for (const s of (pins.statuses || []).filter((x) => x.context === name && x.state !== 'success')) {
+      if (s.state === 'pending') return { ok: false, final: false, reason: `required check "${name}" has a pending commit status` };
+      return { ok: false, final: true, reason: `required check "${name}" has a commit status that ended ${s.state}` };
     }
   }
   for (const [name, r] of latest) {
@@ -1490,7 +1553,7 @@ async function update(deps, cfg, seen = {}) {
     // #727: the release's commit's required checks, each only from its pinned source.
     const pinning = await checkPins(deps, cfg, api);
     const pins = pinning ? await pinning.forSha(v.base) : undefined;
-    const checks = pins === null ? { ok: false, final: false, reason: pinning.rulesUnread ? "GitHub gave no answer for the branch's rules" : `GitHub gave no answer for the workflow runs on ${short(v.base)}` } : evaluateChecks(runs, cfg.required_checks, pins);
+    const checks = pins && pins.noAnswer ? { ok: false, final: false, reason: `GitHub gave no answer for ${pins.noAnswer.replace(/^its /, 'the ')} on ${short(v.base)}` } : evaluateChecks(runs, cfg.required_checks, pins);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
     if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);

@@ -24,25 +24,30 @@ const OTHER = 'b'.repeat(40);
 const ACTIONS = 15368;
 // An Actions check run's page is its own job in its suite's workflow run (run id = suite * 10 here, as workflowRun
 // makes it); `page` overrides that, e.g. for a check run made through the API into that suite.
-type Run = { name: string; suite: number; app?: number; conclusion?: string; page?: string; started?: string };
-const checkRun = (r: Run, id: number) => ({
-  id,
+// `id` overrides the check run's id (else its place in the list), as GitHub numbers check runs in the order it makes them.
+type Run = { name: string; suite: number; app?: number; conclusion?: string; page?: string; started?: string; id?: number; status?: string };
+const checkRun = (r: Run, i: number) => ({
+  id: r.id ?? i,
   name: r.name,
-  status: 'completed',
-  conclusion: r.conclusion ?? 'success',
+  status: r.status ?? 'completed',
+  conclusion: (r.status ?? 'completed') === 'completed' ? (r.conclusion ?? 'success') : null,
   started_at: r.started ?? '2026-10-18T10:00:00Z',
-  html_url: r.page ?? `https://github.com/example-org/engine/actions/runs/${r.suite * 10}/job/${id}`,
+  html_url: r.page ?? `https://github.com/example-org/engine/actions/runs/${r.suite * 10}/job/${r.id ?? i}`,
   app: { id: r.app ?? ACTIONS, slug: (r.app ?? ACTIONS) === ACTIONS ? 'github-actions' : `app-${r.app}` },
   check_suite: { id: r.suite },
 });
 const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'example-org/engine'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
 
-/** A GitHub that answers the updater's reads for commit SHA; `rules`: the branch's rulesets. Every URL asked is kept. */
-function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unknown[] | null }) {
+/**
+ * A GitHub that answers the updater's reads for commit SHA; `rules`: the branch's rulesets; `statuses`: the commit's
+ * (null: no answer). Every URL asked is kept.
+ */
+function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unknown[] | null; statuses?: { context: string; state: string }[] | null }) {
   const calls: string[] = [];
   const fetchJson = async (url: string) => {
     calls.push(url.replace(API, ''));
     if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: o.runs.length, check_runs: o.runs.map(checkRun) };
+    if (url.startsWith(`${API}/commits/${SHA}/status?`)) return o.statuses === null ? null : { state: 'success', total_count: (o.statuses ?? []).length, statuses: o.statuses ?? [] };
     if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return o.workflowRuns === null ? null : { workflow_runs: o.workflowRuns ?? [] };
     if (url === `${API}/rules/branches/main`) return o.rules === null ? null : (o.rules ?? []);
     if (url === `${API}/branches/main`) return { name: 'main', protection: { enabled: false, required_status_checks: { checks: [] } } };
@@ -130,9 +135,10 @@ test("owner rule: a pinned check is its source's latest run on the commit; any n
     const r = await choose({ required_checks: [name] }, gitHub({ runs, workflowRuns }));
     return r.chosen ? 'installs' : (r.reason ?? '');
   };
-  // 1. Cancelled, then passed in the later run: installs. 2. Failed, then passed: installs. List order doesn't matter.
+  // 1. Cancelled, then passed in the later run: installs. 2. Failed, then passed: installs. List order doesn't matter
+  // (the later run's job has the higher id, as GitHub numbers them).
   assert.equal(await verdict([{ name, suite: 1, conclusion: 'cancelled' }, { name, suite: 3, started: '2026-10-18T09:00:00Z' }]), 'installs');
-  assert.equal(await verdict([{ name, suite: 3, started: '2026-10-18T09:00:00Z' }, { name, suite: 1, conclusion: 'failure' }]), 'installs');
+  assert.equal(await verdict([{ name, suite: 3, started: '2026-10-18T09:00:00Z', id: 5 }, { name, suite: 1, conclusion: 'failure', id: 1 }]), 'installs');
   // Passed, then cancelled in the later run: refused (the later run decides, by the runs' own order).
   assert.match(await verdict([{ name, suite: 1, started: '2026-10-18T11:00:00Z' }, { name, suite: 3, conclusion: 'cancelled' }]), /ended cancelled/);
   // 3. The pinned run passed, and another App's same-name run failed: refused.
@@ -153,6 +159,51 @@ test('owner rule: a re-run attempt in the same workflow run counts as the newer;
   const pinned = await choose({ required_checks: ['extra'] }, gh);
   assert.deepEqual(pinned, await choose({ required_checks: ['extra'] }, { ...gh, deps: { ...gh.deps, pinChecks: undefined } }));
   assert.equal(pinned.chosen, true, 'the older failure is not its latest run: installs, as before');
+});
+
+test('an Actions-App pin never lets one workflow file supersede another: every file\'s latest run must pass', async () => {
+  // The branch rules pin "lint" to GitHub Actions' App: ci.yml (suite 1, run 10) and evil.yml (suite 9, run 90), the
+  // latter added in the commit itself.
+  const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'lint', integration_id: ACTIONS }] } }];
+  const files = [...legit, workflowRun(9, '.github/workflows/evil.yml')];
+  const verdict = async (runs: Run[]) => {
+    const r = await choose({ required_checks: ['lint'] }, gitHub({ runs, workflowRuns: files, rules }));
+    return r.chosen ? 'installs' : (r.reason ?? '');
+  };
+  assert.match(await verdict([{ name: 'lint', suite: 1, conclusion: 'failure' }, { name: 'lint', suite: 9 }]), /"lint" ended failure/, 'ci.yml failed, evil.yml passed later');
+  assert.match(await verdict([{ name: 'lint', suite: 1, status: 'in_progress' }, { name: 'lint', suite: 9 }]), /"lint" is in_progress/, 'ci.yml still running');
+  assert.match(await verdict([{ name: 'lint', suite: 1 }, { name: 'lint', suite: 9, conclusion: 'failure' }]), /"lint" ended failure/, 'the added evil.yml failed');
+  assert.equal(await verdict([{ name: 'lint', suite: 1 }, { name: 'lint', suite: 9 }]), 'installs', 'both passed');
+});
+
+test('"latest" fails closed: run 200 passed, then run 100 was re-run and failed: refused; the owner\'s cases stay', async () => {
+  const name = 'test (ubuntu-latest, 22)';
+  // ci.yml ran twice on this commit: run 100 (suite 10) and run 200 (suite 20).
+  const runs = [...legit, workflowRun(10, '.github/workflows/ci.yml'), workflowRun(20, '.github/workflows/ci.yml')];
+  const verdict = async (list: Run[]) => {
+    const r = await choose({ required_checks: [name] }, gitHub({ runs: list, workflowRuns: runs }));
+    return r.chosen ? 'installs' : (r.reason ?? '');
+  };
+  // Check runs 10 (run 100's first attempt, passed), 20 (run 200, passed), 30 (run 100's re-run, failed).
+  assert.match(await verdict([{ name, suite: 10, id: 10 }, { name, suite: 20, id: 20 }, { name, suite: 10, id: 30, conclusion: 'failure' }]), /ended failure/);
+  assert.match(await verdict([{ name, suite: 20, id: 20 }, { name, suite: 10, id: 30, conclusion: 'cancelled' }]), /ended cancelled/);
+  // The owner's cases: run 100 cancelled or failed, then run 200 passed: installs.
+  assert.equal(await verdict([{ name, suite: 10, id: 10, conclusion: 'cancelled' }, { name, suite: 20, id: 20 }]), 'installs');
+  assert.equal(await verdict([{ name, suite: 20, id: 20 }, { name, suite: 10, id: 10, conclusion: 'failure' }]), 'installs');
+});
+
+test("a pinned check's same-name commit status that isn't success refuses it (pending waits); no answer for the statuses waits", async () => {
+  const name = 'scan';
+  const verdict = async (statuses: { context: string; state: string }[] | null) => {
+    const r = await u.chooseCommit(gitHub({ runs: [{ name, suite: 2 }], workflowRuns: legit, statuses }).deps, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+    return r.chosen ? 'installs' : `${r.wait ? 'waits' : 'refused'}: ${r.reason ?? r.skipped[0]?.reason ?? ''}`;
+  };
+  assert.match(await verdict([{ context: name, state: 'failure' }]), /^refused: .*"scan" has a commit status that ended failure/);
+  assert.match(await verdict([{ context: name, state: 'error' }]), /^refused: .*ended error/);
+  assert.match(await verdict([{ context: name, state: 'pending' }]), /^waits: .*"scan" has a pending commit status/);
+  assert.match(await verdict(null), /^waits: GitHub gave no answer for its commit statuses/);
+  assert.equal(await verdict([{ context: name, state: 'success' }, { context: 'other', state: 'failure' }]), 'installs', 'a success of its name, and another name\'s status, as before');
+  assert.equal(await verdict([]), 'installs');
 });
 
 test("updates.json required_check_sources pins a check (over the updater's own list); the branch rules' App pins one it doesn't name", async () => {
