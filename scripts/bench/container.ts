@@ -21,7 +21,7 @@ import { cpus, totalmem } from 'node:os';
 import { posix } from 'node:path';
 import { BRAND } from '../../src/brand.js';
 import { daemonHost } from './agent.js';
-import { hiddenLeaks, stdinCarriesHidden, type TaskRow } from './hidden.js';
+import { hiddenLeaks, stdinCarriesHidden, tarText, type TaskRow } from './hidden.js';
 
 /** Environment names that may carry a credential or reach a daemon: never passed into a container. */
 export const SECRET_NAME = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|^DOCKER_|^XDG_RUNTIME_DIR$/i;
@@ -200,7 +200,7 @@ function send(o: DockerOptions, verbs: readonly string[], args: string[], row: T
     const leaks = hiddenLeaks(args.join('\n'), row);
     if (leaks.length) throw new Error(`refused: this docker command would carry the task's hidden ${leaks.join(', ')}`);
     if (input && !base) throw new Error("refused: a task's input is checked against its base tree, and there is none");
-    if (input && base && stdinCarriesHidden(input.toString('utf8'), row, base.toString('utf8'))) throw new Error(STDIN_REFUSED);
+    if (input && base && stdinCarriesHidden(tarText(input), row, tarText(base))) throw new Error(STDIN_REFUSED);
   }
   return (o.call ?? spawnDocker)(o.docker, args, { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}) });
 }
