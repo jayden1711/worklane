@@ -1000,7 +1000,7 @@ export type Ask = {
   | { kind: 'root_step'; command: string; args: string[]; allowed: boolean; refusal: string | null }
 );
 /**
- * A Claude credential's name, as an earlier version's ask named it (src/console/secrets.ts' CLAUDE_CREDENTIAL_NAMES:
+ * A Claude credential's name, as an earlier version's ask named it (src/claude-credential-guard.ts' CLAUDE_CREDENTIAL_NAMES:
  * add-project's claude-token, a switch's, a new profile's, a relayed sign-in's code), or any name of that family. No
  * page draws a box for one (issue #711): such an ask, left open by an earlier version, shows root's commands instead.
  */
