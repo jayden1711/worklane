@@ -15,6 +15,7 @@ import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { StarterCi } from '../components/StarterCi';
+import { FirstTaskCard } from '../components/FirstTaskProgress';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 import { ConfigPrList } from '../components/ConfigPr';
 import { FirstTaskForm } from '../components/FirstTask';
@@ -654,6 +655,8 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
         </p>
       )}
       <StartCard start={f.start} canStart={f.canStart} blocked={startBlockers(f).length} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
+      {/* #741: the filed first task, followed to its PR. */}
+      {f.firstTask && <FirstTaskCard t={f.firstTask} />}
       {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} settled={!!f.setup?.groups.flatMap((g) => g.steps).find((s) => s.id === 'config-on-main')?.done || !!f.configPrs?.some((p) => p.number === f.autoConfig?.pr?.number && p.state === 'merged')} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">
