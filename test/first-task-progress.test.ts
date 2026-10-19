@@ -501,7 +501,10 @@ function emittersOutside(files: Record<string, string>): string[] {
       const close = lead ? endAt(src, after + lead[0].length + 1, '') : -1;
       const last = lead !== null && /^\s*,?\s*\)/.test(src.slice(close + 1));
       const fields = last ? elements(src.slice(after + lead![0].length, close + 1)) : [];
-      const empty = last && m[0].includes('conflict_fix') && fields.some((f) => /^reasons\s*:\s*\[\]$/.test(f)) && !fields.some((f) => f.startsWith('...') || (/^reasons\b/.test(f) && !/^reasons\s*:\s*\[\]$/.test(f)));
+      // Fail closed: every field a plain identifier key (or shorthand), never __proto__; a computed or quoted key, a
+      // getter, a method or a comment before a key could set `reasons` again at runtime, so it loses the exemption.
+      const plain = fields.every((f) => /^[A-Za-z_$][\w$]*(\s*:|$)/.test(f) && !/^__proto__\b/.test(f));
+      const empty = last && plain && m[0].includes('conflict_fix') && fields.some((f) => /^reasons\s*:\s*\[\]$/.test(f)) && !fields.some((f) => /^reasons\b/.test(f) && !/^reasons\s*:\s*\[\]$/.test(f));
       if (!inside && !empty) out.push(`${file}: ${m[0]}`);
     }
   return out;
@@ -569,6 +572,10 @@ test('#741 the scan fails closed: each way round it the round-2 review found (fi
   // The round-4 review's N11a-c: a wrapped payload, or one followed by another argument, is never exempt.
   for (const call of ["Object.assign({ reasons: [] }, finished)", 'withReasons({ reasons: [] })', "{ outcome: 'interrupted', reasons: [] }, extra", 'pick({ reasons: [] }, finished), extra'])
     assert.deepEqual(emittersOutside({ 'src/x.ts': `this.emit('conflict_fix.finished', ${call});` }), ["src/x.ts: emit('conflict_fix.finished'"], call);
+  // The round-5 probes: a second key that sets `reasons` again at runtime (computed, quoted, a getter, behind a
+  // comment), and __proto__: none is exempt.
+  for (const second of ["['reasons']: why", '[k]: why', "'reasons': why", '"reasons": why', 'get reasons() { return why }', "/* c */ 'reasons': why", "// c\n 'reasons': why", 'reasons() { return why }', '__proto__: finished'])
+    assert.deepEqual(emittersOutside({ 'src/x.ts': `this.emit('conflict_fix.finished', { reasons: [], ${second} });` }), ["src/x.ts: emit('conflict_fix.finished'"], second);
   // A trailing comma after the one payload still reads as the last argument.
   assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { outcome: 'interrupted', reasons: [] },\n);" }), []);
 });
