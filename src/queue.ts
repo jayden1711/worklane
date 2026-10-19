@@ -1,15 +1,13 @@
-// Queued exclusive runs (e.g. a project's full test suite). `queue` spawns a
-// detached runner in its own session, so it outlives the shell and Claude
-// session that started it, then returns. The runner waits for the
-// machine-wide full-run lock AND for the project's idle probe (e.g. "no
-// other full run is live") before starting, and records the result.
+// Queued exclusive runs (e.g. a full test suite): `queue` spawns a detached runner that outlives its caller,
+// waits for the machine-wide full-run lock AND the project's idle probe, then runs and records the result.
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { childEnv, machineLoad, pidAlive, projectCommand } from './os/index.js';
+import { childEnv, machineLoad, pidAlive, projectCommand, type ProjectRunAs } from './os/index.js';
 import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
+import { redactString } from './events/redact.js';
 import { recordBaseline } from './baseline.js';
 import { removeWorktree } from './worktrees.js';
 
@@ -36,8 +34,8 @@ export interface Job {
     cleanup?: { repo: string; root: string; stateDir: string; name: string };
   };
   result?: string;
-  /** The project's suite runs agent-written code: as the instance's agent user, when there is one. */
-  runAs?: { user: string; home: string };
+  /** The project's suite runs agent-written code: as the instance's agent user, when there is one, in its sandbox. */
+  runAs?: ProjectRunAs;
 }
 
 const jobsDir = (stateDir: string) => join(stateDir, 'jobs');
@@ -97,6 +95,11 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
     job = { ...job, ...patch };
     writeJob(stateDir, job);
   };
+  // A job an older engine queued has no sandbox hide list: projectCommand refuses it (#713). Say so by name, at once.
+  if (job.runAs && !Array.isArray((job.runAs as Partial<ProjectRunAs>).hide)) {
+    update({ status: 'error', runnerPid: process.pid, finishedAt: new Date().toISOString(), error: 'queued before this engine version: it has no sandbox hide list for its agent user (#713), so it was not run; queue it again' });
+    return job;
+  }
   update({ status: 'waiting', runnerPid: process.pid, waitingFor: 'machine-wide full-run lock' });
   for (;;) {
     const got = await fullRunLock(`${job.kind} job ${id} (pid ${process.pid})`, 24 * 3600_000);
@@ -127,7 +130,8 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
         const b = job.after.baseline;
         const log = new EventLog(b.eventsDb);
         try {
-          const r = recordBaseline(log, b.actor, b.sha, code, readFileSync(job.log, 'utf8'), { section: b.section, item: b.item });
+          // The suite's output is project code's: credential-shaped text redacted before it is read into events (#713).
+          const r = recordBaseline(log, b.actor, b.sha, code, redactString(readFileSync(job.log, 'utf8')), { section: b.section, item: b.item });
           // A red baseline run is the expected case: the job succeeded if the baseline was recorded.
           update(r.ok ? { status: 'passed', result: `baseline recorded at ${b.sha.slice(0, 8)}: ${r.failing.length} failing` } : { status: 'error', result: `baseline NOT recorded: ${r.why}` });
         } finally {

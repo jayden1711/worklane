@@ -16,6 +16,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
+import type { ReviewConfig } from './config/schema.js';
 
 export type Role = 'owner' | 'writer' | 'viewer';
 
@@ -103,7 +104,14 @@ export const isWriter = (r: Role | null | undefined) => r === 'owner' || r === '
 
 /** Decisions only the owner may answer: held plans, high-risk (L3) merges, and an automation's run. The rest are the writers' too. */
 export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land', 'automation']);
-export const mayAnswerKind = (kind: string, r: Role | null | undefined) => (OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r));
+/**
+ * THE rule for who may answer a decision of each kind, on every surface: the dashboard, a chat thread, a GitHub comment
+ * or review, and the CLI (#715). Owner decisions (OWNER_DECISIONS) are the owners'; the rest are the owners' and
+ * writers'. A high-risk merge (`land`) is the writers' too only where review.yaml on the default branch says
+ * `approvals: { land: writers }` (`approvals`, as read from there); absent, the owners' alone.
+ */
+export const mayAnswerKind = (kind: string, r: Role | null | undefined, approvals?: ReviewConfig['approvals']) =>
+  kind === 'land' && approvals?.land === 'writers' ? isWriter(r) : OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r);
 
 /** `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows). */
 export type RoleOf = (login: string, o?: { fresh?: boolean }) => Promise<Role | null>;

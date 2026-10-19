@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix, sep } from 'node:path';
@@ -456,7 +457,10 @@ test('a failed or low-confidence verdict bumps one level; an agent can raise but
 test('money paths load from the project source of truth (regex literals in a JS list)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'mp-'));
   writeFileSync(join(dir, 'plan.js'), "const OTHER = [/^nope\\//];\nconst MONEY = [\n  /^server\\/(ledger|sweep)\\//,\n  /^shared\\//,\n];\n");
-  const res = loadMoneyPaths(dir, { file: 'plan.js', pattern: 'const MONEY = \\[([\\s\\S]*?)\\];' });
+  // Read as committed (#715: at the default branch's ref, never the working tree).
+  for (const a of [['init', '-q'], ['add', 'plan.js'], ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'list']]) execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  const [self, ...res] = loadMoneyPaths(dir, { file: 'plan.js', pattern: 'const MONEY = \\[([\\s\\S]*?)\\];' }, 'HEAD');
+  assert.ok(self!.test('plan.js') && !self!.test('src/plan.js'), 'the list file itself first');
   assert.equal(res.length, 2);
   assert.ok(res[0]!.test('server/sweep/x.js') && !res[0]!.test('server/games/x.js'));
   assert.ok(!res.some((r) => r.test('nope/x')), 'only the MONEY list');
