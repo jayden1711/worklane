@@ -25,7 +25,9 @@ Still to come:
 
 ## How it is isolated
 
-- **One OS user runs everything:** the bench user (default `wl-bench`, `WORKLANE_BENCH_USER` names another). It has its own clone of this repo at the pinned commit, its own `claude`, its own rootless Docker, and data in `$HOME/bench` (`WORKLANE_BENCH_ROOT` overrides it). There is no sudo and no switching users. The driver refuses to start as any other user.
+- **One OS user runs everything:** the bench user (default `wl-bench`, `WORKLANE_BENCH_USER` names another). It has its own clone of this repo at the pinned commit, its own `claude`, its own rootless Docker, and data in `~/bench` (`WORKLANE_BENCH_ROOT` overrides it). There is no sudo and no switching users. The driver refuses to start as any other user.
+  - Its home is the one in the user database (its passwd entry), never `$HOME`: a `$HOME` that differs is refused, since claude would follow it to another login. Log in with `sudo -iu wl-bench`, which sets it right.
+  - A bench root through a link that doesn't resolve (dangling, or a loop) is refused.
 - **No API key.** `claude` is the unmodified CLI, signed in once by the owner through Anthropic's own `/login`.
   - Before any run, the driver asks `claude auth status --json`. It starts only on `authMethod` `claude.ai` with `apiProvider` `firstParty`, whatever the plan (enterprise, team, personal), and records the plan and the login's `configDirectory`, which must be inside the bench user's home.
   - It refuses `oauth_token` (also a gateway bearer, federation or a Console profile), an API key, an API key helper, Bedrock, Vertex, Foundry, a signed-out status and an unreadable one.
@@ -38,13 +40,15 @@ Still to come:
   - The agent's environment has no `DOCKER_*`, `XDG_RUNTIME_DIR` or `DBUS_SESSION_BUS_ADDRESS`. An agent that could reach the daemon could mount the login into a container and send it out.
   - **Where an agent may write.** That deny list covers reads only.
     - Its Bash commands write only where the sandbox lets them (the working folder and the temp folder).
-    - Its Edit and Write tools run outside the sandbox, as the bench user. Claude Code asks before a file edit, and the bench runs in `dontAsk` mode, which refuses anything that would ask. But a run whose allowed tools name Edit or Write unqualified has them pre-approved, and then they can change any file the bench user can (its `~/.gitconfig`, a shell rc file, `~/.docker/config.json`, its `~/.claude` settings).
-    - So nothing the driver reads back trusts what an agent could have written: patches are exported from the clone's objects only, in a bare repo the driver makes, with no config but its own, and every `claude` the driver starts has its login checked again.
+    - Its Edit, Write, MultiEdit and NotebookEdit tools run outside the sandbox, as the bench user. Pre-approved without a scope, they could change any file the bench user can: `~/.profile` or `~/.bashrc`, which `sudo -iu wl-bench` then runs outside every sandbox, with the daemon and the login in reach.
+    - So they are confined to the task's own folder (`runs/<run>/<key>/`). Every agent run goes through the task's meter, which scopes a bare `Edit`, `Write`, `MultiEdit` or `NotebookEdit` to `Edit(//<task folder>/**)`, and refuses, unstarted, a run that grants any of them anywhere else. Claude Code asks before any other file edit, and the bench runs in `dontAsk` mode, which refuses anything that would ask.
+    - Nothing the driver reads back trusts that folder either: patches are exported from the clone's objects only, in a bare repo the driver makes, with no config but its own.
   - **No retry.** A run that fails is recorded, never retried (the engine's runner is built with retries off). Any usage or rate limit stops the bench: a `rate_limited` result, and a failed run on a 429 alike.
 - **The repo's environment and tests run in one throwaway container per task**, from the task's SWE-bench image, in rootless Docker.
   - Each container has `--network none`, `--cap-drop ALL` and `no-new-privileges`, and mounts nothing.
   - The worktree reaches the container as a tar stream on `docker exec -i`.
   - Task commands go through a runner that sends only `docker exec <that task's container> argv`, with a normalized work dir under `/work` and `NAME=value` variables. Any other verb, any mount or privilege flag, and any credential or daemon variable are refused.
+  - The driver's own `docker` always gets an absolute `DOCKER_HOST` (the bench user's, or `unix://$XDG_RUNTIME_DIR/docker.sock`), so a docker context never picks its daemon. `DOCKER_CONTEXT` and a relative `unix://` `DOCKER_HOST` are refused.
 - **Limits are required.** Every container gets `--memory` with an equal `--memory-swap`, `--cpus` and `--pids-limit`.
   - Defaults: 8g, 4 CPUs, 4096 pids. Override them with `WORKLANE_BENCH_MEMORY`, `WORKLANE_BENCH_CPUS` and `WORKLANE_BENCH_PIDS`. Refused: a zero or missing value, more CPUs than the host has, memory over 75% of the host's, and memory that isn't a multiple of 4096 bytes.
   - Before the first task, a probe container is created with the limits. They are read back through `docker inspect` (Memory, MemorySwap, NanoCpus, PidsLimit), then from inside the container (`memory.max`, `memory.swap.max`, which must be 0, `cpu.max`, `pids.max`).
@@ -57,8 +61,11 @@ Still to come:
 - **Hidden tests stay hidden.**
   - The dataset, the manifest, the hidden fields (`patch`, `test_patch`, `FAIL_TO_PASS`, `PASS_TO_PASS`, `hints_text`, difficulty) and the predictions live in `$HOME/bench/state/evals/held-out/swebench/`, owner-only. That path is also on the engine's held-out deny glob.
   - A container and the agents get only the base commit, the problem statement and the test runner.
-  - Every docker command is checked against the task's hidden fields and refused on a match: its argv, and its stdin (a worktree's tar stream), where only what the task's base tree lacks counts.
-  - Known issue for the test relay still to come: an argv naming a PASS_TO_PASS test by its pytest id is refused, though the base tree has that test.
+  - As a narrow second wall against a driver bug, every docker command is scanned (UTF-8 substrings) and refused on a match:
+    - its argv for the gold and test patches' added lines of at least 24 characters, test ids of at least 12, the hints and the instance id;
+    - its stdin (a worktree's tar stream) only for the instance id, the hints, or 3 or more consecutive test-patch lines that the task's base tree lacks. An agent's own fix that equals the gold line, or its own test with the upstream test's name, goes through, and a stdin refusal never says which field matched.
+  - That scan can't see compressed or binary content, other encodings or shorter lines; the first wall (nothing hidden is ever handed over) covers those.
+  - Known issue for the test relay still to come: an argv naming a FAIL_TO_PASS or PASS_TO_PASS test by its pytest id is refused (naming the field), though the base tree may have that test.
 - **Grading reads only the exported patches** (`runs/<run>/patches/<key>/<label>.diff`, plain files only). It runs the official harness in fresh containers after the run. Only the held-out store maps a task key (`t01`, ...) to its instance id.
 - **Research-on-demand is off.** Every research cap is 0, and the driver checks it before starting.
 
@@ -70,16 +77,17 @@ Two checks that an agent really can't reach the daemon's sockets or the credenti
    - **Why srt:** Claude Code 2.1.303 has no command that runs a command in its own sandbox without a model, so this check runs under `srt`, the CLI of sandbox-runtime, the library Claude Code's sandbox is built on.
    - **The version:** `srt --version` must be exactly `0.0.79` (step 3 installs it), or the run is refused.
    - **Label:** sandbox-runtime 0.0.79 is close to, not identical with, the build bundled in Claude Code 2.1.303. `srt-fingerprint.mjs` compares the binary's `[Sandbox Linux]` log strings with each release's. On 2026-10-18 it placed the bundled build between 0.0.79 (1 string apart each way) and 0.0.80 (4 apart each way).
-   - **What it does:** with the agents' own lane settings (the same `denyRead`, no hosts), it tries to connect to each Docker socket (`$XDG_RUNTIME_DIR/docker.sock`, `/run/docker.sock`, `/var/run/docker.sock`, a unix `DOCKER_HOST`) and to open `~/.claude.json`, `~/.netrc`, `~/.npmrc` and `~/.pypirc`. It reports only what each one is and never reads a byte.
+   - **What it does:** with the agents' own lane settings (the same `denyRead`, no hosts), it tries to connect to each Docker socket (`$XDG_RUNTIME_DIR/docker.sock`, `/run/docker.sock`, `/var/run/docker.sock`, a unix `DOCKER_HOST`), the user bus (`$XDG_RUNTIME_DIR/bus`) and the rootless containerd socket, and to open `~/.claude.json`, `~/.netrc`, `~/.npmrc` and `~/.pypirc`. It reports only what each one is and never reads a byte.
    - **The verdict:** every attempt must be refused, with the lane's deny rule for the path in place. A missing file counts as refused only when its rule is there; the deny rule is checked in the settings, and whether the path exists on the host is recorded beside it.
 2. **The confirmation in Claude Code's own sandbox (one model call).**
    - The run's first model call, on `claude-haiku-5-5`, through the usage meter: capped at $0.50 and counted against the run's ceiling. Claude Code runs, in its own sandbox with the agents' lane, `curl --unix-socket <sock> http://localhost/_ping` for each socket, and `cat` of a **sentinel** at each protected path.
-   - **Sentinels, never real credentials.** Where `~/.netrc`, `~/.npmrc` or `~/.pypirc` doesn't exist, the driver creates a sentinel there with random content (never over anything: it creates new files only) and removes it after.
-   - `~/.claude.json` exists for a signed-in user and is never touched. Its own rule is exact-path, so no other file can sit under it. Its sentinel goes in `~/.claude/` instead, under the login folder's rule (`Read(//<home>/.claude/**)` and the sandbox's denyRead of `~/.claude`). The other three test the exact-path form.
+   - **Sentinels, never real credentials.** Where `~/.netrc`, `~/.npmrc` or `~/.pypirc` doesn't exist, the driver creates a sentinel there with random content (never over anything: it creates new files only) and removes it after, on SIGINT and SIGTERM too.
+   - `~/.claude.json` is never touched, whether or not it exists. Its sentinel always goes in `~/.claude/`, under the login folder's rule (`Read(//<home>/.claude/**)` and the sandbox's denyRead of `~/.claude`), and there is none when that folder is missing. The other three test the exact-path form.
    - A path that already holds a real file gets no sentinel and is never put to the model. The srt probe covers it.
-   - **The verdict is read from Claude Code's stream-json transcript** (which Bash commands ran and what each returned), not from the model's prose.
-     - Any sentinel's content anywhere in the transcript, or a `_ping` answered `OK`, refuses the run.
-     - If the model doesn't run every command, the record says **"sandbox confirmation: model declined"**. The run goes on only because the srt probe passed, and the summary says so in a warning.
+   - **The verdict is read from Claude Code's stream-json transcript** (which Bash commands ran and what each returned), not from the model's prose. Per attempt:
+     - **refused** only when the exact listed command ran and its tool result is an error (`is_error`, which Claude Code sets on a non-zero exit);
+     - **reached** when any command naming the target exited 0, or a sentinel's content or a `_ping` `OK` came back. Any reached attempt, or any sentinel's content anywhere in the transcript, refuses the run;
+     - anything else counts as not run, and the record says **"sandbox confirmation: model declined"**. The run goes on only because the srt probe passed, and the summary says so in a warning.
 3. **Keeping the probe current.** On each new sandbox-runtime release, run `node scripts/bench/srt-fingerprint.mjs <unpacked package> ~/.local/share/claude/versions/<pin>`. When a release shows no difference, switch `SRT_VERSION` (`probe.ts`) and step 3's install to it, as a reviewed change.
 
 ## Caps (usage-equivalent dollars)

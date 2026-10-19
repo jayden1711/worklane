@@ -12,13 +12,15 @@
 // stopped, every later task is "not run (usage limit)", and the aggregate says the run is partial.
 //
 // Where an agent may write: its Bash commands, only where the sandbox lets them (Claude Code's default: the working
-// folder and the temp folder). Its Edit and Write tools run outside the sandbox, as the bench user, and the lane's deny
-// list covers reads only. Claude Code asks before any file edit, and the bench runs in dontAsk mode, which refuses
-// what would ask; but a run whose allowed tools name Edit or Write unqualified has them pre-approved, and then they can
-// change any file the bench user can (its ~/.gitconfig, a shell rc file, ~/.docker/config.json, its ~/.claude
-// settings). Nothing in this lane stops that. What the driver reads back after a task is built so it doesn't matter:
-// patches come from the clone's objects only, in a repo the driver makes, with no config but its own (grade.ts
-// exportPatch), and every claude the driver starts is checked again (auth.ts).
+// folder and the temp folder). Its Edit, Write, MultiEdit and NotebookEdit tools run outside the sandbox, as the bench
+// user, and the lane's deny list covers reads only: pre-approved without a scope, they could change any file the bench
+// user can, ~/.profile and ~/.bashrc included, which a login shell then runs outside every sandbox with the daemon and
+// the login in reach. So every run goes through the task's meter (usage.ts scopeEditTools, owner's decision of
+// 2026-10-18): those tools are pre-approved only inside the task's own folder (a bare name is scoped there), and a run
+// that grants them anywhere else is refused, unstarted. Claude Code asks before any other file edit, and the bench
+// runs in dontAsk mode, which refuses what would ask. What the driver reads back after a task is built not to trust
+// that folder either: patches come from the clone's objects only, in a repo the driver makes, with no config but its
+// own (grade.ts exportPatch).
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeOwnerOnly } from '../../src/os/index.js';
@@ -79,7 +81,7 @@ export interface TaskContext {
   signal: AbortSignal;
   /** The task's commands: `docker exec` into its container, nothing else. */
   exec: TaskRunner;
-  /** The task's own folder on the host (its clone, local remote and engine state). */
+  /** The task's own folder on the host (its clone, local remote and engine state): the only place its agents' file-writing tools may write. */
   workDir: string;
   settings: InstanceSettings;
 }
@@ -179,7 +181,7 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
   // Option D, the run's first model call: Claude Code itself tries the same in its own sandbox, on sentinels.
   const checkDir = join(dir, 'sandbox-check');
   mkdirSync(checkDir, { recursive: true, mode: 0o700 });
-  const check = meter.task(o.caps.perTaskUsd);
+  const check = meter.task(o.caps.perTaskUsd, checkDir);
   const confirmation: SandboxConfirmation = await confirmSandbox({ ...o.lane, runner: check, cwd: checkDir, signal: meter.signal });
   const sandbox = { probe, confirmation, usage_equivalent_usd: check.spent, runs: check.runs };
   writeOwnerOnly(join(dir, 'sandbox.json'), JSON.stringify(sandbox, null, 2) + '\n');
@@ -213,7 +215,7 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
     // container gets it, whatever the task passes; none starts after it fires.
     const wall = new AbortController();
     const signal = AbortSignal.any([meter.signal, wall.signal]);
-    const runner = meter.task(o.caps.perTaskUsd, signal);
+    const runner = meter.task(o.caps.perTaskUsd, workDir, signal);
     let status: TaskStatus = 'error';
     let detail: string | undefined;
     let applied = false;

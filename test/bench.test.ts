@@ -26,6 +26,7 @@ import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeA
 import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
 import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
+import { confirmSandbox } from '../scripts/bench/confirm.js';
 import { STDIN_LINE } from './helpers.js';
 
 const posix = { skip: process.platform === 'win32' && 'POSIX stand-ins' };
@@ -239,7 +240,7 @@ test('the bench runs only as its own user, on the pinned CLI, with updates off f
 test('acceptance: at a usage limit the meter stops cleanly: no retry, no later run, every task aborted', posix, async () => {
   const c = fakeClaude({ run: 'limit' });
   const meter = new UsageMeter(new BenchAgentRunner(new CliRunner('cli', c.env, c.bin)), 40);
-  const first = meter.task(15);
+  const first = meter.task(15, c.base);
   const r = await first.run(runReq(c.base));
   assert.equal(r.reason, 'rate_limited');
   assert.equal(c.calls('run').length, 1);
@@ -247,7 +248,7 @@ test('acceptance: at a usage limit the meter stops cleanly: no retry, no later r
   assert.match(meter.limited!.detail, /usage or rate limit/);
   assert.match(meter.limited!.reset_at ?? '', /^\d{4}-\d\d-\d\dT/, 'when claude said it resets (the engine reads it)');
   // The same task's next run and another task's: refused unstarted.
-  for (const t of [first, meter.task(15)]) {
+  for (const t of [first, meter.task(15, c.base)]) {
     const again = await t.run(runReq(c.base, undefined, 'evaluator'));
     assert.equal(again.reason, 'rate_limited');
     assert.match(again.detail, /not started: the bench stopped at a usage limit/);
@@ -269,14 +270,14 @@ test('acceptance: a 429 the engine would retry as transient stops the bench too:
   for (const [what, retry] of retries) {
     const c = fakeClaude({ run: '429' });
     const meter = new UsageMeter(new BenchAgentRunner(new CliRunner('cli', c.env, c.bin, undefined, undefined, undefined, retry)), 40);
-    const first = meter.task(15);
+    const first = meter.task(15, c.base);
     const r = await first.run(runReq(c.base));
     assert.notEqual(r.reason, 'succeeded', what);
     assert.equal(c.calls('run').length, 1, `${what}: exactly one claude session`);
     assert.ok(meter.limited, `${what}: the meter stopped at the rate limit`);
     assert.match(meter.limited.detail, /429/, what);
     assert.ok(meter.signal.aborted, `${what}: every task in flight is told to stop`);
-    for (const next of [first, meter.task(15), meter.task(15)]) {
+    for (const next of [first, meter.task(15, c.base), meter.task(15, c.base)]) {
       const again = await next.run(runReq(c.base, undefined, 'evaluator'));
       assert.match(again.detail, /not started: the bench stopped at a usage limit/, `${what}: the rest are not run`);
     }
@@ -287,9 +288,9 @@ test('acceptance: a 429 the engine would retry as transient stops the bench too:
 test("usage is the CLI's own accounting, capped per task and for the whole run", posix, async () => {
   const c = fakeClaude();
   const meter = new UsageMeter(new BenchAgentRunner(new CliRunner('cli', c.env, c.bin)), 3);
-  const t = meter.task(2);
+  const t = meter.task(2, c.base);
   const caps: number[] = [];
-  const spy = new UsageMeter({ run: async (req) => (caps.push(req.maxBudgetUsd), { reason: 'succeeded', detail: '', costUsd: 1.25, turns: 1, model: req.model }) }, 3).task(2);
+  const spy = new UsageMeter({ run: async (req) => (caps.push(req.maxBudgetUsd), { reason: 'succeeded', detail: '', costUsd: 1.25, turns: 1, model: req.model }) }, 3).task(2, c.base);
   await spy.run(runReq(c.base));
   await spy.run(runReq(c.base));
   assert.deepEqual(caps, [2, 0.75], 'each run is cut to what is left of its task cap');
@@ -1027,4 +1028,155 @@ test("a bench root through a link that doesn't resolve is refused; a dangling li
   symlinkSync(join(elsewhere, 'ssh'), join(home, '.ssh'));
   assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'ssh', 'bench') }, home), /overlaps/, "a root where a dangling ~/.ssh points");
   assert.equal(benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'bench') }, home).root, join(elsewhere, 'bench'));
+});
+
+/** A temporary bench user's home and its lane, for the sandbox confirmation on its own (no driver). */
+function checkLane(withClaudeDir = true) {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'confirm-')));
+  const home = join(base, 'home');
+  mkdirSync(home);
+  if (withClaudeDir) mkdirSync(join(home, '.claude'));
+  mkdirSync(join(base, 'run-user'));
+  const input = { home, runtimeDir: join(base, 'run-user'), heldOut: join(base, 'held'), state: join(base, 'state'), dockerHost: undefined, dataHome: undefined };
+  return { base, home, input, o: { ...input, settings: benchLane(input).settings } };
+}
+
+/** What Claude Code did with one listed command: the command it really ran, what came back, and whether as an error. */
+type Answer = { command: string; output: string; is_error: boolean } | null;
+
+/** A stand-in for the check's one model call: streams a Bash call and its result per listed command, as stream-json has them. */
+function checkRunner(answer: (command: string) => Answer, seen?: (req: RunRequest) => void): AgentRunner {
+  return {
+    run: async (req) => {
+      seen?.(req);
+      const listed = req.prompt.split('\n').filter((l) => /^\d+\. /.test(l)).map((l) => l.replace(/^\d+\. /, ''));
+      listed.forEach((c, i) => {
+        const a = answer(c);
+        if (!a) return;
+        req.onStreamLine?.({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${i}`, name: 'Bash', input: { command: a.command } }] } });
+        req.onStreamLine?.({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `c${i}`, content: a.output, is_error: a.is_error }] } });
+      });
+      return { reason: 'succeeded', detail: 'done', costUsd: 0.02, turns: 3, model: req.model };
+    },
+  };
+}
+
+const failsAsListed = (c: string): Answer => ({ command: c, output: 'Permission denied', is_error: true });
+
+test('the sandbox confirmation never touches ~/.claude.json: its sentinel goes under ~/.claude/, or there is none', posix, async () => {
+  for (const withClaudeDir of [true, false]) {
+    const { home, o } = checkLane(withClaudeDir);
+    const claudeJson = join(home, '.claude.json');
+    let during: boolean | undefined;
+    let prompt = '';
+    const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(failsAsListed, (req) => ((during = existsSync(claudeJson)), (prompt = req.prompt))) });
+    assert.equal(during, false, `~/.claude.json never exists while the model runs (~/.claude ${withClaudeDir ? 'there' : 'missing'})`);
+    assert.equal(existsSync(claudeJson), false, 'nor after');
+    assert.ok(!prompt.includes(`'${claudeJson}'`), '~/.claude.json itself is never put to the model');
+    if (withClaudeDir) {
+      assert.ok(prompt.includes(join(home, '.claude', '.bench-sentinel-')), 'its sentinel sits under ~/.claude/');
+      assert.deepEqual(readdirSync(join(home, '.claude')), [], 'and is removed');
+      assert.equal(r.status, 'all refused');
+    } else {
+      assert.deepEqual(r.skipped.map((s) => s.path), [claudeJson], 'no ~/.claude folder: no sentinel for it at all');
+      assert.equal(existsSync(join(home, '.claude')), false);
+    }
+  }
+});
+
+test('the sandbox confirmation: refused only when the exact command failed; a command naming a target that exits 0 refuses the run', posix, async () => {
+  const run = async (answer: (c: string) => Answer) => {
+    const { home, o } = checkLane();
+    return confirmSandbox({ ...o, cwd: home, runner: checkRunner(answer) });
+  };
+  assert.equal((await run(failsAsListed)).status, 'all refused', 'every listed command, exactly, failing');
+  // The read or the connect worked, its output hidden or reshaped: each exits 0, so each is a leak.
+  const altered: [string, (c: string) => string | null, string][] = [
+    ["cat '<s>' > /dev/null && echo", (c) => (c.startsWith('cat ') ? `${c} > /dev/null && echo read-ok-but-hidden` : null), 'read-ok-but-hidden'],
+    ["wc -c '<s>'", (c) => (c.startsWith('cat ') ? c.replace(/^cat /, 'wc -c ') : null), '48 sentinel'],
+    ['curl -o /dev/null', (c) => (c.startsWith('curl ') ? c.replace(' http://', " -o /dev/null -w '%{http_code}' http://") : null), '200'],
+  ];
+  for (const [what, alter, output] of altered) {
+    const r = await run((c) => {
+      const a = alter(c);
+      return a === null ? failsAsListed(c) : { command: a, output, is_error: false };
+    });
+    assert.equal(r.status, 'leaked', what);
+    assert.ok(r.attempts.some((a) => a.result === 'reached'), `${what}: an attempt reached its target`);
+    assert.match(r.detail, /did not fail/, what);
+  }
+  // The exact command, exiting 0 whatever it printed: a leak too.
+  assert.equal((await run((c) => ({ command: c, output: '', is_error: false }))).status, 'leaked', 'the listed command exiting 0');
+  // Failing commands that aren't the ones listed prove nothing either way: model declined.
+  const loose = await run((c) => ({ command: c.replace(/'/g, '"'), output: 'Permission denied', is_error: true }));
+  assert.equal(loose.status, 'model declined');
+  assert.ok(loose.attempts.every((a) => a.result === 'not run'));
+});
+
+test('the sandbox confirmation removes its sentinels on SIGINT and SIGTERM', { skip: process.platform === 'win32' && 'POSIX signals', timeout: 60_000 }, async () => {
+  const { spawn } = await import('node:child_process');
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    const { base, home, input } = checkLane();
+    const script = join(base, 'hang.mjs');
+    writeFileSync(
+      script,
+      [
+        `import { confirmSandbox } from ${JSON.stringify(new URL('../scripts/bench/confirm.js', import.meta.url).href)};`,
+        `import { benchLane } from ${JSON.stringify(new URL('../scripts/bench/agent.js', import.meta.url).href)};`,
+        'const o = JSON.parse(process.argv[2]);',
+        // A model call that never ends: what an interrupted check looks like.
+        "const runner = { run: () => { console.log('asked'); setInterval(() => {}, 1000); return new Promise(() => {}); } };",
+        'await confirmSandbox({ ...o, settings: benchLane(o).settings, runner, cwd: o.home });',
+      ].join('\n') + '\n',
+    );
+    const child = spawn(process.execPath, [script, JSON.stringify(input)], { stdio: ['ignore', 'pipe', 'inherit'] });
+    const ended = new Promise<[number | null, NodeJS.Signals | null]>((r) => child.on('exit', (code, signal) => r([code, signal])));
+    await new Promise<void>((resolve, reject) => {
+      child.stdout!.on('data', (b: Buffer) => String(b).includes('asked') && resolve());
+      void ended.then(([code, signal]) => reject(new Error(`the check ended before its model call: ${code} ${signal}`)));
+    });
+    for (const f of ['.netrc', '.npmrc', '.pypirc']) assert.ok(existsSync(join(home, f)), `${sig}: the ${f} sentinel was in place`);
+    assert.equal(readdirSync(join(home, '.claude')).length, 1, `${sig}: and the one under ~/.claude`);
+    child.kill(sig);
+    const [, signal] = await ended;
+    assert.equal(signal, sig, `${sig}: the signal still ends the process`);
+    for (const f of ['.netrc', '.npmrc', '.pypirc', '.claude.json']) assert.ok(!existsSync(join(home, f)), `${sig}: no ${f} left`);
+    assert.deepEqual(readdirSync(join(home, '.claude')), [], `${sig}: nothing left under ~/.claude`);
+  }
+});
+
+test("acceptance: a task's agents get Edit, Write, MultiEdit and NotebookEdit only in the task's own folder; any other grant refuses the run", posix, async () => {
+  // Through the driver: what claude is given, and what is refused before it starts.
+  const m = machine();
+  const outcomes: string[] = [];
+  const task: RunTask = async (ctx) => {
+    for (const allowedTools of [['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'], ['Read', 'Edit(//home/**)']]) {
+      try {
+        outcomes.push((await ctx.runner.run({ ...runReq(ctx.workDir, ctx.signal), allowedTools })).reason);
+      } catch (e) {
+        outcomes.push((e as Error).message);
+      }
+    }
+    return { decision: 'hold', heads: [] };
+  };
+  await runBench(m.opts(task, { tasks: [{ key: 't01', row: ROW, image: 'swebench/example:latest' }] }));
+  const workDir = join(m.layout.runs, 'r1', 't01');
+  const runs = m.calls('run');
+  assert.equal(runs.length, 1, 'the run with an outside grant never started');
+  const args = runs[0]!.args;
+  assert.ok(args.includes(`Edit(/${workDir}/**)`), `scoped to the task's folder: ${args.join(' ')}`);
+  for (const bare of ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']) assert.ok(!args.includes(bare), `no bare ${bare}`);
+  assert.equal(outcomes[0], 'succeeded');
+  assert.match(outcomes[1] ?? '', /Edit\(\/\/home\/\*\*\).*file-writing tools run outside the sandbox/);
+  // The meter itself, on fixtures: what passes and what is refused.
+  const seen: string[][] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push(req.allowedTools), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const wd = '/srv/bench/runs/r1/t01';
+  const t = new UsageMeter(inner, 40).task(15, wd);
+  await t.run({ ...runReq(wd), allowedTools: [`Edit(/${wd}/repo/**)`, `Edit(/${wd})`, 'Bash(git status)'] });
+  assert.deepEqual(seen[0], [`Edit(/${wd}/repo/**)`, `Edit(/${wd})`, 'Bash(git status)']);
+  for (const bad of ['Edit(//home/u/**)', 'Edit(~/.profile)', 'Edit(src/**)', `Edit(/${wd}/../t02/**)`, `Edit(/${wd}x/**)`, `Edit(/${wd}/*.py)`, `Write(/${wd}/**)`, 'Read,Edit', 'Read Write', 'Edit(//**)', 'Edit(*)', 'edit']) {
+    await assert.rejects(t.run({ ...runReq(wd), allowedTools: ['Read', bad] }), /file-writing tools run outside the sandbox/, bad);
+  }
+  assert.equal(seen.length, 1, 'no refused run started');
 });
