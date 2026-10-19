@@ -16,6 +16,8 @@ import { approveMerge } from '../src/decide.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { CONFIG_PATH, type CheckRunAt, type MainWatchApi, type MergedPull } from '../src/main-watch.js';
 import { mergeMessage } from '../src/merge-policy-train.js';
+import { ReviewConfig } from '../src/config/schema.js';
+import { computeLevel, SELF_MODIFICATION, selfModificationPart } from '../src/review.js';
 import { agents, coordinator, fixture, git, passing, skip } from './repro-state-graph/harness.js';
 
 type C = { watchPrs(): Promise<void>; watchMain(): Promise<void> };
@@ -525,9 +527,62 @@ for (const path of ['approved', 'auto'] as const) {
       { passes: Array(10).fill('ok'), bMergedOnPass: 1, aMerged: false, tries: 3, settled: true },
     );
     assert.equal(w.of('coordinator.error').filter((e) => e.where === `merge #${a.number}` && /403/.test(String(e.message))).length, 3, 'each unanswered call is recorded');
-    if (path === 'approved') assert.match(String(w.forPr('merge.failed', a.number).at(-1)!.why), /approved by @example-owner, but merging failed 3 times at this head/);
+    if (path === 'approved') assert.match(String(w.forPr('merge.failed', a.number).at(-1)!.why), /approved by @example-owner, but 3 merge tries at this head failed/);
   });
 }
+
+test('on the approved path, holds never use up the approval: held once (GitHub: blocked), then two merge calls with no answer, it is still tried a third time and merges', { skip }, async () => {
+  const w = world({ autoMerge: false });
+  const a = await w.pr('omicron');
+  const c = w.start();
+  await w.pass(c); // auto-merge off: the policy leaves it to the owner
+  const r = approveMerge(w.f.log, { issue: a.issue, number: a.number, head: a.head, who: { login: 'example-owner', role: 'owner', via: 'discord' }, instance: 'alice', repo: w.f.cfg.project.project.repo });
+  assert.ok(r.ok);
+  w.f.backlog.setPr(a.number, { mergeableState: 'blocked' });
+  await w.pass(c); // a hold: GitHub can't merge it cleanly
+  w.f.backlog.setPr(a.number, { mergeableState: 'clean' });
+  const real = w.f.backlog.mergePr.bind(w.f.backlog);
+  let calls = 0;
+  w.f.backlog.mergePr = async (n, sha, title, body) => {
+    calls++;
+    if (calls <= 2) throw new Error('socket hang up');
+    return real(n, sha, title, body);
+  };
+  for (let i = 0; i < 5; i++) await w.pass(c);
+  assert.deepEqual(
+    {
+      holds: w.forPr('merge.failed', a.number).filter((x) => /can't merge it cleanly/.test(String(x.why))).length,
+      calls,
+      merged: w.merged(a.number),
+      trail: w.trail(a.number),
+    },
+    {
+      holds: 1,
+      calls: 3, // the hold didn't count: a third try
+      merged: true,
+      trail: ['merge.failed', 'merge.attempted', 'merge.failed', 'merge.attempted', 'merge.failed', 'merge.attempted', 'merge.done'],
+    },
+  );
+});
+
+test('a failed lookup of the App\'s bot user is recorded once: merge reconciliation is off until a restart', { skip }, async () => {
+  const w = world();
+  await w.pr('pi');
+  const c = coordinator(w.f, agents(), { prPollMs: 0, autoMerge: () => false, mainWatch: { api: {} as never, engineBot: null, engineBotError: 'GitHub 401 reading App 7' } } as never) as unknown as C;
+  await w.pass(c);
+  await w.pass(c);
+  assert.deepEqual(
+    w.of('coordinator.error').filter((e) => e.where === 'merge reconciliation').map((e) => e.message),
+    ["off until a restart: the App's bot user could not be read (GitHub 401 reading App 7)"],
+  );
+});
+
+test('the merge reconciliation\'s tests are locked: a PR that changes only test/merge-idempotent.test.ts is self-modification, L3, never a tests-only L0', () => {
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
+  const path = 'test/merge-idempotent.test.ts';
+  const r = computeLevel({ files: [{ path, added: 1, removed: 40 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+  assert.deepEqual([r.level, r.categories[SELF_MODIFICATION], selfModificationPart(path)], ['L3', [path], 'the tests of the harness controls']);
+});
 
 /** A batch that tested PR `p` on main as it is and passed, its full check posted (as the PR batcher records it). */
 function greenBatch(w: ReturnType<typeof world>, p: { issue: number; number: number; head: string }) {

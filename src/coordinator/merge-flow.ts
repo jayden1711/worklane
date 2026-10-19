@@ -39,7 +39,7 @@ import { FixForward } from './fix-forward.js';
 import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
-import { ATTEMPT_EVENTS, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
+import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -244,6 +244,19 @@ export abstract class MergeFlow extends FixRuns {
     return [...open.values()];
   }
 
+  private reconcileOffNoted = false;
+
+  /**
+   * #733: the App's bot user couldn't be read at start, so no merge whose record a crash cut off is taken for the
+   * engine's until a restart reads it (such a merge stays unaccounted). Recorded once per start, where the owner sees it.
+   */
+  private noteReconcileOff() {
+    const why = this.d.mainWatch?.engineBotError;
+    if (!why || this.reconcileOffNoted) return;
+    this.reconcileOffNoted = true;
+    this.emit('coordinator.error', { instance: this.d.instance, where: 'merge reconciliation', kind: 'error', message: `off until a restart: the App's bot user could not be read (${why})`.slice(0, 500) });
+  }
+
   /**
    * Each watched PR, at most once per poll interval and a few per tick: read its head and the checks on it,
    * record changes, and mark it ready (out of draft, labelled merge-ready) once every required check passed
@@ -251,6 +264,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected async watchPrs() {
     const now = Date.now();
+    this.noteReconcileOff();
     this.mergePass.start();
     const interval = this.d.prPollMs ?? 60_000;
     // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
@@ -688,10 +702,9 @@ export abstract class MergeFlow extends FixRuns {
     if (this.emergencyInForce()) return;
     const stopped = this.autoMergeStopped();
     if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
-    // As the auto path's "merging failed 3 times" (mergeOrWait): no more tries at this head; it waits for the owner. The
-    // reason names the third failure, so it is recorded once, however many passes follow.
-    const failures = this.d.log.read(0, ['merge.failed']).map((e) => e.payload as EventPayload<'merge.failed'>).filter((p) => p.number === number && p.head === pr.headSha);
-    if (failures.length >= 3) return hold(`approved by @${by}, but merging failed 3 times at this head, so it isn't tried again: ${failures[2]!.why}`.slice(0, 500));
+    // After 3 failed merge tries at this head (failedTries: merge calls that failed, never these holds, so a hold can't use
+    // up an owner's approval), no more tries; it waits for the owner. One fixed reason: recorded once, however many passes.
+    if (failedTries(this.d.log.read(0, [...ATTEMPT_EVENTS]), number, pr.headSha) >= 3) return hold(`approved by @${by}, but 3 merge tries at this head failed, so it isn't tried again`);
     if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
     if (this.mergeDeferred(number, pr.headSha)) return;
     if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `approved by @${by}, but GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);

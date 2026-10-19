@@ -39,6 +39,26 @@ export function openAttempt(events: readonly StoredEvent[], number: number): Ope
   return open;
 }
 
+/**
+ * How many of PR `number`'s merge tries at `head` failed: each `merge.attempted` whose outcome was a `merge.failed`
+ * (the call refused, or found still open on the next look). A `merge.failed` with no attempt open before it (a hold:
+ * not mergeable cleanly, auto-merge stopped, the combined gate) is not a try, and never counts.
+ */
+export function failedTries(events: readonly StoredEvent[], number: number, head: string): number {
+  let open = false;
+  let failed = 0;
+  for (const e of events) {
+    const p = e.payload as { number?: number; head?: string };
+    if (p.number !== number) continue;
+    if (e.type === 'merge.attempted') open = p.head === head;
+    else if (e.type === 'merge.failed') {
+      if (open && p.head === head) failed++;
+      open = false;
+    } else if (e.type === 'merge.done' || e.type === 'merge.deferred') open = false;
+  }
+  return failed;
+}
+
 /** A commit as git reads it: its parents, and its whole message. */
 export interface CommitFacts {
   parents: string[];
