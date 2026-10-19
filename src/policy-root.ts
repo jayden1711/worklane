@@ -286,7 +286,7 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     return { key, from: null, to: false };
   }
   // auto_merge on: the kill switches there now, before anything waits (root's lock included), are the only ones it may
-  // clear; an OFF that says done any time after this has a switch of its own, which stays.
+  // clear; an OFF that starts any time after this leaves a switch of its own name, which stays.
   const seen = key === 'auto_merge' && value === true ? armedSwitches(instance, markers) : [];
   const { dir, file, coordUid } = instancePolicy(instance, d);
   if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);

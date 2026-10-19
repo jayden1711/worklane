@@ -2,8 +2,11 @@
 // never be blocked or undone): root's kill switch for one instance, in root's record directory (/etc/<cli>/policy-root).
 //
 //   - A switch is any file whose name starts with `<instance>.auto-merge-off`: each OFF leaves one under a new name of
-//     its own, `<instance>.auto-merge-off.<id>` (moving an armed one there, or the spare, by rename; so repeated OFFs
-//     never add files). The engine checks for any BEFORE it reads the policy (autoMergeKilled): while
+//     its own, `<instance>.auto-merge-off.<id>`, moving an armed one there, or the spare, by rename. OFFs one after
+//     another, or many at once, add no files and report no failure while a switch is armed (armOne); only an OFF
+//     that finds no switch and no spare at all writes one. While a rename is in progress, an OFF given to the old name
+//     arms the new name's too (`<old>.rename-to`, which instance-rename.sh writes first and removes last). The engine
+//     checks for any BEFORE it reads the policy (autoMergeKilled): while
 //     one is there, auto_merge is off, whatever policy.yaml says. Any error reading the directory but "no such
 //     directory" counts as off.
 //   - Turning auto_merge off never takes root's policy lock and never reads or parses policy.yaml, and needs no new
@@ -19,7 +22,7 @@
 //
 // INVARIANT: this module imports nothing that reads policy.yaml or takes root's lock (test/policy-edit.test.ts holds
 // its imports to node's own modules and the pure ones below).
-import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import { etcPath } from './os/system-paths.js';
@@ -89,8 +92,29 @@ function fsyncPath(p: string): void {
   }
 }
 
+/** How old a temp file of ours is before it counts as a root writer's that crashed between writing and renaming it. */
+const TEMP_STALE_MS = 60_000;
+/** Temp files a root writer killed before its rename left behind (`.<hex>.auto-merge.tmp`): gone on the next write. */
+function sweepTemps(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!/^\.[0-9a-f]{12}\.auto-merge\.tmp$/.test(n)) continue;
+    try {
+      if (Date.now() - statSync(join(dir, n)).mtimeMs > TEMP_STALE_MS) unlinkSync(join(dir, n));
+    } catch {
+      // gone already
+    }
+  }
+}
+
 /** A new file in `dir`, 0644: a temp file renamed to `to`. */
 function writeNew(dir: string, to: string, text: string): void {
+  sweepTemps(dir);
   const tmp = join(dir, `.${randomBytes(6).toString('hex')}.auto-merge.tmp`);
   writeFileSync(tmp, text, { mode: 0o644, flag: 'wx' });
   chmodSync(tmp, 0o644);
@@ -101,6 +125,7 @@ function writeNew(dir: string, to: string, text: string): void {
 export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR): void {
   if (!fileName(instance)) return;
   recordDir(dir);
+  sweepTemps(dir);
   try {
     lstatSync(spareSwitchPath(instance, dir));
     return; // there already
@@ -115,40 +140,96 @@ export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR): void {
   }
 }
 
+/** Where a rename in progress forwards an instance's auto_merge off (instance-rename.sh writes it first, removes it last). */
+export const renameForwardPath = (instance: string, dir = POLICY_ROOT_DIR) => join(dir, `${instance}.rename-to`);
+
+/** The new name a rename of `instance` in progress forwards its OFF to, or null (read only: no lock, no parse). */
+function renamedTo(instance: string, dir: string): string | null {
+  try {
+    const to = readFileSync(renameForwardPath(instance, dir), 'utf8').trim();
+    return /^[a-z][a-z0-9-]{0,40}$/.test(to) && to !== instance ? to : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Turn this instance's auto_merge off (as root): arm a switch of its own, by renaming the disarmed spare (no new space)
- * or, with none, writing one; fsync it and the directory; then, if space allows, a new spare for the next OFF. No
- * lock, no policy.yaml: nothing else can hold this up. Returns the switch's path.
+ * Arm one instance's switch under a new name of its own, and say when that is done. THREAT (#726 round 5): many OFFs
+ * at once (the helper takes no lock, so a coordinator user can run it in parallel) must neither add files nor report a
+ * failure while auto_merge is off. So:
+ *   - it moves a switch armed there (one picked at random, so racing OFFs spread out), else the disarmed spare, by
+ *     rename: no new space, and a switch stays visible throughout;
+ *   - losing a rename race to another OFF is done: when the name it moved has gone and a name it hadn't seen has
+ *     appeared, a later OFF armed that one after this OFF began, so no `set on` that listed before this OFF can clear
+ *     it (only an ON's clear makes names go without new ones coming);
+ *   - it writes a new file only when there is no switch and no spare at all.
  */
-export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): string {
-  if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
-  recordDir(dir);
+function armOne(instance: string, dir: string, at: Date): void {
   const to = `${killSwitchPath(instance, dir)}.${at.getTime()}-${process.pid}-${randomBytes(4).toString('hex')}`;
-  // An armed switch there already is moved to the new name (a switch stays visible throughout, and a `set on` that saw
-  // it under its old name can no longer clear it); else the disarmed spare; else a new file. Renames need no new
-  // space, and repeated OFFs never add files (THREAT: a coordinator looping set-policy auto_merge off would fill
-  // root's filesystem with switches).
-  let armedIt = false;
-  for (let i = 0; i < 4 && !armedIt; i++) {
-    const now = armed(instance, dir);
-    const from = now && now.length ? join(dir, now[0]!) : spareSwitchPath(instance, dir);
+  const spare = spareSwitchPath(instance, dir);
+  let seen = armed(instance, dir) ?? [];
+  let mine = false;
+  for (let i = 0; i < 64; i++) {
+    const from = seen.length ? join(dir, seen[Math.floor(Math.random() * seen.length)]!) : spare;
     try {
       renameSync(from, to);
-      armedIt = true;
+      mine = true;
+      break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      if (from === spareSwitchPath(instance, dir)) break; // no switch and no spare
+    }
+    const now = armed(instance, dir) ?? [];
+    if (now.some((n) => !seen.includes(n))) return fsyncPath(dir); // a later OFF's switch: done
+    if (!now.length && from === spare) break; // no switch, no spare
+    seen = now;
+  }
+  if (!mine) {
+    const now = armed(instance, dir) ?? [];
+    if (now.some((n) => !seen.includes(n))) return fsyncPath(dir);
+    writeNew(dir, to, `auto_merge off since ${at.toISOString()}\n`);
+  }
+  try {
+    fsyncPath(to);
+  } catch (e) {
+    // A later OFF moved it on already (its own name, armed after this one): done all the same.
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  fsyncPath(dir);
+}
+
+/**
+ * Turn this instance's auto_merge off (as root): arm a switch of its own name (armOne: by rename, no new space; a new
+ * file only with no switch and no spare at all); fsync it and the directory; then, if space allows, a new spare for
+ * the next OFF. While a rename of the instance is in progress (renamedTo), the new name's switch is armed too, the
+ * same way, before OFF says done: an OFF given to the old name at any step reaches the instance that runs. No lock,
+ * no policy.yaml: nothing else can hold this up.
+ */
+export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): void {
+  if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
+  recordDir(dir);
+  const forward = renamedTo(instance, dir);
+  if (forward) {
+    // The new name first: it is the one that runs (or will). The old name's coordinator is parked from the rename's
+    // first step, and its switches may be gone already (its removal takes them before its user), so its own switch
+    // is armed where it can be; an --abort carries the new name's back to it (instance-rename.sh).
+    try {
+      armOne(forward, dir, at);
+    } catch (e) {
+      throw new Error(`${instance} is being renamed to ${forward}, and ${forward}'s auto_merge switch couldn't be armed (${(e as Error).message}): run \`policy set ${forward} auto_merge off\` as root`);
+    }
+    try {
+      armOne(instance, dir, at);
+    } catch {
+      // the new name is off; the old one is parked
+    }
+  } else armOne(instance, dir, at);
+  for (const n of forward ? [instance, forward] : [instance]) {
+    try {
+      ensureSpare(n, dir);
+    } catch {
+      // no space for the next spare: the next OFF moves the armed switch, which needs none
     }
   }
-  if (!armedIt) writeNew(dir, to, `auto_merge off since ${at.toISOString()}\n`);
-  fsyncPath(to);
-  fsyncPath(dir);
-  try {
-    ensureSpare(instance, dir);
-  } catch {
-    // no space for the next spare: the next OFF writes its own switch, or names why it can't
-  }
-  return to;
 }
 
 /**

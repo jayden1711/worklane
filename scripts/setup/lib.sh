@@ -585,9 +585,22 @@ auto_merge_killed() {
   done
   return 1
 }
-# Every kill switch of instance $1 copied to instance $2 (a rename): an OFF given to the old name is the new name's too.
-# instance-rename.sh runs it at its home step, again right before the new name's service starts, and again right before
-# the old name's records go, so an OFF given to the old name at any point of the rename is carried.
+# Every kill switch of instance $1 copied to instance $2 (a rename): an OFF given to the old name before the rename began
+# is the new name's too. instance-rename.sh runs it at its home step, again right before the new name's service starts,
+# and again right before the old name's removal. An OFF given to the old name while the rename runs reaches the new name
+# through rename_forward instead (src/policy-kill.ts arms both). (Through 10ca8a1d this comment claimed the carries alone
+# covered any point of the rename; an OFF during step keep, or inside the old name's removal, wasn't carried.)
+# While a rename of $1 to $2 runs, root's forward record: an auto_merge off given to $1 arms $2's switch too, from $2's
+# spare (made here, so that OFF needs no new space). Written before the rename's first step; removed by
+# rename_forward_done once the old name's removal is done (its user, which OFF checks, goes last), or on --abort.
+rename_forward() {
+  mkdir -p "$POLICY_ROOT_DIR" && chmod 0755 "$POLICY_ROOT_DIR"
+  [ -e "$POLICY_ROOT_DIR/$2.auto-merge-spare" ] || install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-spare"
+  printf '%s\n' "$2" > "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
+  chmod 0644 "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
+  mv -f "$POLICY_ROOT_DIR/.$1.rename-to.tmp" "$POLICY_ROOT_DIR/$1.rename-to"
+}
+rename_forward_done() { rm -f "$POLICY_ROOT_DIR/$1.rename-to"; }
 carry_auto_merge_off() {
   local f
   for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
