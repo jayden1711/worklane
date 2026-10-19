@@ -697,43 +697,59 @@ const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
   // readlink by its path (no function or PATH entry can stand in for it); none at all: refused, never nothing hidden.
   `rl=/usr/bin/readlink; [ -x "$rl" ] || rl=/bin/readlink; [ -x "$rl" ] || { printf '%s\\n' "project command not run: no readlink to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
-  'b=$1 h=$2; shift 2; hide=(); dirs=(); declare -A seen=(); maxd=0',
+  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=(); maxd=0; bad=()',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
   // Each hidden path is resolved here, one component and one symlink at a time, so every symlink met at any hop
   // (also one reached through another) is checked. One this user could change, or swap by renaming a directory, would
   // let one command unmask the credential for the next. So a symlink is followed only when this user neither owns
   // nor can write its directory, and every directory above it is then bound onto itself (it can't be renamed). Any
-  // other symlink, or a chain over 40 links, is refused, as a missing sandbox is.
-  `refuse() { printf '%s\\n' "project command not run: $1 is a symlink the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next; replace it with the directory it points to (or name the real path in credentials.yaml)" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
+  // other symlink, or a chain over 40 links, is refused, as a missing sandbox is. Every refusal is collected first,
+  // so one message names every path to fix.
+  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); bad+=("project command not run: $1 is a symlink (to \${t:-?}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"); }`,
+  `unres() { bad+=("project command not run: $1 $2; name the credential's real path in credentials.yaml"); }`,
+  // A path is absent (nothing to hide) only when a component really isn't there, or sits in a directory this user
+  // neither can search nor owns (the coordinator's: it can't reach it by that name at all). Any other failure to look
+  // is refused: a name too long to check, or a directory this user owns but made unsearchable (it could chmod it
+  // back after the masks were set).
   'walk() { local todo=${1#/} cur= c d t n=0',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
   // A `..` (only from a root-made link's target: projectCommand refuses one in a hide path) leaves a directory: bound
   // onto itself first, so no command can remove or rename it to make the path resolve elsewhere for the next.
   '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; continue ;; esac',
+  `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
   '    if [ -L "$cur/$c" ]; then',
-  '      n=$((n + 1)); [ "$n" -le 40 ] || refuse "$cur/$c"',
-  '      d=${cur:-/}; if [ -O "$d" ] || [ -w "$d/" ]; then refuse "$cur/$c"; fi',
-  '      above "$cur/$c"; t=$("$rl" -- "$cur/$c") || refuse "$cur/$c"',
+  '      n=$((n + 1)); [ "$n" -le 40 ] || { refuse "$cur/$c"; return 2; }',
+  '      d=${cur:-/}; if [ -O "$d" ] || [ -w "$d/" ]; then refuse "$cur/$c"; return 2; fi',
+  '      above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
   '      case $t in /*) cur= ;; esac; todo=${t#/}${todo:+/$todo}',
-  '    else cur=$cur/$c; fi',
+  '    elif [ -e "$cur/$c" ]; then cur=$cur/$c',
+  '    else d=${cur:-/}',
+  `      if [ -d "$d" ] && [ ! -x "$d" ] && [ -O "$d" ]; then unres "$1" "goes through $d, which the agent user owns but can't search (it could make it searchable again)"; return 2; fi`,
+  '      return 1; fi',
   '  done; R=${cur:-/}; }',
-  // A path that exists but resolves to nothing here (a /proc/self link resolves per process) or into /proc, /sys or
-  // /dev would hide nothing: refused, never skipped.
-  `unres() { printf '%s\\n' "project command not run: $1 doesn't resolve to a file its sandbox can hide; name the credential's real path in credentials.yaml" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
-  'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" ;; esac; [ -e "$1" ] || [ -L "$1" ] || return 0; walk "$1"; r=$R',
-  '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" ;; esac; [ -e "$r" ] || unres "$1"',
-  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); above "$r"; elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); above "$r"; fi; }',
+  'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "is under /proc, /sys or /dev"; return ;; esac',
+  '  walk "$1"; case $? in 1|2) return ;; esac; r=$R',
+  '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "resolves under /proc, /sys or /dev"; return ;; esac',
+  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); above "$r"; elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); above "$r"; else unres "$1" "does not resolve to a file its sandbox can hide"; fi; }',
   'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
+  `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
   `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
 
-/** An absolute path in normal form, and not `/` itself: what a project command's sandbox may be asked to hide. */
-export const normalAbsolute = (p: string): boolean => p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/');
+/**
+ * An absolute path in normal form, and not `/` itself: what a project command's sandbox may hide, and what a configured
+ * path (credentials.yaml, instance.yaml run_as) must be. No `..`, `//`, `/./` or trailing `/`; no NUL or newline; under
+ * PATH_MAX (4096 bytes) with no component over NAME_MAX (255 bytes), so a check of it can't fail with "name too long"
+ * and be taken for "absent". Such a path is refused, never rewritten.
+ */
+export const normalAbsolute = (p: string): boolean =>
+  p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/') && !/[\0\n]/.test(p) && Buffer.byteLength(p) < 4096 && p.split('/').every((c) => Buffer.byteLength(c) <= 255);
+export const NOT_NORMAL_ABSOLUTE = 'must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
 
 /** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
 export function seatbeltProfile(home: string, hide: readonly string[]): string {
@@ -761,10 +777,12 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   // Normal form only (absolute, no //, /./, .. or trailing /), so the wrapper's checks on a path's text (/proc, /sys,
   // /dev) and its walk see the path the kernel would; anything else is refused, never dropped or rewritten.
   const bad = runAs.hide.find((p) => !normalAbsolute(p));
-  if (bad !== undefined) throw new Error(`a project command's hidden path must be an absolute path in normal form (no //, /./, .. or trailing /): ${JSON.stringify(bad)}; refusing to run it`);
+  if (bad !== undefined) throw new Error(`a project command's hidden path ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(bad)}; refusing to run it`);
   const hide = [...runAs.hide];
-  if (!runAs.home.startsWith('/')) throw new Error(`the agent user's home must be an absolute path: ${runAs.home}`);
-  const home = posixPath.normalize(runAs.home).replace(/(.)\/$/, '$1');
+  // The home too: refused, never rewritten. A lexical rewrite of `..` after a symlink names a directory the kernel
+  // never reaches, and the masks would miss the real one (#787 round 6).
+  if (!normalAbsolute(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
+  const home = runAs.home;
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
     ...own,
@@ -794,7 +812,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     .filter((e): e is [string, string] => typeof e[1] === 'string')
     .map(([k, v]) => `${k}=${v}`);
   const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
-  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, ...hide, '--', ...inner], {});
+  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, runAs.user, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 

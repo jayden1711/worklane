@@ -251,7 +251,75 @@ test('credentials.yaml refuses a relative path: the sandbox hides each by its ab
 test('credentials.yaml refuses a path with `..`: resolved lexically, it could name a different file than the kernel reaches', () => {
   const r = instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/srv/i/gh' }, agent_api_key: '/opt/link/../key' });
   assert.equal(r.success, false);
-  assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['agent_api_key', "must not contain '..': name the credential's real path"]]);
+  assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['agent_api_key', `${osAdapter.NOT_NORMAL_ABSOLUTE}: name the real path`]]);
+});
+
+test('instance.yaml run_as paths are held to the same rule: absolute, in normal form, refused at load and never rewritten', () => {
+  const base = { version: 1, name: 'shop', repos: [{ path: '/srv/shop/repo', repo: 'acme/shop' }] };
+  const runAs = (extra: Record<string, string>) => instance.InstanceFile.safeParse({ ...base, run_as: { agent_user: 'shop-agent', agent_home: '/srv/agents/shop', ...extra } });
+  assert.equal(runAs({}).success, true);
+  for (const [key, value] of [
+    ['agent_home', '/srv/link/../agent'],
+    ['agent_home', '/srv/agents/shop/'],
+    ['agent_home', 'agents/shop'],
+    ['claude_config_dir', '/srv/link/../claude'],
+    ['claude_config_dir', 'rel/claude'],
+    ['claude_config_dir', '//srv/claude'],
+    ['eval_home', '/srv/./eval'],
+    ['eval_home', '/srv/a\nb'],
+  ] as const) {
+    const r = runAs({ [key]: value, ...(key === 'eval_home' ? { eval_user: 'shop-eval' } : {}) });
+    assert.equal(r.success, false, `${key}: ${JSON.stringify(value)} was accepted`);
+    assert.deepEqual(r.error!.issues.map((i) => i.path.join('.')), [`run_as.${key}`], JSON.stringify(value));
+  }
+});
+
+test('an agent home with `..` after a symlink is refused, never rewritten: the masks would miss the home the kernel reaches', { skip: realSkip }, () => {
+  // The reviewer's round-6 H: <root>/link -> <root>/deep/x, so <root>/link/../agent is <root>/deep/agent to the kernel.
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-home-'));
+  mkdirSync(join(root, 'deep', 'x'), { recursive: true });
+  symlinkSync(join(root, 'deep', 'x'), join(root, 'link'));
+  const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(root, 'deep', 'agent', '.claude'), { recursive: true });
+  writeFileSync(join(root, 'deep', 'agent', '.claude', '.credentials.json'), `${value}\n`, { mode: 0o600 });
+  // `cat` by the home the kernel reaches, as `claude` itself would: masked only if the masks were set there.
+  const r = refusedOrRun(`cat ~/.claude/.credentials.json ${root}/deep/agent/.claude/.credentials.json 2>&1; echo "HOME=$HOME"`, { user: 'shop-agent', home: `${root}/link/../agent`, hide: [] }, root);
+  assert.ok(!r.out.includes(value), `the login was read: ${r.out}`);
+  assert.ok(r.refused, `not refused: ${r.out}`);
+});
+
+test('a hide path in a directory the agent owns but made unsearchable is refused, never taken for absent', { skip: realSkip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-acc-'));
+  const home = join(root, 'agent');
+  const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(home, 'keys'), { recursive: true });
+  writeFileSync(join(home, 'keys', 'open'), `${value}\n`, { mode: 0o600 });
+  const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'open')] };
+  // One command makes the directory unsearchable (it owns it; the mask can't stop a chmod), the next would find the
+  // path "absent", get no mask, make it searchable again and read the key.
+  asStandIn(`chmod 000 ${join(home, 'keys')}`, runAs, root);
+  const next = asStandIn(`chmod 700 ${join(home, 'keys')}; cat ${join(home, 'keys', 'open')} 2>&1; true`, runAs, root);
+  chmodSync(join(home, 'keys'), 0o700);
+  assert.ok(!next.stdout.includes(value), `the key was read: ${next.stdout}`);
+  assert.equal(next.status, osAdapter.SANDBOX_UNAVAILABLE, next.stderr);
+  assert.match(next.stderr, /owns but can't search/);
+});
+
+test('a refusal names every symlink to fix, where each points, and how to remove it as the agent user', { skip: realSkip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-r8-'));
+  const home = join(root, 'agent');
+  mkdirSync(join(home, '.config'), { recursive: true });
+  // The reviewer's R8: two links one command planted.
+  symlinkSync('/', join(home, '.claude-x'));
+  symlinkSync('/etc', join(home, '.config', 'z-claude-key'));
+  const r = asStandIn('echo ran', { user: 'shop-agent', home, hide: [] }, root);
+  assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE);
+  assert.equal(r.stdout, '');
+  for (const [link, target] of [[join(home, '.claude-x'), '/'], [join(home, '.config', 'z-claude-key'), '/etc']] as const) {
+    assert.ok(r.stderr.includes(`${link} is a symlink (to ${target})`), `${link} not named: ${r.stderr}`);
+    assert.ok(r.stderr.includes(`sudo -u shop-agent rm -- ${link}`) || r.stderr.includes(`sudo -u shop-agent rm -- '${link}'`), r.stderr);
+  }
+  assert.doesNotMatch(r.stderr, /replace it with the directory it points to/);
 });
 
 test('the wrapper\'s bash runs no ~/.bashrc a sandboxed command planted, even with a socket on stdin (bash\'s rshd check)', { skip: realSkip }, () => {
@@ -303,7 +371,8 @@ test('a symlink on the way to a hidden path, in a directory the agent can write,
   const r = asStandIn('echo ran > ran.txt', { user: 'shop-agent', home, hide: [] }, root);
   assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, r.stderr);
   assert.ok(!existsSync(join(root, 'ran.txt')), 'nothing of the command ran');
-  assert.match(r.stderr, new RegExp(`${join(home, '.config').replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')} is a symlink the agent user could change.*replace it with the directory it points to`));
+  const esc = (s: string) => s.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&');
+  assert.match(r.stderr, new RegExp(`${esc(join(home, '.config'))} is a symlink \\(to ${esc(join(home, 'realcfg'))}\\) the agent user could change.*remove it as the agent user: sudo -u shop-agent rm -- .*replace it with a real directory the agent may read`));
 });
 
 test('a hide path under /proc (another name for a file, per process) is refused, never skipped as unreadable', { skip: realSkip }, () => {
@@ -345,9 +414,13 @@ test('a hide path not in normal form is refused; a `..` can\'t be emptied by one
   const next = refusedOrRun(`cat ${root}/keys/sub/key 2>&1; true`, runAs, root);
   for (const r of [control, next]) assert.ok(!r.out.includes(value), `the secret was read: ${r.out}`);
   assert.ok(control.refused && next.refused, 'refused, never run with a path the wrapper might resolve differently');
-  for (const p of [`${root}/keys/./sub/key`, `${root}//keys/sub/key`, `${root}/keys/sub/`, '/']) assert.ok(refusedOrRun('true', { ...runAs, hide: [p] }, root).refused, p);
-  // The agent's home is normalized, not refused: an instance.yaml home with a trailing slash runs as before.
-  assert.equal(asStandIn('echo "$HOME"', { user: 'shop-agent', home: `${home}/`, hide: [] }, root).stdout.trim(), home);
+  // Round 7: a path the kernel can't stat in one go ("name too long") was taken for absent: PATH_MAX and NAME_MAX.
+  const long = `${root}/${Array(25).fill('a'.repeat(200)).join('/')}/key`;
+  for (const p of [`${root}/keys/./sub/key`, `${root}//keys/sub/key`, `${root}/keys/sub/`, '/', long, `${root}/${'b'.repeat(256)}`, `${root}/keys/a\nb`]) {
+    assert.ok(refusedOrRun('true', { ...runAs, hide: [p] }, root).refused, p.slice(0, 120));
+  }
+  // The agent's home too (round 7): refused, never rewritten. A trailing slash included.
+  for (const h of [`${home}/`, `${home}/../agent`, `${root}//agent`]) assert.ok(refusedOrRun('echo "$HOME"', { user: 'shop-agent', home: h, hide: [] }, root).refused, h);
 });
 
 // The reviewer's round-4 layouts (#787): a symlink the agent could still change by another route. Each is followed and
@@ -389,7 +462,7 @@ for (const [what, build] of swaps) {
     const next = asStandIn(`cat ${JSON.stringify(s.read)} 2>&1; true`, runAs, root);
     for (const r of [control, next]) assert.ok(!`${r.stdout}${r.stderr}`.includes(value), `the secret was read: ${r.stdout}`);
     assert.equal(control.status, osAdapter.SANDBOX_UNAVAILABLE, 'refused from the first command on');
-    assert.match(control.stderr, /is a symlink the agent user could change/);
+    assert.match(control.stderr, /is a symlink \(to [^)]*\) the agent user could change/);
   });
 }
 

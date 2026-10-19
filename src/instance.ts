@@ -14,7 +14,7 @@ import { BRAND } from './brand.js';
 import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -34,6 +34,16 @@ const name = z.string().superRefine((s, ctx) => {
   if (why) ctx.addIssue({ code: 'custom', message: why });
 });
 
+// A configured path (credentials.yaml, instance.yaml run_as): absolute, and in normal form (normalAbsolute, the same
+// check projectCommand makes), refused at load and never rewritten (#713). A relative one would depend on the
+// coordinator's working directory; a `..` resolved lexically can name a different file than the kernel reaches
+// through a symlink; and a project command's sandbox hides each by this exact path.
+const path = z
+  .string()
+  .min(1)
+  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
+  .refine((p) => !isAbsolute(p) || normalAbsolute(p), { message: `${NOT_NORMAL_ABSOLUTE}: name the real path` });
+
 export const InstanceFile = z.strictObject({
   version: z.literal(1),
   name,
@@ -45,12 +55,12 @@ export const InstanceFile = z.strictObject({
   run_as: z
     .strictObject({
       agent_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name'),
-      agent_home: z.string().min(1),
-      claude_config_dir: z.string().min(1).optional(),
+      agent_home: path,
+      claude_config_dir: path.optional(),
       /** A second unprivileged user for lanes that run as `eval`: the only one able to read the eval key. */
       eval_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name').optional(),
       /** Resolved from the system's user database when left out; required where it can't be. */
-      eval_home: z.string().min(1).optional(),
+      eval_home: path.optional(),
       /**
        * PATH for project commands run as the agent users (tests, checks, setup steps). The instance's owner sets it;
        * a repo's tests.yaml never can. Default: the system directories, plus Homebrew's on macOS.
@@ -174,15 +184,6 @@ export const PolicyFile = z.strictObject({
   pre_approved: z.array(z.string()).optional(),
 });
 
-// Absolute only: a relative one would depend on the coordinator's working directory, and a project command's sandbox
-// (projectCommandHides) hides each by its absolute path (#713).
-// No `..` either: projectCommandHides normalizes lexically (path.resolve), and through a symlink the kernel's `..`
-// can land elsewhere, so the sandbox would hide the wrong file.
-const path = z
-  .string()
-  .min(1)
-  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
-  .refine((p) => !p.split('/').includes('..'), { message: "must not contain '..': name the credential's real path" });
 export const CredentialsFile = z.strictObject({
   version: z.literal(1),
   // A dedicated gh config dir (its own login) or a GitHub App key. Never the operator's personal login.
@@ -314,6 +315,8 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (inst.run_as?.eval_user) {
     const evalHome = inst.run_as.eval_home ?? resolveHome(inst.run_as.eval_user);
     if (!evalHome) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `can't find ${inst.run_as.eval_user}'s home on this machine; set eval_home` }]);
+    // The user database's answer is held to the same rule as a configured home: refused, never rewritten.
+    if (!normalAbsolute(evalHome)) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `${inst.run_as.eval_user}'s home ${JSON.stringify(evalHome)} ${NOT_NORMAL_ABSOLUTE}; set eval_home to its real path` }]);
     evalAs = { user: inst.run_as.eval_user, home: evalHome, path };
   }
   return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs, ...(inst.commit_identity ? { commitIdentity: inst.commit_identity } : {}) };
@@ -508,7 +511,9 @@ export function loadInstanceSetup(instanceName: string, dir = instancesDir()): {
 export function projectCommandHides(instanceHome: string, repoPath: string, c: CredentialsFile, claudeConfigDir?: string): string[] {
   const named = [instanceHome, claudeConfigDir, c.github.kind === 'app' ? c.github.key_path : c.github.path, c.claude?.config_dir, c.eval_key, c.agent_api_key, ...Object.values(c.provider_keys ?? {}), ...Object.values(c.intake ?? {})];
   const holdsRepo = (p: string) => repoPath === p || repoPath.startsWith(p.endsWith('/') ? p : `${p}/`);
-  return [...new Set(named.filter((p): p is string => typeof p === 'string' && isAbsolute(p)).map((p) => resolve(p)))].filter((p) => !holdsRepo(p));
+  // Every one as written (the schemas hold them to normalAbsolute): never dropped or rewritten. projectCommand refuses
+  // one that isn't in normal form (the instance home, which no schema checks, included).
+  return [...new Set(named.filter((p): p is string => typeof p === 'string'))].filter((p) => !holdsRepo(p));
 }
 
 /** How an instance's GitHub App was made, as its setup recorded it (beside the App's key): the manifest flow, or by hand. */
