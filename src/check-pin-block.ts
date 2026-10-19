@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
-import { unrecorded, type CheckPin } from './check-source.js';
+import { isJobOfRun, unrecorded, type CheckPin } from './check-source.js';
 
 /** A check run on the default branch's tip: its name, its App, and the workflow file of its Actions run (or null). */
 export interface TipRun {
@@ -111,8 +111,11 @@ export function pinPlan(o: { names: string[]; workflows: Record<string, string>;
 /** The plan as YAML to paste into config.yaml (valid under ProjectConfig's required_check_sources), comments saying why. */
 export function pinBlock(plan: PinPlan): string {
   const lines = plan.pins.length ? ['required_check_sources:'] : [];
-  for (const p of plan.pins) lines.push(`  ${JSON.stringify(p.name)}: ${'app_id' in p.pin ? `{ app_id: ${p.pin.app_id} }` : `{ workflow: ${JSON.stringify(p.pin.workflow)} }`}  # ${p.evidence}`);
-  for (const m of plan.manual) lines.push(`# needs a manual choice: ${JSON.stringify(m.name)}: ${m.why}`);
+  // WHY: a comment carries file and check names; a line break in one (a workflow file can be named so) would end the
+  // comment and inject YAML, a pin, into the block the owner pastes. Each comment stays one line.
+  const oneLine = (s: string) => s.replace(/[\r\n\x85\p{Zl}\p{Zp}]+/gu, ' ');
+  for (const p of plan.pins) lines.push(`  ${JSON.stringify(p.name)}: ${'app_id' in p.pin ? `{ app_id: ${p.pin.app_id} }` : `{ workflow: ${JSON.stringify(p.pin.workflow)} }`}  # ${oneLine(p.evidence)}`);
+  for (const m of plan.manual) lines.push(`# needs a manual choice: ${JSON.stringify(m.name)}: ${oneLine(m.why)}`);
   return lines.join('\n');
 }
 
@@ -152,12 +155,13 @@ export function ghTipRuns(repo: string, branch: string): { sha: string; runs: Ti
     const cr = api(`repos/${repo}/commits/${encodeURIComponent(branch)}/check-runs?filter=latest&per_page=100`) as { check_runs?: { id: number; name: string; head_sha: string; html_url?: string; app?: { id?: number; slug?: string }; check_suite?: { id?: number } }[] };
     const list = cr.check_runs ?? [];
     const sha = list[0]?.head_sha ?? '';
-    const wr = sha ? (api(`repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`) as { workflow_runs?: { id: number; check_suite_id: number; path: string }[] }) : { workflow_runs: [] };
+    const wr = sha ? (api(`repos/${repo}/actions/runs?head_sha=${sha}&per_page=100`) as { workflow_runs?: { id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string } }[] }) : { workflow_runs: [] };
     const bySuite = new Map((wr.workflow_runs ?? []).map((w) => [w.check_suite_id, w]));
     const runs = list.map((c) => {
       const w = c.app?.slug === 'github-actions' && c.check_suite?.id !== undefined ? bySuite.get(c.check_suite.id) : undefined;
-      const job = w && c.html_url ? new URL(c.html_url).pathname.endsWith(`/actions/runs/${w.id}/job/${c.id}`) : false;
-      return { name: c.name, app: c.app?.id ?? null, workflow: w && job ? w.path : null };
+      // The same test a workflow pin passes (src/check-source.ts): this repo, this commit, one of that run's own jobs.
+      const ok = !!w && w.head_sha === sha && w.repository?.full_name?.toLowerCase() === repo.toLowerCase() && isJobOfRun(c.html_url, c.id, { run: w.id, url: w.html_url });
+      return { name: c.name, app: c.app?.id ?? null, workflow: ok ? w!.path : null };
     });
     return { sha, runs };
   } catch {

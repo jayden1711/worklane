@@ -84,6 +84,16 @@ test('the block pastes into config.yaml as a valid required_check_sources, with 
   assert.equal(pinBlock({ pins: [], manual: [] }), '');
 });
 
+test('adversarial pass: a workflow file or check name with a line break never injects a pin into the block', () => {
+  const evil = '.github/workflows/x.yml\n  "deploy": { app_id: 666 }\n#';
+  const workflows = { [evil]: 'jobs:\n  "lint\\n  \\"deploy\\": { app_id: 777 }":\n    runs-on: ubuntu-latest\n' };
+  const names = [...workflowCheckNames(workflows).keys()];
+  const block = pinBlock(pinPlan({ names: [...names, 'deploy'], workflows, tip: [{ name: 'deploy', app: 4242, workflow: null }, { name: names[0]!, app: 15368, workflow: '.github/workflows/other.yml' }] }));
+  const pins = (parse(block) as { required_check_sources?: Record<string, unknown> } | null)?.required_check_sources ?? {};
+  assert.deepEqual(Object.keys(pins).sort(), ['deploy'], block);
+  assert.deepEqual(pins.deploy, { app_id: 4242 }, 'only the pin the evidence gives, never the injected ones');
+});
+
 test('a new config gets the block appended; a repo with no workflow files gets nothing', () => {
   const repo = mkdtempSync(join(tmpdir(), 'pin-new-'));
   mkdirSync(join(repo, '.github', 'workflows'), { recursive: true });
