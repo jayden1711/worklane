@@ -16,7 +16,7 @@ import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { outboundEnv } from './network.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
-import { ownEnv } from './os/own-env.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
@@ -177,11 +177,13 @@ const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'S
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
-export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+export function agentEnv(base: EnvSource, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
-  for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
+  // WHY (#786): own variables only, and case-insensitive on Windows as its environment is (`Path` for PATH).
+  const own = ownEnv(base);
+  for (const k of PASS_THROUGH) if (own.get(k) !== undefined) env[k] = own.get(k);
   // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
-  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  if (runtime === 'api_key' && own.get('ANTHROPIC_API_KEY')) env.ANTHROPIC_API_KEY = own.get('ANTHROPIC_API_KEY');
   Object.assign(env, {
     [`${BRAND.envPrefix}_AGENT`]: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',

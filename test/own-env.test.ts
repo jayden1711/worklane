@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ownEnv, OwnEnv, type EnvSource } from '../src/os/own-env.js';
+import { agentEnv } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
@@ -108,6 +109,21 @@ test('ownEnv: on Windows names are case-insensitive (Path is PATH); elsewhere th
     assert.equal(ownEnv({}, 'win32').get(CANARY), undefined);
     assert.equal(ownEnv({}, 'win32').get(CANARY.toLowerCase()), undefined);
   });
+});
+
+test("regression (#786 round 3): on Windows an agent's environment keeps SystemRoot, ComSpec, ProgramData and ProgramFiles from a snapshot", () => {
+  const win: NodeJS.ProcessEnv = { Path: 'C:\\bin', SystemRoot: 'C:\\Windows', ComSpec: 'C:\\Windows\\system32\\cmd.exe', ProgramData: 'C:\\ProgramData', ProgramFiles: 'C:\\Program Files', USERPROFILE: 'C:\\Users\\example' };
+  const keep = ['SystemRoot', 'ComSpec', 'ProgramData', 'ProgramFiles', 'USERPROFILE'];
+  const pick = (e: NodeJS.ProcessEnv) => Object.fromEntries(keep.map((k) => [k, e[k]]));
+  // What runner.ts, cli-agents.ts and skill eval hand agentEnv: a snapshot, taken as on Windows. Its names keep their
+  // case, as Windows' own environment does, so an exact-case read of it finds them.
+  assert.deepEqual(pick(agentEnv(ownEnv(win, 'win32').asProcessEnv(), 'cli')), pick(win));
+  assert.equal(ownEnv(win, 'win32').asProcessEnv().Path, 'C:\\bin', 'asProcessEnv keeps each name as written');
+  // agentEnv reads its base through get(): a Windows snapshot's `Path` is the agent's PATH, as Windows' own env gives it.
+  const fromSnapshot = agentEnv(ownEnv(win, 'win32'), 'cli');
+  assert.deepEqual([fromSnapshot.PATH, fromSnapshot.SystemRoot], ['C:\\bin', 'C:\\Windows']);
+  // Its result is an ordinary object (a child's env, #846), so the check is for an own TZ, not a read of one.
+  polluted({ TZ: 'from-the-prototype' }, () => assert.equal(Object.hasOwn(agentEnv({ PATH: '/bin' }, 'cli'), 'TZ'), false, 'a raw base: own variables only'));
 });
 
 test('the types: an EnvSource and an OwnEnv are read only through get(), and a raw environment is no OwnEnv (npm run typecheck)', () => {

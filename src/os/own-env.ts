@@ -25,29 +25,33 @@ export type EnvSource = OwnEnv | Readonly<NodeJS.ProcessEnv>;
 
 export class OwnEnv {
   readonly #vars: Readonly<Record<string, string>>;
-  readonly #fold: boolean;
+  /** Windows only: each name folded to upper case, to the name as written (null elsewhere). */
+  readonly #index: Readonly<Record<string, string>> | null;
 
-  private constructor(vars: Record<string, string>, fold: boolean) {
+  private constructor(vars: Record<string, string>, index: Record<string, string> | null) {
     this.#vars = freeze(vars);
-    this.#fold = fold;
+    this.#index = index && freeze(index);
   }
 
   /**
-   * A snapshot of `source`'s own string variables (an OwnEnv is returned as it is). Windows names are
-   * case-insensitive (`Path` is `PATH`), so there both the copy and get() fold to upper case.
+   * A snapshot of `source`'s own string variables (an OwnEnv is returned as it is), each name kept as written.
+   * Windows names are case-insensitive (`Path` is `PATH`), so there get() looks a name up case-insensitively; when
+   * two names differ only in case, the later one copied answers.
    */
   static of(source: EnvSource = process.env, platform: NodeJS.Platform = process.platform): OwnEnv {
     if (OwnEnv.is(source)) return source;
-    const fold = platform === 'win32';
     const vars = create(null) as Record<string, string>;
+    const index = platform === 'win32' ? (create(null) as Record<string, string>) : null;
     // WHY: an indexed loop and an own check per name, not for-of: a polluted Array iterator can't add a name.
     const names = keysOf(source);
     for (let i = 0; i < names.length; i++) {
       const k = names[i]!;
       const v = hasOwn(source, k) ? source[k] : undefined;
-      if (typeof v === 'string') vars[fold ? upper(k) : k] = v;
+      if (typeof v !== 'string') continue;
+      vars[k] = v;
+      if (index) index[upper(k)] = k;
     }
-    return new OwnEnv(vars, fold);
+    return new OwnEnv(vars, index);
   }
 
   /** Whether `x` is a snapshot this module took (the private field's brand: a look-alike object isn't one). */
@@ -57,13 +61,16 @@ export class OwnEnv {
 
   /** The variable `name`, or undefined when it wasn't set: never a value inherited from a prototype. */
   get(name: string): string | undefined {
-    const k = this.#fold ? upper(name) : name;
-    return hasOwn(this.#vars, k) ? this.#vars[k] : undefined;
+    const index = this.#index;
+    const k = index ? (hasOwn(index, upper(name)) ? index[upper(name)]! : undefined) : name;
+    return k !== undefined && hasOwn(this.#vars, k) ? this.#vars[k] : undefined;
   }
 
   /**
-   * The snapshot itself (frozen, null-prototype) for a function still typed NodeJS.ProcessEnv: its reads are own
-   * variables only too. WHY (#786): testSlotsRefusal is rewritten by #818, so its call site hands it this instead.
+   * The snapshot itself (frozen, null-prototype, each name as written) for a function still typed NodeJS.ProcessEnv:
+   * its reads are own variables only too. Plain property reads are case-sensitive even on Windows, so a read of it
+   * must use the name's own case there (as Windows writes it: `Path`, `SystemRoot`); get() needn't.
+   * WHY (#786): testSlotsRefusal (#818) and agentEnv (#819) are rewritten elsewhere, so their callers hand them this.
    */
   asProcessEnv(): NodeJS.ProcessEnv {
     return this.#vars;
