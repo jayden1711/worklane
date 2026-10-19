@@ -458,6 +458,11 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   // gitleaks as the tools step and doctor ask it (installs are tested above, against their checksums).
   writeFileSync(join(bin, 'gitleaks'), '#!/bin/sh\necho 8.30.1\n');
   chmodSync(join(bin, 'gitleaks'), 0o755);
+  // #738: the Claude step reads the user service manager's environment (systemctl --user show-environment), which
+  // this test's bare environment has no bus for: a manager that sets none of the login variables. Anything else it is
+  // asked fails, as systemctl with no bus does.
+  writeFileSync(join(bin, 'systemctl'), '#!/bin/sh\nif [ "$1 $2" = "--user show-environment" ]; then echo "PATH=/usr/bin:/bin"; exit 0; fi\necho "Failed to connect to bus: No medium found" >&2\nexit 1\n');
+  chmodSync(join(bin, 'systemctl'), 0o755);
   const home = mkdtempSync(join(tmpdir(), 'init-home-'));
   const env = { PATH: [bin, join(repoRoot, 'scripts', 'ci', 'stand-ins'), dirname(process.execPath), dirname(which('git')!), '/usr/bin', '/bin'].join(':'), HOME: home, [`${BRAND.envPrefix}_STATE_DIR`]: mkdtempSync(join(tmpdir(), 'init-e2e-state-')), [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local') };
   const cli = (...a: string[]) => spawnSync(process.execPath, [engineCli, ...a], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });

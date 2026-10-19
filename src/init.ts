@@ -26,10 +26,10 @@ import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
 import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
-import { detectOs, fileAccess, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { detectOs, fileAccess, isRoot, serviceManagerEnv, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { instanceNameProblem } from './instance-name.js';
-import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
 import { apiKeyHelperCommand, type RuntimeKind } from './runner.js';
 import { redactString } from './events/redact.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
@@ -155,6 +155,8 @@ export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) =>
 export interface InitIo {
   which(cmd: string): string | null;
   run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
+  /** The login variables this user's service manager gives the coordinator's service (#738); absent: none. */
+  serviceManagerEnv?(): { env: Record<string, string> } | { error: string };
   /** Run a command on the person's terminal (a login): its exit status. */
   interactive(cmd: string, args: string[]): Promise<number>;
   /** Ask on the terminal; null when there is none (then nothing interactive happens). */
@@ -670,6 +672,7 @@ export function systemIo(o: { interactive: boolean }): InitIo {
       const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
+    serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),
     interactive: (cmd, args) =>
       new Promise((done) => {
         rl?.close();

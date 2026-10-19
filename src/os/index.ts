@@ -901,6 +901,51 @@ export function serviceRunning(label: string): boolean | null {
   return null;
 }
 
+/**
+ * The variables among `names` that this user's service manager gives every service it starts, local mode's
+ * coordinator among them. A unit's own Environment= lines come on top of these. On Linux it is systemd's user manager
+ * (`systemctl --user show-environment`: environment.d, set-environment, session imports); on macOS, launchd's
+ * (`launchctl getenv`).
+ * WHY (#738): the wizard's Claude step judges the login with what the service's runs get, not with its own shell.
+ * An error when it can't be read. The error never carries a value: these can be credentials.
+ */
+export function serviceManagerEnv(names: readonly string[], o: { platform?: NodeJS.Platform; run?: (cmd: string, args: string[]) => string } = {}): { env: Record<string, string> } | { error: string } {
+  const platform = o.platform ?? process.platform;
+  const run = o.run ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }));
+  const env: Record<string, string> = {};
+  const failed = (what: string, e: unknown) => ({ error: `${what} failed: ${((e as { stderr?: unknown }).stderr ? String((e as { stderr: unknown }).stderr) : (e as Error).message).trim().split('\n')[0]?.slice(0, 200) ?? ''}` });
+  if (platform === 'darwin') {
+    for (const n of names) {
+      try {
+        const v = run('launchctl', ['getenv', n]).replace(/\r?\n$/, '');
+        if (v) env[n] = v;
+      } catch (e) {
+        return failed(`launchctl getenv ${n}`, e);
+      }
+    }
+    return { env };
+  }
+  if (platform === 'linux') {
+    let out: string;
+    try {
+      out = run('systemctl', ['--user', 'show-environment']);
+    } catch (e) {
+      return failed('systemctl --user show-environment', e);
+    }
+    for (const line of out.split('\n')) {
+      const eq = line.indexOf('=');
+      const k = eq > 0 ? line.slice(0, eq) : '';
+      if (!names.includes(k)) continue;
+      const v = line.slice(eq + 1);
+      // systemd shell-quotes a value it can't print plainly ($'...'): not read here, so not guessed.
+      if (v.startsWith("$'") || v.startsWith('"') || v.startsWith("'")) return { error: `the user service manager sets ${k} in a quoted form this check doesn't read` };
+      if (v) env[k] = v;
+    }
+    return { env };
+  }
+  return { error: `no user service manager this check knows on ${platform}` };
+}
+
 /** Whether a system unit (an instance's `<cli>-<name>.service`) is active; null off Linux. Any user may ask systemd this. */
 export function systemUnitActive(unit: string): boolean | null {
   if (process.platform !== 'linux') return null;

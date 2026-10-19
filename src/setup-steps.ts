@@ -16,7 +16,7 @@ import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instancesDir, loadInstance, readPolicy } from './instance.js';
+import { instanceFilesProblem, instancesDir, loadInstance, loadInstanceCredentials, readPolicy } from './instance.js';
 import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
@@ -24,7 +24,7 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, nodePathProblem, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
+import { lingerEnabled, nodePathProblem, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
@@ -35,7 +35,7 @@ import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
 import { parse as parseYaml } from 'yaml';
 import { ProjectConfig } from './config/schema.js';
-import { agentAuthEnv, loginMethod, RUNTIME_LOGINS, type RuntimeKind } from './runner.js';
+import { agentAuthEnv, apiKeyHelperCommand, loginMethod, RUNTIME_LOGINS, type RuntimeKind } from './runner.js';
 import { outboundEnv } from './network.js';
 
 /**
@@ -61,16 +61,25 @@ export interface ProbeRunOptions {
   cwd?: string;
   /** WHY (#738): the Claude step asks claude as the agents' runs would (src/runner.ts agentAuthEnv), never with more. */
   agentRuntime?: RuntimeKind;
+  /** The login variables the user's service manager gives the coordinator's service (serviceManagerEnv), under the unit's own. */
+  managerEnv?: Record<string, string>;
 }
 
 /**
- * The environment a probe runs a command with: this process's (tools on PATH), or, for the Claude step, what a local
- * agent run of that kind gives claude. That is the local service's own environment (src/service.ts
- * localServiceEnv: PATH and HOME only, never this shell's), then the runner's (agentAuthEnv, outboundEnv).
- * WHY (#738 round 2): through 1a5edc71 the step started from this process's environment, so a key or a
- * CLAUDE_CONFIG_DIR only in init's or doctor's shell passed the step while every run of the service stopped.
+ * The variables that can change which login claude uses and that a service manager can hand the local coordinator's
+ * service (it inherits the manager's environment; its unit sets only PATH and HOME on top). Each is read from the
+ * manager, and then agentAuthEnv keeps exactly what the runner keeps: CLAUDE_CONFIG_DIR always, ANTHROPIC_API_KEY
+ * for api_key only, and never ANTHROPIC_AUTH_TOKEN or CLAUDE_CODE_OAUTH_TOKEN (none of them is stripped by outboundEnv).
  */
-export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv(localServiceEnv(), o.agentRuntime)) : withToolPath());
+export const MANAGER_LOGIN_VARS = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'] as const;
+
+/**
+ * The environment a probe runs a command with: this process's (tools on PATH), or, for the Claude step, what a local
+ * agent run of that kind gives claude. That is the local service's environment: its user service manager's login
+ * variables (`managerEnv`), with the unit's own (src/service.ts localServiceEnv: PATH and HOME) on top, never this
+ * shell's. Then the runner's filters (agentAuthEnv, outboundEnv) apply.
+ */
+export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv({ ...(o.managerEnv ?? {}), ...localServiceEnv() }, o.agentRuntime)) : withToolPath());
 
 /** What the detectors may ask of the machine: read-only commands and the service manager. Tests stand in for it. */
 export interface SetupProbe {
@@ -86,6 +95,8 @@ export interface SetupProbe {
   serviceProgram?(label: string): { file: string; node: string } | null;
   /** Whether a path exists (the service's node); the real file system when absent. */
   exists?(path: string): boolean;
+  /** The login variables this user's service manager gives the coordinator's service (src/os/index.ts); absent: none. */
+  serviceManagerEnv?(): { env: Record<string, string> } | { error: string };
 }
 
 export function systemProbe(): SetupProbe {
@@ -99,6 +110,7 @@ export function systemProbe(): SetupProbe {
     systemUnitActive,
     linger: () => lingerEnabled(),
     serviceProgram: (label) => serviceProgram(label),
+    serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),
   };
 }
 
@@ -276,6 +288,19 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/** Server mode: the instance's credentials.yaml references alone (loadInstanceCredentials), or the context's stand-in facts. */
+function agentCredentials(k: Checking): { agent_api_key?: string | undefined } | { error: string } {
+  if (k.c.instanceFacts) {
+    const i = k.inst();
+    return isErr(i) ? i : i.credentials;
+  }
+  try {
+    return loadInstanceCredentials(k.c.instance!, instancesDir()).credentials;
+  } catch (e) {
+    return { error: `instance ${k.c.instance}'s credentials.yaml can't be read here: ${firstLine(instanceFilesProblem(e))}` };
+  }
+}
+
 /** Server mode: the instance's agent user's login, as claude-account.sh status (or add-project, credentials.sh) last found it; null when it has no record. */
 function agentLogin(k: Checking): Detected | null {
   if (!k.c.instance) return null;
@@ -288,9 +313,11 @@ function agentLogin(k: Checking): Detected | null {
   // WHY (#738): the login must be one the instance's runtime runs on (src/runner.ts RUNTIME_LOGINS), as the
   // preflight checks it; an API key instance is one whose credentials.yaml names agent_api_key (instanceRuntime).
   if (u.loggedIn) {
-    const i = k.inst();
-    if (isErr(i)) return no(`${u.user} is signed in per claude auth status${when}, but which login its agents need can't be told: ${i.error}`);
-    const kind = instanceRuntime(i).runtime;
+    // Only credentials.yaml decides it, read on its own: the instance's repo config isn't valid while its setup PR
+    // waits, and loadInstance needs that (#738 round 3: the step went red during every server setup).
+    const creds = agentCredentials(k);
+    if (isErr(creds)) return no(`${u.user} is signed in per claude auth status${when}, but which login its agents need can't be told: ${creds.error}`);
+    const kind = instanceRuntime({ credentials: creds }).runtime;
     const method = u.authMethod ?? 'unknown';
     if (!RUNTIME_LOGINS[kind].includes(method)) return no(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ' with no login method recorded'}, per claude auth status as that user${when}, but the agents would refuse it: the instance runs ${kind === 'api_key' ? 'on an API key (credentials.yaml agent_api_key)' : 'on a Claude subscription login'}, which takes only ${RUNTIME_LOGINS[kind].join(' or ')}, so every run would stop with auth_mismatch`);
   }
@@ -385,9 +412,23 @@ const RUNTIME_FROM: Record<AgentRuntime['source'], string> = { config: `${BRAND.
 const RUNTIME_WANTS: Record<RuntimeKind, string> = { cli: `a Claude subscription login (${RUNTIME_LOGINS.cli.join(' or ')})`, api_key: `an API key (${RUNTIME_LOGINS.api_key.join(' or ')})` };
 
 /** How to make the login match the runtime, or the runtime match the login, from where the runtime comes. */
+/**
+ * The apiKeyHelper line for a recorded key file, built by the runner's own apiKeyHelperCommand (an absolute plain
+ * path only: no quote, space, newline or shell character), or a placeholder when the path isn't one. WHY (#738 round
+ * 3): init's state is read back unchecked, and a crafted path would otherwise be shown as a command to paste.
+ */
+export function apiKeyHelperLine(keyFile: string | undefined): { line: string; file: string | null } {
+  try {
+    if (keyFile) return { line: `"apiKeyHelper": "${apiKeyHelperCommand(keyFile)}"`, file: keyFile };
+  } catch {
+    // not a plain absolute path: never shown
+  }
+  return { line: '"apiKeyHelper": "cat -- <your key file>"', file: null };
+}
+
 function runtimeFix(rt: AgentRuntime): string {
-  const file = rt.keyFile ?? '<your key file>';
-  const useKey = `make claude read the key from ${rt.keyFile ?? 'a file you own'}: set "apiKeyHelper": "cat -- ${file}" in your Claude settings (~/.claude/settings.json), so \`claude auth status\` reports api_key_helper`;
+  const helper = apiKeyHelperLine(rt.keyFile);
+  const useKey = `make claude read the key from ${helper.file ?? 'a file you own'}: set ${helper.line} in your Claude settings (~/.claude/settings.json), so \`claude auth status\` reports api_key_helper`;
   const login = 'sign in with your Claude subscription (`claude auth login`)';
   const other: RuntimeKind = rt.kind === 'cli' ? 'api_key' : 'cli';
   const first = rt.kind === 'cli' ? login : useKey;
@@ -406,10 +447,16 @@ function runtimeFix(rt: AgentRuntime): string {
  * LOGIN_PROOF_OK_MS, a failure for LOGIN_PROOF_FAILED_MS; Re-check calls again. `mismatch`: the login is not one
  * the agents would run on, and the detail says how to fix it.
  */
-export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
+export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'serviceManagerEnv'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
   if (!p.which('claude')) return no('claude is not installed (the tools step)');
   if ('error' in runtime) return no(runtime.error);
-  const as = { agentRuntime: runtime.kind };
+  // WHY (#738 round 3): the coordinator's service inherits its user service manager's environment, so its runs can
+  // get a CLAUDE_CONFIG_DIR or a key from there. Read with the same names; unreadable means unknown: not done.
+  const mgr = p.serviceManagerEnv ? p.serviceManagerEnv() : { env: {} };
+  if ('error' in mgr) return { ...no(`can't tell which Claude login the coordinator's service gives its agents: it inherits ${MANAGER_LOGIN_VARS.join(', ')} from this user's service manager, and that couldn't be read (${mgr.error}). Make the service manager answer (systemctl --user on Linux, launchctl on macOS), then check again`), mismatch: true as const };
+  const fromManager = Object.keys(mgr.env).sort();
+  const managerNote = fromManager.length ? `; judged with ${fromManager.join(', ')} as the user service manager sets ${fromManager.length === 1 ? 'it' : 'them'} for the coordinator's service` : '';
+  const as = { agentRuntime: runtime.kind, managerEnv: mgr.env };
   const r = p.run('claude', ['auth', 'status'], as);
   type Status = { loggedIn?: unknown; authMethod?: unknown; email?: unknown; orgId?: unknown };
   let parsed: Status | null = null;
@@ -423,14 +470,15 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, runtime:
   const method = parsed ? loginMethod(parsed) : r.status === 0 ? 'unknown' : 'none';
   const needs = `agent_runtime.kind is ${runtime.kind} (${RUNTIME_FROM[runtime.source]}), which runs only on ${RUNTIME_WANTS[runtime.kind]}`;
   // An API-key project has no sign-in to offer: the page's Sign in would start a subscription login it refuses.
-  const keyFix: Fix = { kind: 'terminal', command: `"apiKeyHelper": "cat -- ${runtime.keyFile ?? '<your key file>'}"`, why: "an API key has no sign-in: claude reads it from your key file through apiKeyHelper, a line in your own Claude settings (~/.claude/settings.json), which this page never writes" };
+  const keyFix: Fix = { kind: 'terminal', command: apiKeyHelperLine(runtime.keyFile).line, why: "an API key has no sign-in: claude reads it from your key file through apiKeyHelper, a line in your own Claude settings (~/.claude/settings.json), which this page never writes" };
   const fixed = <T extends Detected>(d: T): T => (runtime.kind === 'api_key' ? { ...d, fix: keyFix } : d);
   const refuse = (detail: string) => fixed({ ...no(`${detail}. To fix: ${runtimeFix(runtime)}`), mismatch: true as const });
-  if (r.status !== 0 || method === 'none') return runtime.kind === 'cli' ? no('not signed in, per `claude auth status`') : refuse(`not signed in, per \`claude auth status\`: ${needs}`);
+  if (r.status !== 0 || method === 'none') return runtime.kind === 'cli' ? no(`not signed in, per \`claude auth status\`${managerNote}`) : refuse(`not signed in, per \`claude auth status\`${managerNote}: ${needs}`);
   const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
-  const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\``;
+  const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\`${managerNote}`;
   if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
-  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null]);
+  // The proof's cache key: the manager's names and its config dir (a path), never a key's value.
+  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, mgr.env.CLAUDE_CONFIG_DIR ?? null]);
   const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
   const proof = memo ? memo(identity, prove) : prove();
   return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));
