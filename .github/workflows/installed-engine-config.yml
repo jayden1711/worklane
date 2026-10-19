@@ -1,0 +1,41 @@
+name: installed-engine-config
+# #810: a pull request that changes .worklane/ has its config, as its merge commit carries it, loaded with the engine
+# release this repo's machines run (the pin in scripts/bootstrap.sh on the base, its signed tag verified against the
+# base's .github/release-signers), with that release's own loader and schema. A key that engine refuses fails here,
+# naming the key and the version, instead of stopping every agent once merged (scripts/ci/installed-engine-config.mjs).
+# It fails closed when the version can't be found or its tag doesn't verify. There is no skip: a PR meant to land
+# after an engine upgrade stays a draft until main's pin includes it, then passes on its next push.
+# It runs on every pull request, with no paths filter: a required check whose workflow a paths filter skips stays
+# pending and holds the PR. On a PR that changes nothing under .worklane/ the script prints so and passes at once,
+# before fetching any engine. It is a required check only once the owner adds it to the main ruleset.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+concurrency:
+  group: installed-engine-config-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  installed-engine-config:
+    runs-on: ubuntu-latest
+    steps:
+      # The PR's merge commit and its base (HEAD^1). The PR is only data here: its config is read with git show.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      # The base's copy of the check (and the scripts it uses) when it has one, so a PR can't loosen the check it is
+      # judged by. The engine's tag is fetched by the script, anonymously: the repository is public.
+      - name: the changed config loads with the installed engine
+        run: |
+          check=scripts/ci/installed-engine-config.mjs
+          if git cat-file -e "HEAD^1:$check" 2>/dev/null; then
+            mkdir -p "$RUNNER_TEMP/base"
+            git archive HEAD^1 scripts | tar -x -C "$RUNNER_TEMP/base"
+            check="$RUNNER_TEMP/base/$check"
+          fi
+          node "$check" --base HEAD^1 --head HEAD
