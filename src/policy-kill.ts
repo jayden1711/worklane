@@ -1,21 +1,11 @@
 // auto_merge OFF on a single machine (#726; the owner's structural decision of 2026-10-19, and principle 2: OFF can
 // never be blocked or undone): root's kill switch for one instance, in root's record directory (/etc/<cli>/policy-root).
 //
-//   - A switch is any file whose name starts with `<instance>.auto-merge-off`: each OFF leaves one under a new name of
-//     its own, `<instance>.auto-merge-off.<id>`, moving an armed one there, or the spare, by rename. OFFs one after
-//     another, or many at once, add no files and report no failure while a switch is armed (armOne); only an OFF
-//     that finds no switch and no spare at all writes one. A rename forwards OFF (killAutoMerge). The engine checks
-//     for any BEFORE it reads the policy (autoMergeKilled): while one is there, auto_merge is off, whatever
-//     policy.yaml says. Any error reading the directory but "no such directory" counts as off.
-//   - Turning auto_merge off never takes root's policy lock and never reads or parses policy.yaml, and needs no new
-//     space: root keeps a disarmed spare (`<instance>.auto-merge-spare`, which the engine never counts), and OFF arms
-//     it by a rename (no new inode or block). With no spare, OFF writes a new switch (a temp file renamed into place).
-//     Either way the switch and the directory are fsynced before OFF says done. Every OFF surface comes here:
-//     `<cli> policy set <instance> auto_merge off`, an admin's or the machine helper's literal rule for a dashboard.
-//   - Only root's `policy set <instance> auto_merge on`, through the locked path, removes switches, and only the ones
-//     it saw before it waited for the lock (armedSwitches), each by its own name: an OFF that lands any time after
-//     that has a name ON never saw, so nothing ON does (or a crash part way) can undo it. There is never a moment
-//     with no switch while one that said done should be there.
+//   - A switch is any `<instance>.auto-merge-off*`; each OFF leaves one of its own name (armOne), by rename from an
+//     armed one or the disarmed spare (`<instance>.auto-merge-spare`): no new space, no lock, no read of policy.yaml.
+//     The engine checks them BEFORE it reads the policy (autoMergeKilled); a directory it can't read counts as off.
+//   - Only root's `set on` removes switches: the ones it saw before it waited for the lock, each by name, so no OFF
+//     that said done is undone.
 // The coordinator user can't create, remove or replace any of them: root's directory, 0755 (recordDir).
 //
 // INVARIANT: this module imports nothing that reads policy.yaml or takes root's lock (test/policy-edit.test.ts holds
@@ -161,15 +151,9 @@ export function renamingTo(instance: string, dir = POLICY_ROOT_DIR): string | nu
 }
 
 /**
- * Arm one instance's switch under a new name of its own, and say when that is done. THREAT (#726 round 5): many OFFs
- * at once (the helper takes no lock, so a coordinator user can run it in parallel) must neither add files nor report a
- * failure while auto_merge is off. So:
- *   - it moves a switch armed there (one picked at random, so racing OFFs spread out), else the disarmed spare, by
- *     rename: no new space, and a switch stays visible throughout;
- *   - losing a rename race to another OFF is done: when the name it moved has gone and a name it hadn't seen has
- *     appeared, a later OFF armed that one after this OFF began, so no `set on` that listed before this OFF can clear
- *     it (only an ON's clear makes names go without new ones coming);
- *   - it writes a new file only when there is no switch and no spare at all.
+ * Arm one instance's switch under a new name of its own. Racing OFFs add no files and never fail while one is armed:
+ * it moves an armed switch (picked at random) or the spare; losing that race is done once a name it hadn't seen
+ * appears (a later OFF's, which no earlier `set on` listed); a new file only with no switch and no spare at all.
  */
 function armOne(instance: string, dir: string, at: Date): void {
   const to = `${killSwitchPath(instance, dir)}.${at.getTime()}-${process.pid}-${randomBytes(4).toString('hex')}`;
