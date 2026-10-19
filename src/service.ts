@@ -1,7 +1,5 @@
-// The coordinator as a long-running process: one per project per machine
-// (a pid lock), started by the OS service manager so it never depends on a
-// Claude session. It recovers on start, ticks, and backs up the log hourly
-// with verified read-back.
+// The coordinator as a service: one per project per machine (a pid lock), never tied to a Claude session.
+// It recovers on start, ticks, and backs up the log hourly with verified read-back.
 import { PINS_FILE } from './experiments/store.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy } from './automations/schema.js';
 import { githubGet } from './automations/github.js';
@@ -35,7 +33,7 @@ import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
-import { CliRunner, type AgentRunner, type CommitIdentity, type RunAs } from './runner.js';
+import { CliRunner, type AgentRunner, type CommitIdentity } from './runner.js';
 import { CliAgentRunner, withCliAgents } from './cli-agents.js';
 import type { CliAgentName } from './providers.js';
 import { latestBaseline } from './baseline.js';
@@ -49,7 +47,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import { stableNodePath, type ServiceSpec } from './os/index.js';
+import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -216,8 +214,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (i.runAs) process.umask(INSTANCE_UMASK);
   for (const k of Object.keys(process.env)) if (!(k in env)) delete process.env[k];
   Object.assign(process.env, env);
-  // The config as the default branch has it (fetched with the instance's own credentials), not the checkout's copy,
-  // which nothing updates: the coordinator then follows it (src/config/live.ts). Hooks are rewritten for it.
+  // The default branch's config (instance credentials), not the stale checkout copy (src/config/live.ts); hooks too.
   const home = i.home;
   const policyNow = (fallback: PolicyFile) => readPolicy(join(home, 'policy.yaml')).policy ?? fallback;
   const check = (c: Config) => instanceConfigProblems(c, i.repo.repo, policyNow(i.policy));
@@ -276,8 +273,8 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
   const ciMetrics = i.config.project.backlog === 'github' ? { api: new GitHubCiMetricsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
-  // The machine watchdog (src/watchdog/): this instance's checks, and the machine's and the posting if elected.
-  // The agents' Claude account profiles (src/claude-profiles.ts): each run's login is the instance's active profile, read as it starts.
+  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: the
+  // instance's active profile (src/claude-profiles.ts), read as it starts.
   const login = i.runAs ? profileLogin({ instance: i.name, agentUser: i.runAs.user }) : undefined;
   const agentAs = i.runAs;
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(agentAs && login ? { runAs: () => login.resolve(agentAs) } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
@@ -291,11 +288,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
-/**
- * What an instance's superfan reads beyond its event log and the incident store: its name, and its own service log,
- * read the way the dashboard's Logs page reads it (its unit's journal as the coordinator's user, else its log file;
- * never sudo). Imported when first read: the dashboard module imports this one.
- */
+/** An instance's superfan view: its name, and its service log as the dashboard's Logs page reads it (never sudo). */
 export function superfanView(name: string, stateDir: string): NonNullable<CoordinatorDeps['superfan']> {
   return { name, journal: async () => (await import('./dashboard.js')).readServiceLog({ unit: `${BRAND.cli}-${name}.service`, file: join(stateDir, 'coordinator.log') }, 200) };
 }
@@ -341,7 +334,7 @@ function wakeableSleep() {
   };
 }
 
-export async function runSite(site: Site, opts: { /** The instance's name (its incidents' `instance`); absent: a local site, which raises none. */ instance?: string; once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan']; experiments?: CoordinatorDeps['experiments']; lockScope?: CoordinatorDeps['lockScope']; /** Automations: the instance's file and policy (GitHub's GET is built here, from `tokens`). */ automations?: { file: string; policy: () => AutomationsPolicy } }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+export async function runSite(site: Site, opts: { /** The instance's name (its incidents' `instance`); absent: a local site, which raises none. */ instance?: string; once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan']; experiments?: CoordinatorDeps['experiments']; lockScope?: CoordinatorDeps['lockScope']; /** Automations: the instance's file and policy (GitHub's GET is built here, from `tokens`). */ automations?: { file: string; policy: () => AutomationsPolicy } }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: ProjectRunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {
@@ -373,8 +366,8 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   // INVARIANT: every test run this process starts (PR runs, batches, the flaky re-run, fix-forward's probes, the deploy
   // gate) and every preview passes this one gate (src/testrun/gate.ts); the disk guard is its `disk` source.
   const ungateDisk = addStartGate('disk', () => disk.held());
-  // The engine updater draining the machine for an install (src/update-drain.ts: root's machine-wide flag, ignored once
-  // past its expiry): no new test run starts until it is installed. Its `drain` source.
+  // `drain`: while the engine updater drains the machine (src/update-drain.ts, root's flag until its expiry), no new
+  // test run starts.
   const ungateDrain = addStartGate('drain', drainRefusal);
   // land_mode direct pushes the default branch itself: never on a branch GitHub doesn't protect (direct-land.ts).
   const refused = await directLandStartGate({ landMode: cfg.project.land_mode, api: opts.protection, local: localRemote(root, 'origin'), repo: cfg.project.project.repo, branch: cfg.project.project.default_branch, label: opts.label ?? 'coordinator', log, actor: instanceId() });
@@ -409,10 +402,8 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   if (tidied.tightened.length || tidied.removedTasks.length) log.append('state.tidied', { tightened: tidied.tightened.length, paths: tidied.tightened.slice(0, 20), removed_tasks: tidied.removedTasks.length }, instanceId());
   const requeued = await coordinator.recover();
   if (requeued.length) console.log(`recovered: requeued ${requeued.map((n) => `#${n}`).join(', ')}`);
-  // Shutdown (SIGTERM from the service manager on a restart or an update, SIGINT from a terminal): nothing new
-  // starts, and everything in flight is aborted, its task requeued (Coordinator.stop). The watchdog steps down from
-  // its machine roles at once, the timers stop, the log and the lock are closed and released, and the process exits.
-  // Whatever is still pending after shutdownMs is named in the log and on stderr, and the process exits anyway.
+  // Shutdown (SIGTERM, SIGINT): nothing new starts; in-flight work is aborted and requeued (Coordinator.stop); the
+  // watchdog steps down, timers stop, log and lock are released. Anything pending after shutdownMs is named, then exit.
   let stopping = false;
   const nap = wakeableSleep();
   let watchdog: { stop: () => void } | null = null;
