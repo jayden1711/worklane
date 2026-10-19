@@ -63,6 +63,7 @@ const REVIEWED: Record<string, { kind: 'writer' | 'passes'; why: string }> = {
   'src/health.ts': { kind: 'passes', why: 'hands its slotsDir option to githubBudgetHealth (budget-health.ts)' },
   'src/update-drain.ts': { kind: 'passes', why: 'reads the drain file (root writes it)' },
   'src/os/index.ts': { kind: 'passes', why: 'defines the slot-dir paths' },
+  'src/os/system-paths.ts': { kind: 'passes', why: 'testSlotsRefusal compares the slot dir with the test machine; writes nothing' },
   'src/cores.ts': { kind: 'passes', why: 'reads slotStatus' },
   'src/coordinator.ts': { kind: 'passes', why: 'hands its slot dir to slots.ts, incidents and post.ts' },
   'src/coordinator/shared.ts': { kind: 'passes', why: 'the slotsDir option' },
