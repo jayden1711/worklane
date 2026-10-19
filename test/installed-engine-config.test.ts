@@ -1,7 +1,8 @@
 // scripts/ci/installed-engine-config.mjs (#810): a .worklane/ change is loaded with the engine release the base pins in
-// scripts/bootstrap.sh, verified as release.yml verifies a tag, and fails when that engine refuses it. Real git, real
-// SSH keys, a throwaway repo, and a pinned-engine stand-in: a release commit whose dist/src/config/load.js takes only
-// the keys it knows, as the real schema's strict objects do.
+// scripts/bootstrap.sh, verified as release.yml verifies a tag, and fails when that engine refuses it. A change that
+// moves that pin (#814) also has its .worklane/ loaded with the engine it pins, that tag verified against the base's
+// signers. Real git, real SSH keys, a throwaway repo, and a pinned-engine stand-in: a release commit whose
+// dist/src/config/load.js takes only the keys it knows, as the real schema's strict objects do.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -15,12 +16,17 @@ import { repoRoot } from './helpers.js';
 const skip = (process.platform === 'win32' || !which('ssh-keygen')) && 'needs ssh-keygen and a POSIX shell';
 const SCRIPT = join(repoRoot, 'scripts', 'ci', 'installed-engine-config.mjs');
 const BOOT = '#!/usr/bin/env bash\nENGINE_TAG=v0.0.0\nENGINE_COMMIT= # NOT FILLED IN\n';
+/** bootstrap.sh pinned to `tag` at `commit`, as scripts/pin-engine.mjs writes it. */
+const bootFor = (tag: string, commit: string) => BOOT.replace('v0.0.0', tag).replace('ENGINE_COMMIT= # NOT FILLED IN', `ENGINE_COMMIT=${commit}`);
 
-/** The stand-in engine's config loader: config.yaml (required) and review.yaml, each with only the keys `known` lists. */
-const standIn = (known: string[]) => `export function configFrom(root, read) {
+/**
+ * The stand-in engine's config loader: config.yaml (required) and, by default, review.yaml, each with only the keys
+ * `known` lists. `files`: the config files this engine reads.
+ */
+const standIn = (known: string[], files = ['config.yaml', 'review.yaml']) => `export function configFrom(root, read) {
   const known = ${JSON.stringify(known)};
   const errors = [];
-  for (const file of ['config.yaml', 'review.yaml']) {
+  for (const file of ${JSON.stringify(files)}) {
     const text = read(file);
     if (text === null) {
       if (file === 'config.yaml') errors.push({ file, path: '', message: 'missing' });
@@ -70,8 +76,8 @@ function fixture() {
   write({ '.github/release-signers': signersFor(owner), 'scripts/bootstrap.sh': BOOT, '.worklane/config.yaml': 'name: demo\n', 'README': 'x\n' });
   sh('git', ['commit', '-q', '-m', 'main']);
   /** A release commit on main carrying the stand-in engine, tagged (signed by `signWith`, else unsigned annotated). */
-  const release = (tag: string, known: string[], signWith?: string) => {
-    const c = commitOn('main', { 'package.json': JSON.stringify({ version: tag.slice(1) }), 'dist/src/config/load.js': standIn(known) }, `Release ${tag}`);
+  const release = (tag: string, known: string[], signWith?: string, files?: string[]) => {
+    const c = commitOn('main', { 'package.json': JSON.stringify({ version: tag.slice(1) }), 'dist/src/config/load.js': standIn(known, files) }, `Release ${tag}`);
     if (signWith) sh('git', ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${signWith}`, 'tag', '-s', tag, '-m', tag]);
     else sh('git', ['tag', '-a', tag, '-m', tag]);
     return c;
@@ -82,7 +88,7 @@ function fixture() {
     sh('git', ['branch', '-f', 'main', c]);
     return c;
   };
-  const pin = (tag: string, commit: string) => onMain({ 'scripts/bootstrap.sh': BOOT.replace('v0.0.0', tag).replace('ENGINE_COMMIT= # NOT FILLED IN', `ENGINE_COMMIT=${commit}`) });
+  const pin = (tag: string, commit: string) => onMain({ 'scripts/bootstrap.sh': bootFor(tag, commit) });
   /** A PR: `files` committed on main's tip, as its merge commit would carry them. */
   const pr = (files: Record<string, string>) => commitOn('main', files, 'pr');
   const run = (head: string, base = 'main') => {
@@ -222,6 +228,99 @@ test('installed-engine-config: a config file the installed engine never reads is
   f.done();
 });
 
+test("a PR that moves the pin loads main's .worklane/ with the engine it pins: one that refuses the config or drops a file fails, one that loads it passes", { skip }, () => {
+  const f = fixture();
+  f.onMain({ '.worklane/config.yaml': 'name: demo\nrequired_checks: [test]\n', '.worklane/review.yaml': 'name: r\n' });
+  f.pin('v1.0.0', f.release('v1.0.0', ['name', 'required_checks'], f.owner));
+  // Only the pin moves, to a release that no longer takes a key main's config sets.
+  const v2 = f.release('v1.1.0', ['name'], f.owner);
+  const r = f.run(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2) }));
+  refused(r, /refused by the engine this change pins, v1\.1\.0 \(\w+, the pin in scripts\/bootstrap\.sh at \w+\)/);
+  assert.match(r.out, /verified v1\.1\.0 /);
+  assert.match(r.out, /\.worklane\/config\.yaml: Unrecognized key: "required_checks"/);
+  assert.match(r.out, /every new bootstrap would install an engine that can't load this repo's config/);
+  // A release that no longer reads a config file main has: what that file sets would be dropped on a new machine.
+  const v3 = f.release('v1.2.0', ['name', 'required_checks'], f.owner, ['config.yaml']);
+  refused(f.run(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.2.0', v3) })), /\.worklane\/review\.yaml: the engine this change pins doesn't read \.worklane\/review\.yaml/);
+  // A release that loads main's config as it is: passes.
+  const v4 = f.release('v1.3.0', ['name', 'required_checks'], f.owner);
+  const ok = f.run(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.3.0', v4) }));
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /verified v1\.3\.0 /);
+  assert.match(ok.out, /\.worklane\/ at \w+ loads with the engine this change pins, v1\.3\.0 \(/);
+  // A bootstrap.sh change that leaves the pin where it is: nothing to load.
+  const same = f.run(f.pr({ 'scripts/bootstrap.sh': `${f.sh('git', ['show', 'main:scripts/bootstrap.sh'])}\n# another line\n` }));
+  assert.equal(same.code, 0, same.out);
+  assert.match(same.out, /no change under \.worklane\/ between \w+ and \w+: nothing to load/);
+  f.done();
+});
+
+test('a PR that moves the pin and changes .worklane/ is judged by both engines: the installed one and the one it pins', { skip }, () => {
+  const f = fixture();
+  f.pin('v1.0.0', f.release('v1.0.0', ['name', 'required_checks'], f.owner));
+  const change = { '.worklane/config.yaml': 'name: demo\nrequired_checks: [test]\n' };
+  const v2 = f.release('v1.1.0', ['name'], f.owner);
+  const r = f.run(f.pr({ ...change, 'scripts/bootstrap.sh': bootFor('v1.1.0', v2) }));
+  refused(r, /refused by the engine this change pins, v1\.1\.0/);
+  assert.match(r.out, /loads with the installed engine v1\.0\.0 .*; changed: config\.yaml/);
+  const v3 = f.release('v1.2.0', ['name', 'required_checks'], f.owner);
+  const ok = f.run(f.pr({ ...change, 'scripts/bootstrap.sh': bootFor('v1.2.0', v3) }));
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /loads with the installed engine v1\.0\.0/);
+  assert.match(ok.out, /loads with the engine this change pins, v1\.2\.0/);
+  f.done();
+});
+
+test("a moved pin fails closed: unsigned, another key, the PR's own signer, a moved tag, malformed, unfilled, removed, no engine", { skip }, () => {
+  const f = fixture();
+  f.pin('v1.0.0', f.release('v1.0.0', ['name'], f.owner));
+  const move = (tag: string, commit: string, more: Record<string, string> = {}) => f.run(f.pr({ 'scripts/bootstrap.sh': bootFor(tag, commit), ...more }));
+  refused(move('v1.1.0', f.release('v1.1.0', ['name'])), /the engine this change pins, v1\.1\.0 \(.*\) doesn't verify: .*v1\.1\.0 is not signed/);
+  refused(move('v1.1.1', f.release('v1.1.1', ['name'], f.stranger)), /v1\.1\.1 is signed by a key .* doesn't list for release-signer/);
+  // The PR adds the stranger to the signers in its own change: the base's file is the one read.
+  const v112 = f.release('v1.1.2', ['name'], f.stranger);
+  refused(move('v1.1.2', v112, { '.github/release-signers': f.signersFor(f.stranger) }), /doesn't list for release-signer/);
+  // The pin names a commit its tag doesn't point at.
+  const v113 = f.release('v1.1.3', ['name'], f.owner);
+  const other = f.release('v1.1.4', ['name'], f.owner);
+  refused(move('v1.1.3', other), new RegExp(`v1\\.1\\.3 points at ${v113}, but this run builds ${other}`));
+  // Malformed, not a release tag, or no commit filled in: bootstrap.sh itself would refuse it, so no new machine could install.
+  refused(f.run(f.pr({ 'scripts/bootstrap.sh': `${bootFor('v1.1.3', v113)}ENGINE_TAG=v1.1.4\n` })), /scripts\/bootstrap\.sh at \w+: bootstrap\.sh needs exactly one ENGINE_TAG= line/);
+  refused(move('latest', v113), /scripts\/bootstrap\.sh at \w+ pins ENGINE_TAG=latest, not a release tag vX\.Y\.Z/);
+  refused(move('"v1.1.3"', v113), /pins ENGINE_TAG="v1\.1\.3", not a release tag vX\.Y\.Z/);
+  refused(f.run(f.pr({ 'scripts/bootstrap.sh': BOOT.replace('v0.0.0', 'v1.1.3') })), /scripts\/bootstrap\.sh at \w+ pins ENGINE_COMMIT=\(none\), not a full commit id/);
+  // The PR removes bootstrap.sh.
+  f.sh('git', ['checkout', '-q', '--detach', 'main']);
+  f.sh('git', ['rm', '-q', 'scripts/bootstrap.sh']);
+  f.sh('git', ['commit', '-q', '-m', 'pr']);
+  refused(f.run(f.sh('git', ['rev-parse', 'HEAD'])), /this change removes scripts\/bootstrap\.sh/);
+  // A signed tag whose commit carries no engine.
+  f.sh('git', ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${f.owner}`, 'tag', '-s', 'v1.1.5', '-m', 'v1.1.5', 'main']);
+  refused(move('v1.1.5', f.sh('git', ['rev-parse', 'v1.1.5^{commit}'])), /the engine this change pins, v1\.1\.5 .* carries no dist\/src\/config\/load\.js/);
+  // A main whose own pin is malformed: a PR that moves it to a good release is still loaded with that release.
+  f.onMain({ 'scripts/bootstrap.sh': `${BOOT}ENGINE_TAG=v1.0.0\n` });
+  const v2 = f.release('v2.0.0', ['name'], f.owner);
+  const ok = move('v2.0.0', v2);
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /loads with the engine this change pins, v2\.0\.0/);
+  f.done();
+});
+
+test("the workflow's step judges a moved pin with the base's copy of the check's script", { skip }, () => {
+  const f = fixture();
+  const steps = (parse(workflow()) as { jobs: Record<string, { steps: { run?: string }[] }> }).jobs['installed-engine-config']!.steps;
+  const step = steps.find((s) => s.run?.includes('installed-engine-config.mjs'))!.run!;
+  f.onMain({ ...checkScripts(), '.worklane/config.yaml': 'name: demo\nrequired_checks: [test]\n' });
+  f.pin('v1.0.0', f.release('v1.0.0', ['name', 'required_checks'], f.owner));
+  const v2 = f.release('v1.1.0', ['name'], f.owner);
+  const r = f.runStep(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/ci/installed-engine-config.mjs': 'process.exit(0);\n' }), step);
+  refused(r, /Unrecognized key: "required_checks"[\s\S]*refused by the engine this change pins, v1\.1\.0/);
+  // Nor can it change how the pin is read.
+  const lib = 'export const readPin = () => ({ tag: "v1.0.0", commit: "" });\nexport const writePin = () => "";\nexport const releaseProblem = () => null;\n';
+  refused(f.runStep(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/lib/engine-pin.mjs': lib }), step), /refused by the engine this change pins, v1\.1\.0/);
+  f.done();
+});
+
 test("the workflow's step runs the base's copy of the check's script: a PR that rewrites the script to pass is still refused", { skip }, () => {
   const f = fixture();
   const steps = (parse(workflow()) as { jobs: Record<string, { steps: { run?: string }[] }> }).jobs['installed-engine-config']!.steps;
@@ -238,11 +337,11 @@ test("the workflow's step runs the base's copy of the check's script: a PR that 
   f.done();
 });
 
-test("the workflow runs the check on every pull request that changes .worklane/, with the base's script and no skip", () => {
+test("the workflow runs the check on every pull request that changes .worklane/ or the engine pin, with the base's script and no skip", () => {
   const text = workflow();
   const wf = parse(text) as { on: Record<string, Record<string, unknown>>; permissions: Record<string, string>; jobs: Record<string, { if?: unknown; steps: { run?: string; if?: unknown }[] }> };
   assert.deepEqual(Object.keys(wf.on), ['pull_request']);
-  assert.deepEqual(wf.on.pull_request!.paths, ['.worklane/**'], 'every PR that changes .worklane/, and only those');
+  assert.deepEqual(wf.on.pull_request!.paths, ['.worklane/**', 'scripts/bootstrap.sh'], 'every PR that changes .worklane/ or the file holding the engine pin, and only those');
   assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened'], 'each push to such a PR');
   assert.equal(wf.on.pull_request!['paths-ignore'], undefined);
   assert.deepEqual(wf.permissions, { contents: 'read' });

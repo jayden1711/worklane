@@ -17,9 +17,17 @@
 //   - every top-level .worklane/*.yaml the change adds or edits must be one that loader reads.
 // No skip label and no exception (#810): a PR meant to land after an engine upgrade waits, as a draft, until the pin
 // on main includes that upgrade, and passes then.
-// A change outside .worklane/ has nothing to load: it prints so and exits 0, before fetching any engine (the
-// workflow's paths filter already skips such PRs; this keeps the script right without it). Exit 1: refused, or it
-// couldn't check.
+//
+// A change that moves that pin (#814) is also judged by the engine it pins, since every new bootstrap would install
+// that one: its .worklane/ as the merge commit carries it (main's own, when only the pin moves) is loaded the same way
+// with the engine the --head pin names. That pin must be complete and well formed (bootstrap.sh itself refuses one
+// that isn't), and its tag must verify against the signers at --base, never --head's, so a PR can't bring its own
+// signer. Every top-level .worklane/*.yaml at --head must be one that engine reads. A change that removes
+// bootstrap.sh is refused. A bootstrap.sh change that leaves ENGINE_TAG and ENGINE_COMMIT as they were moves nothing.
+//
+// A change that touches neither .worklane/ nor the pin has nothing to load: it prints so and exits 0, before fetching
+// any engine (the workflow's paths filter already skips most such PRs; this keeps the script right without it).
+// Exit 1: refused, or it couldn't check.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +39,7 @@ const CONFIG_DIR = '.worklane';
 const BOOTSTRAP = 'scripts/bootstrap.sh';
 const LOADER = 'dist/src/config/load.js';
 const VERSION_TAG = /^v\d+\.\d+\.\d+$/;
+const FULL_COMMIT = /^[0-9a-f]{40}$/;
 const here = dirname(fileURLToPath(import.meta.url));
 
 const args = process.argv.slice(2);
@@ -69,40 +78,125 @@ async function main() {
   if (!root) fail('not inside a git checkout');
 
   // Whether the change touches .worklane/ at all: the same tree id at both ends (or none at either) means nothing to
-  // load, and no engine is fetched.
+  // load with the installed engine. Whether it moves the pin: decided before any engine is fetched.
   const treeAt = (rev) => gitText('rev-parse', '-q', '--verify', `${rev}:${CONFIG_DIR}`);
-  if (treeAt(base) === treeAt(head)) {
-    say(`no change under ${CONFIG_DIR}/ between ${base.slice(0, 12)} and ${head.slice(0, 12)}: nothing to load`);
+  const configChanged = treeAt(base) !== treeAt(head);
+  const moved = movedPin(base, head);
+  if (!configChanged && !moved) {
+    say(`no change under ${CONFIG_DIR}/ between ${base.slice(0, 12)} and ${head.slice(0, 12)}: nothing to load (the engine pin in ${BOOTSTRAP} didn't move)`);
     return;
   }
-  // The top-level config files the change adds or edits: a *.yaml/*.yml entry at --head whose mode or blob differs
-  // from --base's (a deleted one has nothing to load; the loader itself names a required one that is gone).
-  const atBase = entriesAt(base);
-  const changedYaml = [...entriesAt(head)].filter(([name, id]) => /\.ya?ml$/.test(name) && atBase.get(name) !== id).map(([name]) => name);
-
-  const { tag, commit, source } = installed(base);
-  // Signed by a release signer the base lists, and pointing at the pinned commit: the release workflow's own check.
-  const verify = spawnSync(process.execPath, [join(here, '..', 'verify-release-tag.mjs'), tag, '--commit', commit, '--signers-ref', base], { encoding: 'utf8' });
-  if (verify.status !== 0) fail(`the installed engine ${tag} (${source}) doesn't verify: ${lastLine(verify.stderr || verify.stdout) || verify.error?.message}`);
-  say(lastLine(verify.stdout));
-  const engine = `${tag} (${commit.slice(0, 12)}, ${source})`;
-
-  const problems = await loadWith(engine, commit, root, head);
-  for (const file of changedYaml) {
-    if (!problems.asked.has(file)) problems.list.push({ file, path: '', message: `the installed engine doesn't read ${CONFIG_DIR}/${file}: what it sets would have no effect on a machine` });
-  }
-  if (problems.list.length) {
-    for (const p of problems.list) {
+  const yamlAtHead = [...entriesAt(head)].filter(([name]) => /\.ya?ml$/.test(name));
+  let refusals = 0;
+  const refuse = (problems, why) => {
+    for (const p of problems) {
       const where = `${CONFIG_DIR}/${p.file ?? ''}${p.path ? ` at ${p.path}` : ''}`;
       console.error(`installed-engine-config: ${where}: ${p.message}`);
     }
-    fail(
-      `${CONFIG_DIR}/ at ${head.slice(0, 12)} is refused by the installed engine ${engine}. Merged now, the machines running it couldn't load ` +
-        `their config. If this change needs a newer engine, keep the PR a draft until ${BOOTSTRAP} on main pins one that accepts it ` +
-        '(scripts/pin-engine.mjs), then update the PR',
-    );
+    console.error(`installed-engine-config: refused: ${why}`);
+    refusals += 1;
+  };
+
+  if (configChanged) {
+    // The top-level config files the change adds or edits: a *.yaml/*.yml entry at --head whose mode or blob differs
+    // from --base's (a deleted one has nothing to load; the loader itself names a required one that is gone).
+    const atBase = entriesAt(base);
+    const changedYaml = yamlAtHead.filter(([name, id]) => atBase.get(name) !== id).map(([name]) => name);
+    const engine = verified('the installed engine', installed(base), base);
+    const problems = await loadWith(engine, root, head);
+    for (const file of changedYaml) {
+      if (!problems.asked.has(file)) problems.list.push({ file, path: '', message: `the installed engine doesn't read ${CONFIG_DIR}/${file}: what it sets would have no effect on a machine` });
+    }
+    if (problems.list.length) {
+      refuse(
+        problems.list,
+        `${CONFIG_DIR}/ at ${head.slice(0, 12)} is refused by ${engine.label}. Merged now, the machines running it couldn't load ` +
+          `their config. If this change needs a newer engine, keep the PR a draft until ${BOOTSTRAP} on main pins one that accepts it ` +
+          '(scripts/pin-engine.mjs), then update the PR',
+      );
+    } else {
+      say(`${CONFIG_DIR}/ at ${head.slice(0, 12)} loads with ${engine.label}${changedYaml.length ? `; changed: ${changedYaml.join(', ')}` : ''}`);
+    }
   }
-  say(`${CONFIG_DIR}/ at ${head.slice(0, 12)} loads with the installed engine ${engine}${changedYaml.length ? `; changed: ${changedYaml.join(', ')}` : ''}`);
+
+  if (moved) {
+    // The engine every new bootstrap would install once this merges: its tag verified against the BASE's signers.
+    const engine = verified('the engine this change pins,', moved, base);
+    const problems = await loadWith(engine, root, head);
+    // Every config file there, not only changed ones: a release that stops reading one drops what it sets.
+    for (const [file] of yamlAtHead) {
+      if (!problems.asked.has(file)) problems.list.push({ file, path: '', message: `the engine this change pins doesn't read ${CONFIG_DIR}/${file}: what it sets would have no effect on a new machine` });
+    }
+    if (problems.list.length) {
+      refuse(
+        problems.list,
+        `${CONFIG_DIR}/ at ${head.slice(0, 12)} is refused by ${engine.label}. Merged now, every new bootstrap would install an engine that ` +
+          `can't load this repo's config. Pin a release that loads it, or first change ${CONFIG_DIR}/ (in a PR of its own) to a config ` +
+          'both the installed engine and that release accept',
+      );
+    } else {
+      say(`${CONFIG_DIR}/ at ${head.slice(0, 12)} loads with ${engine.label}`);
+    }
+  }
+  if (refusals) process.exitCode = 1;
+}
+
+/**
+ * The pin --head sets in bootstrap.sh when it differs from --base's: { tag, commit, source }, or null when it doesn't
+ * move (bootstrap.sh unchanged, or changed with ENGINE_TAG and ENGINE_COMMIT as they were). A moved pin must be one
+ * bootstrap.sh would install: a release tag and a full commit id. A removed bootstrap.sh is refused.
+ */
+function movedPin(base, head) {
+  const blob = (rev) => gitText('rev-parse', '-q', '--verify', `${rev}:${BOOTSTRAP}`);
+  const [was, now] = [blob(base), blob(head)];
+  if (was === now) return null;
+  if (now === null) fail(`this change removes ${BOOTSTRAP}, the engine pin every new machine bootstraps from: can't tell which engine they would install`);
+  const at = `${BOOTSTRAP} at ${head.slice(0, 12)}`;
+  const text = gitText('show', `${head}:${BOOTSTRAP}`);
+  if (text === null) fail(`can't read ${at}`);
+  let pin;
+  try {
+    pin = readPin(text);
+  } catch (e) {
+    fail(`${at}: ${e.message}`);
+  }
+  // The base's pin, only to tell whether it moved: one that doesn't parse there counts as moved, never as the same.
+  let before = null;
+  if (was !== null) {
+    try {
+      before = readPin(gitText('show', `${base}:${BOOTSTRAP}`) ?? '');
+    } catch {
+      before = null;
+    }
+  }
+  if (before && before.tag === pin.tag && before.commit === pin.commit) return null;
+  if (!VERSION_TAG.test(pin.tag)) fail(`${at} pins ENGINE_TAG=${pin.tag || '(none)'}, not a release tag vX.Y.Z`);
+  if (!FULL_COMMIT.test(pin.commit)) {
+    fail(`${at} pins ENGINE_COMMIT=${pin.commit || '(none)'}, not a full commit id: bootstrap.sh refuses that, so no new machine could install the engine`);
+  }
+  return { tag: pin.tag, commit: pin.commit, source: `the pin in ${at}` };
+}
+
+/**
+ * The engine `{ tag, commit, source }`, its tag here (fetched by name when missing) and verified as release.yml
+ * verifies one: signed by a release signer `signersRef` lists, pointing at `commit`. Returns it with its label.
+ */
+function verified(noun, { tag, commit, source }, signersRef) {
+  const label = `${noun} ${tag} (${commit.slice(0, 12)}, ${source})`;
+  fetchTag(tag, label);
+  const verify = spawnSync(process.execPath, [join(here, '..', 'verify-release-tag.mjs'), tag, '--commit', commit, '--signers-ref', signersRef], { encoding: 'utf8' });
+  if (verify.status !== 0) fail(`${label} doesn't verify: ${lastLine(verify.stderr || verify.stdout) || verify.error?.message}`);
+  say(lastLine(verify.stdout));
+  return { tag, commit, source, label };
+}
+
+/** refs/tags/<tag> here: fetched by name from origin when missing (shallow when this checkout is). */
+function fetchTag(tag, label) {
+  if (gitText('rev-parse', '-q', '--verify', `refs/tags/${tag}`) !== null) return;
+  if (git('remote', 'get-url', 'origin').status !== 0) fail(`no tag ${tag} here for ${label}, and no origin to fetch it from`);
+  const shallow = gitText('rev-parse', '--is-shallow-repository') === 'true' ? ['--depth=1'] : [];
+  const f = git('fetch', '-q', '--no-tags', ...shallow, 'origin', `+refs/tags/${tag}:refs/tags/${tag}`);
+  if (f.status !== 0) fail(`can't fetch ${tag} for ${label}: ${lastLine(f.stderr)}`);
 }
 
 /** The files directly in .worklane/ at `rev`, as name -> "mode object id" (none when it has no .worklane/). */
@@ -123,9 +217,6 @@ function entriesAt(rev) {
 function installed(base) {
   const at = `${BOOTSTRAP} at ${base.slice(0, 12)}`;
   const boot = has(base, BOOTSTRAP) ? gitText('show', `${base}:${BOOTSTRAP}`) : null;
-  let tag;
-  let commit;
-  let source;
   if (boot !== null) {
     let pin;
     try {
@@ -135,55 +226,47 @@ function installed(base) {
     }
     if (!VERSION_TAG.test(pin.tag)) fail(`${at} pins ENGINE_TAG=${pin.tag}, not a release tag vX.Y.Z`);
     if (pin.commit) {
-      if (!/^[0-9a-f]{40}$/.test(pin.commit)) fail(`${at} pins ENGINE_COMMIT=${pin.commit}, not a full commit id`);
-      [tag, commit, source] = [pin.tag, pin.commit, `the pin in ${at}`];
+      if (!FULL_COMMIT.test(pin.commit)) fail(`${at} pins ENGINE_COMMIT=${pin.commit}, not a full commit id`);
+      return { tag: pin.tag, commit: pin.commit, source: `the pin in ${at}` };
     }
   }
-  const hasOrigin = git('remote', 'get-url', 'origin').status === 0;
-  if (!tag) {
-    const names = new Set((gitText('tag', '--list', 'v*') ?? '').split('\n'));
-    if (hasOrigin) {
-      const remote = git('ls-remote', '--tags', '--refs', 'origin', 'refs/tags/v*');
-      if (remote.status !== 0) fail(`no engine pinned in ${at}, and the release tags can't be listed: ${lastLine(remote.stderr)}`);
-      for (const line of remote.stdout.split('\n')) names.add(line.split('refs/tags/')[1] ?? '');
-    }
-    const num = (t) => t.slice(1).split('.').map(Number);
-    const newest = [...names]
-      .filter((t) => VERSION_TAG.test(t))
-      .sort((a, b) => {
-        const [x, y] = [num(a), num(b)];
-        return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
-      })
-      .pop();
-    if (!newest) fail(`no engine pinned in ${at} and no release tag vX.Y.Z: can't tell which engine is installed`);
-    [tag, source] = [newest, `the newest release tag; ${at} pins no commit`];
+  const names = new Set((gitText('tag', '--list', 'v*') ?? '').split('\n'));
+  if (git('remote', 'get-url', 'origin').status === 0) {
+    const remote = git('ls-remote', '--tags', '--refs', 'origin', 'refs/tags/v*');
+    if (remote.status !== 0) fail(`no engine pinned in ${at}, and the release tags can't be listed: ${lastLine(remote.stderr)}`);
+    for (const line of remote.stdout.split('\n')) names.add(line.split('refs/tags/')[1] ?? '');
   }
-  // The tag here, fetched by name when missing (shallow when this checkout is).
-  if (gitText('rev-parse', '-q', '--verify', `refs/tags/${tag}`) === null) {
-    if (!hasOrigin) fail(`no tag ${tag} (${source}) here, and no origin to fetch it from`);
-    const shallow = gitText('rev-parse', '--is-shallow-repository') === 'true' ? ['--depth=1'] : [];
-    const f = git('fetch', '-q', '--no-tags', ...shallow, 'origin', `+refs/tags/${tag}:refs/tags/${tag}`);
-    if (f.status !== 0) fail(`can't fetch ${tag} (${source}): ${lastLine(f.stderr)}`);
-  }
-  commit ??= gitText('rev-parse', `refs/tags/${tag}^{commit}`);
+  const num = (t) => t.slice(1).split('.').map(Number);
+  const tag = [...names]
+    .filter((t) => VERSION_TAG.test(t))
+    .sort((a, b) => {
+      const [x, y] = [num(a), num(b)];
+      return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
+    })
+    .pop();
+  if (!tag) fail(`no engine pinned in ${at} and no release tag vX.Y.Z: can't tell which engine is installed`);
+  const source = `the newest release tag; ${at} pins no commit`;
+  // No pinned commit: the tag's own, so the tag must be here first (fetched by name when missing).
+  fetchTag(tag, `the installed engine ${tag} (${source})`);
+  const commit = gitText('rev-parse', `refs/tags/${tag}^{commit}`);
   if (!commit) fail(`${tag} (${source}) names no commit`);
   return { tag, commit, source };
 }
 
 /**
- * The config committed at `head`, loaded by the engine at `commit`: its dist/src and its locked runtime dependencies
- * in a directory outside this checkout (so nothing resolves to the PR's own modules), then its configFrom.
+ * The config committed at `head`, loaded by the verified engine at `commit`: its dist/src and its locked runtime
+ * dependencies in a directory outside this checkout (so nothing resolves to the PR's own modules), then its configFrom.
  * Returns what the loader refused and the files it asked for.
  */
-async function loadWith(engine, commit, root, head) {
-  if (!has(commit, LOADER)) fail(`the installed engine ${engine} carries no ${LOADER}: not a release commit`);
+async function loadWith({ commit, label: engine }, root, head) {
+  if (!has(commit, LOADER)) fail(`${engine} carries no ${LOADER}: not a release commit`);
   const pkgText = gitText('show', `${commit}:package.json`);
-  if (pkgText === null) fail(`the installed engine ${engine} has no package.json`);
+  if (pkgText === null) fail(`${engine} has no package.json`);
   let pkg;
   try {
     pkg = JSON.parse(pkgText);
   } catch (e) {
-    fail(`the installed engine ${engine} has an unreadable package.json: ${e.message}`);
+    fail(`${engine} has an unreadable package.json: ${e.message}`);
   }
   const dir = mkdtempSync(join(tmpdir(), 'installed-engine-'));
   try {
@@ -192,23 +275,23 @@ async function loadWith(engine, commit, root, head) {
       const x = spawnSync('tar', ['-x', '-C', dir], { input: tar, stdio: ['pipe', 'ignore', 'pipe'] });
       if (x.status !== 0) throw new Error(lastLine(x.stderr) || `tar exited ${x.status}`);
     } catch (e) {
-      fail(`can't unpack the installed engine ${engine}: ${lastLine(e.stderr) || e.message}`);
+      fail(`can't unpack ${engine}: ${lastLine(e.stderr) || e.message}`);
     }
     writeFileSync(join(dir, 'package.json'), pkgText);
     if (Object.keys(pkg.dependencies ?? {}).length) {
       const lock = gitText('show', `${commit}:package-lock.json`);
-      if (lock === null) fail(`the installed engine ${engine} has runtime dependencies but no package-lock.json to install them as released`);
+      if (lock === null) fail(`${engine} has runtime dependencies but no package-lock.json to install them as released`);
       writeFileSync(join(dir, 'package-lock.json'), lock);
       const npm = spawnSync('npm', ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: dir, encoding: 'utf8' });
-      if (npm.status !== 0) fail(`can't install the installed engine ${engine}'s runtime dependencies: ${lastLine(npm.stderr || npm.stdout) || npm.error?.message}`);
+      if (npm.status !== 0) fail(`can't install ${engine}'s runtime dependencies: ${lastLine(npm.stderr || npm.stdout) || npm.error?.message}`);
     }
     let mod;
     try {
       mod = await import(pathToFileURL(join(dir, LOADER)).href);
     } catch (e) {
-      fail(`can't load the installed engine ${engine}'s config loader: ${e.message}`);
+      fail(`can't load ${engine}'s config loader: ${e.message}`);
     }
-    if (typeof mod.configFrom !== 'function') fail(`the installed engine ${engine}'s ${LOADER} exports no configFrom: can't load a config with it`);
+    if (typeof mod.configFrom !== 'function') fail(`${engine}'s ${LOADER} exports no configFrom: can't load a config with it`);
     // Read only from git at --head, never the working tree: every file the engine asks for, as it asks.
     const asked = new Set();
     const read = (file) => {
