@@ -1,12 +1,10 @@
-// WHY (#741): the first-run page's First task card. Folds the filed issue's own events into its stages; a stage with
-// no event is waiting, never guessed done. Each estimate names its basis: the tick, a labelled guess, or none.
+// WHY (#741): the First task card: the filed issue's own events as stages; no event, waiting. Fixed words only.
 import type { StoredEvent } from './events/types.js';
 import { holdsInWords, type HoldWords } from './hold-words.js';
 
-/** src/service.ts runSite's tick: 60 s plus up to 5 s (test/first-task-progress.test.ts keeps them equal). */
+/** src/service.ts's tick (a test keeps them equal). */
 export const COORDINATOR_TICK_MS = 60_000;
 export const COORDINATOR_TICK_JITTER_MS = 5_000;
-/** The audit action src/dashboard.ts records when the first-run form files an issue. */
 export const FIRST_TASK_FILED = 'first_run.first_task_filed';
 
 export type StageId = 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge';
@@ -40,13 +38,12 @@ const issueOf = (e: StoredEvent) => (typeof pl(e).issue === 'number' ? (pl(e).is
 const TITLE: Record<StageId, string> = { claimed: 'Claimed', worker: 'Worker', evaluator: 'Evaluator', pr: 'PR opened', checks: 'Checks', merge: 'Merged' };
 const S = (id: StageId, state: StageState, detail: string, e: E = null, estimate: Estimate | null = null): Stage => ({ id, title: TITLE[id], state, detail, at: e?.ts ?? null, estimate });
 
-/** The worker, evaluator and PR stages: the review's guess for all three (nothing times them). */
 const GUESS: Estimate = { basis: 'guess', text: '15-60 minutes from the claim to a PR, for these stages together; nothing times them' };
 
-/** A word from an enum-valued field (a run's end reason, a confidence), or "unknown": never free text. */
+/** An enum word, or "unknown": never free text. */
 const word = (x: unknown) => (typeof x === 'string' && /^[a-z_]{1,30}$/.test(x) ? x.replace(/_/g, ' ') : 'unknown');
 
-/** GitHub's https page of exactly that PR in `repo`, or null: never a script URL, another host, repo or PR; no repo, no link. */
+/** GitHub's https page of exactly that PR in `repo`, else null. */
 function prLink(url: unknown, n: number, repo: string | null | undefined): string | null {
   try {
     const u = new URL(String(url));
@@ -58,7 +55,6 @@ function prLink(url: unknown, n: number, repo: string | null | undefined): strin
   }
 }
 
-/** The latest first-task filing in the audit; null when the form has filed none. */
 export function firstTaskFiled(events: readonly StoredEvent[]): { issue: number; id: number; at: string } | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
@@ -68,10 +64,7 @@ export function firstTaskFiled(events: readonly StoredEvent[]): { issue: number;
   return null;
 }
 
-/**
- * The latest filed first task, from its own events recorded after the filing; merge events only of the PR the harness
- * opened for it. `local`: no instance (the hold words); `repo`: owner/name, the only repo whose PR page is linked.
- */
+/** The latest filed first task: its events after the filing; merge events of its own PR only. */
 export function firstTaskProgress(events: readonly StoredEvent[], o: { local: boolean; repo?: string | null }): FirstTaskProgress | null {
   const filed = firstTaskFiled(events);
   if (!filed) return null;
@@ -90,7 +83,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
   const pr = opened && Number.isInteger(pl(opened).number) ? (pl(opened).number as number) : null;
   const ofPr = (type: string) => (pr === null ? null : of(type, (p) => p.number === pr));
   const [status, merged, closed] = ['pr.status', 'merge.done', 'pr.closed'].map(ofPr);
-  // A decision or a failed merge counts only at the PR's latest known head: a push after it waits for a fresh one.
+  // A decision or failed merge counts only at the PR's latest head.
   const head = pr === null ? null : pl(last((e) => ['pr.opened', 'pr.status', 'pr.ready', 'pr.unready'].includes(e.type) && pl(e).number === pr)!).head;
   const [decided, failedMerge] = ['merge.decided', 'merge.failed'].map((t) => of(t, (p) => p.number === pr && p.head === head));
   const stale = !!ofPr('merge.decided') && !decided;
@@ -130,7 +123,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
     outcome = 'held';
     stages.push(S('merge', 'held', 'held: it waits for you', decided, { basis: 'none', text: 'no estimate: it waits until a person merges it' }));
   } else stages.push(decided ? S('merge', 'running', 'the merge policy will merge it', decided, { basis: 'none', text: 'no estimate: it merges on a later pass of the PR watch' }) : S('merge', 'waiting', stale ? 'a new head: it waits for its checks and a fresh decision' : opened ? 'no merge decision yet: it comes once the checks are green' : 'after the PR'));
-  // A block after the latest claim and worker start: said in fixed words (its reason can hold run output).
+  // A block: fixed words (its reason can hold run output).
   const blocked = block && after(block, claim) && after(block, wStart) ? { at: block.ts } : null;
   if (blocked && outcome === 'open') outcome = 'blocked';
   return { issue: n, filedAt: filed.at, pr: pr === null ? null : { number: pr, url: prLink(pl(opened!).url, pr, o.repo) }, stages, blocked, question: asked ? { at: asked.ts } : null, holds, outcome };

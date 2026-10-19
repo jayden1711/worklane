@@ -1,6 +1,5 @@
-// WHY (#741; #706 slice 2's table): each kind of reason merge.decided carries, by its prefix, in two fixed sentences:
-// why it waits, what lets it through. Never fed back into a decision; never a reason's own text (it can hold run
-// output, paths or evaluator text). test/first-task-progress.test.ts scans every source of merge.decided reasons.
+// WHY (#741, #706): each merge.decided reason kind, by prefix, in fixed words; never the reason's text. A test scans
+// every source of those reasons for a prefix without words.
 
 export type HoldKind = 'never' | 'policy-off' | 'repo-off' | 'stopped' | 'high-risk' | 'design' | 'big' | 'doubt' | 'eval' | 'outside-plan' | 'conflict-fix' | 'cant-merge' | 'merge-failed' | 'mergeable-unknown' | 'combined' | 'ruleset' | 'other';
 export interface HoldWords {
@@ -10,7 +9,6 @@ export interface HoldWords {
 }
 
 const YOURS = 'Review it and merge it yourself.';
-/** [kind, prefixes, why, what lets it through]. */
 const TABLE: [Exclude<HoldKind, 'other'>, string[], string, string][] = [
   ['never', ['never auto-merged:'], 'The harness never merges this kind of PR itself (one it did not open, a revert, a check from feedback).', YOURS],
   ['policy-off', ['auto-merge is off for this instance'], "Auto-merge is off for this instance (its policy's auto_merge): every PR waits for a person.", YOURS],
@@ -33,14 +31,13 @@ const LOCAL_OFF: HoldWords = { kind: 'policy-off', why: 'Local mode: every PR wa
 
 export const HOLD_KINDS: readonly HoldKind[] = TABLE.map((e) => e[0]);
 
-/** One reason in plain words; `local`: no instance (#729's words). An unknown prefix: fixed words, never its text. */
+/** `local`: no instance (#729's words). */
 export function holdWords(reason: string, o: { local: boolean }): HoldWords {
   const e = TABLE.find((x) => x[1].some((p) => reason.startsWith(p)));
   if (!e) return { kind: 'other', why: 'Another reason (see the Board).', through: "Read the PR's hold comment and decide." };
   return o.local && e[0] === 'policy-off' ? LOCAL_OFF : { kind: e[0], why: e[2], through: e[3] };
 }
 
-/** One line per kind, in the reasons' order. */
 export function holdsInWords(reasons: readonly string[], o: { local: boolean }): HoldWords[] {
   const out: HoldWords[] = [];
   for (const r of reasons) {
