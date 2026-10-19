@@ -24,6 +24,7 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
+import { weakeningOf } from '../merge-policy-weakening.js';
 import { MainWatch, repoGit, type MainWatchDeps, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
@@ -535,6 +536,8 @@ export abstract class MergeFlow extends FixRuns {
       // A planned task: high-risk or design-level files its approved plan didn't list hold the merge: the repo's
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
       claimedProtected: this.claimedClass(n) === 'protected',
+      // A test, lint or guard the change removes or loosens, read from the change itself (#783).
+      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d)),
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).

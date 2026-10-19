@@ -13,6 +13,16 @@ import { repoRoot } from './helpers.js';
 import { BRAND } from '../src/brand.js';
 import { rolePrompt, VERDICT_SCHEMA } from '../src/roles.js';
 import { exampleProject } from './helpers.js';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { FileBacklog } from '../src/backlog/file.js';
+import type { PullRequest } from '../src/backlog/types.js';
+import { ReviewConfig } from '../src/config/schema.js';
+import { Coordinator } from '../src/coordinator.js';
+import { EventLog } from '../src/events/log.js';
+import { CHECK_TABLES, checkShapedTables, NOT_A_CHECK, tableEntries, testFacts, weakeningOf, weakeningReasons, WEAKENING_REASON } from '../src/merge-policy-weakening.js';
+import type { ChangeFile, LockScope } from '../src/review.js';
+import { FakeRunner } from '../src/runner.js';
 
 const cfg = loadConfig(exampleProject().dir);
 const review = cfg.review!;
@@ -406,4 +416,307 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     assert.equal(d.auto, false, path);
     assert.ok(d.reasons.includes(`high-risk: engine-guards (${path})`), `${path}: ${d.reasons.join(' | ')}`);
   }
+});
+
+// ---- A change that removes or weakens a test, a lint or a guard waits for the owner (#783)
+
+/** A test file before a change: two tests, four assertions, one of them awaited. */
+const MATH_TEST = [
+  "import { test } from 'node:test';",
+  "import assert from 'node:assert/strict';",
+  "import { add, sub } from '../src/math.js';",
+  '',
+  "test('adds', () => {",
+  '  assert.equal(add(1, 2), 3);',
+  '  assert.deepStrictEqual(',
+  '    [add(0, 0), add(1, 1)],',
+  '    [0, 2],',
+  '  );',
+  '});',
+  '',
+  "test('subtracts', async () => {",
+  "  await assert.rejects(sub('x', 1), /not a number/);",
+  '  assert.equal(sub(3, 1), 2);',
+  '});',
+  '',
+].join('\n');
+const MATH = 'export const add = (a: number, b: number) => a + b;\nexport const sub = (a: number, b: number) => a - b;\n';
+/** The code, changed: a change to the test alongside it is one that also changes code. */
+const MATH_CHANGED = MATH.replace('a - b', 'b - a');
+/** A lint's allowlist and its rules, under the names the registry reads (CHECK_TABLES). */
+const CLOCK_LINT = "const ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n  'test/b.test.ts': 2,\n};\n";
+const READER_LINT = 'const READER_WORDS: Record<string, RegExp> = {\n  numstat: /numstat/g,\n  raw: /--raw\\b/g,\n};\n';
+const DELEGATION = "export const NEVER_LOOSEN = ['money-path', 'migration', 'auth'] as const;\n\nexport const floor = () => new Set<string>([...NEVER_LOOSEN]);\n";
+const ESLINT = '{\n  "rules": {\n    "eqeqeq": "error",\n    "no-eval": "error"\n  }\n}\n';
+
+/** weakeningReasons for a change given as each file's text before and after (null: not there), its lines as a diff gives them. */
+function weakens(before: Record<string, string | null>, after: Record<string, string | null>, scope?: LockScope): string[] {
+  const lines = (t: string | null | undefined) => (t ?? '').split('\n');
+  const minus = (a: string[], b: string[]) => {
+    const left = [...b];
+    return a.filter((x) => {
+      const k = left.indexOf(x);
+      if (k === -1) return true;
+      left.splice(k, 1);
+      return false;
+    });
+  };
+  const files: ChangeFile[] = [...new Set([...Object.keys(before), ...Object.keys(after)])].map((path) => {
+    const removed = minus(lines(before[path]), lines(after[path])).filter(Boolean);
+    const added = minus(lines(after[path]), lines(before[path])).filter(Boolean);
+    return { path, added: added.length, removed: removed.length, addedLines: added, removedLines: removed };
+  });
+  return weakeningReasons({ files, before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope });
+}
+/** Each reason's kind, without the common start and the places. */
+const kinds = (reasons: string[]) => reasons.map((r) => r.slice(WEAKENING_REASON.length).replace(/ \(.*$/s, ''));
+const ASSERTION = 'removes or changes a test assertion';
+const SKIP = 'adds a skip, todo or only to a test, or changes how an existing test runs';
+
+test('weakening: with code changed too, an assertion removed, loosened, widened, unawaited, made conditional, unreachable or swallowed holds', () => {
+  const change = (t: string) => kinds(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': t }));
+  for (const [why, t] of [
+    ['removed', MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '')],
+    ['strict to loose', MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.ok(sub(3, 1))')],
+    ['an expected value widened, on a line of its own', MATH_TEST.replace('    [0, 2],', '    [0, 2].slice(0, 0),')],
+    ['no longer awaited', MATH_TEST.replace('await assert.rejects', 'assert.rejects')],
+    ['made conditional', MATH_TEST.replace('  assert.equal(add(1, 2), 3);', '  if (process.env.NEVER) {\n    assert.equal(add(1, 2), 3);\n  }')],
+    ['made unreachable', MATH_TEST.replace('  assert.equal(add(1, 2), 3);', '  return;\n  assert.equal(add(1, 2), 3);')],
+    ['its failure swallowed', MATH_TEST.replace('  assert.equal(add(1, 2), 3);', '  try {\n    assert.equal(add(1, 2), 3);\n  } catch {}')],
+    ['moved into a function nothing calls', MATH_TEST.replace('  assert.equal(add(1, 2), 3);', '  const later = () => assert.equal(add(1, 2), 3);')],
+  ]) assert.deepEqual(change(t!), [ASSERTION], why);
+  // A whole test removed: its title and its assertions.
+  assert.deepEqual(change(MATH_TEST.replace(/test\('subtracts'[\s\S]*$/, '')), ['removes or renames a test', ASSERTION]);
+  // A local helper that asserts counts as an assertion: a call to it removed holds.
+  const helper = `${MATH_TEST}\nfunction sums(n: number) {\n  assert.equal(add(n, 0), n);\n}\ntest('sums', () => {\n  sums(4);\n});\n`;
+  assert.deepEqual(kinds(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': helper }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': helper.replace('  sums(4);\n', '') })), [ASSERTION]);
+});
+
+test('weakening: in a change of tests only, fewer assertions or tests hold; a reworded assertion does not (the issue: changed ones wait when code changes too)', () => {
+  const only = (t: string) => kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': t }));
+  assert.deepEqual(only(MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '')), [ASSERTION]);
+  assert.deepEqual(only(MATH_TEST.replace(/test\('subtracts'[\s\S]*$/, '')), ['removes or renames a test', ASSERTION]);
+  assert.deepEqual(only(MATH_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(2, 1), 3)')), []);
+  assert.deepEqual(only(MATH_TEST.replace("test('adds'", "test('adds two numbers'")), []);
+});
+
+test('weakening: a skip, todo or only on an existing test holds, so does a skipped describe around it or a changed skip condition; a new test with its own skip does not', () => {
+  const only = (t: string, base = MATH_TEST) => kinds(weakens({ 'test/math.test.ts': base }, { 'test/math.test.ts': t }));
+  for (const t of [
+    MATH_TEST.replace("test('adds'", "test.skip('adds'"),
+    MATH_TEST.replace("test('adds'", "test.only('adds'"),
+    MATH_TEST.replace("test('adds'", "test.todo('adds'"),
+    MATH_TEST.replace("test('adds', () =>", "test('adds', { skip: true }, () =>"),
+    MATH_TEST.replace("test('adds'", "describe.skip('math', () => {\ntest('adds'").replace(/\n$/, '\n});\n'),
+  ]) assert.deepEqual(only(t), [SKIP], t);
+  const posix = MATH_TEST.replace("test('adds', () =>", "const posix = { skip: process.platform === 'win32' && 'POSIX' };\ntest('adds', posix, () =>");
+  assert.deepEqual(only(posix.replace("process.platform === 'win32' && 'POSIX'", 'true'), posix), [SKIP], 'the condition of an options const an existing test uses');
+  // A new test with a platform skip of its own, with or without a code change: nothing existing runs less.
+  const added = `${MATH_TEST}test('multiplies', { skip: process.platform !== 'linux' && 'Linux only' }, () => {\n  assert.equal(add(2, 2), 4);\n});\n`;
+  assert.deepEqual(only(added), []);
+  assert.deepEqual(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': added }), []);
+});
+
+test('weakening: a deleted test file holds unless the change adds the same text as a test file in its folder; a rename out of the runner or the folder holds', () => {
+  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null })), ['deletes a test file', 'removes or renames a test', ASSERTION]);
+  assert.deepEqual(weakens({ 'test/math.test.ts': MATH_TEST, 'test/sum.test.ts': null }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), []);
+  assert.ok(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/math.tset.ts': MATH_TEST })).includes('deletes a test file'), 'out of the names the runner runs');
+  assert.ok(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/old/math.test.ts': MATH_TEST })).includes('deletes a test file'), 'into another folder');
+});
+
+test('weakening: adding tests, assertions or a test file holds nothing, with or without a code change', () => {
+  const more = MATH_TEST.replace('  assert.equal(sub(3, 1), 2);', '  assert.equal(sub(3, 1), 2);\n  assert.equal(sub(1, 1), 0);');
+  assert.deepEqual(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': more }), []);
+  assert.deepEqual(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': more }), []);
+  assert.deepEqual(weakens({ 'src/math.ts': MATH }, { 'src/math.ts': MATH_CHANGED, 'test/new.test.ts': MATH_TEST }), []);
+});
+
+test('weakening: an entry added to a lint allowlist holds, and so does a raised count; one taken out does not', () => {
+  const lint = (t: string) => weakens({ 'test/no-clock-helpers.test.ts': CLOCK_LINT }, { 'test/no-clock-helpers.test.ts': t });
+  assert.deepEqual(lint(CLOCK_LINT.replace("  'test/b.test.ts': 2,\n", "  'test/b.test.ts': 2,\n  'test/c.test.ts': 1,\n")), [
+    `${WEAKENING_REASON}adds or changes an entry in an allowlist, exception or good-fixture list (test/no-clock-helpers.test.ts: "ALLOWED: 'test/c.test.ts'.1")`,
+  ]);
+  assert.deepEqual(kinds(lint(CLOCK_LINT.replace("'test/a.test.ts': 1", "'test/a.test.ts': 3"))), ['adds or changes an entry in an allowlist, exception or good-fixture list']);
+  assert.deepEqual(lint(CLOCK_LINT.replace("  'test/a.test.ts': 1,\n", '')), []);
+  // Renamed or gone: the table can't be read, so it holds.
+  assert.deepEqual(kinds(lint(CLOCK_LINT.replace('const ALLOWED', 'const ALLOWED_NOW'))), ["removes or renames a check's or guard's table"]);
+});
+
+test("weakening: a rule taken out of a lint's rules or a guard's list holds; a rule added does not", () => {
+  const rules = (t: string) => kinds(weakens({ 'test/change-files-renames.test.ts': READER_LINT }, { 'test/change-files-renames.test.ts': t }));
+  assert.deepEqual(rules(READER_LINT.replace('  raw: /--raw\\b/g,\n', '')), ["removes or changes an entry in a check's rules or a guard's list"]);
+  assert.deepEqual(rules(READER_LINT.replace('  raw: /--raw\\b/g,\n', '  raw: /--raw\\b/g,\n  stat: /--stat\\b/g,\n')), []);
+  // A guard file: its table's entry, and the line it was on.
+  assert.deepEqual(kinds(weakens({ 'src/delegation.ts': DELEGATION }, { 'src/delegation.ts': DELEGATION.replace("'money-path', ", '') })), ["removes or changes an entry in a check's rules or a guard's list", 'removes or changes code in a guard or lint']);
+  // package.json scripts: a lint dropped from the test command holds; a new script does not.
+  const pkg = (scripts: Record<string, string>) => `${JSON.stringify({ name: 'x', scripts }, null, 2)}\n`;
+  const was = pkg({ test: 'node --test && npm run lint', lint: 'eslint .' });
+  assert.deepEqual(kinds(weakens({ 'package.json': was }, { 'package.json': pkg({ test: 'node --test', lint: 'eslint .' }) })), ["removes or changes an entry in a check's rules or a guard's list"]);
+  assert.deepEqual(weakens({ 'package.json': was }, { 'package.json': pkg({ test: 'node --test && npm run lint', lint: 'eslint .', fmt: 'prettier .' }) }), []);
+});
+
+test('weakening: a guard line removed or made conditional holds, a line only added does not; a lint config rule removed or an allowlist file grown holds in every repo', () => {
+  const guard = 'export function guard(ref: string) {\n  if (ref === MAIN) return refuse(ref);\n  return ok();\n}\n';
+  assert.deepEqual(weakens({ 'src/push-guard.ts': guard }, { 'src/push-guard.ts': guard.replace('ref === MAIN)', 'ref === MAIN && !process.env.LET_ME)') }), [
+    `${WEAKENING_REASON}removes or changes code in a guard or lint (src/push-guard.ts: "if (ref === MAIN) return refuse(ref);"; src/push-guard.ts: "if (ref === MAIN && !process.env.LET_ME) return refuse(ref);")`,
+  ]);
+  // Made conditional by a line only added before it (an early return): holds too.
+  assert.deepEqual(weakens({ 'src/push-guard.ts': guard }, { 'src/push-guard.ts': guard.replace('  if (ref === MAIN)', '  if (process.env.LET_ME) return ok();\n  if (ref === MAIN)') }), [
+    `${WEAKENING_REASON}removes or changes code in a guard or lint (src/push-guard.ts: "if (process.env.LET_ME) return ok();")`,
+  ]);
+  assert.deepEqual(weakens({ 'src/push-guard.ts': guard }, { 'src/push-guard.ts': guard.replace('  return ok();', '  refuseDetached(ref);\n  return ok();') }), []);
+  for (const scope of [undefined, 'managed-app'] as const) {
+    assert.deepEqual(weakens({ '.eslintrc.json': ESLINT }, { '.eslintrc.json': ESLINT.replace('    "eqeqeq": "error",\n', '') }, scope), [
+      `${WEAKENING_REASON}removes or changes code in a guard or lint (.eslintrc.json: "\\"eqeqeq\\": \\"error\\",")`,
+    ], String(scope));
+    assert.deepEqual(kinds(weakens({ '.gitleaksignore': 'a1b2c3:src/x.ts:generic-api-key:3\n' }, { '.gitleaksignore': 'a1b2c3:src/x.ts:generic-api-key:3\nd4e5f6:src/y.ts:generic-api-key:9\n' }, scope)), ['adds an entry to an allowlist file'], String(scope));
+  }
+  // A managed app's own src/review.ts is its own code, not the engine's guard (as the locks stand aside there).
+  assert.deepEqual(weakens({ 'src/review.ts': guard }, { 'src/review.ts': guard.replace('  if (ref === MAIN) return refuse(ref);\n', '') }, 'managed-app'), []);
+});
+
+test("weakening (adversarial pass): an assertion called by another name, a shadowed or patched assert, a loose assert import, a process exit, a lint test's own logic, an entry behind a spread, a runner config", () => {
+  const only = (t: string, base = MATH_TEST, path = 'test/math.test.ts') => kinds(weakens({ [path]: base }, { [path]: t }));
+  // Another name for an assertion: an alias, a named import, a destructured one. Removing a call holds.
+  const aliased = MATH_TEST.replace("import assert from 'node:assert/strict';", "import { strict as A } from 'node:assert';").replaceAll('assert.', 'A.');
+  assert.deepEqual(only(aliased.replace('  A.equal(add(1, 2), 3);\n', ''), aliased), [ASSERTION]);
+  const destructured = `${MATH_TEST}const { equal: same } = assert;\ntest('same', () => {\n  same(add(2, 2), 4);\n});\n`;
+  assert.deepEqual(only(destructured.replace('  same(add(2, 2), 4);\n', ''), destructured), [ASSERTION]);
+  // What the assertions call, changed in an existing file: holds whatever else the change does.
+  const binding = "changes what an existing test file's assertions call: an assert import, or a name that shadows or patches one";
+  assert.deepEqual(only(MATH_TEST.replace("'node:assert/strict'", "'node:assert'")), [binding], 'strict to loose equality');
+  assert.deepEqual(only(MATH_TEST.replace("import { add, sub } from '../src/math.js';", "import { add, sub } from '../src/math.js';\nassert.equal = () => {};")), [binding], 'patched');
+  assert.deepEqual(only(MATH_TEST.replace("import assert from 'node:assert/strict';", "import real from 'node:assert/strict';\nconst assert = { ...real, equal() {} };")), [binding], 'shadowed');
+  assert.deepEqual(only(`${MATH_TEST}process.exitCode = 0;\nprocess.exit(0);\n`), ['makes an existing test file exit or abort the process']);
+  // A lint test's own logic beside its table (its rule widened): holds; an allowlist entry taken out still doesn't.
+  const lint = `${CLOCK_LINT}const READ = /Date\\.now\\(\\)/;\ntest('no clock', () => {\n  assert.deepEqual(found(READ, ALLOWED), []);\n});\n`;
+  assert.deepEqual(only(lint.replace('/Date\\.now\\(\\)/', '/Date\\.never\\(\\)/'), lint, 'test/no-clock-helpers.test.ts'), ['removes or changes code in a guard or lint']);
+  assert.deepEqual(only(lint.replace("  'test/a.test.ts': 1,\n", ''), lint, 'test/no-clock-helpers.test.ts'), []);
+  // An entry added behind a spread or a name of another const in the same file.
+  const spread = "const MORE = { 'test/x.test.ts': 1 };\nconst ALLOWED: Record<string, number> = {\n  ...MORE,\n  'test/a.test.ts': 1,\n};\n";
+  assert.deepEqual(kinds(weakens({ 'test/no-clock-helpers.test.ts': spread }, { 'test/no-clock-helpers.test.ts': spread.replace("{ 'test/x.test.ts': 1 }", "{ 'test/x.test.ts': 1, 'test/y.test.ts': 9 }") })), ['adds or changes an entry in an allowlist, exception or good-fixture list', 'removes or changes code in a guard or lint']);
+  // The test runner's and coverage's config, in every repo.
+  for (const scope of [undefined, 'managed-app'] as const) {
+    assert.deepEqual(kinds(weakens({ 'vitest.config.ts': "export default { test: { include: ['**/*.test.ts'] } };\n" }, { 'vitest.config.ts': "export default { test: { include: ['src/a.test.ts'] } };\n" }, scope)), ['removes or changes code in a guard or lint'], String(scope));
+    assert.deepEqual(kinds(weakens({ 'tsconfig.json': '{\n  "compilerOptions": {\n    "strict": true\n  }\n}\n' }, { 'tsconfig.json': '{\n  "compilerOptions": {\n    "strict": false\n  }\n}\n' }, scope)), ['removes or changes code in a guard or lint'], String(scope));
+  }
+});
+
+test("weakening: an inline lint or type-check suppression added holds; one in a string (a lint's own fixture) or a word that only starts like one does not", () => {
+  const app = 'export const x = 1;\n';
+  assert.deepEqual(kinds(weakens({ 'src/a.ts': app }, { 'src/a.ts': `${['// @ts', 'expect-error'].join('-')}: upstream\n${app}` })), ['adds an inline lint or type-check suppression']);
+  assert.deepEqual(kinds(weakens({ 'tools/a.py': 'x = 1\n' }, { 'tools/a.py': `x = eval(s)  # ${'noqa'}\n` })), ['adds an inline lint or type-check suppression']);
+  assert.deepEqual(weakens({ 'test/lint.test.ts': MATH_TEST }, { 'test/lint.test.ts': `${MATH_TEST}const fixture = '// ${['@ts', 'ignore'].join('-')}';\n` }), []);
+  assert.deepEqual(weakens({ 'src/a.ts': app }, { 'src/a.ts': `// the file noseccomp turns it off\n${app}` }), []);
+});
+
+test("weakening: fails closed: a file it can't read, a test file it can't parse after the change, or a git failure each hold", () => {
+  const files: ChangeFile[] = [{ path: 'test/math.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }];
+  const boom = () => {
+    throw new Error('no blob');
+  };
+  assert.deepEqual(kinds(weakeningReasons({ files, before: boom, after: () => MATH_TEST, scope: undefined })), ["can't read a file to check it, so it may weaken a check"]);
+  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': `${MATH_TEST}const s = \`never closed\n` })), ["can't read a file to check it, so it may weaken a check"]);
+  const r = weakeningOf(exampleProject().dir, 'no-such-rev', 'HEAD', files, undefined);
+  assert.equal(r.length, 1);
+  assert.match(r[0]!, /^design: may weaken a check: the check for a removed or weakened test, lint or guard could not run/);
+});
+
+test("weakening: the merge decision waits on it whatever the level, so it still holds if a lock is ever narrowed", () => {
+  const reason = `${WEAKENING_REASON}${ASSERTION} (test/a.test.ts: "assert.ok(x)")`;
+  assert.deepEqual(mergeDecision(clean({ level: level(['test/a.test.ts']), weakening: [reason] })), { auto: false, reasons: [reason], why: [] });
+  assert.deepEqual(mergeDecision(clean({ weakening: [] })), { auto: true, reasons: [], why: [] });
+});
+
+test('weakening registry: each table names a real one that reads, every check-shaped table in test/ and scripts/ is registered, and every test file here parses', () => {
+  for (const t of CHECK_TABLES) {
+    assert.ok(existsSync(join(repoRoot, t.path)), `${t.path} is a real file`);
+    const entries = tableEntries(t.path, readFileSync(join(repoRoot, t.path), 'utf8'), t.table);
+    assert.ok(entries?.length, `${t.path} ${t.table} reads as a table with entries`);
+  }
+  const files: string[] = [];
+  const walk = (d: string) => {
+    for (const e of readdirSync(join(repoRoot, d), { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        if (e.name !== 'node_modules' && e.name !== 'fixtures') walk(join(d, e.name));
+      } else if (/\.(?:ts|mjs|cjs|js)$/.test(e.name)) files.push(join(d, e.name));
+    }
+  };
+  walk('test');
+  walk('scripts');
+  const named = new Set(CHECK_TABLES.map((t) => `${t.path} ${t.table}`));
+  const notChecks = new Set(NOT_A_CHECK.map((t) => `${t.path} ${t.table}`));
+  const found = files.flatMap((f) => checkShapedTables(readFileSync(join(repoRoot, f), 'utf8')).map((n) => `${f.split('\\').join('/')} ${n}`));
+  assert.deepEqual(found.filter((k) => !named.has(k) && !notChecks.has(k)), [], 'register each in CHECK_TABLES (never-grow for an allowlist or good fixtures, never-shrink for rules or bad fixtures), or say why it is no check in NOT_A_CHECK');
+  for (const k of notChecks) assert.ok(found.includes(k) && !named.has(k), `${k}: NOT_A_CHECK names only a check-shaped table that isn't registered`);
+  // A test file the hold can't parse would hold every change to it: none here.
+  const unreadable = files.filter((f) => f.startsWith('test') && !testFacts(readFileSync(join(repoRoot, f), 'utf8')).ok);
+  assert.deepEqual(unreadable, []);
+});
+
+/**
+ * The merge decision for a PR that turns `base` files into `head` ones (null: deleted), as merge-flow makes it, in a
+ * real repo, with an approving evaluator and a review.yaml where only secrets wait.
+ */
+function decideChange(base: Record<string, string>, head: Record<string, string | null>) {
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const commit = (files: Record<string, string | null>) => {
+    for (const [p, t] of Object.entries(files)) {
+      if (t === null) g('rm', '-q', '--', p);
+      else {
+        mkdirSync(dirname(join(dir, p)), { recursive: true });
+        writeFileSync(join(dir, p), t);
+      }
+    }
+    g('add', '-A');
+    g('commit', '-q', '--allow-empty', '-m', 'step');
+    return g('rev-parse', 'HEAD');
+  };
+  const before = commit(base);
+  const after = commit(head);
+  const cfg = loadConfig(dir);
+  cfg.project.land_mode = 'pr';
+  cfg.review = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: [] }, L1_evaluator: { when: ['app-non-money'] }, L2_notify: { when: [] }, L3_human: { when: ['secrets'] } } });
+  const log = new EventLog(join(dir, '..', 'events.db'));
+  const n = 7;
+  log.append('issue.claimed', { issue: n, instance: 'i', lease: 'a'.repeat(40), base: before, owner: 'example-owner' }, 'i');
+  log.append('pr.opened', { issue: n, number: 9, url: 'u', head: after, draft: false }, 'i');
+  log.append('eval.verdict', { issue: n, head: after, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
+  const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true });
+  const pr: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: after, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
+  return c.mergeDecisionFor(n, 9, pr);
+}
+
+test('acceptance (#783): a PR that deletes an assertion waits for the owner, with its code change or without one', () => {
+  const head = MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '');
+  const why = `${WEAKENING_REASON}${ASSERTION} (test/math.test.ts: "assert.equal(add(1,2),3)")`;
+  assert.deepEqual(decideChange({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
+  assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
+});
+
+test('acceptance (#783): a PR that adds .skip to a test waits for the owner', () => {
+  const d = decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': MATH_TEST.replace("test('adds'", "test.skip('adds'") });
+  assert.deepEqual(d, { auto: false, reasons: [`${WEAKENING_REASON}${SKIP} (test/math.test.ts: "'adds'")`], why: [] });
+});
+
+test("acceptance (#783): a PR that adds a lint allowlist or exception entry waits for the owner, though it changes only a test", () => {
+  const d = decideChange({ 'test/no-clock-helpers.test.ts': CLOCK_LINT }, { 'test/no-clock-helpers.test.ts': CLOCK_LINT.replace("  'test/b.test.ts': 2,\n", "  'test/b.test.ts': 2,\n  'test/c.test.ts': 1,\n") });
+  assert.deepEqual(d, { auto: false, reasons: [`${WEAKENING_REASON}adds or changes an entry in an allowlist, exception or good-fixture list (test/no-clock-helpers.test.ts: "ALLOWED: 'test/c.test.ts'.1")`], why: [] });
+});
+
+test('acceptance (#783): a PR that weakens a guard file waits for the owner, on its own reason beside any lock', () => {
+  const d = decideChange({ 'src/delegation.ts': DELEGATION }, { 'src/delegation.ts': DELEGATION.replace("'money-path', ", '') });
+  assert.equal(d.auto, false);
+  assert.ok(d.reasons.includes(`${WEAKENING_REASON}removes or changes an entry in a check's rules or a guard's list (src/delegation.ts: "NEVER_LOOSEN: 'money-path'")`), d.reasons.join(' | '));
+  assert.ok(d.reasons.some((r) => r.startsWith(`${WEAKENING_REASON}removes or changes code in a guard or lint (src/delegation.ts: `)), d.reasons.join(' | '));
+  // A lint's config no lock names: this hold alone stops it.
+  const e = decideChange({ '.eslintrc.json': ESLINT }, { '.eslintrc.json': ESLINT.replace('    "eqeqeq": "error",\n', '') });
+  assert.deepEqual(e, { auto: false, reasons: [`${WEAKENING_REASON}removes or changes code in a guard or lint (.eslintrc.json: "\\"eqeqeq\\": \\"error\\",")`], why: [] });
+});
+
+test('acceptance (#783): a PR that only adds tests, or renames a test file with the same text, does not wait', () => {
+  const more = `${MATH_TEST}test('multiplies', { skip: process.platform !== 'linux' && 'Linux only' }, () => {\n  assert.equal(add(2, 2), 4);\n});\n`;
+  assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': more, 'test/sub.test.ts': MATH_TEST }), { auto: true, reasons: [], why: [] });
+  assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), { auto: true, reasons: [], why: [] });
 });
