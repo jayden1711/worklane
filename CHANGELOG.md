@@ -20,7 +20,10 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - each run variable the sandbox helper is given.
 
   So a config that sets, for example, `MALLOC_ARENA_MAX` or `TZDIR` is valid on v0.5.2 and fails the config check on this release. Before installing, remove these names from the config on the default branch.
-- **In a test run that has a user namespace of its own (#780), bash's own variables are left out.** If a project's `env` sets `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID` or `PPID`, the run doesn't get it, and its stderr says `worklane-testrun: not set: <NAME> is the shell's own`. Bash keeps these as read-only variables of its own, so the step that hands a run its variables can't export them. `UID`, `EUID` and `PPID` never reached a run's commands anyway, because bash sets them itself; `SHELLOPTS` and `BASHOPTS` lose their effect.
+- **In a test run that has a user namespace of its own (#780), bash's own variables are left out.** If a project's `env` sets `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `PPID` or `BASH_VERSINFO`, the run doesn't get the project's value, and its stderr says `worklane-testrun: not set: <NAME> is the shell's own`. Bash keeps these as read-only variables of its own, so the step that hands a run its variables can't export them. What a child of the run's commands then sees (measured with a fixture of that step):
+  - `SHELLOPTS` and `BASHOPTS`: bash's default options, so the project's (`xtrace`, `extglob`, ...) lose their effect;
+  - `UID` and `EUID`: the run's real uid, where v0.5.2 passed the project's value on;
+  - `PPID` and `BASH_VERSINFO`: nothing, as on v0.5.2.
 
 ### After install
 
@@ -35,6 +38,11 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - It installs the wrapper `/usr/local/libexec/worklane-testrun-userns` (a copy of this machine's `unshare`, root:root 0700, with an `r-x` ACL entry for each test user and for no one else), and, where unprivileged user namespaces are restricted (Ubuntu 24.04), the AppArmor profile `worklane-testrun-userns`.
   - Then `sudo bash /opt/worklane/current/scripts/setup/test-user.sh check <name>` must end `OK: all checks passed`, with `PASS a sandboxed run is in a user namespace of its own`.
   - Until the rerun, test runs keep v0.5.2's behaviour: they share the host's user namespace (so they can still join the namespaces of the test user's rootless Docker), and a granted run's `slirp4netns` stays root's. The helper's check prints a `NOTE` saying so, never a `FAIL`, so test runs stay on. `test-user.sh check` fails until then. #796 tracks the engine update installing the wrapper itself.
+  - **The check lines above hold only where this machine's `unshare` has `--map-current-user` and `--keep-caps` (util-linux 2.38 or later) and `setpriv` exists.** Elsewhere (util-linux older than 2.38, or no `setpriv`) the rerun can't install the wrapper. Inferred from `test-user.sh`'s `install_userns` and `service_checks`, not run on such a machine:
+    - `install` prints `note: this machine's unshare (...) has no --map-current-user or --keep-caps, or there's no setpriv: test runs share the host's user namespace` and installs no wrapper and no profile;
+    - `test-user.sh check` prints `NOTE this machine's unshare can't be the test runs' wrapper (it needs util-linux 2.38 or later, and setpriv): runs share the host's user namespace`, which doesn't make it fail (it ends `OK: all checks passed` when nothing else does);
+    - the helper's own check prints `NOTE a sandboxed run shares the host's user namespace (...)`, never `PASS a sandboxed run is in a user namespace of its own`;
+    - test runs keep v0.5.2's behaviour, as above, after the rerun too. The rerun still does everything else it does (the egress rule's step included).
   - Where the host egress rule is in use, it asks for this same `test-user.sh install` command for each test user (#543, #740), and one rerun does both.
 - No new sudoers rules, so no machine-helper rerun.
 
