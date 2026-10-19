@@ -25,6 +25,7 @@ import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu
 import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
+import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -225,12 +226,30 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   out.push(...setupChecks(root, opts));
+  const terminal = ownerTerminalCheck();
+  if (terminal) out.push(terminal);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * The removed owner terminal (#742): nothing while the machine has nothing of it left; a failure (doctor exits 1)
+ * while its console shell or a hub unit naming a console user is still there, since its sudoers rule (which only root
+ * can see) is then still there too and the hub may run without its sandbox. The rerun that removes them comes first:
+ * built exactly from the hub unit's ExecStart, so it keeps the hub's devices, gateways and instances; when the unit
+ * can't be read or parsed, the placeholder version, with why and where to fill it in from (never part of a command).
+ */
+export function ownerTerminalCheck(paths: TerminalPaths = {}): DoctorCheck | null {
+  const r = ownerTerminalRerun(paths);
+  // With the exact command, the notice points at it: one command to run, never a second, placeholder one.
+  const notice = ownerTerminalNotice(paths, 'command' in r);
+  if (!notice) return null;
+  const first = 'command' in r ? `run as root, once (built from the hub unit's ExecStart): ${r.command}` : `run as root, once, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT} (the exact command can't be built here: ${r.error}): ${OWNER_TERMINAL_RERUN}`;
+  return { name: 'owner terminal', level: 'fail', detail: `${first}\n${notice}` };
 }
 
 /**

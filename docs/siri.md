@@ -34,7 +34,7 @@ iPhone (Tailscale on) ──https://<machine>.<tailnet>.ts.net:8443──▶ tai
 - **From the tailnet only.** Behind `tailscale serve` every connection arrives from 127.0.0.1, so the address says
   nothing. The gateway counts a request only when the kernel says tailscaled opened the connection (a program on the
   machine connecting itself is refused whatever headers it sends), takes the one Tailscale address in serve's
-  `X-Forwarded-For`, and asks `tailscale whois` which node it is: the same check as the owner terminal
+  `X-Forwarded-For`, and asks `tailscale whois` which node it is: the same check as for a machine change
   (src/console/terminal-devices.ts). The `Tailscale-User-*` headers are never read: they name a person, not a
   device, and aren't set for tagged devices ([Tailscale Serve](https://tailscale.com/kb/1312/serve)).
 - **The gateway token works on the Siri routes only.** Each instance's dashboard writes `siri-gateway-token` beside
@@ -76,7 +76,7 @@ Each step is off until you take it.
    ```
 
 4. **A token for your phone.** On the dashboard, Settings, **Siri devices**: name the phone and press **New token**.
-   Only an owner can, from one of the console's allowed devices (`--console-devices`) or the break-glass, because a
+   Only an owner can, from one of the machine devices (`dashboards.sh --machine-devices`) or the break-glass, because a
    token is a credential. It is shown once: copy it to the phone now. The server keeps only its SHA-256.
 
 5. **The Shortcuts** (below), with the token and the address `https://<machine>.<tailnet>.ts.net:8443`.

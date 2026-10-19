@@ -5,7 +5,9 @@
 // `set-updates on`). Its "channel" says what it follows:
 //   - "release" (new installs): the newest release tag vX.Y.Z, only when it is newer than the installed
 //     version, its signature verifies (`git verify-tag`) against the owner's allowed signers file
-//     (updates.json allowed_signers), and its commit is the main commit it was cut from plus dist/ only.
+//     (updates.json allowed_signers), its signed tag object names itself that version, and its commit is the main
+//     commit it was cut from plus dist/ only. One tag object throughout: the one ls-remote reported is the one
+//     verified, and the build checks out exactly the commit it points at (#764).
 //     The checks below are read on that main commit (CI runs on main, not on tags).
 //   - "main" (the default when the field is absent, so an existing install keeps following main): the newest
 //     commit on main's first-parent line that passes the checks below, only when it descends from the installed
@@ -72,10 +74,13 @@
 // rolls back as above (backups restored, the old engine, services restarted), holds the commit and raises a watchdog
 // incident. A daily canary that fails only raises the incident.
 // The root-owned helpers the setup scripts installed from scripts/machine/ (the test-run sandbox helper, the machine
-// helper, the console shell) follow the engine: with its services stopped, just before the switch, each one this
-// machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file beside it,
-// renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
-// have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
+// helper, the GPU device fixer, the experiments helper: HELPERS below) follow the engine. The removed owner
+// terminal's console shell (#742) is now a stub that refuses everything (scripts/machine/worklane-console-shell.sh):
+// this updater and older ones replace a live one with it, and a dashboards.sh rerun deletes it and its sudoers rule;
+// once deleted, it is never installed again. With the engine's services stopped, just before the switch, each
+// helper this machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file
+// beside it, renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the
+// machine doesn't have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
 // The updater itself (#760) follows only the release channel: never main, which has no signature to check. Once an
 // install from a release tag is healthy (services steady, sandbox verdicts in), it takes that release's updater: read
@@ -117,7 +122,7 @@ const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
 const HELPERS = [
   { dest: '/usr/local/libexec/worklane-testrun', src: 'scripts/machine/worklane-testrun.sh', check: 'bash' }, // test-user.sh
   { dest: '/usr/local/libexec/worklane-machine', src: 'scripts/machine/worklane-machine.cjs', check: 'node' }, // machine-helper.sh
-  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // console-shell.sh
+  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // the removed owner terminal's, now a refusing stub (#742); dashboards.sh deletes it
   { dest: '/usr/local/libexec/worklane-gpu-devices', src: 'scripts/machine/worklane-gpu-devices.sh', check: 'bash' }, // gpu-devices.sh (run by udev)
   { dest: '/usr/local/libexec/worklane-exp', src: 'scripts/machine/worklane-exp.sh', check: 'bash' }, // experiments.sh
 ];
@@ -844,6 +849,17 @@ function placeFile(bytes, dest, tmpName, o, check = null, before = null) {
 }
 
 /**
+ * Every git command on the verification clone (verifyRelease, verifiedUpdater) starts with these: replace refs
+ * (refs/replace/<oid>) are never honoured, so each object read is its own bytes, never a stand-in planted in the clone.
+ * `--no-replace-objects` is git's own spelling of GIT_NO_REPLACE_OBJECTS=1: git sets that for itself and every git it
+ * runs (#764). It is in the argument list, so no caller's exec can drop it.
+ */
+const VERIFY_GIT_ARGS = ['--no-replace-objects'];
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** The `tag` header of a tag object (`git cat-file tag`), from its header lines only, or null. */
+const tagHeaderName = (text) => (/^tag (\S+)$/m.exec(String(text).split('\n\n')[0]) || [])[1] || null;
+
+/**
  * A release's updater, only as this machine verifies it: refs/tags/<tag> resolved once to one tag object; that object's
  * signature checked again (git verify-tag against the allowed signers, as verifyRelease), the same object naming itself
  * `tag` and pointing at `commit` (the engine just installed), and the file read from that commit's tree in the
@@ -854,13 +870,13 @@ function verifiedUpdater(signers, tag, commit, exec, gitDir = VERIFY_GIT, exists
   const m = /^v(\d+\.\d+\.\d+)$/.exec(String(tag));
   if (!m) return { ok: false, reason: `${tag} isn't a release tag vX.Y.Z` };
   if (!exists(signers)) return { ok: false, reason: `no allowed signers file at ${signers}` };
-  const g = (...a) => exec('git', ['--git-dir', gitDir, ...a]);
+  const g = (...a) => exec('git', [...VERIFY_GIT_ARGS, '--git-dir', gitDir, ...a]);
   // INVARIANT: the ref is resolved once, here. Every check and the read below use this object id (or the commit id it
   // peels to), never the name, so a ref moved after verify-tag can't swap in another object (objects are immutable).
   let oid;
   try {
     oid = String(g('rev-parse', '--verify', '-q', `refs/tags/${tag}`)).trim();
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) throw new Error(`not an object id: ${oid.slice(0, 80)}`);
+    if (!OBJECT_ID.test(oid)) throw new Error(`not an object id: ${oid.slice(0, 80)}`);
     const type = String(g('cat-file', '-t', oid)).trim();
     if (type !== 'tag') return { ok: false, reason: `${tag} is a ${type || 'missing'} object, not a signed tag object` };
   } catch (e) {
@@ -875,7 +891,7 @@ function verifiedUpdater(signers, tag, commit, exec, gitDir = VERIFY_GIT, exists
   let named;
   try {
     at = String(g('rev-parse', '--verify', '-q', `${oid}^{commit}`)).trim();
-    named = (/^tag (\S+)$/m.exec(String(g('cat-file', 'tag', oid))) || [])[1] || null;
+    named = tagHeaderName(g('cat-file', 'tag', oid));
   } catch (e) {
     return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
   }
@@ -1135,27 +1151,52 @@ function newestRelease(tags) {
 }
 
 /**
- * Check a release tag before anything is built: fetched into a root-owned bare clone, its signature verified by
- * `git verify-tag` against the allowed signers file (SSH signatures), its commit one commit on top of a commit on
- * main that adds only dist/. Returns { ok, base } (base: the main commit whose checks count) or { ok: false, reason }.
+ * Check a release tag before anything is built: fetched into a root-owned bare clone, refs/tags/<tag> resolved once to
+ * one tag object, and every check on that object id (or the commit it points at), never the name again: its signature
+ * verified by `git verify-tag` against the allowed signers file (SSH signatures); the object naming itself `tag` (a
+ * signed tag counts only under its own name, so an older release's tag can't pass for a newer version); its commit one
+ * commit on top of a commit on main that adds only dist/; and the ref still that object at the end. Replace refs are
+ * never honoured (VERIFY_GIT_ARGS). Returns { ok: true, base, object, commit } (base: the main commit whose checks
+ * count; object and commit: what was verified, which update() requires to be what ls-remote reported and builds) or
+ * { ok: false, reason }.
  */
 function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists = fs.existsSync) {
+  if (!/^v\d+\.\d+\.\d+$/.test(String(tag))) return { ok: false, reason: `${tag} isn't a release tag vX.Y.Z` };
   if (!exists(signers)) return { ok: false, reason: `no allowed signers file at ${signers}: the release channel installs only tags signed by a key listed there` };
-  const g = (...a) => exec('git', ['--git-dir', gitDir, ...a]).trim();
+  const g = (...a) => String(exec('git', [...VERIFY_GIT_ARGS, '--git-dir', gitDir, ...a])).trim();
   try {
-    if (!exists(gitDir)) exec('git', ['init', '-q', '--bare', gitDir]);
+    if (!exists(gitDir)) exec('git', [...VERIFY_GIT_ARGS, 'init', '-q', '--bare', gitDir]);
     g('fetch', '-q', '--force', '--no-tags', repoUrl, `+refs/tags/${tag}:refs/tags/${tag}`, '+refs/heads/main:refs/heads/main');
   } catch (e) {
     return { ok: false, reason: `couldn't fetch ${tag}: ${String((e && e.message) || e).split('\n')[0]}` };
   }
-  if (g('cat-file', '-t', `refs/tags/${tag}`) !== 'tag') return { ok: false, reason: `${tag} is a lightweight tag: it can't carry a signature` };
+  // INVARIANT: the ref is resolved once, here (as verifiedUpdater does). Every check below uses this object id, or the
+  // commit id it peels to, never the name: a ref moved meanwhile can't swap in another object (objects are immutable).
+  let oid;
   try {
-    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', tag);
+    oid = g('rev-parse', '--verify', '-q', `refs/tags/${tag}`);
+    if (!OBJECT_ID.test(oid)) throw new Error(`not an object id: ${oid.slice(0, 80)}`);
+    const type = g('cat-file', '-t', oid);
+    if (type === 'commit') return { ok: false, reason: `${tag} is a lightweight tag: it can't carry a signature` };
+    if (type !== 'tag') return { ok: false, reason: `${tag} is a ${type || 'missing'} object, not a signed tag object` };
+  } catch (e) {
+    return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
+  }
+  try {
+    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', oid);
   } catch (e) {
     const said = String((e && e.stderr) || (e && e.message) || e).split('\n').filter(Boolean).slice(-1)[0];
     return { ok: false, reason: `${tag}'s signature doesn't verify against ${signers}: ${said || 'no signature'}` };
   }
-  const commit = g('rev-parse', `${tag}^{commit}`);
+  let named;
+  let commit;
+  try {
+    named = tagHeaderName(g('cat-file', 'tag', oid));
+    commit = g('rev-parse', '--verify', '-q', `${oid}^{commit}`);
+  } catch (e) {
+    return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
+  }
+  if (named !== tag) return { ok: false, reason: `${tag}'s signed tag object names itself ${named || 'nothing'}: a signed tag counts only under its own name` };
   const parents = g('rev-list', '--parents', '-n', '1', commit).split(' ').slice(1);
   if (parents.length !== 1) return { ok: false, reason: `${tag}'s commit has ${parents.length} parents; a release commit has one, the main commit it was cut from` };
   try {
@@ -1165,7 +1206,14 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
   }
   const outside = g('diff', '--name-only', parents[0], commit).split('\n').filter((f) => f && !f.startsWith('dist/'));
   if (outside.length) return { ok: false, reason: `${tag}'s release commit changes more than dist/: ${outside.slice(0, 5).join(', ')}` };
-  return { ok: true, base: parents[0] };
+  let still = null;
+  try {
+    still = g('rev-parse', '--verify', '-q', `refs/tags/${tag}`);
+  } catch {
+    // gone: refused below
+  }
+  if (still !== oid) return { ok: false, reason: `${tag} moved while it was being verified (from ${short(oid)} to ${still ? short(still) : 'nothing'})` };
+  return { ok: true, base: parents[0], object: oid, commit };
 }
 
 // ---------- the run ----------
@@ -1231,7 +1279,8 @@ async function update(deps, cfg, seen = {}) {
     head = tag.commit;
     seen.head = head;
     if (head === current) return upToDate(tag.tag);
-    // Never back: a tag no newer than the installed engine's version is not an update.
+    // Never back: a tag no newer than the installed engine's version is not an update. The version is the ref's name,
+    // and verifyRelease refuses a signed tag object that names itself anything else (#764), so it is the signed one.
     const installedVersion = deps.installedVersion();
     if (installedVersion && !newer(tag.version, installedVersion)) return upToDate(tag.tag);
   } else {
@@ -1256,6 +1305,12 @@ async function update(deps, cfg, seen = {}) {
     if (signersHeld) return deps.note('held', head, `the signers file changed outside updates.sh at ${signersHeld.at} and hasn't been acknowledged (${signersChangeText(signersHeld)}); no release is installed until an admin runs: ${SIGNERS_ACK}`, true);
     const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
     if (!v.ok) return deps.note('refused', head, v.reason, true);
+    // INVARIANT: one tag object throughout (#764). The tag object and commit ls-remote reported are the ones verified,
+    // and the build below checks out exactly that commit (head): a tag moved between ls-remote and the fetch is refused,
+    // never built from the commit ls-remote saw while another one was verified.
+    if (v.object !== tag.object || v.commit !== head) {
+      return deps.note('refused', head, `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(head)}, the one verified is ${short(v.object)} at ${short(v.commit)}`, true);
+    }
     const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
