@@ -11,6 +11,12 @@ export type Mode = 'smoke' | 'baseline';
 export const MODE_MAX_USD: Readonly<Record<Mode, number>> = { smoke: 40, baseline: 300 };
 /** The most one task may take, and the default per-task cap. */
 export const PER_TASK_MAX_USD = 15;
+
+/**
+ * Whether `mode` is one of MODE_MAX_USD's own keys. Never `in`: that also matches what every object inherits
+ * (`constructor`, `toString`, `__proto__`), whose "maximum" is a function, so no cap would ever be over it.
+ */
+export const isMode = (mode: unknown): mode is Mode => typeof mode === 'string' && Object.hasOwn(MODE_MAX_USD, mode);
 /** A smoke round averaging more than this per task needs the owner's re-approval before the baseline. */
 export const REAPPROVE_MEAN_USD = 8;
 
@@ -32,8 +38,8 @@ const value = (argv: readonly string[], flag: string): string | undefined => {
  * (its aggregate), which a baseline run needs: over REAPPROVE_MEAN_USD it starts only with --owner-reapproved.
  */
 export function capsFromArgs(argv: readonly string[], plan: (c: Omit<Caps, 'spendUsd'>) => string[], smokeMeanUsd?: number | null): Caps | { refused: string } {
-  const mode = (value(argv, '--tasks') ?? 'smoke') as Mode;
-  if (!(mode in MODE_MAX_USD)) throw new Error(`--tasks takes smoke or baseline, not ${mode}`);
+  const mode = value(argv, '--tasks') ?? 'smoke';
+  if (!isMode(mode)) throw new Error(`--tasks takes smoke or baseline, not ${mode}`);
   const rawTask = value(argv, '--per-task-cap');
   const perTaskUsd = rawTask === undefined ? PER_TASK_MAX_USD : Number(rawTask);
   if (!Number.isFinite(perTaskUsd) || perTaskUsd <= 0) throw new Error(`--per-task-cap takes a positive number of dollars, not ${rawTask}`);

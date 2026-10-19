@@ -10,8 +10,10 @@
 // - the task's commands go through TaskRunner, which only ever sends `docker exec <that task's container> argv`, with
 //   no docker option but a work dir and plain variables.
 // Every container has a memory (no extra swap), CPU and pids limit, read back from the daemon and from the
-// container's own cgroup before anything runs in it: a limit that didn't apply refuses the run (checkLimits).
-// Every docker command passes checkDockerArgs, then (for a task) hiddenLeaks: refused, nothing sent, on any match.
+// container's own cgroup (memory.max, memory.swap.max = 0, cpu.max, pids.max) before anything runs in it: a limit
+// that didn't apply refuses the run (checkLimits).
+// Every docker command passes checkDockerArgs, then (for a task) hiddenLeaks on its argv and on its stdin (a tar
+// stream: only what its base tree lacks counts): refused, nothing sent, on any match.
 import { spawnSync } from 'node:child_process';
 import { cpus, totalmem } from 'node:os';
 import { posix } from 'node:path';
@@ -51,6 +53,9 @@ export interface Limits {
 export const LIMIT_ENV = { memory: `${BRAND.envPrefix}_BENCH_MEMORY`, cpus: `${BRAND.envPrefix}_BENCH_CPUS`, pids: `${BRAND.envPrefix}_BENCH_PIDS` } as const;
 export const DEFAULT_LIMITS = { memory: '8g', cpus: '4', pids: '4096' } as const;
 
+/** The page size memory limits are kept in (cgroup v2 memory.max). */
+const PAGE = 4096;
+
 /** Bytes from 8g / 512m / 1073741824. */
 function bytes(s: string): number {
   const m = /^([0-9]+)([kmg]?)$/i.exec(s.trim());
@@ -70,6 +75,8 @@ export function limitsFrom(env: NodeJS.ProcessEnv, host = { cpus: cpus().length,
   if (!Number.isInteger(l.pids) || l.pids <= 0) throw new Error(`${LIMIT_ENV.pids} ${raw('pids')} refused: a pids limit over 0 is required`);
   if (l.cpus > host.cpus) throw new Error(`${LIMIT_ENV.cpus} ${l.cpus} is over this machine's ${host.cpus} CPUs`);
   if (l.memoryBytes > 0.75 * host.memoryBytes) throw new Error(`${LIMIT_ENV.memory} ${raw('memory')} is over 75% of this machine's memory`);
+  // The kernel keeps memory.max in whole pages: any other value would read back different, and refuse every run.
+  if (l.memoryBytes % PAGE !== 0) throw new Error(`${LIMIT_ENV.memory} ${raw('memory')} refused: not a multiple of ${PAGE} bytes (use k, m or g, e.g. ${Math.floor(l.memoryBytes / 1024 ** 2)}m)`);
   return l;
 }
 
@@ -89,7 +96,8 @@ const EXEC_OPTIONS: Record<string, string | null> = { '--workdir': null, '--env'
  * `start`/`rm --force` of a bench container, `create`/`run` with exactly the options above (so no mount, volume,
  * device, privilege, capability or network, and every limit), and `exec` with only a work dir, variables and stdin.
  * `verbs` narrows further (TaskRunner: exec only). Options stop at the container's name (create/run: the image); what
- * follows is the command inside, where `-v` is pytest's.
+ * follows is the command inside, where `-v` is pytest's. Each option is parsed with its value, and the required ones
+ * are looked for among the parsed options only, so a value (`--name --network`) never stands in for an option.
  */
 export function checkDockerArgs(args: readonly string[], verbs: readonly string[] = ['info', 'create', 'start', 'run', 'inspect', 'exec', 'rm']): void {
   const verb = args[0] ?? '';
@@ -109,28 +117,37 @@ export function checkDockerArgs(args: readonly string[], verbs: readonly string[
   }
   const make = verb === 'run' || verb === 'create';
   const allowed = make ? RUN_OPTIONS : EXEC_OPTIONS;
+  const parsed = new Set<string>();
   let i = 1;
   for (; i < args.length && args[i]!.startsWith('-'); i++) {
     const [flag, glued] = args[i]!.split(/=(.*)/s, 2) as [string, string | undefined];
-    if (!(flag in allowed)) throw new Error(`docker ${verb} option ${flag} refused`);
+    if (!Object.hasOwn(allowed, flag)) throw new Error(`docker ${verb} option ${flag} refused`);
     const want = allowed[flag];
+    parsed.add(flag);
     if (want === '') {
       if (glued !== undefined) throw new Error(`docker ${verb} ${flag} takes no value`);
       continue;
     }
     const v = glued ?? args[++i];
     if (v === undefined || (want !== null && v !== want)) throw new Error(`docker ${verb} ${flag} ${v ?? ''} refused${want ? `: only ${want}` : ''}`);
-    if (flag === '--env' && !ENV_NAME.test(v.split('=')[0]!)) throw new Error(`docker ${verb} --env ${v.split('=')[0]} refused`);
-    if (flag === '--env' && SECRET_NAME.test(v.split('=')[0]!)) throw new Error(`docker ${verb} --env ${v.split('=')[0]} refused: may carry a credential or reach a daemon`);
-    if (flag === '--workdir' && !(v === WORK || v.startsWith(`${WORK}/`))) throw new Error(`docker ${verb} --workdir ${v} refused: only under ${WORK}`);
+    if (flag === '--name' && !NAME.test(v)) throw new Error(`docker ${verb} --name ${v} refused: only a bench container`);
+    if (flag === '--env') {
+      // NAME alone would copy NAME's value from the driver's own environment.
+      const eq = v.indexOf('=');
+      const name = eq < 0 ? v : v.slice(0, eq);
+      if (eq < 0) throw new Error(`docker ${verb} --env ${name} refused: only NAME=value`);
+      if (!ENV_NAME.test(name)) throw new Error(`docker ${verb} --env ${name} refused`);
+      if (SECRET_NAME.test(name)) throw new Error(`docker ${verb} --env ${name} refused: may carry a credential or reach a daemon`);
+    }
+    if (flag === '--workdir' && (posix.normalize(v) !== v || !(v === WORK || v.startsWith(`${WORK}/`)))) throw new Error(`docker ${verb} --workdir ${v} refused: only a normalized path under ${WORK}`);
     if (['--memory', '--memory-swap', '--cpus', '--pids-limit'].includes(flag) && !NUM.test(v.replace(/b$/, ''))) throw new Error(`docker ${verb} ${flag} ${v} refused: a positive number`);
   }
   const target = args[i];
   if (verb === 'exec' && (!target || !NAME.test(target))) throw new Error(`docker exec into ${target ?? 'nothing'} refused: only a bench container`);
   if (make) {
     if (!target || !IMAGE.test(target)) throw new Error(`image ${target ?? 'none'} refused`);
-    for (const need of ['--network', '--cap-drop', '--security-opt', '--memory', '--memory-swap', '--cpus', '--pids-limit']) {
-      if (!args.slice(1, i).some((a) => a === need || a.startsWith(`${need}=`))) throw new Error(`docker ${verb} without ${need} refused`);
+    for (const need of ['--name', '--network', '--cap-drop', '--security-opt', '--memory', '--memory-swap', '--cpus', '--pids-limit']) {
+      if (!parsed.has(need)) throw new Error(`docker ${verb} without ${need} refused`);
     }
   }
 }
@@ -161,12 +178,18 @@ export interface DockerOptions {
   call?: DockerCall;
 }
 
-/** The one way anything reaches docker: checkDockerArgs, then refused when the argv carries any of `row`'s hidden fields. */
-function send(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow | null, timeoutMs: number, input?: Buffer): Sent {
+/**
+ * The one way anything reaches docker: checkDockerArgs, then refused when the argv, or the stdin, carries any of
+ * `row`'s hidden fields. The stdin (a worktree's tar stream) is checked against `base`, the text of the task's base
+ * tree: only a hidden piece the base lacks counts. No base: every piece counts.
+ */
+function send(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow | null, timeoutMs: number, input?: Buffer, base?: Buffer): Sent {
   checkDockerArgs(args, verbs);
   if (row) {
     const leaks = hiddenLeaks(args.join('\n'), row);
     if (leaks.length) throw new Error(`refused: this docker command would carry the task's hidden ${leaks.join(', ')}`);
+    const inLeaks = input ? hiddenLeaks(input.toString('utf8'), row, base?.toString('utf8') ?? '') : [];
+    if (inLeaks.length) throw new Error(`refused: this docker command's input would carry the task's hidden ${inLeaks.join(', ')} (not in its base tree)`);
   }
   return (o.call ?? spawnDocker)(o.docker, args, { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}) });
 }
@@ -188,7 +211,8 @@ const DELEGATE ='scripts/bench/README.md, one-time setup: the systemd Delegate= 
 
 /**
  * Refuses (throws) unless every limit applied: the daemon's record (`docker inspect`: Memory, MemorySwap, NanoCpus,
- * PidsLimit) and, when the container runs (`cgroup`: its memory.max, cpu.max and pids.max), the kernel's.
+ * PidsLimit) and, when the container runs (`cgroup`: its memory.max, memory.swap.max, cpu.max and pids.max, one per
+ * line), the kernel's. memory.swap.max must be 0: --memory-swap equal to --memory means no swap beyond the memory.
  * Names the controller that is missing.
  */
 export function checkLimits(l: Limits, inspect: string, cgroup?: string): void {
@@ -203,8 +227,9 @@ export function checkLimits(l: Limits, inspect: string, cgroup?: string): void {
   if (h.NanoCpus !== Math.round(l.cpus * 1e9)) missing.push('cpu');
   if (h.PidsLimit !== l.pids) missing.push('pids');
   if (cgroup !== undefined) {
-    const [mem, cpu, pids] = cgroup.split('\n').map((s) => s.trim());
+    const [mem, swap, cpu, pids] = cgroup.split('\n').map((s) => s.trim());
     if (mem !== String(l.memoryBytes)) missing.push('memory (memory.max)');
+    if (swap !== '0') missing.push('memory (memory.swap.max)');
     const [quota, period] = (cpu ?? '').split(/\s+/).map(Number);
     if (!quota || !period || Math.abs(quota / period - l.cpus) > 0.01) missing.push('cpu (cpu.max)');
     if (pids !== String(l.pids)) missing.push('pids (pids.max)');
@@ -212,7 +237,7 @@ export function checkLimits(l: Limits, inspect: string, cgroup?: string): void {
   if (missing.length) throw new LimitsNotApplied(`not run: the container's ${[...new Set(missing)].join(', ')} limit did not apply (the ${missing[0]!.split(' ')[0]} cgroup controller is not delegated to this user?): ${DELEGATE}`);
 }
 
-const CGROUP_READ = ['cat', '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/cpu.max', '/sys/fs/cgroup/pids.max'];
+const CGROUP_READ = ['cat', '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.swap.max', '/sys/fs/cgroup/cpu.max', '/sys/fs/cgroup/pids.max'];
 const HOST_CONFIG = '{{json .HostConfig}}';
 
 /** The driver's own docker: the rootless check, the limits' check, and a task container's start and removal. */
@@ -277,13 +302,18 @@ export class TaskRunner {
     private o: DockerOptions,
     readonly c: TaskContainer,
     private row: TaskRow,
+    /**
+     * The task's base tree as a tar stream of its base commit, made by the driver before any agent runs: what a tar
+     * sent to the container is checked against (a hidden piece already in it doesn't count). None: every piece counts.
+     */
+    private base?: Buffer,
   ) {}
 
   /** argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. */
   exec(cwd: string, argv: readonly string[], env: Record<string, string> = {}, timeoutMs = 15 * 60_000, input?: Buffer): Sent {
     if (!argv.length) throw new Error('nothing to run');
     const args = ['exec', ...(input ? ['--interactive'] : []), '--workdir', posix.normalize(cwd), ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]), this.c.name, ...argv];
-    return send(this.o, ['exec'], args, this.row, timeoutMs, input);
+    return send(this.o, ['exec'], args, this.row, timeoutMs, input, this.base);
   }
 
   /** Replace `dst` (under WORK) in the container with the tree in `tar` (a tar stream of a worktree's files). */
