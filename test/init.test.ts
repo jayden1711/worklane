@@ -463,7 +463,7 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   const cli = (...a: string[]) => spawnSync(process.execPath, [engineCli, ...a], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
   const first = cli('init', '--mode', 'local', '--yes', root);
   assert.equal(first.status, 0, first.stdout + first.stderr);
-  assert.match(first.stdout, /\[2\/6\] Claude login\n {3}done: signed in \(stand-in\)/);
+  assert.match(first.stdout, /\[2\/6\] Claude login\n {3}done: signed in \(claude\.ai\)/);
   assert.match(first.stdout, /\[3\/6\] GitHub\n {3}done: gh signed in; you can push to example-org\/example-shop/);
   assert.match(first.stdout, /kept \.worklane\/; hooks merged into/);
   const second = cli('init', root);
@@ -475,7 +475,10 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   for (const id of ['tools', 'claude', 'github', 'repo-config', 'protection', 'discord']) assert.match(doc.stdout, new RegExp(`^ok {4}setup ${id}: `, 'm'));
   for (const id of ['tools', 'claude-login', 'gh-login', 'origin', 'hooks', 'owners']) assert.match(doc.stdout, new RegExp(`^ok {4}setup step ${id}: `, 'm'));
   assert.match(doc.stdout, /^off {3}not in local mode: separate OS users: /m);
-  // Signed out since: doctor fails, naming the step.
+  // Signed out since: doctor fails, naming the step. (#738: claude is asked with the agents' environment only, so its
+  // stand-in reads the sign-out from its home, where a real login lives; gh's still from STANDIN_SIGNED_OUT.)
+  mkdirSync(join(home, '.claude-stand-in'), { recursive: true });
+  writeFileSync(join(home, '.claude-stand-in', 'signed-out'), '');
   const out = spawnSync(process.execPath, [engineCli, 'doctor', '--root', root], { encoding: 'utf8', env: { ...env, STANDIN_SIGNED_OUT: '1' } });
   assert.equal(out.status, 1);
   assert.match(out.stdout, /^FAIL {2}setup claude: Claude login \(local mode\): not signed in/m);

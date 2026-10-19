@@ -33,6 +33,19 @@ import { instanceUnit, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
+import { parse as parseYaml } from 'yaml';
+import { ProjectConfig } from './config/schema.js';
+import { agentAuthEnv, loginMethod, RUNTIME_LOGINS, type RuntimeKind } from './runner.js';
+import { outboundEnv } from './network.js';
+
+/**
+ * The wizard's choice for a new project (local mode, #738), kept in init's machine-local state and never in the
+ * repo: the kind the setup PR writes, and for an API key the path of a file that holds it, never the key.
+ */
+export type RuntimeChoice = { kind: 'cli' } | { kind: 'api_key'; keyFile: string };
+
+/** Each kind in the words the wizard offers it. */
+export const RUNTIME_CHOICE_LABEL: Readonly<Record<RuntimeKind, string>> = { cli: 'your Claude subscription', api_key: 'an API key' };
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -43,10 +56,20 @@ export interface RunResult {
   stderr: string;
 }
 
+/** How a probe runs a command: where, and (`agentRuntime`) with only the environment agent runs of that kind give claude. */
+export interface ProbeRunOptions {
+  cwd?: string;
+  /** WHY (#738): the Claude step asks claude as the agents' runs would (src/runner.ts agentAuthEnv), never with more. */
+  agentRuntime?: RuntimeKind;
+}
+
+/** The environment a probe runs a command with: this process's (tools on PATH), or the agents' own for a runtime. */
+export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv(withToolPath(), o.agentRuntime)) : withToolPath());
+
 /** What the detectors may ask of the machine: read-only commands and the service manager. Tests stand in for it. */
 export interface SetupProbe {
   which(cmd: string): string | null;
-  run(cmd: string, args: string[], o?: { cwd?: string }): RunResult;
+  run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
   /** This user's service (local mode's coordinator) running now; null where there is no service manager to ask. */
   serviceRunning(label: string): boolean | null;
   /** A system unit (a server instance's coordinator, the dashboard hub) active now; null off Linux. */
@@ -63,7 +86,7 @@ export function systemProbe(): SetupProbe {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, o = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: withToolPath(), ...(o.cwd ? { cwd: o.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: probeEnv(o), ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceRunning,
@@ -138,6 +161,9 @@ export interface SetupContext {
   instanceFacts?: () => InstanceFacts | { error: string };
   /** Steps skipped on the first-run page (src/dashboard.ts). */
   skipped?: readonly string[];
+  /** Local mode (#738): the Claude login init's wizard chose for a new project (init's state), and the held draft's config.yaml. */
+  runtimeChoice?: RuntimeChoice | undefined;
+  draftConfig?: string | undefined;
 }
 
 export interface Detected {
@@ -306,23 +332,87 @@ export function proveClaudeLogin(p: Pick<SetupProbe, 'run'>): Detected {
 }
 
 /**
- * Claude Code signed in (local mode: the person's own login, which the agents use): `claude auth status` says so,
- * and a minimal real call proves the API takes it. `memo` (the dashboard's) keeps the call's answer for the same
- * login: a success for LOGIN_PROOF_OK_MS, a failure for LOGIN_PROOF_FAILED_MS; Re-check calls again.
+ * The agent_runtime kind a local project's agents run with, and where that comes from (#738): the checkout's
+ * config.yaml when it has one (an existing project's, never rewritten by the wizard), else the held draft's, else
+ * the wizard's choice for the setup PR, else a new project's default (the template's `kind: cli`).
  */
-export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, memo?: (identity: string, call: () => Detected) => Detected): Detected {
-  if (!p.which('claude')) return no('claude is not installed (the tools step)');
-  const r = p.run('claude', ['auth', 'status']);
-  let parsed: { loggedIn?: boolean; authMethod?: string; email?: unknown; orgId?: unknown } = {};
-  try {
-    parsed = JSON.parse(r.stdout) as typeof parsed;
-  } catch {
-    // older output: the exit status says it
+export interface AgentRuntime {
+  kind: RuntimeKind;
+  source: 'config' | 'draft' | 'choice' | 'default';
+  /** The key file the wizard recorded (an API-key choice): named in the fix, never opened here. */
+  keyFile?: string;
+}
+
+export function agentRuntimeOf(c: Pick<SetupContext, 'root' | 'runtimeChoice' | 'draftConfig'>, cfg: () => Config | { error: string }): AgentRuntime | { error: string } {
+  const keyFile = c.runtimeChoice?.kind === 'api_key' ? { keyFile: c.runtimeChoice.keyFile } : {};
+  const cannot = (why: string) => ({ error: `can't tell which Claude login the agents need: ${why}` });
+  if (existsSync(join(c.root, BRAND.configDir, 'config.yaml'))) {
+    const loaded = cfg();
+    if (isErr(loaded)) return cannot(`${BRAND.configDir}/config.yaml doesn't load (${loaded.error})`);
+    return { kind: loaded.project.agent_runtime.kind, source: 'config', ...keyFile };
   }
-  if (!(r.status === 0 && parsed.loggedIn !== false)) return no('not signed in, per `claude auth status`');
-  const how = `signed in${parsed.authMethod ? ` (${parsed.authMethod})` : ''}, per \`claude auth status\``;
-  const identity = JSON.stringify([parsed.authMethod ?? null, parsed.email ?? null, parsed.orgId ?? null]);
-  const proof = memo ? memo(identity, () => proveClaudeLogin(p)) : proveClaudeLogin(p);
+  if (c.draftConfig !== undefined) {
+    try {
+      const p = ProjectConfig.safeParse(parseYaml(c.draftConfig));
+      if (!p.success) return cannot(`the drafted config.yaml doesn't validate (${p.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)[0] ?? 'invalid'})`);
+      return { kind: p.data.agent_runtime.kind, source: 'draft', ...keyFile };
+    } catch (e) {
+      return cannot(`the drafted config.yaml doesn't parse (${firstLine((e as Error).message)})`);
+    }
+  }
+  if (c.runtimeChoice) return { kind: c.runtimeChoice.kind, source: 'choice', ...keyFile };
+  return { kind: 'cli', source: 'default' };
+}
+
+const RUNTIME_FROM: Record<AgentRuntime['source'], string> = { config: `${BRAND.configDir}/config.yaml`, draft: 'the drafted config', choice: 'your choice in init, for the setup PR', default: "a new project's default" };
+const RUNTIME_WANTS: Record<RuntimeKind, string> = { cli: `a Claude subscription login (${RUNTIME_LOGINS.cli.join(' or ')})`, api_key: `an API key (${RUNTIME_LOGINS.api_key.join(' or ')})` };
+
+/** How to make the login match the runtime, or the runtime match the login, from where the runtime comes. */
+function runtimeFix(rt: AgentRuntime): string {
+  const file = rt.keyFile ?? '<your key file>';
+  const useKey = `make claude read the key from ${rt.keyFile ?? 'a file you own'}: set "apiKeyHelper": "cat -- ${file}" in your Claude settings (~/.claude/settings.json), so \`claude auth status\` reports api_key_helper`;
+  const login = 'sign in with your Claude subscription (`claude auth login`)';
+  const other: RuntimeKind = rt.kind === 'cli' ? 'api_key' : 'cli';
+  const first = rt.kind === 'cli' ? login : useKey;
+  if (rt.source === 'config') return `${first}, or change agent_runtime.kind to ${other} in ${BRAND.configDir}/config.yaml through a reviewed PR`;
+  if (rt.source === 'draft') return `${first}, or set agent_runtime.kind to ${other} in the draft's config.yaml on the first-run page`;
+  return rt.kind === 'cli'
+    ? `${login}, or choose an API key: \`${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path of a file holding the key>\` (the setup PR then sets agent_runtime.kind: api_key)`
+    : `${useKey}; or choose your subscription: \`${BRAND.cli} init --answer agent-runtime=subscription\``;
+}
+
+/**
+ * Claude Code signed in (local mode: the person's own login, which the agents use) with a login the project's
+ * agent_runtime runs on (#738: the runner's preflight refuses any other, src/runner.ts), and a minimal real call
+ * proves the API takes it. `claude auth status` and the call run with only the environment agent runs of that kind
+ * give claude (agentAuthEnv). `memo` (the dashboard's) keeps the call's answer for the same login: a success for
+ * LOGIN_PROOF_OK_MS, a failure for LOGIN_PROOF_FAILED_MS; Re-check calls again. `mismatch`: the login is not one
+ * the agents would run on, and the detail says how to fix it.
+ */
+export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
+  if (!p.which('claude')) return no('claude is not installed (the tools step)');
+  if ('error' in runtime) return no(runtime.error);
+  const as = { agentRuntime: runtime.kind };
+  const r = p.run('claude', ['auth', 'status'], as);
+  type Status = { loggedIn?: unknown; authMethod?: unknown; email?: unknown; orgId?: unknown };
+  let parsed: Status | null = null;
+  try {
+    const j = JSON.parse(r.stdout) as unknown;
+    parsed = j && typeof j === 'object' ? (j as Status) : null;
+  } catch {
+    // older output: the runner can't read a method from it either, so no runtime runs on it
+  }
+  // INVARIANT (#738): the method as the runner's preflight reads it (loginMethod), checked against the same table.
+  const method = parsed ? loginMethod(parsed) : r.status === 0 ? 'unknown' : 'none';
+  const needs = `agent_runtime.kind is ${runtime.kind} (${RUNTIME_FROM[runtime.source]}), which runs only on ${RUNTIME_WANTS[runtime.kind]}`;
+  const refuse = (detail: string) => ({ ...no(`${detail}. To fix: ${runtimeFix(runtime)}`), mismatch: true as const });
+  if (r.status !== 0 || method === 'none') return runtime.kind === 'cli' ? no('not signed in, per `claude auth status`') : refuse(`not signed in, per \`claude auth status\`: ${needs}`);
+  const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
+  const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\``;
+  if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
+  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null]);
+  const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
+  const proof = memo ? memo(identity, prove) : prove();
   return proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`);
 }
 
@@ -514,10 +604,11 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['local'],
     optional: false,
     reach: 'all',
-    today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here).`,
+    // WHY (#738): two choices, and the login must be one the project's agent_runtime runs on, or the agents refuse it.
+    today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here): your Claude subscription. Or an API key: \`${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path>\` (a file you own that holds the key; claude reads it through apiKeyHelper, and the setup PR sets agent_runtime.kind: api_key). The login must be one the project's agent_runtime.kind runs on, or every agent run stops.`,
     fix: { kind: 'signin', label: 'Sign in' },
-    automation: 'claude auth login (in a terminal, as this user)',
-    detect: (k) => detectClaudeLogin(k.p, k.memo),
+    automation: `claude auth login (in a terminal, as this user); an API key: ${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path>`,
+    detect: (k) => detectClaudeLogin(k.p, agentRuntimeOf(k.c, k.cfg), k.memo),
   },
   {
     id: 'claude-token',
@@ -1203,7 +1294,7 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       return r;
     },
   };
-  const key = JSON.stringify([c.mode, c.root, c.repo, c.instance, c.openQuestions, c.setupPr]);
+  const key = JSON.stringify([c.mode, c.root, c.repo, c.instance, c.openQuestions, c.setupPr, c.runtimeChoice ?? null, c.draftConfig ?? null]);
   const steps: StepView[] = [];
   for (const s of SETUP_STEPS) {
     if (!s.modes.includes(c.mode)) continue;
