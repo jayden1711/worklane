@@ -145,6 +145,15 @@ export const PolicyFile = z.strictObject({
    */
   auto_merge: z.boolean().default(false),
   /**
+   * Whether the repo's review.yaml may let writers approve a high-risk merge (`approvals: { land: writers }`, #715).
+   * Off (the default): only the owners approve, whatever review.yaml says. Never settable from the dashboard (not a
+   * policy-edit.ts POLICY_KEYS key): root or the coordinator user edits this file today, root alone once #769 makes it
+   * root's. Read on every approval,
+   * so turning it off takes effect at once. WHY not a config refusal: turning it off must never stop an instance
+   * starting (a repo config refused at start, with its checkout's copy asking the same, would).
+   */
+  writers_approve_land: z.boolean().default(false),
+  /**
    * The main watch (src/main-watch.ts): auto, it guards the default branch whenever GitHub doesn't protect it (the
    * protection API answers 403 or 404); off, it doesn't. Read on every pass.
    */

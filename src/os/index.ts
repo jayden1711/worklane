@@ -291,6 +291,14 @@ export function loopbackPeerIsMe(clientPort: number, serverPort: number, platfor
   return uid !== null && typeof process.getuid === 'function' && uid === process.getuid();
 }
 
+/**
+ * The uid this process acts as (its effective uid), from the kernel through Node, never from a program found on PATH
+ * or the environment (#715). Null on native Windows, which has no uids.
+ */
+export function currentUid(): number | null {
+  return typeof process.geteuid === 'function' ? process.geteuid() : null;
+}
+
 /** The OS user this process runs as. */
 export function currentUser(): string {
   try {

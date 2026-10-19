@@ -8,7 +8,7 @@ import type { ReviewConfig } from '../config/schema.js';
 import { type DoneWhenList, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventPayload } from '../events/types.js';
-import { loadMoneyPaths } from '../review.js';
+import { mayAnswerKind, type Role } from '../dashboard-auth.js';
 import { defaultRolePrompt, issueBrief } from '../roles.js';
 import { checkedPush } from '../push-check.js';
 import { domainDecision, withAllowedHost, type DomainAnswer, type RefusedRequest } from '../domain-requests.js';
@@ -65,7 +65,7 @@ export abstract class Decisions extends Recovery {
     }
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     // The plan gate: always (the default) holds every plan for the owner; risky only one the merge policy's checks hold.
-    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
+    const reasons = gateReasons(this.d.cfg.project.plan_gate, planHoldReasons(plan, { review, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d), existsAtBase: (d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: this.d.repo }).status === 0 }));
     await this.d.backlog.comment(n, planComment(plan, owner, reasons));
     const commentsAt = (await this.d.backlog.comments(n)).length;
     if (reasons.length) {
@@ -141,14 +141,10 @@ export abstract class Decisions extends Recovery {
     let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
     let body = '';
     if (!a) {
-      const reply = (await this.d.backlog.comments(n))
-        .filter((c) => writers.has(c.author.toLowerCase()))
-        .map((c) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
-        .filter((x) => x.m && q.options.includes(x.m[1]!))
-        .at(-1);
+      const reply = await this.commentAnswer(n, q, writers, cmd);
       if (!reply) return;
       body = reply.body;
-      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.m![1]! }).payload;
+      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.answer, role: reply.role }).payload;
     }
     const act = planAnswer(a.answer, body);
     const answer = a.answer as PlanAnswer;
@@ -182,13 +178,9 @@ export abstract class Decisions extends Recovery {
     if (!req) return;
     let a = this.d.log.read(askedId, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
     if (!a) {
-      const reply = (await this.d.backlog.comments(issue))
-        .filter((c) => writers.has(c.author.toLowerCase()))
-        .map((c) => ({ by: c.author, m: c.body.match(cmd) }))
-        .filter((x) => x.m && q.options.includes(x.m[1]!))
-        .at(-1);
+      const reply = await this.commentAnswer(issue, q, writers, cmd);
       if (!reply) return;
-      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.m![1]! }).payload;
+      a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.answer, role: reply.role }).payload;
     }
     await this.d.backlog.removeLabel(issue, 'needs:decision');
     const answer = a.answer as DomainAnswer;
@@ -238,6 +230,34 @@ export abstract class Decisions extends Recovery {
     return { pr: opened.url, detail: '' };
   }
 
+  /**
+   * The latest `/<cli> <option>` reply to decision `q` on issue `n` from someone who may answer it (#715): a listed
+   * writer whose role on the repo passes the one rule every surface uses (mayAnswerKind), with review.yaml's
+   * `approvals` as the default branch has it. A reply from anyone else answers nothing: a writer's `approve` of a
+   * high-risk merge (`land`) or a held plan waits for an owner, as on the dashboard.
+   */
+  private async commentAnswer(n: number, q: EventPayload<'decision.asked'>, writers: Set<string>, cmd: RegExp): Promise<{ by: string; body: string; answer: string; role: 'owner' | 'writer' } | null> {
+    const replies = (await this.d.backlog.comments(n))
+      .filter((c) => writers.has(c.author.toLowerCase()))
+      .map((c) => ({ by: c.author, body: c.body, m: c.body.match(cmd) }))
+      .filter((x) => x.m && q.options.includes(x.m[1]!));
+    for (const r of replies.reverse()) {
+      const role = await this.commenterRole(r.by);
+      if (mayAnswerKind(q.kind, role, this.approvals())) return { by: r.by, body: r.body, answer: r.m![1]!, role: role === 'owner' ? 'owner' : 'writer' };
+    }
+    return null;
+  }
+
+  /** A listed writer's role on the repo (roleOf); without a lookup here, owners.default is the owner and the rest writers. A failed lookup: none. */
+  private async commenterRole(login: string): Promise<Role | null> {
+    if (!this.d.roleOf) return login.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase() ? 'owner' : 'writer';
+    try {
+      return await this.d.roleOf(login);
+    } catch {
+      return null;
+    }
+  }
+
   protected async handleDecisions() {
     const writers = new Set(this.d.cfg.project.owners.writers.map((w) => w.toLowerCase()));
     const cmd = new RegExp(`^/${BRAND.cli}\\s+(\\S+)`, 'm');
@@ -257,13 +277,9 @@ export abstract class Decisions extends Recovery {
       if (later.some((e) => e.type === 'land.queued' || e.type === 'issue.released')) continue;
       let a = this.d.log.read(asked.id, ['decision.answered']).map((e) => e.payload as EventPayload<'decision.answered'>).find((x) => x.id === q.id);
       if (!a) {
-        const reply = (await this.d.backlog.comments(q.issue))
-          .filter((c) => writers.has(c.author.toLowerCase()))
-          .map((c) => ({ by: c.author, m: c.body.match(cmd) }))
-          .filter((x) => x.m && q.options.includes(x.m[1]!))
-          .at(-1);
+        const reply = await this.commentAnswer(q.issue, q, writers, cmd);
         if (!reply) continue;
-        a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.m![1]! }).payload;
+        a = this.emit('decision.answered', { id: q.id, by: reply.by, answer: reply.answer, role: reply.role }).payload;
       }
       await this.d.backlog.removeLabel(q.issue, 'needs:decision');
       if (q.kind === 'land') {
