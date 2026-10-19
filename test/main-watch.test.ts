@@ -1095,6 +1095,40 @@ test("main watch (#727 round 8): with no required check pinned, it reads one pag
   assert.deepEqual(s.checked.map((c) => c.number), [7]);
 });
 
+test("main watch (#727, the owner's decision (a)): a branch read refused for permission or 404 is 'no App named' for a bare-names merge; a 5xx or rate limit, or a pin judged, waits", async () => {
+  const outcome = async (branch: Response, config: string) => {
+    // GitHub's App per check comes from PinnedChecks over a GitHubBacklog stand-in, wired as merge-flow.ts wires it.
+    const f = (async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === '/repos/example-org/example-shop/branches/main') return branch.clone();
+      if (u.pathname === '/repos/example-org/example-shop/rules/branches/main') return new Response('[]');
+      return new Response('{"message":"Not Found"}', { status: 404 });
+    }) as typeof fetch;
+    const pinned = new PinnedChecks({ backlog: new GitHubBacklog('example-org/example-shop', () => `tok-branch-${Math.random()}`, f), branch: () => 'main', repo: () => 'example-org/example-shop', configured: () => ({}) });
+    const s = await started({ pins: { sources: () => ({}), github: (judging, configured) => pinned.githubAppsFor(judging, configured), repo: 'example-org/example-shop' }, config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, [ci({ app: 2222, suite: 22, id: 1 })]);
+    await run(s.gh, s.watch, 10);
+    return s.checked.length ? 'accounted' : s.unaccounted.length ? 'unaccounted' : 'no verdict';
+  };
+  const bare = 'required_checks: [ci]\n';
+  const pinnedCfg = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: 2222 }\n';
+  const permission = () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+  const notFound = () => new Response('{"message":"Branch not found"}', { status: 404 });
+  const boom = () => new Response('{"message":"boom"}', { status: 500 });
+  const rate = () => new Response('{"message":"API rate limit exceeded"}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' } });
+  for (const [what, answer] of [['a permission 403', permission], ['a 404', notFound]] as const) {
+    assert.equal(await outcome(answer(), bare), 'accounted', `bare, ${what}: main's verdict (cf32770b waited)`);
+    assert.equal(await outcome(answer(), pinnedCfg), 'no verdict', `a pin judged, ${what}: it waits, as before`);
+  }
+  for (const [what, answer] of [['a 500', boom], ['a rate-limited 403', rate]] as const) {
+    assert.equal(await outcome(answer(), bare), 'no verdict', `bare, ${what}: transient, it waits`);
+    assert.equal(await outcome(answer(), pinnedCfg), 'no verdict', `a pin judged, ${what}`);
+  }
+});
+
 // #727 round 6: readiness and the main watch judge a pinned check through one function (pinnedVerdict) over the same
 // facts. One table, each case under a workflow pin, an Actions-App pin (GitHub's rules name 15368) and a pin to an App
 // that isn't Actions: readiness through PinnedChecks.of over GitHubBacklog's real requests, the watch through its own

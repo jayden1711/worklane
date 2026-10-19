@@ -253,6 +253,43 @@ test('round 10: the rules read pages: a pin on page 2 is kept; a refused page 2 
   assert.deepEqual(await verdicts((p) => json(filler(p))), ['ci: missing']);
 });
 
+/** The branch read's refusals: [what, answer, is it the owner's "no App named" (a permission 403 or a 404)]. */
+const BRANCH_REFUSALS: [string, () => Response, boolean][] = [
+  ['a permission 403', NO_ACCESS, true],
+  ['a 404', () => json({ message: 'Branch not found' }, 404), true],
+  ['a 500', () => json({ message: 'boom' }, 500), false],
+  ['a rate-limited 403', RATE_LIMITED, false],
+];
+
+test("the owner's decision (a): a branch read refused for permission or 404 is 'no App named' for a bare-names judgement (main's verdict); a 5xx or rate limit waits; with a pin judged, fail closed as before", async () => {
+  // `ci` passes from App 2222 and `lint` from App 2222; GitHub's rules name nothing. `pinCi`: config.yaml pins `ci` to
+  // App 2222 (so a pin is judged), leaving `lint` bare.
+  const verdict = async (branch: () => Response, pinCi: boolean) => {
+    const f = (async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [run(1, 'ci', OTHER_APP), run(2, 'lint', OTHER_APP)] });
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return json({ statuses: [] });
+      if (u.pathname === '/repos/o/r/branches/main') return branch();
+      if (u.pathname === '/repos/o/r/rules/branches/main') return json([]);
+      return json({ message: 'Not Found' }, 404);
+    }) as typeof fetch;
+    const t = `tok-${++token}`;
+    const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => (pinCi ? { ci: { app_id: OTHER_APP } } : {}), required: () => ['ci', 'lint'] });
+    try {
+      const r = readiness({ required: ['ci', 'lint'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+      return r.ready ? 'ready' : r.reasons.join('; ');
+    } catch {
+      return 'waits';
+    }
+  };
+  for (const [what, answer, noApp] of BRANCH_REFUSALS) {
+    // A bare-names install: the permission 403 and the 404 give main's verdict (cf32770b: `ci`, `lint` missing).
+    assert.equal(await verdict(answer, false), noApp ? 'ready' : 'ci: missing; lint: missing', `bare, ${what}`);
+    // A pin judged (`ci` pinned in config.yaml): the rules stay unknown, so the bare `lint` is missing, as before.
+    assert.equal(await verdict(answer, true), 'lint: missing', `pinned, ${what}`);
+  }
+});
+
 test("round 9: ownVerdict never puts an Actions run in the App group: one whose workflow runs weren't read waits", async () => {
   const { ownVerdict } = await import('../src/check-source.js');
   const actions = (id: number, conclusion: string) => ({ id, name: 'ci', source: 'check_run' as const, status: 'completed', conclusion, app: 15368 });

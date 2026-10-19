@@ -7,7 +7,7 @@ import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
-import { ACTIONS_APP_ID, githubCheckApps, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
+import { ACTIONS_APP_ID, BranchDenied, githubCheckApps, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
 
 /** GitHub's default page size for a commit's combined status (the first page main read is that size). */
 const STATUS_PAGE_DEFAULT = 30;
@@ -325,7 +325,17 @@ export class GitHubBacklog implements Backlog {
   /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */
   async checkApps(branch: string): Promise<GithubCheckApps> {
     const b = encodeURIComponent(branch);
-    const protection = await this.req<unknown>('GET', `/repos/${this.repo}/branches/${b}`);
+    // The branch read refused for permission (a 403 that isn't a rate limit) or a 404: the owner's decision (a),
+    // 2026-10-19: no App named by classic protection, for a judgement with no pinned name (BranchDenied carries what the
+    // rules name; PinnedChecks decides). A rate limit or a 5xx throws: transient, so it keeps waiting.
+    let protection: unknown = null;
+    let denied = false;
+    try {
+      protection = await this.req<unknown>('GET', `/repos/${this.repo}/branches/${b}`);
+    } catch (e) {
+      if (!(e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited')))) throw e;
+      denied = true;
+    }
     const rules: unknown[] = [];
     // Every page while a page is full (#727: a rule on an unread page could pin a check); past 10, not an answer.
     for (let page = 1; ; page++) {
@@ -345,7 +355,9 @@ export class GitHubBacklog implements Backlog {
       rules.push(...list);
       if (list.length < 100) break;
     }
-    return githubCheckApps(protection, rules);
+    const apps = githubCheckApps(protection, rules);
+    if (denied) throw new BranchDenied(apps);
+    return apps;
   }
 
   async requestReview(n: number, logins: string[]) {
