@@ -8,7 +8,7 @@ import { join, relative } from 'node:path';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import type { CommitCheck } from '../src/backlog/types.js';
 import { checkSourceDoctor } from '../src/check-pin-block.js';
-import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, withTestRuns, type CheckPin, type JudgedChecks } from '../src/check-source.js';
+import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin, type JudgedChecks } from '../src/check-source.js';
 import { ProjectConfig } from '../src/config/schema.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { readiness, requiredOutcomes } from '../src/pr-watch.js';
@@ -125,8 +125,11 @@ test("owner rule: a pinned check is its source's latest run on the head; any non
   const otherHead = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { sha: OTHER })];
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], otherHead), ['test fail']);
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }], otherHead), ['test fail']);
-  // An App pin: its later check run supersedes its earlier one.
-  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test pass']);
+  // An App pin that isn't Actions (round 6, fail closed): it can't be split by file, so its earlier failure in another
+  // check suite still blocks, whatever its later run says; a re-run GitHub lists in place of it (same suite) is the one there is.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test fail']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 12 }, { id: 1, name: 'test', app: CI_APP, suite: 11, status: 'in_progress', conclusion: null }] }), pin)), ['test pending']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }] }), pin)), ['test pass']);
   // A same-name commit status that isn't success (fail closed), or one still pending.
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'failure' }] }), pin)), ['test fail']);
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'pending' }] }), pin)), ['test pending']);
@@ -162,7 +165,7 @@ test('"latest" fails closed: a re-run of an older workflow run that failed after
 
 test('the brand holds at run time: a cast, an any, a ts-expect-error value or a mutated judged array throws (fails closed)', async () => {
   const raw: CommitCheck[] = [{ name: 'test', source: 'check_run', status: 'completed', conclusion: 'success', id: 1, app: CI_APP }];
-  const ok = asJudged(raw);
+  const ok = await asJudged(raw);
   assert.equal(readiness({ required: ['test'], checks: ok, head: HEAD, evaluated: approved }).ready, true);
   const notMade = /checks to judge must come from PinnedChecks\.of/;
   assert.throws(() => readiness({ required: ['test'], checks: raw as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'a cast');
@@ -171,7 +174,9 @@ test('the brand holds at run time: a cast, an any, a ts-expect-error value or a 
   assert.throws(() => requiredOutcomes(['test'], raw), notMade, 'a ts-expect-error value');
   assert.throws(() => readiness({ required: ['test'], checks: Object.assign([...raw], ok) as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'Object.assign onto other data');
   assert.throws(() => readiness({ required: ['test'], checks: [...ok] as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'a copy of a judged array');
-  assert.throws(() => withTestRuns(raw as unknown as JudgedChecks, new Set(), []), notMade, 'withTestRuns over unjudged data');
+  // Round 6: withTestRuns (a maker that took a caller's checks) is gone; PinnedChecks.of is the only maker.
+  const exported = (await import('../src/check-source.js')) as Record<string, unknown>;
+  assert.equal(exported.withTestRuns, undefined, 'no withTestRuns to call over unjudged data');
   // A judged array and its checks are frozen: pushing onto it, or changing a check, throws.
   assert.throws(() => (ok as unknown as CommitCheck[]).push(raw[0]!), TypeError);
   assert.throws(() => Array.prototype.push.apply(ok as unknown as CommitCheck[], raw), TypeError);
@@ -180,14 +185,29 @@ test('the brand holds at run time: a cast, an any, a ts-expect-error value or a 
   }, TypeError);
 });
 
-test('the two makers are used only where MAKERS_ALLOWED says: a stray withTestRuns or new PinnedChecks in src/ is flagged (fixtures, and src/ itself)', () => {
-  const prelude = "import { PinnedChecks, withTestRuns, type JudgedChecks } from './check-source.js';\nimport type { CommitCheck } from './backlog/types.js';\n";
-  const e6 = { 'src/zz-e6.ts': `${prelude}export const f = (judged: JudgedChecks, other: CommitCheck[]) => withTestRuns(judged, new Set(), other);\n` };
-  const e7 = { 'src/zz-e7.ts': `${prelude}export const f = (other: CommitCheck[]) => new PinnedChecks({ backlog: { checks: async () => other }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('a');\n` };
-  const alias = { 'src/zz-alias.ts': "import * as cs from './check-source.js';\nexport const w = cs.withTestRuns;\n" };
-  const keyed = { 'src/zz-keyed.ts': "import * as cs from './check-source.js';\nconst k = 'withTest' + 'Runs';\nexport const w = (cs as Record<string, unknown>)[k];\n" };
-  const dynamic = { 'src/zz-dynamic.ts': "const m = './check-' + 'source.js';\nexport const w = async () => ((await import(m)) as Record<string, unknown>)['withTestRuns'];\n" };
-  for (const files of [e6, e7, alias, keyed, dynamic]) assert.ok(makerUses(files).length > 0, Object.keys(files)[0]);
+test('the one maker is used only where MAKERS_ALLOWED says, however it is reached (fixtures as data, and src/ itself); withTestRuns and headChecks are gone', () => {
+  const key = "const k = 'Pinned' + 'Checks';\n";
+  const fixtures: Record<string, Record<string, string>> = {
+    // e7: a PinnedChecks over a stand-in backlog, named directly.
+    e7: { 'src/zz-e7.ts': "import { PinnedChecks } from './check-source.js';\nimport type { CommitCheck } from './backlog/types.js';\nexport const f = (other: CommitCheck[]) => new PinnedChecks({ backlog: { checks: async () => other }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('a');\n" },
+    m1: { 'src/zz-m1.ts': "import { PinnedChecks as P } from './check-source.js';\nexport const w = P;\n" },
+    m2: { 'src/zz-barrel.ts': "export { PinnedChecks } from './check-source.js';\n", 'src/zz-m2.ts': "import { PinnedChecks } from './zz-barrel.js';\nexport const w = PinnedChecks;\n" },
+    m3: { 'src/zz-barrel.ts': "export * from './check-source.js';\n", 'src/zz-m3.ts': `import * as b from './zz-barrel.js';\n${key}export const w = (b as Record<string, unknown>)[k];\n` },
+    m4: { 'src/zz-barrel.ts': "export * as cs from './check-source.js';\n", 'src/zz-m4.ts': `import { cs } from './zz-barrel.js';\n${key}export const w = (cs as Record<string, unknown>)[k];\n` },
+    m5: { 'src/zz-barrel.ts': "export * from './check-source.js';\n", 'src/zz-m5.ts': `${key}export const w = async () => ((await import('./zz-barrel.js')) as Record<string, unknown>)[k];\n` },
+    m6: { 'src/zz-m6.ts': `import { createRequire } from 'node:module';\n${key}export const w = (createRequire(import.meta.url)('./check-' + 'source.js') as Record<string, unknown>)[k];\n` },
+    m6b: { 'src/zz-m6b.ts': "declare const require: (id: string) => unknown;\nexport const w = () => require('./check-source.js');\n" },
+    m7: { 'src/zz-m7.ts': `${key}export const w = async () => ((await import('./check-source.js')) as Record<string, unknown>)[k];\n` },
+    m8: { 'src/zz-barrel.ts': "export { PinnedChecks } from './check-source.js';\n", 'src/zz-m8.ts': "export const w = async () => { const { PinnedChecks } = await import('./zz-barrel.js'); return PinnedChecks; };\n" },
+    m10: { 'src/zz-barrel.ts': "export * from './check-source.js';\n", 'src/zz-m10.ts': "import * as b from './zz-barrel.js';\nexport const w = Object.values(b);\n" },
+    computed: { 'src/zz-computed.ts': "const m = './check-' + 'source.js';\nexport const w = async () => import(m);\n" },
+  };
+  for (const [name, files] of Object.entries(fixtures)) assert.ok(makerUses(files).length > 0, name);
+  // e6 and m9 can't be written any more: withTestRuns and headChecks aren't exported (they took a caller's checks or events).
+  assert.ok(typeErrors({ 'src/zz-e6.ts': "import { withTestRuns } from './check-source.js';\nexport const w = withTestRuns;\n" }).length > 0, 'e6: no withTestRuns');
+  assert.ok(typeErrors({ 'src/zz-m9.ts': "import { headChecks } from './ci-none.js';\nexport const w = headChecks;\n" }).length > 0, 'm9: no headChecks');
+  // A module that exposes no maker is no hit.
+  assert.deepEqual(makerUses({ 'src/zz-ok.ts': "import * as cs from './ci-none.js';\nimport { pinOf } from './check-source.js';\nexport const w = [cs, pinOf];\n" }), []);
   const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
   const src = Object.fromEntries(files(join(repoRoot, 'src')).map((p) => [relative(repoRoot, p).split('\\').join('/'), readFileSync(p, 'utf8')]));
   assert.deepEqual(makerUses(src), []);
@@ -206,7 +226,7 @@ test('option (c) unchanged: an unpinned check is judged exactly by name, over ev
   for (const checks of orders) {
     const pinned = new PinnedChecks({ backlog: { checks: async () => checks, checkApps: async () => ({}) }, branch: () => 'main', repo: () => 'o/r', configured: () => ({ other: { app_id: CI_APP } }) });
     const a = readiness({ required: ['test'], checks: await pinned.of(HEAD), head: HEAD, evaluated: approved });
-    assert.deepEqual(a, readiness({ required: ['test'], checks: asJudged(checks), head: HEAD, evaluated: approved }), JSON.stringify(checks));
+    assert.deepEqual(a, readiness({ required: ['test'], checks: await asJudged(checks), head: HEAD, evaluated: approved }), JSON.stringify(checks));
     same++;
   }
   assert.equal(same, 65, 'every subset in every order (sum of P(4,k))');
@@ -224,7 +244,7 @@ test("a check with no recorded source takes the App GitHub's protection or rules
   const gh = github({ runs, branch: anySource, rules: 403 });
   const none = await judged(gh, {}, ['test', 'lint']);
   assert.deepEqual(outcomes(none), ['test pass', 'lint pass']);
-  assert.deepEqual(none, readiness({ required: ['test', 'lint'], checks: asJudged(await gh.backlog.checks(HEAD)), head: HEAD, evaluated: approved }), 'the same as judging the raw checks by name');
+  assert.deepEqual(none, readiness({ required: ['test', 'lint'], checks: await asJudged(await gh.backlog.checks(HEAD)), head: HEAD, evaluated: approved }), 'the same as judging the raw checks by name');
   // A recorded source wins over GitHub's.
   assert.deepEqual(outcomes(await judged(github({ runs, branch: classic }), { lint: { app_id: SPOOF_APP } }, ['lint'])), ['lint missing']);
 });
@@ -259,7 +279,7 @@ test('without GitHub (no checkApps) every check is judged by name exactly as bef
   for (const [required, checks] of cases) {
     const pinned = new PinnedChecks({ backlog: { checks: async () => checks }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) });
     assert.equal(pinned.enforced, false);
-    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }), readiness({ required, checks: asJudged(checks), head: HEAD, evaluated: approved }));
+    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }), readiness({ required, checks: await asJudged(checks), head: HEAD, evaluated: approved }));
   }
 });
 
@@ -459,11 +479,10 @@ test("src/ reads GitHub's checks raw only where RAW_READS_ALLOWED says why (chec
   assert.deepEqual([...new Set(hits.map((h) => h.file))].sort(), Object.keys(RAW_READS_ALLOWED).sort(), 'an allowed file that no longer reads them raw');
 });
 
-test("a raw Backlog.checks answer doesn't compile where checks are judged: readiness, requiredOutcomes, headChecks, mayMerge, prReadiness, fix-forward's reader", () => {
+test("a raw Backlog.checks answer doesn't compile where checks are judged: readiness, requiredOutcomes, mayMerge, prReadiness, fix-forward's reader", () => {
   const body = [
     "import type { Backlog } from '../src/backlog/types.js';",
     "import { readiness, requiredOutcomes } from '../src/pr-watch.js';",
-    "import { headChecks } from '../src/ci-none.js';",
     "import { mayMerge } from '../src/coordinator/pr-batch.js';",
     "import type { FixForwardDeps } from '../src/coordinator/fix-forward.js';",
     "import type { MergeFlow } from '../src/coordinator/merge-flow.js';",
@@ -471,7 +490,6 @@ test("a raw Backlog.checks answer doesn't compile where checks are judged: readi
     '  const raw = await backlog.checks(sha);',
     "  readiness({ required: ['ci'], checks: raw, head: sha, evaluated: null });",
     "  requiredOutcomes(['ci'], raw);",
-    "  headChecks({ project: {}, tests: {}, github: raw, events: () => [], sha });",
     "  mayMerge({ events: [], number: 1, head: sha, checks: raw, fastChecks: ['ci'] });",
     '  flow.prReadiness(1, sha, raw);',
     "  const reader: FixForwardDeps['checks'] = (s) => backlog.checks(s);",
@@ -479,7 +497,8 @@ test("a raw Backlog.checks answer doesn't compile where checks are judged: readi
     '}',
   ].join('\n');
   const errors = typeErrors({ 'test/raw-judged-fixture.ts': body });
-  for (const line of [9, 10, 11, 12, 13, 14]) assert.ok(errors.some((e) => e.startsWith(`test/raw-judged-fixture.ts:${line}:`)), `line ${line} doesn't compile: ${errors.join('\n')}`);
+  // headChecks (round 5's line 11) is gone: it can't be imported at all (the makers test checks that).
+  for (const line of [8, 9, 10, 11, 12]) assert.ok(errors.some((e) => e.startsWith(`test/raw-judged-fixture.ts:${line}:`)), `line ${line} doesn't compile: ${errors.join('\n')}`);
 });
 
 test("nothing in src/ judges GitHub's checks raw: only check-source.ts reads Backlog.checks (canary.ts: see RAW_READS_ALLOWED)", () => {

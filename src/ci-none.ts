@@ -10,7 +10,6 @@
 // write or append to the events DB).
 import { checkName } from './testrun/config.js';
 import type { CommitCheck } from './backlog/types.js';
-import { withTestRuns, type JudgedChecks } from './check-source.js';
 import type { ProjectConfig, TestsConfig } from './config/schema.js';
 import type { StoredEvent } from './events/types.js';
 
@@ -71,15 +70,6 @@ export function localRunChecks(events: StoredEvent[], sha: string, tests: Pick<T
     } else if (running) out.push({ name, source: 'check_run', status: 'in_progress', conclusion: null });
   }
   return out;
-}
-
-/**
- * The checks a PR's head is judged by under No CI: GitHub's, with every one named like a test-run check taken out,
- * and the event log's in their place. Elsewhere (ci: github), GitHub's as they are.
- */
-export function headChecks(o: { project: Pick<ProjectConfig, 'ci'>; tests: Pick<TestsConfig, 'test_run'>; github: JudgedChecks; events: () => StoredEvent[]; sha: string }): JudgedChecks {
-  if (!ciIsNone(o.project)) return o.github;
-  return withTestRuns(o.github, new Set(testRunCheckNames(o.tests)), localRunChecks(o.events(), o.sha, o.tests));
 }
 
 /** The checks a PR must pass: required_checks, or under No CI every test-run tier's check. */

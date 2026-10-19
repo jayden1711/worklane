@@ -63,8 +63,12 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   // Owner rule: listed after the pinned pass, another App's failure still blocks (the check of main after a merge reads these).
   f.backlog.setChecks(sha, [ci(CI_APP), ci(SPOOF_APP, 'failure'), lint]);
   assert.deepEqual(await judged(), [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'failure' }, lint]);
-  // The pinned App's own later run supersedes its earlier cancelled or failed one.
+  // Round 6: an App that isn't Actions can't be split by workflow file, so its own later run never supersedes its
+  // earlier failed one that GitHub still lists (fail closed); the finished failure is the one reported.
   const own = (id: number, conclusion: string): CommitCheck => ({ name: 'ci', source: 'check_run', status: 'completed', conclusion, id, app: CI_APP });
   f.backlog.setChecks(sha, [own(7, 'success'), own(5, 'cancelled'), own(6, 'failure'), lint]);
+  assert.deepEqual(await judged(), [own(6, 'failure'), lint]);
+  // Its re-run as GitHub lists it in place of the failure: the one check run there is.
+  f.backlog.setChecks(sha, [own(7, 'success'), lint]);
   assert.deepEqual(await judged(), [own(7, 'success'), lint]);
 });

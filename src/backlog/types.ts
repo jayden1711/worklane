@@ -138,6 +138,11 @@ export interface CommitCheck {
   app?: number;
   /** The Actions workflow run behind a check run's suite; null: Actions couldn't be read for it. Absent: not Actions. */
   workflow?: WorkflowSource | null;
+  /**
+   * #727: read past the first page main read (a status on a later page of the combined status). Only a pinned name is
+   * judged with it (a non-pass of it blocks); an unpinned name is judged exactly as before, without it.
+   */
+  extra?: true;
 }
 
 export const LABELS = [
