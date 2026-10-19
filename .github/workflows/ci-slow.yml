@@ -2108,11 +2108,20 @@ jobs:
           id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
           [ -n "$id" ] && [ -n "$url" ]
           sudo cp "$d/steps.jsonl" "$F/siri-steps-before.jsonl"
-          # What an older install left: the store and the token, made as its units made them (the coordinator, closed to
-          # others: dashboards.sh refuses an instance state anything in which is open to others), the hub unit's option, 8443.
-          (cd / && sudo -u wl-ci sh -c 'umask 077 && mkdir -p "$1/siri" && printf "{\"devices\":[]}\n" > "$1/siri/devices.json" && head -c 24 /dev/urandom | base64 > "$1/siri-gateway-token"' sh "$state")
+          # What an older install left: the store and the token, the coordinator's and closed to others as the engine
+          # made them (dashboards.sh refuses an instance state anything in which is open to others), the hub unit's
+          # option, 8443. Explicit modes, not a umask: a default ACL on the state directory overrides a umask.
+          siri_files=("$state/siri" "$state/siri/devices.json" "$state/siri-gateway-token")
+          siri_show() { for p in "${siri_files[@]}"; do sudo stat -c '%A %U:%G %n' "$p"; sudo getfacl -p "$p"; done; sudo getfacl -p "$state"; }
+          g="$(id -gn wl-ci)"
+          printf '{"devices":[]}\n' > "$F/siri-devices.json"
+          head -c 24 /dev/urandom | base64 > "$F/siri-gateway-token"
+          sudo install -d -m 0700 -o wl-ci -g "$g" "$state/siri"
+          sudo install -m 0600 -o wl-ci -g "$g" "$F/siri-devices.json" "$state/siri/devices.json"
+          sudo install -m 0600 -o wl-ci -g "$g" "$F/siri-gateway-token" "$state/siri-gateway-token"
+          rm -f "$F/siri-gateway-token"
           sudo test -s "$state/siri/devices.json" && sudo test -s "$state/siri-gateway-token"
-          if sudo find "$state" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print | grep .; then echo "the planted files are open to others" >&2; exit 1; fi
+          if sudo find "$state" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print | grep .; then echo "the planted files are open to others" >&2; siri_show >&2 || true; exit 1; fi
           sudo sed -i 's/^\(ExecStart=.* --signin-dir [^ ]*\)/\1 --siri-port 4397/' "$hub"
           grep -q -- ' --siri-port 4397' "$hub"
           t0="$(date +%s)"
@@ -2133,7 +2142,7 @@ jobs:
           sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '(.siri|not) and .serve and (.funnel|not)'
           # dashboards.sh with --siri, as an older rerun passes it: accepted, said to be ignored, and everything of Siri gone.
           if ! sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci > "$F/siri-removed.log" 2> "$F/siri-removed.err"; then
-            cat "$F/siri-removed.log" "$F/siri-removed.err" >&2; exit 1
+            cat "$F/siri-removed.log" "$F/siri-removed.err" >&2; siri_show >&2 || true; exit 1
           fi
           cat "$F/siri-removed.err"
           grep -q 'warning: --siri is ignored: Siri was removed' "$F/siri-removed.err"
@@ -2716,7 +2725,11 @@ jobs:
           done
           # What an older install's Siri left in ci's state (removed, #743): its device token store. And an open ask for
           # ci, made the engine's way, as ci's coordinator; the canary on ci.
-          asu wl-ci sh -c 'umask 077 && mkdir -p "$1/siri" && printf "{\"devices\":[]}\n" > "$1/siri/devices.json"' sh "$state"
+          # Explicit modes, the coordinator's and closed to others, as the engine made it (a umask doesn't hold under a default ACL).
+          printf '{"devices":[]}\n' > "$F/rename-siri-devices.json"
+          sudo install -d -m 0700 -o wl-ci -g "$(id -gn wl-ci)" "$state/siri"
+          sudo install -m 0600 -o wl-ci -g "$(id -gn wl-ci)" "$F/rename-siri-devices.json" "$state/siri/devices.json"
+          if sudo find "$state/siri" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print | grep .; then sudo stat -c '%A %U:%G %n' "$state/siri" "$state/siri/devices.json" >&2; sudo getfacl -p "$state/siri" "$state/siri/devices.json" >&2; exit 1; fi
           asu wl-ci node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const { asks } = await import("/opt/worklane/current/dist/src/console/asks.js"); const log = new EventLog(process.argv[1]); asks(log).create({ instance: "ci", kind: "question", title: "ci rename: carried?", detail: "an open ask", options: ["yes", "no"] }); log.close();' "$state/events.db"
           sudo node -e 'const fs = require("fs"); const f = "/etc/worklane/updates.json"; const u = JSON.parse(fs.readFileSync(f, "utf8")); u.canary = { instance: "ci", repo: "example/alpha", time_limit_minutes: 30 }; fs.writeFileSync(f + ".ci", JSON.stringify(u, null, 2) + "\n"); fs.renameSync(f + ".ci", f);'
           a="$home/.config/ci-app/private-key.pem"; c="$(getent passwd wl-ci-agent | cut -d: -f6)/.claude/.credentials.json"
