@@ -2268,9 +2268,8 @@ test('Add project: the steps show in the script order as they arrive, and its as
   a.create({ kind: 'paste_secret', instance: 'shop', title: "The agent's Claude token", detail: 'x', credential: 'claude-token', where: 'the agent user only' }, 'setup');
   v = render();
   assert.equal((v.run.match(/data-testid="ask-card"/g) ?? []).length, 3, 'both GitHub links and the token ask');
-  const secret = v.run.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
-  assert.match(secret, /type="password"/, "the token goes through the dashboard's paste box");
-  assert.doesNotMatch(secret, /value=/);
+  // The token's ask, as an earlier version opened it: nobody may answer it (issue #711), so no paste box is drawn.
+  assert.doesNotMatch(v.run, /data-testid="ask-secret"/, "no paste box for a Claude credential's ask");
 
   for (const s of order.slice(2)) step(s, 'done');
   log.append('machine.finished', { id: 'mr-0000000000aa', outcome: 'done', detail: 'shop added' }, 'demo', 'coordinator');

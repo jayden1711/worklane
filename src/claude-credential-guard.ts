@@ -31,6 +31,18 @@ export const REMOVED_CREDENTIAL_PATHS: ReadonlySet<string> = new Set(['/api/clau
 export const CREDENTIAL_ROUTE_GONE =
   "the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude, or claude-account.sh switch or profile-add at a root shell), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md";
 
+/**
+ * The credential names earlier versions had the dashboard store a Claude credential under (add-project's token, a
+ * switch's token, a new profile's token, a relayed sign-in's code): the file's name in a secrets dir, and a
+ * paste_secret ask's credential. No paste box writes one any more; claude-account.sh removes any left behind, the
+ * coordinator withdraws an ask for one at startup, and none is ever answerable.
+ */
+export const CLAUDE_CREDENTIAL_NAMES: ReadonlySet<string> = new Set(['claude-token', 'claude-account-token', 'claude-profile-token', 'claude-login-code']);
+
+/** Why the coordinator withdrew such an ask: a fixed text (an ask's event never holds a value). */
+export const CLAUDE_ASK_WITHDRAWN =
+  'issue #711: the dashboard never takes a Claude credential; a root admin installs it on the machine (sudo bash credentials.sh <name> claude, or claude-account.sh at a root shell), or signs in there as the agent user. See docs/auth.md';
+
 /** Whether a value (a parsed JSON body, any depth) holds a Claude credential: in a string value, or a key. */
 export function holdsClaudeCredential(v: unknown, depth = 0): boolean {
   if (typeof v === 'string') return SETUP_TOKEN_IN.test(v) || LOGIN_CODE_VALUE.test(v.trim());
