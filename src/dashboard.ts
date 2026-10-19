@@ -16,14 +16,14 @@ import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automation
 import { spawnSync } from 'node:child_process';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { starterCiView } from './starter-ci.js';
 import { CI_NONE_MEANS, ciIsNone, headChecks, requiredFor } from './ci-none.js';
-import { acknowledgement, measureMain, mayResume, stopWaitsForGreen, type MainState, type ResumeVerdict } from './auto-merge-resume.js';
+import { acknowledgement, mainNow, mayResume, stopWaitsForGreen, type MainState, type ResumeVerdict } from './auto-merge-resume.js';
 
 /** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
 const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
@@ -802,9 +802,28 @@ export async function clearAutoMergeStop(o: { stateDir: string; eventsDb: string
     const gated = stopWaitsForGreen(stop.by) || (last?.type === 'merge.stopped' && stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by));
     const v = await mayResume({ gated, ack: o.ack ?? null, measure: o.measure });
     if (!v.ok) return { ok: false, status: 409, error: v.error, needsAck: true, main: v.main };
-    // A stop written (or rewritten) while main was measured is a new stop: it isn't the one this resume judged.
-    if (readStopFile(o.stateDir)?.raw !== stop.raw) return { ok: false, status: 409, error: 'the stop changed while the default branch was being measured; look again before resuming' };
-    rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+    // Claimed by a rename (atomic), then compared: a stop written (or rewritten) while main was measured is a new stop,
+    // not the one this resume judged, and stays in force.
+    const file = join(o.stateDir, 'auto-merge-stopped.json');
+    const claimed = `${file}.resume-${randomBytes(6).toString('hex')}`;
+    try {
+      renameSync(file, claimed);
+    } catch {
+      return { ok: false, status: 409, error: 'the stop changed while the default branch was being measured; look again before resuming' };
+    }
+    let raw: string | null = null;
+    try {
+      raw = readFileSync(claimed, 'utf8');
+    } catch {
+      raw = null;
+    }
+    if (raw !== stop.raw) {
+      // Put it back, unless a newer stop is already there (a stop stays in force either way).
+      if (!existsSync(file)) renameSync(claimed, file);
+      else rmSync(claimed, { force: true });
+      return { ok: false, status: 409, error: 'the stop changed while the default branch was being measured; look again before resuming' };
+    }
+    rmSync(claimed, { force: true });
     const main = v.main;
     const how =
       v.how === 'acknowledged' && main && !main.green
@@ -2789,13 +2808,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may resume auto-merge; @${who.login} is a ${who.role}` });
           const ack = acknowledgement(await readBody(req));
           if ('error' in ack) return json(res, 400, { error: ack.error });
-          const branch = opts.cfg.project.project.default_branch;
-          const git = opts.acceptGit ?? acceptGit(opts.root, 'origin', branch);
+          // Main's tip on the remote now, as the coordinator reads it (never the clone's last fetch, which may be stale).
           const measure = () =>
-            measureMain({
-              branch,
+            mainNow({
+              repo: opts.root,
+              remote: 'origin',
+              branch: opts.cfg.project.project.default_branch,
               required: requiredFor(opts.cfg.project, opts.cfg.tests),
-              tip: () => git.tip(),
               checks: async (sha) => {
                 if (!opts.backlog) throw new Error('this dashboard has no backlog to read checks from');
                 return headChecks({ project: opts.cfg.project, tests: opts.cfg.tests, github: await opts.backlog().checks(sha), events: () => eventCache.all(), sha });

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { measureMain } from '../src/auto-merge-resume.js';
+import { acknowledgement, measureMain } from '../src/auto-merge-resume.js';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
 import type { Role } from '../src/dashboard-auth.js';
@@ -298,6 +298,38 @@ test('resume (#776): with main still red, an explicit acknowledgement (a typed r
   }
 });
 
+test('resume (#776): an acknowledgement is a readable typed reason: control and format characters are refused, and only visible characters count toward the minimum', async () => {
+  const refused = {
+    'zero-width spaces': '​'.repeat(12),
+    'word joiners': '⁠'.repeat(12),
+    'one letter and combining marks': `a${'́'.repeat(12)}`,
+    'a bidi override': '‮evitcepsorter si siht ok',
+    'NULs': '\u0000'.repeat(12),
+    'terminal escapes': '\u001b[2J\u001b[31mmain is fine, resume',
+    'a zero-width space inside a real reason': 'the fix PR​ is ready to merge',
+    'spaces only': ' '.repeat(20),
+    'no-break spaces only': ' '.repeat(20),
+    'nine visible characters': 'a b c d e f g h i',
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.ok('error' in acknowledgement({ acknowledge: { reason } }), `${what} is refused`);
+  // Accented letters (composed or not), newlines folded: accepted, stored as typed, whitespace folded.
+  const ok = acknowledgement({ acknowledge: { reason: 'Le correctif était\nprêt à fusionner' } });
+  assert.deepEqual(ok, { reason: 'Le correctif était prêt à fusionner' });
+  // Through the route: refused with 400, nothing written raw into the log.
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(10));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    for (const reason of [refused['terminal escapes'], refused['zero-width spaces']]) assert.equal((await resume({ acknowledge: { reason } })).status, 400);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.ok(!w.f.log.read(0).some((e) => JSON.stringify(e.payload).includes('\\u001b')), 'no escape in the log');
+  } finally {
+    await d.close();
+  }
+});
+
 test("resume (#776): fail closed: the main watch's stop, a stop with no `by`, an unreadable one, no required checks and a tip that can't be read all wait; only another kind of stop resumes as before", async () => {
   const w = world();
   await w.watch(2);
@@ -378,6 +410,54 @@ test('resume (#776): a stop changed while main is measured is not resumed: the n
   assert.match(!r.ok ? r.error : '', /the stop changed/);
   assert.match(readFileSync(stopFile(w.f), 'utf8'), /a newer commit/);
   assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test("resume (#776): the dashboard reads main's tip from the remote now: a fetch that fails while the clone's last-fetched main is green refuses (fail closed)", async () => {
+  const w = world();
+  await w.watch(2); // the clone's refs/remotes/origin/main is main's tip now
+  const stale = git(w.f.repo, 'rev-parse', 'refs/remotes/origin/main');
+  w.f.backlog.setChecks(stale, passing);
+  // Main moves on and goes red; the clone hasn't fetched it.
+  const tip = w.commit('red.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  w.f.backlog.setChecks(tip, failing(5));
+  redMainStop(w);
+  assert.equal(git(w.f.repo, 'rev-parse', 'refs/remotes/origin/main'), stale, 'the clone still has the old, green main');
+  // Then the remote can't be reached (network, auth): nothing can say what main's tip is now.
+  git(w.f.repo, 'remote', 'set-url', 'origin', join(w.f.base, 'unreachable.git'));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    const r = await resume();
+    assert.equal(r.status, 409, 'the stale green tip is never measured as main now');
+    assert.match(r.body.error ?? '', /tip can't be read from the remote/);
+    assert.ok(existsSync(stopFile(w.f)));
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): every stop is logged before its file is written, so no stop file exists without its merge.stopped', async () => {
+  const w = world();
+  await w.watch(2);
+  const seen: boolean[] = [];
+  const c = w.c as unknown as { emit(type: string, p: unknown): unknown };
+  const emit = c.emit.bind(c);
+  c.emit = (type, p) => {
+    if (type === 'merge.stopped') seen.push(existsSync(stopFile(w.f)));
+    return emit(type, p);
+  };
+  redMainStop(w); // fix-forward's stop
+  unlinkSync(stopFile(w.f));
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), failing(6));
+  await watchMerges(w); // written back
+  unlinkSync(stopFile(w.f));
+  w.f.log.append('merge.resumed', { detail: 'test: an earlier resume' }, 'example-owner', 'human');
+  w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(4); // the main watch's stop
+  assert.equal(seen.length, 3, 'three stops');
+  assert.deepEqual(seen, [false, false, false], 'each logged before its file exists');
+  assert.ok(existsSync(stopFile(w.f)));
 });
 
 test('resume (#776): a stop file deleted by hand while main is still red is written back (same rule as the dashboard); with main green on its tip it resumes', async () => {

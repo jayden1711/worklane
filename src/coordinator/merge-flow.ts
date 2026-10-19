@@ -41,7 +41,7 @@ import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
-import { measureMain, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
+import { mainNow, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -919,21 +919,14 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
+    // Logged first (#776): a crash between the two leaves a logged stop with no file, which autoMergeStopped holds.
     this.emit('merge.stopped', { reason, number, sha, revert, by: 'red_main' });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
   }
 
   /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */
-  private async mainNow(): Promise<MainState> {
-    return measureMain({
-      branch: this.branch,
-      required: this.requiredChecks(),
-      tip: () => {
-        const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
-        return r.status === 0 ? (r.stdout.split(/\s/)[0] ?? null) : null;
-      },
-      checks: (sha) => this.headChecksOf(sha),
-    });
+  private mainNow(): Promise<MainState> {
+    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha) });
   }
 
   /**
@@ -950,8 +943,8 @@ export abstract class MergeFlow extends FixRuns {
     if (main.green) return this.emit('merge.resumed', { detail: `the operator cleared the stop by hand, with ${this.branch} green on ${main.tip.slice(0, 8)}` });
     const by = p.by ?? (p.reason.startsWith('main watch: ') ? 'main_watch' : 'red_main');
     const restored = `the stop file was deleted by hand while ${main.why}, so it was written back; an admin resumes on the dashboard once ${this.branch} is green, or with an acknowledgement there`;
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason: p.reason, by, number: p.number, sha: p.sha, revert: p.revert, at: new Date().toISOString(), restored }, null, 2));
     this.emit('merge.stopped', { reason: p.reason, number: p.number, sha: p.sha, revert: p.revert, by, restored });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason: p.reason, by, number: p.number, sha: p.sha, revert: p.revert, at: new Date().toISOString(), restored }, null, 2));
   }
 
   /**
@@ -1111,8 +1104,10 @@ export abstract class MergeFlow extends FixRuns {
     if (before.some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
-    if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
+    // Logged before the file (#776), as stopFor does.
+    const had = existsSync(this.stopFile);
     this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null, by: 'main_watch' });
+    if (!had) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
     // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
     if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;

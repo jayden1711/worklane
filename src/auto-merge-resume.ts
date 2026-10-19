@@ -8,6 +8,7 @@
 // hand is written back by the coordinator (coordinator/merge-flow.ts stopGoneByHand) while main isn't measured green.
 // Fail closed: a stop with no `by`, an unknown one, or an unreadable stop file waits for green main; main with no
 // required checks configured, a tip that can't be read, or checks that can't be read is not green.
+import { spawnSync } from 'node:child_process';
 import type { CommitCheck } from './backlog/types.js';
 import { requiredOutcomes } from './pr-watch.js';
 
@@ -49,18 +50,41 @@ export async function measureMain(o: { branch: string; required: string[]; tip: 
   return { green: true, tip };
 }
 
+/**
+ * The default branch's tip on the remote now (`git ls-remote`), or null when it can't be read: never a clone's
+ * last-fetched ref, which a failed fetch leaves behind and which may be an older, green commit.
+ */
+export function remoteTip(repo: string, remote: string, branch: string): string | null {
+  const r = spawnSync('git', ['ls-remote', remote, `refs/heads/${branch}`], { cwd: repo, encoding: 'utf8', timeout: 60_000 });
+  if (r.status !== 0) return null;
+  const sha = (r.stdout ?? '').split(/\s/)[0] ?? '';
+  return SHA.test(sha) ? sha : null;
+}
+
+/** Main now, the one way every surface measures it: the remote's tip (remoteTip) and the required checks on it. */
+export function mainNow(o: { repo: string; remote: string; branch: string; required: string[]; checks: (sha: string) => Promise<CommitCheck[]> }): Promise<MainState> {
+  return measureMain({ branch: o.branch, required: o.required, tip: () => remoteTip(o.repo, o.remote, o.branch), checks: o.checks });
+}
+
 export const ACK_MIN = 10;
 export const ACK_MAX = 500;
 
+/** Characters that print nothing or change how text around them reads: control, format (zero-width, bidi), private-use, unassigned. */
+const UNREADABLE = /\p{C}/u;
+/** What counts toward the minimum: letters, digits, punctuation and symbols (not spaces, not combining marks alone). */
+const VISIBLE = /[\p{L}\p{N}\p{P}\p{S}]/gu;
+
 /**
  * The acknowledgement a resume request carries (`{ acknowledge: { reason } }`): none, a typed reason, or why it is
- * refused. A bare `true`, an empty or short reason is no acknowledgement.
+ * refused. A bare `true`, an empty or short reason, or one with characters that don't print is no acknowledgement.
+ * Whitespace (newlines too) is folded to single spaces; nothing else is changed, so what is recorded is what was typed.
  */
 export function acknowledgement(body: unknown): { reason: string | null } | { error: string } {
   const a = (body as { acknowledge?: unknown } | null)?.acknowledge;
   if (a === undefined || a === null) return { reason: null };
   const reason = typeof (a as { reason?: unknown }).reason === 'string' ? (a as { reason: string }).reason.replace(/\s+/g, ' ').trim() : '';
-  if (reason.length < ACK_MIN) return { error: `an acknowledgement needs a typed reason of at least ${ACK_MIN} characters` };
+  if (UNREADABLE.test(reason)) return { error: 'the reason has characters that don\'t print (control, format such as zero-width or bidi, or unassigned): type it plainly' };
+  if ((reason.match(VISIBLE)?.length ?? 0) < ACK_MIN) return { error: `an acknowledgement needs a typed reason of at least ${ACK_MIN} visible characters` };
   if (reason.length > ACK_MAX) return { error: `the reason is too long (at most ${ACK_MAX} characters)` };
   return { reason };
 }
