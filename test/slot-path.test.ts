@@ -6,8 +6,11 @@
 //   forms #766's lint doesn't resolve (U4 to U6b, B10c, R8): each fails to compile, and the same text with a plain
 //   path compiles (a control).
 // - checks over src/, each tested against fixture text fed to its own function:
-//   - only src/os/index.ts makes a slot path (slotPathOf, slotDirAt), only the OS layer passes slotsDir a `system`,
-//     and nothing outside it imports the helper or os/index.js whole;
+//   - only src/os/index.ts makes a slot path (slotPathOf, slotDirAt) or names the test seam slotsDirFor; slotsDir
+//     takes no argument; no module but the helper imports or re-exports the helper or os/index.js whole; every module
+//     specifier is one this check resolves exactly (no import-equals, query, hash, %-encoding, absolute path or URL);
+//     and src/ holds no symlink;
+//   - nothing patches a built-in prototype or Error.prepareStackTrace in its plain forms;
 //   - nothing reads private fields or the heap from inside the process (node:inspector, a heap snapshot);
 //   - only src/os/index.ts and src/os/system-paths.ts read where the slot dir is (AGENT_SLOTS_DIR, SYSTEM_SLOTS, the
 //     `agent-slots` name);
@@ -17,7 +20,7 @@
 // - the value at run time: fs, path.join, String() and a template literal refuse it, nothing prints its path, an
 //   error from a slot file names no path, and a forged one (its prototype, its constructor, a Proxy) is refused.
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, posix, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -38,6 +41,24 @@ function srcFiles(): Map<string, string> {
     }
   };
   walk(join(repoRoot, 'src'));
+  return out;
+}
+
+/**
+ * The symlinks under `root` (paths relative to it). The checks read a module by the path written in its specifier; a
+ * symlink would give the helper or os/index.ts a second name they don't know (Node loads the link's target, #806
+ * round 5). src/ has none.
+ */
+function symlinksUnder(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isSymbolicLink()) out.push(relative(root, p).split(sep).join('/'));
+      else if (e.isDirectory()) walk(p);
+    }
+  };
+  walk(root);
   return out;
 }
 
@@ -197,6 +218,12 @@ const nameText = (n: ts.Node): string | null => (ts.isIdentifier(n) || ts.isPriv
 
 /** The helper and os/index.ts, as src/ paths: a namespace of either reads MAKER_ONLY by a computed name. */
 const WHOLE_MODULES = new Set(['src/slot-file.js', 'src/os/index.js']);
+/**
+ * A specifier `target` resolves exactly: a plain relative path (`./a/b.js`, `../c.js`: letters, digits, `_`, `.`,
+ * `-` and `/` only) or a package or builtin name (`yaml`, `@scope/pkg/sub`, `node:fs`). Nothing with `?`, `#`, `%`, a
+ * leading `/`, a scheme other than `node:`, or a backslash.
+ */
+const PLAIN_SPECIFIER = /^(\.\.?(\/[A-Za-z0-9_.-]+)+|(node:)?@?[A-Za-z0-9][A-Za-z0-9._-]*(\/[A-Za-z0-9._-]+)*)$/;
 /** The src/ path an import's specifier in `file` names (`./index.js` in src/os/ is src/os/index.js), or null. */
 const target = (file: string, spec: string) => (spec.startsWith('.') ? posix.normalize(posix.join(posix.dirname(file), spec)) : null);
 
@@ -212,6 +239,12 @@ function slotPathMakers(files: Map<string, string>): Finding[] {
     if (file === HELPER) continue;
     const sf = parse(file, text);
     const whole = (spec: string) => WHOLE_MODULES.has(target(file, spec) ?? '');
+    // Fail closed on what `target` doesn't resolve the way Node does (#806 round-4 review): a specifier in any form
+    // that isn't a plain relative path or a package name. `?x`/`#x` load a second instance of a module; an absolute
+    // path, a `file:` URL or %-encoding name a module by another spelling.
+    const plainOnly = (n: ts.Node, spec: string) => {
+      if (!PLAIN_SPECIFIER.test(spec)) at(n, `${JSON.stringify(spec)}: a module specifier this check can't resolve exactly (a query, a hash, %-encoding, an absolute path or a URL): use a plain relative path or a package name`);
+    };
     const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
     /** The names slotsDir goes by here: its own, and any it is imported as. */
     const slotsDirNames = new Set(['slotsDir']);
@@ -223,12 +256,20 @@ function slotPathMakers(files: Map<string, string>): Finding[] {
     const visit = (n: ts.Node) => {
       const name = nameText(n);
       if (name && MAKER_ONLY.has(name) && file !== MAKER) at(n, `${name}: only ${MAKER} makes a slot path`);
+      if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) plainOnly(n, n.moduleSpecifier.text);
+      // `import x = require('…')`: tsc emits a createRequire, which loads the same instance (#806 round-4 review). src/
+      // has none, so every one is reported, whatever it names.
+      if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) at(n, `${n.getText(sf).slice(0, 60)}: import = require is a require; import the module with import`);
       if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && whole(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) at(n, `import * from ${n.moduleSpecifier.text}: import its functions by name`);
       // A re-export of the whole module is the same namespace, one import away (#806 round-3 review, A8).
       if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && whole(n.moduleSpecifier.text) && (!n.exportClause || ts.isNamespaceExport(n.exportClause))) at(n, `export *${n.exportClause ? ' as' : ''} from ${n.moduleSpecifier.text}: re-export its functions by name`);
       if (ts.isCallExpression(n)) {
         const a = n.arguments[0];
         if (n.expression.kind === ts.SyntaxKind.ImportKeyword && a && ts.isStringLiteralLike(a) && whole(a.text)) at(n, 'import() of slot-file.js or os/index.js: import its functions by name');
+        if (n.expression.kind === ts.SyntaxKind.ImportKeyword) {
+          if (a && ts.isStringLiteralLike(a)) plainOnly(n, a.text);
+          else at(n, 'import() of a name not written out: this check can\'t tell which module it loads');
+        }
         const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
         const isSlotsDir = ts.isIdentifier(n.expression) ? slotsDirNames.has(n.expression.text) : callee === 'slotsDir';
         if (isSlotsDir && n.arguments.length > 0) at(n, `${n.getText(sf).slice(0, 60)}: slotsDir's system argument is for tests only (with any other, it makes a slot path of any directory)`);
@@ -440,6 +481,45 @@ test('the maker check: another module making a slot path, opening one, passing s
     'src/github/budget.ts:3: slotsDirFor',
   ]);
   // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported.
+});
+
+test("the maker check: a specifier it can't resolve exactly, in any form, and every import-equals are reported (#806 round-4 review)", () => {
+  const lines = [
+    "import osx = require('./os/index.js');",
+    "import sfx = require('./slot-file.js');",
+    "import * as q1 from './os/index.js?x';",
+    "import * as q2 from './os/index.js#x';",
+    "export * as q3 from './os/index.js?x';",
+    "export { slotsDir as q4 } from './os/index.js#y';",
+    "export const q5 = () => import('./os/index.js?x');",
+    "export const q6 = () => import('./os/index.js#x');",
+    "export const q7 = () => import('./os/%69ndex.js');",
+    "export const q8 = () => import('/abs/src/os/index.js');",
+    "export const q9 = () => import('file:///abs/src/os/index.js');",
+    'export const q10 = (u: URL) => import(u.href);',
+    'export const q11 = () => import(`./os/index.js`);',
+    "import { slotsDir } from './os/index.js';",
+    "import yaml from 'yaml'; import { join } from 'node:path'; import { SandboxManager } from '@anthropic-ai/sandbox-runtime';",
+    "import '#internal';",
+    "import w from '.\\\\os\\\\index.js';",
+    'void [osx, sfx, q1, q2, slotsDir, yaml, join, SandboxManager, w];',
+  ];
+  const found = slotPathMakers(new Map([['src/cores.ts', lines.join('\n')]])).map((x) => x.line);
+  // Lines 14 and 15 (a plain relative path, package and builtin names) are not reported.
+  assert.deepEqual([...new Set(found)], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17]);
+});
+
+test('src/: no symlink (a module the checks would know by one name, loaded by another)', () => {
+  assert.deepEqual(symlinksUnder(join(repoRoot, 'src')), []);
+});
+
+test('the symlink check: a link in the tree is reported, wherever it points', () => {
+  const root = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'links-'));
+  mkdirSync(join(root, 'os'));
+  writeFileSync(join(root, 'os', 'index.ts'), '');
+  symlinkSync(join(root, 'os', 'index.ts'), join(root, 'osx.ts'));
+  symlinkSync(join(root, 'os'), join(root, 'os2'));
+  assert.deepEqual(symlinksUnder(root).sort(), ['os2', 'osx.ts']);
 });
 
 test('the source check: the slot dir\'s location read anywhere but the OS layer is reported (env, SYSTEM_SLOTS, the name)', () => {
