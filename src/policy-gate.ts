@@ -100,12 +100,12 @@ export function recordMismatch(rec: PolicyRecord, opened: { text: string; at: st
  * check is read), it is the file the record names, and its content is what root last wrote; else why it is refused,
  * and never read.
  */
-export function readPolicyChecked(file: string, dir = POLICY_ROOT_DIR, instance = policyInstance(file)): { text: string } | { refused: string } | null {
+export function readPolicyChecked(file: string, dir = POLICY_ROOT_DIR, instance = policyInstance(file), uid = rootUid): { text: string } | { refused: string } | null {
   const rec = policyRecord(instance, dir);
   if (rec === null) return null;
   const refused = (why: string) => ({ refused: `refused: on this machine ${file} is root's and only root changes it, but ${why}, so the coordinator user (or something running as it) may have changed it. An admin checks it, then makes it root's again: ${ownCommand(instance, '--retake')}` });
   if ('problem' in rec) return refused(rec.problem);
-  const r = readRootFile(resolve(file), rootUid);
+  const r = readRootFile(resolve(file), uid);
   if ('problem' in r) return refused(r.problem.replace(`${resolve(file)} `, 'it '));
   const why = recordMismatch(rec, r);
   return why ? refused(why) : { text: r.text };

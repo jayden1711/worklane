@@ -5,7 +5,6 @@ Code reused from other open-source projects is listed here with its license. Run
 | Source | License | What we reused | Where |
 |---|---|---|---|
 | [Contributor Covenant 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/) | CC BY 4.0 | Code of Conduct text | `CODE_OF_CONDUCT.md` |
-| [ws](https://github.com/websockets/ws) | MIT | Used, not copied: the npm dependency that serves the dashboard hub's owner terminal over a WebSocket. Its PTY is util-linux `script`, run as a program (no code reused) | `src/console/terminal-server.ts` |
 | [shadcn/ui](https://github.com/shadcn-ui/ui) | MIT | Design-token names and the component API shape for the dashboard; components were written for this project in that style | `web/src/styles.css`, `web/src/components/ui.tsx` |
 | [Beautiful UI](https://www.beautifului.dev/) | MIT (below) | The dashboard's dark palette, its radii, shadows and motion, and its interface patterns adapted to the dashboard's data: approval and recommendation cards (decisions), task rows and tool chips (agent runs), diff and records tables (checks), sidebar nav (pages and the instance switcher), insight cards, the loading state. Copied from the components and stylesheet published on beautifului.dev; no demo content or animation timelines, and no icons from its third-party icon sets | `web/src/styles.css`, `web/src/components/ui.tsx`, `web/src/components/patterns.tsx`, `web/src/pages/*.tsx`, `web/src/App.tsx` |
 

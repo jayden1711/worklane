@@ -35,7 +35,7 @@ import { MACHINE_PATHS } from '../src/setup-steps.js';
 import { TAILSCALE_DIR, TAILSCALE_SCRIPT } from '../src/tailscale-setup.js';
 import { SANDBOX_HELPER } from '../src/testrun/host.js';
 import { FULL_RUN_LOCK } from '../src/testrun/run.js';
-import { CONSOLE_SHELL } from '../src/console/terminal.js';
+import { CONSOLE_SHELL } from '../src/console/owner-terminal-removed.js';
 import { ALLOWED_SIGNERS, PENDING_SIGNERS } from '../src/updater-setup.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';

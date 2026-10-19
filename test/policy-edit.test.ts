@@ -514,3 +514,81 @@ test("rename: a recorded instance's policy.yaml is root's and recorded under the
   // The rename script's home step runs it.
   assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-rename.sh'), 'utf8'), /\n {2}carry_policy_root "\$old" "\$new"\n/);
 });
+
+test("`policy check <name>` (read-only) is 0 only when the engine's gate would read the policy: not before root's record, not with an earlier root file put back; it changes nothing (#726)", { skip }, () => {
+  const m = machineInstance('check');
+  const check = () => quietly(() => policyCommand('check', ['check'], m.deps, false));
+  assert.match(check().err, /isn't root's yet/, 'no record');
+  assert.equal(check().code, 1);
+  ownPolicy('check', m.deps);
+  const earlier = readFileSync(m.file, 'utf8');
+  assert.equal(check().code, 0, 'root takes no part: a reader may ask');
+  setPolicy('check', 'budget.daily_usd', '60', null, m.deps);
+  assert.equal(check().code, 0);
+  // An earlier root file put back: root's, 0644, one name, recorded; not what root last wrote.
+  writeFileSync(join(m.dir, '.earlier'), earlier, { mode: 0o644 });
+  renameSync(join(m.dir, '.earlier'), m.file);
+  const record = readFileSync(join(POLICY_ROOT_DIR, 'check'), 'utf8');
+  const out = check();
+  assert.equal(out.code, 1);
+  assert.match(out.err, /its content isn't what root last wrote there/);
+  assert.equal(readFileSync(m.file, 'utf8'), earlier, 'read only');
+  assert.equal(readFileSync(join(POLICY_ROOT_DIR, 'check'), 'utf8'), record, 'read only');
+});
+
+test("root's writers of one instance's policy are serialized: a coordinator's set-policy that read before an admin's `policy set land_mode pr` never writes after it, putting back what the admin changed (#726)", { skip }, () => {
+  const m = machineInstance('race');
+  ownPolicy('race', m.deps);
+  setPolicy('race', 'land_mode', 'direct', null, m.deps); // the admin accepted direct, once
+  // The reviewer's interleaving: the coordinator's set-policy has read policy.yaml; as it opens its temp file, the
+  // admin's `policy set land_mode pr` runs whole.
+  const fs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+  const open = fs.openSync;
+  let admin: string | null = null;
+  let ran = false;
+  fs.openSync = ((p: string, ...rest: unknown[]) => {
+    if (!ran && String(p).startsWith('.policy.yaml.')) {
+      ran = true;
+      try {
+        setPolicy('race', 'land_mode', 'pr', null, { ...m.deps, lockWaitMs: 0 });
+        admin = 'ran';
+      } catch (e) {
+        admin = (e as Error).message;
+      }
+    }
+    return (open as (...a: unknown[]) => number)(p, ...rest);
+  }) as typeof fs.openSync;
+  syncBuiltinESMExports();
+  try {
+    setPolicy('race', 'budget.daily_usd', '40', 'wl-race', m.deps);
+  } finally {
+    fs.openSync = open;
+    syncBuiltinESMExports();
+  }
+  assert.ok(ran);
+  // The admin's change waits for (here: is refused during) the coordinator's; run again, as the admin would, it lands.
+  if (admin !== 'ran') {
+    assert.match(admin!, /another root change to race's policy is in progress/);
+    setPolicy('race', 'land_mode', 'pr', null, m.deps);
+  }
+  const p = asRoot(() => readPolicy(m.file).policy)!;
+  assert.equal(p.land_mode, 'pr', "the admin's tightening is never rolled back");
+  assert.equal(p.budget.daily_usd, 40);
+  assert.ok(asRoot(() => readPolicyChecked(m.file)) !== null && 'text' in asRoot(() => readPolicyChecked(m.file))!);
+});
+
+test("root's lock on an instance's policy: a held one makes `own` and `set` wait, then refuse, naming it; nothing changes; it is gone after each (#726)", { skip }, () => {
+  const m = machineInstance('locked');
+  ownPolicy('locked', m.deps);
+  const lock = join(POLICY_ROOT_DIR, '.locked.lock');
+  assert.equal(existsSync(lock), false, 'released after own');
+  const text = readFileSync(m.file, 'utf8');
+  writeFileSync(lock, '4242\n');
+  const d = { ...m.deps, lockWaitMs: 100 };
+  assert.throws(() => setPolicy('locked', 'auto_merge', 'off', null, d), new RegExp(`in progress \\(${lock.replace(/[.]/g, '\\.')} exists\\).*removes ${lock.replace(/[.]/g, '\\.')}`));
+  assert.throws(() => ownPolicy('locked', d), /in progress/);
+  assert.equal(readFileSync(m.file, 'utf8'), text);
+  renameSync(lock, join(m.T, 'gone'));
+  setPolicy('locked', 'budget.daily_usd', '60', null, m.deps);
+  assert.equal(existsSync(lock), false, 'released after set');
+});
