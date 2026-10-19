@@ -468,7 +468,7 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
 /** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
 const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) => [
   h.usernsBin, '--user', '--map-current-user', '--net', '--mount', '--keep-caps', '--', '/bin/sh', '-c',
-  `${join(h.bin, 'ip')} link set lo up && ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
+  `${join(h.bin, 'env')} -i ${join(h.bin, 'ip')} link set lo up && ${join(h.bin, 'env')} -i ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
 ];
 
 /** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
@@ -663,7 +663,9 @@ test('#545 round 3: who counts as a test user, and who may run or write the wrap
   // only the name rule keeps wl-test-agent out.
   const base = tmp('acl-base-');
   for (const n of ['shop', 'other', 'test', 'agent']) mkdirSync(join(base, n));
-  const pw = ['wl-test', 'wl-test-agent', 'wl-test-eval', 'wl-test-mcp', 'wl-test-test', 'wl-test-other', 'wl-test-gone', 'wl-ci'].map((u, i) => `${u}:x:${1001 + i}:${1001 + i}::/nonexistent:/usr/sbin/nologin`).join('\n');
+  // An instance directory that is a symlink was never test-user.sh's: wl-test-link doesn't count.
+  symlinkSync(join(base, 'other'), join(base, 'link'));
+  const pw = ['wl-test', 'wl-test-agent', 'wl-test-eval', 'wl-test-mcp', 'wl-test-test', 'wl-test-other', 'wl-test-gone', 'wl-test-link', 'wl-ci'].map((u, i) => `${u}:x:${1001 + i}:${1001 + i}::/nonexistent:/usr/sbin/nologin`).join('\n');
   const sh = (script: string, fns: string, call: string, acl = '') =>
     spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\nuserns_bin=/x\nBASE=${base}\ngetfacl() { printf '%s' "$ACL"; }\ngetent() { printf '%s\\n' "$PW"; }\n${fnOf(script === 'helper' ? src : lib, 'instance_name_problem')}${fns}${call}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl, PW: pw } });
   try {
@@ -684,6 +686,7 @@ test('#545 round 3: who counts as a test user, and who may run or write the wrap
       [`${base4}user:4242:r-x\n`, /4242, not the test user/],
       [`${base4}default:user::rwx\n`, /an ACL entry this helper doesn't know/],
       [`${base4}user:wl-test-gone:r-x\n`, /wl-test-gone, not the test user/],
+      [`${base4}user:wl-test-link:r-x\n`, /wl-test-link, not the test user/],
       [`${base4}user:wl-ci:r-x\n`, /wl-ci, not the test user/],
       ['user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n', /every user may run it/],
       ['user::rwx\nuser:wl-test-shop:r-x\ngroup::r-x\nmask::r-x\nother::---\n', /a group may run it/],

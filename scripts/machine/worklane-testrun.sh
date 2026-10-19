@@ -1055,6 +1055,7 @@ USERNS_AA=0
 IP_BIN=
 SETPRIV_BIN=
 MOUNT_BIN=
+ENV_BIN=
 userns_ok() {
   local got acl
   USERNS_AA=0
@@ -1065,8 +1066,8 @@ userns_ok() {
   got="$(wrapper_acl_problem "$acl")"
   [ -z "$got" ] || { USERNS_WHY="$USERNS: $got (scripts/setup/test-user.sh install sets it)"; return 1; }
   if ! grep -qaF 'map-current-user' "$USERNS" || ! grep -qaF 'keep-caps' "$USERNS"; then USERNS_WHY="$USERNS takes no --map-current-user or --keep-caps (util-linux 2.38 or later has both)"; return 1; fi
-  IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"; MOUNT_BIN="$(command -v mount || true)"
-  [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] && [ -n "$MOUNT_BIN" ] || { USERNS_WHY="no ip, setpriv or mount on this machine (iproute2, util-linux)"; return 1; }
+  IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"; MOUNT_BIN="$(command -v mount || true)"; ENV_BIN="$(command -v env || true)"
+  [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] && [ -n "$MOUNT_BIN" ] && [ -n "$ENV_BIN" ] || { USERNS_WHY="no ip, setpriv, mount or env on this machine (iproute2, util-linux, coreutils)"; return 1; }
   if grep -q "^$USERNS_PROFILE " "$AA_PROFILES" 2>/dev/null; then USERNS_AA=1
   elif [ "$(cat "$USERNS_RESTRICT" 2>/dev/null || true)" = 1 ]; then
     USERNS_WHY="user namespaces are restricted here ($USERNS_RESTRICT is 1) and the AppArmor profile $USERNS_PROFILE isn't loaded (scripts/setup/test-user.sh install loads it)"; return 1
@@ -1130,7 +1131,9 @@ USERNS_ARGV=()
 userns_argv() {
   local v="$1" s aa=""
   [ "$USERNS_AA" != 1 ] || aa=" --apparmor-profile=unconfined"
-  s="$(systemd_command "$v" "$IP_BIN link set lo up && $MOUNT_BIN --bind /dev/null $USERNS && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
+  # env -i: ip and mount run while the prelude holds its capabilities, so none of the run's variables (LIBMOUNT_*, the
+  # locale's) reaches them.
+  s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
   USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
 }
 
