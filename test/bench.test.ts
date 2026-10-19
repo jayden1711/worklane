@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { HELD_OUT_ENV } from '../src/held-out-paths.js';
@@ -96,7 +96,8 @@ function fakeClaude(o: FakeClaude = {}) {
   chmodSync(bin, 0o755);
   const calls = (kind?: ClaudeCall['kind']) => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as ClaudeCall) : []).filter((c) => !kind || c.kind === kind);
   // Nothing of this machine's own that could switch the login (the check would refuse it): wider than the check.
-  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|AWS_|AZURE_|GOOGLE_|CLOUD_ML_)|_FILE_DESCRIPTOR$|_BASE_URL$|BEDROCK|VERTEX|FOUNDRY|MANTLE/i.test(k)));
+  // HOME is the bench user's home, as a login shell (sudo -iu) sets it.
+  const env: NodeJS.ProcessEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|AWS_|AZURE_|GOOGLE_|CLOUD_ML_)|_FILE_DESCRIPTOR$|_BASE_URL$|BEDROCK|VERTEX|FOUNDRY|MANTLE/i.test(k))), HOME: home };
   return { base, home, bin, env, calls };
 }
 
@@ -139,7 +140,7 @@ test('acceptance: only a claude.ai login is accepted, whatever its plan; a token
   ];
   for (const [what, auth] of refusedShapes) {
     const c = fakeClaude({ auth });
-    assert.throws(() => requireSubscription(c.env, c.bin, home), /not a claude\.ai login|not Anthropic's own|not inside the bench user's home/, what);
+    assert.throws(() => requireSubscription({ ...c.env, HOME: home }, c.bin, home), /not a claude\.ai login|not Anthropic's own|not inside the bench user's home/, what);
   }
   // Every variable that can switch the login, by prefix: refused before claude is even asked, whatever claude says.
   const switching: Record<string, string>[] = [
@@ -160,8 +161,28 @@ test('acceptance: only a claude.ai login is accepted, whatever its plan; a token
   assert.deepEqual(requireSubscription({ ...c.env, DISABLE_TELEMETRY: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000' }, c.bin, c.home), { method: 'claude.ai', subscription_type: 'enterprise', config_directory: join(c.home, '.claude') });
   for (const plan of ['max', 'team', undefined]) {
     const f = fakeClaude({ auth: authStatus(home, 'claude.ai', { subscriptionType: plan }) });
-    assert.equal(requireSubscription(f.env, f.bin, home).subscription_type, plan ?? null);
+    assert.equal(requireSubscription({ ...f.env, HOME: home }, f.bin, home).subscription_type, plan ?? null);
   }
+});
+
+test("acceptance: the bench user's home is its passwd entry's, never $HOME: a HOME moved to another claude.ai login is refused", posix, () => {
+  const c = fakeClaude();
+  // Another folder holding a claude.ai login: claude follows $HOME there and reports that login, config dir and all.
+  const other = fakeClaude().home;
+  const moved = fakeClaude({ auth: authStatus(other, 'claude.ai') });
+  assert.throws(() => requireSubscription({ ...moved.env, HOME: other }, moved.bin, c.home), /HOME is .*not this user's home/, 'HOME at another login');
+  assert.throws(() => requireSubscription({ ...c.env, HOME: '' }, c.bin, c.home), /HOME is \(empty\)/, 'an empty HOME');
+  assert.equal(moved.calls().length, 0, 'claude not even asked');
+  assert.throws(() => benchRoot({ HOME: other }, c.home), /HOME is .*not this user's home/, 'the bench root: HOME at another folder');
+  // With no home given, it comes from the user database. This process's HOME is test/isolate.ts's temporary home,
+  // which the user database doesn't name: a claude.ai login there, and a root in it, were accepted when the home was
+  // $HOME (os.homedir()).
+  const tempHome = homedir();
+  if (tempHome === userInfo().homedir) return;
+  const here = fakeClaude({ auth: authStatus(tempHome, 'claude.ai') });
+  assert.throws(() => requireSubscription({ ...here.env, HOME: tempHome }, here.bin), /HOME is .*not this user's home/, "the default home: HOME at test/isolate's home");
+  assert.equal(here.calls().length, 0, 'claude not even asked');
+  assert.throws(() => benchRoot({ HOME: tempHome }), /HOME is .*not this user's home/, "the bench root's default home");
 });
 
 test('the bench runs only as its own user, on the pinned CLI, with updates off for every claude it starts', posix, async () => {
@@ -267,4 +288,21 @@ test('the bench root is checked where it really is: a symlink into a credential 
   const data = realpathSync(mkdtempSync(join(tmpdir(), 'data-')));
   symlinkSync(data, join(home, 'bench-data'));
   assert.equal(benchRoot({ [BENCH_ROOT_ENV]: join(home, 'bench-data', 'b') }, home).root, join(data, 'b'));
+});
+
+test("a bench root through a link that doesn't resolve is refused; a dangling link at a credential place is followed", { skip: process.platform !== 'linux' && 'Linux only' }, () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+  mkdirSync(join(home, '.claude'));
+  symlinkSync(join(home, '.claude', 'not-yet'), join(home, 'bench'));
+  assert.throws(() => benchRoot({}, home), /doesn't resolve/, '~/bench -> ~/.claude/not-yet (dangling)');
+  assert.equal(existsSync(join(home, '.claude', 'not-yet')), false);
+  symlinkSync(join(home, 'gone'), join(home, 'mid'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(home, 'mid', 'bench') }, home), /doesn't resolve/, 'a dangling link further up the root');
+  symlinkSync(join(home, 'loop'), join(home, 'loop'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(home, 'loop', 'bench') }, home), /doesn't resolve/, 'a link loop');
+  // ~/.ssh -> a folder that doesn't exist yet: a root there would become the credential store once it's created.
+  const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'elsewhere-')));
+  symlinkSync(join(elsewhere, 'ssh'), join(home, '.ssh'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'ssh', 'bench') }, home), /overlaps/, "a root where a dangling ~/.ssh points");
+  assert.equal(benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'bench') }, home).root, join(elsewhere, 'bench'));
 });

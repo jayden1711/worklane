@@ -5,12 +5,11 @@
 // `claude auth status --json` and starts nothing unless the CLI reports a claude.ai login (the engine's runner asks
 // again before every run, src/runner.ts), and only on the pinned CLI version, with updates off.
 import { spawnSync } from 'node:child_process';
-import { homedir } from 'node:os';
 import { isAbsolute } from 'node:path';
 import { BRAND } from '../../src/brand.js';
 import { currentUser } from '../../src/os/index.js';
 import type { AgentRunner, RunRequest, RunResult } from '../../src/runner.js';
-import { inside, realPath } from './paths.js';
+import { benchHome, inside, realPath } from './paths.js';
 
 /** Names the bench's OS user (default DEFAULT_BENCH_USER). */
 export const BENCH_USER_ENV = `${BRAND.envPrefix}_BENCH_USER`;
@@ -78,12 +77,15 @@ export interface Login {
  * personal one), on Anthropic's own API (apiProvider firstParty), kept in a config dir inside the bench user's home.
  * Refused: any login-switching variable (LOGIN_SWITCH_VAR) before claude is even asked; an oauth_token, an API key, a
  * helper, a cloud provider (third_party), a signed-out or unreadable status; a config dir elsewhere (CLAUDE_CONFIG_DIR
- * pointed at another login). Run before any task, any container and any model call. Reads only the CLI's answer
+ * pointed at another login); a $HOME that isn't the bench user's home. The home is the passwd entry's (benchHome),
+ * never $HOME. Run before any task, any container and any model call. Reads only the CLI's answer
  * (`claude auth status --json`, which never prints the token), never the login's files.
  */
-export function requireSubscription(env: NodeJS.ProcessEnv, bin = 'claude', home = homedir()): Login {
+export function requireSubscription(env: NodeJS.ProcessEnv, bin = 'claude', home = benchHome(env)): Login {
   const other = loginSwitchVars(env);
   if (other.length) throw new Error(`${other.join(', ')} set in the bench's environment: claude could leave the claude.ai login (a key, a token, federation, another endpoint or a cloud provider); unset ${other.length > 1 ? 'them' : 'it'}`);
+  // claude finds its login through $HOME: one moved off the bench user's own home is refused before claude is asked.
+  benchHome(env, () => home);
   const r = spawnSync(bin, ['auth', 'status', '--json'], { env: cliEnv(env), encoding: 'utf8', timeout: 30_000 });
   let j: { loggedIn?: unknown; authMethod?: unknown; subscriptionType?: unknown; apiProvider?: unknown; configDirectory?: unknown } = {};
   try {
