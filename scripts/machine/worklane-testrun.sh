@@ -298,14 +298,22 @@ valid_env() {
   [[ "$1" == *=* && "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env takes NAME=value, got ${1%%=*}"
   [[ "$v" != *$'\n'* ]] || die "--env $k: one line"
   if [[ "$k" =~ ^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TMP|TEMP|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|NODE_OPTIONS|NODE_PATH|LD_.*|DYLD_.*|BASH_FUNC_.*|GIT_.*|GH_.*|GITHUB_.*|SSH_.*|CLAUDE_.*|ANTHROPIC_.*|SUDO_.*|WORKLANE_.*|DOCKER_.*|XDG_.*)$ ]]; then die "--env $k: set by the sandbox, never by a run"; fi
+  # glibc's unsafe-environment list (what it ignores for a setuid program: these steer its loader, gconv, locales,
+  # malloc, resolver and time zones), libmount's own, and LANGUAGE. WHY (round 4): no step of a run that holds a
+  # capability ever gets a run's variable (USERNS_LOAD); this keeps them out besides. LANG, LC_* and TZ stay a run's to
+  # set here, as before (the engine refuses them for a project; a test keeps TZ=UTC accepted): they name a locale or a
+  # zone, not a path, and reach no privileged step anyway.
+  if [[ "$k" =~ ^(GCONV_PATH|GETCONF_DIR|GLIBC_TUNABLES|HOSTALIASES|LOCALDOMAIN|LOCPATH|MALLOC_.*|NIS_PATH|NLSPATH|RESOLV_HOST_CONF|RES_OPTIONS|TZDIR|LIBMOUNT_.*|LANGUAGE)$ ]]; then die "--env $k: steers the C library or libmount, never a run's to set"; fi
   if [ "$k" != DATABASE_URL ] && [[ "$(printf %s "$k" | tr '[:lower:]' '[:upper:]')" =~ TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE ]]; then die "--env $k: looks like a secret; a test run gets none"; fi
 }
 
 # INVARIANT: no variable's value is ever in an argv: not this helper's (sudo logs its whole command line to the
 # journal), not systemd-run's or docker's (any user reads a process's argv with ps or /proc/<pid>/cmdline), and not in
 # the transient unit's Environment= (systemctl show and the unit file under /run/systemd/transient show it to anyone).
-# DATABASE_URL carries the run's database password. So exec reads the run's variables on stdin, and systemd reads
-# them from a root-only file (EnvironmentFile=), removed when the run's command ends and by wipe.
+# DATABASE_URL carries the run's database password. So exec reads the run's variables on stdin, and puts them in a
+# root-only file, removed when the run's command ends and by wipe. systemd reads it (EnvironmentFile=); or, where the
+# run gets a user namespace of its own (#545), it is the unit's stdin, read by the loader after setpriv (USERNS_LOAD),
+# so no step that holds a capability ever has one of them in its environment.
 RUN_ENV=()
 ENV_FILE=
 read_run_env() {
@@ -1127,14 +1135,23 @@ wrapper_acl_problem() {
 # binds /dev/null over the wrapper itself while it still has its capabilities, so the run's command can't run the wrapper
 # and get its profile's allowance back by path. With no capability in its own user namespace it can't unmount that, and
 # the mounts it was copied from are locked to it (round 3). The test-run CI job asserts a run running the wrapper is refused.
+# USERNS_LOAD: the step after setpriv (no capability left, the unconfined label) that gives the run's command its
+# variables: it reads them from its stdin, each NAME=value ended by a NUL (exec_run feeds the root-only file there),
+# exports each, and runs the command with /dev/null as its stdin, as before. A name bash keeps as its own read-only
+# variable (SHELLOPTS, BASHOPTS, UID, EUID, PPID, BASH_VERSINFO) can't be exported: it is left out, with a note on
+# stderr, and the run goes on. Nothing of it reaches a step with a capability: sh and setpriv before it read no stdin,
+# and ip and mount get /dev/null.
 USERNS_ARGV=()
+USERNS_LOAD=()
 userns_argv() {
   local v="$1" s aa=""
   [ "$USERNS_AA" != 1 ] || aa=" --apparmor-profile=unconfined"
   # env -i: ip and mount run while the prelude holds its capabilities, so none of the run's variables (LIBMOUNT_*, the
   # locale's) reaches them.
-  s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
+  s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up < /dev/null && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS < /dev/null && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
   USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
+  s="$(systemd_command "$v" 'while IFS= read -r -d "" kv; do export "$kv" 2> /dev/null || echo "worklane-testrun: not set: ${kv%%=*} is the shell'"'"'s own" >&2; done; exec "$@" < /dev/null')"
+  USERNS_LOAD=(/bin/bash -c "${s#*$'\n'}" load)
 }
 
 # Whether test users' Docker may be exempt from the host's egress rule: lib.sh's egress_docker_mode, word for word (a
@@ -1308,21 +1325,34 @@ exec_run() {
     net_props 0
     [ -z "$net" ] || echo "worklane-testrun: network none ($NET_WHY)" >&2
   fi
-  # The run's variables (RUN_ENV), for systemd to read from a file of root's only: never on systemd-run's argv nor in
-  # the unit's Environment= (the INVARIANT above). Only the run's own processes get them.
+  # The run's own user and network namespace (the header), when this machine has the wrapper; its slirp4netns's user.
+  USERNS_ARGV=()
+  if userns_ok; then own=1; userns_argv "$(systemd_version)"; fi
+  slirp_who "$own"
+  # The run's variables (RUN_ENV), in a file of root's only: never on systemd-run's argv nor in the unit's
+  # Environment= (the INVARIANT above). Only the run's own processes get them. Without the wrapper, systemd reads the
+  # file (EnvironmentFile=), as before #545. With it, the unit gets none of them: the file is the unit's stdin, each
+  # NAME=value ended by a NUL, and a loader after setpriv (USERNS_LOAD) exports them and runs the command with /dev/null
+  # as its stdin. WHY (round 4): the wrapper, sh and setpriv hold capabilities in the run's new namespaces, under the
+  # wrapper's AppArmor label, and no variable of the run's (GCONV_PATH, LOCPATH, MALLOC_*, LIBMOUNT_* and the like,
+  # which steer glibc and libmount) may reach a step that holds any.
+  local stdin_file=/dev/null
   if [ "${#RUN_ENV[@]}" -gt 0 ]; then
     if [ -L "$ENV_DIR" ]; then die "$ENV_DIR is a symlink"; fi
     [ -d "$ENV_DIR" ] || mkdir -m 0700 -- "$ENV_DIR" 2>/dev/null || [ -d "$ENV_DIR" ] || die "can't make $ENV_DIR"
     p="$(stat -c '%U %a' -- "$ENV_DIR")"; [ "$p" = "$(id -un) 700" ] || die "$ENV_DIR is $p, not $(id -un)'s and 0700"
     # Dots: no name or id has one, so wipe's "<name>.<id>.*" is this run's alone.
     ENV_FILE="$ENV_DIR/$name.$id.$$"
-    ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
-    envfile=(-p "EnvironmentFile=$ENV_FILE")
+    if [ "$own" -eq 1 ]; then
+      ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s\0' "$kv"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
+      stdin_file="$ENV_FILE"
+    else
+      ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
+      envfile=(-p "EnvironmentFile=$ENV_FILE")
+    fi
   fi
-  # The run's own user and network namespace (the header), when this machine has the wrapper; its slirp4netns's user.
-  USERNS_ARGV=()
-  if userns_ok; then own=1; userns_argv "$(systemd_version)"; fi
-  slirp_who "$own"
+  local -a load=()
+  [ "$own" -eq 0 ] || load=("${USERNS_LOAD[@]}")
   # The unit's own name carries the run id (run_unit), so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
@@ -1338,16 +1368,16 @@ exec_run() {
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible"
     --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user"
-    ${USERNS_ARGV[@]+"${USERNS_ARGV[@]}"} /bin/bash -o pipefail -c "$cmd")
+    ${USERNS_ARGV[@]+"${USERNS_ARGV[@]}"} ${load[@]+"${load[@]}"} /bin/bash -o pipefail -c "$cmd")
   if [ "${#gpuprops[@]}" -eq 0 ] && [ "$granted" -eq 0 ]; then
-    "${run[@]}" || rc=$?
+    "${run[@]}" < "$stdin_file" || rc=$?
   else
     # WHY: the GPU's lock must never be let go while the unit runs. bash runs a trap only once a foreground child
     # ends, so systemd-run goes in the background and is waited for: a TERM (sudo passes the coordinator's on) stops
     # the unit first, and the locks go with this helper after it. systemd-run keeps the lock fds open too. A granted
     # run's network is started once its unit has a main process (slirp_start), so it goes in the background too.
     trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
-    "${run[@]}" &
+    "${run[@]}" < "$stdin_file" &
     pid=$!
     if [ "$granted" -eq 1 ]; then slirp_start "$unit" "$pid" "$id" "$own" || echo "worklane-testrun: the run's network could not be started" >&2; fi
     wait "$pid" || rc=$?

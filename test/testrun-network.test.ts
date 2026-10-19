@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { networkCheck } from '../src/doctor.js';
 import { TestRunConfig } from '../src/testrun/config.js';
+import { projectEnvProblem } from '../src/project-env.js';
 import { npmFetchScript, pipFetchScript, requirementsFileProblem } from '../src/testrun/fetch.js';
 import { localHost, postgresSocketUrl, sandboxHost } from '../src/testrun/host.js';
 import { networkFileText, networkLine, networkPolicy, networkRecord, networkSummaryLine, parseNetworkFile } from '../src/testrun/network.js';
@@ -124,6 +125,7 @@ function netHelper() {
   stub('systemd-run', `[ "$1" = --version ] && { echo "systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)"; exit 0; }
 n="$(date +%s%N)-$$"
 printf '%s\\n' "$@" > "${sd}/$n.argv"
+cat > "${sd}/$n.stdin"
 for a in "$@"; do case "$a" in BindReadOnlyPaths=*) f="\${a#BindReadOnlyPaths=}"; f="\${f%%:*}"; { echo "== $f"; cat "$f"; } >> "${sd}/$n.binds" ;; esac; done
 echo ran`);
   stub('chown', 'exit 0');
@@ -241,10 +243,22 @@ echo ran`);
     mkdirSync(join(tmpBase, h), { mode: 0o700 });
     chmodSync(join(tmpBase, h), 0o700);
   };
-  const run = (...args: string[]) => spawnSync('/bin/bash', [helper, 'shop', ...args], { encoding: 'utf8', input: '', env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });
+  const runIn = (input: string, ...args: string[]) => spawnSync('/bin/bash', [helper, 'shop', ...args], { encoding: 'utf8', input, env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });
+  const run = (...args: string[]) => runIn('', ...args);
   const exec = (id: string, opts: string[], cmd = 'true') => {
     mkRun(id);
     return run('exec', id, '60', ...opts, '--', cmd);
+  };
+  /** exec with the run's variables on stdin, as the engine sends them (NAME=value, each ended by a NUL). */
+  const execEnv = (id: string, opts: string[], cmd: string, vars: Record<string, string>) => {
+    mkRun(id);
+    return runIn(Object.entries(vars).map(([k, v]) => `${k}=${v}\0`).join(''), 'exec', id, '60', ...opts, '--', cmd);
+  };
+  /** What the newest run unit's systemd-run got on its stdin. */
+  const lastStdin = () => {
+    const f = spawnSync('ls', [sd], { encoding: 'utf8' }).stdout.split('\n').filter((x) => x.endsWith('.argv')).sort()
+      .filter((x) => !readFileSync(join(sd, x), 'utf8').split('\n').some((a) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(a))).pop()!;
+    return readFileSync(join(sd, f.replace(/\.argv$/, '.stdin')), 'utf8');
   };
   const grant = (instances: Record<string, string[]>, mode = 0o644) => {
     writeFileSync(file, networkFileText({ instances }));
@@ -270,7 +284,7 @@ echo ran`);
   /** The network units' systemd-run calls (slirp_start), oldest first. */
   const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
   return {
-    dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, bin, usernsBin, proc, procNs, userns,
+    dir, base, file, slirp, run, exec, execEnv, lastStdin, mkRun, grant, lastProps, netCalls, binds, bin, usernsBin, proc, procNs, userns,
     usernsRan: () => existsSync(ranMark),
     noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''),
     /** kernel.apparmor_restrict_unprivileged_userns, and whether the wrapper's profile is loaded. */
@@ -468,8 +482,11 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
 /** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
 const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) => [
   h.usernsBin, '--user', '--map-current-user', '--net', '--mount', '--keep-caps', '--', '/bin/sh', '-c',
-  `${join(h.bin, 'env')} -i ${join(h.bin, 'ip')} link set lo up && ${join(h.bin, 'env')} -i ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
+  `${join(h.bin, 'env')} -i ${join(h.bin, 'ip')} link set lo up < /dev/null && ${join(h.bin, 'env')} -i ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} < /dev/null && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
+  // Round 4: the loader, after setpriv, gives the command the run's variables from its stdin.
+  '/bin/bash', '-c', LOADER.replaceAll('$', () => dollar), 'load',
 ];
+const LOADER = 'while IFS= read -r -d "" kv; do export "$kv" 2> /dev/null || echo "worklane-testrun: not set: ${kv%%=*} is the shell\'s own" >&2; done; exec "$@" < /dev/null';
 
 /** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
 const prelude = (h: ReturnType<typeof netHelper>) => h.lastProps().argv.slice(-(usernsArgv(h).length + 5), -5);
@@ -596,8 +613,10 @@ test('#545: the fetch gets its own namespaces and a test-user slirp4netns too; s
     const { argv } = h.lastProps();
     const at = argv.indexOf(h.usernsBin);
     assert.ok(at > 0, argv.join(' '));
-    const n = usernsArgv(h).length;
-    assert.deepEqual(argv.slice(at, at + n), usernsArgv(h));
+    // The fetch has no variable of the run's (only the helper's own --setenv), so no loader: the prelude, then bash.
+    const pre = usernsArgv(h).slice(0, -4);
+    const n = pre.length;
+    assert.deepEqual(argv.slice(at, at + n), pre);
     assert.deepEqual(argv.slice(at + n, at + n + 4), ['/bin/bash', '-o', 'pipefail', '-c']);
     assert.deepEqual(argv.slice(-2), ['fetch', join(h.base, 'shop', 'runs', 'fast-w-1', 'work')]);
     const [net] = h.netCalls();
@@ -609,6 +628,55 @@ test('#545: the fetch gets its own namespaces and a test-user slirp4netns too; s
     const r = h.exec('fast-w-2', ['--network', 'e2e']);
     assert.match(r.stderr, /worklane-testrun: the run's network could not be started/);
     assert.equal(h.netCalls().length, 1, 'no second network unit');
+  } finally {
+    h.done();
+  }
+});
+
+/** glibc's unsafe-environment list (what it ignores under AT_SECURE), libmount's and the locale's: never a run's to set. */
+const UNSAFE_ENV = ['GCONV_PATH', 'GETCONF_DIR', 'GLIBC_TUNABLES', 'HOSTALIASES', 'LOCALDOMAIN', 'LOCPATH', 'MALLOC_TRACE', 'MALLOC_ARENA_MAX', 'MALLOC_CHECK_', 'NIS_PATH', 'NLSPATH', 'RESOLV_HOST_CONF', 'RES_OPTIONS', 'TZDIR', 'LIBMOUNT_FSTAB', 'LIBMOUNT_DEBUG', 'LANGUAGE', 'TMPDIR', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT'];
+
+test('#545 round 4: no variable of the run\'s reaches a step that holds a capability: the unit gets none (no EnvironmentFile=), they come on its stdin, and a loader after setpriv exports them; without the wrapper, EnvironmentFile= as before', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    const vars = { DATABASE_URL: 'postgres://u:CANARYPW@localhost/db', FOO: 'bar baz', SHELLOPTS: 'xtrace' };
+    // Without the wrapper: systemd reads the root-only file (EnvironmentFile=), and the unit's stdin is empty, as before.
+    let r = h.execEnv('fast-v-0', [], 'echo hi', vars);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(h.lastProps().props.some((p) => p.startsWith('EnvironmentFile=')), 'legacy: EnvironmentFile=');
+    assert.equal(h.lastStdin(), '');
+    // With it: no EnvironmentFile=, no value anywhere in the argv; the helper's own --setenv only (fixed values).
+    h.userns('ok');
+    r = h.execEnv('fast-v-1', [], 'echo hi', vars);
+    assert.equal(r.status, 0, r.stderr);
+    const { argv, props } = h.lastProps();
+    assert.ok(!props.some((p) => p.startsWith('EnvironmentFile=')), props.join(' | '));
+    assert.ok(!argv.some((a) => a.includes('CANARYPW') || a.includes('bar baz') || a.includes('xtrace')), 'no value in any argv');
+    assert.deepEqual(argv.filter((a) => a.startsWith('--setenv=')).map((a) => a.slice('--setenv='.length).split('=')[0]), ['HOME', 'TMPDIR', 'TMP', 'TEMP', 'PATH', 'LANG', 'CI', 'USER', 'LOGNAME']);
+    // The privileged steps (the wrapper, sh, ip, mount, setpriv) are fixed text, then the loader, then the command.
+    assert.deepEqual(prelude(h), usernsArgv(h));
+    assert.equal(h.lastStdin(), 'DATABASE_URL=postgres://u:CANARYPW@localhost/db\0FOO=bar baz\0SHELLOPTS=xtrace\0', 'the variables, on the unit\'s stdin');
+    // The loader as built: exports each, notes a name bash keeps as its own, gives the command /dev/null as stdin.
+    const loader = argv[argv.indexOf('load') - 1]!;
+    const l = spawnSync('bash', ['-c', loader, 'load', 'bash', '-c', 'printf "%s|%s|" "$FOO" "$DATABASE_URL"; cat; echo end'], { encoding: 'utf8', input: h.lastStdin(), env: { PATH: '/usr/bin:/bin' } });
+    assert.equal(l.stdout, 'bar baz|postgres://u:CANARYPW@localhost/db|end\n');
+    assert.match(l.stderr, /not set: SHELLOPTS is the shell's own/);
+  } finally {
+    h.done();
+  }
+});
+
+test('#545 round 4: the helper (valid_env) and the engine (projectEnvProblem) refuse glibc\'s unsafe-environment list, libmount\'s and LANGUAGE', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    for (const name of UNSAFE_ENV) {
+      const r = h.execEnv(`fast-x-${name.toLowerCase().replace(/_/g, '-').replace(/-+$/, '')}`, [], 'true', { [name]: '/x' });
+      assert.equal(r.status, 2, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`--env ${name}: (steers the C library or libmount|set by the sandbox)`), name);
+      assert.ok(projectEnvProblem(name) !== null, `projectEnvProblem ${name}`);
+    }
+    assert.equal(projectEnvProblem('WORKERS'), null, 'an ordinary name still passes');
+    assert.equal(h.execEnv('fast-x-ok', [], 'true', { WORKERS: '4' }).status, 0);
   } finally {
     h.done();
   }
