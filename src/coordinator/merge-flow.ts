@@ -63,9 +63,10 @@ export abstract class MergeFlow extends FixRuns {
       repo: () => this.d.cfg.project.project.repo,
       configured: () => this.d.cfg.project.required_check_sources,
       local: { project: () => this.d.cfg.project, tests: () => this.d.cfg.tests, log: this.d.log },
-      // Every name a judgement here can require (the PR's, the batch's fast and full checks) and every name config.yaml
-      // pins: with none of them pinned, checks are read exactly as before pins.
-      required: () => [...this.requiredChecks(), ...this.d.cfg.tests.land.pr_batch.fast_checks, ...this.d.cfg.tests.land.pr_batch.full_checks, ...(this.d.cfg.review ?? DEFAULT_REVIEW).docs_only_checks, ...Object.keys(this.d.cfg.project.required_check_sources)],
+      // The names a judgement here judges when the caller names none (the PR's, the batch's fast and full checks, the
+      // docs-only ones): with none of them pinned, checks are read exactly as before pins (round 10: a pin on a name
+      // nothing here judges changes nothing). A caller judging other names passes them (fix-forward's episode names).
+      required: () => [...this.requiredChecks(), ...this.d.cfg.tests.land.pr_batch.fast_checks, ...this.d.cfg.tests.land.pr_batch.full_checks, ...(this.d.cfg.review ?? DEFAULT_REVIEW).docs_only_checks],
     });
     return this.pinnedInst;
   }
@@ -117,7 +118,7 @@ export abstract class MergeFlow extends FixRuns {
       },
       config: () => this.d.cfg.project.fix_forward,
       required: () => this.requiredChecks(),
-      checks: (sha) => this.headChecksOf(sha),
+      checks: (sha, judging) => this.headChecksOf(sha, judging),
       probeTimeoutMin: () => this.d.cfg.project.flaky.rerun_timeout_min,
       // WHY: read at each use, not once: off while the sandbox's check fails, on when it passes (liveTestRuns).
       get testRuns() {
@@ -225,7 +226,7 @@ export abstract class MergeFlow extends FixRuns {
       this.peoplePolled.set(pr.number, now);
       const role = pr.bot ? null : ((await this.d.roleOf?.(pr.author)) ?? null);
       const mapped = role === 'owner' || role === 'writer';
-      const fast = requiredOutcomes(fastChecks, await this.headChecksOf(pr.headSha));
+      const fast = requiredOutcomes(fastChecks, await this.headChecksOf(pr.headSha, fastChecks));
       if (fast.some((c) => c.outcome !== 'pass')) continue;
       if (!mapped && !(await this.adminApproved(pr.number))) continue;
       this.prBatch.enqueue({ issue: pr.number, number: pr.number, head: pr.headSha, by: pr.author || 'unknown' });
@@ -597,7 +598,7 @@ export abstract class MergeFlow extends FixRuns {
       // GitHub still computing: try again next poll, up to a cap. A conflict, or anything else blocking a clean merge: a human.
       if (pr.mergeableState === 'draft') return;
       // Decided on the light checks, but GitHub's ruleset still requires every required check: blocked until they pass.
-      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.requiredChecks(), await this.headChecksOf(pr.headSha))) : { act: 'none' as const };
+      const hold = fast && pr.mergeableState === 'blocked' ? rulesetHold(requiredOutcomes(this.requiredChecks(), await this.headChecksOf(pr.headSha, this.requiredChecks()))) : { act: 'none' as const };
       if (hold.act === 'wait') return;
       if (hold.act === 'hold') d.reasons.push(hold.why);
       else if (pr.mergeable === null || pr.mergeableState === 'unknown') {
@@ -654,7 +655,7 @@ export abstract class MergeFlow extends FixRuns {
   private async mergeTested(w: EventPayload<'pr.opened'>, pr: PullRequest, how: 'auto' | 'approved') {
     const { issue: n, number } = w;
     const events = () => this.d.log.read(0, [...PR_BATCH_EVENTS, 'merge.done', 'merge.decided', 'pr.status', 'pr.opened']);
-    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.headChecksOf(pr.headSha), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
+    const ok = mayMerge({ events: events(), number, head: pr.headSha, checks: await this.headChecksOf(pr.headSha, this.d.cfg.tests.land.pr_batch.fast_checks), fastChecks: this.d.cfg.tests.land.pr_batch.fast_checks });
     if (!ok.ok) {
       this.emit('merge.failed', { issue: n, number, head: pr.headSha, why: `not merged untested: ${ok.why}`.slice(0, 500) });
       return;
@@ -850,7 +851,7 @@ export abstract class MergeFlow extends FixRuns {
       // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
       // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
       // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
-      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.headChecksOf(m.sha)) });
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.headChecksOf(m.sha, required)) });
       if (gate.wait) continue;
       const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
@@ -1306,8 +1307,9 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
-  protected async headChecksOf(sha: string): Promise<JudgedChecks> {
-    return this.pinned.of(sha);
+  protected async headChecksOf(sha: string, judging?: readonly string[]): Promise<JudgedChecks> {
+    // `judging`: the names the caller judges (#727): a pin on one of them turns the pinned reads on.
+    return this.pinned.of(sha, judging ? { judging } : {});
   }
 
   /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */

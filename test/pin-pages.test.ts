@@ -25,7 +25,9 @@ let token = 0;
  * Readiness of `ci`, pinned to App 1111, whose own run passes on page 1: the check-run pages `runs(page)` (filter=latest),
  * and the combined status's pages `status(page)`. Rejects when the read throws.
  */
-async function ready(o: { runs: (page: number) => unknown[]; status?: (page: number) => Response; bare?: boolean; calls?: string[] }) {
+async function ready(o: { runs: (page: number) => unknown[]; status?: (page: number) => Response; bare?: boolean; calls?: string[]; otherPinned?: 'ruleset' | 'config' }) {
+  // `otherPinned`: a check nothing here judges (`other`) is pinned to App 1111, by GitHub's ruleset or config.yaml.
+  const ruleset = o.otherPinned === 'ruleset' ? [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'other', integration_id: PINNED_APP }] } }] : [];
   const f = (async (url: string) => {
     const u = new URL(url);
     const page = Number(u.searchParams.get('page') ?? '1');
@@ -33,13 +35,14 @@ async function ready(o: { runs: (page: number) => unknown[]; status?: (page: num
     if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: o.runs(page) });
     if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return o.status ? o.status(page) : json({ statuses: [] });
     if (u.pathname === '/repos/o/r/branches/main') return json({ name: 'main', protection: { enabled: false } });
-    if (u.pathname === '/repos/o/r/rules/branches/main') return json([]);
+    if (u.pathname === '/repos/o/r/rules/branches/main') return json(ruleset);
     return json({ message: 'Not Found' }, 404);
   }) as typeof fetch;
   // A fresh token each time, so no rate limit here is shared with another test's budget.
   const t = `tok-${++token}`;
-  // `bare`: nothing pinned (round 8: main's reads and main's verdict). Else `ci` is pinned to App 1111.
-  const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => (o.bare ? {} : { ci: { app_id: PINNED_APP } }), required: () => ['ci'] });
+  // `bare`: nothing `ci` pinned (round 8: main's reads and main's verdict). Else `ci` is pinned to App 1111.
+  const configured = { ...(o.bare ? {} : { ci: { app_id: PINNED_APP } }), ...(o.otherPinned === 'config' ? { other: { app_id: PINNED_APP } } : {}) };
+  const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => configured, required: () => ['ci'] });
   const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
   return r.ready ? 'ready' : r.reasons.join('; ');
 }
@@ -190,8 +193,64 @@ test("round 9: an Actions-App pin whose workflow runs weren't read never passes:
   }) as typeof fetch;
   const t = `tok-${++token}`;
   const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['lint'] });
-  // The judgement fix-forward makes: requiredOutcomes(ep.started.failed, checks).
-  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD)).map((c) => c.outcome), ['fail'], 'ci.yml failed: blocked (ff971e5e: pass)');
+  // The judgement fix-forward makes: requiredOutcomes(ep.started.failed, checks), its checks read judging those names.
+  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD, { judging: ['ci'] })).map((c) => c.outcome), ['fail'], 'ci.yml failed: blocked (ff971e5e: pass)');
+  // Read for `required` alone (round 10: no judged name pinned, main's reads), the unread Actions runs still never pass.
+  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD)).map((c) => c.outcome), ['pending'], 'an unread Actions run waits');
+});
+
+test("round 10: a PR whose judged checks are all bare names gets main's verdict and reads, whatever other check is pinned (the ruleset or config.yaml)", async () => {
+  const bareCi = run(1, 'ci', OTHER_APP);
+  const full30 = () => json({ total_count: 301, statuses: Array.from({ length: 30 }, (_, i) => ({ context: `s${i}`, state: 'success' })) });
+  for (const otherPinned of ['ruleset', 'config'] as const) {
+    // A page-1 status 403 (permission): no statuses, as main: READY (f33956d2 waited: the pinned reads were on).
+    assert.equal(await ready({ bare: true, otherPinned, runs: (p) => (p === 1 ? [bareCi] : []), status: () => NO_ACCESS() }), 'ready', `${otherPinned}: page-1 403`);
+    // 301 status contexts: main reads page 1: READY.
+    const calls: string[] = [];
+    assert.equal(await ready({ bare: true, otherPinned, calls, runs: (p) => (p === 1 ? [bareCi] : []), status: () => full30() }), 'ready', `${otherPinned}: 301 contexts`);
+    assert.deepEqual(calls.filter((c) => c.startsWith('status')), ['status 1'], 'one status page, as main');
+    // 1,001 check runs: main reads 9 pages: READY.
+    const first = [bareCi, ...filler(1).slice(1)];
+    assert.equal(await ready({ bare: true, otherPinned, runs: (p) => (p === 1 ? first : p <= 10 ? filler(p) : [run(99_999, 'x', OTHER_APP)]) }), 'ready', `${otherPinned}: 1,001 check runs`);
+  }
+});
+
+test('round 10: the rules read pages: a pin on page 2 is kept; a refused page 2 keeps the last answer or leaves the rules unknown; 11 full pages are no answer', async () => {
+  // GitHub's rules: page 1 full of other rules; `ci` pinned to App 1111 on page 2. The commit has only App 2222's `ci`.
+  const filler = (p: number) => Array.from({ length: 100 }, (_, i) => ({ type: 'required_status_checks', parameters: { required_status_checks: [{ context: `x-${p}-${i}`, integration_id: 4242 }] } }));
+  const pinOnPage2 = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: PINNED_APP }] } }];
+  const verdicts = async (rules: (page: number, tick: number) => Response, ticks = 1) => {
+    let tick = 0;
+    let clock = 0;
+    const f = (async (url: string) => {
+      const u = new URL(url);
+      const page = Number(u.searchParams.get('page') ?? '1');
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [run(1, 'ci', OTHER_APP)] });
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return json({ statuses: [] });
+      if (u.pathname === '/repos/o/r/branches/main') return json({ name: 'main', protection: { enabled: false } });
+      if (u.pathname === '/repos/o/r/rules/branches/main') return rules(page, tick);
+      return json({ message: 'Not Found' }, 404);
+    }) as typeof fetch;
+    const t = `tok-${++token}`;
+    const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['ci'], now: () => clock });
+    const out: string[] = [];
+    for (; tick < ticks; tick++) {
+      const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+      out.push(r.ready ? 'ready' : r.reasons.join('; '));
+      clock += 11 * 60_000;
+    }
+    return out;
+  };
+  // The pin on page 2 behind a full page 1: kept (ff971e5e read page 1 only: READY on App 2222's `ci`).
+  assert.deepEqual(await verdicts((p) => json(p === 1 ? filler(1) : pinOnPage2)), ['ci: missing']);
+  // Answered, then page 2 refused (a permission 403, a 404 or a 500): the last answer is kept.
+  for (const refuse of [NO_ACCESS, () => json({ message: 'Not Found' }, 404), () => json({ message: 'boom' }, 500)]) {
+    assert.deepEqual(await verdicts((p, tick) => (p === 1 ? json(filler(1)) : tick === 0 ? json(pinOnPage2) : refuse()), 2), ['ci: missing', 'ci: missing']);
+    // Refused from the start: the rules are unknown, so `ci` is missing.
+    assert.deepEqual(await verdicts((p) => (p === 1 ? json(filler(1)) : refuse())), ['ci: missing']);
+  }
+  // 11 full pages: no answer, so the rules are unknown: `ci` is missing.
+  assert.deepEqual(await verdicts((p) => json(filler(p))), ['ci: missing']);
 });
 
 test("round 9: ownVerdict never puts an Actions run in the App group: one whose workflow runs weren't read waits", async () => {

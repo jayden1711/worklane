@@ -20,8 +20,9 @@
 // Every check of its name from any OTHER source must pass too (another App, another workflow, a run for another head,
 // a commit status). The ways this is looser than judging by name, both the owner's decisions: a pinned workflow
 // file's later run on the head supersedes its own earlier failed or cancelled runs, and a pinned non-Actions App's
-// later run supersedes its earlier ones. With a required check pinned, a commit-status read GitHub refuses at all
-// (a 403 or 404 on page 1 too) waits; with none pinned, statuses are read as on main (the owner's decision, round 8). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
+// later run supersedes its earlier ones. With a check being judged pinned, a commit-status read GitHub refuses at all
+// (a 403 or 404 on page 1 too) waits; with none of them pinned, statuses are read as on main, whatever else is pinned
+// (the owner's decision, round 8; scoped to the judged names in round 10). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
 // facts (GitHub's latest check run per check suite and name, the workflow run behind each Actions suite, and the
 // latest status per context); the watch takes them as they stood at merge time.
 // Gating PRs nobody here wrote is governance mode's job (#704): it refuses to turn on while any required check is
@@ -293,16 +294,18 @@ export class PinnedChecks {
     return typeof this.d.backlog.checkApps === 'function';
   }
 
-  async of(sha: string): Promise<JudgedChecks> {
+  /**
+   * The checks on `sha` as judged. `judging`: the names the caller will judge (fix-forward's episode names, the batch's
+   * fast checks); absent, the `required` dep's. The reads a pinned check needs (more pages, failing closed) are made only
+   * when a name being judged is pinned, or may be (GitHub's rules not read yet): with every judged name bare, exactly
+   * main's reads, so main's verdict, whatever else is pinned (round 10).
+   */
+  async of(sha: string, opts: { judging?: readonly string[] } = {}): Promise<JudgedChecks> {
     if (!this.enforced) return this.withLocal(await this.d.backlog.checks(sha), sha);
     const configured = this.d.configured();
     const apps = await this.githubApps();
-    // #727: the reads a pinned check needs (more pages, failing closed) only when a required check is pinned, or may
-    // be (GitHub's rules not read yet). With every required check bare, exactly main's reads, so main's verdict.
-    const required = this.d.required?.();
-    // Round 9: any pin at all (config.yaml's, or an App GitHub's rules name for any check), not only a required name's,
-    // so a judge of a name outside `required` (fix-forward's episode names) still gets the pinned reads.
-    const pinned = !required || apps === null || Object.keys(configured).length > 0 || Object.keys(apps).length > 0 || required.some((n) => pinOf(n, configured, apps) !== null);
+    const judging = opts.judging ?? this.d.required?.();
+    const pinned = !judging || apps === null || judging.some((n) => pinOf(n, configured, apps) !== null);
     const all = await this.d.backlog.checks(sha, { pinned });
     return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha }), sha);
   }
