@@ -22,7 +22,7 @@ import { benchClaude, benchDenied, benchLane } from '../scripts/bench/agent.js';
 import { sandboxProbe, type ProbeReport } from '../scripts/bench/probe.js';
 import { agentBase, BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
 import { capsFromArgs, type Caps } from '../scripts/bench/caps.js';
-import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
+import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, STDIN_REFUSED, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
 import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
 import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
@@ -1011,6 +1011,80 @@ test("acceptance: a tree's tar stream is refused only for the instance id, the h
   for (const field of ['patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints', 'instance', 'test']) assert.ok(![...said][0]!.includes(field), `the refusal names no field (${field})`);
   // No base tree: a task's input is refused outright.
   await assert.rejects(new TaskRunner(d.opts, C, row, undefined as unknown as Buffer).syncTree('/work/t', base), /checked against its base tree, and there is none/);
+});
+
+/** Whether a task's syncTree of `stream` was sent (true) or refused with STDIN_REFUSED and nothing sent (false). */
+function stdinSends(row: TaskRow, base: Buffer, stream: Buffer): boolean {
+  const d = fakeDocker();
+  try {
+    new TaskRunner(d.opts, C, row, base).syncTree('/work/t', stream);
+  } catch (e) {
+    assert.equal((e as Error).message, STDIN_REFUSED);
+    assert.equal(d.sent.length, 0, 'nothing sent');
+    return false;
+  }
+  assert.equal(d.sent.length, 1);
+  return true;
+}
+const STDIN_BASE = Buffer.from('tests/test_price.py\0def test_plain_totals_PASSMARK():\n    pass\n');
+/** The base tree's stream plus one more file, in the stand-in's form: name, NUL, text. */
+const withFile = (file: string, text: string) => Buffer.concat([STDIN_BASE, Buffer.from(`\0\0${file}\0${text}`)]);
+const STDIN_HUNK = ['def test_negative_quantities_are_skipped_TESTMARK():', '    items = [(5, -1), (3, 2)]', '    assert total(items) == 6'];
+/** A test patch that adds `added` after the base's first test. */
+const testPatch = (added: readonly string[]) => ['diff --git a/tests/test_price.py b/tests/test_price.py', '--- a/tests/test_price.py', '+++ b/tests/test_price.py', `@@ -1,2 +1,${added.length + 2} @@`, ' def test_plain_totals_PASSMARK():', ...added, ''].join('\n');
+const HUNK_ROW: TaskRow = { ...ROW, test_patch: testPatch(['+', ...STDIN_HUNK.map((l) => `+${l}`)]) };
+
+test('stdin: the test patch written into the tree as a .diff file (LF) is refused', () => {
+  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch)), false);
+  // The base exemption holds for the diff form too: a base tree that already ships that .diff file.
+  const base = Buffer.concat([STDIN_BASE, Buffer.from(`\0\0docs/example.diff\0${HUNK_ROW.test_patch}`)]);
+  assert.equal(stdinSends(HUNK_ROW, base, Buffer.concat([base, Buffer.from(`\0\0hidden/test.diff\0${HUNK_ROW.test_patch}`)])), true);
+});
+
+test('stdin: the test patch written into the tree as a .diff file with CRLF line ends is refused', () => {
+  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch.replace(/\n/g, '\r\n'))), false);
+});
+
+test("stdin: an agent's own test file that starts with a new test file's imports is sent; imports with code are refused", () => {
+  // A new upstream test file whose first lines are imports, one of them in parentheses.
+  const imports = ['import pytest', 'from price import total, subtotal', 'from price.models import (', '    ItemWithDiscount,', '    BasketOfItems,', ')'];
+  const tests = ['def test_items_are_counted_TESTMARK():', '    assert subtotal([ItemWithDiscount(1)]) == 1'];
+  const newFile = ['diff --git a/tests/test_items.py b/tests/test_items.py', 'new file mode 100644', '--- /dev/null', '+++ b/tests/test_items.py', '@@ -0,0 +1,9 @@', ...[...imports, '', ...tests].map((l) => `+${l}`), ''].join('\n');
+  const rowImports: TaskRow = { ...ROW, test_patch: newFile };
+  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n\n\ndef test_mine():\n    assert total([]) == 0\n`)), true, "the agent's own test file, with the same imports: sent");
+  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_items.py', `${imports.join('\n')}\n\n${tests.join('\n')}\n`)), false, 'the applied file, imports and its test: refused');
+  // A 3-line hunk of an import and code is still the test patch.
+  const mixed = ['from price import subtotal', 'def test_subtotal_of_nothing_TESTMARK():', '    assert subtotal([]) == 0'];
+  const rowMixed: TaskRow = { ...ROW, test_patch: testPatch(mixed.map((l) => `+${l}`)) };
+  assert.equal(stdinSends(rowMixed, STDIN_BASE, withFile('tests/test_sub.py', `${mixed.join('\n')}\n`)), false, 'an import then code: refused');
+});
+
+test("stdin: a blank context line in the test patch doesn't end a run", () => {
+  // Two 2-line blocks split by a blank context line (written as a space, or stripped to nothing): one run once applied.
+  const two = ['def test_a_new_case_one():', '    assert total([(1, 1)]) == 1', 'def test_b_new_case_two():', '    assert total([(2, 2)]) == 4'];
+  for (const blank of [' ', '']) {
+    const rowBlank: TaskRow = { ...ROW, test_patch: testPatch([`+${two[0]}`, `+${two[1]}`, blank, `+${two[2]}`, `+${two[3]}`]) };
+    assert.equal(stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
+  }
+});
+
+test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', () => {
+  // A real ustar stream: the file's last line would otherwise run into the next header's name.
+  const header = (name: string, size: number) => {
+    const h = Buffer.alloc(512);
+    h.write(name, 0);
+    h.write(`${size.toString(8).padStart(11, '0')}\0`, 124);
+    h.write('ustar\x0000', 257);
+    return h;
+  };
+  const block = (text: string) => Buffer.concat([Buffer.from(text), Buffer.alloc((512 - (Buffer.byteLength(text) % 512)) % 512)]);
+  const ustar = (files: readonly (readonly [string, string])[]) => Buffer.concat([...files.flatMap(([n, t]) => [header(n, Buffer.byteLength(t)), block(t)]), Buffer.alloc(1024)]);
+  const tail = STDIN_HUNK.join('\n');
+  const full = `${'#'.repeat(512 - tail.length - 1)}\n${tail}`;
+  assert.equal(Buffer.byteLength(full), 512);
+  const base = ustar([['tests/test_price.py', 'def test_plain_totals_PASSMARK():\n    pass\n']]);
+  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', full], ['tests/b.py', 'x\n']])), false, 'a run ending a 512-byte file, then a header: refused');
+  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', `${STDIN_HUNK[0]}\n${STDIN_HUNK[1]}\n`], ['tests/b.py', 'x\n']])), true, 'two of its lines, then a header: sent');
 });
 
 test("a bench root through a link that doesn't resolve is refused; a dangling link at a credential place is followed", { skip: process.platform !== 'linux' && 'Linux only' }, () => {

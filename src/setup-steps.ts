@@ -911,14 +911,14 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     detect: (k) => detectTailscale(k.p) ?? no('not on a tailnet: the dashboard stays on this machine'),
   },
   {
-    id: 'console-devices',
+    id: 'machine-devices',
     group: 'tailscale',
     rows: [32],
-    title: 'Owner terminal devices',
+    title: 'Machine-change devices',
     modes: ['server'],
     optional: true,
     reach: 'few',
-    today: '`console-shell.sh <admin user>`, then dashboards.sh again with --console-user and --console-devices tag:...; tag the devices in your tailnet policy.',
+    today: 'dashboards.sh again with --machine-devices tag:... (the Tailscale devices a machine change from the page may come from); tag the devices in your tailnet policy.',
     fix: { kind: 'outside', url: 'https://login.tailscale.com/admin/acls', label: "Tailscale's access controls", why: "devices are tagged in the tailnet's own policy" },
     detect: (k) => {
       let unit = '';
@@ -927,8 +927,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       } catch {
         return no(`no dashboard hub unit (${k.m.hubUnitFile})`);
       }
-      const m = unit.match(/--console-devices (\S+)/);
-      return m ? ok(`terminal devices: ${m[1]}`) : no('no terminal devices listed for the owner terminal');
+      // An older unit's --console-devices (the removed owner terminal's list) is read as the machine devices (#742).
+      const m = unit.match(/ --machine-devices (\S+)/) ?? unit.match(/ --console-devices (\S+)/);
+      return m ? ok(`machine devices: ${m[1]}`) : no('no machine devices listed: a machine change from the page is refused (the break-glass still works)');
     },
   },
   // Updates

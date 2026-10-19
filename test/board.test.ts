@@ -7,7 +7,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { boardForViewer, boardView, checkState, columnOf, VIEWER_CARD_FIELDS, type BoardView } from '../src/board.js';
 import { asks } from '../src/console/asks.js';
-import { terminalRefusal } from '../src/console/terminal.js';
 import { loadConfig } from '../src/config/load.js';
 import { mayRequest, takeRequests, writeLive } from '../src/console.js';
 import { startDashboard } from '../src/dashboard.js';
@@ -232,11 +231,10 @@ test("the server: a viewer gets 403 on Watch and no run fields on the board; a w
     assert.equal((await post('example-collaborator', '/api/decide', { id: 'd-q', answer: '$50' })).status, 200, 'a writer answers a question');
     assert.equal((await post('example-owner', '/api/decide', { id: 'd-land', answer: 'approve' })).status, 200);
 
-    // The rest of the console stays the owner's: root steps (run or answered) and the terminal.
+    // The rest of the console stays the owner's: root steps (run or answered).
     const step = asks(s.log).create({ instance: 'shop', kind: 'root_step', title: 'Four slots', detail: 'x', command: 'set-slots', args: ['4'] });
     assert.equal((await post('example-collaborator', `/api/asks/${step.id}/run`, {})).status, 403, "a writer can't run a root step");
     assert.equal((await post('example-collaborator', `/api/asks/${step.id}/answer`, { answer: 'declined' })).status, 403, "a writer can't answer a root step");
-    assert.match(terminalRefusal({ login: 'example-collaborator', role: 'writer', csrfOk: true }, { consoleUser: 'console-admin', hubUser: 'hub-viewer' }) ?? '', /owner's alone/, "a writer can't open the terminal");
 
     const audit = s.log.read(0, ['dashboard.audit']).map((e) => e.payload as { login: string; role: string; action: string; instance: string | null });
     assert.deepEqual(audit.map((a) => [a.login, a.role, a.action, a.instance]), [

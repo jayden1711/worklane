@@ -13,7 +13,7 @@
 //   exactly SIRI_ROUTES on the instance the device token names.
 // - A request counts only from the tailnet: the connection must be tailscaled's (the kernel says which uid opened it)
 //   with serve's X-Forwarded-For naming one Tailscale address, which `tailscale whois` turns into a node
-//   (src/console/terminal-devices.ts identifyDevice, as for the owner terminal). Tailscale-User-* headers are never
+//   (src/console/terminal-devices.ts identifyDevice, as for a machine change). Tailscale-User-* headers are never
 //   read. A token binds to the first node that uses it (src/siri/tokens.ts).
 // - Ten refused tokens from one node in ten minutes lock that node out for fifteen.
 // Refusals made here, before any instance is asked, go to the hub's own siri-audit.jsonl; the instance audits the rest.

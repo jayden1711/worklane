@@ -195,7 +195,7 @@ test('the dashboards setup gives the viewer read of each token and traverse on t
   // Per-person sign-in: no single --user for people; the hub gets the sign-in App's client id and its public URL.
   assert.match(sh, /ExecStart=\/usr\/local\/bin\/worklane dashboard --instance \$1 --service\n/, 'an instance\'s dashboard names no person: roles come from its repo');
   assert.doesNotMatch(sh, /--user/);
-  assert.match(sh, /--hub \$hub_arg --service --client-id \$client_id --public-url \$public_url --signin-dir \$signin_dir\$\{siri:\+ --siri-port 4397\}\$\{hooks:\+ --hooks-port 4396\}(\$\{console_user:\+ --console-user \$console_user\}\$\{console_devices:\+ --console-devices \$console_devices\})?\n/);
+  assert.match(sh, /--hub \$hub_arg --service --client-id \$client_id --public-url \$public_url --signin-dir \$signin_dir\$\{siri:\+ --siri-port 4397\}\$\{hooks:\+ --hooks-port 4396\}\$\{machine_devices:\+ --machine-devices \$machine_devices\}\n/);
   assert.match(sh, /run credentials.sh dashboard-signin first/, 'it refuses to start the hub without the sign-in secrets');
   assert.match(sh, /tailscale serve --bg --https=443 http:\/\/127\.0\.0\.1:4399/, 'tailscale serve forwards the sign-in port');
   assert.doesNotMatch(sh, /tailscale serve --[^\n]*4398/, 'never the break-glass port');

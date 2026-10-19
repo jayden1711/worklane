@@ -11,11 +11,14 @@
 //   difficulty key;
 // - a command's stdin, a worktree's tar stream included (stdinCarriesHidden): only what an agent can't plausibly
 //   write itself (owner, 2026-10-18): the instance id, the hints, and the test patch as a run of STDIN_RUN or more
-//   consecutive added lines. Not the gold patch's lines and not test names or ids: an agent's own correct fix or test
-//   may match those. A piece the task's base tree already holds doesn't count (it is in the container's image anyway).
+//   consecutive added lines, applied or still in diff form (`+`-prefixed lines, LF or CRLF). Not the gold patch's
+//   lines and not test names or ids: an agent's own correct fix or test may match those, nor a run made only of
+//   import lines (an agent's own test file may start with the same imports). A piece the task's base tree already
+//   holds, or the problem statement holds (the id, the hints), doesn't count: the container or the agents have it
+//   anyway.
 // It can't see: compressed or binary content (a gzip member, a .git object pack), other encodings (UTF-16), shorter
-// lines (a changed expected value in an existing test), single test-patch lines or shorter runs on stdin. Those rely
-// on the first wall.
+// lines (a changed expected value in an existing test), single test-patch lines or shorter runs on stdin, a run
+// split across files or reordered, and the gold patch on stdin (owner, 2026-10-18). Those rely on the first wall.
 
 /** One SWE-bench Verified row, as the pinned download writes it (one JSON object per line). */
 export interface TaskRow {
@@ -107,37 +110,88 @@ export const STDIN_RUN = 3;
 /** A run's lines together must hold at least this many non-space characters: three closing brackets are no patch. */
 const RUN_CHARS = 24;
 
-/** The non-blank lines of `text`, trailing space dropped; a NUL (tar padding, a header field) ends a line too. */
-const textLines = (text: string): string[] => text.split(/[\n\0]/).map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+/**
+ * A tar stream as text for the stdin scan, with a NUL before each header block: a file whose content fills its last
+ * 512-byte block exactly, with no trailing newline, would otherwise run its last line into the next file's name.
+ */
+export function tarText(stream: Buffer): string {
+  const parts: Buffer[] = [];
+  let from = 0;
+  for (let at = 512; at + 262 <= stream.length; at += 512) {
+    if (stream.toString('latin1', at + 257, at + 262) !== 'ustar') continue;
+    parts.push(stream.subarray(from, at), Buffer.from([0]));
+    from = at;
+  }
+  parts.push(stream.subarray(from));
+  return Buffer.concat(parts).toString('utf8');
+}
 
-/** Each STDIN_RUN consecutive lines of `lines`, joined: the keys a run is matched on. */
-function windows(lines: readonly string[]): string[] {
+/** `text` cut into lines: at a line end or a NUL (tar padding, a header field). */
+const rawLines = (text: string): string[] => text.split(/[\n\0]/);
+/** The non-blank lines, trailing space (a CR too) dropped; with `plus`, one leading `+` dropped first (a diff's form). */
+const textLines = (raw: readonly string[], plus = false): string[] =>
+  raw.map((l) => (plus && l.startsWith('+') ? l.slice(1) : l).trimEnd()).filter((l) => l.trim() !== '');
+
+/**
+ * Each STDIN_RUN consecutive lines of `lines`, joined: the keys a run is matched on. With `imports` (whether each line
+ * is an import line), a window made only of import lines is left out.
+ */
+function windows(lines: readonly string[], imports?: readonly boolean[]): string[] {
   const out: string[] = [];
   for (let i = 0; i + STDIN_RUN <= lines.length; i++) {
+    if (imports && imports.slice(i, i + STDIN_RUN).every(Boolean)) continue;
     const w = lines.slice(i, i + STDIN_RUN);
     if (w.join('').replace(/\s/g, '').length >= RUN_CHARS) out.push(w.join('\n'));
   }
   return out;
 }
 
+/** An import statement's first line: Python's `import a` / `from a import b` (and an ES module's `import ...`). */
+const IMPORT = /^(import\s+\S|from\s+\S+\s+import\b)/;
+/** Whether an import statement is still open: inside `from a import (` until its `)`, or after a trailing `\`. */
+type ImportOpen = 'paren' | 'slash' | undefined;
+/** Whether `line` is part of an import statement, given what is open above it; and what is open after it. */
+function importStep(line: string, open: ImportOpen): [boolean, ImportOpen] {
+  const t = line.trim();
+  if (open === 'paren') return [true, t.includes(')') ? undefined : 'paren'];
+  if (open !== 'slash' && !IMPORT.test(t)) return [false, undefined];
+  return [true, t.endsWith('\\') ? 'slash' : t.includes('(') && !t.includes(')') ? 'paren' : undefined];
+}
+
 /**
- * The test patch's runs of STDIN_RUN consecutive added lines, blank lines left out: a context or removed line, or a
- * new hunk or file, ends a run.
+ * The test patch's runs of STDIN_RUN consecutive added lines, blank lines left out (a blank context line too: the
+ * tree side drops blank lines, so it doesn't end a run). Any other context or removed line, or a new hunk or file,
+ * ends a run. A window made only of import lines is left out (owner, 2026-10-18): an agent's own test file may well
+ * start with the same imports as a new upstream test file. Whether a line is an import line is read from the new
+ * side of the hunk (context and added lines), so the names inside an open `from a import (` count too.
  */
 function testPatchRuns(patch: string): Set<string> {
   const out = new Set<string>();
   let run: string[] = [];
+  let imports: boolean[] = [];
+  let open: ImportOpen;
   const flush = () => {
-    for (const w of windows(run)) out.add(w);
+    for (const w of windows(run, imports)) out.add(w);
     run = [];
+    imports = [];
   };
-  for (const l of patch.split('\n')) {
-    if (!isAdded(l)) {
-      flush();
+  for (const raw of patch.split('\n')) {
+    const l = raw.trimEnd();
+    if (l === '') continue;
+    const added = isAdded(l);
+    if (!added) flush();
+    if (!added && !l.startsWith(' ')) {
+      // A removed line isn't on the new side; a hunk or file header starts a new one.
+      if (!l.startsWith('-')) open = undefined;
       continue;
     }
-    const line = l.slice(1).trimEnd();
-    if (line.trim() !== '') run.push(line);
+    const line = l.slice(1);
+    if (line.trim() === '') continue;
+    let isImport: boolean;
+    [isImport, open] = importStep(line, open);
+    if (!added) continue;
+    run.push(line);
+    imports.push(isImport);
   }
   flush();
   return out;
@@ -149,10 +203,13 @@ function testPatchRuns(patch: string): Set<string> {
  * counts (owner, 2026-10-18), as UTF-8 text:
  * - the instance id, or the hints, as a substring (at least 8 characters, and not in the problem statement);
  * - the test patch as STDIN_RUN or more consecutive added lines, matched as whole lines in a row (blank lines left
- *   out on both sides): what a driver bug that applied the test patch would carry.
+ *   out on both sides): what a driver bug that applied the test patch would carry. The lines are matched as they
+ *   stand and again with one leading `+` dropped: a driver bug that copied the test patch file itself, as a diff,
+ *   carries them in that form. A window made only of import lines doesn't count.
  * Not the gold patch's lines, nor test names or ids: an agent's correct fix may equal the gold line, and its own
- * regression test may share the upstream test's name. The answer is yes or no, never which field: a refusal relayed
- * to an agent must not tell it which of its lines match the hidden patch.
+ * regression test may share the upstream test's name. A run the base tree holds, in either form, doesn't count. The
+ * answer is yes or no, never which field: a refusal relayed to an agent must not tell it which of its lines match
+ * the hidden patch. `text` and `base` are tar streams as tarText makes them.
  */
 export function stdinCarriesHidden(text: string, row: TaskRow, base: string): boolean {
   for (const v of [row.instance_id, row.hints_text]) {
@@ -162,14 +219,23 @@ export function stdinCarriesHidden(text: string, row: TaskRow, base: string): bo
   const runs = testPatchRuns(row.test_patch);
   if (!runs.size) return false;
   const firsts = new Set([...runs].map((w) => w.split('\n')[0]!));
-  const lines = textLines(text);
-  let inBase: Set<string> | undefined;
-  for (let i = 0; i + STDIN_RUN <= lines.length; i++) {
-    if (!firsts.has(lines[i]!)) continue;
-    const w = lines.slice(i, i + STDIN_RUN).join('\n');
-    if (!runs.has(w)) continue;
-    inBase ??= new Set(windows(textLines(base)));
-    if (!inBase.has(w)) return true;
+  const raw = rawLines(text);
+  let baseWindows: Set<string> | undefined;
+  const inBase = (w: string) => {
+    if (!baseWindows) {
+      const b = rawLines(base);
+      baseWindows = new Set([...windows(textLines(b)), ...windows(textLines(b, true))]);
+    }
+    return baseWindows.has(w);
+  };
+  for (const plus of [false, true]) {
+    if (plus && !raw.some((l) => l.startsWith('+'))) break;
+    const lines = textLines(raw, plus);
+    for (let i = 0; i + STDIN_RUN <= lines.length; i++) {
+      if (!firsts.has(lines[i]!)) continue;
+      const w = lines.slice(i, i + STDIN_RUN).join('\n');
+      if (runs.has(w) && !inBase(w)) return true;
+    }
   }
   return false;
 }
