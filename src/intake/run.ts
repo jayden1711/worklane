@@ -11,11 +11,11 @@ import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE } from '../research.js'
 import { defaultRolePrompt } from '../roles.js';
 import type { Candidate } from './dedupe.js';
 import { INTAKE_SCHEMA } from './triage.js';
+import { INTAKE_DENIED, INTAKE_ROLE, INTAKE_TOOLS } from '../guard/intake.js';
 
-export const INTAKE_ROLE = 'intake';
-export const INTAKE_TOOLS = ['Read', 'Glob', 'Grep'] as const;
-/** Named as disallowed too, so a project's pre-approved tools or settings can't add them back. */
-export const INTAKE_DENIED = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Task', 'WebSearch', 'WebFetch', 'mcp__*'] as const;
+// WHY (#785): the run's tool lists live in src/guard/intake.ts (locked with the guard), so the guard doesn't load this
+// module and its imports. Re-exported for this module's callers.
+export { INTAKE_DENIED, INTAKE_ROLE, INTAKE_TOOLS } from '../guard/intake.js';
 
 /** The intake agent's instructions: kept with the other roles (src/roles.ts), where the instruction evals reach them. */
 export const INTAKE_PROMPT = defaultRolePrompt('intake');
