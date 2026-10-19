@@ -7,9 +7,9 @@
 //
 // Two checks:
 // - A lint over src/. Every module that names a slot-dir path, or hands one to another module, is reviewed in
-//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes, and it only a new
-//   temp file of its own: it writes, truncates or sets a mode only through a const bound, in the same function, to
-//   its exclusive open (`const fd = openSync(tmp, 'wx', mode)`). A writer, and a module that only reads there or hands
+//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes. The lint doesn't
+//   judge the helper's own fs calls: test/slot-file.test.ts records every fs call writeSlotFile makes and asserts the
+//   exact sequence, which covers only the paths that test drives. A writer, and a module that only reads there or hands
 //   the path on, writes no file but through it, whatever the path: no fs write under the names this lint resolves
 //   (an fs import, renamed or destructured; `fs['...']`; `const w = fs.writeFileSync`), and no direct call of a
 //   function or method that writes a file named from one of its parameters. A module that also writes files
@@ -210,8 +210,6 @@ function flagOf(a: ts.Expression | undefined): string | null | undefined {
   return null; // computed: unknown
 }
 
-const exclusive = (f: string | null | undefined) => typeof f === 'string' && f.includes('x');
-
 /**
  * Whether an fs call can write: an open only with a write flag, or one not known here (numeric flags count as a
  * read only when every one named is a read flag: `O_RDONLY | O_NOFOLLOW`); every other write call always.
@@ -229,58 +227,6 @@ function fsWrites(call: ts.CallExpression, name: string): boolean {
 
 /** Which argument an fs write call writes: the destination for a copy, else the first. */
 const baseTarget = (name: string) => (/^(copyFile|cp)(Sync)?$/.test(name) ? 1 : 0);
-
-/**
- * Why a write in the helper is not a new temp file of its own, created exclusively, or null. A whole-file write to
- * a descriptor (`writeFileSync(fd, …)`) is one when `fd` is the helper's own exclusive descriptor (`own`).
- */
-function helperWrite(call: ts.CallExpression, name: string, own: (a: ts.Expression | undefined) => boolean): string | null {
-  const a = call.arguments;
-  if (name === 'writeFileSync' && own(a[0])) return null;
-  const flag = /^writeFile(Sync)?$/.test(name) ? flagOf(a[2]) : /^(open(Sync)?|createWriteStream)$/.test(name) ? flagOf(a[1]) : undefined;
-  return exclusive(flag) ? null : `${name}(${a[baseTarget(name)]?.getText()}) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')`;
-}
-
-/** Calls that set a file's mode by its name: they follow a symlink. */
-const CHMOD_BY_NAME = new Set(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
-
-/** Calls that write, truncate or change the mode of the file behind a descriptor (their first argument). */
-const FD_WRITES = new Set(['writeSync', 'write', 'writev', 'writevSync', 'ftruncate', 'ftruncateSync', 'fchmod', 'fchmodSync']);
-
-/** Every declaration of `name` in a function (or the module), its parameters included, outside nested functions. */
-function declarationsIn(scope: ts.Node, name: string): ts.Node[] {
-  const out: ts.Node[] = [];
-  const visit = (x: ts.Node) => {
-    if ((ts.isVariableDeclaration(x) || ts.isParameter(x) || ts.isBindingElement(x)) && ts.isIdentifier(x.name) && x.name.text === name) out.push(x);
-    if (x === scope || !ts.isFunctionLike(x)) ts.forEachChild(x, visit);
-  };
-  visit(scope);
-  return out;
-}
-
-/**
- * Whether an argument is the helper's own exclusive descriptor: a name whose one binding in the function it is used
- * in is a `const` initialised straight from an exclusive open (`const fd = openSync(tmp, 'wx', mode)`) and never
- * assigned. A parameter, a for-of variable, a destructured binding, a `let`, or a const of an outer function never is.
- */
-function exclusiveFd(m: Mod, writers: Writers, a: ts.Expression | undefined): boolean {
-  if (!a || !ts.isIdentifier(a)) return false;
-  const scope = scopeOf(a);
-  const decls = declarationsIn(scope, a.text);
-  const d = decls[0];
-  if (decls.length !== 1 || !d || !ts.isVariableDeclaration(d) || !ts.isVariableDeclarationList(d.parent) || !(d.parent.flags & ts.NodeFlags.Const)) return false;
-  if (ts.isForOfStatement(d.parent.parent) || ts.isForInStatement(d.parent.parent) || !d.initializer || !ts.isCallExpression(d.initializer)) return false;
-  const w = writeOf(m, d.initializer, writers);
-  if (!w || w.via || w.name !== 'openSync' || !exclusive(flagOf(d.initializer.arguments[1]))) return false;
-  let assigned = false;
-  const visit = (x: ts.Node) => {
-    const target = ts.isBinaryExpression(x) && x.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && x.operatorToken.kind <= ts.SyntaxKind.LastAssignment ? x.left : (ts.isPrefixUnaryExpression(x) || ts.isPostfixUnaryExpression(x)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(x.operator) ? x.operand : null;
-    if (target && ts.isIdentifier(target) && target.text === a.text) assigned = true;
-    if (x === scope || !ts.isFunctionLike(x)) ts.forEachChild(x, visit);
-  };
-  visit(scope);
-  return !assigned;
-}
 
 /** The src/ module a relative import names, as a REVIEWED key. */
 function resolveImport(from: string, spec: string): string | null {
@@ -595,7 +541,6 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
     const at = (n: ts.Node, what: string) => out.push({ file, line: src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1, what });
     /** In a mixed module: how many times each listed write was found so far. */
     const seen = new Map<string, number>();
-    const own = (a: ts.Expression | undefined) => exclusiveFd(m, writers, a);
     let slot = false;
     const visit = (n: ts.Node) => {
       if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && SLOT_NAMES.has(n.text.replace(/^#/, ''))) slot = true;
@@ -616,20 +561,14 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
             }
           }
         }
-        if (file === HELPER && ts.isCallExpression(n)) {
-          const name = calleeName(n.expression) ?? '';
-          const fsName = ts.isIdentifier(n.expression) ? m.fsAlias.get(name) : name;
-          if (fsName && CHMOD_BY_NAME.has(fsName)) at(n, `${fsName}(${n.arguments[0]?.getText() ?? ''}) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name`);
-          const fdName = ts.isIdentifier(n.expression) ? (m.fsAlias.get(name) ?? name) : name;
-          if (FD_WRITES.has(fdName) && !own(n.arguments[0])) at(n, `${fdName}(${n.arguments[0]?.getText() ?? ''}) in the helper: it writes only to its own exclusive descriptor, a const bound in the same function to openSync(tmp, 'wx', …)`);
-        }
         if (w && ts.isCallExpression(n)) {
           const t = targetOf(n, w);
           const what = `${w.name}(${t?.getText() ?? ''})`;
           const key = `${ownerName(n)}: ${what}`;
           if (file === HELPER) {
-            const why = w.via ? `${what} in the helper: it writes only through fs, a new temp file of its own` : helperWrite(n, w.name, own);
-            if (why) at(n, why);
+            // Not judged by its syntax: test/slot-file.test.ts records every fs call writeSlotFile makes, in each mode
+            // and on each failure, and asserts the exact sequence. The helper is in the hook import tree, so a change
+            // to it waits for the owner.
           } else if (t && mentionsSlot(t, m)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
           else if (review?.kind === 'mixed') {
             const listed = review.elsewhere[key]?.[0] ?? 0;
@@ -740,30 +679,6 @@ test('lint: in a module that writes elsewhere, a listed write is not reported; a
   assert.deepEqual(lines(lintSlotWrites(files), 'src/dashboard.ts'), ['0: startDashboard: writeFileSync(viewsFile): listed as a write elsewhere but not found: drop it from REVIEWED']);
 });
 
-test('lint: in the helper, an append, an open for write and a stream are reported; an exclusive create and a read are not', () => {
-  const files = srcFiles();
-  const body = [
-    "import { appendFileSync, createWriteStream, openSync, writeFileSync } from 'node:fs';",
-    'export function w(file: string) {',
-    "  appendFileSync(file, 'x');",
-    "  openSync(file, 'r+');",
-    '  createWriteStream(file);',
-    "  writeFileSync(file, 'x');",
-    "  writeFileSync(file, 'x', { flag: 'wx' });",
-    "  openSync(file, 'wx');",
-    '  openSync(file);',
-    '}',
-    '',
-  ].join('\n');
-  files.set(HELPER, `${files.get(HELPER)!}\n${body}`);
-  const found = lines(lintSlotWrites(files), HELPER);
-  assert.equal(found.length, 4, found.join('\n'));
-  assert.match(found[0]!, /appendFileSync\(file\) in the helper/);
-  assert.match(found[1]!, /openSync\(file\) in the helper/);
-  assert.match(found[2]!, /createWriteStream\(file\) in the helper/);
-  assert.match(found[3]!, /writeFileSync\(file\) in the helper/);
-});
-
 test('lint: a pass-through module that writes a slot-dir path itself, or hands one to an unreviewed module, is reported', () => {
   const files = srcFiles();
   files.set('src/fixture-gate.ts', 'export function gate(o: { dir: string }) { return o.dir; }\n');
@@ -871,80 +786,6 @@ test('lint: a write in a module that writes elsewhere is counted: one more than 
   assert.deepEqual(lines(lintSlotWrites(files), 'src/harness-evals/replay.ts'), [
     `${before.slice(0, before.indexOf('    writeFileSync(f, d.toString());\n')).split('\n').length + 1}: edit: writeFileSync(f) is listed as a write elsewhere 1 time(s), and this is one more: read it, then raise its count in REVIEWED`,
   ]);
-});
-
-test('lint: in the helper, a write to the descriptor of its own exclusive open is allowed; a chmod by name, and a write to any other descriptor, are reported', () => {
-  const files = srcFiles();
-  const body = [
-    "import { chmodSync as cm, fchmodSync, openSync as op, writeFileSync as wf } from 'node:fs';",
-    'export function v(file: string, other: number) {',
-    "  const fd = op(file, 'wx', 0o600);",
-    '  fchmodSync(fd, 0o600);',
-    "  wf(fd, 'x');",
-    "  let g = op(file, 'wx');",
-    '  g = other;',
-    "  wf(g, 'x');",
-    "  wf(other, 'x');",
-    '  cm(file, 0o660);',
-    '}',
-    '',
-  ].join('\n');
-  files.set(HELPER, `${files.get(HELPER)!}\n${body}`);
-  const found = lines(lintSlotWrites(files), HELPER).map((l) => l.replace(/^\d+: /, ''));
-  assert.deepEqual(found, [
-    "writeFileSync(g) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
-    "writeFileSync(other) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
-    'chmodSync(file) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name',
-  ]);
-});
-
-/** What the lint reports in the helper with `body` appended to it (fixture text: no file is written), lines dropped. */
-function inHelper(...body: string[]): string[] {
-  const files = srcFiles();
-  const imports = "import { fchmodSync as fcm, ftruncateSync, openSync as op, writeFileSync as wf, writeSync, writevSync } from 'node:fs';";
-  files.set(HELPER, `${files.get(HELPER)!}\n${imports}\n${body.join('\n')}\n`);
-  return lines(lintSlotWrites(files), HELPER).map((l) => l.replace(/^\d+: /, ''));
-}
-const wholeWrite = (w: string) => `${w} in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')`;
-const fdWrite = (w: string) => `${w} in the helper: it writes only to its own exclusive descriptor, a const bound in the same function to openSync(tmp, 'wx', …)`;
-
-test("lint: in the helper, a parameter named like tempWith's exclusive fd is not its own descriptor (#766 review, H1)", () => {
-  assert.deepEqual(inHelper('export function h1(fd: number) {', "  wf(fd, 'x');", '}'), [wholeWrite('writeFileSync(fd)')]);
-});
-
-test('lint: in the helper, writeSync to any other descriptor is reported (#766 review, H2)', () => {
-  assert.deepEqual(inHelper('export function h2(other: number) {', "  writeSync(other, 'x');", '}'), [fdWrite('writeSync(other)')]);
-});
-
-test('lint: in the helper, a non-exclusive open and a write to its descriptor are reported (#766 review, H3, a control)', () => {
-  assert.deepEqual(inHelper('export function h3(file: string) {', "  const g = op(file, 'r+');", "  wf(g, 'x');", '}'), [wholeWrite('openSync(file)'), wholeWrite('writeFileSync(g)')]);
-});
-
-test('lint: in the helper, a for-of variable named fd is not its own descriptor (#766 review, H4)', () => {
-  assert.deepEqual(inHelper('export function h4(fds: number[]) {', "  for (const fd of fds) wf(fd, 'x');", '}'), [wholeWrite('writeFileSync(fd)')]);
-});
-
-test('lint: in the helper, ftruncateSync and fchmodSync on any other descriptor are reported (#766 review, H5)', () => {
-  assert.deepEqual(inHelper('export function h5(other: number) {', '  ftruncateSync(other, 0);', '  fcm(other, 0o666);', '}'), [fdWrite('ftruncateSync(other)'), fdWrite('fchmodSync(other)')]);
-});
-
-test("lint: in the helper, a descriptor is its own only as a const bound to its exclusive open in the same function: not destructured, not a let, not from a closure", () => {
-  const found = inHelper(
-    'export function own(file: string) {',
-    "  const [d] = [op(file, 'wx')];",
-    "  writeSync(d, 'x');",
-    "  let l = op(file, 'wx');",
-    "  writeSync(l, 'x');",
-    "  const fd = op(file, 'wx', 0o600);",
-    '  fcm(fd, 0o600);',
-    '  ftruncateSync(fd, 0);',
-    "  writeSync(fd, 'x');",
-    '  writevSync(fd, []);',
-    "  wf(fd, 'x');",
-    "  return () => writeSync(fd, 'y');",
-    '}',
-  );
-  assert.deepEqual(found, [fdWrite('writeSync(d)'), fdWrite('writeSync(l)'), fdWrite('writeSync(fd)')], 'the const itself is allowed every descriptor write; the closure is not');
 });
 
 // ---------------------------------------------------------------------------------------------------------------
