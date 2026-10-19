@@ -264,9 +264,9 @@ test('project commands (checks, gates, setup, full runs) run as the agent user w
 
 // A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password), and
 // that can start a project command's sandbox (#713: bubblewrap, which machine.sh installs; ci-slow's real-users job
-// runs a check that runs git there).
+// runs a check that runs git there, and runs this test with PROJECT_SANDBOX_REQUIRED=1, where it can't skip for it).
 const canSudoNobody = process.platform !== 'win32' && spawnSync('sudo', ['-n', '-u', 'nobody', 'true']).status === 0;
-const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || spawnSync('sudo', ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
+const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync('sudo', ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
 
 test('regression: a check that runs git, run as the agent user in the coordinator\'s checkout, gets git\'s answer (not "dubious ownership")', { skip: !nobodySandbox && 'needs passwordless sudo to another user that can start bubblewrap' }, () => {
   // The checkout belongs to the coordinator user; checks run as the agent user. Git refuses a repository owned by
