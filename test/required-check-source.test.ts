@@ -8,12 +8,12 @@ import { join, relative } from 'node:path';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import type { CommitCheck } from '../src/backlog/types.js';
 import { checkSourceDoctor } from '../src/check-pin-block.js';
-import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin } from '../src/check-source.js';
+import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, withTestRuns, type CheckPin, type JudgedChecks } from '../src/check-source.js';
 import { ProjectConfig } from '../src/config/schema.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
-import { readiness } from '../src/pr-watch.js';
+import { readiness, requiredOutcomes } from '../src/pr-watch.js';
 import { asJudged, repoRoot } from './helpers.js';
-import { JUDGED_CASTS_ALLOWED, judgedCasts, RAW_READS_ALLOWED, rawCheckReads, testImports, typeErrors } from './raw-check-reads.js';
+import { JUDGED_CASTS_ALLOWED, judgedCasts, makerUses, RAW_READS_ALLOWED, rawCheckReads, testImports, typeErrors } from './raw-check-reads.js';
 
 const HEAD = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -132,6 +132,65 @@ test("owner rule: a pinned check is its source's latest run on the head; any non
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'pending' }] }), pin)), ['test pending']);
   // Every one passing: it passes.
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }, { id: 1, name: 'test', app: SPOOF_APP, suite: 10 }], statuses: [{ context: 'test', state: 'success' }] }), pin)), ['test pass']);
+});
+
+test('an Actions-App pin never lets one workflow file supersede another: every file\'s latest run must pass', async () => {
+  // GitHub's rules pin `test` to the Actions App (15368): ci.yml (run 700, suite 70) and a PR-added evil.yml (run 710, suite 71).
+  const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test', integration_id: ACTIONS }] } }];
+  const files = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/evil.yml')];
+  const verdict = async (runs: Run[]) => outcomes(await judged(github({ runs, workflowRuns: files, rules }), {}));
+  // ci.yml failed, evil.yml's later run passed: not ready.
+  assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test fail']);
+  // ci.yml still running, evil.yml passed: not ready.
+  assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70, status: 'in_progress', conclusion: null }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pending']);
+  // A workflow added in the PR that fails beside ci.yml's pass: not ready either.
+  assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }]), ['test fail']);
+  // Both files pass: ready.
+  assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+});
+
+test('"latest" fails closed: a re-run of an older workflow run that failed after a newer run passed blocks; the owner\'s cases stay', async () => {
+  const wfPin = { test: { workflow: '.github/workflows/ci.yml' } };
+  const twoRuns = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml')];
+  const verdict = async (runs: Run[]) => outcomes(await judged(github({ runs, workflowRuns: twoRuns }), wfPin));
+  // Run 710 (suite 71) passed with check run 20; then run 700 (suite 70) was re-run, and its newest attempt (check run 30) failed.
+  assert.deepEqual(await verdict([{ id: 20, name: 'test', app: ACTIONS, suite: 71 }, { id: 30, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
+  // The owner's cases: cancelled (or failed) in run 700, then passed in the later run 710, each newer.
+  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+});
+
+test('the brand holds at run time: a cast, an any, a ts-expect-error value or a mutated judged array throws (fails closed)', async () => {
+  const raw: CommitCheck[] = [{ name: 'test', source: 'check_run', status: 'completed', conclusion: 'success', id: 1, app: CI_APP }];
+  const ok = asJudged(raw);
+  assert.equal(readiness({ required: ['test'], checks: ok, head: HEAD, evaluated: approved }).ready, true);
+  const notMade = /checks to judge must come from PinnedChecks\.of/;
+  assert.throws(() => readiness({ required: ['test'], checks: raw as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'a cast');
+  assert.throws(() => requiredOutcomes(['test'], JSON.parse(JSON.stringify(ok))), notMade, 'an any (JSON.parse)');
+  // @ts-expect-error a raw array where JudgedChecks is wanted
+  assert.throws(() => requiredOutcomes(['test'], raw), notMade, 'a ts-expect-error value');
+  assert.throws(() => readiness({ required: ['test'], checks: Object.assign([...raw], ok) as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'Object.assign onto other data');
+  assert.throws(() => readiness({ required: ['test'], checks: [...ok] as unknown as JudgedChecks, head: HEAD, evaluated: approved }), notMade, 'a copy of a judged array');
+  assert.throws(() => withTestRuns(raw as unknown as JudgedChecks, new Set(), []), notMade, 'withTestRuns over unjudged data');
+  // A judged array and its checks are frozen: pushing onto it, or changing a check, throws.
+  assert.throws(() => (ok as unknown as CommitCheck[]).push(raw[0]!), TypeError);
+  assert.throws(() => Array.prototype.push.apply(ok as unknown as CommitCheck[], raw), TypeError);
+  assert.throws(() => {
+    (ok[0] as CommitCheck).conclusion = 'failure';
+  }, TypeError);
+});
+
+test('the two makers are used only where MAKERS_ALLOWED says: a stray withTestRuns or new PinnedChecks in src/ is flagged (fixtures, and src/ itself)', () => {
+  const prelude = "import { PinnedChecks, withTestRuns, type JudgedChecks } from './check-source.js';\nimport type { CommitCheck } from './backlog/types.js';\n";
+  const e6 = { 'src/zz-e6.ts': `${prelude}export const f = (judged: JudgedChecks, other: CommitCheck[]) => withTestRuns(judged, new Set(), other);\n` };
+  const e7 = { 'src/zz-e7.ts': `${prelude}export const f = (other: CommitCheck[]) => new PinnedChecks({ backlog: { checks: async () => other }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('a');\n` };
+  const alias = { 'src/zz-alias.ts': "import * as cs from './check-source.js';\nexport const w = cs.withTestRuns;\n" };
+  const keyed = { 'src/zz-keyed.ts': "import * as cs from './check-source.js';\nconst k = 'withTest' + 'Runs';\nexport const w = (cs as Record<string, unknown>)[k];\n" };
+  const dynamic = { 'src/zz-dynamic.ts': "const m = './check-' + 'source.js';\nexport const w = async () => ((await import(m)) as Record<string, unknown>)['withTestRuns'];\n" };
+  for (const files of [e6, e7, alias, keyed, dynamic]) assert.ok(makerUses(files).length > 0, Object.keys(files)[0]);
+  const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
+  const src = Object.fromEntries(files(join(repoRoot, 'src')).map((p) => [relative(repoRoot, p).split('\\').join('/'), readFileSync(p, 'utf8')]));
+  assert.deepEqual(makerUses(src), []);
 });
 
 test('option (c) unchanged: an unpinned check is judged exactly by name, over every subset and order of its checks', async () => {
