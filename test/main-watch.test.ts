@@ -190,7 +190,8 @@ test('main watch (#727): a merge whose required checks came from another App or 
   const job = (id: number) => ({ id, url: `https://github.com/${repo}/actions/runs/7000/job/${id}` });
   s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) })]);
   s.gh.statuses.set(m.head, [{ context: 'deploy', state: 'success', createdAt: iso(T - 60_000) }]);
-  s.gh.sources.set(m.head, { '70': { run: 7000, path: '.github/workflows/evil.yml', repo, sha: m.head } });
+  const runPage = `https://github.com/${repo}/actions/runs/7000`;
+  s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/evil.yml', repo, sha: m.head } });
   await run(s.gh, s.watch, 8);
   assert.equal(s.unaccounted.length, 1);
   assert.match(s.unaccounted[0]!.reason, /ci missing, lint missing, deploy missing/);
@@ -201,7 +202,7 @@ test('main watch (#727): a merge whose required checks came from another App or 
   a.gh.pr(8, n.merge, n.head, iso(T), 'example-collaborator');
   a.gh.roles.set('example-collaborator', 'writer');
   a.gh.runs.set(n.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
-  a.gh.sources.set(n.head, { '70': { run: 7000, path: '.github/workflows/ci.yml', repo, sha: n.head } });
+  a.gh.sources.set(n.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: n.head } });
   await run(a.gh, a.watch, 8);
   assert.deepEqual(a.unaccounted, []);
   assert.deepEqual(a.checked, [{ sha: n.merge, how: 'person', number: 8 }]);
@@ -214,7 +215,7 @@ test('main watch (#727): a merge whose required checks came from another App or 
   api.gh.pr(10, q.merge, q.head, iso(T), 'example-collaborator');
   api.gh.roles.set('example-collaborator', 'writer');
   api.gh.runs.set(q.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, id: 702, url: `https://github.com/${repo}/runs/702` }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
-  api.gh.sources.set(q.head, { '70': { run: 7000, path: '.github/workflows/ci.yml', repo, sha: q.head } });
+  api.gh.sources.set(q.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: q.head } });
   await run(api.gh, api.watch, 8);
   assert.match(api.unaccounted[0]?.reason ?? '', /: lint missing$/);
 });
@@ -228,6 +229,20 @@ test("main watch (#727): pinning never turns a check that wasn't a pass into one
   s.gh.runs.set(m.head, [ci({ app: 1111, suite: 1 }), ci({ app: 2222, suite: 2, conclusion: 'failure', startedAt: iso(T - 8 * 60_000) })]);
   await run(s.gh, s.watch, 8);
   assert.match(s.unaccounted[0]?.reason ?? '', /: ci fail$/);
+});
+
+test("main watch (#727): while GitHub's rules have never answered, a merge waits to be judged: never by name, never unaccounted", async () => {
+  let rules: Record<string, number> | null = null;
+  const s = await started({ pins: { sources: () => ({}), github: async () => rules, repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 })]);
+  await run(s.gh, s.watch, 8);
+  assert.deepEqual([s.checked, s.unaccounted], [[], []], 'not judged yet');
+  rules = { ci: 1111 };
+  await run(s.gh, s.watch, 8);
+  assert.match(s.unaccounted[0]?.reason ?? '', /: ci missing$/, "judged once GitHub answers: its App pin applies");
 });
 
 test('main watch (#727): with no pin recorded and none named by GitHub, a check is judged by name, exactly as before pins', async () => {

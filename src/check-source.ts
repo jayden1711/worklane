@@ -36,9 +36,11 @@ export function withTestRuns(github: JudgedChecks, names: ReadonlySet<string>, l
 export type CheckPin = { app_id: number } | { workflow: string };
 /** Each required check's App as GitHub's branch protection or ruleset requires it (a name absent: any source). */
 export type GithubCheckApps = Record<string, number>;
-/** The Actions workflow run behind a check run's suite: its id, its file, its repo and the commit it ran for. */
+/** The Actions workflow run behind a check run's suite: its id and page, its file, its repo and the commit it ran for. */
 export interface WorkflowSource {
   run: number;
+  /** The run's own page (html_url): each of its jobs' pages is this plus /job/<id>. */
+  url: string;
   path: string;
   repo: string;
   sha: string;
@@ -51,14 +53,17 @@ export function pinOf(name: string, configured: Record<string, CheckPin>, github
 }
 
 /**
- * Is `url` (a check run's html_url) the page of job `id` in workflow run `run` of `repo`? A job of an Actions run has
- * exactly that page (measured: .../actions/runs/39197227793/job/117883963166 for check run 117883963166). A check run
- * made through the API into an Actions suite has some other page (guess: /<repo>/runs/<id>; not measured).
+ * Is `url` (a check run's html_url) the page of job `id` in workflow run `w`: the run's own page plus /job/<id>, on
+ * the same host? A job of an Actions run has exactly that page (measured: .../actions/runs/39197227793/job/117883963166
+ * for check run 117883963166). A check run made through the API into an Actions suite has some other page (guess:
+ * /<repo>/runs/<id>; not measured).
  */
-export function isJobOfRun(url: string | undefined, id: number | undefined, repo: string, run: number): boolean {
+export function isJobOfRun(url: string | undefined, id: number | undefined, w: Pick<WorkflowSource, 'run' | 'url'>): boolean {
   if (!url || id === undefined) return false;
   try {
-    return new URL(url).pathname.toLowerCase() === `/${repo}/actions/runs/${run}/job/${id}`.toLowerCase();
+    const page = new URL(url);
+    const run = new URL(w.url);
+    return page.protocol === 'https:' && page.host === run.host && page.pathname.toLowerCase() === `${run.pathname.replace(/\/+$/, '')}/job/${id}`.toLowerCase() && run.pathname.endsWith(`/actions/runs/${w.run}`);
   } catch {
     return false;
   }
@@ -72,7 +77,7 @@ export function fromPinnedSource(c: Pick<CommitCheck, 'source' | 'app' | 'workfl
   if (c.source !== 'check_run') return false;
   if ('app_id' in pin) return c.app === pin.app_id;
   const w = c.workflow;
-  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(c.url, c.id, w.repo, w.run);
+  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(c.url, c.id, w);
 }
 
 /** A name's check as judged by name (pr-watch.ts requiredOutcomes): its first check run, else its first status. */
@@ -85,12 +90,13 @@ const passed = (c: CommitCheck) => c.status === 'completed' && c.conclusion === 
  * judged by name alone (any source) doesn't, that check's state stands instead, without its id or link (it isn't the
  * pinned run): pinning never turns a check that was not a pass into one.
  */
-export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Record<string, CheckPin>; github: GithubCheckApps; repo: string; sha: string }): CommitCheck[] {
+export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Record<string, CheckPin>; github: GithubCheckApps | null; repo: string; sha: string }): CommitCheck[] {
   const out: CommitCheck[] = [];
   for (const name of new Set(checks.map((c) => c.name))) {
-    const pin = pinOf(name, o.configured, o.github);
+    const pin = pinOf(name, o.configured, o.github ?? {});
     if (!pin) {
-      out.push(...checks.filter((c) => c.name === name));
+      // GitHub's rules unknown (never answered): the name may be pinned there, so it is missing, never by name.
+      if (o.github !== null) out.push(...checks.filter((c) => c.name === name));
       continue;
     }
     const fromPin = byName(
@@ -174,16 +180,20 @@ export class PinnedChecks {
     return judged(pinnedChecks(all, { configured: this.d.configured(), github: await this.githubApps(), repo: this.d.repo(), sha }));
   }
 
-  /** GitHub's App per required check; on an error the last answer, or none (then only config.yaml's pins count). */
-  async githubApps(): Promise<GithubCheckApps> {
+  /**
+   * GitHub's App per required check; on an error the last answer. Null while GitHub has never answered: then a check
+   * config.yaml doesn't pin is unknown, not unpinned, and counts as missing until it does (fail closed).
+   */
+  async githubApps(): Promise<GithubCheckApps | null> {
+    if (!this.d.backlog.checkApps) return {};
     const now = (this.d.now ?? Date.now)();
-    if (this.d.backlog.checkApps && (!this.apps || now - this.apps.at >= CHECK_APPS_TTL_MS)) {
+    if (!this.apps || now - this.apps.at >= CHECK_APPS_TTL_MS) {
       try {
         this.apps = { at: now, apps: await this.d.backlog.checkApps(this.d.branch()) };
       } catch {
         // kept: the last answer, asked again next time
       }
     }
-    return this.apps?.apps ?? {};
+    return this.apps?.apps ?? null;
   }
 }

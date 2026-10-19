@@ -556,7 +556,7 @@ export interface MainWatchDeps {
    * #727: where checks come from GitHub, each must come from its pinned source: the loaded config's pins (the fallback,
    * as for `required`), the Apps GitHub's protection or ruleset requires, and the repo. Absent: no GitHub, names match.
    */
-  pins?: { sources: () => Record<string, CheckPin>; github: () => Promise<GithubCheckApps>; repo: string };
+  pins?: { sources: () => Record<string, CheckPin>; github: () => Promise<GithubCheckApps | null>; repo: string };
   /** Why there is nothing to judge commits by, when the config says (No CI, src/ci-none.ts); null: the plain reason. */
   offWhy?: () => string | null;
   api: MainWatchApi;
@@ -760,7 +760,11 @@ export class MainWatch {
     const { required: judgedBy, sources, note } = this.judgedBy;
     // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
     const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
-    const pins = this.d.pins ? { pins: { configured: sources, github: await this.d.pins.github(), repo: this.d.pins.repo } } : {};
+    const github = this.d.pins ? await this.d.pins.github() : null;
+    // #727: GitHub's rules never answered: which checks they pin is unknown, so the commit waits to be judged (never
+    // judged by name meanwhile, and never unaccounted for a read that failed).
+    if (this.d.pins && github === null) return;
+    const pins = this.d.pins && github ? { pins: { configured: sources, github, repo: this.d.pins.repo } } : {};
     const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {

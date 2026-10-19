@@ -256,7 +256,7 @@ export class GitHubBacklog implements Backlog {
 
   /** Keeps each Actions workflow run for `sha` by its check suite (one page of 100); none when Actions can't be read. */
   private async workflowRuns(sha: string): Promise<void> {
-    let r: { workflow_runs: { id?: number; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] };
+    let r: { workflow_runs: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] };
     try {
       r = await this.req('GET', `/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
     } catch (e) {
@@ -266,8 +266,8 @@ export class GitHubBacklog implements Backlog {
     }
     if (this.suiteRuns.size > 5000) this.suiteRuns.clear();
     for (const w of r.workflow_runs) {
-      if (typeof w.id === 'number' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') {
-        this.suiteRuns.set(w.check_suite_id, { run: w.id, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') {
+        this.suiteRuns.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
       }
     }
   }
