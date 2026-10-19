@@ -49,6 +49,12 @@
 #     run is going. It builds as a throwaway unprivileged user (systemd DynamicUser) with
 #     `npm ci --ignore-scripts`; root only copies the result. It restarts the worklane-*.service units and
 #     rolls back if any isn't active and steady within 2 minutes.
+#     On the release channel only, once a release's install is healthy, it replaces itself with that release's
+#     updater, read from the signed tag it verified, when that release is newer than its own recorded version
+#     (/var/lib/worklane/updater.json). The one it replaces is kept as /usr/local/libexec/worklane-update.prev; back by
+#     hand: install -o root -g root -m 0755 /usr/local/libexec/worklane-update.prev /usr/local/libexec/worklane-update
+#     (it then replaces itself again only after this script is rerun). Off: as root, touch
+#     /etc/worklane/updater-no-self-update. This script never puts its updater over a newer one the updater took that way.
 #   - /etc/worklane/updates.json (root:root 0644): enabled (false), channel ("release"), allowed_signers, the repo
 #     and branch to follow (this checkout's origin, main), and the required checks (each --check, or the defaults
 #     below). An existing file keeps its values, its channel included; --add-check adds checks to it.
@@ -121,14 +127,23 @@ put_unit() {
 
 say "the updater, root-owned"
 src="$(dirname "$0")/../machine/worklane-update.cjs"
-# The temp name ends in .cjs: node --check refuses an unknown extension such as .tmp.
-tmp=/usr/local/libexec/.worklane-update.tmp.cjs
+# Never over a newer updater it took from a signed release itself (exit 3: kept); the one it replaces is kept as
+# worklane-update.prev, for a manual rollback (scripts/machine/worklane-update.cjs setupBefore, #760).
+updater_steps="$(cd "$(dirname "$0")/../machine" && pwd)/worklane-update.cjs"
 install -d -o root -g root -m 0755 /usr/local/libexec
+self_step=0
+node -e 'process.exitCode = require(process.argv[1]).setupBefore()' "$updater_steps" || self_step=$?
+[ "$self_step" -eq 0 ] || [ "$self_step" -eq 3 ] || { echo "couldn't check the installed updater; nothing installed" >&2; exit 1; }
+if [ "$self_step" -eq 0 ]; then
+# (Not indented: test/setup-install-check.test.ts reads these lines.) The temp name ends in .cjs: node --check refuses
+# an unknown extension such as .tmp.
+tmp=/usr/local/libexec/.worklane-update.tmp.cjs
 rm -f /usr/local/libexec/.worklane-update.tmp   # left by an earlier run that failed on that name
 install -o root -g root -m 0755 "$src" "$tmp"
 node --check "$tmp"
 mv -f "$tmp" /usr/local/libexec/worklane-update
 echo "installed /usr/local/libexec/worklane-update"
+fi
 
 say "its config (off) and log"
 if [ ! -f /etc/worklane/updates.json ]; then
@@ -146,6 +161,9 @@ install -d -o root -g root -m 0755 /var/lib/worklane
 [ -f /var/lib/worklane/updates.jsonl ] || install -o root -g root -m 0644 /dev/null /var/lib/worklane/updates.jsonl
 chown root:root /var/lib/worklane/updates.jsonl
 chmod 0644 /var/lib/worklane/updates.jsonl
+# The installed updater's version and sha256 (/var/lib/worklane/updater.json): what it compares a release's with
+# before it replaces itself, so it never takes an older one.
+[ "$self_step" -ne 0 ] || node -e 'require(process.argv[1]).setupRecord()' "$updater_steps"
 
 say "the timer: every 10 minutes (the updater does nothing while updates are off)"
 put_unit worklane-update.service "[Unit]

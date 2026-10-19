@@ -155,6 +155,8 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/update-verdicts.json', why: "the updater's verdicts on engine commits" },
   { at: '/var/lib/worklane/signers-state.json', why: "the updater's record of the signers file's hash" },
   { at: '/var/lib/worklane/verify.git', why: "the updater's verification clone of the engine" },
+  { at: '/var/lib/worklane/updater.json', why: "the installed updater's release version and sha256: no instance" },
+  { at: '/etc/worklane/updater-no-self-update', why: "root's switch that turns the updater's self-update off: no instance" },
   { at: '/var/lib/worklane/tailscale', why: "tailscale.sh's steps for the hub: the asking coordinator's login link only while `up` waits" },
   { at: '/var/lib/worklane/renames', why: "instance-rename.sh's progress and the parked coordinator unit of a rename under way (root's 0700)" },
   { at: '/var/lib/worklane/removed', why: "instance-remove.sh's archive of removed instances' history (root's 0700)" },
