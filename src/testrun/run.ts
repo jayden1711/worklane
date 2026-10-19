@@ -9,6 +9,7 @@ import { redact, redactString } from '../events/redact.js';
 import { holdFlock, type HeldFlock } from '../os/index.js';
 import { BRAND } from '../brand.js';
 import type { Lock } from '../locks.js';
+import { slotFileName, type SlotPathLike } from '../slot-file.js';
 import { recordable } from '../test-durations.js';
 import { cacheDirs } from './cache.js';
 import type { TestRunConfig, TestRunTier } from './config.js';
@@ -104,7 +105,7 @@ export interface TestRunDeps {
   /** Where each tier's full log goes: the instance's private state. */
   logDir: string;
   lockPath?: string;
-  slotsDir?: string;
+  slotsDir?: SlotPathLike;
   slotPollMs?: number;
   /** Taking the lock (tests inject one). */
   lock?: (path: string, signal?: AbortSignal) => Promise<HeldFlock>;
@@ -251,7 +252,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     // INVARIANT: a run that may use the GPU says so before any command of it runs (./gpu.ts: never run again by itself
     // once cut off). A file that can't be read counts as on.
     gpuRun = tiers.some((t) => t.gpu) && !!d.gpuOptIn && gpuPlanned(d.gpuOptIn());
-    emit('testrun.started', { id, slot: slot.path.split(/[\\/]/).pop()!.replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom), ...(gpuRun ? { gpu: 'planned' as const } : {}) });
+    emit('testrun.started', { id, slot: slotFileName(slot.path).replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom), ...(gpuRun ? { gpu: 'planned' as const } : {}) });
     created = true;
     stage = 'create';
     await createWorkspace(d.host, d.repo, req.sha, id, workspaceExclude(tiers, d.sparseExclude));

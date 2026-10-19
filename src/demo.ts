@@ -115,6 +115,7 @@ export async function seedDemo(dir: string): Promise<{ root: string; eventsDb: s
   const log = new EventLog(eventsDb);
   const run = spawnSync('node', ['--test', '--test-reporter=spec'], { cwd: root, encoding: 'utf8', env: childEnv() });
   recordBaseline(log, 'demo', git(root, 'rev-parse', 'HEAD'), run.status, `${run.stdout}${run.stderr}`, cfg.tests.failures);
+  // The demo's own slot dir, in its state dir: a plain path (src/slot-file.ts takes one), not the machine's slot dir.
   const slots = join(state, 'demo-slots');
   mkdirSync(slots, { recursive: true });
   writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));

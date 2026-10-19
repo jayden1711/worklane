@@ -64,6 +64,20 @@ for (const [what, file, text, msg] of blocked) {
   });
 }
 
+test('push gate scans a file the pushed .gitattributes marks -diff or binary, even one deleted again before the push (#693)', { skip }, () => {
+  for (const mark of ['-diff', 'binary']) {
+    const r = repo();
+    r.commit('.gitattributes', `*.txt ${mark}\n`, 'attributes');
+    r.commit('notes.txt', 'deployed by secretproject\n', 'add notes');
+    r.git('rm', '-q', 'notes.txt');
+    r.git('commit', '-q', '-m', 'drop notes');
+    const p = r.push();
+    assert.notEqual(p.status, 0, `${mark}: push must be refused`);
+    assert.match(p.stderr, /private details in what would be pushed:[\s\S]*notes\.txt/, mark);
+    assert.equal(spawnSync('git', ['ls-remote', 'origin', 'refs/heads/feature'], { cwd: r.dir, encoding: 'utf8' }).stdout, '', 'nothing reached the remote');
+  }
+});
+
 test('push gate allows a clean push; the author\'s own sign-off is not a leak; placeholders are fine', { skip }, () => {
   const r = repo();
   r.commit('docs.md', 'paths like /home/example/x and /Users/you/x are placeholders; 192.0.2.5 is documentation\n', 'Add docs\n\nSigned-off-by: Ada <ada@example.com>');

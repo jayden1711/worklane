@@ -82,7 +82,7 @@ export const LOCKFILE_GLOBS = [
   '**/Pipfile.lock', '**/Cargo.lock', '**/go.sum', '**/Gemfile.lock', '**/composer.lock',
 ];
 
-/** One file of a change (git diff -M): its added and removed lines. A pure rename has none, a binary file none. */
+/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
 export interface SizeFile {
   path: string;
   /** A rename's old path. */
