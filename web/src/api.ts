@@ -1221,7 +1221,7 @@ export interface FirstTaskProgress {
   title: string | null;
   filedAt: string;
   pr: { number: number; url: string | null } | null;
-  stages: { id: 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge'; title: string; state: 'waiting' | 'running' | 'done' | 'failed' | 'held'; detail: string; at: string | null; estimate: { basis: 'tick' | 'median' | 'guess' | 'none'; text: string } | null }[];
+  stages: { id: 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge'; title: string; state: 'waiting' | 'running' | 'done' | 'failed' | 'held'; detail: string; at: string | null; estimate: { basis: 'tick' | 'guess' | 'none'; text: string } | null }[];
   blocked: { why: string; at: string } | null;
   question: { at: string } | null;
   /** The held PR's reasons in plain words (src/hold-words.ts): why it waits, and what lets it through. */

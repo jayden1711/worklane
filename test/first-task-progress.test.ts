@@ -51,10 +51,10 @@ function log() {
   return { events, add };
 }
 
-/** An earlier task here (issue 3, PR 30): a 10-minute worker run, a 2-minute evaluation, a PR a minute later, 5 minutes of CI. */
+/** An earlier task here (issue 3, PR 30), merged: none of its events is the first task's. */
 function withEarlierTask() {
   const l = log();
-  l.add('run.started', P.started(3))('run.finished', P.finished(3), { minutes: 10 })('eval.verdict', P.verdict(3), { minutes: 2 })('pr.opened', P.opened(3, 30), { minutes: 1 })('ci.pr_timing', P.timing(30, 5 * 60_000));
+  l.add('issue.claimed', P.claimed(3))('run.started', P.started(3))('run.finished', P.finished(3), { minutes: 10 })('eval.verdict', P.verdict(3), { minutes: 2 })('pr.opened', P.opened(3, 30), { minutes: 1 })('ci.pr_timing', P.timing(30, 5 * 60_000))('merge.done', P.done(3, 30));
   return l;
 }
 
@@ -68,26 +68,18 @@ test('#741 nothing filed from the form: no card', () => {
   assert.equal(firstTaskProgress(l.events, { local: true }), null, 'a refused filing is no first task');
 });
 
-test('#741 just filed: every stage waiting, each with an estimate that names its basis (the tick, a median of earlier tasks, or a labelled guess)', () => {
+test('#741 just filed: every stage waiting, each estimate naming its basis: the tick, the labelled guess, or none', () => {
   const l = withEarlierTask();
   l.add('dashboard.audit', P.filed(7));
   const p = firstTaskProgress(l.events, { local: true })!;
   assert.equal(p.issue, 7);
   assert.deepEqual(states(p), { claimed: 'waiting', worker: 'waiting', evaluator: 'waiting', pr: 'waiting', checks: 'waiting', merge: 'waiting' });
   assert.equal(p.outcome, 'open');
+  assert.equal(p.pr, null, "the earlier task's PR is not this one's");
   assert.deepEqual(stage(p, 'claimed').estimate, { basis: 'tick', text: 'within about 65 s of the coordinator running: it looks for work every 60 s, plus up to 5 s' });
-  assert.deepEqual(stage(p, 'worker').estimate, { basis: 'median', text: 'about 10 min: the median of 1 earlier worker run here' });
-  assert.deepEqual(stage(p, 'evaluator').estimate, { basis: 'median', text: 'about 2 min: the median of 1 earlier evaluation here' });
-  assert.deepEqual(stage(p, 'checks').estimate, { basis: 'median', text: 'about 5 min: the median of 1 earlier PR check run here' });
-  // A first install has no earlier task: no number is made up, and the one guess is labelled as one.
-  const fresh = log();
-  fresh.add('dashboard.audit', P.filed(7));
-  const f = firstTaskProgress(fresh.events, { local: true })!;
-  assert.equal(stage(f, 'worker').estimate!.basis, 'none');
-  assert.match(stage(f, 'worker').estimate!.text, /^no estimate yet/);
-  assert.equal(stage(f, 'pr').estimate!.basis, 'guess');
-  assert.equal(stage(f, 'checks').estimate!.basis, 'none');
-  for (const s of f.stages) assert.ok(!s.estimate || s.estimate.basis !== 'median', 'no median without earlier tasks');
+  for (const id of ['worker', 'evaluator', 'pr']) assert.deepEqual(stage(p, id).estimate, { basis: 'guess', text: '15-60 minutes from the claim to a PR, for these stages together; nothing times them' }, `${id}: the guess, labelled as one`);
+  assert.deepEqual(stage(p, 'checks').estimate!.basis, 'none', 'no number made up for CI');
+  assert.equal(stage(p, 'merge').estimate, null);
 });
 
 test('#741 the coordinator\'s tick in the estimate is the one src/service.ts sleeps', () => {
@@ -104,7 +96,7 @@ test('#741 the filed issue followed to its PR: claimed, the worker, the verdict,
   let p = firstTaskProgress(l.events, { local: true })!;
   assert.equal(p.title, 'Round totals');
   assert.deepEqual(states(p), { claimed: 'done', worker: 'running', evaluator: 'waiting', pr: 'waiting', checks: 'waiting', merge: 'waiting' });
-  assert.equal(stage(p, 'worker').estimate!.basis, 'median', 'a running stage keeps its estimate');
+  assert.equal(stage(p, 'worker').estimate!.basis, 'guess', 'a running stage keeps its estimate');
   l.add('run.finished', P.finished(7))('eval.verdict', P.verdict(7))('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, false, ['pass', 'pending']));
   p = firstTaskProgress(l.events, { local: true })!;
   assert.deepEqual(states(p), { claimed: 'done', worker: 'done', evaluator: 'done', pr: 'done', checks: 'running', merge: 'waiting' });

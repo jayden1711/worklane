@@ -11,7 +11,7 @@ type Stage = FirstTaskProgress['stages'][number];
 const STATE_TONE: Record<Stage['state'], 'neutral' | 'ok' | 'warn' | 'danger' | 'info'> = { waiting: 'neutral', running: 'info', done: 'ok', failed: 'danger', held: 'warn' };
 const STATE_WORD: Record<Stage['state'], string> = { waiting: 'waiting', running: 'in progress', done: 'done', failed: 'failed', held: 'held' };
 /** How an estimate is labelled: never as measured. */
-const BASIS_WORD: Record<NonNullable<Stage['estimate']>['basis'], string> = { tick: 'Estimate', median: 'Estimate', guess: 'Guess', none: 'Estimate' };
+const BASIS_WORD: Record<NonNullable<Stage['estimate']>['basis'], string> = { tick: 'Estimate', guess: 'Guess', none: 'Estimate' };
 
 export function FirstTaskCard({ t }: { t: FirstTaskProgress }) {
   return (

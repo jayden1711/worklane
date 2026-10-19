@@ -1,12 +1,8 @@
-// WHY (#741, #706 slice 2's table): a held PR's reasons are the merge policy's own strings ("doubt: evaluator
-// confidence medium: ...", "auto-merge is off for this instance (policy.yaml auto_merge)"). A new user waiting on
-// their first PR needs two plain sentences per kind instead: why it waits, and what lets it through. One table, keyed
-// by the prefix every reason of that kind starts with (src/merge-policy.ts); the words never feed back into the
-// decision. A reason with no known prefix is shown as its own text, so a hold is never hidden or emptied.
-// Local mode (no instance) words the kill switch as #729 does: there, every PR waits for you, and no policy.yaml
-// exists to name.
+// WHY (#741; #706 slice 2's table): each merge-policy hold reason kind, by its prefix (src/merge-policy.ts), in two
+// plain sentences: why it waits, what lets it through. Never fed back into the decision. An unknown prefix shows its
+// own text. Local mode words the kill switch as #729 does (no policy.yaml there).
 
-/** One kind of hold, said plainly. `kind` 'other' is a reason no prefix matched: `why` is then its own text. */
+/** `kind` 'other': no prefix matched, and `why` is the reason's own text. */
 export interface HoldWords {
   kind: HoldKind;
   why: string;
@@ -17,7 +13,7 @@ export type HoldKind = 'never' | 'policy-off' | 'repo-off' | 'stopped' | 'high-r
 
 type Entry = { kind: Exclude<HoldKind, 'other'>; prefix: string; why: string; through: string; local?: { why: string; through: string } };
 
-/** Every reason prefix src/merge-policy.ts emits, in the order mergeDecision adds them. test/first-task-progress.test.ts builds one hold per prefix. */
+/** Every prefix mergeDecision emits (test/first-task-progress.test.ts builds one hold per prefix). */
 const TABLE: readonly Entry[] = [
   { kind: 'never', prefix: 'never auto-merged:', why: 'The harness never merges this kind of PR itself: one it did not open, a revert, or a check proposed from feedback.', through: 'A person reviews it and merges it.' },
   {
@@ -37,24 +33,20 @@ const TABLE: readonly Entry[] = [
   { kind: 'outside-plan', prefix: 'not in the approved plan:', why: 'It changes high-risk or design-level files that its approved plan did not list.', through: 'Review those files and merge it yourself.' },
 ];
 
-/** The kinds the table words (every one but 'other'). */
 export const HOLD_KINDS: readonly HoldKind[] = TABLE.map((e) => e.kind);
 
-/** The longest a reason with no known prefix is shown: the hold comment on the PR has it in full. */
-const RAW_MAX = 300;
-
-/** One reason in plain words; `local`: a checkout's dashboard (no instance), where the kill switch reads as #729 words it. */
+/** One reason in plain words; `local`: no instance. An unknown reason: its own text, at most 300 characters. */
 export function holdWords(reason: string, o: { local: boolean }): HoldWords {
   const e = TABLE.find((x) => reason.startsWith(x.prefix));
   if (!e) {
     const raw = reason.replace(/\s+/g, ' ').trim();
-    return { kind: 'other', why: raw ? (raw.length > RAW_MAX ? `${raw.slice(0, RAW_MAX - 1)}…` : raw) : 'held for a reason the engine did not record', through: "Read the PR's hold comment and decide." };
+    return { kind: 'other', why: raw ? (raw.length > 300 ? `${raw.slice(0, 299)}…` : raw) : 'held for a reason the engine did not record', through: "Read the PR's hold comment and decide." };
   }
   const w = o.local && e.local ? e.local : e;
   return { kind: e.kind, why: w.why, through: w.through };
 }
 
-/** A hold's reasons in plain words: one line per kind (several reasons of one kind say the same), in the policy's order. */
+/** One line per kind, in the policy's order. */
 export function holdsInWords(reasons: readonly string[], o: { local: boolean }): HoldWords[] {
   const out: HoldWords[] = [];
   for (const r of reasons) {
