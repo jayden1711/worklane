@@ -2,7 +2,7 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
-## v0.5.3 (unreleased)
+## v0.5.3 (2026-10-19)
 
 ### Upgrading (from v0.5.2)
 
@@ -168,7 +168,129 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **pip test-run setups get a fetch step (#609)** like npm's: with network, before any setup step, it downloads wheels only, by name, and runs no repo code; the install then runs with no network and no grant. Building anything during the fetch, a repo-chosen index, and a package with no wheel are refused.
 - **Single machine: each instance's `policy.yaml` is root's (#726).** Before, the coordinator user owned it, so anything running as that user could turn `sandbox` off or set `allow_same_user`. Setup now makes it root's (0644, its content kept, its isolation and merge keys printed) and records its path and a sha256 of its content. The engine then refuses a `policy.yaml` that isn't root's alone, isn't the recorded file, or isn't what root last wrote, and the instance stops instead (doctor fails, naming `sudo worklane policy own <name> --retake`). Setup never takes over a policy looser than its coordinator could make it (`sandbox: false`, `allow_same_user: true`, `land_mode: direct`, lanes, and the like): its policy step stops, naming `sudo worklane policy own <name> --accept-loose` for an admin who has checked it. Root changes one key at a time with `sudo worklane policy set <name> <key> <value>`, which never takes `sandbox` or `allow_same_user`. `sudo worklane policy set <name> auto_merge off` arms a root kill switch and nothing else: no lock and no read of `policy.yaml`, so nothing can stop it, and it needs no free space (a disarmed spare is renamed). Switches are keyed by a stable instance id, never by name (`/etc/worklane/policy-root/<name>.id` names `by_id/<id>/`), so a rename shares them from its start and never carries one. While one is there auto_merge is off, whatever `policy.yaml` says, until root's `policy set <name> auto_merge on`, which clears only the switches that were there before it started, so an OFF given meanwhile stays.
 
+### Features
+
+- Pin the engine to v0.5.2 (#578)
+- review: lock src/coordinator/** and the experiment studies' file, hold #580's gap paths in review.yaml now, default effort high (#584)
+- push gate: a fetch killed by ETIMEDOUT says "no answer within" whatever the wall clock reads (#588)
+- claude: drop .claude/settings.json (it blocked every agent run), name #579 in the refusal, workers count 4 (#590)
+- first run: an open panel stays put across a poll that changes the detail lines above it (#594)
+- test/pr-batch: the test world's repos run no background git maintenance or auto-gc (#599)
+- eval-roles: run base and head 3 times per role, report mean and min-max, gate on base's spread [PROTECTED: owner merges] (#591)
+- instance removal: a process that exits mid-check is no longer work in flight [PROTECTED: owner merges] (#592)
+- claude-account.sh: a token installed drops the account cached for the previous login (#341) [PROTECTED: owner merges] (#595)
+- agents: a per-role effort in agents.yaml (workers, evaluator, routing.planner_effort), passed to claude --effort; unset sends none [PROTECTED: owner merges] (#598)
+- github budget: one shared API budget per token across the machine, starting with the backlog client [PROTECTED: owner merges] (#593)
+- dashboard: caches age by a monotonic injectable clock; lint new wall-clock durations in tests [PROTECTED: owner merges] (#611)
+- MCP broker: ProtectControlGroups back on; real-systemd proof in ci-slow (part of #551) [PROTECTED: owner merges] (#596)
+- Dashboard: Experiments as its own top-level nav item; /extend/experiments redirects; an instance gets its experiments (#563) [PROTECTED: owner merges] (#597)
+- instance remove: a removed instance's files in a shared engine group lose group write, each re-owned on one O_NOFOLLOW fd by its path's bytes (#555) [PROTECTED: owner merges] (#601)
+- providers: a provider's base_url only to a host root allows in /etc/<cli>/providers.json [PROTECTED: owner merges] (#607)
+- test runs: a pip fetch step (wheels only, no repo code with network), so a pip setup installs offline with no grant (part of #544) [PROTECTED: owner merges] (#609)
+- first run: the Repo config form says "no checks yet on <short sha>" and reads the tip's checks again on Re-check (#610)
+- web: All instances names itself in the sidebar header and the Claude account panel (#621)
+- main watch: one revert PR per trip and three a day; warn once of a required check that never runs [PROTECTED: owner merges] (#602)
+- main watch: an alert with no revert PR says why; a rebase-merged PR's commits revert as one range [PROTECTED: owner merges] (#606)
+- web: the sidebar's pages become tabs in six groups; every old route redirects (#585 part 1) (#620)
+- comments: one policy for new comments, checked on PR diffs; off until a repo turns it on (#330 part 1) [PROTECTED: owner merges] (#618)
+- delegation: suggestions carry time to approve and who approved; a per-approver history and a Reports summary [PROTECTED: owner merges] (#624)
+- web: only buttons look like buttons, and a held button says why [PROTECTED: owner merges] (#630)
+- dashboard-switch-speed: a false Board check says which part failed and what the page had (#656)
+- Claude accounts: the accounts table shows this instance's usage limit and reset time on its active account [PROTECTED: owner merges] (#632)
+- main red: the #566 switch test stamps its pause on the test's clock, not the wall clock (#684)
+- ci-slow: fetch plugin fixtures from the commit under test, not the PR head; a failed kernel preview says why [PROTECTED: owner merges] (#662)
+- Claude accounts: a viewer learns only that an account is set; nothing a viewer is sent names it [PROTECTED: owner merges] (#663)
+- review: lock src/hook.ts (the agents' tool guard) as self-modification [PROTECTED: owner merges] (#647)
+- setup: token install and claude_login_ok bounded by timeout; a hung home can't hold a switch [PROTECTED: owner merges] (#648)
+- harness-evals: replays run with the harness under test's principles, and the score counts turns (#466 part 1) [PROTECTED: owner merges] (#636)
+- test: temporary directories live inside the test's own machine, so a run leaves nothing in /tmp (#652)
+- slot dir: a test fails if engine code writes a slot-directory file in place (#654)
+- web: Needs you is one queue at /needs-you, blocking first then oldest; its badge counts Waiting on you (#585 part 2) (#627)
+- web: decision cards lead with three plain lines, options once, evidence behind Details [PROTECTED: owner merges] (#650)
+- merge flow: the waiting comment is a phone-sized review packet (risk class, receipts, eval scores) [PROTECTED: owner merges] (#640)
+- deploy-gate: a failed post-deploy check files one follow-up issue per commit and check, never ready [PROTECTED: owner merges] (#637)
+- chat: a refused issue draft is asked for once more, with the reason, inside the answer's caps [PROTECTED: owner merges] (#638)
+- push gate: refuse a commit whose line 2 isn't blank or whose subject is over 180 characters [PROTECTED: owner merges] (#642)
+- coordinator: the experiment_review incident points at the Experiments page, not Extend [PROTECTED: owner merges] (#645)
+- perf-dashboard: switch pages by the sidebar's group rows and tabs, held to the feature map by a test [PROTECTED: owner merges] (#646)
+- dashboard-auth, hub: role caches age by a monotonic clock, so a wall-clock step can't stretch a role [PROTECTED: owner merges] (#668)
+- review.yaml: the tests' own machine, the slot-write check and the tool-guard denial tests wait for the owner [PROTECTED: owner merges] (#681)
+- runner: a run stops unless claude's init event shows its --settings were applied [PROTECTED: owner merges] (#649)
+- ci-slow: a label starts no ci slow run and cancels nothing; full-ci reruns through its own caller workflow [PROTECTED: owner merges] (#672)
+- review: lock the modules the agents' tool guard decides with [PROTECTED: owner merges] (#658)
+- instance remove: the last check fails closed: a pid listed then gone counts as left, and its cmdline read says nothing [PROTECTED: owner merges] (#666)
+- evals: no paid model call without --spend, no held-out read unless a store is named (#612) [PROTECTED: owner merges] (#659)
+- comments: quoted <<, CRLF and <<A <<B can't hide the rest; hook declines filtered files, one deadline [PROTECTED: owner merges] (#634)
+- intake: a GitHub-sourced report is worked from its checked draft; one done_when block per body [PROTECTED: owner merges] (#671)
+- Claude accounts: the ops channel's sign-in failure posts name no account, only the instance and lane [PROTECTED: owner merges] (#682)
+- browser runs: also shoot dark mode and phone width; the evidence lists every shot (#331 part 1) [PROTECTED: owner merges] (#670)
+- merge-policy test: slot-dir-writes.test.ts must exist like the other engine-guards entries [PROTECTED: owner merges] (#692)
+- No vendor attribution: agents run with it off, push gate and PR-body check refuse it [PROTECTED: owner merges] (#619)
+- docs/design: product architecture for cloud account, servers and single machine (proposal for owner review) (#698)
+- review.yaml: docs/design/** joins engine-guards, so architecture docs always wait for the owner [PROTECTED: owner merges] (#719)
+- main watch: a dead check's warning says when the workflow that would post it is disabled [PROTECTED: owner merges] (#657)
+- digest, web: Waiting on you from the event cache's fold, its count in /api/state, the badge from the state [PROTECTED: owner merges] (#696)
+- web: light mode uses the warm light palette; every text colour is AA on every light background (#690)
+- web: while paused, start actions say they take effect on resume, File it and Add ready say they happen now, and land approvals say they land now (#664)
+- health: the Machine page shows root's provider hosts and each configured provider they refuse (#392) [PROTECTED: owner merges] (#675)
+- cli: check-comments runs the comment policy's PR check for managed repos (#330) [PROTECTED: owner merges] (#651)
+- slots: in a test run, every slot-directory default (GitHub budget, slots, STOP, incidents, update drain) is only ever the test machine's [PROTECTED: owner merges] (#694)
+- Main green: package budget for the merged growth since v0.5.2, and drop the stale RING_OWED entry [PROTECTED: owner merges] (#753)
+- Updater: a retired required check (desktop) that no longer runs doesn't block updates; ships before the desktop job's removal (#744) [PROTECTED: owner merges] (#755)
+- docs: restate the thesis: code decides the merge, a model can only hold one [PROTECTED: owner merges] (#725)
+- health: the Machine page shows the shared GitHub API budget: left, reset, back-off, top consumers [PROTECTED: owner merges] (#676)
+- Updater: replace itself from a verified release tag after a healthy install, never with an older one [PROTECTED: owner merges] (#761)
+- egress-firewall: test users covered by default, Docker's image pulls the one exception (#543) [PROTECTED: owner merges] (#686)
+- Remove the browser owner terminal, its sudoers rule and root helper; a dashboards.sh rerun deletes them; the device gate stays (#742) [PROTECTED: owner merges] (#752)
+- Updater: a release installs only under its own signed name, as the one tag object verified, with replace refs off [PROTECTED: owner merges] (#773)
+- add-project-view test: the stand-in helper holds until released, so a slow runner can't see the run already failed (#777)
+- bench: preflight for the SWE-bench run (subscription-only login, CLI pin, caps, usage meter) [PROTECTED: owner merges] (#756)
+- Lock scope follow-ups: old cli.js hook installs flagged and migrated, one githubRepoOf, updates.json read as root's file, readLockScope takes only the instance and its repo [PROTECTED: owner merges] (#765)
+- egress-firewall: drop each covered user's subordinate uids too, not only its own uid (#740) [PROTECTED: owner merges] (#778)
+- bench: task containers in rootless Docker with required limits, exec-only, no daemon for agents [PROTECTED: owner merges] (#757)
+- Slot dir: one writeSlotFile helper for every slot-dir write; the lint fails on any other [PROTECTED: owner merges] (#766)
+- Tailscale setup: the by-hand dashboards.sh command keeps --siri, --hooks and the machine devices (#767) [PROTECTED: owner merges] (#779)
+- Test: list scripts/bench/hidden.ts on the changed-files reader list (main red after #688 + #757) (#797)
+- bench: hidden.ts counts added lines starting "++ "; pin its two lines on the reader list (#797 follow-up) [PROTECTED: owner merges] (#804)
+- bench: run driver, patch export, grading inputs, aggregates and setup README [PROTECTED: owner merges] (#759)
+- ci: a .worklane/ change is loaded with the pinned engine release; a config it refuses fails an advisory check [PROTECTED: owner merges] (#812)
+- Slot dir: a slot path is an opaque SlotPath that only writeSlotFile and the slot readers take; tsc rejects it at any other writer [PROTECTED: owner merges] (#806)
+- Release notes v0.5.3: every install-affecting change since v0.5.2, the v0.5.2 NVML correction, notes the release keeps [PROTECTED: owner merges] (#809)
+- Approvals: one role rule on every surface, decide only as root or the coordinator user, money paths read from main (#715) [PROTECTED: owner merges] (#805)
+- test: raise the package budget to main's size + 2% after #805 and #787 [PROTECTED: owner merges] (#823)
+- Test runs: each run in a user namespace of its own; slirp4netns as the test user; a run can't join Docker's namespaces (#545) [PROTECTED: owner merges] (#780)
+
+### Fixes
+
+- eval-roles: --fix proposes a role-prompt fix from failing visible cases, reruns it, rejects a held-out drop, reports each attempt [PROTECTED: owner merges] (#600)
+- intake: bug drafts always carry repro: true; couldnt-reproduce label; fixed reply names the commit [PROTECTED: owner merges] (#635)
+- docs: fix three stale statements (merging, dashboard process, runtime deps) [PROTECTED: owner merges] (#718)
+- docs/design: architecture accuracy fixes after #698's verdict, and the decisions raised after merge [PROTECTED: owner merges] (#723)
+- Tests: fix the budget-health second-boundary flake; weekly optional shifted-clock run; lint on clock-reading helpers (#687) [PROTECTED: owner merges] (#774)
+- Merge: idempotent across a crash: merge.attempted before the API call, then reconciled, so the engine never reverts its own good merge (#733) [PROTECTED: owner merges] (#793)
+
+### Security and guardrails
+
+- review: lock the evaluator, sandbox, push gate and denylist, their tests and the release rules as self-modification (#580)
+- hook: the post-edit hook runs the comment policy on what an agent just wrote (#330 part 2) [PROTECTED: owner merges] (#623)
+- escape fixture: refuses to run outside the MCP broker's sandbox, and never as root (#653)
+- redact: catch JWTs, Stripe and Google keys, JSON credential values; issues and comments drop emails, hosts, IPs, paths [PROTECTED: owner merges] (#660)
+- review: lock the tool guard's whole import tree; engine-source locks stand aside only where root names a managed app [PROTECTED: owner merges] (#691)
+- docs/design: record decision 5 (isolation runtime): sandbox profiles (a) and (b), not gVisor [PROTECTED: owner merges] (#754)
+- ci-slow: every MCP preview stops at a failure with its real reason, from one shared check that never prints a secret [PROTECTED: owner merges] (#678)
+- claude credentials: the dashboard never takes one; the four paths that did are gone (#711 part 2, server) [PROTECTED: owner merges] (#749)
+- web: the Claude account and sign-in panels take no credential; root's commands instead (#711 part 2, UI) [PROTECTED: owner merges] (#751)
+- Test: budget health reads the limited credential's reset time once (#790)
+- Review levels: a renamed file counts under its old and its new path, in changeFiles and every path reader [PROTECTED: owner merges] (#688)
+- Review levels: a .gitattributes mark can't hide a change's lines or content; adding one waits for the owner (#693) [PROTECTED: owner merges] (#802)
+- Project commands run as the agent user only in a sandbox that hides its credentials; their output is redacted (#713) [PROTECTED: owner merges] (#787)
+
 ### Guardrail changes
+
+- hook: the post-edit hook runs the comment policy on what an agent just wrote (#330 part 2) [PROTECTED: owner merges] (#623): src/hook.ts
+- review: lock the tool guard's whole import tree; engine-source locks stand aside only where root names a managed app [PROTECTED: owner merges] (#691): src/hook.ts
+- Review levels: a renamed file counts under its old and its new path, in changeFiles and every path reader [PROTECTED: owner merges] (#688): src/guardrails/glob.ts, src/push-check.ts
+- Review levels: a .gitattributes mark can't hide a change's lines or content; adding one waits for the owner (#693) [PROTECTED: owner merges] (#802): src/push-check.ts
 
 ## v0.5.2 (2026-10-17)
 
