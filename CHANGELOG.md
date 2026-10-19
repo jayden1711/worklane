@@ -14,6 +14,8 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - It fails closed: over 4,000,000 changed characters, a diff cut short, a changed file that isn't text (an image or other asset excepted), a registered table it can't read plainly (declared twice, or a line at its indent inside it), or a git failure, the PR waits.
   - Known gaps, not closed: a changed line with no assertion or test on it (a setup line, an expected value in a const or a case-table row); a pure insertion with no mark that makes a test run less (`return;`, `process.exit(0)`, a patched `assert`, `files.splice(0)` in a lint test); a line added to a guard or config with no mark (`continue-on-error: true`); a hook losing its executable bit; a submodule moved outside the test paths; Rust's inline tests in `src/`.
 
+### Guardrail changes
+
 ## v0.5.3 (2026-10-19)
 
 ### Upgrading (from v0.5.2)
