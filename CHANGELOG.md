@@ -13,12 +13,21 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **The dashboard's owner terminal is removed (#742).** The Setup console no longer opens a login shell as the machine's admin user; use ssh, or the break-glass (port 4398, through ssh). The device list for machine changes stays: it is now `dashboards.sh --machine-devices`, and a hub unit's older `--console-devices` is read as it, with no device added, so machine changes from the page keep the same gate before and after the rerun below. Migration, on a machine that had the terminal (`--console-user` in the hub's unit), as root, once, after the install:
   - `worklane doctor` prints the exact command, built from the hub unit's own `ExecStart` (`/etc/systemd/system/worklane-dashboard-hub.service`), every value single-quoted, and only when each value is one `dashboards.sh` itself accepts (otherwise it prints the placeholder version below, and why, never a word from the unit). By hand, fill in each `<...>` and `[...]` from that `ExecStart`, and leave out `--siri` and `--hooks` only if it has no `--siri-port` or `--hooks-port` (without them the rerun turns the Siri and hooks gateways off): `sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url <its --public-url> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...` (the older command line works too: `--console-user` is ignored and `--console-devices` is read as `--machine-devices`). It removes the console shell (`/usr/local/libexec/worklane-console-shell`) and its sudoers rule (`/etc/sudoers.d/worklane-console`), and writes the hub's unit with `NoNewPrivileges=yes`, `ProtectSystem=strict`, `ProtectHome=read-only` and `PrivateTmp=yes` again. Add project, `tailscale.sh public-url` and instance removal rerun it the same way.
   - Until then the engine never starts the console shell, and the engine update itself replaces the installed console shell with a stub that refuses every command (the updater keeps the file's owner and mode, as for every root helper). But the sudoers rule is still there and the hub runs without its sandbox: the Setup console shows its owner a notice, and `doctor` fails (`owner terminal`, exit 1).
-- The setup step `console-devices` (Owner terminal devices) is now `machine-devices` (Machine-change devices); a skip recorded for the old one doesn't carry over.
 - **A change that can hide a file from review now waits for the owner (#693, #802).** The new always-L3 category `diff-hiding-attributes` (no `review.yaml` can drop it) flags two kinds of change:
   - a `.gitattributes` change that hides a path, by git's own reading of the base and head trees or by its lines (`-diff`, `binary`, `linguist-generated`, a `filter`, a `working-tree-encoding`, a diff driver git doesn't ship, a macro);
   - any `.gitmodules` change in a repo whose `.gitmodules` sets a submodule's `ignore` to anything but `none`.
 
   On a machine whose git is older than 2.40 (`git --version`; Ubuntu 22.04 ships 2.34, inferred), or whose repo has any rule in `$GIT_DIR/info/attributes`, **every** `.gitattributes` change waits for the owner. A file git calls binary (a NUL byte, or a `-diff` or `binary` mark) now counts its real lines toward the size limit (`max_pr_lines`), the review levels' line limits and the push limit (`push.max_changed_lines`), so a change that adds a large image or data file can now be sent back as "split it" or refused at push.
+- The setup step `console-devices` (Owner terminal devices) is now `machine-devices` (Machine-change devices); a skip recorded for the old one doesn't carry over.
+
+### Guardrail changes: what each one does
+
+- **A `.gitattributes` or `.gitmodules` can't hide a change from the review levels (#693, #802).**
+  - The changed-files reader reads every change as text, whatever the attributes say: no textconv, no external diff, no user attributes file, no replace refs, and every submodule link. A `-diff` file holding `DROP TABLE` is L3 `deletes-data`, and its lines count.
+  - The new category `diff-hiding-attributes` is always L3 and in the merge policy's floor. No `review.yaml` can drop it or put it in `merge.loosened`.
+  - It flags a change whose `.gitattributes` git judges to hide a path (`check-attr --source` on both trees), or whose lines can hide one. It also flags a `.gitmodules` that sets `ignore` to anything but `none`.
+  - It fails closed on git older than 2.40, on a rule in `info/attributes`, and on data it can't read.
+  - The evaluator is told to read the diff the same way, and the push gate's per-commit scan reads as text too.
 
 ### After install
 
@@ -29,15 +38,6 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **That same rerun is the last one an updater change needs on the release channel (#760).** It also records the installed updater's version in `/var/lib/worklane/updater.json` and keeps the one it replaces as `/usr/local/libexec/worklane-update.prev`. From the next release on, an updater on the release channel replaces itself after each healthy install. An update can't do this first step: until root installs an updater that has this code, the running one doesn't know how. Without the rerun the old updater keeps installing releases and never replaces itself.
   - A machine on the main channel never replaces its updater (main has no signature to check), so updater changes still need this rerun there.
 - No new sudoers rules, so no machine-helper rerun.
-
-### Guardrail changes: what each one does
-
-- **A `.gitattributes` or `.gitmodules` can't hide a change from the review levels (#693, #802).**
-  - The changed-files reader reads every change as text, whatever the attributes say: no textconv, no external diff, no user attributes file, no replace refs, and every submodule link. A `-diff` file holding `DROP TABLE` is L3 `deletes-data`, and its lines count.
-  - The new category `diff-hiding-attributes` is always L3 and in the merge policy's floor. No `review.yaml` can drop it or put it in `merge.loosened`.
-  - It flags a change whose `.gitattributes` git judges to hide a path (`check-attr --source` on both trees), or whose lines can hide one. It also flags a `.gitmodules` that sets `ignore` to anything but `none`.
-  - It fails closed on git older than 2.40, on a rule in `info/attributes`, and on data it can't read.
-  - The evaluator is told to read the diff the same way, and the push gate's per-commit scan reads as text too.
 
 ### Guardrail changes
 
