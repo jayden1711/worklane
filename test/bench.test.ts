@@ -744,6 +744,17 @@ test('stdin: an open import paren goes on only through names or its `)`; a "++ "
   assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n`)), true, 'names in an open paren: sent');
 });
 
+test("stdin: a line is an import line only if 682c8ce5's rule says so too; `\\` continuations can't hide a run it refused (#804)", () => {
+  for (const [what, added] of [
+    ['R1: a `\\` import, then a "++ " line ending in `\\`', ['import a, \\', '++ counter_value_should_be_long \\', 'first_line_of_the_hidden \\', 'second_line_of_the_hidden \\', 'third_line_of_the_hidden']],
+    ['R2: an open paren, an import ending in `\\`, then `)  \\`', ['from m import (', 'import a, \\', ')  \\', 'counter one two three four five']],
+    ['R2b: an open paren, code, an import ending in `\\`, then `b) \\`', ['from m import (', 'x = 1', 'import a, \\', 'b) \\', 'counter one two three four five']],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch: testPatch(added.map((l) => `+${l}`)) };
+    assert.equal(stdinSends(row, STDIN_BASE, withFile('tests/test_r.py', `${added.slice(-3).join('\n')}\n`)), false, `${what}: refused`);
+  }
+});
+
 test('stdin: a `+++ ` line with no name after `--- ` is an added line, as before #797 (#804)', () => {
   const two = ['counter one two three four five', 'counter six seven eight nine'];
   const row: TaskRow = { ...ROW, test_patch: ['diff --git a/t b/t', '--- a/t', '+++ ', ...two.map((l) => `+${l}`), ''].join('\n') };
