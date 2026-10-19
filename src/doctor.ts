@@ -243,9 +243,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
  * can't be read or parsed, the placeholder version, with why and where to fill it in from (never part of a command).
  */
 export function ownerTerminalCheck(paths: TerminalPaths = {}): DoctorCheck | null {
-  const notice = ownerTerminalNotice(paths);
-  if (!notice) return null;
   const r = ownerTerminalRerun(paths);
+  // With the exact command, the notice points at it: one command to run, never a second, placeholder one.
+  const notice = ownerTerminalNotice(paths, 'command' in r);
+  if (!notice) return null;
   const first = 'command' in r ? `run as root, once (built from the hub unit's ExecStart): ${r.command}` : `run as root, once, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT} (the exact command can't be built here: ${r.error}): ${OWNER_TERMINAL_RERUN}`;
   return { name: 'owner terminal', level: 'fail', detail: `${first}\n${notice}` };
 }

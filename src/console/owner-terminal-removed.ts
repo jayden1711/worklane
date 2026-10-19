@@ -12,6 +12,7 @@
 // placeholder version, OWNER_TERMINAL_RERUN.
 import { existsSync, readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
+import { instanceNameOk } from '../instance-name.js';
 import { readRegularFile } from '../os/index.js';
 import { asRoot, libexecPath, SYSTEM_ROOTS, unitPath } from '../os/system-paths.js';
 
@@ -55,11 +56,16 @@ export function ownerTerminalLeftovers(o: TerminalPaths = {}): string[] {
   return out;
 }
 
-/** The notice the Setup page and doctor show while anything of the owner terminal is left; null when nothing is. */
-export function ownerTerminalNotice(o: TerminalPaths = {}): string | null {
+/**
+ * The notice the Setup page and doctor show while anything of the owner terminal is left; null when nothing is.
+ * `exactAbove`: doctor printed the exact command on the line above, so the notice points at it and holds no second,
+ * placeholder command.
+ */
+export function ownerTerminalNotice(o: TerminalPaths = {}, exactAbove = false): string | null {
   const left = ownerTerminalLeftovers(o);
   if (!left.length) return null;
-  return `The owner terminal has been removed from the dashboard, but this machine still has it set up: ${left.join('; and ')}. As root, run dashboards.sh again once, with the hub's own settings filled in from its unit's ExecStart (${HUB_UNIT_AS_ROOT}): ${OWNER_TERMINAL_RERUN}, which removes the console shell and its sudoers rule and gives the hub its sandbox back. For a shell on this machine, use ssh; the break-glass (port 4398, through ssh) still works.`;
+  const run = exactAbove ? `with the exact command on the line above (built from its unit's ExecStart, ${HUB_UNIT_AS_ROOT})` : `with the hub's own settings filled in from its unit's ExecStart (${HUB_UNIT_AS_ROOT}): ${OWNER_TERMINAL_RERUN}`;
+  return `The owner terminal has been removed from the dashboard, but this machine still has it set up: ${left.join('; and ')}. As root, run dashboards.sh again once, ${run}, which removes the console shell and its sudoers rule and gives the hub its sandbox back. For a shell on this machine, use ssh; the break-glass (port 4398, through ssh) still works.`;
 }
 
 /** What dashboards.sh needs to write the hub's unit again with every setting it has now. */
@@ -105,16 +111,38 @@ const UNIT_OPTIONS: Record<string, string> = {
   '--console-devices': '--machine-devices (its older name)',
   '--machine-devices': '--machine-devices',
 };
-/** The instance names lib.sh hub_instances takes from --hub. */
-const HUB_NAME = /^[a-z][a-z0-9-]{0,20}$/;
+/**
+ * The patterns dashboards.sh itself holds each printed value to (it refuses anything else, exit 2), so doctor never
+ * prints a value dashboards.sh would refuse, and none can hold a control character, a quote, a backtick or a glob.
+ * test/owner-terminal-rerun.test.ts reads them back out of scripts/setup/dashboards.sh, so the two can't drift.
+ * Instance names are held to dashboards.sh's need_instance_name (lib.sh instance_name_problem): instanceNameOk.
+ */
+export const HUB_VALUE_PATTERNS = {
+  /** dashboards.sh: [[ "$client_id" =~ ... ]] */
+  clientId: /^[A-Za-z0-9._-]{8,64}$/,
+  /** dashboards.sh url_ok */
+  publicUrl: /^https:\/\/[a-z0-9.-]+$/,
+  /** dashboards.sh: [[ "$machine_devices" =~ ... ]] (and the older --console-devices, the same pattern) */
+  machineDevices: /^[a-z0-9:.,-]+$/,
+} as const;
+/**
+ * The characters any ExecStart word dashboards.sh writes is made of (paths, names, ids, URLs, ports, device lists).
+ * Anything else (systemd's quotes, escapes and expansions, ';', a backtick, a control or non-ASCII character) means
+ * root wrote it some other way: no exact reading, and never printed.
+ */
+const UNIT_WORD = /^[\w.,:=/@+~-]+$/;
 
-/** The hub's settings from its unit's text, or why they can't be read exactly. Never a guess, never a part. */
+/**
+ * The hub's settings from its unit's text, or why they can't be read exactly. Never a guess, never a part. The why
+ * names an option at most (one of UNIT_OPTIONS), never a word from the unit: those are root's file's bytes, and doctor
+ * prints the why.
+ */
 export function parseHubUnit(text: string): HubSettings | { error: string } {
   const lines = text.split('\n').filter((l) => /^\s*ExecStart\s*=/.test(l));
   if (lines.length !== 1) return { error: `it has ${lines.length} ExecStart lines, not one` };
-  const words = lines[0]!.replace(/^\s*ExecStart\s*=/, '').trim().split(/\s+/);
-  // systemd quotes, escapes and expands these, and dashboards.sh never writes them: no exact reading of such a word.
-  if (words.some((w) => /["'\\$%;]/.test(w))) return { error: 'its ExecStart has quotes, escapes, expansions or ";", which dashboards.sh never writes' };
+  // Split as systemd does, on spaces and tabs only: any other space stays in its word, which UNIT_WORD then refuses.
+  const words = lines[0]!.replace(/^\s*ExecStart\s*=/, '').replace(/^[ \t]+|[ \t\r]+$/g, '').split(/[ \t]+/);
+  if (!words.every((w) => UNIT_WORD.test(w))) return { error: 'its ExecStart has quotes, escapes, expansions, ";", a backtick, or a control or non-ASCII character, which dashboards.sh never writes' };
   const [exe, sub, ...rest] = words;
   if (!exe?.startsWith('/') || sub !== 'dashboard') return { error: "its ExecStart isn't the dashboard hub as dashboards.sh writes it" };
   const opts = new Map<string, string>();
@@ -125,7 +153,7 @@ export function parseHubUnit(text: string): HubSettings | { error: string } {
       service = true;
       continue;
     }
-    if (!(o in UNIT_OPTIONS)) return { error: `its ExecStart has ${o}, which dashboards.sh doesn't write` };
+    if (!Object.hasOwn(UNIT_OPTIONS, o)) return { error: "its ExecStart has an option dashboards.sh doesn't write" };
     const v = rest[++i];
     if (v === undefined || v.startsWith('--')) return { error: `its ${o} has no value` };
     if (opts.has(o) && opts.get(o) !== v) return { error: `its ExecStart has ${o} twice, with different values` };
@@ -135,14 +163,20 @@ export function parseHubUnit(text: string): HubSettings | { error: string } {
   const clientId = opts.get('--client-id');
   const publicUrl = opts.get('--public-url');
   if (!service || !hub || !clientId || !publicUrl) return { error: 'its ExecStart lacks --hub, --service, --client-id or --public-url' };
+  if (!HUB_VALUE_PATTERNS.clientId.test(clientId)) return { error: "its --client-id isn't one dashboards.sh takes (letters, digits, '.', '_' and '-', 8 to 64)" };
+  if (!HUB_VALUE_PATTERNS.publicUrl.test(publicUrl)) return { error: "its --public-url isn't one dashboards.sh takes (https://, then lowercase letters, digits, '.' and '-')" };
+  for (const o of ['--machine-devices', '--console-devices'] as const) {
+    const v = opts.get(o);
+    if (v !== undefined && !HUB_VALUE_PATTERNS.machineDevices.test(v)) return { error: `its ${o} isn't a list dashboards.sh takes (lowercase letters, digits, ':', '.', ',' and '-')` };
+  }
   for (const [o, port] of [['--siri-port', '4397'], ['--hooks-port', '4396']] as const) {
-    if (opts.has(o) && opts.get(o) !== port) return { error: `its ${o} is ${opts.get(o)}, not the ${port} dashboards.sh writes` };
+    if (opts.has(o) && opts.get(o) !== port) return { error: `its ${o} isn't the ${port} dashboards.sh writes` };
   }
   const instances: string[] = [];
   if (hub !== '-') {
     for (const item of hub.split(',')) {
       const name = item.slice(0, item.indexOf('='));
-      if (!item.includes('=') || !HUB_NAME.test(name)) return { error: `its --hub has ${item}, not <name>=<state>` };
+      if (!item.includes('=') || !instanceNameOk(name)) return { error: "its --hub has an item that isn't <name>=<state> with an instance name dashboards.sh takes" };
       instances.push(name);
     }
   }
