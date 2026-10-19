@@ -206,6 +206,77 @@ test("a pinned check's same-name commit status that isn't success refuses it (pe
   assert.equal(await verdict([]), 'installs');
 });
 
+test('every pager reads on past a full page whose total_count is missing or wrong (statuses, workflow runs, check runs)', async () => {
+  const name = 'scan';
+  // 100 statuses of other contexts on page 1, the pinned name's failure on page 2.
+  const filler = (n: number, prefix: string) => Array.from({ length: n }, (_, i) => ({ context: `${prefix}-${i}`, state: 'success' }));
+  for (const total of [undefined, 100]) {
+    const calls: string[] = [];
+    let clock = Date.parse('2026-10-18T12:00:00Z');
+    const fetchJson = async (url: string) => {
+      calls.push(url.replace(API, ''));
+      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1, check_runs: [checkRun({ name, suite: 2 }, 0)] };
+      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return url.includes('page=2') ? { workflow_runs: [] } : { workflow_runs: [...legit, ...Array.from({ length: 98 }, (_, i) => workflowRun(100 + i, '.github/workflows/other.yml'))] };
+      if (url.startsWith(`${API}/commits/${SHA}/status?`)) return url.includes('page=2') ? { total_count: total, statuses: [{ context: name, state: 'failure' }] } : { ...(total === undefined ? {} : { total_count: total }), statuses: filler(100, 'other') };
+      return null;
+    };
+    const deps = { pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) };
+    const r = await u.chooseCommit(deps, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T09:00:00Z' }], null);
+    assert.equal(r.chosen, undefined, `total_count ${total}: page 2's failing status refuses`);
+    assert.match(r.skipped[0]?.reason ?? r.reason ?? '', /"scan" has a commit status that ended failure/);
+    assert.ok(calls.some((c) => c.startsWith('/actions/runs') && c.includes('page=2')), 'a full page of workflow runs: the next page is read');
+  }
+  // Check runs: a full page whose total_count says 100, a failing check on page 2: refused (it used to stop at page 1).
+  let clock = Date.parse('2026-10-18T12:00:00Z');
+  const runsOn = (page: number) => (page === 1 ? Array.from({ length: 100 }, (_, i) => checkRun({ name: i === 0 ? name : `other-${i}`, suite: 2 }, i)) : [checkRun({ name: 'lint', suite: 2, conclusion: 'failure' }, 500)]);
+  const fetchJson = async (url: string) => {
+    if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 100, check_runs: runsOn(url.includes('page=2') ? 2 : 1) };
+    if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return { workflow_runs: legit };
+    if (url.startsWith(`${API}/commits/${SHA}/status?`)) return { total_count: 0, statuses: [] };
+    return null;
+  };
+  const r = await u.chooseCommit({ pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T09:00:00Z' }], null);
+  assert.equal(r.chosen, undefined);
+  assert.match(r.skipped[0]?.reason ?? r.reason ?? '', /check "lint" ended failure/);
+});
+
+test('the read cost: a commit where a pinned required check has no run at all reads neither its workflow runs nor its statuses', async () => {
+  const gh = gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit });
+  const r = await choose(engine, gh);
+  assert.equal(r.chosen, false);
+  assert.match(r.reason ?? '', /"test \(ubuntu-latest, 22\)" hasn't run on this commit from its pinned source/);
+  assert.deepEqual(gh.calls.map((c) => c.replace(/\?.*/, '')), [`/commits/${SHA}/check-runs`], 'one read: the check runs');
+  // A pinned check with runs but no pass at all; a check judged by name that ended red, or is still running: one read each.
+  const oneRead = async (runs: Run[], why: RegExp) => {
+    const g = gitHub({ runs, workflowRuns: legit });
+    const v = await choose(engine, g);
+    assert.equal(v.chosen, false);
+    assert.match(v.reason ?? '', why);
+    assert.deepEqual(g.calls.map((c) => c.replace(/\?.*/, '')), [`/commits/${SHA}/check-runs`], String(why));
+  };
+  await oneRead([{ name: 'test (ubuntu-latest, 22)', suite: 1, conclusion: 'failure' }, { name: 'scan', suite: 2 }], /"test \(ubuntu-latest, 22\)" ended failure/);
+  await oneRead([{ name: 'test (ubuntu-latest, 22)', suite: 1 }, { name: 'scan', suite: 2 }, { name: 'lint-bot', suite: 7, app: 4242, conclusion: 'failure' }], /check "lint-bot" ended failure/);
+  await oneRead([{ name: 'test (ubuntu-latest, 22)', suite: 1 }, { name: 'scan', suite: 2 }, { name: 'lint-bot', suite: 7, app: 4242, status: 'in_progress' }], /check "lint-bot" is in_progress/);
+  // With every pinned check present, both are read.
+  const all = gitHub({ runs: [{ name: 'test (ubuntu-latest, 22)', suite: 1 }, { name: 'scan', suite: 2 }], workflowRuns: legit });
+  assert.equal((await choose(engine, all)).chosen, true);
+  assert.deepEqual(all.calls.map((c) => c.replace(/\?.*/, '')), [`/commits/${SHA}/check-runs`, '/actions/runs', `/commits/${SHA}/status`]);
+});
+
+test('a pin to an App that is not Actions fails closed: every one of its check runs listed must pass', async () => {
+  const pin = { required_checks: ['scan'], required_check_sources: { scan: { app_id: 4242 } } };
+  const verdict = async (runs: Run[]) => {
+    const r = await choose(pin, gitHub({ runs }));
+    return r.chosen ? 'installs' : (r.reason ?? '');
+  };
+  // Its first suite cancelled or failed, its second passed: refused (no file to group by, so nothing supersedes).
+  assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, conclusion: 'cancelled' }, { name: 'scan', suite: 12, app: 4242 }]), /"scan" ended cancelled/);
+  assert.match(await verdict([{ name: 'scan', suite: 12, app: 4242 }, { name: 'scan', suite: 11, app: 4242, conclusion: 'failure' }]), /"scan" ended failure/);
+  // A re-run GitHub lists in place of the failure (the latest of its suite): installs; both suites passed: installs.
+  assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242 }]), 'installs');
+  assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242 }, { name: 'scan', suite: 12, app: 4242 }]), 'installs');
+});
+
 test("updates.json required_check_sources pins a check (over the updater's own list); the branch rules' App pins one it doesn't name", async () => {
   const own = await choose({ required_checks: ['scan'], required_check_sources: { scan: { app_id: 4242 } } }, gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit }));
   assert.equal(own.chosen, false, 'from Actions, but pinned to App 4242');
