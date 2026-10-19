@@ -103,6 +103,12 @@ test("a required check nothing pins (not the engine's, none in updates.json, non
   assert.match((await choose({ required_checks: ['scan'], required_check_sources: { scan: { workflow: 'gitleaks.yml' } } }, gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit }))).reason ?? '', /invalid pin for "scan".*: refused/);
 });
 
+test("a check the branch's rules pin under the name __proto__ keeps its pin: another App's run of it doesn't install", async () => {
+  const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: '__proto__', integration_id: 4242 }] } }];
+  assert.equal((await choose({ required_checks: ['__proto__'] }, gitHub({ runs: [{ name: '__proto__', suite: 3, app: 5555 }], rules }))).chosen, false);
+  assert.equal((await choose({ required_checks: ['__proto__'] }, gitHub({ runs: [{ name: '__proto__', suite: 3, app: 4242 }], rules }))).chosen, true);
+});
+
 test("the branch's rules unread (a rate limit, say): a check they might pin waits, never judged by name and never refused", async () => {
   const r = await u.chooseCommit(gitHub({ runs: [{ name: 'test', suite: 1, app: 4242 }], rules: null }).deps, { branch: 'main', required_checks: ['test'] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
   assert.equal(r.chosen, undefined);

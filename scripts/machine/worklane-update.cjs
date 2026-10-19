@@ -437,7 +437,8 @@ function ruleApps(branch, rules) {
     const list = r && r.type === 'required_status_checks' && r.parameters ? r.parameters.required_status_checks : null;
     if (Array.isArray(list)) for (const c of list) named.push([c && c.context, c && c.integration_id]);
   }
-  const out = {};
+  // WHY: no prototype, so a check the rules pin under the name "__proto__" keeps its pin (a {} would drop it).
+  const out = Object.create(null);
   const conflicting = new Set();
   for (const [name, id] of named) {
     if (typeof name !== 'string' || !Number.isInteger(id) || id <= 0) continue;
@@ -608,8 +609,9 @@ const RETIRED_CHECKS = Object.freeze(['desktop']);
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
  * pins (checkPins, #727): a pinned required check counts only from its pinned source, and one nothing pins by name, as
- * before; every check on the commit, whatever its source, must still be green, so a pin never turns a fail into a
- * pass. Absent: by name alone (tests' stand-ins only).
+ * before; the latest run of every name on the commit, whatever its source, must still be green, so a pin never turns
+ * a check that isn't a pass, as judged by name (the latest run of that name), into a pass. Absent: by name alone
+ * (tests' stand-ins only).
  */
 function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
