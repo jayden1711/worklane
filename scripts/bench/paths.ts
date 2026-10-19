@@ -2,9 +2,9 @@
 // dir, ~/bench unless BENCH_ROOT_ENV names another. Task text, patches and grades are third-party data under each
 // task's source licence, and the hidden tests must stay out of every agent's reach, so none of it lives in a repo.
 // The bench is Linux-only (rootless Docker Engine in WSL2 or on Linux); it refuses to start elsewhere.
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { BRAND } from '../../src/brand.js';
 import { HELD_OUT_ENV } from '../../src/held-out-paths.js';
 import { stateDir } from '../../src/os/index.js';
@@ -38,21 +38,38 @@ export const inside = (p: string, dir: string): boolean => {
   return r === '' || (!r.startsWith('..') && !isAbsolute(r));
 };
 
+/**
+ * `p` with every symlink resolved: its longest existing ancestor through realpath, and the rest (not created yet)
+ * appended. So a root that is, or sits under, a link into ~/.claude or a checkout is checked where it really is.
+ */
+export function realPath(p: string): string {
+  const rest: string[] = [];
+  for (let d = resolve(p); ; d = dirname(d)) {
+    try {
+      return join(realpathSync(d), ...rest);
+    } catch {
+      if (dirname(d) === d) return resolve(p);
+      rest.unshift(basename(d));
+    }
+  }
+}
+
 /** Places in a home the bench never reads, writes or mounts: logins and other credential stores. */
 export const credentialPlaces = (home: string): string[] => ['.claude', '.claude.json', '.config', '.ssh', '.aws', '.gnupg', '.docker', '.netrc'].map((p) => join(home, p));
 
 /**
  * The bench root, refused when it is inside (or holds) a place the bench must never touch: the engine's real state
  * dir, a held-out store the environment names, a login or credential store in this (the bench user's) home, or a
- * git checkout (the bench user's own clone included). Checked before anything is read or written.
+ * git checkout (the bench user's own clone included). Checked before anything is read or written, on real paths (every
+ * symlink resolved, on both sides): the layout is built on the resolved root.
  */
 export function benchRoot(env: NodeJS.ProcessEnv = process.env, home = homedir()): BenchLayout {
   if (process.platform !== 'linux') throw new Error(`the benchmark runs on Linux only (rootless Docker Engine); this is ${process.platform}`);
   const raw = env[BENCH_ROOT_ENV] || join(home, 'bench');
   if (!isAbsolute(raw)) throw new Error(`${BENCH_ROOT_ENV} must be an absolute path, not ${raw}`);
-  const root = resolve(raw);
+  const root = realPath(raw);
   const realState = [stateDir(), join(env.XDG_STATE_HOME ?? join(home, '.local', 'state'), BRAND.cli), join(home, '.local', 'state', BRAND.cli)];
-  const never = [...realState, env[HELD_OUT_ENV], ...credentialPlaces(home)].filter((p): p is string => Boolean(p));
+  const never = [...realState, env[HELD_OUT_ENV], ...credentialPlaces(home)].filter((p): p is string => Boolean(p)).flatMap((p) => [resolve(p), realPath(p)]);
   for (const p of never) {
     if (inside(root, p) || inside(p, root)) throw new Error(`the bench root ${root} overlaps ${p}, which the bench must never touch: set ${BENCH_ROOT_ENV} to a folder of its own (default ~/bench)`);
   }
