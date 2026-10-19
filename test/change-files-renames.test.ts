@@ -961,6 +961,9 @@ test('a change that marks a path -diff, binary or linguist-generated in a .gitat
     // A macro definition (even one of harmless names: what uses it is judged as the name it looks like), a name a
     // macro may stand for (its definition may be on main already), and a name git doesn't know.
     '[attr]quiet -diff', '[attr]plain text eol=lf', '*.sql quiet', '*.sql made-up',
+    // A quoted macro definition (git C-unquotes the pattern first, then skips blanks after `[attr]`), even of harmless
+    // names, and quoting git can't read (no closing quote, an unknown escape): fails closed (R7, round 3).
+    '"[attr]eol" -diff', '"[attr] eol" -diff', '"[attr]eol" text', '"[attr] eol" text', '"\\[attr]eol" -diff', '"*.sql -diff', '"[attr]\\x" text',
     // A filter (git-lfs: a review reads a pointer, a checkout gets the content), a diff driver git doesn't ship.
     '*.sql filter=lfs diff=lfs merge=lfs -text', '*.sql filter=strip', '*.sql diff=sql',
     // An encoding the checkout converts from: the blob a review reads is the file re-encoded (R1, round 2).
@@ -975,8 +978,10 @@ test('a change that marks a path -diff, binary or linguist-generated in a .gitat
   // Taking away a line that turned a filter off, or forced text, turns it back on.
   assert.deepEqual(judge('* filter=lfs\n', '* filter=lfs\n*.sql -filter\n'), flagged('.gitattributes'));
   assert.deepEqual(judge('*.sql binary\n', '*.sql binary\n*.sql diff\n'), flagged('.gitattributes'));
-  // Taking away a macro definition: the lines that use it now mean something else.
+  // Taking away a macro definition: the lines that use it now mean something else. Quoted, with a blank, or quoting git
+  // can't read, the same (R7, round 3).
   assert.deepEqual(judge('*.sql keep\n', '[attr]keep -filter\n*.sql keep\n'), flagged('.gitattributes'));
+  for (const def of ['"[attr]keep" -filter', '"[attr] keep" text', '"\\[attr]keep" text', '"*.sql text']) assert.deepEqual(judge('*.sql keep\n', `${def}\n*.sql keep\n`), flagged('.gitattributes'), def);
   // Lines that hide nothing get the review they had: a comment, a path named "binary", line endings, a diff driver git
   // ships, forcing text, GitHub's language marks, turning a fold or a filter off, the engine's own .gitattributes, and
   // taking a mark away.
@@ -1022,6 +1027,15 @@ test('a name a macro on main stands for (`[attr]eol -diff`, then `*.job eol`) is
   const other = repo({ 'README.md': '# x\n', '.gitattributes': '[attr]eol -diff\n' });
   write(other.dir, { 'db/.gitattributes': '*.job eol\n' });
   assert.deepEqual(level(changeFiles(other.dir, other.base, commit(other.dir, 'nested')), plain).categories['diff-hiding-attributes'], ['db/.gitattributes']);
+  // A quoted definition on main (`"[attr]eol" -diff`, `"[attr] eol" -diff`) is a macro to git too, and one git can't
+  // unquote may be: the use is flagged, in the same file or a nested one (R7, round 3).
+  for (const def of ['"[attr]eol" -diff', '"[attr] eol" -diff', '"\\[attr]eol" -diff']) {
+    const q = repo({ 'README.md': '# x\n', '.gitattributes': `${def}\n` });
+    write(q.dir, { 'db/.gitattributes': '*.job eol\n', 'db/purge.job': jobLines(30, 'DROP TABLE users;') });
+    const qHead = commit(q.dir, 'use it');
+    if (!def.includes('\\')) assert.match(git(q.dir, 'diff', '--numstat', `${q.base}..${qHead}`), /^-\t-\tdb\/purge\.job$/m, `git hides it: ${def}`);
+    assert.deepEqual(level(changeFiles(q.dir, q.base, qHead), plain).categories['diff-hiding-attributes'], ['db/.gitattributes'], def);
+  }
   // With no macro of that name anywhere, `eol` is git's own: the review it had.
   const none = repo({ 'README.md': '# x\n' });
   write(none.dir, { '.gitattributes': '*.job eol=lf\n' });
@@ -1042,6 +1056,68 @@ test('a .gitmodules line that hides a submodule\'s changes (ignore = anything bu
   assert.deepEqual(judge('[submodule "m"] ignore = all\n'), ['L3', ['.gitmodules']], 'after a header on the same line');
   assert.deepEqual(judge(section('\tignore = all'), 'lib/.GitModules'), ['L3', ['lib/.GitModules']]);
   for (const line of ['\tignore = none', '\tignore = "none" # always', '\t# ignore = all', '\tbranch = main']) assert.deepEqual(judge(section(line)), ['L1', []], JSON.stringify(line));
+  // Read by git's own config parser, so the header forms it accepts count (R8, round 3): a subsection holding `]`, two
+  // headers on one line.
+  for (const text of ['[submodule "x]y"] ignore = all\n', '[core] [submodule "m"] ignore = all\n']) {
+    assert.match(git(writeRepo(text), 'config', '-f', '.gitmodules', '--list'), /\.ignore=all$/m, `git reads it: ${text}`);
+    assert.deepEqual(judge(text), ['L3', ['.gitmodules']], text);
+  }
+  // A file git can't parse is flagged (fails closed).
+  for (const text of ['[submodule "m"\n\tignore = none\n', '[submodule "m"]\n\t= all\n']) assert.deepEqual(judge(text), ['L3', ['.gitmodules']], text);
+});
+
+/** A scratch repo holding `.gitmodules` with `text` (uncommitted): for asking git how it reads it. */
+function writeRepo(text: string): string {
+  const { dir } = repo({ 'README.md': '# x\n' });
+  write(dir, { '.gitmodules': text });
+  return dir;
+}
+
+test('an ignore = all already on main, moved onto a new link by editing its path, is flagged (R9, round 3)', () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const before = (path: string) => `[submodule "docs"]\n\tpath = ${path}\n\turl = ./x\n\tignore = all\n`;
+  const { dir, base } = repo({ 'README.md': '# x\n', '.gitmodules': before('docs/ext') });
+  git(dir, 'update-index', '--add', '--cacheinfo', `160000,${submoduleCommit(3)},lib/ext`);
+  write(dir, { '.gitmodules': before('lib/ext') });
+  // Not `add -A`: the link has no directory in the worktree, and `add -A` would take it out of the index.
+  git(dir, 'add', '.gitmodules');
+  git(dir, 'commit', '-q', '-m', 'move the ignored submodule onto a new link');
+  const head = git(dir, 'rev-parse', 'HEAD');
+  // git itself leaves the new link out.
+  assert.equal(git(dir, 'diff', '--name-only', `${base}..${head}`), '.gitmodules');
+  const files = changeFiles(dir, base, head);
+  assert.deepEqual(files.map((f) => f.path).sort(), ['.gitmodules', 'lib/ext']);
+  assert.deepEqual(files.find((f) => f.path === '.gitmodules')?.submoduleIgnores, ['all', 'all']);
+  const lvl = level(files, plain);
+  assert.deepEqual([lvl.level, lvl.categories['diff-hiding-attributes']], ['L3', ['.gitmodules']]);
+});
+
+test('a .gitattributes or .gitmodules under another spelling a file system opens as one (trailing dot or space, an NTFS stream, an 8.3 short name) is judged as one', { skip: process.platform === 'win32' && 'names Windows refuses' }, () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  for (const [at, text] of [
+    ['.gitattributes.', '*.sql -diff\n'], ['.gitattributes ', '*.sql -diff\n'], ['.gitattributes::$DATA', '*.sql -diff\n'], ['GITATT~1', '*.sql -diff\n'], ['db/gi7d29~2', '*.sql -diff\n'],
+    ['.gitmodules.', '[submodule "m"]\n\tignore = all\n'], ['GITMOD~1', '[submodule "m"]\n\tignore = all\n'], ['gi7eba~3', '[submodule "m"]\n\tignore = all\n'],
+  ] as const) {
+    const { dir, base } = repo({ 'README.md': '# x\n' });
+    write(dir, { [at]: text });
+    const lvl = level(changeFiles(dir, base, commit(dir, 'spelling')), plain);
+    assert.deepEqual([lvl.level, lvl.categories['diff-hiding-attributes']], ['L3', [at]], at);
+  }
+  // Names that aren't one: their review as before.
+  for (const at of ['gitattributes', '.gitattributes-old', 'GITATT~5', 'docs/.gitattributes.md']) {
+    const { dir, base } = repo({ 'README.md': '# x\n' });
+    write(dir, { [at]: '*.sql -diff\n' });
+    assert.equal(level(changeFiles(dir, base, commit(dir, 'name')), plain).categories['diff-hiding-attributes'], undefined, at);
+  }
+});
+
+test('a .gitattributes or .gitmodules that didn\'t come through changeFiles (no macro list, no parsed ignores) is flagged: fails closed', () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  assert.equal(level([{ path: '.gitattributes', added: 1, removed: 0, addedLines: ['*.sql text'], removedLines: [] }], plain).level, 'L3');
+  assert.equal(level([{ path: '.gitattributes', added: 1, removed: 0, addedLines: ['*.sql text'], removedLines: [], attributeMacros: [] }], plain).level, 'L1');
+  assert.equal(level([{ path: '.gitmodules', added: 1, removed: 0, addedLines: ['\tbranch = main'], removedLines: [] }], plain).level, 'L3');
+  assert.equal(level([{ path: '.gitmodules', added: 1, removed: 0, addedLines: ['\tbranch = main'], removedLines: [], submoduleIgnores: [] }], plain).level, 'L1');
+  assert.equal(level([{ path: '.gitmodules', added: 1, removed: 0, addedLines: ['\tbranch = main'], removedLines: [], submoduleIgnores: null }], plain).level, 'L3');
 });
 
 /** A commit's id in a scratch repo of its own: the commit a submodule link points at (`n` makes each one different). */

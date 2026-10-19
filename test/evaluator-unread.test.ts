@@ -97,11 +97,11 @@ test('#106: an evaluator that says it reviewed a file its run never read leaves 
   assert.ok(t.level!.reasons.some((r) => /evaluator did not read: src\/price\.js/.test(r)), t.level!.reasons.join(' | '));
 });
 
-test('#693: the evaluator is told to read the diff as text, with no textconv or external diff, whatever the change\'s .gitattributes says', { skip }, async () => {
+test('#693: the evaluator is told to read the diff as text, with no textconv or external diff and every submodule link, whatever the change\'s .gitattributes or .gitmodules says', { skip }, async () => {
   const t = await run(agents('code', [pass()]));
   const prompt = t.verdictRuns[0]!.prompt;
   const line = prompt.split('\n').find((l) => l.startsWith('Base commit: '));
-  assert.match(line ?? '', /^Base commit: ([0-9a-f]{40})\. Head: ([0-9a-f]{40})\. Inspect with: git diff --text --no-textconv --no-ext-diff \1\.\.\2$/, prompt);
+  assert.match(line ?? '', /^Base commit: ([0-9a-f]{40})\. Head: ([0-9a-f]{40})\. Inspect with: git diff --text --no-textconv --no-ext-diff --ignore-submodules=none \1\.\.\2$/, prompt);
 });
 
 test('#106: a file the run did read is not unread, whatever the evaluator lists', { skip }, async () => {

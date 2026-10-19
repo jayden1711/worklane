@@ -27,7 +27,7 @@
 import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
 import type { SizeFile } from '../pr-rules.js';
-import { isGitattributesPath, type ChangeFile } from '../review.js';
+import { isGitattributesPath, isGitmodulesPath, macroDefined, type ChangeFile } from '../review.js';
 
 const MAX_BUFFER = 256 * 1024 * 1024;
 
@@ -217,10 +217,13 @@ export function changeFiles(cwd: string, base: string, head: string): ChangeFile
     const macros = [...new Set([...attributeMacros(cwd, base), ...attributeMacros(cwd, head)])];
     for (const f of files) if (isGitattributesPath(f.path)) f.attributeMacros = macros;
   }
+  // A .gitmodules is read by git's own config parser on both sides (review.ts hidesSubmodules): an `ignore` already on
+  // main that the change moves onto a new link (by editing `path`) counts as much as one the change adds.
+  for (const f of files) if (isGitmodulesPath(f.path)) f.submoduleIgnores = submoduleIgnores(cwd, [base, head], f.path);
   return files;
 }
 
-/** Every macro name (`[attr]name`) any .gitattributes (any directory, any case) of `rev`'s tree defines. */
+/** Every macro name (`[attr]name`) any .gitattributes (any directory, any case) of `rev`'s tree defines, as review.ts macroDefined reads it. */
 function attributeMacros(cwd: string, rev: string): string[] {
   const out: string[] = [];
   // -z: "mode SP type SP object TAB path NUL" for each file of the tree.
@@ -229,8 +232,39 @@ function attributeMacros(cwd: string, rev: string): string[] {
     const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
     if (type !== 'blob' || !sha || !isGitattributesPath(rec.subarray(tab + 1).toString('latin1'))) continue;
     for (const line of must(runBytes(cwd, ['cat-file', 'blob', sha])).toString('utf8').split('\n')) {
-      const m = /^\s*\[attr\](\S+)/.exec(line);
-      if (m) out.push(m[1]!);
+      const name = macroDefined(line);
+      if (name) out.push(name);
+    }
+  }
+  return out;
+}
+
+/** git's exit status and stdout, for the calls whose status is an answer (`cat-file -e`, `config --get-regexp`). */
+function runStatus(cwd: string, args: string[]): { status: number | null; stdout: string } {
+  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
+}
+
+/**
+ * The value of every `ignore` key (any section: `submodule.<name>.ignore` and anything else git would read so) in the
+ * .gitmodules at `path` on each side it exists, read by git's own config parser (`config --blob -z --list`; git gives
+ * section and key names in lower case); null for a key with no value. null for the whole when git can't parse a side
+ * or the name can't be handed to git. `--list`, not `--get-regexp`: the latter exits 1 both for "no such key" and for
+ * a file it can't parse.
+ */
+function submoduleIgnores(cwd: string, revs: string[], path: string): (string | null)[] | null {
+  if (path.includes('�')) return null;
+  const out: (string | null)[] = [];
+  for (const rev of revs) {
+    const spec = `${rev}:${path}`;
+    if (runStatus(cwd, ['cat-file', '-e', spec]).status !== 0) continue;
+    const r = runStatus(cwd, ['config', '--blob', spec, '-z', '--list']);
+    if (r.status !== 0) return null;
+    // -z: "key NL value NUL", or "key NUL" for a key with no value.
+    for (const entry of r.stdout.split('\0').filter(Boolean)) {
+      const nl = entry.indexOf('\n');
+      const key = nl === -1 ? entry : entry.slice(0, nl);
+      if (/\.ignore$/.test(key)) out.push(nl === -1 ? null : entry.slice(nl + 1));
     }
   }
   return out;
