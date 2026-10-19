@@ -19,7 +19,7 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, relative, sep } from 'node:path';
+import { join, posix, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 import ts from 'typescript';
@@ -166,8 +166,6 @@ const HELPER = 'src/slot-file.ts';
 const MAKER = 'src/os/index.ts';
 /** Names only the maker uses: slotPathOf and slotDirAt make a slot path from a string. */
 const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt']);
-/** The OS layer: its modules may name slotsDir's `system` seam and import each other whole. */
-const OS_LAYER = /^src\/os\//;
 /** Where the slot dir's location may be read: the maker, and the system paths it reads it from. */
 const SLOT_SOURCES = new Set([MAKER, 'src/os/system-paths.ts']);
 const SOURCE_NAMES = new Set(['AGENT_SLOTS_DIR', 'SYSTEM_SLOTS', 'devSlotsPath', 'unguardedSlotsDir']);
@@ -176,20 +174,23 @@ const parse = (file: string, text: string) => ts.createSourceFile(file, text, ts
 const lineOf = (sf: ts.SourceFile, n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
 const nameText = (n: ts.Node): string | null => (ts.isIdentifier(n) || ts.isPrivateIdentifier(n) ? n.text : ts.isStringLiteralLike(n) ? n.text : null);
 
-/** The helper or the OS layer's index, by an import's specifier: a namespace of either reads MAKER_ONLY by a computed name. */
-const WHOLE_MODULES = /(^|\/)(slot-file|os\/index)\.js$/;
+/** The helper and os/index.ts, as src/ paths: a namespace of either reads MAKER_ONLY by a computed name. */
+const WHOLE_MODULES = new Set(['src/slot-file.js', 'src/os/index.js']);
+/** The src/ path an import's specifier in `file` names (`./index.js` in src/os/ is src/os/index.js), or null. */
+const target = (file: string, spec: string) => (spec.startsWith('.') ? posix.normalize(posix.join(posix.dirname(file), spec)) : null);
 
 /**
- * Who makes a slot path, or a way to its path. MAKER_ONLY names only in the maker (and the helper, which defines
- * them). slotsDir's `system` argument only in the OS layer: with any other, slotsDir would make a slot path of any
- * directory (#806 review, A3). No `import *` or `import()` of the helper or of os/index.js outside the OS layer.
+ * Who makes a slot path, or a way to its path, in every src/ module but the helper (no scope for the OS layer: #806
+ * round-2 review, principle 9). MAKER_ONLY names only in the maker (and the helper, which defines them). No call
+ * passes slotsDir an argument (its `system` would make a slot path of any directory: A3). No `import *` or `import()`
+ * of the helper or of os/index.js.
  */
 function slotPathMakers(files: Map<string, string>): Finding[] {
   const out: Finding[] = [];
   for (const [file, text] of files) {
     if (file === HELPER) continue;
     const sf = parse(file, text);
-    const os = OS_LAYER.test(file);
+    const whole = (spec: string) => WHOLE_MODULES.has(target(file, spec) ?? '');
     const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
     /** The names slotsDir goes by here: its own, and any it is imported as. */
     const slotsDirNames = new Set(['slotsDir']);
@@ -201,13 +202,46 @@ function slotPathMakers(files: Map<string, string>): Finding[] {
     const visit = (n: ts.Node) => {
       const name = nameText(n);
       if (name && MAKER_ONLY.has(name) && file !== MAKER) at(n, `${name}: only ${MAKER} makes a slot path`);
-      if (!os && ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && WHOLE_MODULES.test(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) at(n, `import * from ${n.moduleSpecifier.text}: import its functions by name`);
+      if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && whole(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) at(n, `import * from ${n.moduleSpecifier.text}: import its functions by name`);
       if (ts.isCallExpression(n)) {
-        if (n.expression.kind === ts.SyntaxKind.ImportKeyword && /slot-file|os\/index/.test(n.arguments[0]?.getText(sf) ?? '') && !os) at(n, 'import() of slot-file.js or os/index.js: import its functions by name');
+        const a = n.arguments[0];
+        if (n.expression.kind === ts.SyntaxKind.ImportKeyword && a && ts.isStringLiteralLike(a) && whole(a.text)) at(n, 'import() of slot-file.js or os/index.js: import its functions by name');
         const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
         const isSlotsDir = ts.isIdentifier(n.expression) ? slotsDirNames.has(n.expression.text) : callee === 'slotsDir';
-        if (isSlotsDir && n.arguments.length > 0 && !os) at(n, `${n.getText(sf).slice(0, 60)}: slotsDir's system argument is the OS layer's (with any other, it makes a slot path of any directory)`);
+        if (isSlotsDir && n.arguments.length > 0) at(n, `${n.getText(sf).slice(0, 60)}: slotsDir's system argument is for tests only (with any other, it makes a slot path of any directory)`);
       }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return out;
+}
+
+/** Names that reach a prototype or V8's stack hook. */
+const PROTO_NAMES = new Set(['__proto__', 'getPrototypeOf', 'setPrototypeOf', 'prepareStackTrace']);
+
+/**
+ * What patches a built-in from src/ (#806 round-2 review, 3b): any `.prototype` (a getter put on String.prototype or
+ * Object.prototype as `href` is read by fs on every path it is given, a slot path's included; a method there is handed
+ * its `this`), `__proto__`, get/setPrototypeOf (a prototype reached around `.prototype`), and Error.prepareStackTrace
+ * (handed every error's frames). src/ has none of these but the helper's own class, which is skipped.
+ */
+function builtinPatches(files: Map<string, string>): Finding[] {
+  const out: Finding[] = [];
+  for (const [file, text] of files) {
+    if (file === HELPER) continue;
+    const sf = parse(file, text);
+    const hit = (k: string | null) => k !== null && (k === 'prototype' || PROTO_NAMES.has(k));
+    const visit = (n: ts.Node) => {
+      let found = false;
+      // `x.prototype`, `x['prototype']`, `Object.getPrototypeOf`, `Error.prepareStackTrace`: the access, once.
+      if (ts.isPropertyAccessExpression(n)) found = hit(n.name.text);
+      else if (ts.isElementAccessExpression(n)) found = hit(nameText(n.argumentExpression));
+      // A bare name (an import of setPrototypeOf, a `__proto__:` key), or a string (`defineProperty(Error,
+      // 'prepareStackTrace')`, `Reflect.get(String, 'prototype')`), but not the name or key of an access above.
+      else if (ts.isIdentifier(n) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) found = PROTO_NAMES.has(n.text);
+      else if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n)) found = hit(n.text);
+      if (found) out.push({ file, line: lineOf(sf, n), what: `${n.getText(sf).slice(0, 60)}: reaches a built-in's prototype or V8's stack hook, where a getter or method is handed the paths fs is given` });
       ts.forEachChild(n, visit);
     };
     visit(sf);
@@ -345,8 +379,10 @@ test('the maker check: another module making a slot path, opening one, passing s
     // A3: slotsDir with a system of the caller's, under its own name and renamed; and the A8 namespace route.
     ['src/slots.ts', "import { slotsDir, slotsDir as sd } from './os/index.js';\nexport const h = (dir: string) => slotsDir({ dir, config: '' });\nexport const i = (dir: string) => sd({ dir, config: '' });\nexport const j = () => slotsDir();\n"],
     ['src/health2.ts', "import * as os from './os/index.js';\nexport const k = (g: string) => (os as unknown as Record<string, (d: string) => unknown>)['slot' + 'DirAt']!(g) === os.slotsDir();\nexport const l = (dir: string) => os.slotsDir({ dir, config: '' });\n"],
+    // The OS layer has no scope (#806 round-2 review, principle 9): the maker may name slotPathOf, and nothing else.
     [MAKER, "import { slotPathOf } from '../slot-file.js';\nexport const f = slotPathOf('/x');\nexport const m = (dir: string) => slotsDir({ dir, config: '' });\n"],
     ['src/os/system-paths.ts', "import * as os from './index.js';\nexport const n = () => os.slotsDir({ dir: '/x', config: '' });\n"],
+    ['src/os/stats.ts', "import * as sf from '../slot-file.js';\nexport const o = (g: string) => (sf as unknown as Record<string, (d: string) => unknown>)['slotPath' + 'Of']!(g);\nexport const p = () => import('../slot-file.js');\nexport const q = () => import('./index.js');\n"],
   ]);
   assert.deepEqual(show(slotPathMakers(files)).map((l) => l.replace(/^(.*?:\d+: [^:]*?)(: |\(…|\(\{).*$/, '$1')), [
     'src/cores.ts:1: slotPathOf',
@@ -360,9 +396,14 @@ test('the maker check: another module making a slot path, opening one, passing s
     'src/slots.ts:3: sd',
     'src/health2.ts:1: import * from ./os/index.js',
     'src/health2.ts:3: os.slotsDir',
+    'src/os/index.ts:3: slotsDir',
+    'src/os/system-paths.ts:1: import * from ./index.js',
+    'src/os/system-paths.ts:2: os.slotsDir',
+    'src/os/stats.ts:1: import * from ../slot-file.js',
+    'src/os/stats.ts:3: import() of slot-file.js or os/index.js',
+    'src/os/stats.ts:4: import() of slot-file.js or os/index.js',
   ]);
-  // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported. The OS
-  // layer (os/index.ts, os/system-paths.ts) may pass a system and import its index whole.
+  // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported.
 });
 
 test('the source check: the slot dir\'s location read anywhere but the OS layer is reported (env, SYSTEM_SLOTS, the name)', () => {
@@ -441,6 +482,35 @@ test('the conversion check: casts to or from a slot path and its conversions to 
     `${FIX}:8: a cast`,
     `${FIX}:9: a cast`,
   ]);
+});
+
+test('src/: nothing patches a built-in prototype or Error.prepareStackTrace (#806 round-2 review, 3b)', () => {
+  assert.deepEqual(show(builtinPatches(srcFiles())), []);
+});
+
+test('the built-in patch check: a getter or method on a built-in prototype, a prototype reached around .prototype, and Error.prepareStackTrace are reported', () => {
+  const files = new Map([
+    [
+      'src/os/stats.ts',
+      [
+        "Object.defineProperty(String.prototype, 'href', { get() { return undefined; } });",
+        'Object.prototype.toJSON = () => 1;',
+        "(Array.prototype as unknown as Record<string, unknown>)['push'] = () => 0;",
+        "globalThis.Map.prototype.get = () => undefined;",
+        "export const a = (''.constructor as unknown as Record<string, unknown>)['prototype'];",
+        "export const b = Object.getPrototypeOf('');",
+        'export const c = Reflect.setPrototypeOf({}, null);',
+        'export const d = { __proto__: null };',
+        'Error.prepareStackTrace = () => 1;',
+        "Object.defineProperty(Error, 'prepareStackTrace', { value: 1 });",
+        "export const e = Reflect.get(Uint8Array, 'prototype');",
+        "import { setPrototypeOf } from 'node:util';",
+        "export const ok = (o: { proto: number; prototypes: string[] }) => [o.proto, o.prototypes, 'prototypes'];",
+        'void setPrototypeOf;',
+      ].join('\n'),
+    ],
+  ]);
+  assert.deepEqual(show(builtinPatches(files)).map((l) => l.replace(/^(src\/os\/stats\.ts:\d+): .*$/, '$1')), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14].map((n) => `src/os/stats.ts:${n}`));
 });
 
 test('the introspection check: node:inspector and heap snapshots are reported (#806 review, A4)', () => {
