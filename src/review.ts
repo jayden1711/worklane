@@ -352,14 +352,16 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change
   // there could point an agent's hooks at another entry, or at none (#665).
   { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
-  // WHY (#785): these were locked only as modules the guard's import tree reached (through src/runner.ts). The tree no
-  // longer reaches them, but each still decides what an agent run gets: the settings that keep its hooks on, the
-  // bundles it may read, the plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop. So they
-  // stay locked here, exactly as before; only the part that names them changed.
+  // WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but
+  // each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the
+  // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, and the role, lane and tools of the
+  // runs that read untrusted input (the research, intake and chat run builders; #841 would let those three go). So
+  // they stay locked here, exactly as before; only the part that names them changed.
   {
     what: 'what an agent run is given',
     globs: [
       'src/agent-settings.ts', 'src/bundle.ts', 'src/domain-requests.ts', 'src/stuck.ts',
+      'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts',
       'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts', 'src/plugins/run.ts', 'src/plugins/tree.ts',
     ],
   },

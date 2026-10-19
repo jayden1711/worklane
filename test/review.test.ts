@@ -225,14 +225,18 @@ test("regression: the guard's process loads only modules of its pinned tree, and
 });
 
 // WHY (#785): of the modules that left the tree, these still decide what an agent run gets (the settings that keep its
-// hooks on, its bundles, plugins, MCP servers, host requests and stuck-run stop, and the secret redaction): they stay
-// locked, L3, under parts of their own. The rest are ordinary modules and are no longer locked.
+// hooks on, its bundles, plugins, MCP servers, host requests and stuck-run stop, the untrusted-input runs' builders,
+// and the secret redaction): they stay locked, L3, under parts of their own. The rest are ordinary modules and are no
+// longer locked.
 const STILL_LOCKED: [string, string][] = [
   ['src/agent-settings.ts', 'what an agent run is given'], ['src/bundle.ts', 'what an agent run is given'],
   ['src/domain-requests.ts', 'what an agent run is given'], ['src/stuck.ts', 'what an agent run is given'],
   ['src/mcp/client.ts', 'what an agent run is given'], ['src/mcp/connector.ts', 'what an agent run is given'],
   ['src/mcp/snapshot.ts', 'what an agent run is given'], ['src/plugins/approval.ts', 'what an agent run is given'],
   ['src/plugins/run.ts', 'what an agent run is given'], ['src/plugins/tree.ts', 'what an agent run is given'],
+  // The run builders of the runs that read untrusted input: they set its role, lane and tools (#841 would free them).
+  ['src/research.ts', 'what an agent run is given'], ['src/intake/run.ts', 'what an agent run is given'],
+  ['src/intake/chat.ts', 'what an agent run is given'],
   ['src/events/redact.ts', 'sign-in, credentials or secrets'],
   ['src/runner.ts', 'the evaluator and the agent runner'], ['src/sandbox.ts', 'the sandbox and test runs'],
 ];
