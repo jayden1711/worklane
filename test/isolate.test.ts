@@ -739,6 +739,8 @@ import { heldOutAllowed } from '../src/spend-gate.js';
 import { verifyWithScript } from '../src/setup/app-manifest.js';
 import { currentUser } from '../src/os/index.js';
 import { EventEmitter } from 'node:events';
+import { CliAgentRunner, cliAgentCommand } from '../src/cli-agents.js';
+import { authStatusCommand, CliRunner } from '../src/runner.js';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
 function polluted<T>(vars: Record<string, string>, f: () => T): T {
@@ -759,6 +761,25 @@ function unsetWhile<T>(keys: string[], f: () => T): T {
     for (const k of keys) delete process.env[k];
     return f();
   } finally {
+    for (const [k, v] of saved) {
+      if (Object.hasOwn(isolatedEnv, k)) restoreIsolated(k);
+      else if (v !== undefined) process.env[k] = v;
+    }
+  }
+}
+
+/** polluted() and unsetWhile() across awaits: for a run whose environment is built after its first await. */
+async function pollutedUnset<T>(vars: Record<string, string>, f: () => Promise<T>): Promise<T> {
+  const proto = Object.prototype as Record<string, unknown>;
+  const keys = Object.keys(vars);
+  for (const k of keys) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  const saved = new Map(keys.map((k) => [k, Object.hasOwn(process.env, k) ? process.env[k] : undefined] as const));
+  try {
+    for (const k of keys) delete process.env[k];
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return await f();
+  } finally {
+    for (const k of keys) delete proto[k];
     for (const [k, v] of saved) {
       if (Object.hasOwn(isolatedEnv, k)) restoreIsolated(k);
       else if (v !== undefined) process.env[k] = v;
@@ -859,4 +880,33 @@ test("regression (#786): a NODE_OPTIONS on Object.prototype is not handed to the
   await verify({ user: currentUser(), key: '/k', appId: 1, installationId: 2, repo: 'acme/shop' } as Parameters<typeof verify>[0]);
   assert.equal(seen.length, 1);
   assert.equal(seen[0]!.NODE_OPTIONS, own, "only this process's own NODE_OPTIONS, if it has one");
+});
+
+test("regression (#786 round 2): an agent user's run gets none of Object.prototype's variables across the user switch, and sudo gets no PATH from it", { skip: process.platform === 'win32' && 'agent users: POSIX' }, async () => {
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const vars = { TZ: 'Canary/786', LC_ALL: 'canary-786', XDG_RUNTIME_DIR: join(canary, 'run'), CLAUDE_CONFIG_DIR: join(canary, 'claude'), PATH: join(canary, 'path') };
+  const home = mkdtempSync(join(tmpdir(), 'agent-home-'));
+  // What the runner hands sudo (the env -i list is built from it): recorded, then a node that exits at once runs instead.
+  const wrapped: NodeJS.ProcessEnv[] = [];
+  const exec = {
+    wrap: (_u: string, _f: string, _a: string[], e: NodeJS.ProcessEnv): [string, string[], NodeJS.ProcessEnv] => (wrapped.push({ ...e }), [process.execPath, ['-e', ''], { PATH: '/usr/bin:/bin' }]),
+    kill: () => {},
+  };
+  const runner = new CliAgentRunner('codex', { runAs: () => ({ user: 'agent', home }), exec });
+  const req = { role: 'worker', prompt: 'p', appendSystemPrompt: 's', cwd: canary, model: 'codex-model-x', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, route: { kind: 'build' as const, fallback: 'sonnet' }, provider: { name: 'cli:codex', kind: 'cli' as const, agent: 'codex' as const, usdPerMtok: { in: 1, out: 1 } } };
+  const out = await pollutedUnset(vars, async () => ({
+    run: await runner.run(req as Parameters<typeof runner.run>[0]),
+    sudo: cliAgentCommand('agent', '/bin/true', [], {})[2],
+    probe: authStatusCommand({}, { user: 'agent', home }).env,
+    login: new CliRunner('cli', process.env).loginOf({}),
+  }));
+  assert.equal(wrapped.length, 1, `the run reached its CLI: ${out.run.detail}`);
+  // Every route at once, so a failure names each one that leaks.
+  const leaks = [
+    ...Object.entries(vars).filter(([k, v]) => wrapped[0]![k] === v).map(([k]) => `the agent run's environment has ${k} from Object.prototype`),
+    ...(out.sudo.PATH === '' ? [] : [`cliAgentCommand gives sudo PATH=${out.sudo.PATH}`]),
+    ...(out.probe.PATH === '' ? [] : [`authStatusCommand gives sudo PATH=${out.probe.PATH}`]),
+    ...(out.login === join(homedir(), '.claude') ? [] : [`loginOf is ${out.login}`]),
+  ];
+  assert.deepEqual(leaks, []);
 });

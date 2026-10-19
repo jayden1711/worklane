@@ -16,6 +16,7 @@ import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { outboundEnv } from './network.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
+import { ownEnv } from './os/own-env.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
@@ -280,7 +281,7 @@ export function authStatusCommand(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = '
   if (!runAs) return { file: bin, args: argv, env };
   const [file, args] = asUser(runAs.user, bin, argv, { ...env, ...agentUserEnv(runAs) });
   // As another user, sudo gets only PATH; the probe's environment is passed explicitly through env -i.
-  return { file, args, env: { PATH: env.PATH ?? '' } };
+  return { file, args, env: { PATH: ownEnv(env).get('PATH') ?? '' } };
 }
 
 /** Which auth `claude` would use. The cli runtime refuses API-key billing it wasn't asked for. */
@@ -511,7 +512,8 @@ export class CliRunner implements AgentRunner {
     if (req.provider) return `provider:${req.provider.name}`;
     const runAs = this.userOf(req.lane ?? 'default');
     if (runAs) return runAs.claudeConfigDir ?? posix.join(runAs.home, '.claude');
-    return this.base.CLAUDE_CONFIG_DIR ?? join(this.base.HOME ?? this.base.USERPROFILE ?? '', '.claude');
+    const own = ownEnv(this.base);
+    return own.get('CLAUDE_CONFIG_DIR') ?? join(own.get('HOME') ?? own.get('USERPROFILE') ?? '', '.claude');
   }
 
   /**
@@ -569,7 +571,8 @@ export class CliRunner implements AgentRunner {
   private async runOnce(req: RunRequest, started: () => void): Promise<RunResult> {
     if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };
     // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
-    const base = req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base;
+    // WHY (#786): a null-prototype snapshot, so agentEnv's reads of it are own variables only.
+    const base = ownEnv(req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base).asProcessEnv();
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
     const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
@@ -697,7 +700,7 @@ export class CliRunner implements AgentRunner {
       const argv = cliArgs(mcpArgs ? { ...req, allowedTools: [...req.allowedTools, ...mcpArgs.allowedTools] } : req, settings, systemPromptFile, plugins?.dirs ?? [], mcpConfigFile);
       const [file, args] = runAs ? asUser(runAs.user, this.bin, argv, runEnv) : [this.bin, argv];
       // As another user, sudo gets only PATH; the agent's environment is passed explicitly through env -i.
-      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: env.PATH ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
+      const child = spawn(file, args, { cwd: req.cwd, env: runAs ? { PATH: ownEnv(env).get('PATH') ?? '' } : runEnv, stdio: ['pipe', 'pipe', 'pipe'], detached: spawnDetached });
       child.stdin.on('error', () => {}); // a run that exits before reading its prompt reports that itself
       child.on('error', cleanup);
       // The prompt is the first user message; the input stays open for console messages until a turn
