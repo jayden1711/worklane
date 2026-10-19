@@ -21,7 +21,7 @@ import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { armedSwitches, clearKillSwitches, ensureSpare, forwardRecord, killAutoMerge, recordDir } from './policy-kill.js';
+import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, sharedWith } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -234,9 +234,10 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     const policy = parsePolicy(text, file);
     const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
     if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
-    // A disarmed kill switch first, so any auto_merge off from now on needs no new space (src/policy-kill.ts): with no
-    // room for it, nothing is taken over.
-    ensureSpare(instance, markers);
+    // Its id and a disarmed kill switch first, so any auto_merge off from now on needs no new space
+    // (src/policy-kill.ts): with no room, nothing is taken over. A new id only on a first takeover, or an admin's
+    // --retake: a recorded instance with no pointer reads off, and the coordinator (no flag) can't turn that back on.
+    ensureSpare(instance, markers, rec === null || !!flags.retake);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(text) });
     return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
@@ -258,14 +259,13 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   // auto_merge off: root's kill switch alone (src/policy-kill.ts), before any lock or read of policy.yaml, so nothing
   // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
-  // A name with a forward record is reached even once its user is gone (killAutoMerge says when it is done).
+  // A name with root's id pointer is reached even once its user is gone (inside its removal): the id is the instance's.
   if (key === 'auto_merge' && value === false) {
-    // Only a definite "no such user" means a name can't start; a lookup that fails counts as can (round 8).
+    // Only a definite "no such user" counts; a lookup that fails counts as there (round 8).
     const uid = d.uid;
     const presence = d.presence ?? (uid ? (u: string) => (uid(u) === null ? 'absent' : 'exists') : userPresence);
-    const canStart = (name: string) => presence(`wl-${name}`) !== 'absent';
-    if (!instanceNameOk(instance) || (!canStart(instance) && forwardRecord(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
-    killAutoMerge(instance, markers, new Date(), canStart);
+    if (!instanceNameOk(instance) || (presence(`wl-${instance}`) === 'absent' && instanceId(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
+    killAutoMerge(instance, markers);
     return { key, from: null, to: false };
   }
   // auto_merge on: the kill switches there now, before anything waits (root's lock included), are the only ones it may
@@ -290,6 +290,10 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     const on = key === 'auto_merge' && value === true;
     // auto_merge on: the spare first, before anything changes, so the next auto_merge off needs no new space; with no
     // room for it, ON is refused and auto_merge stays off. Any other change: a spare if there is room.
+    // Never while another name shares its id (a rename under way, or one a crash left): ON there would clear that
+    // name's OFF too.
+    const shared = on ? sharedWith(instance, markers) : [];
+    if (shared.length) throw new Error(`${shared.join(', ')} shares ${instance}'s id (a rename under way, or one that stopped): finish or undo it first, so auto_merge stays off`);
     if (on) ensureSpare(instance, markers);
     else {
       try {
@@ -302,7 +306,7 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     writeRecord(markers, instance, { file, sha256: sha256(out) });
     // auto_merge on (root's alone; a coordinator's was refused above): the switches it saw go, last, each by its own
     // name, so auto_merge reads off until policy.yaml says on, and any an OFF armed since stays.
-    if (on) clearKillSwitches(seen, markers);
+    if (on) clearKillSwitches(seen);
     return { key, from, to: value };
   });
 }
@@ -322,7 +326,7 @@ export function checkPolicy(instance: string, d: PolicyRootDeps = {}): string | 
 
 /** `<cli> policy own|set|check ...`, as root (check reads only). `deps` and `root`: tests stand in for the machine and for root. */
 export function policyCommand(sub: string | undefined, rest: string[], deps: PolicyRootDeps = {}, root = isRoot()): number {
-  const usage = `usage: ${BRAND.cli} policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value>   (as root) | policy check <instance>`;
+  const usage = `usage: ${BRAND.cli} policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value> | policy alias <old> <new>   (as root) | policy check <instance>`;
   if (sub === 'check' && rest.length === 1 && !rest[0]!.startsWith('--')) {
     try {
       const why = checkPolicy(rest[0]!, deps);
@@ -349,6 +353,13 @@ export function policyCommand(sub: string | undefined, rest: string[], deps: Pol
     }
     if (sub === 'set' && rest.length === 3 && !flags.length) {
       console.log(JSON.stringify(setPolicy(rest[0]!, rest[1]!, rest[2]!, process.env.SUDO_USER ?? null, deps)));
+      return 0;
+    }
+    // instance-rename.sh's start (an admin's, at a root shell; never a coordinator's): the new name shares the old one's id.
+    if (sub === 'alias' && args.length === 2 && !flags.length) {
+      if (/^wl-/.test(process.env.SUDO_USER ?? '')) throw new Error("policy alias is an admin's, at a root shell");
+      if (!instanceNameOk(args[0]!) || !instanceNameOk(args[1]!)) throw new Error(`${args.join(' ')}: not instance names`);
+      console.log(`${args[1]} shares ${args[0]}'s id ${aliasInstance(args[0]!, args[1]!, deps.markerDir ?? POLICY_ROOT_DIR)}`);
       return 0;
     }
   } catch (e) {

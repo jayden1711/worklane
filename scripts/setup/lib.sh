@@ -568,83 +568,33 @@ ensure_instance_home() {
 # without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
 # merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
 POLICY_ROOT_DIR=/etc/worklane/policy-root
-# Whether root's kill switch turns instance $1's auto_merge off: any file named <name>.auto-merge-off* (src/policy-kill.ts).
-# A directory that can't be listed counts as off, as the engine reads it (round 8: never "on" from an error).
+# Whether root's kill switch turns instance $1's auto_merge off, as the engine reads it (src/policy-kill.ts
+# autoMergeKilled): its id pointer <name>.id names by_id/<id>/, and any auto-merge-off* there is off. Fail closed: a
+# pointer that isn't a plain file or holds no id, an id directory missing or unlistable, or a taken-over instance (its
+# record there) with no pointer, all count as off.
 auto_merge_killed() {
-  local f
-  [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null 2>&1 || return 0
-  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
+  local p="$POLICY_ROOT_DIR/$1.id" id f
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+    [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null 2>&1 || return 0
+    [ -e "$POLICY_ROOT_DIR/$1" ] && return 0
+    return 1
+  fi
+  [ -f "$p" ] && [ ! -L "$p" ] || return 0
+  id="$(head -c 64 -- "$p" 2>/dev/null | tr -d '[:space:]')" || return 0
+  [[ "$id" =~ ^[0-9a-f]{32}$ ]] || return 0
+  ls -A -- "$POLICY_ROOT_DIR/by_id/$id" >/dev/null 2>&1 || return 0
+  for f in "$POLICY_ROOT_DIR/by_id/$id"/auto-merge-off*; do
     if [ -e "$f" ] || [ -L "$f" ]; then return 0; fi
   done
   return 1
 }
-# Every kill switch of instance $1 copied to instance $2 (a rename): an OFF given to the old name before the rename began
-# is the new name's too. instance-rename.sh runs it at its home step, again right before the new name's service starts,
-# and again right before the old name's removal. An OFF given to the old name while the rename runs reaches the new name
-# through rename_forward instead (src/policy-kill.ts arms both). (Through 10ca8a1d this comment claimed the carries alone
-# covered any point of the rename; an OFF during step keep, or inside the old name's removal, wasn't carried.)
-# While a rename of $1 to $2 runs, root's forward record: an auto_merge off given to $1 arms $1's switch and $2's too,
-# each from its spare (both made here, so that OFF needs no new space, whether root took $1's policy over or not).
-# Written before the rename's first step; removed by instance-remove.sh $1 once $1's user is gone, and by
-# rename_forward_done after it; on --abort, first of all (before the carry back). (Through ae00a348, --abort removed it
-# last, so an OFF between its carry back and the new name's removal said done while the old name came back on.)
-rename_forward() {
-  mkdir -p "$POLICY_ROOT_DIR" && chmod 0755 "$POLICY_ROOT_DIR"
-  [ -e "$POLICY_ROOT_DIR/$1.auto-merge-spare" ] || install -m 0644 /dev/null "$POLICY_ROOT_DIR/$1.auto-merge-spare"
-  [ -e "$POLICY_ROOT_DIR/$2.auto-merge-spare" ] || install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-spare"
-  printf '%s\n' "$2" > "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
-  chmod 0644 "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
-  mv -f "$POLICY_ROOT_DIR/.$1.rename-to.tmp" "$POLICY_ROOT_DIR/$1.rename-to"
-}
-rename_forward_done() { rm -f "$POLICY_ROOT_DIR/$1.rename-to"; }
-# Root's forward records that name instance $1, either way ($1.rename-to, and any whose new name is $1): gone with $1
-# (instance-remove.sh, once $1's users are), so none outlives the rename or removal that it was for.
-forward_records_of() {
-  local f
-  [ ! -e "$POLICY_ROOT_DIR/$1.rename-to" ] || echo "$POLICY_ROOT_DIR/$1.rename-to"
-  for f in "$POLICY_ROOT_DIR"/*.rename-to; do
-    if [ -f "$f" ] && [ "$(head -c 64 "$f" | tr -d '[:space:]')" = "$1" ]; then echo "$f"; fi
-  done
-  return 0
-}
-# A directory that is there but can't be listed fails the carry or the move (errexit stops the step), so a glob that
-# found nothing is never read as "no switch to carry" (#726 round 8).
-policy_root_listable() { [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null; }
-carry_auto_merge_off() {
-  local f
-  policy_root_listable || return 1
-  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
-    if [ -e "$f" ] || [ -L "$f" ]; then install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
-  done
-}
-# The same, moving each switch (a rename: no new space), for --abort only once nothing of $1 can run
-# (instance_can_run empty). (Through b9d89224 this said "never runs (before services)": a failed services step left
-# $1's coordinator running, and the move took its switch.)
-move_auto_merge_off() {
-  local f
-  policy_root_listable || return 1
-  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
-    if [ -e "$f" ] || [ -L "$f" ]; then mv -f "$f" "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
-  done
-}
-# What of instance $1 can run now, one line each (nothing when nothing can): a unit of its that systemd knows (its
-# file installed, whatever its state), a template's instance that isn't inactive or failed, or anything of it in
-# flight. A systemctl or registry that can't answer counts as "can run" (fail closed).
-instance_can_run() {
-  local items k u st
-  items="$("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$1")" || { echo "the registry of $1's units can't be read"; return 0; }
-  while IFS=$'\t' read -r k u _; do
-    [ "$k" = unit ] || continue
-    if [[ "$u" == *@* ]]; then
-      st="$(systemctl show -p ActiveState --value "$u" 2>/dev/null)" || st=""
-      case "$st" in inactive | failed) ;; *) echo "unit $u: ${st:-no answer from systemd}" ;; esac
-    else
-      st="$(systemctl show -p LoadState --value "$u" 2>/dev/null)" || st=""
-      [ "$st" = not-found ] || echo "unit $u is installed (${st:-no answer from systemd})"
-    fi
-  done <<<"$items"
-  instance_in_flight "$1"
-}
+# A rename's start (instance-rename.sh): instance $2's id pointer holds $1's id (made, with its spare, if $1 had none),
+# so the two names are one instance's switches: a rename never carries, forwards or moves one (#726 round 9).
+instance_alias() { "$ENGINE_CLI" policy alias "$1" "$2"; }
+# The id instance $1's pointer holds, or nothing (instance-remove.sh: its id directory goes once no pointer names it).
+instance_id_of() { local id; id="$(head -c 64 -- "$POLICY_ROOT_DIR/$1.id" 2>/dev/null | tr -d '[:space:]')" || true; [[ "$id" =~ ^[0-9a-f]{32}$ ]] && echo "$id"; return 0; }
+# Whether any instance's pointer still names id $1.
+id_in_use() { local f; for f in "$POLICY_ROOT_DIR"/*.id; do [ -f "$f" ] && [ "$(head -c 64 -- "$f" | tr -d '[:space:]')" = "$1" ] && return 0; done; return 1; }
 # Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
 # coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of
 # policy own's flags, which no script here passes. test/policy-edit.test.ts holds this line, and that, as they are.
@@ -652,10 +602,8 @@ own_policy() { "$ENGINE_CLI" policy own "$1"; }
 # A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
 # carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
 # wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
-# Root's auto_merge kill switches (<name>.auto-merge-off*: auto_merge off whatever policy.yaml says) go with it, first,
-# recorded or not: a rename never turns auto_merge back on.
+# Root's auto_merge kill switches need nothing here: both names share one id from the rename's start (instance_alias).
 carry_policy_root() {
-  carry_auto_merge_off "$1" "$2"
   [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
   install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
   own_policy "$2"
