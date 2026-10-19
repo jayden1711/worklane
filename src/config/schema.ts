@@ -124,9 +124,11 @@ export const ProjectConfig = z.strictObject({
    * branch protection or ruleset requires for it, and is judged by name alone when neither names one (doctor prints a
    * block that pins them): src/check-source.ts.
    */
-  required_check_sources: z
-    .record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]))
-    .default({}),
+  required_check_sources: z.preprocess(
+    // WHY: a record drops a "__proto__" key, which would leave that check judged by name: refused instead.
+    (v) => (v && typeof v === 'object' && Object.hasOwn(v, '__proto__') ? 'a check named __proto__ cannot be pinned' : v),
+    z.record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })])).default({}),
+  ),
   /**
    * WHY (#469): which CI judges a PR. `github` (absent: the same): the required_checks above, as GitHub reports them.
    * `none`: GitHub runs nothing a PR waits on; a PR is ready when this machine's own test runs (tests.yaml test_run,

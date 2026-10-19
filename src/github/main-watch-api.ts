@@ -70,8 +70,8 @@ export class GitHubMainWatchApi implements MainWatchApi {
     if (res.status === 403 || res.status === 404) return null;
     if (!res.ok) throw new Error(`GitHub ${res.status} reading the workflow runs on ${sha.slice(0, 8)}`);
     const out: Record<string, WorkflowSource> = {};
-    for (const w of ((await res.json()) as { workflow_runs?: { id?: number; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
-      if (typeof w.id === 'number' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { run: w.id, path: w.path, repo: w.repository.full_name, sha: w.head_sha };
+    for (const w of ((await res.json()) as { workflow_runs?: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
+      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha };
     }
     return out;
   }
