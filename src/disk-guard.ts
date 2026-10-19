@@ -12,6 +12,7 @@
 import { BRAND } from './brand.js';
 import type { EventLog, WriteFailure } from './events/log.js';
 import { diskFree } from './os/index.js';
+import type { SlotPathLike } from './slot-file.js';
 import { raiseIncident, resolveIncident, type Severity } from './watchdog/incidents.js';
 import { testRunBasePath } from './os/system-paths.js';
 
@@ -46,7 +47,7 @@ export interface DiskGuardDeps {
   /** Free and total bytes of the filesystem holding `path`; null when it can't be measured (tests inject this). */
   free?: (path: string) => { freeBytes: number; totalBytes: number } | null;
   /** The incident store's directory, when incidents are raised (an instance's coordinator); absent: the journal only. */
-  incidents?: { dir?: string };
+  incidents?: { dir?: SlotPathLike };
   /** Runs in flight now, for the incident's detail. */
   inFlight?: () => number | undefined;
   /** A journal line (stderr under the service manager). */
@@ -197,7 +198,7 @@ export class DiskGuard {
  * incident names the instance by its name, as the Health page and the watchdog filter on it, never the process's
  * user@host id; a site with no instance (local mode) says it in the journal only.
  */
-export function siteDiskGuard(o: { log: EventLog; stateDir: string; testRuns: boolean; instance: string | null; actor: string; floor: () => Floor; inFlight?: () => number | undefined; incidentsDir?: string; say?: (line: string) => void }): DiskGuard {
+export function siteDiskGuard(o: { log: EventLog; stateDir: string; testRuns: boolean; instance: string | null; actor: string; floor: () => Floor; inFlight?: () => number | undefined; incidentsDir?: SlotPathLike; say?: (line: string) => void }): DiskGuard {
   return new DiskGuard({
     log: o.log,
     instance: o.instance ?? o.actor,
