@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { updateChannel, updateSettings } from '../src/updates.js';
 import { repoRoot } from './helpers.js';
 
-type Verified = { ok: true; base: string } | { ok: false; reason: string };
+type Verified = { ok: true; base: string; object: string; commit: string } | { ok: false; reason: string };
 const u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs')) as {
   channelOf(cfg: unknown): string;
   newer(a: string, b: string): boolean;
@@ -76,9 +76,9 @@ test('an unsigned release tag is refused; so is a lightweight one, one signed by
 
 test('a release tag signed by an allowed key, cut from main with only dist/ added, verifies; its main commit is the one whose checks count', { skip: posix }, () => {
   const o = origin();
-  o.release('v1.1.0', 'signed');
+  const commit = o.release('v1.1.0', 'signed');
   o.release('v1.1.1', 'signed', true);
-  assert.deepEqual(verify(o, 'v1.1.0'), { ok: true, base: o.main });
+  assert.deepEqual(verify(o, 'v1.1.0'), { ok: true, base: o.main, object: run(o.dir, 'rev-parse', 'refs/tags/v1.1.0'), commit }, 'the one tag object verified, and the commit it points at');
   assert.match((verify(o, 'v1.1.1') as { reason: string }).reason, /changes more than dist\/: README\.md/);
 });
 
@@ -125,7 +125,7 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
   assert.equal(await u.run(refused.deps), 'refused');
   assert.match(String(refused.logs.at(-1)!.reason), /signature doesn't verify/);
   assert.ok(!refused.calls.some((c) => /^(systemd-run|installTree|switchTo)/.test(c)), 'nothing built or switched');
-  const ok = machine({ ok: true, base: BASE });
+  const ok = machine({ ok: true, base: BASE, object: '3'.repeat(40), commit: NEW });
   assert.equal(await u.run(ok.deps), 'installed');
   assert.ok(ok.calls.includes('verify v0.5.0'), 'the newest tag');
   assert.ok(ok.calls.includes(`fetch example-org/engine/commits/${BASE}/check-runs?per_page=100`), 'checks on the main commit the release was cut from');
@@ -133,7 +133,7 @@ test('run, release channel: an unsigned newest tag is refused and nothing is bui
   assert.ok(ok.calls.includes('switchTo bbbb'));
   assert.equal(ok.logs.find((l) => l.event === 'attempt')!.tag, 'v0.5.0');
   // Not newer than the installed version: nothing to do, never a downgrade.
-  const same = machine({ ok: true, base: BASE }, '0.5.0');
+  const same = machine({ ok: true, base: BASE, object: '3'.repeat(40), commit: NEW }, '0.5.0');
   assert.equal(await u.run(same.deps), 'current');
   assert.deepEqual(same.calls.filter((c) => c.startsWith('verify')), []);
   // Recorded with its time and channel in the state file, not as a line in the log (#465).
