@@ -838,7 +838,7 @@ test('acceptance: patch export runs nothing the clone configures, and exports th
 
 test('acceptance: the wall-clock cap ends every agent run and container command of a task, starts none after, and records the spend', posix, async () => {
   const m = machine();
-  const t0 = Date.now();
+  const t0 = performance.now();
   const log: string[] = [];
   // claude under the meter: a run lasts 1.5 s unless its request's signal aborts it (what CliRunner's killTree does).
   const inner: AgentRunner = {
@@ -861,7 +861,7 @@ test('acceptance: the wall-clock cap ends every agent run and container command 
     return { decision: 'hold', heads: [], detail: `${r1.reason} / ${r2.reason}` };
   };
   const agg = await runBench(m.opts(task, { runner: inner, taskWallMs: 100 }));
-  assert.ok(Date.now() - t0 < 1400, 'no run ran on to its end');
+  assert.ok(performance.now() - t0 < 1400, 'no run ran on to its end');
   assert.deepEqual(log, ['start worker', 'end worker: killed', 'start worker', 'end worker: killed', 'start worker', 'end worker: killed'], 'each run killed at the cap, none started after it, no overlap between tasks');
   assert.equal(agg.tasks.wall_cap_hit, 3);
   assert.equal(agg.usage.total, 3, "each killed run's spend recorded");
@@ -880,9 +880,9 @@ test('acceptance: the wall-clock cap ends every agent run and container command 
     return { decision: 'hold', heads: [] };
   };
   const e = machine();
-  const started = Date.now();
+  const started = performance.now();
   await runBench(e.opts(execTask, { docker: { ...e.opts(execTask).docker, callAsync: hang }, taskWallMs: 100, tasks: [{ key: 't01', row: ROW, image: 'swebench/example:latest' }] }));
-  assert.ok(Date.now() - started < 1400, 'the command did not run on');
+  assert.ok(performance.now() - started < 1400, 'the command did not run on');
   assert.deepEqual(ended, ['killed']);
   // The task itself runs on past the cap (only its runs and commands are stopped): give it a moment to try again.
   await new Promise((r) => setTimeout(r, 100));
