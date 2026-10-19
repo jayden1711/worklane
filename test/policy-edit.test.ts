@@ -3,16 +3,19 @@
 // PolicyRootDeps.rootUid), and the real root (uid 0) where the coordinator user's own file must be refused.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
-import { loadInstanceSetup, readPolicy } from '../src/instance.js';
-import { applyPolicy, POLICY_KEYS, PolicyEditError } from '../src/policy-edit.js';
+import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instance.js';
+import { processIdentity } from '../src/os/index.js';
+import { autoMergeKilled, killSwitchPath } from '../src/policy-kill.js';
+import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
 import { decodePolicyValue, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, policyCommand, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
@@ -335,8 +338,14 @@ test("P5: an earlier root file the coordinator kept aside during root's `set` an
   const r = asRoot(() => readPolicy(m.file));
   assert.equal(r.policy, undefined, 'land_mode direct is never read again');
   assert.match(r.errors[0]!.message, /its content isn't what root last wrote there/);
-  assert.throws(() => setPolicy('stash', 'auto_merge', 'off', 'wl-stash', m.deps), /isn't what root last wrote there/, 'nor changed and recorded as root\'s');
+  assert.throws(() => setPolicy('stash', 'budget.daily_usd', '40', 'wl-stash', m.deps), /isn't what root last wrote there/, 'nor changed and recorded as root\'s');
   assert.throws(() => ownPolicy('stash', m.deps), /--retake/, 'nor taken back by setup');
+  // auto_merge off never reads it (root's kill switch): it works on the put-back file too, and leaves it and the record as they are.
+  const record = readFileSync(join(POLICY_ROOT_DIR, 'stash'), 'utf8');
+  const putBack = readFileSync(m.file, 'utf8');
+  assert.deepEqual(setPolicy('stash', 'auto_merge', 'off', 'wl-stash', m.deps), { key: 'auto_merge', from: null, to: false });
+  assert.equal(readFileSync(m.file, 'utf8'), putBack);
+  assert.equal(readFileSync(join(POLICY_ROOT_DIR, 'stash'), 'utf8'), record);
 });
 
 test("rename: a recorded instance's policy.yaml is root's and recorded under the new name, its content as carried; an unrecorded one's isn't taken over (#726)", { skip }, () => {
@@ -349,8 +358,11 @@ test("rename: a recorded instance's policy.yaml is root's and recorded under the
   const n = machineInstance('newname', readFileSync(o.file, 'utf8'));
   const calls = join(n.T, 'calls');
   const carry = (from: string, to: string) => spawnSync('bash', ['-c', 'source "$1"; POLICY_ROOT_DIR="$2"; CALLS="$3"; own_policy() { echo "own_policy $*" >> "$CALLS"; }; carry_policy_root "$4" "$5"', '_', lib, markers, calls, from, to], { encoding: 'utf8' });
+  // Root's auto_merge kill switch under the old name: carried too, so a rename never turns auto_merge back on.
+  writeFileSync(join(markers, 'oldname.auto-merge-off'), 'auto_merge off\n', { mode: 0o644 });
   assert.equal(carry('oldname', 'newname').status, 0);
   assert.equal(readFileSync(calls, 'utf8'), 'own_policy newname\n');
+  assert.equal(autoMergeKilled('newname', markers), true);
   // The engine's `policy own newname`, as the script runs it (no flag): the carried bytes are root's content.
   ownPolicy('newname', { ...n.deps, markerDir: markers });
   assert.equal(statSync(n.file).mode & 0o777, 0o644);
@@ -431,18 +443,155 @@ test("root's writers of one instance's policy are serialized: a coordinator's se
   assert.ok(asRoot(() => readPolicyChecked(m.file)) !== null && 'text' in asRoot(() => readPolicyChecked(m.file))!);
 });
 
-test("root's lock on an instance's policy: a held one makes `own` and `set` wait, then refuse, naming it; nothing changes; it is gone after each (#726)", { skip }, () => {
+/** A process that keeps running until killed: a live lock holder. */
+function liveHolder() {
+  const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const id = processIdentity(c.pid!);
+  assert.ok(id, 'the holder runs');
+  return { pid: c.pid!, line: `${c.pid} ${id}\n`, stop: () => c.kill('SIGKILL') };
+}
+
+test("root's lock on an instance's policy: one a live writer holds makes `own` and `set` wait, then refuse, naming it; nothing changes; it is gone after each; auto_merge off never waits for it (#726)", { skip }, () => {
   const m = machineInstance('locked');
   ownPolicy('locked', m.deps);
+  setPolicy('locked', 'auto_merge', 'on', null, m.deps);
   const lock = join(POLICY_ROOT_DIR, '.locked.lock');
-  assert.equal(existsSync(lock), false, 'released after own');
+  assert.equal(existsSync(lock), false, 'released after own and set');
   const text = readFileSync(m.file, 'utf8');
-  writeFileSync(lock, '4242\n');
-  const d = { ...m.deps, lockWaitMs: 100 };
-  assert.throws(() => setPolicy('locked', 'auto_merge', 'off', null, d), new RegExp(`in progress \\(${lock.replace(/[.]/g, '\\.')} exists\\).*removes ${lock.replace(/[.]/g, '\\.')}`));
-  assert.throws(() => ownPolicy('locked', d), /in progress/);
-  assert.equal(readFileSync(m.file, 'utf8'), text);
-  renameSync(lock, join(m.T, 'gone'));
+  const h = liveHolder();
+  try {
+    writeFileSync(lock, h.line);
+    const d = { ...m.deps, lockWaitMs: 100 };
+    assert.throws(() => setPolicy('locked', 'budget.daily_usd', '60', null, d), new RegExp(`in progress \\(${lock.replace(/[.]/g, '\\.')}, held by ${h.pid} `));
+    assert.throws(() => ownPolicy('locked', d), /in progress/);
+    assert.equal(readFileSync(m.file, 'utf8'), text);
+    // OFF: root's kill switch, no lock: at once, while it is held.
+    const t = Date.now();
+    assert.deepEqual(setPolicy('locked', 'auto_merge', 'off', 'wl-locked', d), { key: 'auto_merge', from: null, to: false });
+    assert.ok(Date.now() - t < 1000, 'never waited');
+    assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, 'the engine reads off');
+    assert.equal(readFileSync(lock, 'utf8'), h.line, "the holder's lock untouched");
+  } finally {
+    h.stop();
+  }
+  // Its holder gone (killed, not yet reaped: a zombie still answers signal 0): the lock is stale, broken, and a writer goes on.
+  for (let i = 0; i < 100 && processIdentity(h.pid) !== null; i++) spawnSync('sleep', ['0.05']);
+  assert.equal(processIdentity(h.pid), null, 'a killed holder reads as gone');
   setPolicy('locked', 'budget.daily_usd', '60', null, m.deps);
   assert.equal(existsSync(lock), false, 'released after set');
+});
+
+test("a lock a writer left empty (killed between creating it and writing its line) is live for a few seconds, then stale; a garbage one is stale; and `own` never clears root's kill switch (#726 round 4 adversarial pass)", { skip }, () => {
+  const m = machineInstance('empty');
+  ownPolicy('empty', m.deps);
+  const lock = join(POLICY_ROOT_DIR, '.empty.lock');
+  writeFileSync(lock, '');
+  assert.throws(() => setPolicy('empty', 'budget.daily_usd', '60', null, { ...m.deps, lockWaitMs: 100 }), /in progress/, 'a fresh empty lock: a writer still writing its line');
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lock, old, old);
+  setPolicy('empty', 'budget.daily_usd', '60', null, { ...m.deps, lockWaitMs: 100 });
+  assert.equal(existsSync(lock), false);
+  writeFileSync(lock, 'not-a-pid x\n');
+  setPolicy('empty', 'budget.daily_usd', '61', null, { ...m.deps, lockWaitMs: 100 });
+  assert.equal(existsSync(lock), false);
+  // auto_merge off, then an admin retaking the file (or setup taking it back): the switch stays; only `set on` clears it.
+  setPolicy('empty', 'auto_merge', 'off', null, m.deps);
+  ownPolicy('empty', m.deps, { retake: true });
+  assert.equal(autoMergeKilled('empty'), true);
+});
+
+test("a root writer that died inside the lock (SIGKILL in `own`, add-project's call) leaves no lock that blocks anyone: auto_merge off works, and so does the next writer (#726 round 3)", { skip }, () => {
+  const m = machineInstance('died');
+  ownPolicy('died', m.deps);
+  setPolicy('died', 'auto_merge', 'on', null, m.deps);
+  // The coordinator puts its own file there, so add-project's rerun runs `own`; root's `own` is killed while it reads.
+  coordinatorWrites(m, readFileSync(m.file, 'utf8').replace('daily_usd: 50', 'daily_usd: 51'));
+  const child = join(m.T, 'own-child.mjs');
+  writeFileSync(child, `import { createRequire, syncBuiltinESMExports } from 'node:module';
+const a = JSON.parse(process.argv[2]);
+const fs = createRequire(import.meta.url)('node:fs');
+const open = fs.openSync;
+fs.openSync = (p, ...r) => { if (p === 'policy.yaml') process.kill(process.pid, 'SIGKILL'); return open(p, ...r); };
+syncBuiltinESMExports();
+const { ownPolicy } = await import(a.module);
+ownPolicy(a.name, { home: () => a.home, uid: () => a.uid, rootUid: a.uid, rootGid: a.gid, markerDir: a.markers, limitsPath: a.limits });
+`);
+  const r = spawnSync(process.execPath, [child, JSON.stringify({ module: pathToFileURL(join(repoRoot, 'dist', 'src', 'policy-root.js')).href, name: 'died', home: join(m.T, 'home', 'wl-died'), uid: me, gid: process.getgid!(), markers: POLICY_ROOT_DIR, limits: join(m.T, 'limits.json') })], { encoding: 'utf8' });
+  assert.equal(r.signal, 'SIGKILL', r.stderr);
+  const lock = join(POLICY_ROOT_DIR, '.died.lock');
+  assert.ok(existsSync(lock), 'it died holding the lock');
+  // auto_merge off: at once; the engine reads off whatever policy.yaml says.
+  assert.deepEqual(setPolicy('died', 'auto_merge', 'off', 'wl-died', { ...m.deps, lockWaitMs: 100 }), { key: 'auto_merge', from: null, to: false });
+  assert.equal(autoMergeKilled('died'), true);
+  // The next root writer breaks the dead holder's lock and goes on (here: an admin retaking the file, checked).
+  ownPolicy('died', { ...m.deps, lockWaitMs: 100 }, { retake: true });
+  assert.equal(existsSync(lock), false);
+  assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, 'still off: only an admin turns it on');
+});
+
+test("`own` refuses an oversized policy.yaml from fstat, before reading or parsing it, and a changed one before parsing it; neither holds the lock; auto_merge off works, and the engine reads off (#726 round 3)", { skip }, () => {
+  const m = machineInstance('big');
+  ownPolicy('big', m.deps);
+  setPolicy('big', 'auto_merge', 'on', null, m.deps);
+  // Oversized: 2 MB the coordinator planted.
+  coordinatorWrites(m, `${POLICY}# ${'x'.repeat(2 * 1024 * 1024)}\n`);
+  let t = Date.now();
+  assert.throws(() => ownPolicy('big', m.deps), /is \d+ bytes, over 262144, so it isn't read/);
+  assert.ok(Date.now() - t < 2000, 'refused at once');
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, '.big.lock')), false, 'the lock released');
+  assert.match(refusal(asRoot(() => readPolicyChecked(m.file))), /bytes, over 262144/, 'the gate refuses it, unread, too');
+  setPolicy('big', 'auto_merge', 'off', 'wl-big', m.deps);
+  assert.equal(instanceAutoMerge('big', m.instances), false, 'the engine reads off without reading the policy');
+  // Changed and corrupt (not YAML): refused as changed, never parsed.
+  const c = machineInstance('corrupt');
+  ownPolicy('corrupt', c.deps);
+  setPolicy('corrupt', 'auto_merge', 'on', null, c.deps);
+  coordinatorWrites(c, 'version: 1\nbudget: [ {{{ :\n');
+  t = Date.now();
+  assert.throws(() => ownPolicy('corrupt', c.deps), /isn't what root last wrote there/);
+  setPolicy('corrupt', 'auto_merge', 'off', 'wl-corrupt', c.deps);
+  assert.equal(instanceAutoMerge('corrupt', c.instances), false, 'off: the corrupt policy is never read');
+});
+
+test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no lock (a lint on its module, and every path it touches), the coordinator can't make, remove or replace it, and only root's `set on` clears it (#726, the owner's structural decision)", { skip }, () => {
+  // Its module imports nothing that reads policy.yaml or takes the lock.
+  const src = readFileSync(join(repoRoot, 'src', 'policy-kill.ts'), 'utf8');
+  const imports = [...src.matchAll(/^import .* from '([^']+)';$/gm)].map((x) => x[1]).sort();
+  assert.deepEqual(imports, ['./os/system-paths.js', 'node:crypto', 'node:fs', 'node:path']);
+  const m = machineInstance('kill');
+  ownPolicy('kill', m.deps);
+  setPolicy('kill', 'auto_merge', 'on', null, m.deps);
+  // Every path the OFF call touches through node:fs.
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const names = ['openSync', 'readFileSync', 'lstatSync', 'statSync', 'writeFileSync', 'renameSync', 'mkdirSync', 'chmodSync', 'unlinkSync', 'linkSync'];
+  const orig = Object.fromEntries(names.map((n) => [n, fs[n]]));
+  const touched: string[] = [];
+  for (const n of names) fs[n] = (p: unknown, ...r: unknown[]) => (touched.push(String(p)), (orig[n] as (...a: unknown[]) => unknown)(p, ...r));
+  syncBuiltinESMExports();
+  try {
+    setPolicy('kill', 'auto_merge', 'off', 'wl-kill', m.deps);
+  } finally {
+    for (const n of names) fs[n] = orig[n];
+    syncBuiltinESMExports();
+  }
+  assert.ok(touched.length > 0);
+  assert.deepEqual(touched.filter((p) => /policy\.yaml$|\.lock$/.test(p) || p === m.dir || p.startsWith(`${m.dir}/`)), [], 'no policy.yaml, no lock, nothing in the instance home');
+  // The switch: root's (the stand-in), 0644, in root's 0755 directory: the coordinator user can't write there.
+  const flag = killSwitchPath('kill');
+  assert.equal(statSync(flag).mode & 0o777, 0o644);
+  assert.equal(statSync(flag).uid, me);
+  assert.equal(statSync(POLICY_ROOT_DIR).mode & 0o777, 0o755);
+  assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false);
+  assert.equal(asRoot(() => policyForm(m.file)).fields.find((f) => f.key === 'auto_merge')!.value, false, 'the form shows off');
+  // Root's ON clears it (a coordinator's ON is refused by #770's HELPER_ONLY).
+  assert.ok(existsSync(flag));
+  setPolicy('kill', 'auto_merge', 'on', null, m.deps);
+  assert.equal(existsSync(flag), false);
+  assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, true);
+  // Anything at its name counts as off (fail closed): a link, a directory.
+  symlinkSync('/nonexistent', flag);
+  assert.equal(autoMergeKilled('kill'), true);
+  renameSync(flag, join(m.T, 'gone-link'));
+  mkdirSync(flag);
+  assert.equal(autoMergeKilled('kill'), true);
 });

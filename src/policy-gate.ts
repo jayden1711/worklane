@@ -20,10 +20,10 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { readRootFile } from './os/root-file.js';
-import { etcPath } from './os/system-paths.js';
+import { POLICY_ROOT_DIR } from './policy-kill.js';
 
 /** Root's record of the instances whose policy.yaml is root's: one file per instance (policyRecord). */
-export const POLICY_ROOT_DIR = etcPath('policy-root');
+export { POLICY_ROOT_DIR };
 
 /** What root's record of an instance holds: its policy.yaml's real path, and the sha256 of what root last wrote there. */
 export interface PolicyRecord {
