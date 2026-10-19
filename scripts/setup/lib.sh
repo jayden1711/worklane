@@ -9,6 +9,41 @@ as_root() {
 # A user's home directory, from the passwd database: never assumed to be /home/<user>.
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
+# The host's egress rule (egress-firewall.sh): its nftables table, and the set of cgroups exempt from it. A unit whose
+# NFTSet= names the set (test-user.sh's Docker unit) has its cgroup added by systemd while it runs. Named once here, so
+# the rule and the units that join it can't disagree.
+EGRESS_TABLE=worklane_egress
+EGRESS_SET=egress_ok
+# NFTSet= is in systemd 255 and later; on an older one nothing can fill the set, so test users stay opt-in there.
+EGRESS_NFTSET_SYSTEMD=255
+# The rule's record: the uids it covers, its flags, and whether test users' Docker may be exempt. Root's: /etc/worklane
+# is root's, 0755, and no sandbox user may enter it (test-user.sh denies it to the test user).
+EGRESS_RECORD=/etc/worklane/egress.users
+# Whether test users' Docker may be exempt from the host egress rule (the set, #543), from the rule's record $1:
+# "exempt", or "dropped" once a rule this install loaded covered test users with no exception for their Docker.
+#   - the record's "# docker: dropped" or "# docker: exempt" line (apply writes one; dropped wins);
+#   - else a record from before #543: "# --with-test-users" in it means dropped; none, exempt (test users weren't covered);
+#   - no record (no rule was ever applied, or revert removed it): exempt. A record it can't read: dropped.
+# WHY: where a rule covered test users and their Docker had no exception (apply --with-test-users before #543, or on a
+# systemd older than 255), all of Docker's traffic was dropped, and so was every route out through it: a run that joins
+# Docker's namespaces got nowhere. The exception reopens that route (docs/test-runs.md, "Known gap"), and nothing may
+# reopen a route an install had closed. Such an install keeps dropping Docker's traffic, whatever the flags, until revert.
+egress_docker_mode() {
+  local rec
+  [ -e "$1" ] || { echo exempt; return 0; }
+  rec="$(cat "$1" 2>/dev/null)" || { echo dropped; return 0; }
+  if grep -qx '# docker: dropped' <<<"$rec"; then echo dropped
+  elif grep -qx '# docker: exempt' <<<"$rec"; then echo exempt
+  elif grep -qx '# --with-test-users' <<<"$rec"; then echo dropped
+  else echo exempt; fi
+}
+# systemd's major version (systemctl's first line, "systemd 255 (...)"); 0 when it can't be read.
+systemd_major() {
+  local v
+  v="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p' || true)"
+  echo "${v:-0}"
+}
+
 # A JSON string (for the scripts that print JSON lines): backslashes and quotes escaped, newlines as \n, other control characters dropped.
 json_str() {
   local s="$1"
@@ -736,7 +771,7 @@ unit_start() { systemctl start "$1"; }
 # (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
 # can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
 # refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
+UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "egress firewall (real systemd)" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {
