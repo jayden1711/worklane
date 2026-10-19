@@ -22,6 +22,7 @@ import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
 import { REMOVED_CREDENTIAL_PATHS } from '../src/claude-credential-guard.js';
+import { CLAUDE_CREDENTIAL_NAMES } from '../src/console/secrets.js';
 import { profilesView } from '../src/claude-profiles.js';
 import { resetWords } from '../src/usage-limit.js';
 import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
@@ -2148,6 +2149,22 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
+test("#711: an open Claude credential ask an earlier version left (add-project's claude-token, any of the server's former names) draws no box in the Setup console, even to an owner who may answer it; root's commands instead", () => {
+  const base = { id: 'ask-000000000009', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-12T10:00:00Z', createdBy: 'add-project', cancelled: null, kind: 'paste_secret', where: "wl-demo-agent's Claude login", status: 'open', answer: null, canAnswer: true, request: null };
+  assert.ok(CLAUDE_CREDENTIAL_NAMES.has('claude-token'));
+  for (const credential of [...CLAUDE_CREDENTIAL_NAMES, 'claude_other-token']) {
+    const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...base, credential }] });
+    assert.match(html, /data-testid="ask-card"/, credential);
+    assert.doesNotMatch(html, /<input|<textarea|type="password"|data-testid="ask-secret"/, `${credential}: no field a Claude credential could be typed into`);
+    assert.doesNotMatch(html, /credential store|Waiting on the owner/, `${credential}: not offered as a paste, nor as the owner's to answer`);
+    assert.match(html, /data-testid="ask-claude-root"[\s\S]*?never takes a Claude credential[\s\S]*?data-testid="ask-claude-login-command"[^>]*>sudo -u wl-demo-agent -i claude auth login<[\s\S]*?claude setup-token[\s\S]*?data-testid="ask-claude-credentials-command"[^>]*>sudo bash scripts\/setup\/credentials\.sh demo claude</, credential);
+  }
+  // Any other secret is still a password field.
+  const other = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...base, credential: 'intake-discord' }] });
+  assert.match(other.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '', /type="password"/);
+  assert.doesNotMatch(other, /ask-claude-root/);
+});
+
 test("Add project: enabled for a machine owner on an allowed device; otherwise disabled, saying why", () => {
   const ownersFile = machineOwnersFile('ada', 'olu');
   const view = (requester: ReturnType<typeof ownerRequester>, role: 'owner' | 'writer' = 'owner') => r.renderAddProject(addProjectView([], { role, requester }, { ownersFile }));
@@ -2233,7 +2250,7 @@ test("Add project's repo picker: the account's repos to pick from, the ones the 
   assert.doesNotMatch(refused, /data-testid="add-project-picker/, 'no picker for someone who may not add a project');
 });
 
-test('Add project: the steps show in the script order as they arrive, and its asks (GitHub links, the Claude token) appear in the same view', () => {
+test("Add project: the steps show in the script order as they arrive, and its asks (GitHub links; an earlier version's Claude token ask, as root's commands) appear in the same view", () => {
   const log = new EventLog(':memory:');
   const ownersFile = machineOwnersFile('ada');
   const a = asks(log);
@@ -2263,13 +2280,14 @@ test('Add project: the steps show in the script order as they arrive, and its as
 
   a.create({ kind: 'approve_link', instance: 'shop', title: 'Install shop-app on acme/shop only', detail: 'x', url: 'https://github.com/apps/shop-app/installations/new' }, 'setup');
   step('app', 'done');
+  // A Claude token ask, as an earlier version's add-project opened it (#711): no box in the run's view, root's commands.
   step('claude-token', 'ask', 'paste the token from claude setup-token');
   a.create({ kind: 'paste_secret', instance: 'shop', title: "The agent's Claude token", detail: 'x', credential: 'claude-token', where: 'the agent user only' }, 'setup');
   v = render();
   assert.equal((v.run.match(/data-testid="ask-card"/g) ?? []).length, 3, 'both GitHub links and the token ask');
-  const secret = v.run.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
-  assert.match(secret, /type="password"/, "the token goes through the dashboard's paste box");
-  assert.doesNotMatch(secret, /value=/);
+  assert.doesNotMatch(v.run, /<input|type="password"|data-testid="ask-secret"/, 'Add project: no box for the Claude token (#711)');
+  assert.match(v.run, /data-testid="ask-claude-login-command"[^>]*>sudo -u wl-shop-agent -i claude auth login</);
+  assert.match(v.run, /data-testid="ask-claude-credentials-command"[^>]*>sudo bash scripts\/setup\/credentials\.sh shop claude</);
 
   for (const s of order.slice(2)) step(s, 'done');
   log.append('machine.finished', { id: 'mr-0000000000aa', outcome: 'done', detail: 'shop added' }, 'demo', 'coordinator');
