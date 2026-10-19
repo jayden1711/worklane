@@ -729,7 +729,6 @@ test(
 // ---------------------------------------------------------------------------------------------------------------
 // #786: a variable that isn't set reads as unset, whatever is on Object.prototype (src/os/own-env.ts).
 
-import { desktopBinary } from '../src/desktop.js';
 import { heldOutDir } from '../src/held-out.js';
 import { HELD_OUT_ENV } from '../src/held-out-paths.js';
 import { readManagedApps } from '../src/managed-apps.js';
@@ -787,20 +786,17 @@ async function pollutedUnset<T>(vars: Record<string, string>, f: () => Promise<T
   }
 }
 
-test('regression (#786): with Object.prototype polluted, an unset variable reads as unset: the system root, the test-run marks, the service modes, the held-out store, the tool prefix, the desktop binary', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+test('regression (#786): with Object.prototype polluted, an unset variable reads as unset: the system root, the test-run marks, the service modes, the held-out store, the tool prefix', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
   const uid = process.getuid!();
   const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] as string[] };
   const clean: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/example' };
   const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
-  const desktop = join(canary, 'desktop');
-  writeFileSync(desktop, '');
   const vars = {
     [SYSTEM_ROOT_VAR]: join(canary, 'root'),
     NODE_TEST_CONTEXT: 'child-v8',
     [TEST_RUN_VAR]: '1',
     [HELD_OUT_ENV]: join(canary, 'held-out'),
     [`${BRAND.envPrefix}_PREFIX`]: join(canary, 'prefix'),
-    [`${BRAND.envPrefix}_DESKTOP`]: desktop,
   };
   polluted(vars, () => {
     // The pollution reaches a plain read (measured on Node 22, #786): what these read before.
@@ -811,7 +807,6 @@ test('regression (#786): with Object.prototype polluted, an unset variable reads
     assert.equal(heldOutDir('/state', { ...clean }), join('/state', 'evals', 'held-out'), "the held-out store: the state's");
     assert.equal(heldOutAllowed([], { ...clean }), false, 'held-out cases: not asked for');
     assert.equal(toolPrefix({ ...clean }), join(homedir(), '.local'), 'the tool prefix: the default');
-    assert.equal(desktopBinary({ ...clean }, canary), null, 'the desktop binary: none given, none built');
   });
 });
 

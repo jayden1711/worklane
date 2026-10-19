@@ -10,7 +10,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - the system root and the test-run marks;
   - the slot dir and its config, and the instances, init and held-out dirs;
   - the tool prefix, PATH lookups, and the PATH handed to sudo, git, tar, npm and docker;
-  - the desktop, Chrome and Git Bash binaries, and the backup dirs;
+  - the Chrome and Git Bash binaries, and the backup dirs;
   - the agent users' homes and `SUDO_USER`;
   - the variables an agent user's run is given across the user switch (`TZ`, `LC_ALL`, `XDG_RUNTIME_DIR` and the rest of its pass-through list), the Claude login a run is serialized on, and the `NODE_OPTIONS` handed to the App check's node;
   - the `HOME` and instances dir written into an instance's service unit.

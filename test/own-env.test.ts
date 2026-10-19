@@ -140,7 +140,6 @@ export const OWN_ENV_MODULES: readonly string[] = [
   'src/browser/run.ts',
   'src/cli-agents.ts',
   'src/coordinator/browser.ts',
-  'src/desktop.ts',
   'src/held-out.ts',
   'src/init.ts',
   'src/instance.ts',
