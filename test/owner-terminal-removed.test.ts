@@ -9,7 +9,7 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request, type IncomingMessage } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -19,14 +19,14 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import * as hub from '../src/dashboard-hub.js';
 import { deviceRefusal } from '../src/console/terminal-devices.js';
-import { CONSOLE_SHELL, OWNER_TERMINAL_RERUN, ownerTerminalLeftovers } from '../src/console/owner-terminal-removed.js';
+import { CONSOLE_SHELL, HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalLeftovers, rerunCommand, shellQuote } from '../src/console/owner-terminal-removed.js';
 import { doctor } from '../src/doctor.js';
 import { MACHINE_PATHS } from '../src/setup-steps.js';
 import type { Role } from '../src/console/asks.js';
+import { machine } from './dashboards-root.js';
 import { exampleProject, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
-const setupDir = join(repoRoot, 'scripts', 'setup');
 // Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules).
 const NET = ['tail1234', 'ts', 'net'].join('.');
 const ip = (n: number) => [100, 101, 102, 100 + n].join('.');
@@ -119,15 +119,19 @@ test('deprecation: on an install with a console user, the Setup page shows its o
     assert.match(notice ?? '', /The owner terminal has been removed/);
     assert.match(notice!, /still names a console user and runs without its sandbox/);
     assert.match(notice!, /console shell .* is still installed/);
-    assert.match(notice!, /run dashboards\.sh again .* --machine-devices/);
+    assert.ok(notice!.includes(`from its unit's ExecStart (${HUB_UNIT_AS_ROOT}): ${OWNER_TERMINAL_RERUN}`), 'the placeholder version, and where to fill it in from');
     assert.deepEqual((await s.asks('wendy')).notices ?? [], [], "a writer isn't shown the machine's root files");
     const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [], notices: [notice] });
     assert.match(html, /data-testid="setup-notice"[^>]*>[\s\S]*The owner terminal has been removed/);
     // Loud: doctor fails (exit 1, src/cli.ts) while the sudoers rule may still be there, and the rerun comes first.
     const check = doctor(root).find((c) => c.name === 'owner terminal');
     assert.equal(check?.level, 'fail', 'doctor fails, not warns');
-    assert.equal(check?.detail, `run as root, once: ${OWNER_TERMINAL_RERUN}\n${notice}`);
-    assert.match(OWNER_TERMINAL_RERUN, /^sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh --machine-devices /);
+    // This unit isn't root's (the test wrote it), so doctor builds no command from it: the placeholder version, and why.
+    // (The exact command from a unit: test/owner-terminal-rerun.test.ts.)
+    const [first, ...rest] = check!.detail.split('\n');
+    assert.ok(first!.startsWith(`run as root, once, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT} (the exact command can't be built here: it isn't root's alone`), first);
+    assert.ok(first!.endsWith(`: ${OWNER_TERMINAL_RERUN}`), first);
+    assert.deepEqual(rest, [notice]);
     // Only the unit left (the shell already removed by hand): still said, since the hub runs without its sandbox.
     rmSync(CONSOLE_SHELL);
     assert.match((await s.asks('olive')).notices?.[0] ?? '', /still names a console user/);
@@ -161,51 +165,6 @@ test('an existing --console-devices list still gates machine changes from the pa
   assert.match(check(5, allow) ?? '', /isn't one of the allowed devices/);
   assert.match(check(3, hub.hubMachineDevices(argv(['--console-user', 'admin']))) ?? '', /machine devices are empty/);
 });
-
-/**
- * dashboards.sh in a temporary root: its lib.sh sources the real one, then points the machine's paths into the root
- * and stands in for what needs root (users, ACLs, systemd, sudo). One instance, alpha, is ready for it.
- */
-function machine() {
-  const T = mkdtempSync(join(tmpdir(), 'dash-root-'));
-  const s = join(T, 'scripts', 'setup');
-  for (const d of ['scripts/setup', 'bin', 'units', 'libexec', 'sudoers.d']) mkdirSync(join(T, d), { recursive: true });
-  copyFileSync(join(setupDir, 'dashboards.sh'), join(s, 'dashboards.sh'));
-  writeFileSync(
-    join(s, 'lib.sh'),
-    `source ${JSON.stringify(join(setupDir, 'lib.sh'))}
-T=${JSON.stringify(T)}
-PATH="$T/bin:$PATH"
-as_root() { :; }
-home_of() { echo "$T/home/$1"; }
-ensure_user() { echo "user $1 exists"; }
-refuse_if_open() { :; }
-HUB_UNIT="$T/units/worklane-dashboard-hub.service" ENGINE_CLI="$T/bin/engine-cli" MACHINE_OWNERS="$T/machine-owners.json"
-CONSOLE_SHELL="$T/libexec/worklane-console-shell" CONSOLE_SUDOERS="$T/sudoers.d/worklane-console"
-`,
-  );
-  const exe = (name: string, body: string) => {
-    writeFileSync(join(T, 'bin', name), `#!/usr/bin/env bash\n${body}\n`);
-    chmodSync(join(T, 'bin', name), 0o755);
-  };
-  for (const c of ['systemctl', 'systemd-analyze', 'setfacl', 'engine-cli']) exe(c, `echo "${c} $*" >> ${JSON.stringify(join(T, 'calls'))}`);
-  exe('id', 'echo 1000');
-  // The viewer may read each token and nothing else, as the real ACLs give it.
-  exe('sudo', '[ "$1" = -u ] && shift 2\ncase "$*" in "test -r "*/dashboard-token) exit 0 ;; *) exit 1 ;; esac');
-  const state = join(T, 'home', 'wl-alpha', '.local', 'state', 'worklane', 'instances', 'alpha', 'state');
-  mkdirSync(state, { recursive: true });
-  for (const f of ['dashboard-token', 'siri-gateway-token', 'hooks-gateway-token']) writeFileSync(join(state, f), 'x');
-  const signin = join(T, 'home', 'wl-dash', '.config', 'dashboard-signin');
-  const hubState = join(T, 'home', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');
-  for (const d of [signin, hubState]) mkdirSync(d, { recursive: true });
-  for (const f of ['client-secret', 'session-secret']) writeFileSync(join(signin, f), 'x');
-  writeFileSync(join(hubState, 'dashboard-token'), 'x');
-  const paths = { unit: join(T, 'units', 'worklane-dashboard-hub.service'), shell: join(T, 'libexec', 'worklane-console-shell'), sudoers: join(T, 'sudoers.d', 'worklane-console') };
-  const run = (args: string[]) => spawnSync('bash', [join(s, 'dashboards.sh'), ...args], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T }, timeout: 60_000 });
-  /** What lib.sh's hub_keep_args (add-project, instance-remove, instance-rename) forwards from the unit now. */
-  const kept = () => spawnSync('bash', ['-c', 'source "$1"; HUB_UNIT="$2"; hub_keep_args', '_', join(setupDir, 'lib.sh'), paths.unit], { encoding: 'utf8' }).stdout.trim().split('\n');
-  return { T, paths, run, kept };
-}
 
 test('a dashboards.sh rerun on an install that had a console user: the console shell and its sudoers rule are removed, and the hub unit gets NoNewPrivileges=yes, ProtectSystem=strict and ProtectHome=read-only', { skip: !posix && 'bash' }, () => {
   for (const how of ['the same command line as before', "the hub's own settings (hub_keep_args, as add-project reruns it)"]) {
@@ -284,7 +243,8 @@ test('upgrade: the updater replaces a live console shell with a stub that refuse
     const r = spawnSync(m.paths.shell, args, { encoding: 'utf8', input: 'id\n', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: m.T }, timeout: 10_000 });
     assert.equal(r.status, 3, `${args.join(' ') || '(none)'}: refused`);
     assert.equal(r.stdout, '', `${args.join(' ') || '(none)'}: nothing on stdout`);
-    assert.match(r.stderr, /^refusing: the owner terminal is removed .*rerun dashboards\.sh .*sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh --machine-devices /);
+    assert.match(r.stderr, /^refusing: the owner terminal is removed .*rerun dashboards\.sh /);
+    assert.ok(r.stderr.includes(`: ${OWNER_TERMINAL_RERUN} For a shell, use ssh.`), `${args.join(' ') || '(none)'}: the placeholder version, verbatim`);
   }
   assert.equal(existsSync(log), false, 'the stub runs nothing');
 
@@ -296,4 +256,47 @@ test('upgrade: the updater replaces a live console shell with a stub that refuse
   assert.deepEqual(sync(OLD_UPDATER_ENTRY), [{ path: m.paths.shell, state: 'absent' }], 'an absent helper is never installed');
   assert.equal(existsSync(m.paths.shell), false);
   assert.deepEqual(ownerTerminalLeftovers({ hubUnitFile: m.paths.unit, consoleShell: m.paths.shell }), []);
+});
+
+test('one placeholder version: the CHANGELOG (Upgrading and After install), docs/dashboard.md, the Setup notice and the stub hold it verbatim, with --siri and --hooks and their conditions', () => {
+  assert.match(OWNER_TERMINAL_RERUN, / \[--siri if it has --siri-port\] \[--hooks if it has --hooks-port\] /);
+  assert.match(OWNER_TERMINAL_RERUN, /^sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh \[--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>\] --client-id <its --client-id> --public-url <its --public-url> /);
+  const changelog = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  const release = changelog.slice(changelog.indexOf('## v0.5.3'), changelog.indexOf('\n## ', changelog.indexOf('## v0.5.3') + 1));
+  const section = (name: string) => {
+    const at = release.indexOf(`\n### ${name}\n`);
+    assert.ok(at >= 0, `v0.5.3 has ### ${name}`);
+    const end = release.indexOf('\n### ', at + 1);
+    return release.slice(at, end < 0 ? undefined : end);
+  };
+  const upgrading = section('Upgrading (from v0.5.2)');
+  const bullet = upgrading.slice(upgrading.indexOf('**The dashboard\'s owner terminal is removed (#742).**'));
+  assert.ok(bullet.split('\n- ')[0]!.includes(OWNER_TERMINAL_RERUN), 'the Upgrading bullet');
+  const after = section('After install');
+  assert.ok(after.split('\n- ').find((b) => b.includes('`--console-user`'))?.includes(OWNER_TERMINAL_RERUN), 'the After install bullet');
+  assert.ok(readFileSync(join(repoRoot, 'docs', 'dashboard.md'), 'utf8').includes(OWNER_TERMINAL_RERUN), 'docs/dashboard.md');
+  // The stub's own text (its stderr is checked when it runs: the upgrade test above).
+  assert.ok(readFileSync(join(repoRoot, 'scripts', 'machine', 'worklane-console-shell.sh'), 'utf8').includes(`: ${OWNER_TERMINAL_RERUN} For a shell`), 'the stub');
+});
+
+test("the exact rerun quotes every value: pasted into bash it passes each one as one word, exactly, and runs nothing else", { skip: !posix && 'bash' }, () => {
+  const T = mkdtempSync(join(tmpdir(), 'rerun-quote-'));
+  const bin = join(T, 'bin');
+  mkdirSync(bin);
+  // A stand-in sudo that prints the words it was given, NUL-separated, and does nothing else.
+  writeFileSync(join(bin, 'sudo'), '#!/usr/bin/env bash\nprintf \'%s\\0\' "$@"\n', { mode: 0o755 });
+  const nasty = ["two words", "it's", 'say "hi"', `$(touch ${join(T, 'by-subst')})`, `\`touch ${join(T, 'by-backtick')}\``, 'line one\nline two', "'; touch by-quote; '", '\\', '${HOME}', '*', '-x'];
+  for (const v of nasty) {
+    const r = spawnSync('bash', ['-c', `printf '%s' ${shellQuote(v)}`], { encoding: 'utf8', cwd: T, env: { PATH: '/usr/bin:/bin' } });
+    assert.equal(r.stdout, v, `one word, exactly: ${JSON.stringify(v)}`);
+  }
+  const s = { machineDevices: nasty[3]!, clientId: nasty[1]!, publicUrl: nasty[5]!, siri: true, hooks: true, instances: [nasty[4]!, nasty[6]!, nasty[0]!] };
+  const command = rerunCommand(s);
+  assert.doesNotMatch(command.split('\n')[0]!, /[^']\$\(/, 'nothing unquoted');
+  const r = spawnSync('bash', ['-c', command], { encoding: 'utf8', cwd: T, env: { PATH: `${bin}:/usr/bin:/bin`, HOME: T } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.split('\0').slice(0, -1), ['bash', '/opt/worklane/current/scripts/setup/dashboards.sh', '--machine-devices', s.machineDevices, '--client-id', s.clientId, '--public-url', s.publicUrl, '--siri', '--hooks', '--', ...s.instances]);
+  assert.deepEqual(readdirSync(T).sort(), ['bin'], 'no command substitution, backtick or quote break ran');
+  // No gateways, no devices, no instance: those flags are left out, and --no-instances said.
+  assert.equal(rerunCommand({ machineDevices: null, clientId: 'id', publicUrl: 'u', siri: false, hooks: false, instances: [] }), "sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id 'id' --public-url 'u' --no-instances");
 });

@@ -7,5 +7,7 @@
 # reaches only this stub. Rerunning dashboards.sh as root deletes this file and that rule.
 # It runs nothing, reads nothing and prints nothing on stdout: every subcommand (check, shell, anything else, none)
 # is refused with exit 3. The old hub opened its terminal only on `check` printing "password-required".
-echo "refusing: the owner terminal is removed (#742). As root, rerun dashboards.sh once to remove this file and its sudoers rule: sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --machine-devices <the hub unit's --console-devices> --client-id <id> --public-url <url> <instance>... For a shell, use ssh." >&2
+# The command is src/console/owner-terminal-removed.ts OWNER_TERMINAL_RERUN, verbatim (a test checks it); `doctor`
+# prints it exactly, filled in from the hub's unit.
+echo "refusing: the owner terminal is removed (#742). As root, rerun dashboards.sh once to remove this file and its sudoers rule, with the hub's own settings filled in from the ExecStart of /etc/systemd/system/worklane-dashboard-hub.service (worklane doctor prints it filled in): sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url <its --public-url> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>... For a shell, use ssh." >&2
 exit 3

@@ -191,13 +191,15 @@ A request through an ssh tunnel, or on the break-glass port 4398, can't be tied 
 
 The Setup console no longer opens a terminal (#742). It was a login shell as the machine's admin user, which the hub's viewer user started through a sudoers rule and a root-installed console shell, and it made the hub's unit drop its sandbox. For a shell on the machine, use ssh; the break-glass (port 4398, through ssh) stays.
 
-An install that had it (`--console-user` in the hub's unit, or `/usr/local/libexec/worklane-console-shell` present) keeps its sudoers rule until root runs `dashboards.sh` again. The first engine update replaces the console shell with a stub that refuses every command (the updater keeps each root helper the machine has in step, with its owner and mode), so the rule then reaches only that stub. Until the rerun, the Setup console shows its owner a notice, and `doctor` fails (`owner terminal`, exit 1) with the rerun first. The rerun:
+An install that had it (`--console-user` in the hub's unit, or `/usr/local/libexec/worklane-console-shell` present) keeps its sudoers rule until root runs `dashboards.sh` again. The first engine update replaces the console shell with a stub that refuses every command (the updater keeps each root helper the machine has in step, with its owner and mode), so the rule then reaches only that stub. Until the rerun, the Setup console shows its owner a notice, and `doctor` fails (`owner terminal`, exit 1) with the rerun first.
 
-```bash
-sudo bash scripts/setup/dashboards.sh --machine-devices <the devices the unit's --console-devices lists> --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+`doctor` prints the rerun exactly, built from the hub unit's own `ExecStart` (`/etc/systemd/system/worklane-dashboard-hub.service`): its devices, its client id and URL, `--siri` and `--hooks` when it has those gateways, and its instances, every value single-quoted. It reads the unit only if it is root's regular file that no one else may write, and it builds nothing from a unit it can't read exactly (an option `dashboards.sh` doesn't write, quotes or expansions in `ExecStart`); it then still fails, and shows the same command with placeholders. By hand, fill in each `<...>` and `[...]` from that `ExecStart`:
+
+```
+sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url <its --public-url> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...
 ```
 
-removes the console shell (or its stub) and its sudoers rule (`/etc/sudoers.d/worklane-console`) and writes the hub's unit with its full sandbox. An older command line still runs: `--console-user` is accepted and ignored, and `--console-devices` is read as `--machine-devices`, with no device added.
+Leaving out `--siri` or `--hooks` that the unit has turns that gateway off (`dashboards.sh` removes the viewer's read of its tokens). The rerun removes the console shell (or its stub) and its sudoers rule (`/etc/sudoers.d/worklane-console`) and writes the hub's unit with its full sandbox. An older command line still runs: `--console-user` is accepted and ignored, and `--console-devices` is read as `--machine-devices`, with no device added.
 
 ## Machine owners
 
