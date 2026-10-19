@@ -25,7 +25,7 @@ export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.tes
 
 /**
  * A path JSON-quoted with every character outside printable ASCII written as \uXXXX, so an invisible, look-alike or
- * control character shows as what it is (a top level with a Cyrillic U+0455 as `"ѕrc/x.ts"`, a newline as `"src/a\nb.ts"`).
+ * control character shows as what it is (a top level with a Cyrillic U+0455 as `"\u0455rc/x.ts"`, a newline as `"src/a\nb.ts"`).
  */
 export const escapedPath = (path: string): string => JSON.stringify(path).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
