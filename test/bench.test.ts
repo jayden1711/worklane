@@ -23,7 +23,7 @@ import { sandboxProbe, type ProbeReport } from '../scripts/bench/probe.js';
 import { agentBase, BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
 import { capsFromArgs, type Caps } from '../scripts/bench/caps.js';
 import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, STDIN_REFUSED, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
-import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
+import { hiddenLeaks, taskView, type TaskRow } from '../scripts/bench/hidden.js';
 import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
 import { confirmSandbox } from '../scripts/bench/confirm.js';
@@ -1098,6 +1098,66 @@ test("stdin: a blank context line in the test patch doesn't end a run", async ()
     const rowBlank: TaskRow = { ...ROW, test_patch: testPatch([`+${two[0]}`, `+${two[1]}`, blank, `+${two[2]}`, `+${two[3]}`]) };
     assert.equal(await stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
   }
+});
+
+/** An added hunk line whose text starts with "++ ": `+++ counter...` in the patch, as long as a header line. */
+const PLUS_LINE = '++ counter_value_should_be_long_enough';
+
+test('argv: an added test-patch line starting "++ " is a hidden piece; only the file name line after `--- ` is skipped (#797)', () => {
+  const header = '++ b/tests/test_price.py';
+  assert.ok(header.length >= 24, 'the name line would count as a piece if it were read as an added line');
+  for (const [what, test_patch] of [
+    ['LF', testPatch([`+${PLUS_LINE}`])],
+    ['CRLF', testPatch([`+${PLUS_LINE}`]).replace(/\n/g, '\r\n')],
+    ['after a removed line starting "-- "', testPatch(['--- old_counter_value_line', `+${PLUS_LINE}`])],
+    ['the last line, no newline at its end', testPatch([`+${PLUS_LINE}`, '\\ No newline at end of file'])],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch };
+    assert.ok(hiddenLeaks(`echo ${PLUS_LINE}`, row).includes('test_patch'), `${what}: the "++ " line is found`);
+    assert.ok(!hiddenLeaks(`pytest ${header}`, row).includes('test_patch'), `${what}: the file name line is not a piece`);
+  }
+});
+
+test('stdin: a test-patch run with an added line starting "++ " is refused, applied or as a .diff (#797)', async () => {
+  const run = ['def test_counter_render_TESTMARK():', '    assert render(2) == """', PLUS_LINE];
+  const row: TaskRow = { ...ROW, test_patch: testPatch(run.map((l) => `+${l}`)) };
+  assert.equal(await stdinSends(row, STDIN_BASE, withFile('tests/test_render.py', `${run.join('\n')}\n`)), false, 'applied: refused');
+  assert.equal(await stdinSends(row, STDIN_BASE, withFile('hidden/test.diff', row.test_patch)), false, 'as a .diff: refused');
+  assert.equal(await stdinSends(row, STDIN_BASE, withFile('tests/test_render.py', `${run.slice(0, 2).join('\n')}\n`)), true, 'two of its lines: sent');
+});
+
+test('stdin: an open import paren goes on only through names or its `)`; a "++ " line or code ends it, so the run after is refused (#804)', async () => {
+  const run = ['EXPECTED = """', 'counter one two three four five', 'counter six seven eight nine'];
+  const applied = withFile('tests/test_render.py', `${run.join('\n')}\n`);
+  for (const [what, added] of [
+    ['a stray "(" in an import\'s comment, then a "++ " line', ['from mod import helper  # wraps render(', PLUS_LINE, ...run]],
+    ['an open "from mod import (", then a "++ " line', ['from mod import (', PLUS_LINE, ...run]],
+    ['a stray "(" in an import\'s comment, then code', ['from mod import helper  # wraps render(', ...run]],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch: testPatch(added.map((l) => `+${l}`)) };
+    assert.equal(await stdinSends(row, STDIN_BASE, applied), false, `${what}: refused`);
+  }
+  // The names of an open paren still count as import lines: an agent's own file with the same imports is sent.
+  const imports = ['from price.models import (', '    ItemWithDiscount,', '    BasketOfItems as Basket,  # the two kinds', ')'];
+  const rowImports: TaskRow = { ...ROW, test_patch: testPatch(imports.map((l) => `+${l}`)) };
+  assert.equal(await stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n`)), true, 'names in an open paren: sent');
+});
+
+test("stdin: a line is an import line only if 682c8ce5's rule says so too; `\\` continuations can't hide a run it refused (#804)", async () => {
+  for (const [what, added] of [
+    ['R1: a `\\` import, then a "++ " line ending in `\\`', ['import a, \\', '++ counter_value_should_be_long \\', 'first_line_of_the_hidden \\', 'second_line_of_the_hidden \\', 'third_line_of_the_hidden']],
+    ['R2: an open paren, an import ending in `\\`, then `)  \\`', ['from m import (', 'import a, \\', ')  \\', 'counter one two three four five']],
+    ['R2b: an open paren, code, an import ending in `\\`, then `b) \\`', ['from m import (', 'x = 1', 'import a, \\', 'b) \\', 'counter one two three four five']],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch: testPatch(added.map((l) => `+${l}`)) };
+    assert.equal(await stdinSends(row, STDIN_BASE, withFile('tests/test_r.py', `${added.slice(-3).join('\n')}\n`)), false, `${what}: refused`);
+  }
+});
+
+test('stdin: a `+++ ` line with no name after `--- ` is an added line, as before #797 (#804)', async () => {
+  const two = ['counter one two three four five', 'counter six seven eight nine'];
+  const row: TaskRow = { ...ROW, test_patch: ['diff --git a/t b/t', '--- a/t', '+++ ', ...two.map((l) => `+${l}`), ''].join('\n') };
+  assert.equal(await stdinSends(row, STDIN_BASE, withFile('tests/t.txt', `++\n${two.join('\n')}\n`)), false, 'refused');
 });
 
 test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', async () => {
