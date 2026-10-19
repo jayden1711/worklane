@@ -1747,12 +1747,14 @@ test('round 7: nesting is compared by device and inode too, so a second spelling
  * - a CR anywhere but at the very end of the line (one there is a CRLF line end; one elsewhere also ends a comment);
  * - every other control character but tab (\p{Cc}: C0, DEL, C1);
  * - every default-ignorable code point (\p{Default_Ignorable_Code_Point}, round 9: the whole class that renders as
- *   nothing, assigned or not, e.g. all the variation selectors, the Mongolian ones U+180B-180F included, the Khmer
+ *   nothing, assigned or not, e.g. all the variation selectors, the Mongolian ones U+180B-180D and U+180F included, the Khmer
  *   inherent vowels U+17B4 and U+17B5, the Hangul fillers and U+034F), with the variation-selector and Hangul-filler
- *   ranges and U+034F still named on their own, and the braille blank (U+2800), which also renders as nothing.
- * Allowed: tab, LF, a CR at a line's end, and every visible character.
+ *   ranges and U+034F still named on their own, and the braille blank (U+2800), which also renders as nothing;
+ * - (round 10) every space but the ASCII one (\p{Zs}: no-break, thin, ideographic...), private-use characters (\p{Co})
+ *   and the object replacement character (U+FFFC), which show as something other than what they are.
+ * Allowed: tab, LF, a CR at a line's end, the ASCII space, and every other visible character.
  */
-const RAW_UNSAFE = /[\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}\u{34F}]|\r(?!$)|(?![\t\r])\p{Cc}/u;
+const RAW_UNSAFE = /[\p{Cf}\p{Cs}\p{Co}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}\u{34F}\u{FFFC}]|\r(?!$)|(?![\t\r])\p{Cc}|(?! )\p{Zs}/u;
 
 test('round 8: the raw-character scan catches what it names, and lets tab, LF, a line-end CR and visible text through', () => {
   // The round-7 final check's fixtures, built from code points so none sits raw here.
@@ -1786,12 +1788,19 @@ test('round 8: the raw-character scan catches what it names, and lets tab, LF, a
     'U+180F': `let a${at(0x180f)} = 2;`,
     'U+2065 (unassigned, default-ignorable)': `// a${at(0x2065)}`,
     'U+E0002 (unassigned tag range)': `// a${at(0xe0002)}`,
+    // Round 10: non-ASCII spaces, private use and U+FFFC.
+    'U+00A0': `const${at(0xa0)}a = 1;`,
+    'U+2009': `a${at(0x2009)}b`,
+    'U+3000': `a${at(0x3000)}b`,
+    'U+E000 (private use)': `a${at(0xe000)}b`,
+    'U+F0000 (private use)': `a${at(0xf0000)}b`,
+    'U+FFFC': `a${at(0xfffc)}b`,
   };
   for (const [what, line] of Object.entries(caught)) assert.ok(RAW_UNSAFE.test(line), `${what} is caught`);
   for (const line of ['const a = 1;', `a${at(9)}b`, `const a = 1;${at(13)}`, 'café 中文 ж', `const s = "${at(0x1f600)}";`]) assert.ok(!RAW_UNSAFE.test(line), JSON.stringify(line));
 });
 
-test('round 7: no raw format, default-ignorable, line or paragraph separator, braille blank or control character (but tab and a line-end CR) sits in the bench sources or this test file', () => {
+test('round 7: no raw format, default-ignorable, private-use, line or paragraph separator, non-ASCII space, braille blank, U+FFFC or control character (but tab and a line-end CR) sits in the bench sources or this test file', () => {
   const files = [join(repoRoot, 'test', 'bench.test.ts'), ...readdirSync(join(repoRoot, 'scripts', 'bench')).filter((f) => /\.(ts|mjs|md)$/.test(f)).map((f) => join(repoRoot, 'scripts', 'bench', f))];
   const found = files.flatMap((f) => readFileSync(f, 'utf8').split('\n').flatMap((l, i) => (RAW_UNSAFE.test(l) ? [`${f.slice(repoRoot.length)}:${i + 1}`] : [])));
   assert.deepEqual(found, []);
