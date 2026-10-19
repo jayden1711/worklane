@@ -355,6 +355,16 @@ test("#727: a new project's drafted config.yaml (init, add-project) starts with 
   assert.deepEqual(cfg.project.required_check_sources, { lint: { workflow: '.github/workflows/ci.yml' }, 'test (22)': { workflow: '.github/workflows/ci.yml' }, 'test (24)': { workflow: '.github/workflows/ci.yml' } });
 });
 
+test("#727: init and add-project can't fail because of the block: a job keyed __proto__, a name too long for a key, a duplicate and a broken file", async () => {
+  const hostile = `on: push\njobs:\n  __proto__:\n    runs-on: ubuntu-latest\n  dup:\n    name: lint\n  lint:\n    runs-on: ubuntu-latest\n  long:\n    name: ${'x'.repeat(1100)}\n`;
+  const p = project({ 'README.md': 'shop\n', '.github/workflows/ci.yml': CI_WORKFLOW, '.github/workflows/odd.yml': hostile, '.github/workflows/broken.yml': 'jobs: [' });
+  const r = await autoConfigure({ root: p.root, repo: 'example-org/example-shop', io: acIo(ghStandIn().gh, ['custom', PASSES, 'none']), state: emptyAutoConfig(), save: () => undefined });
+  assert.equal(r.kind, 'proposed', JSON.stringify(r));
+  execFileSync('git', ['fetch', '-q', 'origin', SETUP_BRANCH], { cwd: p.root });
+  const cfg = loadConfigAt(p.root, `origin/${SETUP_BRANCH}`);
+  assert.deepEqual(cfg.project.required_check_sources, { 'test (22)': { workflow: '.github/workflows/ci.yml' }, 'test (24)': { workflow: '.github/workflows/ci.yml' } }, 'lint is posted by two files: a manual choice');
+});
+
 test('#727: an existing config.yaml is never rewritten with pins: auto-config leaves a repo that has one alone', async () => {
   const config = 'version: 1\n';
   const p = project({ 'README.md': 'shop\n', '.github/workflows/ci.yml': CI_WORKFLOW, [`${BRAND.configDir}/config.yaml`]: config });

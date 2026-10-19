@@ -221,7 +221,7 @@ test('turning governance mode on with any bare-name required check is refused, n
 
 test('doctor names each required check with no recorded source, judged by name, with the block that pins it', () => {
   const project = { land_mode: 'pr', required_checks: ['test', 'lint'], required_check_sources: { test: { app_id: CI_APP } } };
-  const workflows = { '.github/workflows/ci.yml': 'jobs:\n  lint:\n    runs-on: ubuntu-latest\n' };
+  const workflows = { at: 'c'.repeat(40), files: { '.github/workflows/ci.yml': 'jobs:\n  lint:\n    runs-on: ubuntu-latest\n' }, skipped: [] };
   const d = checkSourceDoctor(project, workflows, null);
   assert.equal(d.level, 'warn');
   assert.match(d.detail, /^no source recorded for lint: each is judged by name .*\nrequired_check_sources:\n {2}"lint": \{ workflow: "\.github\/workflows\/ci\.yml" \}/);
