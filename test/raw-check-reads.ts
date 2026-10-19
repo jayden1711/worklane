@@ -116,7 +116,7 @@ export function rawCheckReads(files: Record<string, string>, root = repoRoot): {
 }
 
 /** The files in src/ that may assert a type into JudgedChecks: only the one that makes them. */
-export const JUDGED_CASTS_ALLOWED: Record<string, string> = { 'src/check-source.ts': 'PinnedChecks.of and withTestRuns make JudgedChecks: the brand is theirs to give' };
+export const JUDGED_CASTS_ALLOWED: Record<string, string> = { 'src/check-source.ts': 'PinnedChecks.of makes JudgedChecks: the brand is its to give' };
 
 /**
  * Each way in `files` around the JudgedChecks brand: a type assertion whose target or expected type is JudgedChecks
@@ -161,39 +161,59 @@ export function judgedCasts(files: Record<string, string>, root = repoRoot): { f
 }
 
 /**
- * The JudgedChecks makers and the only src/ files that may use them (besides check-source.ts itself): a caller
- * elsewhere could brand data from anywhere (withTestRuns' `local`, or a PinnedChecks over a stand-in backlog).
+ * The JudgedChecks maker and the only src/ file that may use it (besides check-source.ts itself): a PinnedChecks over a
+ * stand-in backlog elsewhere could brand checks from anywhere. merge-flow.ts builds it over the coordinator's own
+ * backlog, config and event log.
  */
 export const MAKERS_ALLOWED: Record<string, string[]> = {
-  withTestRuns: ['src/ci-none.ts'],
   PinnedChecks: ['src/coordinator/merge-flow.ts'],
 };
 
-/** Each reference in `files` to a JudgedChecks maker (withTestRuns, PinnedChecks; aliases and re-exports too) outside the files MAKERS_ALLOWED names. */
+/**
+ * Each way in `files` to reach a JudgedChecks maker outside the files MAKERS_ALLOWED names, found through the
+ * compiler's own symbols and module resolution, never by text:
+ * - a name that resolves (through any alias, re-export or barrel) to a maker, or to check-source.ts's module itself
+ *   (an `export * as cs` re-exported and imported by name);
+ * - a namespace import, `export *`, `export * as`, or dynamic import of any module that exposes a maker (check-source.ts,
+ *   or a barrel re-exporting it), since a computed key or Object.values reaches it with no name;
+ * - a dynamic import whose module the compiler can't resolve (a computed specifier);
+ * - any require() or createRequire: CommonJS loading reaches the same module instance by a computed name.
+ */
 export function makerUses(files: Record<string, string>, root = repoRoot): { file: string; line: number; maker: string }[] {
   const { byPath, program } = programOf(files, root);
   const checker = program.getTypeChecker();
+  const fileOf = (d: ts.Node | undefined) => (d ? relative(root, d.getSourceFile().fileName).split('\\').join('/') : '');
+  const resolved = (s: ts.Symbol | undefined): ts.Symbol | undefined => (s && s.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(s) : s);
+  const isSourceModule = (s: ts.Symbol | undefined) => !!s && !!(s.flags & ts.SymbolFlags.ValueModule) && (s.declarations ?? []).some((d) => ts.isSourceFile(d) && fileOf(d) === 'src/check-source.ts');
+  const makerOf = (s: ts.Symbol | undefined): string | undefined => {
+    const t = resolved(s);
+    if (isSourceModule(t)) return 'check-source.ts (the module)';
+    return t && Object.hasOwn(MAKERS_ALLOWED, t.name) && (t.declarations ?? []).some((d) => fileOf(d) === 'src/check-source.ts') ? t.name : undefined;
+  };
+  // A module exposes a maker when it is check-source.ts or any of its exports resolves to one (or to check-source.ts itself).
+  const exposes = (mod: ts.Symbol | undefined): boolean => !!mod && (isSourceModule(mod) || checker.getExportsOfModule(mod).some((e) => makerOf(e) !== undefined));
+  const nodeModule = (s: ts.Symbol | undefined) => (resolved(s)?.declarations ?? []).some((d) => /node_modules[\\/]@types[\\/]node[\\/]/.test(d.getSourceFile().fileName));
   const out: { file: string; line: number; maker: string }[] = [];
   for (const path of byPath.keys()) {
     const sf = program.getSourceFile(path);
     if (!sf) continue;
     const file = relative(root, path).split('\\').join('/');
     if (file === 'src/check-source.ts') continue;
+    const hit = (node: ts.Node, maker: string) => out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, maker });
     const visit = (node: ts.Node): void => {
-      // A namespace import or a dynamic import of check-source.ts reaches the makers by a string key (`cs['withTestRuns']`), which no identifier names.
-      const spec = ts.isImportDeclaration(node) && node.importClause?.namedBindings && ts.isNamespaceImport(node.importClause.namedBindings) ? node.moduleSpecifier : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword ? node.arguments[0] : undefined;
-      if (spec && (!ts.isStringLiteralLike(spec) || /(^|\/)check-source(\.js)?$/.test(spec.text))) {
-        out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, maker: '* (namespace or dynamic import)' });
-      }
-      if (ts.isIdentifier(node)) {
-        let sym = checker.getSymbolAtLocation(node);
-        if (sym && sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
-        const decl = sym?.declarations?.[0];
-        const from = decl ? relative(root, decl.getSourceFile().fileName).split('\\').join('/') : '';
-        const maker = sym?.name;
-        if (from === 'src/check-source.ts' && maker && Object.hasOwn(MAKERS_ALLOWED, maker) && !MAKERS_ALLOWED[maker]!.includes(file)) {
-          out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, maker });
-        }
+      if (ts.isImportDeclaration(node) && node.importClause?.namedBindings && ts.isNamespaceImport(node.importClause.namedBindings) && exposes(checker.getSymbolAtLocation(node.moduleSpecifier))) hit(node, '* (namespace import of a module exposing a maker)');
+      else if (ts.isExportDeclaration(node) && node.moduleSpecifier && (!node.exportClause || ts.isNamespaceExport(node.exportClause)) && exposes(checker.getSymbolAtLocation(node.moduleSpecifier))) hit(node, '* (export * of a module exposing a maker)');
+      else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        const spec = node.arguments[0];
+        const mod = spec && ts.isStringLiteralLike(spec) ? checker.getSymbolAtLocation(spec) : undefined;
+        if (!mod) hit(node, '* (dynamic import of a module the compiler cannot resolve)');
+        else if (exposes(mod)) hit(node, '* (dynamic import of a module exposing a maker)');
+      } else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') hit(node, 'require()');
+      else if (ts.isIdentifier(node)) {
+        const sym = checker.getSymbolAtLocation(node);
+        const maker = makerOf(sym);
+        if (maker && !(MAKERS_ALLOWED[maker] ?? []).includes(file)) hit(node, maker);
+        else if (resolved(sym)?.name === 'createRequire' && nodeModule(sym)) hit(node, 'createRequire');
       }
       ts.forEachChild(node, visit);
     };

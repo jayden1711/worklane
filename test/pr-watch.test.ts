@@ -6,26 +6,26 @@ import { readiness as judgeReadiness, requiredOutcomes as judgeOutcomes } from '
 import { asJudged } from './helpers.js';
 
 // The judging functions take JudgedChecks (#727): these fixtures stand for checks already judged.
-const readiness = (o: Omit<Parameters<typeof judgeReadiness>[0], 'checks'> & { checks: CommitCheck[] }) => judgeReadiness({ ...o, checks: asJudged(o.checks) });
-const requiredOutcomes = (required: string[], checks: CommitCheck[]) => judgeOutcomes(required, asJudged(checks));
+const readiness = async (o: Omit<Parameters<typeof judgeReadiness>[0], 'checks'> & { checks: CommitCheck[] }) => judgeReadiness({ ...o, checks: await asJudged(o.checks) });
+const requiredOutcomes = async (required: string[], checks: CommitCheck[]) => judgeOutcomes(required, await asJudged(checks));
 
 const HEAD = 'a'.repeat(40);
 const run = (name: string, conclusion: string | null, status = 'completed', id = 1): CommitCheck => ({ name, source: 'check_run', status, conclusion, id });
 const approved = { head: HEAD, approved: true };
 
-test('ready: every required check passed on the evaluated head, and the evaluator approved', () => {
-  const r = readiness({ required: ['test', 'build'], checks: [run('test', 'success'), run('build', 'success'), run('lint', 'failure')], head: HEAD, evaluated: approved });
+test('ready: every required check passed on the evaluated head, and the evaluator approved', async () => {
+  const r = await readiness({ required: ['test', 'build'], checks: [run('test', 'success'), run('build', 'success'), run('lint', 'failure')], head: HEAD, evaluated: approved });
   assert.deepEqual(r, { ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass', id: 1 }, { name: 'build', outcome: 'pass', id: 1 }], failed: [] });
 });
 
-test('no required checks configured: never ready (fails closed)', () => {
-  const r = readiness({ required: [], checks: [run('test', 'success')], head: HEAD, evaluated: approved });
+test('no required checks configured: never ready (fails closed)', async () => {
+  const r = await readiness({ required: [], checks: [run('test', 'success')], head: HEAD, evaluated: approved });
   assert.equal(r.ready, false);
   assert.match(r.reasons.join(), /no required checks are configured/);
 });
 
-test('missing, pending, cancelled, skipped and neutral required checks are not passed; only a failure counts as failed', () => {
-  const r = readiness({
+test('missing, pending, cancelled, skipped and neutral required checks are not passed; only a failure counts as failed', async () => {
+  const r = await readiness({
     required: ['gone', 'running', 'cancelled', 'skipped', 'neutral', 'red'],
     checks: [run('running', null, 'in_progress'), run('cancelled', 'cancelled'), run('skipped', 'skipped'), run('neutral', 'neutral'), run('red', 'timed_out', 'completed', 7)],
     head: HEAD,
@@ -37,19 +37,19 @@ test('missing, pending, cancelled, skipped and neutral required checks are not p
   assert.equal(r.reasons.length, 6);
 });
 
-test('a head other than the evaluated commit, a rejection, or no verdict: not ready, with the reason', () => {
+test('a head other than the evaluated commit, a rejection, or no verdict: not ready, with the reason', async () => {
   const checks = [run('test', 'success')];
-  const moved = readiness({ required: ['test'], checks, head: 'b'.repeat(40), evaluated: approved });
+  const moved = await readiness({ required: ['test'], checks, head: 'b'.repeat(40), evaluated: approved });
   assert.match(moved.reasons.join(), /head bbbbbbbb is not the commit the evaluator approved \(aaaaaaaa\)/);
-  assert.match(readiness({ required: ['test'], checks, head: HEAD, evaluated: { head: HEAD, approved: false } }).reasons.join(), /did not approve/);
-  assert.match(readiness({ required: ['test'], checks, head: HEAD, evaluated: null }).reasons.join(), /no evaluator verdict/);
+  assert.match((await readiness({ required: ['test'], checks, head: HEAD, evaluated: { head: HEAD, approved: false } })).reasons.join(), /did not approve/);
+  assert.match((await readiness({ required: ['test'], checks, head: HEAD, evaluated: null })).reasons.join(), /no evaluator verdict/);
 });
 
-test('a commit status counts like a check run; a check run of the same name wins', () => {
+test('a commit status counts like a check run; a check run of the same name wins', async () => {
   const status = (name: string, conclusion: string | null): CommitCheck => ({ name, source: 'status', status: conclusion ? 'completed' : 'pending', conclusion });
-  assert.deepEqual(requiredOutcomes(['deploy'], [status('deploy', 'success')]).map((c) => c.outcome), ['pass']);
-  assert.deepEqual(requiredOutcomes(['deploy'], [status('deploy', null)]).map((c) => c.outcome), ['pending']);
-  assert.deepEqual(requiredOutcomes(['x'], [status('x', 'success'), run('x', 'failure')]).map((c) => c.outcome), ['fail']);
+  assert.deepEqual((await requiredOutcomes(['deploy'], [status('deploy', 'success')])).map((c) => c.outcome), ['pass']);
+  assert.deepEqual((await requiredOutcomes(['deploy'], [status('deploy', null)])).map((c) => c.outcome), ['pending']);
+  assert.deepEqual((await requiredOutcomes(['x'], [status('x', 'success'), run('x', 'failure')])).map((c) => c.outcome), ['fail']);
 });
 
 // GitHub over a scripted fetch: each request is answered from `routes` by method and path prefix.
