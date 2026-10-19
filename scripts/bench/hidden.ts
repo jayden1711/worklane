@@ -61,8 +61,36 @@ export function taskView(row: TaskRow, key: string): TaskView {
 /** The fields no container, agent or evaluator may see (design section 6.1), plus the instance id (it names the upstream PR). */
 export const HIDDEN_FIELDS = ['patch', 'test_patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints_text', 'instance_id', 'difficulty'] as const;
 
-/** A patch's added lines (`+x`, not the `+++ b/file` header), without the `+`. */
-const isAdded = (l: string) => l.startsWith('+') && !l.startsWith('+++ ');
+/** A hunk's header, `@@ -a,b +c,d @@`: b and d (1 when left out) are its old-side and new-side line counts. */
+const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
+
+/**
+ * Which lines of a patch are added lines (`+x`).
+ * INVARIANT: a `+++ ` line is a file name only right after its file's `--- ` line, outside any hunk (#797).
+ * In a hunk it is an added line starting "++ ". A hunk ends where its counts say, so a `--- ` line in it opens no header.
+ */
+function addedLines(lines: readonly string[]): boolean[] {
+  let old = 0;
+  let neu = 0;
+  let afterOldName = false;
+  return lines.map((l) => {
+    const nameLine = afterOldName;
+    afterOldName = false;
+    if (old > 0 || neu > 0) {
+      if (l.startsWith('+')) return (neu--, true);
+      if (l.startsWith('-')) return (old--, false);
+      // A context line; a blank one may have lost its leading space (CR too).
+      if (l.startsWith(' ') || l.trimEnd() === '') return (old--, neu--, false);
+      if (l.startsWith('\\')) return false;
+      // WHY: a line no hunk holds (a hand-cut patch's counts ran long): the hunk ends here, and this line is read as outside one.
+      old = neu = 0;
+    }
+    const h = HUNK.exec(l);
+    if (h) [old, neu] = [Number(h[1] ?? 1), Number(h[2] ?? 1)];
+    else if (l.startsWith('--- ')) afterOldName = true;
+    return !h && l.startsWith('+') && !(nameLine && l.startsWith('+++ '));
+  });
+}
 
 /**
  * Pieces of a hidden value the argv scan looks for: the whole value (at least 8 characters), each added line of a
@@ -70,10 +98,11 @@ const isAdded = (l: string) => l.startsWith('+') && !l.startsWith('+++ ');
  */
 function pieces(field: (typeof HIDDEN_FIELDS)[number], value: string): string[] {
   if (field === 'patch' || field === 'test_patch') {
-    return value
-      .split('\n')
+    const lines = value.split('\n');
+    const added = addedLines(lines);
+    return lines
       // Added lines only: a removed line is in the base commit, which the container already holds.
-      .filter(isAdded)
+      .filter((_, i) => added[i])
       .map((l) => l.slice(1).trim())
       .filter((l) => l.length >= 24);
   }
@@ -175,10 +204,12 @@ function testPatchRuns(patch: string): Set<string> {
     run = [];
     imports = [];
   };
-  for (const raw of patch.split('\n')) {
+  const lines = patch.split('\n');
+  const isAdded = addedLines(lines);
+  for (const [i, raw] of lines.entries()) {
     const l = raw.trimEnd();
     if (l === '') continue;
-    const added = isAdded(l);
+    const added = isAdded[i]!;
     if (!added) flush();
     if (!added && !l.startsWith(' ')) {
       // A removed line isn't on the new side; a hunk or file header starts a new one.

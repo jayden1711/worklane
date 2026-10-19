@@ -15,7 +15,7 @@ import { sandboxProbe, type ProbeReport } from '../scripts/bench/probe.js';
 import { agentBase, BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
 import { capsFromArgs, type Caps } from '../scripts/bench/caps.js';
 import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, STDIN_REFUSED, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
-import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
+import { hiddenLeaks, taskView, type TaskRow } from '../scripts/bench/hidden.js';
 import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
 import { STDIN_LINE } from './helpers.js';
@@ -699,6 +699,32 @@ test("stdin: a blank context line in the test patch doesn't end a run", () => {
     const rowBlank: TaskRow = { ...ROW, test_patch: testPatch([`+${two[0]}`, `+${two[1]}`, blank, `+${two[2]}`, `+${two[3]}`]) };
     assert.equal(stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
   }
+});
+
+/** An added hunk line whose text starts with "++ ": `+++ counter...` in the patch, as long as a header line. */
+const PLUS_LINE = '++ counter_value_should_be_long_enough';
+
+test('argv: an added test-patch line starting "++ " is a hidden piece; only the file name line after `--- ` is skipped (#797)', () => {
+  const header = '++ b/tests/test_price.py';
+  assert.ok(header.length >= 24, 'the name line would count as a piece if it were read as an added line');
+  for (const [what, test_patch] of [
+    ['LF', testPatch([`+${PLUS_LINE}`])],
+    ['CRLF', testPatch([`+${PLUS_LINE}`]).replace(/\n/g, '\r\n')],
+    ['after a removed line starting "-- "', testPatch(['--- old_counter_value_line', `+${PLUS_LINE}`])],
+    ['the last line, no newline at its end', testPatch([`+${PLUS_LINE}`, '\\ No newline at end of file'])],
+  ] as const) {
+    const row: TaskRow = { ...ROW, test_patch };
+    assert.ok(hiddenLeaks(`echo ${PLUS_LINE}`, row).includes('test_patch'), `${what}: the "++ " line is found`);
+    assert.ok(!hiddenLeaks(`pytest ${header}`, row).includes('test_patch'), `${what}: the file name line is not a piece`);
+  }
+});
+
+test('stdin: a test-patch run with an added line starting "++ " is refused, applied or as a .diff (#797)', () => {
+  const run = ['def test_counter_render_TESTMARK():', '    assert render(2) == """', PLUS_LINE];
+  const row: TaskRow = { ...ROW, test_patch: testPatch(run.map((l) => `+${l}`)) };
+  assert.equal(stdinSends(row, STDIN_BASE, withFile('tests/test_render.py', `${run.join('\n')}\n`)), false, 'applied: refused');
+  assert.equal(stdinSends(row, STDIN_BASE, withFile('hidden/test.diff', row.test_patch)), false, 'as a .diff: refused');
+  assert.equal(stdinSends(row, STDIN_BASE, withFile('tests/test_render.py', `${run.slice(0, 2).join('\n')}\n`)), true, 'two of its lines: sent');
 });
 
 test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', () => {
