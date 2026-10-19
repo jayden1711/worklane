@@ -24,7 +24,7 @@ import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
-import { homeDir } from './os/index.js';
+import { currentUid, currentUser, fileAccess, homeDir, isRoot } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
 import { runCommentCheck } from './comment-policy.js';
@@ -1075,7 +1075,6 @@ async function main(argv: string[]): Promise<number> {
       // WHY (#715): only root or the coordinator user may answer from here, checked before anything is read; the
       // answer is the instance's owner's, through the one decide path (src/decide.ts), audited with the OS user.
       const { cliDecideRefusal, answerDecision } = await import('./decide.js');
-      const { currentUid, currentUser, fileAccess, isRoot } = await import('./os/index.js');
       const { coordinatorUser } = await import('./setup/app-manifest.js');
       // The caller's uid is the kernel's (geteuid), never a program on PATH. INVARIANT: on a local site the owner check
       // is on the very file then written, so steering logPath (<PREFIX>_PROJECT_STATE_DIR, --root) only picks which log
