@@ -969,6 +969,48 @@ test("from the default policy.yaml a new instance gets, root's takeover leaves n
   assert.equal(setPolicy('dflt', 'settings.ci_repair.enabled', 'off', 'wl-dflt', m.deps).key, 'settings.ci_repair.enabled');
 });
 
+test("on a root policy, Settings queues only a tightening root's `policy set` can prove: one it can't (ci_repair's cap, run windows, while the repo's config decides them) is refused up front, naming root's command, and nothing is asked; once policy.yaml holds the value, the same tightening is queued and the helper runs it (#726 round 12)", { skip }, () => {
+  // Through 72ead9a5 Settings queued both, and root's helper always refused them ("the value in effect isn't in policy.yaml").
+  const m = machineInstance('prov');
+  ownPolicy('prov', m.deps);
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), String(asked.length));
+  const settings = (key: string, value: unknown) => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key, value, by: cfg.project.owners.default, owner: true, request }));
+  const narrow = [{ from: '09:00', to: '17:00' }];
+  assert.throws(() => settings('ci_repair.max_fixes_per_pr', 1), new RegExp(`settings\\.ci_repair\\.max_fixes_per_pr 1: .*policy set prov settings\\.ci_repair\\.max_fixes_per_pr 1`));
+  assert.throws(() => settings('run_windows', narrow), new RegExp(`settings\\.run_windows .*policy set prov settings\\.run_windows 0900-1700`));
+  assert.equal(asked.length, 0, 'nothing asked');
+  // Turning ci_repair off is provable from the file alone: queued, and the helper runs it.
+  assert.ok(settings('ci_repair.enabled', false).requested);
+  assert.equal(setPolicy('prov', 'settings.ci_repair.enabled', 'off', 'wl-prov', m.deps).to, false);
+  // An admin puts the values in policy.yaml; from then on the dashboard's tightening is provable, queued and run.
+  setPolicy('prov', 'settings.ci_repair.max_fixes_per_pr', '2', null, m.deps);
+  setPolicy('prov', 'settings.run_windows', '0800-1800', null, m.deps);
+  assert.ok(settings('ci_repair.max_fixes_per_pr', 1).requested);
+  assert.ok(settings('run_windows', narrow).requested);
+  assert.deepEqual(asked.slice(1), [['set-policy', 'settings.ci_repair.max_fixes_per_pr', '1'], ['set-policy', 'settings.run_windows', '0900-1700']]);
+  for (const [, key, arg] of asked.slice(1)) assert.equal(setPolicy('prov', key!, arg!, 'wl-prov', m.deps).key, key);
+});
+
+test("root's `policy set` on the coordinator's route compares an intake cap with the one the engine applies (intake.yaml's beside policy.yaml), and Settings on a root policy refuses that raise up front; an intake.yaml root can't read refuses all but a value policy.yaml sets (#726 round 12)", { skip }, () => {
+  // Through 72ead9a5 root compared with the engine's defaults (10/20/2), so with intake.yaml at 5/3/1 it took 20.
+  const m = machineInstance('pint');
+  ownPolicy('pint', m.deps);
+  writeFileSync(join(m.dir, 'intake.yaml'), 'version: 1\ncaps: { drafts_per_day: 5, reports_per_sender_per_day: 3, max_usd_per_day: 1 }\n', { mode: 0o600 });
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), String(asked.length));
+  assert.throws(() => setPolicy('pint', 'settings.intake.drafts_per_day', '20', 'wl-pint', m.deps), /intake\.drafts_per_day 20 would loosen it \(now 5\)/);
+  assert.throws(() => setPolicy('pint', 'settings.intake.max_usd_per_day', '2', 'wl-pint', m.deps), /max_usd_per_day 2 would loosen it \(now 1\)/);
+  assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'intake.drafts_per_day', value: 20, by: cfg.project.owners.default, owner: true, request })), /would loosen it \(now 5\)/);
+  assert.equal(asked.length, 0, 'nothing asked');
+  assert.equal(setPolicy('pint', 'settings.intake.drafts_per_day', '4', 'wl-pint', m.deps).to, 4);
+  // A link in its place: root never follows it, so it can't tell what applies, and refuses (fail closed).
+  renameSync(join(m.dir, 'intake.yaml'), join(m.T, 'intake.yaml'));
+  symlinkSync(join(m.T, 'intake.yaml'), join(m.dir, 'intake.yaml'));
+  assert.throws(() => setPolicy('pint', 'settings.intake.reports_per_sender_per_day', '2', 'wl-pint', m.deps), /reports_per_sender_per_day 2: .*intake\.yaml/);
+  assert.equal(setPolicy('pint', 'settings.intake.drafts_per_day', '3', 'wl-pint', m.deps).to, 3, "policy.yaml's own value: still provable");
+});
+
 test("an install root never took over (a laptop, cloud or VM; a machine not taken over yet) also only tightens from the dashboard: each loosening key's raise is refused, naming that install's route; lowering is written (#726 round 11, the owner's decision of 2026-10-19)", { skip }, () => {
   for (const machine of [false, true]) {
     const u = machineInstance(`unr${machine ? 'm' : 'l'}`);

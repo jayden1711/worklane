@@ -15,7 +15,7 @@
 import { chmodSync, closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { parseDocument } from 'yaml';
+import { parse, parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
@@ -23,10 +23,9 @@ import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, u
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
-import { intakeCaps, type Limits, LIMITS_PATH, loadLimits, researchCaps, researchRepoAccess, settingsProblems, stuckMode } from './settings.js';
-import { attachmentCaps } from './chat-attachments.js';
-import type { IntakeCaps } from './intake/report.js';
-import type { ResearchCaps } from './research.js';
+import { type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
+import { INTAKE_DEFAULT_CAPS, IntakeConfig, type IntakeCaps } from './intake/report.js';
+import { INTAKE_FILE } from './intake/config.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
@@ -78,23 +77,17 @@ function setIn(o: Record<string, unknown>, path: string[], v: unknown): void {
   at[path[path.length - 1]!] = v;
 }
 /**
- * The value of a CEILING_KEYS key in effect, as root can tell it from policy.yaml alone (#726 round 11): the file's
- * value; else the engine's default where it doesn't depend on the repo's config; else, for workers and the daily
- * budget, the policy's own cap on them (the repo can only stay under it); else undefined (the repo's config decides:
- * ci_repair, run_windows), which tightenProblem refuses but for turning a switch off.
+ * The intake caps the engine applies beside root's policy.yaml (#726 round 12): intake.yaml's, read as policy.yaml is
+ * read there (never through a link, one name, the coordinator's or root's, size-capped); the engine's defaults when
+ * there is none; null when it can't be read or isn't valid, so root can't tell what applies (fail closed).
  */
-function inEffect(key: string, p: PolicyFile): unknown {
-  const set = getIn(p, pathOf(key));
-  if (set !== undefined) return set;
-  const s = p.settings ?? {};
-  const sub = key.split('.').slice(2).join('.');
-  if (key === 'settings.workers') return p.agents.max_workers;
-  if (key === 'settings.daily_budget_usd') return p.budget.daily_usd;
-  if (key.startsWith('settings.research.')) return sub === 'repo_access' ? researchRepoAccess(s) : researchCaps(s)[sub as keyof ResearchCaps];
-  if (key.startsWith('settings.intake.')) return intakeCaps(s)[sub as keyof IntakeCaps];
-  if (key.startsWith('settings.chat_attachments.')) return attachmentCaps(s)[sub as keyof ReturnType<typeof attachmentCaps>];
-  if (key === 'settings.stuck_guard') return stuckMode(s);
-  return undefined;
+function intakeCapsBeside(dir: string, coordUid: number, rootUid: number): IntakeCaps | null {
+  try {
+    const r = IntakeConfig.safeParse(parse(readInOwnedDir(dir, INTAKE_FILE, coordUid, [coordUid, rootUid])));
+    return r.success ? r.data.caps : null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? INTAKE_DEFAULT_CAPS : null;
+  }
 }
 const shown = (v: unknown) => (v === undefined ? '(none)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
 /** Every place `b` differs from `a`, as `path: b's value`. */
@@ -312,7 +305,8 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     // The coordinator's route (the helper, for a dashboard) only tightens, every key (the owner's decision of
     // 2026-10-19; round 11): the value in effect now is the ceiling. Loosening is an admin's, here at a root shell.
     if (by && /^wl-/.test(by)) {
-      const past = tightenProblem(key, value, inEffect(key, parsePolicy(text, file)), policySetCommand(instance, key, arg));
+      const intake = key.startsWith('settings.intake.') ? intakeCapsBeside(dir, coordUid, rootUid) : null;
+      const past = tightenProblem(key, value, rootInEffect(key, parsePolicy(text, file), intake), policySetCommand(instance, key, arg));
       if (past) throw new Error(`refused: ${past}`);
     }
     doc.setIn(pathOf(key), value);

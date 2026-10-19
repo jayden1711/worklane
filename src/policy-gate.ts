@@ -245,13 +245,14 @@ export function looserThan(key: string, value: unknown, ceiling: unknown): boole
 /**
  * Why the dashboard or the coordinator's route may not set `key` to `value`: it loosens the value in effect now
  * (`current`), or null. `current` undefined means the caller can't tell it (root, for a setting the repo's config
- * decides): then only turning a switch off is provably tighter, and anything else is refused (fail closed). `route`
- * is what the admin runs instead.
+ * decides; anyone, for an intake cap when intake.yaml doesn't load): then only turning a switch off is provably
+ * tighter, and anything else is refused (fail closed). `route` is what the admin runs instead.
  */
 export function tightenProblem(key: string, value: unknown, current: unknown, route: string): string | null {
   if (!CEILING_KEYS.includes(key)) return null;
   const shown = (v: unknown) => (typeof v === 'object' ? JSON.stringify(v) : String(v));
-  if (current === undefined) return POLICY_SET_KEYS[key] === 'bool' && value === false ? null : `${key} ${shown(value)}: the value in effect isn't in policy.yaml (the repo's config sets it), so this route can't tell it would only tighten; an admin sets it (${route})`;
+  const from = key.startsWith('settings.intake.') ? "intake.yaml beside it doesn't load" : "the repo's config sets it";
+  if (current === undefined) return POLICY_SET_KEYS[key] === 'bool' && value === false ? null : `${key} ${shown(value)}: the value in effect isn't in policy.yaml (${from}), so this route can't tell it would only tighten; an admin sets it (${route})`;
   return looserThan(key, value, current) ? `${key} ${shown(value)} would loosen it (now ${shown(current)}): the dashboard only tightens; an admin does that (${route})` : null;
 }
 

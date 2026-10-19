@@ -43,6 +43,25 @@ test('changing an intake cap: owner only, bounded by the machine limits, recorde
   assert.deepEqual(settingsProblems({ intake: { max_usd_per_day: 5 } }, loadLimits(i.limitsPath)), ['intake.max_usd_per_day 5 is over 1 (machine limits)']);
 });
 
+test("Settings compares an intake cap with the one the engine applies: intake.yaml's beside policy.yaml, not the engine's defaults; one it can't load refuses all but a value policy.yaml sets (#726 round 12)", { skip: !posix && 'POSIX owners and modes' }, () => {
+  // Through 72ead9a5 Settings compared with the defaults (10/20/2), so with intake.yaml at 5/3/1 it took 20/10/2.
+  const i = instance();
+  const base = { policyPath: i.policyPath, cfg, eventsDb: i.eventsDb, limitsPath: i.limitsPath, by: owner };
+  const intake = join(i.d, 'intake.yaml');
+  writeFileSync(intake, 'version: 1\ncaps: { drafts_per_day: 5, reports_per_sender_per_day: 3, max_usd_per_day: 1 }\n', { mode: 0o600 });
+  assert.throws(() => changeSetting({ ...base, key: 'intake.drafts_per_day', value: 20 }), /intake\.drafts_per_day 20 would loosen it \(now 5\)/);
+  assert.throws(() => changeSetting({ ...base, key: 'intake.reports_per_sender_per_day', value: 10 }), /reports_per_sender_per_day 10 would loosen it \(now 3\)/);
+  assert.throws(() => changeSetting({ ...base, key: 'intake.max_usd_per_day', value: 2 }), /max_usd_per_day 2 would loosen it \(now 1\)/);
+  assert.doesNotMatch(readFileSync(i.policyPath, 'utf8'), /intake/, 'nothing written');
+  assert.deepEqual(changeSetting({ ...base, key: 'intake.drafts_per_day', value: 4 }), { from: 5, to: 4 });
+  assert.deepEqual(changeSetting({ ...base, key: 'intake.reports_per_sender_per_day', value: 3 }), { from: 3, to: 3 });
+  // intake.yaml there but not loadable: what applies can't be told, so nothing but a value policy.yaml sets changes.
+  writeFileSync(intake, 'version: 1\ncaps: { drafts_per_day: 0 }\n');
+  assert.throws(() => changeSetting({ ...base, key: 'intake.max_usd_per_day', value: 0.5 }), /intake\.max_usd_per_day 0\.5: .*intake\.yaml/);
+  assert.deepEqual(changeSetting({ ...base, key: 'intake.drafts_per_day', value: 3 }), { from: 4, to: 3 }, "policy.yaml's own value wins over intake.yaml's: still a lowering");
+  assert.throws(() => changeSetting({ ...base, key: 'intake.drafts_per_day', value: 4 }), /would loosen it \(now 3\)/);
+});
+
 test('intake credentials: files the coordinator holds, each checked to exist', () => {
   const c = CredentialsFile.parse({
     version: 1,

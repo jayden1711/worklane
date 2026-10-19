@@ -5,6 +5,7 @@
 // owner may call. Bounds come from a machine-wide, root-owned limits file the
 // dashboard can't write; a value outside them is refused, never clamped.
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
@@ -13,12 +14,13 @@ import { EventLog } from './events/log.js';
 import { InstanceSettings, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
+import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
 import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
-import { adminRoute, encodePolicyValue, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
+import { adminRoute, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { MACHINE_HELPER } from './machine.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
@@ -167,8 +169,43 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
 export const SETTING_KEYS = ['workers', 'daily_budget_usd', 'ci_repair.enabled', 'ci_repair.max_fixes_per_pr', 'run_windows', 'research.max_searches_per_day', 'research.max_fetches_per_day', 'research.max_usd_per_day', 'research.repo_access', 'intake.reports_per_sender_per_day', 'intake.drafts_per_day', 'intake.max_usd_per_day', 'stuck_guard', 'chat_attachments.max_file_mb', 'chat_attachments.max_message_mb', 'chat_attachments.retention_days'] as const;
 export type SettingKey = (typeof SETTING_KEYS)[number];
 
-/** A setting's value in effect: the instance's if set, else the repo's. */
-export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey): unknown {
+/**
+ * The intake caps the engine applies where policy.yaml sets none (src/intake/wire.ts): intake.yaml's, beside
+ * policy.yaml, loaded as the engine loads it; the engine's defaults when there is none. null when it is there but
+ * doesn't load (the engine has intake off until it does), so what would apply can't be told (#726 round 12).
+ */
+export function intakeFileCaps(policyPath: string): IntakeCaps | null {
+  try {
+    const r = loadIntakeConfig(join(dirname(policyPath), INTAKE_FILE));
+    return r === null ? INTAKE_DEFAULT_CAPS : 'config' in r ? r.config.caps : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The value of a CEILING_KEYS key in effect, as root's `policy set` can tell it without the repo's config (#726 rounds
+ * 11 and 12): the file's value; else the engine's default where the repo's config can't change it (for the intake
+ * caps, intake.yaml's: `intake`, null when it can't be read); else, for workers and the daily budget, the policy's own
+ * cap on them (the repo can only stay under it); else undefined (the repo's config decides: ci_repair, run_windows),
+ * which tightenProblem refuses but for turning a switch off. Settings checks a root policy's change with it up front.
+ */
+export function rootInEffect(key: string, p: PolicyFile, intake: IntakeCaps | null): unknown {
+  const set = key.split('.').reduce<unknown>((v, k) => (v && typeof v === 'object' ? (v as Record<string, unknown>)[k] : undefined), p);
+  if (set !== undefined) return set;
+  const s = p.settings ?? {};
+  const sub = key.split('.').slice(2).join('.');
+  if (key === 'settings.workers') return p.agents.max_workers;
+  if (key === 'settings.daily_budget_usd') return p.budget.daily_usd;
+  if (key.startsWith('settings.research.')) return sub === 'repo_access' ? researchRepoAccess(s) : researchCaps(s)[sub as keyof ResearchCaps];
+  if (key.startsWith('settings.intake.')) return intake ? intakeCaps(s, intake)[sub as keyof IntakeCaps] : undefined;
+  if (key.startsWith('settings.chat_attachments.')) return attachmentCaps(s)[sub as keyof ReturnType<typeof attachmentCaps>];
+  if (key === 'settings.stuck_guard') return stuckMode(s);
+  return undefined;
+}
+
+/** A setting's value in effect: the instance's if set, else the repo's (intake: `intake`'s caps; null: unknown). */
+export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey, intake: IntakeCaps | null = INTAKE_DEFAULT_CAPS): unknown {
   const eff = applySettings(cfg, s);
   switch (key) {
     case 'workers':
@@ -189,8 +226,10 @@ export function currentValue(cfg: Config, s: InstanceSettings, key: SettingKey):
       return researchRepoAccess(s);
     case 'intake.reports_per_sender_per_day':
     case 'intake.drafts_per_day':
-    case 'intake.max_usd_per_day':
-      return intakeCaps(s)[key.slice('intake.'.length) as keyof IntakeCaps];
+    case 'intake.max_usd_per_day': {
+      const k = key.slice('intake.'.length) as keyof IntakeCaps;
+      return intake ? intakeCaps(s, intake)[k] : s.intake?.[k];
+    }
     case 'stuck_guard':
       return stuckMode(s);
     case 'chat_attachments.max_file_mb':
@@ -250,13 +289,15 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   const text = checked ? checked.text : readFileSync(o.policyPath, 'utf8');
   const doc = parseDocument(text);
   const before = PolicyFile.parse(doc.toJS());
-  const from = currentValue(o.cfg, before.settings, key);
+  // The intake caps the engine applies under these settings: intake.yaml's beside this file (round 12).
+  const intake = intakeFileCaps(o.policyPath);
+  const from = currentValue(o.cfg, before.settings, key, intake);
   doc.setIn(['settings', ...key.split('.')], o.value);
   const parsed = PolicyFile.safeParse(doc.toJS());
   if (!parsed.success) throw new SettingsError(`refused: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
   const problems = settingsProblems(parsed.data.settings, loadLimits(o.limitsPath), parsed.data);
   if (problems.length) throw new SettingsError(`refused: ${problems.join('; ')}`);
-  const to = currentValue(o.cfg, parsed.data.settings, key);
+  const to = currentValue(o.cfg, parsed.data.settings, key, intake);
   // Only tightening, on every install (the owner's decision of 2026-10-19): the value in effect now is the ceiling;
   // loosening is the admin's route (root's command, own then set before a machine's takeover, or an edit of the file).
   const tight = tightenProblem(`settings.${key}`, to, from, adminRoute(o.policyPath, `settings.${key}`, encodePolicyValue(`settings.${key}`, o.value) ?? '<value>', !!checked, o.machine ?? existsSync(MACHINE_HELPER)));
@@ -268,6 +309,10 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     if (arg === null) throw new SettingsError(`refused: ${key} ${JSON.stringify(o.value)} can't be passed to root's helper`);
     const root = policySetCommand(policyInstance(o.policyPath), `settings.${key}`, arg);
     if (!policySetOk([`settings.${key}`, arg])) throw new SettingsError(`refused: settings.${key} ${arg} is root's to set, at a root shell (${root})`);
+    // Up front, nothing asked: root's own check on the coordinator's route (round 12), so nothing is queued that
+    // root's helper would refuse (a tightening it can't prove: ci_repair's cap or run windows the repo's config sets).
+    const unproven = tightenProblem(`settings.${key}`, decodePolicyValue(`settings.${key}`, arg), rootInEffect(`settings.${key}`, before, intake), root);
+    if (unproven) throw new SettingsError(`refused: ${unproven}`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
     const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);
     if (missing) throw new SettingsError(`${o.policyPath} is root's, and ${missing}: an admin changes it at a root shell (${root})`);
