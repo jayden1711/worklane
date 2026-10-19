@@ -153,10 +153,12 @@ export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', 
 
 /**
  * Keys whose HELPER_ONLY value is the only one a dashboard sets on EVERY install, whether its policy.yaml is root's or
- * the coordinator's (a laptop, cloud or VM install, or a machine not taken over yet): turning auto_merge on is an
- * admin's alone (the owner's decision on #770). Elsewhere the HELPER_ONLY limits apply to a root policy only.
+ * the coordinator's (a laptop, cloud or VM install, or a machine not taken over yet): every HELPER_ONLY key. Turning
+ * auto_merge on, land_mode to direct or main_watch off is an admin's alone (the owner's decisions on #770: auto_merge
+ * 2026-10-18; land_mode and anything else that loosens, 2026-10-19, principle 6). test/policy-edit.test.ts holds it
+ * equal to HELPER_ONLY's keys.
  */
-export const DASHBOARD_TIGHTEN_ONLY: readonly string[] = ['auto_merge'];
+export const DASHBOARD_TIGHTEN_ONLY: readonly string[] = ['land_mode', 'main_watch', 'auto_merge'];
 
 /** The root shell command that sets one key of an instance's policy.yaml. */
 export const policySetCommand = (instance: string, key: string, arg: string) => `sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}`;

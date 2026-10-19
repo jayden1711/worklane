@@ -43,9 +43,8 @@ export interface PolicyField {
   choices?: string[];
   why: string;
   /**
-   * The one value this form may set this key to (HELPER_ONLY: its tightening), on a root policy.yaml
-   * (src/policy-gate.ts), and for auto_merge on every install; and the admin's route for any other (adminRoute). The
-   * form offers nothing else.
+   * The one value this form may set this key to (HELPER_ONLY: its tightening), on every install
+   * (DASHBOARD_TIGHTEN_ONLY); and the admin's route for any other (adminRoute). The form offers nothing else.
    */
   only?: number | boolean | string;
   root?: string;
@@ -87,8 +86,8 @@ export function policyForm(path: string, limitsPath?: string, machine = existsSy
   } catch (e) {
     return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable', ...(rootRecorded(path) ? { canTurnOff: true } : {}) };
   }
-  // A HELPER_ONLY key only toward its one value here, on a root policy; auto_merge (DASHBOARD_TIGHTEN_ONLY) on every
-  // install. Any other value is an admin's, named as its route.
+  // A HELPER_ONLY key only toward its one value here, on every install (DASHBOARD_TIGHTEN_ONLY: land_mode pr,
+  // main_watch auto, auto_merge off). Any other value is an admin's, named as its route.
   const tightenOnly = (f: PolicyField): PolicyField => {
     if (!Object.hasOwn(HELPER_ONLY, f.key) || !(root || DASHBOARD_TIGHTEN_ONLY.includes(f.key))) return f;
     const only = decodePolicyValue(f.key, HELPER_ONLY[f.key]!) as PolicyField['value'];
@@ -145,8 +144,8 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   // INVARIANT: a policy the repo's config already loosens would stop the instance from loading at its next start.
   problems.push(...policyViolations(o.cfg, parsed.data).map((v) => `${v.file} ${v.path}: ${v.message}`));
   const machine = o.machine ?? existsSync(MACHINE_HELPER);
-  // On every install, root's policy or not: auto_merge only off here (the owner's decision on #770); turning it on is
-  // an admin's alone, named as the route this install has.
+  // On every install, root's policy or not: land_mode only pr, main_watch only auto, auto_merge only off here (the
+  // owner's decisions on #770, principle 6); loosening any is an admin's alone, named as the route this install has.
   if (!root) {
     for (const c of changes) {
       const arg = encodePolicyValue(c.key, c.to);

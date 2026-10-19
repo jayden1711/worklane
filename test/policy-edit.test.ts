@@ -18,7 +18,7 @@ import { processIdentity } from '../src/os/index.js';
 import { aliasInstance, armedSwitches, autoMergeKilled, idDir, instanceId, killAutoMerge } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
-import { decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
+import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, policyCommand, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
 import { checkRootStep } from '../src/console/root-steps.js';
@@ -282,8 +282,28 @@ test("auto_merge on is never the dashboard's on ANY install: an unrecorded polic
   // The form offers only off, naming the route.
   const f = policyForm(m.file, undefined, true).fields.find((x) => x.key === 'auto_merge')!;
   assert.deepEqual([f.only, f.root], [false, `sudo ${BRAND.cli} policy own unrec, then sudo ${BRAND.cli} policy set unrec auto_merge on`]);
-  // land_mode and main_watch stay as they were on an unrecorded policy (the brief: auto_merge only).
-  assert.equal(policyForm(m.file, undefined, true).fields.find((x) => x.key === 'land_mode')!.only, undefined);
+  // Inverted (the owner's decision, 2026-10-19, principle 6): land_mode and main_watch are tighten-only on an
+  // unrecorded policy too. Until then this line held `only` undefined for land_mode here ("the brief: auto_merge only").
+  const form = policyForm(m.file, undefined, true).fields;
+  assert.deepEqual(['land_mode', 'main_watch'].map((k) => form.find((x) => x.key === k)!.only), ['pr', 'auto']);
+});
+
+test("land_mode is tighten-only on the dashboard on EVERY install (the owner's decision, 2026-10-19, principle 6): an unrecorded policy can't be set to direct, nor main_watch off, from the Policy form; pr and auto still can; the tables hold every HELPER_ONLY key (#770)", { skip }, () => {
+  assert.deepEqual([...DASHBOARD_TIGHTEN_ONLY].sort(), Object.keys(HELPER_ONLY).sort(), 'every key the helper only tightens is tighten-only on the dashboard everywhere');
+  for (const machine of [false, true]) {
+    const m = machineInstance(`ld${machine ? 'm' : 'l'}`);
+    const events = join(m.T, 'events.db');
+    const before = readFileSync(m.file, 'utf8');
+    // direct (and main_watch off): refused, naming the admin's route; nothing written, nothing logged.
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { land_mode: 'direct' }, eventsDb: events, by: 'olive', machine }), /land_mode direct: that is an admin's alone, never this form's .*here it may only be pr/);
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { main_watch: 'off' }, eventsDb: events, by: 'olive', machine }), /main_watch off: that is an admin's alone, never this form's .*here it may only be auto/);
+    assert.equal(readFileSync(m.file, 'utf8'), before, 'nothing written');
+    assert.equal(existsSync(events) ? new EventLog(events).read(0, ['settings.changed']).length : 0, 0, 'nothing logged');
+    // Back to pr (an admin had set direct by hand): still the form's to do.
+    writeFileSync(m.file, before.replace('land_mode: pr', 'land_mode: direct'));
+    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { land_mode: 'pr' }, eventsDb: events, by: 'olive', machine }), [{ key: 'land_mode', from: 'direct', to: 'pr' }]);
+    assert.match(readFileSync(m.file, 'utf8'), /land_mode: pr/);
+  }
 });
 
 test("turning auto_merge off (and land_mode back to pr, main_watch back to auto) works on a sudo older than 1.9.10 too: listed whole in sudoers, so the dashboard asks and the helper runs it; anything else is still refused up front (#770)", { skip }, () => {
