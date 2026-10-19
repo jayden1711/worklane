@@ -370,19 +370,22 @@ const short = (sha) => String(sha).slice(0, 7);
  * full, whatever total_count says (#727: a missing or wrong total_count never makes a full page the last), at most
  * CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's
  * scheduled run adds one to main's tip every half hour, newest first, so the checks that matter can be on a later
- * page. Returns { check_runs } (past CHECK_PAGES_MAX pages, the newest only: a required check among the older ones
- * reads as not run, so that commit isn't installed), or null when GitHub gives no answer for any page.
+ * page. Returns { check_runs }, or null when GitHub gives no answer for any page. Still full past CHECK_PAGES_MAX
+ * pages: with `pinned` (pins are judged, #727), null too, since another source's failure on an unread page would block
+ * a pinned check; without, the newest pages only, as before (a required check among the older ones reads as not run).
  */
-async function checkRunsOf(deps, api, sha) {
+async function checkRunsOf(deps, api, sha, pinned = false) {
   const all = [];
   for (let page = 1; page <= CHECK_PAGES_MAX; page++) {
     if (page > 1) await deps.sleep(CHECKS_SPACING_MS);
     const data = await deps.fetchJson(`${api}/commits/${sha}/check-runs?per_page=100${page > 1 ? `&page=${page}` : ''}`);
     if (!data || !Array.isArray(data.check_runs)) return null; // a page missing could hide a red check
     all.push(...data.check_runs);
-    if (data.check_runs.length < 100) break;
+    if (data.check_runs.length < 100) return { check_runs: all };
   }
-  return { check_runs: all };
+  // #727: still full past CHECK_PAGES_MAX. Judging pins, any run of a pinned name from another source that isn't a
+  // pass blocks it, so an unread page could hold the failure: no answer (the commit waits), as the other pagers do.
+  return pinned ? null : { check_runs: all };
 }
 
 /**
@@ -612,7 +615,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
-      const data = await checkRunsOf(deps, api, c.sha);
+      const data = await checkRunsOf(deps, api, c.sha, !!pinning);
       const pins = data && pinning ? await pinning.forSha(c.sha, data.check_runs) : undefined;
       if (!data) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
       else if (pins && pins.noAnswer) v = { ok: false, final: false, noAnswer: true, reason: `GitHub gave no answer for ${pins.noAnswer}` };
@@ -1593,7 +1596,8 @@ async function update(deps, cfg, seen = {}) {
     if (v.object !== tag.object || v.commit !== head) {
       return deps.note('refused', head, `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(head)}, the one verified is ${short(v.object)} at ${short(v.commit)}`, true);
     }
-    const runs = ((await checkRunsOf(deps, api, v.base)) || {}).check_runs;
+    // No answer (past the pages read while pins are judged, too): no runs, so the required checks haven't run: not installed.
+    const runs = ((await checkRunsOf(deps, api, v.base, !!deps.pinChecks)) || {}).check_runs;
     // #727: the release's commit's required checks, each only from its pinned source.
     const pinning = await checkPins(deps, cfg, api);
     const pins = pinning ? await pinning.forSha(v.base, runs) : undefined;

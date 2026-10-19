@@ -240,6 +240,24 @@ test('every pager reads on past a full page whose total_count is missing or wron
   assert.match(r.skipped[0]?.reason ?? r.reason ?? '', /check "lint" ended failure/);
 });
 
+test('check runs still full past CHECK_PAGES_MAX pages wait while pins are judged: a failing run of another source on page 11 never installs', async () => {
+  const name = 'scan';
+  const verdict = async (failOn: number) => {
+    let clock = Date.parse('2026-10-18T12:00:00Z');
+    const page = (n: number) => (n === 1 ? [checkRun({ name, suite: 2 }, 0), ...Array.from({ length: 99 }, (_, i) => checkRun({ name: `other-${i}`, suite: 2 }, 1 + i))] : n < failOn ? Array.from({ length: 100 }, (_, i) => checkRun({ name: `other-${n}-${i}`, suite: 2 }, n * 1000 + i)) : [checkRun({ name, suite: 8, app: 4242, conclusion: 'failure' }, 99_999)]);
+    const fetchJson = async (url: string) => {
+      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1100, check_runs: page(Number(new URL(url).searchParams.get('page') ?? '1')) };
+      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return { workflow_runs: legit };
+      if (url.startsWith(`${API}/commits/${SHA}/status?`)) return { total_count: 0, statuses: [] };
+      return null;
+    };
+    const r = await u.chooseCommit({ pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, { branch: 'main', required_checks: [name] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+    return r.chosen ? 'installs' : `${r.wait ? 'waits' : 'refused'}: ${r.reason ?? r.skipped[0]?.reason ?? ''}`;
+  };
+  assert.match(await verdict(10), /^refused: .*"scan" from another source ended failure/, 'page 10 is read');
+  assert.match(await verdict(11), /^waits: GitHub gave no answer for its check runs/, 'past page 10: no answer, never an install (457e89b5 installed)');
+});
+
 test('the read cost: a commit where a pinned required check has no run at all reads neither its workflow runs nor its statuses', async () => {
   const gh = gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit });
   const r = await choose(engine, gh);
