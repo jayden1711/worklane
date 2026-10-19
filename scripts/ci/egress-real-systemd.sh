@@ -228,8 +228,9 @@ as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
 # any thread of any process of the test user's in a network namespace other than the host's.
 # Every thread of every test-user process in a network namespace other than the host's, as <pid>:<tid>:<netns inode>,
 # one a line, in $t/threads-<tag>. Each thread, not each pid: rootlesskit's detach-netns puts only some threads of its
-# child in the containers' netns, and which ones depends on Go's thread scheduling when Docker starts, so a pid's
-# /proc/<pid>/ns/net (its main thread's) can miss it (#543: the job once found no pid there after a restart).
+# child in the containers' netns (measured: 1 of 10, the main one, on 11 starts in one run), and the job once found no
+# pid's main thread there after a restart; which threads end up there may depend on the start (inferred, not
+# confirmed), so a pid's /proc/<pid>/ns/net (its main thread's) alone can miss it.
 netns_threads() {
   local tag="$1" hostnet p tid n
   hostnet="$(sudo readlink /proc/1/ns/net)"
