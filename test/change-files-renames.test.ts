@@ -26,9 +26,11 @@ import { instructionEvalReasons, mergeDecision, waitCategoriesOf, whyHighRisk } 
 import { checkDraft } from '../src/checks-from-feedback.js';
 import { crossFamilySkip } from '../src/cross-eval.js';
 import { revertFirstReasons } from '../src/fix-forward.js';
+import { reviewPacket } from '../src/coordinator/review-packet.js';
+import type { EventPayload } from '../src/events/types.js';
 import { lightCheckPlan } from '../src/light-check.js';
 import { riskClassOf, sizeFiles, sizeVerdict } from '../src/pr-rules.js';
-import { computeLevel, selfModificationPart, type ChangeFile, type LevelInput } from '../src/review.js';
+import { computeLevel, escapedPath, selfModificationPart, shownPath, type ChangeFile, type LevelInput } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -658,11 +660,17 @@ test('inspect\'s "changes protected harness files" shows each odd name escaped',
   assert.equal(got.split(', ').length, ODD_CHARS.length, got);
 });
 
-test('the other reasons that name a changed path show it escaped: instruction evals, the cross-family skip, fix-forward\'s revert-first, a check draft, the combined-state plan', () => {
+test('the other reasons that name a changed path show it escaped: instruction evals, the review packet\'s eval lines, the cross-family skip, fix-forward\'s revert-first, a check draft, the combined-state plan', () => {
   const found: Record<string, string[]> = {};
+  const head = 'a'.repeat(40);
+  const evalOf = (target: string, o: Partial<EventPayload<'instructions.eval'>> = {}): EventPayload<'instructions.eval'> => ({ issue: 7, head, target, base: { passed: 3, total: 3 }, result: { passed: 2, total: 3 }, dropped: true, incomplete: false, changes: [], cost_usd: 0.1, ...o });
   for (const c of ODD_CHARS) {
     const p = `src/a${c}b.ts`;
     rawIn(found, 'instructionEvalReasons', instructionEvalReasons([`role a${c}b`, `skill a${c}b`], []));
+    // The review packet: its "Evals" line on top and its "Instruction evals" lines in Full details, scored and not
+    // evaluated. Its own line breaks are its own; each line is checked.
+    const evals = [evalOf(`role a${c}b`, { held_out: null }), evalOf(`skill s${c}k`, { error: 'the CLI failed' })];
+    rawIn(found, 'reviewPacket', reviewPacket({ owner: 'example-owner', ask: 'waits for you to review and merge', head, reasons: [], risk: null, evals, receipts: null }).split('\n'));
     rawIn(found, 'crossFamilySkip', [crossFamilySkip({ paths: [`evals/held-out/a${c}b.json`], categories: {} }) ?? '', crossFamilySkip({ paths: [p], categories: { secrets: [p] } }) ?? '']);
     rawIn(found, 'revertFirstReasons', revertFirstReasons({ files: [p], globs: ['src/**'], categories: { migration: [p], secrets: [p], auth: [p], 'money-path': [p] } }));
     const draft = (files: { path: string; status: string }[]) => checkDraft({ kind: 'test' }, files.map((f) => ({ ...f, content: 'x' })));
@@ -670,6 +678,44 @@ test('the other reasons that name a changed path show it escaped: instruction ev
     rawIn(found, 'lightCheckPlan', [lightCheckPlan({ enabled: true, mainChanged: [p], prFiles: [p], imports: {} }).why]);
   }
   assert.deepEqual(found, {});
+  // The packet names the target escaped, on top and in Full details; an ordinary one as itself.
+  const packet = reviewPacket({ owner: 'example-owner', ask: 'waits', head, reasons: [], risk: null, evals: [evalOf('role a\u202eb'), evalOf('role worker')], receipts: null });
+  assert.match(packet, /^\*\*Evals:\*\* `"role a\\u202eb"` 3\/3 → 2\/3 LOWER; `role worker` 3\/3 → 2\/3 LOWER$/m, packet);
+  assert.match(packet, /^- `"role a\\u202eb"`: visible 3\/3 → 2\/3, \*\*lower\*\*/m, packet);
+});
+
+test('shownPath: two different paths never show as the same text, so a name starting with a quote (a directory named "src) is escaped too', () => {
+  // The round-5 collisions: an odd path, and an ordinary ASCII one that is the odd one's escaped text.
+  const pairs: [string, string][] = [
+    ['src/re\u202eview.ts', '"src/re\\u202eview.ts"'],
+    ['src/a\nb.ts', '"src/a\\nb.ts"'],
+    ['\u0455rc/x.ts', '"\\u0455rc/x.ts"'],
+    ['docs/a\u007fb.md', '"docs/a\\u007fb.md"'],
+  ];
+  for (const [odd, plain] of pairs) {
+    assert.notEqual(shownPath(odd), shownPath(plain), `${esc(odd)} and ${plain} show as ${esc(shownPath(odd))}`);
+    assert.equal(JSON.parse(shownPath(plain)), plain);
+    assert.equal(JSON.parse(shownPath(odd)), odd);
+  }
+  // A directory literally named "src: escaped, and reads back as itself. A quote further in is an ordinary name.
+  assert.equal(shownPath('"src/x.ts'), '"\\"src/x.ts"');
+  assert.equal(JSON.parse(shownPath('"src/x.ts')), '"src/x.ts');
+  assert.equal(shownPath('web/say"hi".ts'), 'web/say"hi".ts');
+  assert.equal(shownPath('docs/x.md'), 'docs/x.md');
+  // Every odd path from the probes, the escaped and the JSON text of each as an ordinary name, names that aren't
+  // valid UTF-8, and ordinary names: no two show the same, none shown raw, and each quoted one reads back as itself.
+  const odd = ODD_CHARS.flatMap(oddPaths);
+  const fffd = ['src/a\ufffdb.ts', '\ufffd/x.ts', '"src/a\ufffdb.ts'];
+  const ordinary = ['docs/x.md', '"docs/x.md"', 'src/na\u00efve.ts', 'lib/back\\slash.ts', '"src', '""', '"'];
+  const all = [...new Set([...odd, ...fffd, ...ordinary, ...[...odd, ...fffd, ...ordinary].flatMap((p) => [escapedPath(p), JSON.stringify(p)])])];
+  const seen = new Map<string, string>();
+  for (const p of all) {
+    const s = shownPath(p);
+    assert.ok(!seen.has(s), `${esc(p)} and ${esc(seen.get(s) ?? '')} both show as ${esc(s)}`);
+    seen.set(s, p);
+    assert.ok(!RAW.test(s), esc(s));
+    if (s !== p) assert.equal(JSON.parse(s), p, esc(p));
+  }
 });
 
 test('the odd-name tests and how text shows a path (src/path-text.ts) are locked with the review levels', () => {

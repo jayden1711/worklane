@@ -25,7 +25,7 @@ export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.tes
 
 /**
  * A path JSON-quoted with every character outside printable ASCII written as \uXXXX, so an invisible, look-alike or
- * control character shows as what it is (`"ѕrc/x.ts"`, `"src/a\nb.ts"`).
+ * control character shows as what it is (a top level with a Cyrillic U+0455 as `"ѕrc/x.ts"`, a newline as `"src/a\nb.ts"`).
  */
 export const escapedPath = (path: string): string => JSON.stringify(path).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
@@ -35,9 +35,14 @@ export const escapedPath = (path: string): string => JSON.stringify(path).replac
  * isn't ASCII: so no Cc, Cf or default-ignorable character reaches the text, a newline can't start a line of its own,
  * and a bidi override can't reorder the line around it. Quoted (JSON) when it holds a U+FFFD (a name that isn't valid
  * UTF-8), so it reads as the odd name it is.
+ *
+ * INVARIANT: two different paths never show as the same text. The three forms are disjoint: a name shown as itself
+ * never starts with `"` (one that does, like a directory named `"src`, is escaped too, so it can't read as the
+ * escaped form of another path); the escaped form is printable ASCII; the JSON form holds a raw U+FFFD. Each form is
+ * one-to-one (JSON.parse gives the path back).
  */
 export const shownPath = (path: string): string =>
-  hasControlCharacter(path) || hasInvisibleCharacter(path) || hasNonAsciiTopLevel(path) ? escapedPath(path) : isNonUtf8Path(path) ? JSON.stringify(path) : path;
+  hasControlCharacter(path) || hasInvisibleCharacter(path) || hasNonAsciiTopLevel(path) || path.startsWith('"') ? escapedPath(path) : isNonUtf8Path(path) ? JSON.stringify(path) : path;
 
 /** Several changed paths as text: each one shownPath, joined. */
 export const shownPaths = (paths: readonly string[], sep = ', '): string => paths.map(shownPath).join(sep);
