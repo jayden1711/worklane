@@ -20,10 +20,13 @@
 //
 // A change that moves that pin (#814) is also judged by the engine it pins, since every new bootstrap would install
 // that one: its .worklane/ as the merge commit carries it (main's own, when only the pin moves) is loaded the same way
-// with the engine the --head pin names. That pin must be complete and well formed (bootstrap.sh itself refuses one
-// that isn't), and its tag must verify against the signers at --base, never --head's, so a PR can't bring its own
-// signer. Every top-level .worklane/*.yaml at --head must be one that engine reads. A change that removes
-// bootstrap.sh is refused. A bootstrap.sh change that leaves ENGINE_TAG and ENGINE_COMMIT as they were moves nothing.
+// with the engine the --head pin names. Once bootstrap.sh changes, both pin lines must be exactly
+// `ENGINE_TAG=vX.Y.Z` and `ENGINE_COMMIT=<40 hex>` in ASCII with nothing after them (strictPin), or it is refused:
+// bash must not be able to read another pin than this check does. The tag must verify against the signers at --base,
+// never --head's, so a PR can't bring its own signer. Every top-level .worklane/*.yaml at --head must be one that
+// engine reads. A change that removes bootstrap.sh is refused. A bootstrap.sh change that leaves both pin lines as
+// they were moves nothing. An engine chosen elsewhere in bootstrap.sh's code is not seen here: owner review of
+// scripts/** is what covers that.
 //
 // A change that touches neither .worklane/ nor the pin has nothing to load: it prints so and exits 0, before fetching
 // any engine (the workflow's paths filter already skips most such PRs; this keeps the script right without it).
@@ -40,6 +43,11 @@ const BOOTSTRAP = 'scripts/bootstrap.sh';
 const LOADER = 'dist/src/config/load.js';
 const VERSION_TAG = /^v\d+\.\d+\.\d+$/;
 const FULL_COMMIT = /^[0-9a-f]{40}$/;
+// The only pin lines a moved pin may have (strictPin): ASCII, nothing after the value.
+const PIN_LINE = { ENGINE_TAG: /^ENGINE_TAG=v[0-9]+\.[0-9]+\.[0-9]+$/, ENGINE_COMMIT: /^ENGINE_COMMIT=[0-9a-f]{40}$/ };
+const PIN_FORM = { ENGINE_TAG: 'vX.Y.Z', ENGINE_COMMIT: '<40 hex digits>' };
+/** A line as printable ASCII: anything else as \uXXXX, so a CR, NBSP, BOM or lookalike shows in the message. */
+const shown = (s) => s.replace(/[^\x20-\x7e]/gu, (c) => `\\u${c.codePointAt(0).toString(16).padStart(4, '0')}`);
 const here = dirname(fileURLToPath(import.meta.url));
 
 const args = process.argv.slice(2);
@@ -143,8 +151,9 @@ async function main() {
 
 /**
  * The pin --head sets in bootstrap.sh when it differs from --base's: { tag, commit, source }, or null when it doesn't
- * move (bootstrap.sh unchanged, or changed with ENGINE_TAG and ENGINE_COMMIT as they were). A moved pin must be one
- * bootstrap.sh would install: a release tag and a full commit id. A removed bootstrap.sh is refused.
+ * move (bootstrap.sh unchanged, or changed with both pin lines byte for byte as they were). Read with strictPin from
+ * the raw file, so a pin line bash would read differently is refused, never taken as "the same". A base pin that
+ * strictPin refuses counts as moved. A removed bootstrap.sh is refused.
  */
 function movedPin(base, head) {
   const blob = (rev) => gitText('rev-parse', '-q', '--verify', `${rev}:${BOOTSTRAP}`);
@@ -152,29 +161,59 @@ function movedPin(base, head) {
   if (was === now) return null;
   if (now === null) fail(`this change removes ${BOOTSTRAP}, the engine pin every new machine bootstraps from: can't tell which engine they would install`);
   const at = `${BOOTSTRAP} at ${head.slice(0, 12)}`;
-  const text = gitText('show', `${head}:${BOOTSTRAP}`);
+  // Raw bytes, never trimmed: trimming would drop a trailing NBSP, BOM or newline that bash keeps.
+  const raw = (rev) => {
+    const r = git('show', `${rev}:${BOOTSTRAP}`);
+    return r.status === 0 ? r.stdout : null;
+  };
+  const text = raw(head);
   if (text === null) fail(`can't read ${at}`);
   let pin;
   try {
-    pin = readPin(text);
+    pin = strictPin(text);
   } catch (e) {
     fail(`${at}: ${e.message}`);
   }
-  // The base's pin, only to tell whether it moved: one that doesn't parse there counts as moved, never as the same.
   let before = null;
   if (was !== null) {
     try {
-      before = readPin(gitText('show', `${base}:${BOOTSTRAP}`) ?? '');
+      before = strictPin(raw(base) ?? '');
     } catch {
       before = null;
     }
   }
   if (before && before.tag === pin.tag && before.commit === pin.commit) return null;
-  if (!VERSION_TAG.test(pin.tag)) fail(`${at} pins ENGINE_TAG=${pin.tag || '(none)'}, not a release tag vX.Y.Z`);
-  if (!FULL_COMMIT.test(pin.commit)) {
-    fail(`${at} pins ENGINE_COMMIT=${pin.commit || '(none)'}, not a full commit id: bootstrap.sh refuses that, so no new machine could install the engine`);
-  }
   return { tag: pin.tag, commit: pin.commit, source: `the pin in ${at}` };
+}
+
+/**
+ * The pin in bootstrap.sh's raw text, only when bash can't read it differently from this check: exactly one line
+ * `ENGINE_TAG=vX.Y.Z` and one `ENGINE_COMMIT=<40 lowercase hex>`, ASCII, with nothing else on the line (no comment,
+ * quote, `$`, CR, NBSP, BOM or U+2028) and a newline after it. Every line that starts with either name must be that
+ * line (so `ENGINE_TAG+=…` is refused). No line may assign a name with a character outside ASCII, since a lookalike of
+ * either name can't be told apart. Lines are split on "\n" only, as bash splits them. Throws why otherwise.
+ * It sees only these lines: an engine set some other way in the script (indented, export, eval, ...) is not seen.
+ */
+function strictPin(text) {
+  const lines = text.split('\n');
+  const found = { ENGINE_TAG: [], ENGINE_COMMIT: [] };
+  lines.forEach((line, i) => {
+    const n = i + 1;
+    const name = /^\s*([^\s=#][^\s=]*)=/u.exec(line)?.[1];
+    if (name && /[^\x00-\x7f]/u.test(name)) {
+      throw new Error(`line ${n} assigns "${shown(name)}", a name with a character outside ASCII: it can't be told from the pin's names`);
+    }
+    for (const key of Object.keys(found)) {
+      if (!line.startsWith(key)) continue;
+      if (!PIN_LINE[key].test(line)) {
+        throw new Error(`line ${n} is "${shown(line)}", not exactly ${key}=${PIN_FORM[key]} (ASCII, nothing after it): bash could read another pin there than this check does`);
+      }
+      if (i === lines.length - 1) throw new Error(`line ${n}, "${shown(line)}", doesn't end in a newline`);
+      found[key].push(line.slice(key.length + 1));
+    }
+  });
+  if (found.ENGINE_TAG.length !== 1 || found.ENGINE_COMMIT.length !== 1) throw new Error('bootstrap.sh needs exactly one ENGINE_TAG= line and one ENGINE_COMMIT= line');
+  return { tag: found.ENGINE_TAG[0], commit: found.ENGINE_COMMIT[0] };
 }
 
 /**

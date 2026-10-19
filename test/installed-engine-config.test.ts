@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
@@ -286,9 +286,9 @@ test("a moved pin fails closed: unsigned, another key, the PR's own signer, a mo
   refused(move('v1.1.3', other), new RegExp(`v1\\.1\\.3 points at ${v113}, but this run builds ${other}`));
   // Malformed, not a release tag, or no commit filled in: bootstrap.sh itself would refuse it, so no new machine could install.
   refused(f.run(f.pr({ 'scripts/bootstrap.sh': `${bootFor('v1.1.3', v113)}ENGINE_TAG=v1.1.4\n` })), /scripts\/bootstrap\.sh at \w+: bootstrap\.sh needs exactly one ENGINE_TAG= line/);
-  refused(move('latest', v113), /scripts\/bootstrap\.sh at \w+ pins ENGINE_TAG=latest, not a release tag vX\.Y\.Z/);
-  refused(move('"v1.1.3"', v113), /pins ENGINE_TAG="v1\.1\.3", not a release tag vX\.Y\.Z/);
-  refused(f.run(f.pr({ 'scripts/bootstrap.sh': BOOT.replace('v0.0.0', 'v1.1.3') })), /scripts\/bootstrap\.sh at \w+ pins ENGINE_COMMIT=\(none\), not a full commit id/);
+  refused(move('latest', v113), /scripts\/bootstrap\.sh at \w+: line 2 is "ENGINE_TAG=latest", not exactly ENGINE_TAG=vX\.Y\.Z/);
+  refused(move('"v1.1.3"', v113), /line 2 is "ENGINE_TAG="v1\.1\.3"", not exactly ENGINE_TAG=vX\.Y\.Z/);
+  refused(f.run(f.pr({ 'scripts/bootstrap.sh': BOOT.replace('v0.0.0', 'v1.1.3') })), /scripts\/bootstrap\.sh at \w+: line 3 is "ENGINE_COMMIT= # NOT FILLED IN", not exactly ENGINE_COMMIT=<40 hex digits>/);
   // The PR removes bootstrap.sh.
   f.sh('git', ['checkout', '-q', '--detach', 'main']);
   f.sh('git', ['rm', '-q', 'scripts/bootstrap.sh']);
@@ -303,6 +303,46 @@ test("a moved pin fails closed: unsigned, another key, the PR's own signer, a mo
   const ok = move('v2.0.0', v2);
   assert.equal(ok.code, 0, ok.out);
   assert.match(ok.out, /loads with the engine this change pins, v2\.0\.0/);
+  f.done();
+});
+
+test('a pin line bash could read differently from the check fails closed; a base pin like that counts as moved', { skip }, () => {
+  const f = fixture();
+  const v1 = f.release('v1.0.0', ['name'], f.owner);
+  f.pin('v1.0.0', v1);
+  const boot = bootFor('v1.0.0', v1);
+  const tagLine = 'ENGINE_TAG=v1.0.0\n';
+  const commitLine = `ENGINE_COMMIT=${v1}\n`;
+  // Each keeps the pin a lenient reader (readPin: trims, strips "#...", stops at \r or U+2028) sees as v1.0.0 at v1,
+  // while bash reads another value, runs a command, or doesn't run at all.
+  const cases: [string, string, RegExp][] = [
+    ['a "#" mid-word (bash keeps it in the tag)', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0#evil\n'), /line 2 is "ENGINE_TAG=v1\.0\.0#evil", not exactly ENGINE_TAG=vX\.Y\.Z/],
+    ['"#$(cmd)" (bash runs cmd)', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0#$(touch ran)\n'), /line 2 is "ENGINE_TAG=v1\.0\.0#\$\(touch ran\)", not exactly/],
+    ['CRLF on the tag line', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0\r\n'), /line 2 is "ENGINE_TAG=v1\.0\.0\\u000d", not exactly/],
+    ['CRLF on the commit line', boot.replace(commitLine, `ENGINE_COMMIT=${v1}\r\n`), /line 3 is "ENGINE_COMMIT=\w+\\u000d", not exactly ENGINE_COMMIT=<40 hex digits>/],
+    ['a trailing NBSP', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0 \n'), /line 2 is "ENGINE_TAG=v1\.0\.0\\u00a0", not exactly/],
+    ['a trailing NBSP on the commit', boot.replace(commitLine, `ENGINE_COMMIT=${v1} \n`), /line 3 is "ENGINE_COMMIT=\w+\\u00a0", not exactly/],
+    ['a trailing BOM', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0﻿\n'), /line 2 is "ENGINE_TAG=v1\.0\.0\\ufeff", not exactly/],
+    ['U+2028 and text', boot.replace(tagLine, 'ENGINE_TAG=v1.0.0 evil\n'), /line 2 is "ENGINE_TAG=v1\.0\.0\\u2028evil", not exactly/],
+    ['a fullwidth digit', boot.replace(tagLine, 'ENGINE_TAG=v1.0.０\n'), /line 2 is "ENGINE_TAG=v1\.0\.\\uff10", not exactly/],
+    ['"+=" at line start', `${boot}ENGINE_TAG+=-evil\n`, /line 4 is "ENGINE_TAG\+=-evil", not exactly/],
+    ['no newline after the pin line', boot.replace(`${commitLine}`, `ENGINE_COMMIT=${v1}`), /line 3, "ENGINE_COMMIT=\w+", doesn't end in a newline/],
+    // A Cyrillic "Е" for "E": an added line (bash: command not found), and one replacing the pin line's name.
+    ['a lookalike name added', `${boot}ЕNGINE_TAG=v9.9.9\n`, /line 4 assigns "\\u0415NGINE_TAG", a name with a character outside ASCII/],
+    ['a lookalike name in place of the pin', boot.replace(tagLine, 'ЕNGINE_TAG=v1.0.0\n'), /line 2 assigns "\\u0415NGINE_TAG", a name with a character outside ASCII/],
+  ];
+  // Every case is run before asserting, so a failure lists each one that wasn't refused.
+  const missed = cases
+    .map(([what, text, why]) => ({ what, why, r: f.run(f.pr({ 'scripts/bootstrap.sh': text })) }))
+    .filter(({ why, r }) => r.code !== 1 || !/installed-engine-config: refused: scripts\/bootstrap\.sh at \w+: /.test(r.out) || !why.test(r.out))
+    .map(({ what, r }) => `${what} (exit ${r.code}): ${r.out.trim().split('\n').pop()}`);
+  assert.deepEqual(missed, [], `not refused as expected:\n${missed.join('\n')}`);
+  assert.ok(!existsSync(join(f.repo, 'ran')), 'nothing in bootstrap.sh is run');
+  // main's own pin line carries a trailing NBSP: a PR that writes it cleanly is a move, so it is loaded.
+  f.onMain({ 'scripts/bootstrap.sh': boot.replace(tagLine, 'ENGINE_TAG=v1.0.0 \n') });
+  const ok = f.run(f.pr({ 'scripts/bootstrap.sh': boot }));
+  assert.equal(ok.code, 0, ok.out);
+  assert.match(ok.out, /loads with the engine this change pins, v1\.0\.0/);
   f.done();
 });
 
