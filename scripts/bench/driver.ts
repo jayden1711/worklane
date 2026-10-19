@@ -195,14 +195,16 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
   if (!limits || !(limits.memoryBytes > 0 && limits.cpus > 0 && limits.pids > 0)) throw new Error('not run: every container needs a memory, CPU and pids limit');
   const docker = new Docker(o.docker, limits);
   docker.preflight();
-  // Fail closed before the first task: a container with the limits, read back from the daemon and its own cgroup.
-  if (o.tasks[0]) docker.probe({ name: `bench-${o.runId}-probe`, image: o.tasks[0].image });
 
   const dir = runDir(o.layout, o.runId);
   // A fresh run folder, never one that exists (round 7): a run id used again (after a crash, say) would put new runs in
-  // task folders whose earlier runs, or what they left behind, the new meters have never seen.
+  // task folders whose earlier runs, or what they left behind, the new meters have never seen. Made before the probe
+  // container (round 8), so a reused or racing run id is refused before any container, and a losing racer never
+  // removes the winner's probe container (both are named after the run id).
   mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
   freshDir(dir, `the run folder ${dir} already exists: a run id is never used twice (pick a new one)`);
+  // Fail closed before the first task: a container with the limits, read back from the daemon and its own cgroup.
+  if (o.tasks[0]) docker.probe({ name: `bench-${o.runId}-probe`, image: o.tasks[0].image });
   const meter = new UsageMeter(o.runner, o.caps.spendUsd);
 
   // Option D, the run's first model call: Claude Code itself tries the same in its own sandbox, on sentinels.

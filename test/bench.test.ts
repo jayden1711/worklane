@@ -1641,6 +1641,11 @@ test('round 7: one task folder never gets two meters: a repeated task key, or a 
   const before = r.calls('check').length + r.calls('run').length;
   await assert.rejects(runBench(r.opts(engineTask)), /run folder .* already exists/);
   assert.equal(r.calls('check').length + r.calls('run').length, before, 'the second run made no model call');
+  // Round 8: refused before any container too (no probe container named after the run id, which a racer would remove).
+  const containerCalls = () => r.docker.filter((s) => ['create', 'run', 'start', 'rm'].includes(s.args[0] ?? '')).length;
+  const containers = containerCalls();
+  await assert.rejects(runBench(r.opts(engineTask)), /run folder .* already exists/);
+  assert.equal(containerCalls(), containers, 'no container made, started or removed for a reused run id');
   // A run folder made beforehand (by anything): refused the same way.
   const p = machine();
   mkdirSync(join(p.layout.runs, 'r1', 't01'), { recursive: true });
@@ -1673,9 +1678,52 @@ test('round 7: nesting is compared by device and inode too, so a second spelling
   assert.deepEqual(seen, [join(wd, 'repo'), join(wd, 'renamed')]);
 });
 
-test('round 7: no raw invisible, bidi or control character sits in the bench sources or this test file', () => {
-  const unsafe = /[\p{Cf}\p{Cs}]|(?![\t\n\r])\p{Cc}/u;
+/**
+ * What may not sit raw in a line of the bench sources (one line: the text between two LFs). Each can hide code or show
+ * it out of order:
+ * - format characters (\p{Cf}: bidi overrides and isolates, zero-width ones, the soft hyphen, a BOM, tag characters);
+ * - surrogates (\p{Cs});
+ * - the line and paragraph separators (\p{Zl}, \p{Zp}: they end a // comment in JS and TS);
+ * - a CR anywhere but at the very end of the line (one there is a CRLF line end; one elsewhere also ends a comment);
+ * - every other control character but tab (\p{Cc}: C0, DEL, C1);
+ * - variation selectors (U+FE00-FE0F, U+E0100-E01EF), the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0), the
+ *   braille blank (U+2800) and the combining grapheme joiner (U+034F), which render as nothing.
+ * Allowed: tab, LF, a CR at a line's end, and every visible character.
+ */
+const RAW_UNSAFE = /[\p{Cf}\p{Cs}\p{Zl}\p{Zp}\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}\u{115F}\u{1160}\u{3164}\u{FFA0}\u{2800}\u{34F}]|\r(?!$)|(?![\t\r])\p{Cc}/u;
+
+test('round 8: the raw-character scan catches what it names, and lets tab, LF, a line-end CR and visible text through', () => {
+  // The round-7 final check's fixtures, built from code points so none sits raw here.
+  const at = (n: number) => String.fromCodePoint(n);
+  const caught = {
+    'U+202E': `const s = "a${at(0x202e)}b";`,
+    'U+2066': `// x${at(0x2066)}y`,
+    'U+200B': `const a${at(0x200b)} = 1;`,
+    'BOM': `${at(0xfeff)}const a = 1;`,
+    'U+00AD': `const s = "co${at(0xad)}op";`,
+    'tag': `// a${at(0xe0041)}`,
+    'NUL': `a${at(0)}b`,
+    'ESC': `const s = "${at(0x1b)}[2K";`,
+    'DEL': `a${at(0x7f)}b`,
+    'NEL': `a${at(0x85)}b`,
+    'CR mid-line': `const ok = 1; // fine${at(13)}const evil = 2;`,
+    'U+2028': `// note${at(0x2028)}evil();`,
+    'U+2029': `// note${at(0x2029)}evil();`,
+    'U+FE0F': `const s = "a${at(0xfe0f)}";`,
+    'U+E0100': `const s = "a${at(0xe0100)}";`,
+    'U+3164': `const ${at(0x3164)} = 1;`,
+    'U+115F': `const x${at(0x115f)} = 1;`,
+    'U+1160': `const x${at(0x1160)} = 1;`,
+    'U+FFA0': `const x${at(0xffa0)} = 1;`,
+    'U+2800': `const s = "${at(0x2800)}";`,
+    'U+034F': `const s = "a${at(0x34f)}b";`,
+  };
+  for (const [what, line] of Object.entries(caught)) assert.ok(RAW_UNSAFE.test(line), `${what} is caught`);
+  for (const line of ['const a = 1;', `a${at(9)}b`, `const a = 1;${at(13)}`, 'café 中文 ж', `const s = "${at(0x1f600)}";`]) assert.ok(!RAW_UNSAFE.test(line), JSON.stringify(line));
+});
+
+test('round 7: no raw format, separator, filler or control character (but tab and a line-end CR) sits in the bench sources or this test file', () => {
   const files = [join(repoRoot, 'test', 'bench.test.ts'), ...readdirSync(join(repoRoot, 'scripts', 'bench')).filter((f) => /\.(ts|mjs|md)$/.test(f)).map((f) => join(repoRoot, 'scripts', 'bench', f))];
-  const found = files.flatMap((f) => readFileSync(f, 'utf8').split('\n').flatMap((l, i) => (unsafe.test(l) ? [`${f.slice(repoRoot.length)}:${i + 1}`] : [])));
+  const found = files.flatMap((f) => readFileSync(f, 'utf8').split('\n').flatMap((l, i) => (RAW_UNSAFE.test(l) ? [`${f.slice(repoRoot.length)}:${i + 1}`] : [])));
   assert.deepEqual(found, []);
 });
