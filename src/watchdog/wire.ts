@@ -1,12 +1,13 @@
 // The watchdog for one instance's coordinator, as the service runs it: its event log and state files, the agent
 // user's Claude sign-in, its GitHub token, the machine's units, update log and disks, and its ops channel (its
 // intake.yaml's discord.ops_channel, else the machine's watchdog.json) with its own Discord bot token.
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { StoredEvent } from '../events/types.js';
 import { instancesDir } from '../instance.js';
 import type { IntakeConfig } from '../intake/report.js';
 import { diskFree, slotsDir } from '../os/index.js';
+import { statSlotFile, type SlotPathLike } from '../slot-file.js';
 import { unitStates } from '../os/stats.js';
 import { claudeAuthStatusJson, type RunAs } from '../runner.js';
 import { emergencyStop } from '../slots.js';
@@ -19,17 +20,21 @@ import { raiseIncident, resolveIncident } from './incidents.js';
 import { discordPoster } from './post.js';
 import { startWatchdog, type WatchdogDeps } from './watchdog.js';
 
+/** What a disk finding calls the slot directory. */
+export const SLOT_DIR_LABEL = 'the machine slot directory';
+
 /** The machine's disks to watch: the slot directory's and the instances', once per volume. */
-export function machineDisks(paths: string[] = [slotsDir(), instancesDir()]): { path: string; usedPct: number; freeGb: number }[] {
+export function machineDisks(paths: SlotPathLike[] = [slotsDir(), instancesDir()]): { path: string; usedPct: number; freeGb: number }[] {
   const seen = new Set<number>();
   const out: { path: string; usedPct: number; freeGb: number }[] = [];
   for (const p of paths) {
     try {
-      const dev = statSync(p).dev;
+      const dev = statSlotFile(p).dev;
       if (seen.has(dev)) continue;
       seen.add(dev);
       const d = diskFree(p);
-      out.push({ path: p, usedPct: 100 - d.freePct, freeGb: d.freeGb });
+      // The slot dir is a slot path (#772), named here by what it is: its path never leaves src/slot-file.ts.
+      out.push({ path: typeof p === 'string' ? p : SLOT_DIR_LABEL, usedPct: 100 - d.freePct, freeGb: d.freeGb });
     } catch {
       // not there, or unreadable: not measured
     }
@@ -111,7 +116,7 @@ export function watchdogForInstance(o: {
  * instance's, in the machine's store the watchdog posts from and the Health page lists. Never throws: a store that
  * can't be written leaves the pause to its own events and banner.
  */
-export function incidentSink(instance: string, dir?: string): IncidentSink {
+export function incidentSink(instance: string, dir?: SlotPathLike): IncidentSink {
   const o = { instance, ...(dir ? { dir } : {}) };
   return {
     raiseIncident: (kind, key, detail, fix) => {

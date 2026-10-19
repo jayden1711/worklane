@@ -4,6 +4,7 @@
 // paths: anything else (the eval, the harness's config, a symlink, a mode change) is refused and logged, never run.
 import { redactString } from '../events/redact.js';
 import { globToRegExp } from '../guardrails/glob.js';
+import { shownPath } from '../path-text.js';
 import { configRefusal, type Study } from './study.js';
 
 export const TEXT_CAPS = { hypothesis: 200, variable: 200, motivation: 600, expected_effect: 200 } as const;
@@ -86,9 +87,9 @@ export function checkChange(changes: readonly Change[], study: Study): { ok: tru
   const editable = study.editable.map(globToRegExp);
   const evalFiles = [...study.eval.files, ...study.eval.predict_files];
   for (const c of changes) {
-    if (evalFiles.includes(c.path)) return { ok: false, why: `changed the eval file ${c.path}` };
-    if (!editable.some((r) => r.test(c.path))) return { ok: false, why: `changed ${c.path}, outside the study's editable paths` };
-    if (!plainChange(c.oldMode, c.newMode)) return { ok: false, why: `${c.path}: only plain files may change, never a symlink, a submodule or a mode (${c.oldMode} -> ${c.newMode})` };
+    if (evalFiles.includes(c.path)) return { ok: false, why: `changed the eval file ${shownPath(c.path)}` };
+    if (!editable.some((r) => r.test(c.path))) return { ok: false, why: `changed ${shownPath(c.path)}, outside the study's editable paths` };
+    if (!plainChange(c.oldMode, c.newMode)) return { ok: false, why: `${shownPath(c.path)}: only plain files may change, never a symlink, a submodule or a mode (${c.oldMode} -> ${c.newMode})` };
   }
   return { ok: true, files: changes.map((c) => c.path).sort(), lockfile: changes.some((c) => c.path === study.train.env.lockfile) };
 }

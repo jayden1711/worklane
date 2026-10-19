@@ -5,13 +5,13 @@
 //   watchdog.lock       the machine checks; every coordinator competes
 //   watchdog-post.lock  the posting; only coordinators that can post (an ops channel and a Discord token) compete
 // so the machine has one poster, and every incident is posted once wherever it was raised.
-import { join } from 'node:path';
 import type { StoredEvent } from '../events/types.js';
 import { tryLock, type Lock } from '../locks.js';
 import type { UnitState } from '../os/stats.js';
 import type { UpdateEntry } from '../updates.js';
 import { isNetworkFailure } from '../github/errors.js';
 import { incidentsDir } from './incidents.js';
+import { slotFile, type SlotPathLike } from '../slot-file.js';
 import { postPending, type Poster } from './post.js';
 import { diskFindings, INSTANCE_KINDS, instanceFindings, profileFindings, reconcile, signerFindings, stagedSignerFindings, unitFindings, updateFindings, watchedUnits, type InstanceFacts, type RestartHistory } from './probes.js';
 import type { MachineChange } from '../machine.js';
@@ -25,7 +25,7 @@ export interface WatchdogDeps {
   /** This coordinator's instance. */
   instance: string;
   /** The machine-wide directory (the slot directory); the incident store and the locks are there. */
-  dir?: string;
+  dir?: SlotPathLike;
   /** The instance's event log. */
   events: () => StoredEvent[];
   /** The auto-merge stop file, when there is one. */
@@ -84,7 +84,7 @@ export class Watchdog {
     if (this.stopped) return false;
     const held = which === 'machine' ? this.machineLock : this.postLock;
     if (held) return true;
-    const r = tryLock(join(this.dir, which === 'machine' ? 'watchdog.lock' : 'watchdog-post.lock'), `watchdog ${this.d.instance} ${process.pid}`);
+    const r = tryLock(slotFile(this.dir, which === 'machine' ? 'watchdog.lock' : 'watchdog-post.lock'), `watchdog ${this.d.instance} ${process.pid}`);
     if (!('lock' in r)) return false;
     if (which === 'machine') this.machineLock = r.lock;
     else this.postLock = r.lock;
@@ -113,7 +113,7 @@ export class Watchdog {
     }
   }
 
-  private async instancePass(now: Date, cfg: WatchdogConfig, opts: { dir: string; now: Date }) {
+  private async instancePass(now: Date, cfg: WatchdogConfig, opts: { dir: SlotPathLike; now: Date }) {
     if (this.d.auth && (!this.auth || now.getTime() - this.auth.at >= AUTH_EVERY_MS)) {
       let value: ReturnType<NonNullable<WatchdogDeps['auth']>> = null;
       try {
@@ -148,7 +148,7 @@ export class Watchdog {
     reconcile(instanceFindings(facts), { kinds, instance: this.d.instance }, opts);
   }
 
-  private machinePass(now: Date, cfg: WatchdogConfig, opts: { dir: string; now: Date }) {
+  private machinePass(now: Date, cfg: WatchdogConfig, opts: { dir: SlotPathLike; now: Date }) {
     const units = watchedUnits(this.d.instances());
     const states = this.d.units(units.map((u) => u.unit));
     // No unit states on this platform: nothing is known about them, so nothing is raised or resolved.

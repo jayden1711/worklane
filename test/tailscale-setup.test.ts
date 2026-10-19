@@ -138,7 +138,8 @@ test('the four steps follow the machine: which is next, which wait, and what eac
   // Each says what it changes and the command that does the same without the dashboard.
   const all = tailscaleSteps(status());
   assert.deepEqual(all.map((s) => s.command.split('   ')[0]), TAILSCALE_ACTIONS.map((a) => `sudo bash scripts/setup/tailscale.sh ${a}`));
-  assert.match(all[3]!.command, new RegExp(`dashboards\\.sh --client-id .* --public-url https://${NAME.replace(/\./g, '\\.')} <instance>`));
+  // No hub unit here: the placeholder, which keeps the gateways and devices (test/owner-terminal-rerun.test.ts runs it).
+  assert.match(all[3]!.command, new RegExp(`dashboards\\.sh \\[--machine-devices .*\\] --client-id <its --client-id> --public-url https://${NAME.replace(/\./g, '\\.')} \\[--siri .*\\] \\[--hooks .*\\] <each instance name`));
   assert.ok(all.every((s) => s.changes.length >= 2));
   assert.match(all[0]!.changes.join(' '), /signing key.*fingerprint the script pins.*version 1\.104\.1 \(pinned\).*no install script/);
   assert.match(all[1]!.changes.join(' '), /no auth key.*machine owners only.*never written to a log/);

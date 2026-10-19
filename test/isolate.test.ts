@@ -18,6 +18,24 @@ import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
 import { machineInitDir } from '../src/init.js';
 import { instancesDir } from '../src/instance.js';
 import { childEnv, slotsDir, stateDir } from '../src/os/index.js';
+import { slotFile, slotFileExists, type SlotPath } from '../src/slot-file.js';
+
+/**
+ * Whether slot path `p` names the directory `dir`: a marker made in `dir` with plain fs (a random name, so nothing
+ * stale answers) is seen through `p`, read-only. A slot path has no identity or text to compare (#772, #806 round 6).
+ * Nothing is written through `p`: if it pointed somewhere else (the machine's own slot dir, say), this writes nothing
+ * there (rule A, #806 round 7).
+ */
+function names(p: SlotPath, dir: string): boolean {
+  const marker = `.names-${randomBytes(6).toString('hex')}`;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, marker), '');
+  try {
+    return slotFileExists(slotFile(p, marker));
+  } finally {
+    rmSync(join(dir, marker), { force: true });
+  }
+}
 import { toolPrefix } from '../src/tool-path.js';
 import { CLAUDE_ACCOUNT_DIR } from '../src/claude-account.js';
 import { TEST_RUN_BASE } from '../src/disk-guard.js';
@@ -214,15 +232,22 @@ test('the engine started outside a test run is never one: no sign, no mark on wh
   // A service's environment: built from scratch, nothing of a test run in it (as `up` writes one).
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: live.home, AGENT_SLOTS_DIR: live.slots };
   const dist = (p: string) => JSON.stringify(pathToFileURL(join(repoRoot, 'dist', 'src', p)).href);
+  // slotsDir() is a slot path (#772) with no identity or text to compare. A marker made here in the expected dir, under a
+  // random name, is looked for through it, read-only: the child (outside a test run, with nothing to refuse it) writes
+  // nothing where its slotsDir() points (rule A, #806 round 7).
+  const marker = `.where-${randomBytes(6).toString('hex')}`;
+  writeFileSync(join(live.slots, marker), '');
   const probe = fixtureTest(
     'engine.mjs',
     [
       `import { childEnv, slotsDir } from ${dist('os/index.js')};`,
+      `import { slotFile, slotFileExists } from ${dist('slot-file.js')};`,
       `import { testRunSign, TEST_RUN_VAR } from ${dist('os/system-paths.js')};`,
-      'console.log(JSON.stringify({ sign: testRunSign(), own: process.env[TEST_RUN_VAR] ?? null, child: childEnv()[TEST_RUN_VAR] ?? null, slots: slotsDir() }));',
+      `console.log(JSON.stringify({ sign: testRunSign(), own: process.env[TEST_RUN_VAR] ?? null, child: childEnv()[TEST_RUN_VAR] ?? null, slots: slotFileExists(slotFile(slotsDir(), ${JSON.stringify(marker)})) ? ${JSON.stringify(live.slots)} : 'another' }));`,
     ].join('\n'),
   );
   const r = spawnSync(process.execPath, [probe], { cwd: live.home, env, encoding: 'utf8' });
+  rmSync(join(live.slots, marker), { force: true });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), { sign: null, own: null, child: null, slots: live.slots });
   // The CLI itself, on a command that reads the slot directory.
@@ -234,9 +259,10 @@ test('the engine started outside a test run is never one: no sign, no mark on wh
 
 test("in a test process every slot-directory default is the test machine's slot directory, and nothing outside it (#669)", () => {
   assert.equal(process.env[TEST_MACHINE_VAR], testMachine);
-  assert.equal(slotsDir(), isolatedEnv.AGENT_SLOTS_DIR);
-  assert.equal(budgetFor('tok').dir, isolatedEnv.AGENT_SLOTS_DIR);
-  assert.equal(new GitHubBudget('0123456789abcdef').dir, isolatedEnv.AGENT_SLOTS_DIR);
+  // The slot dir is a slot path (#772): a marker made in the expected dir is seen through it, read-only (`names`).
+  assert.ok(names(slotsDir(), isolatedEnv.AGENT_SLOTS_DIR!), 'slotsDir() is the isolated AGENT_SLOTS_DIR');
+  assert.ok(names(budgetFor('tok').dir as SlotPath, isolatedEnv.AGENT_SLOTS_DIR!), "budgetFor's dir is it");
+  assert.ok(names(new GitHubBudget('0123456789abcdef').dir as SlotPath, isolatedEnv.AGENT_SLOTS_DIR!), "GitHubBudget's default dir is it");
   assert.equal(emergencyStop(), null);
   const elsewhere = join(dirname(testMachine), `not-the-test-machine-${randomBytes(4).toString('hex')}`);
   try {
@@ -327,7 +353,9 @@ test('in a test process, home, state, instances, slots, tool prefix and machine 
     assert.equal(process.env[k], v, k);
     assert.ok(inside(v), `${k} is inside ${testMachine}`);
   }
-  const derived: [string, string][] = [['stateDir()', stateDir()], ['instancesDir()', instancesDir()], ['slotsDir()', slotsDir()], ['toolPrefix()', toolPrefix()], ['machineInitDir()', machineInitDir()]];
+  // slotsDir() is a slot path (#772), the same value as the isolated AGENT_SLOTS_DIR's, which is checked above.
+  assert.ok(names(slotsDir(), isolatedEnv.AGENT_SLOTS_DIR!), 'slotsDir() is the isolated AGENT_SLOTS_DIR');
+  const derived: [string, string][] = [['stateDir()', stateDir()], ['instancesDir()', instancesDir()], ['toolPrefix()', toolPrefix()], ['machineInitDir()', machineInitDir()]];
   // macOS keeps the real HOME (test/isolate.ts homeMoved); everything above, derived from it, is still temporary.
   if (homeMoved) derived.push(['homedir()', homedir()], ["a child's HOME", childEnv().HOME!]);
   for (const [what, p] of derived) assert.ok(inside(p), `${what} is ${p}, outside ${testMachine}`);

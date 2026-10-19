@@ -11,11 +11,10 @@
 // Never a secret: every text is redacted before it is stored, and again before it is posted. A title is fixed per
 // kind (no data in it), so what a viewer is shown of an incident (viewer-events.ts) can't carry any either.
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { redactString } from '../events/redact.js';
 import { tryLock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { makeSlotDir, readSlotFile, slotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 import { FAILOVER_INCIDENT, USAGE_INCIDENT } from '../usage-limit.js';
 import { CONFIG_INCIDENT } from '../config/live.js';
 import { DEPLOY_GATE_INCIDENT, POST_DEPLOY_INCIDENT, POST_DEPLOY_WAIT_INCIDENT } from '../deploy-gate/config.js';
@@ -121,12 +120,12 @@ export interface RaiseOptions {
   /** The machine owners' fuller detail (Incident.ownerDetail); unset keeps what the open incident has. */
   ownerDetail?: string;
   /** The store's directory; the machine's slot directory when unset. */
-  dir?: string;
+  dir?: SlotPathLike;
   now?: Date;
 }
 
 /** The store's directory: the machine's slot directory, which every instance's coordinator can write. */
-export const incidentsDir = (dir?: string) => dir ?? slotsDir();
+export const incidentsDir = (dir?: SlotPathLike): SlotPathLike => dir ?? slotsDir();
 
 /** A Discord bot token's shape (three dot-separated base64url parts): never stored or posted, whoever's it is. */
 export const DISCORD_TOKEN = /\b[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g;
@@ -140,35 +139,28 @@ const clip = (s: string, n: number) => {
 };
 
 /** The store as it is now; empty when missing or unreadable. */
-export function readIncidents(dir?: string): IncidentFile {
+export function readIncidents(dir?: SlotPathLike): IncidentFile {
   try {
-    const j = JSON.parse(readFileSync(join(incidentsDir(dir), INCIDENTS_FILE), 'utf8')) as Partial<IncidentFile>;
+    const j = JSON.parse(readSlotFile(slotFile(incidentsDir(dir), INCIDENTS_FILE))) as Partial<IncidentFile>;
     return { incidents: Array.isArray(j.incidents) ? j.incidents : [], posts: Array.isArray(j.posts) ? j.posts.filter((p) => typeof p === 'string') : [] };
   } catch {
     return { incidents: [], posts: [] };
   }
 }
 
-function writeIncidents(dir: string, f: IncidentFile): void {
-  const file = join(dir, INCIDENTS_FILE);
+function writeIncidents(dir: SlotPathLike, f: IncidentFile): void {
+  const file = slotFile(dir, INCIDENTS_FILE);
   // Whole or not at all: a reader never sees half a file.
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(f), { mode: 0o660 });
-    renameSync(tmp, file);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeSlotFile(file, JSON.stringify(f), { mode: 0o660 });
 }
 
 const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /** Change the store under its lock: read, change, write. The change returns what the caller gets back. */
-export function withIncidents<T>(dir: string | undefined, change: (f: IncidentFile) => T): T {
+export function withIncidents<T>(dir: SlotPathLike | undefined, change: (f: IncidentFile) => T): T {
   const d = incidentsDir(dir);
-  mkdirSync(d, { recursive: true });
-  const lockPath = join(d, LOCK_FILE);
+  makeSlotDir(d);
+  const lockPath = slotFile(d, LOCK_FILE);
   for (let i = 0; ; i++) {
     const r = tryLock(lockPath, `incidents ${process.pid}`);
     if ('lock' in r) {
@@ -185,7 +177,7 @@ export function withIncidents<T>(dir: string | undefined, change: (f: IncidentFi
       }
     }
     // A holder keeps it for a read and a write: milliseconds. Give up after about 5 s rather than block a tick.
-    if (i >= 250) throw new Error(`the incident store's lock (${lockPath}) stayed held`);
+    if (i >= 250) throw new Error(`the incident store's lock (${LOCK_FILE} in its directory) stayed held`);
     pause(20);
   }
 }

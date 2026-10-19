@@ -9,10 +9,9 @@
 // instance's coordinator user): holding it, the gate reads when this token last identified (by a hash of the
 // token, never the token), waits out the 5 s, asks Discord how many session starts are left, records the time and
 // lets the identify go. Two instances starting at once identify one after the other, at least 5 s apart.
-import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tryLock, type Lock } from '../locks.js';
+import { makeSlotDir, readSlotFile, slotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 
 /** The least time between two identifies on one token (Discord: one per 5 s per bucket; every session here is shard 0). */
 export const IDENTIFY_SPACING_MS = 5_000;
@@ -33,7 +32,7 @@ export type GateResult = { ok: true } | { ok: false; retryInMs: number; why: str
 
 export interface IdentifyGateOptions {
   /** The machine-wide directory (the agent slot directory: every instance's coordinator can write it). */
-  dir: string;
+  dir: SlotPathLike;
   /** The bot token; only a hash of it keys the gate's state. */
   token: string;
   /** Who holds the lock, as the lock file says. */
@@ -49,9 +48,9 @@ export const tokenKey = (token: string) => createHash('sha256').update(token).di
 
 type GateState = Record<string, { last: number }>;
 
-function readState(file: string): GateState {
+function readState(file: SlotPathLike): GateState {
   try {
-    const v = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    const v = JSON.parse(readSlotFile(file)) as unknown;
     return v && typeof v === 'object' ? (v as GateState) : {};
   } catch {
     return {};
@@ -66,10 +65,10 @@ export function identifyGate(o: IdentifyGateOptions): () => Promise<GateResult> 
   const now = o.now ?? Date.now;
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const key = tokenKey(o.token);
-  const lockPath = join(o.dir, GATE_LOCK);
-  const stateFile = join(o.dir, GATE_STATE);
+  const lockPath = slotFile(o.dir, GATE_LOCK);
+  const stateFile = slotFile(o.dir, GATE_STATE);
   return async () => {
-    mkdirSync(o.dir, { recursive: true });
+    makeSlotDir(o.dir);
     let lock: Lock | null = null;
     const start = now();
     while (!lock) {
@@ -92,9 +91,7 @@ export function identifyGate(o: IdentifyGateOptions): () => Promise<GateResult> 
       const state = readState(stateFile);
       state[key] = { last: now() };
       // Whole or not at all: a reader never sees half a file.
-      const tmp = `${stateFile}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-      writeFileSync(tmp, JSON.stringify(state));
-      renameSync(tmp, stateFile);
+      writeSlotFile(stateFile, JSON.stringify(state));
       return { ok: true };
     } finally {
       lock.release();

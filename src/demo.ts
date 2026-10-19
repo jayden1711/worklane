@@ -10,10 +10,12 @@ import { FileBacklog } from './backlog/file.js';
 import { recordBaseline } from './baseline.js';
 import { loadConfig } from './config/load.js';
 import { Coordinator } from './coordinator.js';
+import { changedNames } from './coordinator/change-files.js';
 import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { childEnv } from './os/index.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from './runner.js';
+import { writeSlotFile } from './slot-file.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -48,7 +50,7 @@ function agents() {
     }
     if (req.role === 'evaluator-verdict') {
       const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
-      const files_reviewed = base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+      const files_reviewed = base ? changedNames(req.cwd, [`${base}..HEAD`]) : [];
       return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed }, costUsd: 0.18 };
     }
     // workers
@@ -113,9 +115,10 @@ export async function seedDemo(dir: string): Promise<{ root: string; eventsDb: s
   const log = new EventLog(eventsDb);
   const run = spawnSync('node', ['--test', '--test-reporter=spec'], { cwd: root, encoding: 'utf8', env: childEnv() });
   recordBaseline(log, 'demo', git(root, 'rev-parse', 'HEAD'), run.status, `${run.stdout}${run.stderr}`, cfg.tests.failures);
+  // The demo's own slot dir, in its state dir: a plain path (src/slot-file.ts takes one), not the machine's slot dir.
   const slots = join(state, 'demo-slots');
   mkdirSync(slots, { recursive: true });
-  writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));
   const c = new Coordinator({ cfg, log, backlog, runner: agents(), repo: root, instance: 'demo@local', stateDir: state, slotsDir: slots, maxAttempts: 2, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
   log.append('coordinator.started', { instance: 'demo@local', pid: process.pid, version: 'demo' }, 'demo@local');
   for (let i = 0; i < ISSUES.length + 3; i++) {

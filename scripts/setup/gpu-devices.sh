@@ -25,8 +25,10 @@
 #     that unit fails; the same unit runs at every boot after systemd-modules-load and nvidia-cdi-refresh, once udev
 #     has settled, for a machine where that unit is absent or skipped, or whose late writer is something else (measured:
 #     nvidia-uvm and nvidia-uvm-tools made after the last fixer run, with none after them).
-#     apply --no-dynamic-nodes also sets NVreg_ModifyDeviceFiles=0: NVML then changes no node, and
-#     /dev/nvidia-caps stays empty (MIG's capability nodes aren't made: don't use it on a MIG GPU).
+#     apply --no-dynamic-nodes also sets NVreg_ModifyDeviceFiles=0, and /dev/nvidia-caps stays empty (MIG's
+#     capability nodes aren't made: don't use it on a MIG GPU). That is all it does: it does NOT stop a root NVML call
+#     resetting nvidia-uvm and nvidia-uvm-tools (measured, #583: with ModifyDeviceFiles: 0 in effect, `sudo nvidia-smi
+#     -L` put both back to root:root 0666). After any root NVML call, run the fixer, then check.
 #   - the driver's options (NVreg_DeviceFileUID, NVreg_DeviceFileGID, NVreg_DeviceFileMode) are what NVML applies to
 #     nvidiactl, nvidia<N> and nvidia-modeset: /etc/modprobe.d/worklane-gpu-devices.conf sets them to 0, the group, 0660.
 #   - nvidia-modprobe, where a distribution ships it, makes nvidia-uvm and nvidia-uvm-tools 0666 root:root whatever
@@ -425,7 +427,7 @@ apply() {
     dropin_ok || { echo "the drop-in came out wrong" >&2; exit 1; }
     echo "installed: the fixer runs after $CDI_UNIT, and as $FIXER_UNIT_NAME when it fails"
   else
-    echo "no $CDI_UNIT here: only $FIXER_UNIT_NAME runs the fixer, at boot. A root nvidia-smi later still puts nvidia-uvm back to 0666 (--no-dynamic-nodes stops that, or run $FIXER)."
+    echo "no $CDI_UNIT here: only $FIXER_UNIT_NAME runs the fixer, at boot. A root nvidia-smi later still puts nvidia-uvm back to 0666, with --no-dynamic-nodes too: run $FIXER after it, then check."
   fi
 
   if p="$(setuid_modprobe)"; then
