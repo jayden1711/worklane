@@ -27,7 +27,9 @@
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it (a retired check,
-//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS);
+//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS); a required check counts
+//     only from its pinned source (#727, checkPins: the workflow file or App updates.json, ENGINE_CHECK_SOURCES or
+//     the repo's branch rules name for it), and one nothing pins refuses the commit;
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
 // Drain: a machine that is never quiet (one instance running long test tiers back to back) would starve updates for
 // good. So once an update has waited updates.json "drain_after_minutes" (default 60) for a busy machine, the updater
@@ -382,6 +384,110 @@ async function checkRunsOf(deps, api, sha) {
   return { check_runs: all };
 }
 
+/**
+ * #727: the workflow file (in .github/workflows/) each of the engine's own CI checks comes from, as measured on main's
+ * batched commits. A required check counts only from its pinned source: updates.json required_check_sources (root's,
+ * { "<name>": { "app_id": N } | { "workflow": ".github/workflows/<file>" } }), else this list, else the App the repo's
+ * branch protection or ruleset requires for it; a check none of them pins is refused. A fixed list in this installed
+ * file, never read from the commit being judged, so every machine's default checks are pinned without a manual step.
+ */
+const ENGINE_CHECK_SOURCES = Object.freeze({
+  agentshield: 'ci.yml',
+  dco: 'ci.yml',
+  denylist: 'ci.yml',
+  desktop: 'ci.yml',
+  'push-gate': 'ci.yml',
+  'test (ubuntu-latest, 22)': 'ci.yml',
+  'test (ubuntu-latest, 24)': 'ci.yml',
+  scan: 'gitleaks.yml',
+  'Claude sign-in probe (real users)': 'ci-slow.yml',
+  'add-project (real systemd)': 'ci-slow.yml',
+  'bootstrap (macos-latest)': 'ci-slow.yml',
+  'bootstrap (ubuntu-latest)': 'ci-slow.yml',
+  'bootstrap (windows-wsl)': 'ci-slow.yml',
+  'egress firewall (real systemd)': 'ci-slow.yml',
+  'test-run sandbox (real systemd)': 'ci-slow.yml',
+  'wizard end to end (real systemd)': 'ci-slow.yml',
+});
+const hasOwn = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+const WORKFLOW_PIN = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/** The pin for `name`: updates.json's (an invalid one pins nothing), else ENGINE_CHECK_SOURCES, else the branch rules' App. */
+function checkPinOf(name, own, rules) {
+  if (hasOwn(own, name)) {
+    const p = own[name];
+    if (p && Number.isInteger(p.app_id) && p.app_id > 0 && Object.keys(p).length === 1) return { app_id: p.app_id };
+    if (p && typeof p.workflow === 'string' && WORKFLOW_PIN.test(p.workflow) && Object.keys(p).length === 1) return { workflow: p.workflow };
+    return null;
+  }
+  if (hasOwn(ENGINE_CHECK_SOURCES, name)) return { workflow: `.github/workflows/${ENGINE_CHECK_SOURCES[name]}` };
+  return hasOwn(rules, name) ? { app_id: rules[name] } : null;
+}
+
+/** Each check's App as the branch's classic protection (get a branch) and its rulesets name it; -1 or none: any source. */
+function ruleApps(branch, rules) {
+  const named = [];
+  const classic = branch && branch.protection && branch.protection.required_status_checks && branch.protection.required_status_checks.checks;
+  if (Array.isArray(classic)) for (const c of classic) named.push([c && c.context, c && c.app_id]);
+  for (const r of Array.isArray(rules) ? rules : []) {
+    const list = r && r.type === 'required_status_checks' && r.parameters ? r.parameters.required_status_checks : null;
+    if (Array.isArray(list)) for (const c of list) named.push([c && c.context, c && c.integration_id]);
+  }
+  const out = {};
+  const conflicting = new Set();
+  for (const [name, id] of named) {
+    if (typeof name !== 'string' || !Number.isInteger(id) || id <= 0) continue;
+    if (hasOwn(out, name) && out[name] !== id) conflicting.add(name);
+    out[name] = id;
+  }
+  for (const name of conflicting) delete out[name];
+  return out;
+}
+
+/**
+ * Did check run `r` on `o.sha` come from `pin`? A workflow pin needs GitHub Actions to have posted it, from its
+ * suite's workflow run in `o.repo` and for `o.sha`.
+ */
+function fromPinnedSource(r, pin, o) {
+  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id;
+  const w = r.app && r.app.slug === 'github-actions' && r.check_suite && o.suites.get(r.check_suite.id);
+  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha;
+}
+
+/**
+ * #727: what evaluateChecks judges each required check's source by, for one updater run. Null when these deps don't
+ * read GitHub (deps.pinChecks unset: tests' stand-ins; realDeps sets it). Else forSha(sha) gives the pins on `sha`,
+ * with the workflow run behind each check suite (one call, CHECKS_SPACING_MS after the last), or null when GitHub
+ * gave no answer. The branch rules are read once, and only when a required check has no other pin.
+ */
+async function checkPins(deps, cfg, api) {
+  if (!deps.pinChecks) return null;
+  const own = cfg.required_check_sources;
+  const required = Array.isArray(cfg.required_checks) ? cfg.required_checks : [];
+  const repo = api.slice(api.indexOf('/repos/') + '/repos/'.length);
+  let rules = {};
+  if (required.some((n) => !hasOwn(own, n) && !hasOwn(ENGINE_CHECK_SOURCES, n))) {
+    const b = encodeURIComponent(cfg.branch || 'main');
+    rules = ruleApps(await deps.fetchJson(`${api}/branches/${b}`), await deps.fetchJson(`${api}/rules/branches/${b}`));
+  }
+  const pinOf = (n) => checkPinOf(n, own, rules);
+  const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}));
+  return {
+    forSha: async (sha) => {
+      const suites = new Map();
+      if (needRuns) {
+        await deps.sleep(CHECKS_SPACING_MS);
+        const data = await deps.fetchJson(`${api}/actions/runs?head_sha=${sha}&per_page=100`);
+        if (!data || !Array.isArray(data.workflow_runs)) return null;
+        for (const w of data.workflow_runs) {
+          if (w && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+        }
+      }
+      return { pinOf, suites, repo, sha };
+    },
+  };
+}
+
 /** `a0685ce: required check "push-gate" ended failure; …` */
 const skippedText = (skipped) => skipped.map((s) => `${short(s.sha)}: ${s.reason}`).join('; ');
 // A hold is released only at a root shell (updates.sh --release-hold) or by a newer commit: never by updates.json
@@ -411,6 +517,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
   const skipped = [];
   let calls = 0;
   let out = null;
+  const pinning = await checkPins(deps, cfg, api);
   for (let i = 0; i < cands.length && !out; i++) {
     const c = cands[i];
     let v;
@@ -419,7 +526,10 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
       const data = await checkRunsOf(deps, api, c.sha);
-      v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
+      const pins = data && pinning ? await pinning.forSha(c.sha) : undefined;
+      if (!data) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
+      else if (pins === null) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its workflow runs' };
+      else v = evaluateChecks(data.check_runs, cfg.required_checks, pins);
       // WHY: idle only once the commit has been on main a while: just landed, its checks may not have appeared yet.
       if (v.idle && !(now - Date.parse(c.date || '') >= IDLE_AFTER_MS)) v = { ...v, idle: false };
       if (!v.ok && (v.final || v.idle) && i > 0) {
@@ -468,20 +578,34 @@ const RETIRED_CHECKS = Object.freeze(['desktop']);
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
+ * pins (checkPins, #727): a required check counts only from its pinned source, and one with none is refused; every
+ * check on the commit, whatever its source, must still be green. Absent: by name alone (tests' stand-ins only).
  */
-function evaluateChecks(runs, required) {
+function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
-  const latest = new Map();
-  for (const r of runs || []) {
-    const prev = latest.get(r.name);
-    if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) latest.set(r.name, r);
+  const latestOf = (list) => {
+    const m = new Map();
+    for (const r of list) {
+      const prev = m.get(r.name);
+      if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) m.set(r.name, r);
+    }
+    return m;
+  };
+  const latest = latestOf(runs || []);
+  let judged = latest;
+  let from = '';
+  if (pins) {
+    const bare = required.filter((name) => !pins.pinOf(name));
+    if (bare.length) return { ok: false, final: true, reason: `required check(s) ${bare.map((n) => `"${n}"`).join(', ')} have no pinned source (updates.json required_check_sources, the updater's own list, or an App the repo's branch rules require): refused` };
+    judged = latestOf((runs || []).filter((r) => pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins)));
+    from = ' from its pinned source';
   }
-  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || latest.has(name));
+  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || judged.has(name));
   // WHY: a list of retired names alone would otherwise pass on any green commit, with nothing actually required.
   if (live.length === 0) return { ok: false, final: true, reason: `no required checks configured in updates.json but retired ones (${required.join(', ')}): add the checks to require at a root shell (updates.sh --add-check)` };
   for (const name of live) {
-    const r = latest.get(name);
-    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
+    const r = judged.get(name);
+    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit${from}` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
     if (r.conclusion === 'skipped') return { ok: false, final: true, reason: `required check "${name}" was skipped` };
     if (r.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" ended ${r.conclusion}` };
@@ -1311,7 +1435,11 @@ async function update(deps, cfg, seen = {}) {
     if (v.object !== tag.object || v.commit !== head) {
       return deps.note('refused', head, `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(head)}, the one verified is ${short(v.object)} at ${short(v.commit)}`, true);
     }
-    const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
+    const runs = ((await checkRunsOf(deps, api, v.base)) || {}).check_runs;
+    // #727: the release's commit's required checks, each only from its pinned source.
+    const pinning = await checkPins(deps, cfg, api);
+    const pins = pinning ? await pinning.forSha(v.base) : undefined;
+    const checks = pins === null ? { ok: false, final: false, reason: `GitHub gave no answer for the workflow runs on ${short(v.base)}` } : evaluateChecks(runs, cfg.required_checks, pins);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
     if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);
@@ -1890,6 +2018,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
       }
     },
     exec: (file, args, opts = {}) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeout || 120_000 }),
+    // #727: a required check counts only from its pinned source (checkPins); always, against the real GitHub.
+    pinChecks: true,
     fetchJson: async (url) => {
       const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
       return r.ok ? r.json() : null;
@@ -1994,6 +2124,6 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, ENGINE_CHECK_SOURCES, checkPins, ruleApps, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });

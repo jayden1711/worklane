@@ -38,7 +38,8 @@ function machine(o: { repoUrl?: string; build?: string; migrate?: string } = {})
   const real = u.realDeps((l) => printed.push(l), files);
   const deps = {
     ...real,
-    config: () => ({ enabled: true, repo_url: o.repoUrl ?? 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'] }),
+    // realDeps judges checks by their source (#727): `test` is pinned to App 1, which posts it below.
+    config: () => ({ enabled: true, repo_url: o.repoUrl ?? 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'], required_check_sources: { test: { app_id: 1 } } }),
     installed: () => current,
     exec: (file: string, args: string[]) => {
       if (file === 'git') return `${NEW}\trefs/heads/main\n`;
@@ -52,7 +53,7 @@ function machine(o: { repoUrl?: string; build?: string; migrate?: string } = {})
       if (file === 'systemd-run' && o.build) throw new Error(o.build); // the build
       return '';
     },
-    fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
+    fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }] }),
     slots: () => [],
     alive: () => false,
     installTree: () => {},
