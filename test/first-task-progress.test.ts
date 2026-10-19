@@ -493,11 +493,15 @@ function emittersOutside(files: Record<string, string>): string[] {
         const r = region(src, sig, file);
         return m.index > r.at && m.index < r.at + r.text.length;
       });
-      // A conflict fix recorded with no reasons at all (recovery's "interrupted"): `reasons: []` in the call itself.
-      const call = src.slice(m.index, endAt(src, m.index + m[0].indexOf('(') + 1, '') + 1);
-      // Exactly `reasons: []` among its top-level fields, and no spread that could override it.
-      const fields = elements(call.slice(call.indexOf('{')));
-      const empty = m[0].includes('conflict_fix') && fields.some((f) => /^reasons\s*:\s*\[\]$/.test(f)) && !fields.some((f) => f.startsWith('...') || (/^reasons\b/.test(f) && !/^reasons\s*:\s*\[\]$/.test(f)));
+      // A conflict fix recorded with no reasons at all (recovery's "interrupted"): only when the argument right after
+      // the event type is itself an object literal, the call's last argument, holding exactly `reasons: []` among its
+      // top-level fields and no spread (never a wrapped payload: Object.assign({ reasons: [] }, x), f({ reasons: [] })).
+      const after = m.index + m[0].length;
+      const lead = src.slice(after).match(/^\s*,\s*(?=\{)/);
+      const close = lead ? endAt(src, after + lead[0].length + 1, '') : -1;
+      const last = lead !== null && /^\s*,?\s*\)/.test(src.slice(close + 1));
+      const fields = last ? elements(src.slice(after + lead![0].length, close + 1)) : [];
+      const empty = last && m[0].includes('conflict_fix') && fields.some((f) => /^reasons\s*:\s*\[\]$/.test(f)) && !fields.some((f) => f.startsWith('...') || (/^reasons\b/.test(f) && !/^reasons\s*:\s*\[\]$/.test(f)));
       if (!inside && !empty) out.push(`${file}: ${m[0]}`);
     }
   return out;
@@ -562,6 +566,11 @@ test('#741 the scan fails closed: each way round it the round-2 review found (fi
   assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { outcome: 'pushed', reasons: ['stale: x'], detail: 'x' });" }), ["src/x.ts: emit('conflict_fix.finished'"]);
   // The review's N7: a spread beside `reasons: []` could override it.
   assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { reasons: [], ...finished });" }), ["src/x.ts: emit('conflict_fix.finished'"]);
+  // The round-4 review's N11a-c: a wrapped payload, or one followed by another argument, is never exempt.
+  for (const call of ["Object.assign({ reasons: [] }, finished)", 'withReasons({ reasons: [] })', "{ outcome: 'interrupted', reasons: [] }, extra", 'pick({ reasons: [] }, finished), extra'])
+    assert.deepEqual(emittersOutside({ 'src/x.ts': `this.emit('conflict_fix.finished', ${call});` }), ["src/x.ts: emit('conflict_fix.finished'"], call);
+  // A trailing comma after the one payload still reads as the last argument.
+  assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { outcome: 'interrupted', reasons: [] },\n);" }), []);
 });
 
 test('#741 the card carries no run detail: not the worktree path, the run\'s error text, the evaluator\'s advice, nor who filed it', () => {
