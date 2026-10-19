@@ -43,6 +43,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
     - `test-user.sh check` prints `NOTE this machine's unshare can't be the test runs' wrapper (it needs util-linux 2.38 or later, and setpriv): runs share the host's user namespace`, which doesn't make it fail (it ends `OK: all checks passed` when nothing else does);
     - the helper's own check prints `NOTE a sandboxed run shares the host's user namespace (...)`, never `PASS a sandboxed run is in a user namespace of its own`;
     - test runs keep v0.5.2's behaviour, as above, after the rerun too. The rerun still does everything else it does (the egress rule's step included).
+    - **An `OK` from `test-user.sh check` there doesn't mean #545 is in effect.** A test run can still join the namespaces of the test user's rootless Docker and get out through its exempt `slirp4netns`, the route #545 closes. It stays open on that machine until util-linux 2.38 or later and `setpriv` are installed and this rerun is done again. #796 (the engine update installing the wrapper) doesn't change that: the wrapper is a copy of the machine's own `unshare`.
   - Where the host egress rule is in use, it asks for this same `test-user.sh install` command for each test user (#543, #740), and one rerun does both.
 - No new sudoers rules, so no machine-helper rerun.
 
