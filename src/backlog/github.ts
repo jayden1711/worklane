@@ -227,30 +227,38 @@ export class GitHubBacklog implements Backlog {
     }
   }
 
-  async checks(sha: string): Promise<CommitCheck[]> {
+  /**
+   * Every check on `sha`. Without `pinned` (no required check is pinned), exactly main's reads: up to 9 pages of check
+   * runs, judged as read, and the combined status's first page (a 403 or 404: none). With `pinned` (#727), the reads a
+   * pinned check needs, failing closed: see below and statusPages.
+   */
+  async checks(sha: string, opts: { pinned?: boolean } = {}): Promise<CommitCheck[]> {
+    const pinned = opts.pinned === true;
     const out: CommitCheck[] = [];
     const suites = new Map<CommitCheck, number>();
-    // Main read 9 pages and judged them; #727 reads a 10th (marked `extra`: only a pinned name is judged with it) and
-    // throws past it, as the main watch does: a failing run on an unread page could be another source's, which blocks a
-    // pinned check, so a truncated list is never judged (the PR waits).
+    // Main read 9 pages and judged them. Pinned (#727): a 10th too (marked `extra`: only a pinned name is judged with
+    // it), and a throw past it, as the main watch does: a failing run on an unread page could be another source's,
+    // which blocks a pinned check, so a truncated list is never judged (the PR waits).
     for (let page = 1; ; page++) {
+      if (!pinned && page >= CHECK_PAGES_MAX) break;
       if (page > CHECK_PAGES_MAX) throw new Error(`more than ${CHECK_PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}: not judged`);
       const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string; app?: { id?: number; slug?: string } | null; check_suite?: { id?: number } | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
       for (const c of r.check_runs) {
         const app = c.app?.id;
         const check: CommitCheck = { name: c.name, source: 'check_run', status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}), ...(typeof app === 'number' ? { app } : {}), ...(page >= CHECK_PAGES_MAX ? { extra: true as const } : {}) };
         // An Actions run is told by its App's id, as the main watch tells it (src/check-source.ts ACTIONS_APP_ID).
-        if (app === ACTIONS_APP_ID && typeof c.check_suite?.id === 'number') suites.set(check, c.check_suite.id);
+        if (pinned && app === ACTIONS_APP_ID && typeof c.check_suite?.id === 'number') suites.set(check, c.check_suite.id);
         out.push(check);
       }
       if (r.check_runs.length < 100) break;
     }
-    // #727: which workflow run, in which repo and for which commit, posted each Actions check (its suite's run).
+    // #727: which workflow run, in which repo and for which commit, posted each Actions check (its suite's run). Read
+    // only when a required check is pinned: by name, nothing needs it.
     if (suites.size) {
       if (![...suites.values()].every((s) => this.suiteRuns.has(s))) await this.workflowRuns(sha);
       for (const [check, suite] of suites) check.workflow = this.suiteRuns.get(suite) ?? null;
     }
-    const statuses = await this.statusPages(sha);
+    const statuses = pinned ? await this.statusPages(sha) : await this.firstStatusPage(sha);
     for (const s of statuses) {
       out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}), ...(s.extra ? { extra: true as const } : {}) });
     }
@@ -266,6 +274,16 @@ export class GitHubBacklog implements Backlog {
    * that isn't a rate limit) or has none (404) means no statuses, as on main. Any other refusal, a rate-limited 403 or
    * a refusal of a later page, throws (#727): a status read refused part-way never reads as "no statuses".
    */
+  private async firstStatusPage(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
+    // Main's read, unchanged: commit statuses need their own permission; without it (403) or with none (404), none.
+    try {
+      return (await this.req<{ statuses: { context: string; state: string; target_url?: string | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/status`)).statuses;
+    } catch (e) {
+      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+      return [];
+    }
+  }
+
   private async statusPages(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
     type Page = { total_count?: number; statuses: { context: string; state: string; target_url?: string | null }[] };
     let first: Page;

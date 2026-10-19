@@ -1076,6 +1076,25 @@ test('main watch (#727 round 7): past its page cap a pinned merge is unaccounted
   assert.equal(s.unaccounted.length, 1);
 });
 
+test("main watch (#727 round 8): with no required check pinned, it reads one page of runs and statuses, as main, so a commit past the cap is judged as on main", async () => {
+  // GitHub's rules name no App and config.yaml pins nothing: `ci` is a bare name.
+  const s = await started({ pins: { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  const asked: (boolean | undefined)[] = [];
+  // The head carries more than 10 pages of runs: a read of every page would give up (TooManyPages).
+  s.gh.api.checkRuns = async (_sha, opts) => {
+    asked.push(opts?.pinned);
+    if (opts?.pinned) throw new TooManyPages('more than 10 pages of check runs', []);
+    return [ci()];
+  };
+  await run(s.gh, s.watch, 10);
+  assert.deepEqual(asked, [false], 'one read, of the first page, as main');
+  assert.deepEqual(s.unaccounted, [], 'accounted, as main (9c1c8bd5 read every page: with a pin it trips)');
+  assert.deepEqual(s.checked.map((c) => c.number), [7]);
+});
+
 // #727 round 6: readiness and the main watch judge a pinned check through one function (pinnedVerdict) over the same
 // facts. One table, each case under a workflow pin, an Actions-App pin (GitHub's rules name 15368) and a pin to an App
 // that isn't Actions: readiness through PinnedChecks.of over GitHubBacklog's real requests, the watch through its own
