@@ -14,7 +14,7 @@
 // that didn't apply refuses the run (checkLimits).
 // Every docker command passes checkDockerArgs, then (for a task) hiddenLeaks on its argv and on its stdin (a tar
 // stream: only what its base tree lacks counts): refused, nothing sent, on any match.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { cpus, totalmem } from 'node:os';
 import { posix } from 'node:path';
 import { BRAND } from '../../src/brand.js';
@@ -172,10 +172,28 @@ const spawnDocker: DockerCall = (docker, args, o) => {
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? (r.error ? String(r.error) : '') };
 };
 
+/** Runs the docker CLI without blocking, ended (its process killed) when `signal` fires (tests pass a stand-in). */
+export type DockerCallAsync = (docker: string, args: readonly string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number; input?: Buffer; signal?: AbortSignal }) => Promise<Sent>;
+
+const spawnDockerAsync: DockerCallAsync = (docker, args, o) =>
+  new Promise((resolve) => {
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    const child = spawn(docker, args, { env: o.env, timeout: o.timeoutMs, ...(o.signal ? { signal: o.signal } : {}), stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdout.on('data', (b: Buffer) => out.push(b));
+    child.stderr.on('data', (b: Buffer) => err.push(b));
+    child.on('error', (e) => resolve({ status: null, stdout: Buffer.concat(out).toString('utf8'), stderr: `${Buffer.concat(err).toString('utf8')}${String(e)}` }));
+    child.on('close', (status) => resolve({ status, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
+    child.stdin.on('error', () => {});
+    child.stdin.end(o.input ?? undefined);
+  });
+
 export interface DockerOptions {
   docker: string;
   env?: NodeJS.ProcessEnv;
   call?: DockerCall;
+  /** A task's commands (TaskRunner); unset: the docker CLI, or `call` when only that is given (tests). */
+  callAsync?: DockerCallAsync;
 }
 
 /**
@@ -183,7 +201,7 @@ export interface DockerOptions {
  * `row`'s hidden fields. The stdin (a worktree's tar stream) is checked against `base`, the text of the task's base
  * tree: only a hidden piece the base lacks counts. No base: every piece counts.
  */
-function send(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow | null, timeoutMs: number, input?: Buffer, base?: Buffer): Sent {
+function check(verbs: readonly string[], args: string[], row: TaskRow | null, input?: Buffer, base?: Buffer): void {
   checkDockerArgs(args, verbs);
   if (row) {
     const leaks = hiddenLeaks(args.join('\n'), row);
@@ -191,7 +209,21 @@ function send(o: DockerOptions, verbs: readonly string[], args: string[], row: T
     const inLeaks = input ? hiddenLeaks(input.toString('utf8'), row, base?.toString('utf8') ?? '') : [];
     if (inLeaks.length) throw new Error(`refused: this docker command's input would carry the task's hidden ${inLeaks.join(', ')} (not in its base tree)`);
   }
+}
+
+function send(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow | null, timeoutMs: number, input?: Buffer, base?: Buffer): Sent {
+  check(verbs, args, row, input, base);
   return (o.call ?? spawnDocker)(o.docker, args, { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}) });
+}
+
+/** send, for a task's commands: the same checks, then the docker CLI without blocking, ended when `signal` fires. */
+async function sendAsync(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow, timeoutMs: number, signal: AbortSignal | undefined, input?: Buffer, base?: Buffer): Promise<Sent> {
+  check(verbs, args, row, input, base);
+  if (signal?.aborted) throw new Error("not run: the task's wall-clock cap has passed");
+  const opt = { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}), ...(signal ? { signal } : {}) };
+  if (o.callAsync) return o.callAsync(o.docker, args, opt);
+  if (o.call) return o.call(o.docker, args, opt);
+  return spawnDockerAsync(o.docker, args, opt);
 }
 
 /** Whether this daemon is rootless, from `docker info --format '{{json .SecurityOptions}}'`. */
@@ -307,17 +339,22 @@ export class TaskRunner {
      * sent to the container is checked against (a hidden piece already in it doesn't count). None: every piece counts.
      */
     private base?: Buffer,
+    /**
+     * The task's stop (the driver's wall-clock cap, the run's usage limit): a command running when it fires is ended
+     * (its docker CLI killed; the container's removal right after ends what it started inside), and none starts after.
+     */
+    private signal?: AbortSignal,
   ) {}
 
-  /** argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. */
-  exec(cwd: string, argv: readonly string[], env: Record<string, string> = {}, timeoutMs = 15 * 60_000, input?: Buffer): Sent {
+  /** argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. Never blocks the driver. */
+  async exec(cwd: string, argv: readonly string[], env: Record<string, string> = {}, timeoutMs = 15 * 60_000, input?: Buffer): Promise<Sent> {
     if (!argv.length) throw new Error('nothing to run');
     const args = ['exec', ...(input ? ['--interactive'] : []), '--workdir', posix.normalize(cwd), ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]), this.c.name, ...argv];
-    return send(this.o, ['exec'], args, this.row, timeoutMs, input, this.base);
+    return sendAsync(this.o, ['exec'], args, this.row, timeoutMs, this.signal, input, this.base);
   }
 
   /** Replace `dst` (under WORK) in the container with the tree in `tar` (a tar stream of a worktree's files). */
-  syncTree(dst: string, tar: Buffer): Sent {
+  async syncTree(dst: string, tar: Buffer): Promise<Sent> {
     const d = posix.normalize(dst);
     if (!d.startsWith(`${WORK}/`)) throw new Error(`sync target ${dst} is not under ${WORK}`);
     return this.exec(WORK, ['sh', '-c', 'rm -rf -- "$1" && mkdir -p -- "$1" && tar -x -f - -C "$1"', 'sh', d], {}, 10 * 60_000, tar);

@@ -31,12 +31,19 @@ export interface RunMeta {
   /** Every container's limits, read back before each task. */
   limits: Limits;
   task_wall_ms: number;
-  stopped: 'usage_limit' | null;
+  /** usage_limit: a usage or rate limit; halted: a run didn't end after its task's wall-clock cap. */
+  stopped: 'usage_limit' | 'halted' | null;
   stop_detail: string | null;
+  /**
+   * The sandbox checks before the first task: the srt probe (sandbox-runtime 0.0.79, per attempt) and the one-call
+   * confirmation in Claude Code's own sandbox (its status, attempts and usage). Optional only for aggregates made
+   * outside a run.
+   */
+  sandbox?: { probe: unknown; confirmation: { status: string; usage_equivalent_usd: number } & Record<string, unknown> };
 }
 
 const RAN = new Set(['auto-merge', 'hold', 'failed', 'error', 'stopped (usage limit)']);
-const NOT_DONE = new Set(['not run (usage limit)', 'not run (spend cap)', 'not run (limits)', 'stopped (usage limit)']);
+const NOT_DONE = new Set(['not run (usage limit)', 'not run (spend cap)', 'not run (limits)', 'not run (halted)', 'stopped (usage limit)']);
 
 export function aggregate(meta: RunMeta, results: readonly TaskResult[], grades?: Grades) {
   const count = (s: string) => results.filter((r) => r.status === s).length;
@@ -53,6 +60,7 @@ export function aggregate(meta: RunMeta, results: readonly TaskResult[], grades?
       not_run_usage_limit: count('not run (usage limit)'),
       not_run_spend_cap: count('not run (spend cap)'),
       not_run_limits: count('not run (limits)'),
+      not_run_halted: count('not run (halted)'),
       wall_cap_hit: results.filter((r) => r.wall_cap_hit).length,
     },
     decisions: { auto_merge: count('auto-merge'), hold: count('hold'), failed: count('failed'), error: count('error'), stopped_usage_limit: count('stopped (usage limit)') },
@@ -60,6 +68,8 @@ export function aggregate(meta: RunMeta, results: readonly TaskResult[], grades?
       unit: 'usage-equivalent USD (the CLI total_cost_usd; a subscription bills none per run)',
       total: usd,
       mean_per_task: mean,
+      /** The sandbox confirmation's one call, counted against the run's ceiling, not in the tasks' total. */
+      sandbox_check: meta.sandbox?.confirmation.usage_equivalent_usd ?? 0,
       owner_reapproval_needed: meta.caps.mode === 'smoke' && mean > REAPPROVE_MEAN_USD,
     },
   };

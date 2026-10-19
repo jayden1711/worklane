@@ -5,7 +5,8 @@
 // harness run id) into the held-out store, the only place a task key meets its instance id. The official harness
 // grades them in fresh containers from the pristine images, after the whole run.
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ownerOnlyDir, writeOwnerOnly } from '../../src/os/index.js';
 import type { BenchLayout } from './paths.js';
@@ -21,11 +22,43 @@ export const runDir = (layout: BenchLayout, runId: string): string => {
 };
 export const patchesDir = (layout: BenchLayout, runId: string): string => join(runDir(layout, runId), 'patches');
 
-/** Export `git diff base head` of the task's clone as <patches>/<key>/<label>.diff (owner-only). */
+/**
+ * git, with no config but its own: none of the system's or the user's (an agent's Edit or Write can reach the bench
+ * user's ~/.gitconfig), plus the engine's hardened flags (src/comment-policy.ts, #330).
+ */
+const GIT_ENV = (extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', ...extra });
+const GIT_HARDENED = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null'];
+
+/**
+ * Export `git diff base head` of the task's clone as <patches>/<key>/<label>.diff (owner-only). The clone is the
+ * agents' (they can write its .git/config, info/attributes and hooks), so nothing of it but its objects is read: the
+ * diff runs in a bare repo the driver makes for it, with the clone's object store as an alternate, no config but its
+ * own, no textconv, no external diff and fixed a/ b/ prefixes (what `git apply -p1` and the harness expect).
+ */
 export function exportPatch(o: { layout: BenchLayout; runId: string; key: string; label: string; repo: string; base: string; head: string }): string {
   if (!TASK_KEY.test(o.key) || !LABEL.test(o.label)) throw new Error(`patch ${o.key}/${o.label} refused`);
   for (const sha of [o.base, o.head]) if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`not a commit sha: ${sha}`);
-  const diff = execFileSync('git', ['-C', o.repo, 'diff', '--binary', '--no-color', '--no-ext-diff', o.base, o.head], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 120_000 });
+  const objects = join(o.repo, '.git', 'objects');
+  for (const p of [join(o.repo, '.git'), objects]) {
+    const s = lstatSync(p);
+    if (s.isSymbolicLink() || !s.isDirectory()) throw new Error(`${p} is not a plain folder: refused, the patch is read from the clone's own objects only`);
+  }
+  const bare = mkdtempSync(join(tmpdir(), 'bench-export-'));
+  try {
+    execFileSync('git', ['init', '--bare', '-q', '--template=', bare], { env: GIT_ENV(), timeout: 60_000 });
+    const diff = execFileSync('git', [...GIT_HARDENED, '--git-dir', bare, 'diff', '--binary', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', o.base, o.head, '--'], {
+      env: GIT_ENV({ GIT_ALTERNATE_OBJECT_DIRECTORIES: objects }),
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+    });
+    return writePatch(o, diff);
+  } finally {
+    rmSync(bare, { recursive: true, force: true });
+  }
+}
+
+function writePatch(o: { layout: BenchLayout; runId: string; key: string; label: string }, diff: string): string {
   const dir = join(patchesDir(o.layout, o.runId), o.key);
   ownerOnlyDir(dir);
   const f = join(dir, `${o.label}.diff`);

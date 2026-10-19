@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -15,7 +15,8 @@ import { CliRunner, type RetryOptions, type RunRequest } from '../src/runner.js'
 import { sandboxSettings } from '../src/sandbox.js';
 import { aggregate, wilson } from '../scripts/bench/aggregate.js';
 import { assertResearchOff, BENCH_SETTINGS, runBench, type BenchOptions, type RunTask, type TaskResult } from '../scripts/bench/driver.js';
-import { readPatches, writePredictions } from '../scripts/bench/grade.js';
+import { exportPatch, readPatches, writePredictions } from '../scripts/bench/grade.js';
+import type { AgentRunner, RunResult } from '../src/runner.js';
 import { MANIFEST, writeStore } from '../scripts/bench/store.js';
 import { benchClaude, benchDenied, benchLane } from '../scripts/bench/agent.js';
 import { sandboxProbe, type ProbeReport } from '../scripts/bench/probe.js';
@@ -33,7 +34,7 @@ const CAPS: Caps = { mode: 'smoke', spendUsd: 40, perTaskUsd: 15 };
 
 /** A call the stand-in claude recorded. */
 interface ClaudeCall {
-  kind: 'version' | 'auth' | 'run';
+  kind: 'version' | 'auth' | 'run' | 'check';
   args: string[];
   env: Record<string, string>;
   settings: { sandbox?: { filesystem?: { denyRead?: string[] } } };
@@ -67,6 +68,11 @@ interface FakeClaude {
   version?: string;
   /** What a session ends with: a success, the CLI's usage-limit shape, or exit 1 on an API 429 with no result line. */
   run?: 'ok' | 'limit' | '429';
+  /**
+   * The sandbox confirmation's session: every command refused (default), a sentinel's content read (the sandbox let the
+   * read through), a socket's _ping answered OK, or the model running nothing.
+   */
+  sandboxCheck?: 'refused' | 'leak' | 'ping' | 'declined';
 }
 
 /** A stand-in claude in a fresh folder (with the bench user's home, `home`), and what it was asked. */
@@ -99,6 +105,24 @@ function fakeClaude(o: FakeClaude = {}) {
       `const input = ${STDIN_LINE};`,
       "const at = args.indexOf('--settings');",
       'const settings = at >= 0 ? JSON.parse(args[at + 1]) : {};',
+      // The driver's sandbox confirmation (confirm.ts): Claude Code running the listed commands in its sandbox.
+      "const prompt = (() => { try { const c = JSON.parse(input).message.content; return typeof c === 'string' ? c : c.map((b) => b.text || '').join(''); } catch { return ''; } })();",
+      "if (prompt.startsWith('This is a sandbox check')) {",
+      "  log({ kind: 'check', args, env: process.env, settings, input });",
+      "  const out = (l) => console.log(JSON.stringify(l));",
+      "  out({ type: 'system', subtype: 'init', session_id: 'chk', output_style: settings.outputStyle });",
+      `  const mode = ${JSON.stringify(o.sandboxCheck ?? 'refused')};`,
+      "  const commands = prompt.split('\\n').filter((l) => /^\\d+\\. /.test(l)).map((l) => l.replace(/^\\d+\\. /, ''));",
+      "  if (mode === 'declined') out({ type: 'assistant', message: { content: [{ type: 'text', text: 'I will not run these commands.' }] } });",
+      '  else commands.forEach((command, i) => {',
+      "    const path = (/'([^']+)'/.exec(command) || [])[1] || '';",
+      "    const result = command.startsWith('curl') ? (mode === 'ping' ? 'OK' : \"curl: (7) Couldn't connect to server\") : mode === 'leak' ? fs.readFileSync(path, 'utf8') : 'cat: ' + path + ': Permission denied';",
+      "    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'c' + i, name: 'Bash', input: { command } }] } });",
+      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c' + i, content: result, is_error: mode === 'refused' } ] } });",
+      '  });',
+      "  out({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 3, total_cost_usd: 0.02, usage: { input_tokens: 300, output_tokens: 40 } });",
+      '  process.exit(0);',
+      '}',
       "log({ kind: 'run', args, env: process.env, settings, input });",
       ...(o.run === '429'
         ? ["process.stderr.write('API Error: 429 ' + JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }) + '\\n');", 'process.exit(1);']
@@ -375,7 +399,7 @@ test('acceptance: the bench never retries a run: a 429 at startup is one session
   assert.ok(Date.now() - started < 15_000, 'reported at once');
 });
 
-test('the task runner sends docker exec into its own container only, with no mount flag; containers mount nothing', () => {
+test('the task runner sends docker exec into its own container only, with no mount flag; containers mount nothing', async () => {
   checkDockerArgs(['exec', '--workdir', '/work/t', 'bench-r1-t01', 'python', '-m', 'pytest', '-v', 'x.py'], ['exec']);
   for (const bad of [
     ['run', '--network', 'none', 'img'],
@@ -423,7 +447,7 @@ test('the task runner sends docker exec into its own container only, with no mou
     assert.throws(() => checkDockerArgs([...make.slice(0, n), ...make.slice(n + 2)]), /without --name/);
   }
   const d = fakeDocker();
-  new TaskRunner(d.opts, C, ROW).syncTree('/work/t', Buffer.from('tar'));
+  await new TaskRunner(d.opts, C, ROW).syncTree('/work/t', Buffer.from('tar'));
   assert.deepEqual(d.sent[0]!.args.slice(0, 5), ['exec', '--interactive', '--workdir', '/work', 'bench-r1-t01']);
 });
 
@@ -460,7 +484,7 @@ test('a limit that did not apply refuses, naming the controller; the limits are 
   assert.deepEqual(limitsFrom({ [LIMIT_ENV.memory]: '4g', [LIMIT_ENV.cpus]: '2', [LIMIT_ENV.pids]: '512' }, HOST), { memoryBytes: 4 * 1024 ** 3, cpus: 2, pids: 512 });
 });
 
-test('acceptance: the hidden fields never reach a container', () => {
+test('acceptance: the hidden fields never reach a container', async () => {
   const view = JSON.stringify(taskView(ROW, 't01'));
   for (const mark of MARKS) assert.ok(!view.includes(mark), `the task view has no ${mark}`);
   const d = fakeDocker();
@@ -469,32 +493,35 @@ test('acceptance: the hidden fields never reach a container', () => {
   const r = new TaskRunner(d.opts, C, ROW);
   // A buggy caller that hands the container a hidden test name, or the gold line in a variable: refused, nothing sent.
   const before = d.sent.length;
-  assert.throws(() => r.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']), /hidden FAIL_TO_PASS/);
-  assert.throws(() => r.exec('/work/t', ['true'], { FIX: 'return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731' }), /hidden patch/);
-  assert.throws(() => r.exec('/work/t', ['echo', 'example__proj-4242']), /hidden instance_id/);
+  await assert.rejects(r.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']), /hidden FAIL_TO_PASS/);
+  await assert.rejects(r.exec('/work/t', ['true'], { FIX: 'return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731' }), /hidden patch/);
+  await assert.rejects(r.exec('/work/t', ['echo', 'example__proj-4242']), /hidden instance_id/);
   assert.equal(d.sent.length, before, 'nothing reached docker');
-  r.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
+  await r.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
   assert.equal(d.sent.length, before + 1, 'the honest command went through');
   const seen = JSON.stringify(d.sent);
   for (const mark of MARKS) assert.ok(!seen.includes(mark), `no docker command carried ${mark}`);
 });
 
 /** A bench machine for the driver: a stand-in claude and docker, a layout, and the driver's options. */
-function machine(o: FakeClaude & FakeDocker = {}) {
+function machine(o: FakeClaude & FakeDocker & { srt?: 'honors' | 'none' } = {}) {
   const c = fakeClaude(o);
   const d = fakeDocker(o);
   const layout = benchLayout(join(c.base, 'bench'));
   const runtime = join(c.base, 'run-user');
   const env: NodeJS.ProcessEnv = { ...c.env, XDG_RUNTIME_DIR: runtime, DOCKER_HOST: `unix://${runtime}/docker.sock`, [BENCH_USER_ENV]: currentUser() };
-  const lane = benchLane({ home: process.env.HOME!, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state });
+  const laneInput = { home: c.home, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state, dockerHost: env.DOCKER_HOST };
+  const lane = benchLane(laneInput);
+  const srt = fakeSrt(o.srt ?? 'honors', '0.0.79', c.base);
   const opts = (runTask: RunTask, over: Partial<BenchOptions> = {}): BenchOptions => ({
     layout,
     runId: 'r1',
     caps: CAPS,
     limits: LIMITS,
     tasks: ['t01', 't02', 't03'].map((key) => ({ key, row: ROW, image: 'swebench/example:latest' })),
-    preflight: { benchUser: () => requireBenchUser(env), claudePin: () => requireClaudePin(env, c.bin), subscription: () => requireSubscription(env, c.bin, c.home) },
+    preflight: { benchUser: () => requireBenchUser(env), claudePin: () => requireClaudePin(env, c.bin), subscription: () => requireSubscription(env, c.bin, c.home), sandboxProbe: () => sandboxProbe({ ...laneInput, settings: lane.settings, srt }) },
     runner: benchClaude(env, c.bin, lane),
+    lane: { ...laneInput, settings: lane.settings },
     docker: { ...d.opts, env },
     runTask,
     ...over,
@@ -509,7 +536,7 @@ const engineTask: RunTask = async (ctx) => {
     const r = await ctx.runner.run(runReq(ctx.workDir, ctx.signal, role));
     if (r.reason !== 'succeeded') return { decision: 'failed', detail: r.detail, heads: [] };
   }
-  ctx.exec.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
+  await ctx.exec.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
   const repo = join(ctx.workDir, 'repo');
   mkdirSync(repo);
   const g = (...a: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=b@example.com', '-c', 'user.name=b', '-c', 'commit.gpgsign=false', ...a], { encoding: 'utf8' }).trim();
@@ -525,8 +552,12 @@ const engineTask: RunTask = async (ctx) => {
 
 test('acceptance: the driver refuses to start without a spend cap or on a non-subscription login, before any model call or container', posix, async () => {
   const m = machine();
-  for (const caps of [undefined, { ...CAPS, spendUsd: 0 }, { ...CAPS, spendUsd: 41 }, { ...CAPS, perTaskUsd: 16 }]) {
+  for (const caps of [undefined, { ...CAPS, spendUsd: 0 }, { ...CAPS, spendUsd: 41 }, { ...CAPS, perTaskUsd: 16 }, { ...CAPS, spendUsd: Infinity }]) {
     await assert.rejects(runBench(m.opts(engineTask, { caps: caps as Caps })), /spend cap|over the owner's approval/);
+  }
+  // What every object inherits is no mode: each would have had no ceiling at all.
+  for (const mode of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    await assert.rejects(runBench(m.opts(engineTask, { caps: { mode, spendUsd: 5000, perTaskUsd: 15 } as unknown as Caps })), /over the owner's approval/, mode);
   }
   assert.equal(m.calls().length, 0, 'claude never ran');
   assert.equal(m.docker.length, 0, 'docker never ran');
@@ -602,7 +633,7 @@ test('acceptance: through the driver, no container and no agent gets a hidden fi
   const refusals: string[] = [];
   const leaky: RunTask = async (ctx) => {
     try {
-      ctx.exec.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']);
+      await ctx.exec.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']);
     } catch (e) {
       refusals.push((e as Error).message);
     }
@@ -751,7 +782,7 @@ test('acceptance: the sandbox probe refuses the run unless every attempt from in
   }
 });
 
-test("acceptance: a tree's tar stream carries nothing hidden that its base tree lacks", () => {
+test("acceptance: a tree's tar stream carries nothing hidden that its base tree lacks", async () => {
   // The base tree (the base commit as a tar stream): it already holds a context line the test patch also adds, and
   // the PASS_TO_PASS test, both in the container's image anyway.
   const shared = 'assert total([(2, 3), (4, 1)]) == 10  # SHARED_BASE_LINE';
@@ -759,7 +790,7 @@ test("acceptance: a tree's tar stream carries nothing hidden that its base tree 
   const base = Buffer.from(`tests/test_price.py\0def test_plain_totals_PASSMARK():\n    ${shared}\n`);
   const d = fakeDocker();
   const r = new TaskRunner(d.opts, C, row, base);
-  r.syncTree('/work/t', Buffer.concat([base, Buffer.from('src/price.py\0def total(items):\n    return 0\n')]));
+  await r.syncTree('/work/t', Buffer.concat([base, Buffer.from('src/price.py\0def total(items):\n    return 0\n')]));
   assert.equal(d.sent.length, 1, 'the base tree and an honest change go through');
   for (const [what, extra, field] of [
     ['an added line of the test patch', 'def test_negative_quantities_are_skipped_TESTMARK():\n    assert total([(5, -1)]) == 0\n', /test_patch|FAIL_TO_PASS/],
@@ -769,9 +800,143 @@ test("acceptance: a tree's tar stream carries nothing hidden that its base tree 
     ['a FAIL_TO_PASS test by its name', 'def test_negative_quantities_are_skipped_TESTMARK(): pass\n', /FAIL_TO_PASS/],
   ] as const) {
     const before: number = d.sent.length;
-    assert.throws(() => r.syncTree('/work/t', Buffer.concat([base, Buffer.from(`tests/x.py\0${extra}`)])), (e: Error) => /input would carry the task's hidden/.test(e.message) && field.test(e.message), what);
+    await assert.rejects(r.syncTree('/work/t', Buffer.concat([base, Buffer.from(`tests/x.py\0${extra}`)])), (e: Error) => /input would carry the task's hidden/.test(e.message) && field.test(e.message), what);
     assert.equal(d.sent.length, before, `${what}: nothing sent`);
   }
   // No base tree: every hidden piece counts, the shared context line too.
-  assert.throws(() => new TaskRunner(d.opts, C, row).syncTree('/work/t', base), /input would carry the task's hidden test_patch/);
+  await assert.rejects(new TaskRunner(d.opts, C, row).syncTree('/work/t', base), /input would carry the task's hidden test_patch/);
+});
+
+test('acceptance: patch export runs nothing the clone configures, and exports the real diff with a/ b/ prefixes', posix, () => {
+  const base = mkdtempSync(join(tmpdir(), 'export-'));
+  const repo = join(base, 'repo');
+  mkdirSync(repo);
+  const g = (...a: string[]) => execFileSync('git', ['-C', repo, '-c', 'user.email=b@example.com', '-c', 'user.name=b', '-c', 'commit.gpgsign=false', ...a], { encoding: 'utf8' }).trim();
+  g('init', '-q');
+  writeFileSync(join(repo, 'price.py'), 'def total(items):\n    return sum(c * q for c, q in items)\n');
+  g('add', '-A');
+  g('commit', '-qm', 'base');
+  const baseSha = g('rev-parse', 'HEAD');
+  writeFileSync(join(repo, 'price.py'), 'def total(items):\n    return sum(c * q for c, q in items if q >= 0)\n');
+  g('commit', '-qam', 'fix');
+  const head = g('rev-parse', 'HEAD');
+  // What an agent can plant in its clone: a textconv driver and the attribute that selects it, an external diff, an
+  // fsmonitor and a pager command, and diff options that would change the patch's shape.
+  const marker = join(base, 'PLANTED_COMMAND_RAN');
+  const evil = join(base, 'evil.sh');
+  writeFileSync(evil, `#!/bin/sh\ntouch '${marker}'\ncat "$1" 2>/dev/null\n`);
+  chmodSync(evil, 0o755);
+  writeFileSync(join(repo, '.git', 'info', 'attributes'), '*.py diff=evil\n');
+  for (const [k, v] of [['diff.evil.textconv', evil], ['diff.external', evil], ['core.fsmonitor', evil], ['core.pager', evil], ['diff.noprefix', 'true'], ['diff.mnemonicPrefix', 'true']] as const) g('config', k, v);
+  const layout = benchLayout(join(base, 'bench'));
+  const f = exportPatch({ layout, runId: 'r1', key: 't01', label: 'final', repo, base: baseSha, head });
+  assert.ok(!existsSync(marker), 'nothing the clone configured ran');
+  const diff = readFileSync(f, 'utf8');
+  assert.match(diff, /^diff --git a\/price\.py b\/price\.py\n/);
+  assert.match(diff, /\n-    return sum\(c \* q for c, q in items\)\n\+    return sum\(c \* q for c, q in items if q >= 0\)\n/);
+});
+
+test('acceptance: the wall-clock cap ends every agent run and container command of a task, starts none after, and records the spend', posix, async () => {
+  const m = machine();
+  const t0 = Date.now();
+  const log: string[] = [];
+  // claude under the meter: a run lasts 1.5 s unless its request's signal aborts it (what CliRunner's killTree does).
+  const inner: AgentRunner = {
+    run: (req) =>
+      new Promise<RunResult>((resolve) => {
+        if (req.role === 'sandbox-check') return resolve({ reason: 'succeeded', detail: '', costUsd: 0, turns: 1, model: req.model });
+        log.push(`start ${req.role}`);
+        const done = (how: string) => {
+          log.push(`end ${req.role}: ${how}`);
+          resolve({ reason: how === 'killed' ? 'stopped' : 'succeeded', detail: how, costUsd: 1, turns: 1, model: req.model });
+        };
+        const timer = setTimeout(() => done('ran to the end'), 1500);
+        req.signal?.addEventListener('abort', () => (clearTimeout(timer), done('killed')));
+      }),
+  };
+  // A task that, as many loops would, passes no signal of its own.
+  const task: RunTask = async (ctx) => {
+    const r1 = await ctx.runner.run(runReq(ctx.workDir));
+    const r2 = await ctx.runner.run(runReq(ctx.workDir, undefined, 'evaluator-after-cap'));
+    return { decision: 'hold', heads: [], detail: `${r1.reason} / ${r2.reason}` };
+  };
+  const agg = await runBench(m.opts(task, { runner: inner, taskWallMs: 100 }));
+  assert.ok(Date.now() - t0 < 1400, 'no run ran on to its end');
+  assert.deepEqual(log, ['start worker', 'end worker: killed', 'start worker', 'end worker: killed', 'start worker', 'end worker: killed'], 'each run killed at the cap, none started after it, no overlap between tasks');
+  assert.equal(agg.tasks.wall_cap_hit, 3);
+  assert.equal(agg.usage.total, 3, "each killed run's spend recorded");
+  assert.deepEqual(m.results().map((r) => r.runs.map((u) => u.role)), [['worker'], ['worker'], ['worker']]);
+  // A command in the container: ended at the cap too, and none starts after it.
+  const ended: string[] = [];
+  const hang = (_d: string, _a: readonly string[], o: { signal?: AbortSignal }) =>
+    new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+      const timer = setTimeout(() => (ended.push('ran to the end'), resolve({ status: 0, stdout: '', stderr: '' })), 1500);
+      o.signal?.addEventListener('abort', () => (clearTimeout(timer), ended.push('killed'), resolve({ status: null, stdout: '', stderr: 'killed' })));
+    });
+  const after: string[] = [];
+  const execTask: RunTask = async (ctx) => {
+    await ctx.exec.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
+    await ctx.exec.exec('/work/t', ['true']).catch((e: Error) => after.push(e.message));
+    return { decision: 'hold', heads: [] };
+  };
+  const e = machine();
+  const started = Date.now();
+  await runBench(e.opts(execTask, { docker: { ...e.opts(execTask).docker, callAsync: hang }, taskWallMs: 100, tasks: [{ key: 't01', row: ROW, image: 'swebench/example:latest' }] }));
+  assert.ok(Date.now() - started < 1400, 'the command did not run on');
+  assert.deepEqual(ended, ['killed']);
+  // The task itself runs on past the cap (only its runs and commands are stopped): give it a moment to try again.
+  await new Promise((r) => setTimeout(r, 100));
+  assert.match(after[0] ?? '', /wall-clock cap has passed/);
+});
+
+test("acceptance: the sandbox confirmation in Claude Code's own sandbox refuses the run on a sentinel read or a _ping OK", posix, async () => {
+  // Every command refused: one model call on the cheapest pinned model, recorded; the sentinels gone after.
+  const ok = machine();
+  const agg = await runBench(ok.opts(engineTask));
+  assert.equal(agg.sandbox?.confirmation.status, 'all refused');
+  assert.equal(ok.calls('check').length, 1, 'one model call');
+  const args = ok.calls('check')[0]!.args;
+  assert.equal(args[args.indexOf('--model') + 1], 'claude-haiku-5-5');
+  assert.equal(agg.usage.sandbox_check, 0.02, 'its usage recorded');
+  const attempts = (agg.sandbox!.confirmation as unknown as { attempts: { kind: string; refused: boolean }[] }).attempts;
+  assert.deepEqual(attempts.map((a) => [a.kind, a.refused]), [['connect', true], ['connect', true], ['connect', true], ['read', true], ['read', true], ['read', true], ['read', true]]);
+  for (const f of ['.claude.json', '.netrc', '.npmrc', '.pypirc']) assert.ok(!existsSync(join(ok.home, f)), `the ${f} sentinel removed`);
+  assert.match(readFileSync(join(ok.layout.runs, 'r1', 'sandbox.json'), 'utf8'), /"status": "all refused"/);
+  // A sentinel read, or the daemon answering: the run refused, no task started, the sentinels still removed.
+  for (const [mode, why] of [['leak', /sentinel at .* was read/], ['ping', /_ping answered OK/]] as const) {
+    const k = machine({ sandboxCheck: mode });
+    await assert.rejects(runBench(k.opts(engineTask)), why, mode);
+    assert.equal(k.calls('run').length, 0, `${mode}: no agent run`);
+    assert.ok(!k.docker.some((s) => s.args[0] === 'run'), `${mode}: no task container`);
+    for (const f of ['.claude.json', '.netrc', '.npmrc', '.pypirc']) assert.ok(!existsSync(join(k.home, f)), `${mode}: the ${f} sentinel removed`);
+    assert.match(readFileSync(join(k.layout.runs, 'r1', 'sandbox.json'), 'utf8'), /"status": "leaked"/);
+  }
+});
+
+test('the sandbox confirmation: a declining model leaves the srt probe as the guard, said plainly; real files are never touched', posix, async () => {
+  const dk = machine({ sandboxCheck: 'declined' });
+  const said: string[] = [];
+  const agg = await runBench(dk.opts(engineTask, { say: (l) => said.push(l) }));
+  assert.equal(agg.sandbox?.confirmation.status, 'model declined');
+  assert.ok(said.some((l) => /^WARNING: sandbox confirmation: model declined .*sandbox-runtime 0\.0\.79: close to, not identical with, the build bundled in Claude Code 2\.1\.303/.test(l)), said.join('\n'));
+  assert.equal(agg.complete, true, 'the srt probe passed, so the run went on');
+  // Real files at protected paths: untouched, never put to the model; ~/.claude.json's sentinel goes under ~/.claude.
+  const real = machine();
+  writeFileSync(join(real.home, '.netrc'), 'machine example.com password REAL_NETRC_NEVER_READ\n');
+  writeFileSync(join(real.home, '.claude.json'), '{"real":"REAL_LOGIN_FILE"}');
+  const a = await runBench(real.opts(engineTask));
+  assert.equal(readFileSync(join(real.home, '.netrc'), 'utf8'), 'machine example.com password REAL_NETRC_NEVER_READ\n');
+  assert.equal(readFileSync(join(real.home, '.claude.json'), 'utf8'), '{"real":"REAL_LOGIN_FILE"}');
+  const prompt = String((real.calls('check')[0] as unknown as { input: string }).input);
+  assert.ok(!prompt.includes(join(real.home, '.netrc')) && !prompt.includes(`${join(real.home, '.claude.json')}'`), 'neither real file is put to the model');
+  assert.ok(prompt.includes(join(real.home, '.claude', '.bench-sentinel-')), "~/.claude.json's stand-in sits under the login folder's rule");
+  assert.deepEqual((a.sandbox!.confirmation as unknown as { skipped: { path: string }[] }).skipped.map((s) => s.path), [join(real.home, '.netrc')]);
+  assert.equal(a.sandbox?.confirmation.status, 'all refused');
+  assert.deepEqual(readdirSync(join(real.home, '.claude')), [], 'its sentinel removed');
+  // The srt probe reaching a file: refused before any model call or container.
+  const none = machine({ srt: 'none' });
+  writeFileSync(join(none.home, '.claude.json'), '{}');
+  await assert.rejects(runBench(none.opts(engineTask)), /from inside the agents' sandbox, .*\.claude\.json: opened file/);
+  assert.equal(none.calls('check').length + none.calls('run').length, 0, 'no model call');
+  assert.equal(none.docker.length, 0, 'docker never ran');
 });
