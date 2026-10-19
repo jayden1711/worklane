@@ -15,20 +15,22 @@
 // lanes, allowlists, any key `policy set` doesn't take, a value over the machine's limits) is refused, and so is a
 // recorded policy that changed since root last wrote it (P5: an earlier root file put back). Those take an admin, at a
 // root shell, with --accept-loose or --retake. setup-scripts never pass either (test/policy-edit.test.ts holds that).
-import { chmodSync, closeSync, mkdirSync, openSync, realpathSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, linkSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join, relative, sep } from 'node:path';
+import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
-import { isRoot, userHomeDir, userUid } from './os/index.js';
+import { isRoot, processIdentity, userHomeDir, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
+import { clearKillSwitch, killAutoMerge, recordDir } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
+const EMPTY_LOCK_MS = 5_000;
 /** The keys an admin should see whenever root takes a policy over: what isolates the agents, and what merges. */
 const WATCHED = ['sandbox', 'allow_same_user', 'land_mode', 'main_watch', 'auto_merge'] as const;
 
@@ -104,19 +106,9 @@ export function beyondCoordinator(p: PolicyFile, limits: Limits): string[] {
 }
 
 /**
- * Root's record of an instance, written whatever root's umask: the directory 0755 (each one made here too) and the
- * record 0644, so the coordinator user can always read it (an unreadable one refuses its policy).
+ * Root's record of an instance, written whatever root's umask: the directory 0755 (recordDir) and the record 0644, so
+ * the coordinator user can always read it (an unreadable one refuses its policy).
  */
-function recordDir(dir: string): void {
-  const made = mkdirSync(dir, { recursive: true, mode: 0o755 });
-  if (made) {
-    let p = made;
-    chmodSync(p, 0o755);
-    for (const s of relative(made, dir).split(sep).filter(Boolean)) chmodSync((p = join(p, s)), 0o755);
-  }
-  chmodSync(dir, 0o755);
-}
-
 function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
   recordDir(dir);
   const tmp = join(dir, `.${instance}.${randomBytes(6).toString('hex')}.tmp`);
@@ -130,33 +122,95 @@ function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
  * which the coordinator user can't create, remove or write. `own` and `set` hold it from their read of policy.yaml to
  * their record write, so two root writers of one instance never interleave (THREAT: a coordinator's `set-policy`
  * reading before an admin's `policy set` and writing after it would put back what the admin changed, and record it).
- * Another holder: wait (bounded), then refuse, naming the lock, which a writer that stopped part way leaves behind.
+ * Another live holder: wait (bounded), then refuse, naming it.
+ *
+ * A holder that stopped part way (killed, crashed, the machine rebooted) is stale, so it never blocks anyone: the lock
+ * names its holder (pid, and processIdentity: this boot and the process's start time, through the OS adapter), and a
+ * lock whose holder no longer runs, or whose pid now belongs to another process, is broken. THREAT (#726 round 3): an
+ * `own` that died inside the lock left it for good, so no root writer, an admin's included, could change the policy
+ * after it. Breaking it renames it aside and checks the renamed file is the stale one, so a fresh lock another writer
+ * took meanwhile is put back, not broken; a holder removes the lock only while it is still its own.
  */
 function withPolicyLock<T>(dir: string, instance: string, waitMs: number, fn: () => T): T {
   recordDir(dir);
   const lock = join(dir, `.${instance}.lock`);
+  const mine = `${process.pid} ${processIdentity(process.pid) ?? ''}\n`;
   const until = Date.now() + waitMs;
-  let fd: number;
   for (;;) {
+    let fd: number;
     try {
       fd = openSync(lock, 'wx', 0o600);
-      break;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      if (Date.now() >= until) throw new Error(`another root change to ${instance}'s policy is in progress (${lock} exists), so nothing is changed: try again once it is done. If none runs, a change stopped part way left it: an admin checks the policy, removes ${lock}, and runs ${ownCommand(instance, '--retake')}`);
+      const held = readLock(lock);
+      if (held !== null && lockStale(held, lock)) {
+        breakLock(lock, held);
+        continue;
+      }
+      if (Date.now() >= until) throw new Error(`another root change to ${instance}'s policy is in progress (${lock}, held by ${held?.trim() || 'a writer'}), so nothing is changed: try again once it is done`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      continue;
     }
-  }
-  try {
     try {
-      writeSync(fd, `${process.pid}\n`);
+      writeSync(fd, mine);
     } finally {
       closeSync(fd);
     }
+    break;
+  }
+  try {
     return fn();
   } finally {
-    unlinkSync(lock);
+    if (readLock(lock) === mine) unlinkSync(lock);
   }
+}
+
+function readLock(lock: string): string | null {
+  try {
+    return readFileSync(lock, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a lock's holder (its text: `<pid> <identity>`) no longer runs, or its pid is another process's now. An empty
+ * lock is a holder still writing its line, live for EMPTY_LOCK_MS; older, it is one killed between creating and writing
+ * it, and stale.
+ */
+function lockStale(text: string, lock: string): boolean {
+  if (!text.trim()) {
+    try {
+      return Date.now() - statSync(lock).mtimeMs > EMPTY_LOCK_MS;
+    } catch {
+      return false;
+    }
+  }
+  const sp = text.trim().indexOf(' ');
+  const pid = Number(sp < 0 ? text.trim() : text.trim().slice(0, sp));
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  const now = processIdentity(pid);
+  if (now === null) return true;
+  const was = sp < 0 ? '' : text.trim().slice(sp + 1);
+  return was !== '' && now !== was;
+}
+
+/** Break a stale lock: rename it aside, keep the rename only if it is the stale one, else put the lock back. */
+function breakLock(lock: string, stale: string): void {
+  const aside = `${lock}.stale.${randomBytes(6).toString('hex')}`;
+  try {
+    renameSync(lock, aside);
+  } catch {
+    return; // another writer broke or released it first
+  }
+  if (readLock(aside) !== stale) {
+    try {
+      linkSync(aside, lock);
+    } catch {
+      // a third writer holds the name now; the lock moved aside stays its holder's own to release
+    }
+  }
+  unlinkSync(aside);
 }
 
 /** What an admin passed to `policy own`, having checked the file first (never setup: its own_policy passes neither). */
@@ -180,11 +234,13 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
   const rootUid = d.rootUid ?? 0;
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
+    // Size-capped from fstat (readInOwnedDir), and the record's sha256 checked before a byte is parsed: a changed file
+    // the coordinator planted (huge, or built to be slow to parse) is refused without parsing it.
     const text = readInOwnedDir(dir, FILE, coordUid, [coordUid, rootUid]);
-    const policy = parsePolicy(text, file);
     const rec = policyRecord(instance, markers);
     const written = rec !== null && !('problem' in rec) && rec.sha256 === sha256(text);
     if (rec !== null && !written && !flags.retake) throw new Error(`${file} isn't what root last wrote there (${'problem' in rec ? rec.problem : 'its content changed since'}), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then takes it over as it is with ${ownCommand(instance, '--retake')}`);
+    const policy = parsePolicy(text, file);
     const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
     if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
@@ -205,8 +261,15 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const value = decodePolicyValue(key, arg);
   if (value === undefined) throw new Error(`${arg} isn't a value for ${key}`);
   if (by && /^wl-/.test(by) && Object.hasOwn(HELPER_ONLY, key) && HELPER_ONLY[key] !== arg) throw new Error(`${key}: ${arg} loosens the instance, which is an admin's, at a root shell (sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}); a dashboard may only tighten it`);
-  const { dir, file, coordUid } = instancePolicy(instance, d);
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
+  // auto_merge off: root's kill switch alone (src/policy-kill.ts), before any lock or read of policy.yaml, so nothing
+  // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
+  if (key === 'auto_merge' && value === false) {
+    if (!instanceNameOk(instance) || (d.uid ?? userUid)(`wl-${instance}`) === null) throw new Error(`no instance ${instance} on this machine`);
+    killAutoMerge(instance, markers);
+    return { key, from: null, to: false };
+  }
+  const { dir, file, coordUid } = instancePolicy(instance, d);
   if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
     const rec = policyRecord(instance, markers);
@@ -224,6 +287,9 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
     replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(out) });
+    // auto_merge on (root's alone; a coordinator's was refused above): the kill switch goes, last, so auto_merge reads
+    // off until policy.yaml says on.
+    if (key === 'auto_merge' && value === true) clearKillSwitch(instance, markers);
     return { key, from, to: value };
   });
 }

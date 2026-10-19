@@ -17,7 +17,8 @@ import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './conf
 import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
-import { readPolicyChecked } from './policy-gate.js';
+import { policyInstance, readPolicyChecked } from './policy-gate.js';
+import { autoMergeKilled } from './policy-kill.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
 import { CHAT_KEY_GLOBS, CHAT_LANE, CHAT_ROOT_ENV } from './intake/chat.js';
 import { fileURLToPath } from 'node:url';
@@ -256,14 +257,20 @@ function readYaml<S extends z.ZodType>(schema: S, file: string, errors: ConfigEr
   return undefined;
 }
 
-/** A policy.yaml, unless root's record says it is root's and it isn't: then refused, and never read (src/policy-gate.ts). */
+/**
+ * A policy.yaml, unless root's record says it is root's and it isn't: then refused, and never read (src/policy-gate.ts).
+ * Root's auto_merge kill switch (src/policy-kill.ts) is checked first: while it is there, auto_merge is off, whatever
+ * the file says.
+ */
 function readPolicyYaml(file: string, errors: ConfigError[]): PolicyFile | undefined {
+  const killed = autoMergeKilled(policyInstance(file));
   const r = readPolicyChecked(file);
   if (r && 'refused' in r) {
     errors.push({ file, path: '', message: r.refused });
     return undefined;
   }
-  return readYaml(PolicyFile, file, errors, r?.text);
+  const policy = readYaml(PolicyFile, file, errors, r?.text);
+  return policy && killed ? { ...policy, auto_merge: false } : policy;
 }
 
 /** Every way the repo's config loosens the instance policy. A repo may only tighten it. */
@@ -345,6 +352,15 @@ export function instanceProblems(i: Instance): string[] {
     else if (!existsSync(r.home)) out.push(`agent user ${r.user}'s home ${r.home} not found`);
   }
   return out;
+}
+
+/**
+ * Whether an instance merges its own PRs by its policy (the coordinator asks before each merge): root's kill switch
+ * (src/policy-kill.ts) first, and while it is there the policy is never read, so no lock, parse or bad file can turn
+ * it back on. A policy that doesn't load throws (the coordinator reads that as off).
+ */
+export function instanceAutoMerge(instanceName: string, dir = instancesDir()): boolean {
+  return !autoMergeKilled(instanceName) && loadInstance(instanceName, dir).policy.auto_merge;
 }
 
 /** A policy file on its own, e.g. a copy of an instance's, to check a repo config against. */

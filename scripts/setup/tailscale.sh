@@ -43,8 +43,10 @@
 #             serve forwards to the hub, and never while Funnel is on. The name is read here, from tailscale status,
 #             and must be a *.ts.net name: no caller gives it, and no other host can be set. It writes the hub's and
 #             the instance dashboards' units and restarts them; the hub still listens on 127.0.0.1 only, so this makes
-#             nothing reachable that tailscale serve didn't already forward. The same as running, yourself:
-#               sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...
+#             nothing reachable that tailscale serve didn't already forward. The same as running, yourself, with each
+#             <...> and [...] filled in from the hub unit's ExecStart (leaving out --siri or --hooks turns that gateway
+#             off; src/console/owner-terminal-removed.ts TAILSCALE_PUBLIC_URL_RERUN holds this line, a test checks it):
+#               sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url https://<name> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...
 #             Then set the sign-in App's callback URL to exactly https://<name>/auth/callback.
 #
 # Each root step writes its progress to $TAILSCALE_DIR/steps.jsonl (root's, 0644: one JSON line per change, for the

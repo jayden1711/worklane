@@ -8,7 +8,7 @@
 // owner's, and then works on names relative to it. It reads with O_NOFOLLOW and checks what it opened, and writes a new
 // file it created itself (O_EXCL, so never through a planted link) before renaming it over the old name. Whatever the
 // owner swaps in afterwards is the owner's own file, which readRootFile refuses.
-import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 
 /**
@@ -26,6 +26,25 @@ export function openedPath(fd: number): string | null {
 
 // O_NONBLOCK: a FIFO planted under the name opens at once instead of waiting for a writer (a regular file ignores it).
 const OPEN_READ = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+/**
+ * The most either reader here reads, checked from fstat before reading: a policy.yaml is a few hundred bytes. THREAT:
+ * a file the directory's owner planted, megabytes long, would hold root (and its lock) for minutes while parsed, or
+ * crash it (#726 round 3).
+ */
+export const ROOT_FILE_MAX_BYTES = 256 * 1024;
+
+/** The text of the file open on `fd`, read into a buffer of ROOT_FILE_MAX_BYTES + 1 at most; null when it holds more (it grew after fstat). */
+function readCapped(fd: number): string | null {
+  const buf = Buffer.alloc(ROOT_FILE_MAX_BYTES + 1);
+  let n = 0;
+  for (;;) {
+    const r = readSync(fd, buf, n, buf.length - n, null);
+    if (r === 0) break;
+    n += r;
+    if (n > ROOT_FILE_MAX_BYTES) return null;
+  }
+  return buf.subarray(0, n).toString('utf8');
+}
 
 /** Why an opened file isn't one only `rootUid` can change: a regular file, its owner's, writable by no one else, one name. */
 function notRootsAlone(st: { isFile(): boolean; uid: number; mode: number; nlink: number }, rootUid: number): string | null {
@@ -52,8 +71,11 @@ export function readRootFile(file: string, rootUid = 0): { text: string; at: str
     return { problem: `${file} ${code === 'ELOOP' ? 'is a link' : code === 'ENOENT' ? 'is missing' : `can't be opened (${code ?? (e as Error).message})`}` };
   }
   try {
-    const why = notRootsAlone(fstatSync(fd), rootUid);
-    return why ? { problem: `${file} ${why}` } : { text: readFileSync(fd, 'utf8'), at: openedPath(fd) };
+    const st = fstatSync(fd);
+    const why = notRootsAlone(st, rootUid) ?? (st.size > ROOT_FILE_MAX_BYTES ? `is ${st.size} bytes, over ${ROOT_FILE_MAX_BYTES}` : null);
+    if (why) return { problem: `${file} ${why}` };
+    const text = readCapped(fd);
+    return text === null ? { problem: `${file} is over ${ROOT_FILE_MAX_BYTES} bytes` } : { text, at: openedPath(fd) };
   } finally {
     closeSync(fd);
   }
@@ -85,7 +107,11 @@ export function readInOwnedDir(dir: string, name: string, dirOwner: number, owne
     try {
       const st = fstatSync(fd);
       if (!st.isFile() || st.nlink !== 1 || !owners.includes(st.uid)) throw new Error(`${dir}/${name} isn't a regular file with one name owned by uid ${owners.join(' or ')}`);
-      return readFileSync(fd, 'utf8');
+      // From fstat, before a byte is read: nothing this long is read, let alone parsed.
+      if (st.size > ROOT_FILE_MAX_BYTES) throw new Error(`${dir}/${name} is ${st.size} bytes, over ${ROOT_FILE_MAX_BYTES}, so it isn't read: a policy.yaml is far smaller`);
+      const text = readCapped(fd);
+      if (text === null) throw new Error(`${dir}/${name} is over ${ROOT_FILE_MAX_BYTES} bytes, so it isn't read: a policy.yaml is far smaller`);
+      return text;
     } finally {
       closeSync(fd);
     }

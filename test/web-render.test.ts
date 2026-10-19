@@ -2971,7 +2971,7 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   assert.deepEqual(steps(url), ['install:done', 'up:done', 'serve:done', 'public-url:next']);
   assert.match(url, new RegExp(`the hub&#x27;s URL becomes https://${name.replace(/\./g, '\\.')} \\(now https://hub\\.example\\.test\\), through dashboards\\.sh`));
   assert.match(url, new RegExp(`callback URL to exactly https://${name.replace(/\./g, '\\.')}/auth/callback`));
-  assert.match(url, /dashboards\.sh --client-id/);
+  assert.match(url, /dashboards\.sh \[--machine-devices [^\]]*\] --client-id .* \[--siri [^\]]*\] \[--hooks [^\]]*\]/);
   // All done: nothing is next; each step can be run again.
   const done = r.renderTailscaleSetup(view('ada', st({ hubUrl: `https://${name}` })));
   assert.match(done, /data-testid="tailscale-setup" data-next="none"/);

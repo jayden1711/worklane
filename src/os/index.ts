@@ -540,6 +540,28 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/**
+ * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
+ * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
+ * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs.
+ */
+export function processIdentity(pid: number): string | null {
+  if (!pidAlive(pid)) return null;
+  if (process.platform !== 'linux') return `pid-${pid}`;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // After "(comm)", the fields from the third on; comm may hold spaces and parentheses, so from the last ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    // A zombie (Z) or dying (X) process has exited: signal 0 still finds it until its parent reaps it.
+    if (fields[0] === 'Z' || fields[0] === 'X') return null;
+    const start = fields[19];
+    const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return start && /^\d+$/.test(start) ? `${boot}:${start}` : null;
+  } catch {
+    return null;
+  }
+}
+
 export function wslAvailable(): boolean {
   if (process.platform !== 'win32') return false;
   try {

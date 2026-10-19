@@ -584,7 +584,10 @@ own_policy() { "$ENGINE_CLI" policy own "$1"; }
 # A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
 # carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
 # wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
+# Root's auto_merge kill switch (<name>.auto-merge-off: auto_merge off whatever policy.yaml says) goes with it, first,
+# recorded or not: a rename never turns auto_merge back on.
 carry_policy_root() {
+  if [ -e "$POLICY_ROOT_DIR/$1.auto-merge-off" ]; then install -m 0644 "$POLICY_ROOT_DIR/$1.auto-merge-off" "$POLICY_ROOT_DIR/$2.auto-merge-off"; fi
   [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
   install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
   own_policy "$2"

@@ -11,6 +11,7 @@ import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
 import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { autoMergeKilled } from './policy-kill.js';
 
 /**
  * Who sets `key` to `arg` when this form may not, and how: on a root policy, root's `policy set`; on a machine
@@ -62,7 +63,8 @@ function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: Po
   const doc = parseDocument(checked ? checked.text : readFileSync(path, 'utf8'));
   const r = PolicyFile.safeParse(doc.toJS());
   if (!r.success) throw new PolicyEditError(`${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
-  return { doc, policy: r.data, root: !!checked };
+  // Root's kill switch (src/policy-kill.ts): auto_merge reads off while it is there, as the engine reads it.
+  return { doc, policy: autoMergeKilled(policyInstance(path)) ? { ...r.data, auto_merge: false } : r.data, root: !!checked };
 }
 
 export function policyForm(path: string, limitsPath?: string, machine = existsSync(MACHINE_HELPER)): PolicyFormView {
