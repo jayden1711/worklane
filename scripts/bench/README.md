@@ -47,7 +47,12 @@ Still to come:
       - a run strictly inside the folder of an earlier run, which a process it left behind could still write.
 
       Runs in disjoint folders, and runs one after another in the same folder, are fine.
-    - A path that goes into a rule (the task's folder, the working folder) must have no glob or rule character (`* ? [ ] { } ! ( ) \`, a comma, whitespace, a control character (C0, DEL or C1), a format character such as a zero-width space or a bidi override, or a lone surrogate) and no trailing slash. Such a path is refused, not escaped. A bench root with a space in it is therefore refused.
+    - **Folders are compared by device and inode as well as by path** (round 7). So a second spelling of one folder (a case- or normalisation-insensitive filesystem, or a folder renamed while a run is going) is still the same folder.
+    - **One meter per task folder** (round 7). The driver makes the run folder and each task folder fresh, and refuses one that already exists, so a run id is never used twice (pick a new one after a crash). It also refuses a task key that appears twice in one run. So no task folder ever has runs that its meter hasn't seen.
+    - **What this means for RunTask** (the task runner still to come):
+      - no run can sit below an earlier run's folder. A run at the clone's root followed by runs in worktrees under it (the engine's default `.claude/worktrees`) is refused, so the task's worktrees go outside the clone, side by side in the task folder;
+      - runs of one task can be concurrent only in disjoint folders.
+    - A path that goes into a rule (the task's folder, the working folder) must have no glob or rule character (`* ? [ ] { } ! ( ) \`, a comma, whitespace, a control character (C0, DEL or C1), a format character such as a zero-width space or a bidi override, or a lone surrogate) and no trailing slash. Format characters include the zero-width non-joiner and joiner (U+200C, U+200D) and the soft hyphen (U+00AD), so a name that uses them (some Persian or Indic names, emoji ZWJ sequences) is refused too. Such a path is refused, not escaped. A bench root with a space in it is therefore refused.
     - Claude Code asks before any other file edit, and the bench runs in `dontAsk` mode, which refuses anything that would ask.
     - Nothing the driver reads back trusts that folder either: patches are exported from the clone's objects only, in a bare repo the driver makes, with no config but its own.
   - **No retry.** A run that fails is recorded, never retried (the engine's runner is built with retries off). Any usage or rate limit stops the bench: a `rate_limited` result, and a failed run on a 429 alike.

@@ -27,7 +27,7 @@
 // that folder either: patches come from the clone's objects only, in a repo the driver makes, with no config but its
 // own (grade.ts exportPatch).
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeOwnerOnly } from '../../src/os/index.js';
 import type { AgentRunner } from '../../src/runner.js';
 import { researchCaps } from '../../src/settings.js';
@@ -158,6 +158,16 @@ export interface BenchOptions {
   say?: (line: string) => void;
 }
 
+/** Creates `p` (its parent must exist), refusing (throwing) when anything is already there: EEXIST is never accepted. */
+function freshDir(p: string, why: string): void {
+  try {
+    mkdirSync(p, { mode: 0o700 });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`not run: ${why}`);
+    throw e;
+  }
+}
+
 function checkCaps(c: Caps | undefined): asserts c is Caps {
   if (!c || !Number.isFinite(c.spendUsd) || !Number.isFinite(c.perTaskUsd) || !(c.spendUsd > 0) || !(c.perTaskUsd > 0)) throw new Error('not run: the bench needs a spend cap (--spend <usd>) and a per-task cap');
   // isMode: MODE_MAX_USD's own keys only, never what every object inherits (constructor, toString, __proto__).
@@ -172,6 +182,12 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
   const claudeVersion = o.preflight.claudePin();
   const login = o.preflight.subscription();
   for (const t of o.tasks) if (!TASK_KEY.test(t.key)) throw new Error(`task key ${t.key} refused`);
+  // One task folder per key (round 7): a repeated key would give one folder two meters, neither knowing the other's runs.
+  const keys = new Set<string>();
+  for (const t of o.tasks) {
+    if (keys.has(t.key)) throw new Error(`not run: task key ${t.key} appears twice in this run`);
+    keys.add(t.key);
+  }
   // Option A: from inside sandbox-runtime 0.0.79's sandbox with the agents' lane, every socket and credential refused.
   const probe = o.preflight.sandboxProbe();
   if (!probe.ok) throw new Error('not run: the sandbox probe did not refuse every attempt');
@@ -183,12 +199,15 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
   if (o.tasks[0]) docker.probe({ name: `bench-${o.runId}-probe`, image: o.tasks[0].image });
 
   const dir = runDir(o.layout, o.runId);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // A fresh run folder, never one that exists (round 7): a run id used again (after a crash, say) would put new runs in
+  // task folders whose earlier runs, or what they left behind, the new meters have never seen.
+  mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+  freshDir(dir, `the run folder ${dir} already exists: a run id is never used twice (pick a new one)`);
   const meter = new UsageMeter(o.runner, o.caps.spendUsd);
 
   // Option D, the run's first model call: Claude Code itself tries the same in its own sandbox, on sentinels.
   const checkDir = join(dir, 'sandbox-check');
-  mkdirSync(checkDir, { recursive: true, mode: 0o700 });
+  freshDir(checkDir, `the sandbox check's folder ${checkDir} already exists`);
   const check = meter.task(o.caps.perTaskUsd, checkDir);
   const confirmation: SandboxConfirmation = await confirmSandbox({ ...o.lane, runner: check, cwd: checkDir, signal: meter.signal });
   const sandbox = { probe, confirmation, usage_equivalent_usd: check.spent, runs: check.runs };
@@ -218,7 +237,8 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
     o.say?.(`${t.key}: starting ($${meter.left.toFixed(2)} of $${o.caps.spendUsd} left)`);
     const started = Date.now();
     const workDir = join(dir, t.key);
-    mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    // Fresh too: the task's meter is the only one that has ever run anything in it (round 7).
+    freshDir(workDir, `the task folder ${workDir} already exists`);
     const c: TaskContainer = { name: `bench-${o.runId}-${t.key}`, image: t.image };
     // The task's own stop: the wall-clock cap, or the run's usage limit. Every agent run and every command in the
     // container gets it, whatever the task passes; none starts after it fires.

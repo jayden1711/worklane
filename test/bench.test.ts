@@ -27,7 +27,7 @@ import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
 import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
 import { confirmSandbox } from '../scripts/bench/confirm.js';
-import { STDIN_LINE } from './helpers.js';
+import { repoRoot, STDIN_LINE } from './helpers.js';
 
 const posix = { skip: process.platform === 'win32' && 'POSIX stand-ins' };
 
@@ -1602,7 +1602,8 @@ test('round 6: a Bash call counts as a listed command only with a string command
 test('round 6: C1 control and format characters are refused in a path put into a permission rule', () => {
   const inner: AgentRunner = { run: async (req) => ({ reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
   const meter = new UsageMeter(inner, 40);
-  for (const ch of ['\x80', '\x85', '\x9b', '\x9f', '​', '‍', '‮', '⁦', '­', '﻿']) {
+  // Written as code points, so no invisible or bidi character sits raw in this file (round 7).
+  for (const ch of [0x80, 0x85, 0x9b, 0x9f, 0x200b, 0x200d, 0x202e, 0x2066, 0xad, 0xfeff].map((c) => String.fromCodePoint(c))) {
     assert.throws(() => meter.task(15, `/srv/bench/t${ch}01`), /task's folder/, JSON.stringify(ch));
   }
   // A lone surrogate (no file name on disk holds it as written) too.
@@ -1625,4 +1626,56 @@ test("round 6: no run starts strictly inside an ended run's working folder (a pr
   await t.run({ ...runReq(wd), allowedTools: ['Edit'] });
   await assert.rejects(t.run({ ...runReq(join(wd, 'other')), allowedTools: ['Edit'] }), /earlier run/, 'now inside the task-folder run');
   assert.deepEqual(seen, [join(wd, 'repo'), join(wd, 'repo'), wd]);
+});
+
+test('round 7: one task folder never gets two meters: a repeated task key, or a run id used again, is refused before any agent run', posix, async () => {
+  // The reviewer's two-meter cases. A repeated key: refused before the sandbox check, so nothing reaches claude.
+  const m = machine();
+  const twice = [{ key: 't01', row: ROW, image: 'swebench/example:latest' }, { key: 't01', row: ROW, image: 'swebench/example:latest' }];
+  await assert.rejects(runBench(m.opts(engineTask, { tasks: twice })), /task key t01 appears twice/);
+  assert.equal(m.calls('check').length + m.calls('run').length, 0, 'no model call');
+  assert.equal(existsSync(join(m.layout.runs, 'r1')), false, 'no run folder made');
+  // A run id used again (a restarted driver after a crash): its run folder exists, so nothing runs in it again.
+  const r = machine();
+  await runBench(r.opts(engineTask));
+  const before = r.calls('check').length + r.calls('run').length;
+  await assert.rejects(runBench(r.opts(engineTask)), /run folder .* already exists/);
+  assert.equal(r.calls('check').length + r.calls('run').length, before, 'the second run made no model call');
+  // A run folder made beforehand (by anything): refused the same way.
+  const p = machine();
+  mkdirSync(join(p.layout.runs, 'r1', 't01'), { recursive: true });
+  await assert.rejects(runBench(p.opts(engineTask)), /run folder .* already exists/);
+  assert.equal(p.calls('check').length + p.calls('run').length, 0, 'no model call');
+});
+
+test('round 7: nesting is compared by device and inode too, so a second spelling of a folder is still the same folder', posix, async () => {
+  // A rename gives a folder a second spelling with the same inode (as a case-insensitive filesystem would): the path
+  // text no longer shows the nesting, the inode does.
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const seen: string[] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push(req.cwd), req.cwd.endsWith('/repo') ? await gate : undefined, { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const wd = taskFolder();
+  mkdirSync(join(wd, 'repo', 'sub'));
+  const t = new UsageMeter(inner, 40).task(15, wd);
+  const going = t.run({ ...runReq(join(wd, 'repo')), allowedTools: ['Edit'] });
+  renameSync(join(wd, 'repo'), join(wd, 'renamed'));
+  // While the run in (what was) repo is going: its folder under the new name, and one inside it, are nested with it.
+  for (const cwd of [join(wd, 'renamed'), join(wd, 'renamed', 'sub')]) {
+    await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /nested with/, cwd);
+  }
+  release();
+  await going;
+  // After it: a folder inside it, under the new name, is still inside an earlier run's folder.
+  await assert.rejects(t.run({ ...runReq(join(wd, 'renamed', 'sub')), allowedTools: ['Edit'] }), /inside .*earlier run/);
+  // Its own folder again, under the new name, is the same folder: allowed, like any run again in one folder.
+  await t.run({ ...runReq(join(wd, 'renamed')), allowedTools: ['Edit'] });
+  assert.deepEqual(seen, [join(wd, 'repo'), join(wd, 'renamed')]);
+});
+
+test('round 7: no raw invisible, bidi or control character sits in the bench sources or this test file', () => {
+  const unsafe = /[\p{Cf}\p{Cs}]|(?![\t\n\r])\p{Cc}/u;
+  const files = [join(repoRoot, 'test', 'bench.test.ts'), ...readdirSync(join(repoRoot, 'scripts', 'bench')).filter((f) => /\.(ts|mjs|md)$/.test(f)).map((f) => join(repoRoot, 'scripts', 'bench', f))];
+  const found = files.flatMap((f) => readFileSync(f, 'utf8').split('\n').flatMap((l, i) => (unsafe.test(l) ? [`${f.slice(repoRoot.length)}:${i + 1}`] : [])));
+  assert.deepEqual(found, []);
 });

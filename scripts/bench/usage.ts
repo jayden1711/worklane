@@ -15,7 +15,7 @@
 // (RULE_UNSAFE): refused, never escaped, since the escaping rules of Claude Code's rule globs aren't documented.
 // The working folder is checked where it really is too (round 5): its realpath must be inside the task folder's, so a
 // link in the task folder (or a task folder that is a link) can't take a run's sandboxed Bash writes elsewhere.
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { isAbsolute, posix } from 'node:path';
 import { classifyTransient, type AgentRunner, type RunRequest, type RunResult, type TerminalReason } from '../../src/runner.js';
 
@@ -52,6 +52,33 @@ function rulePath(p: string, what: string): string {
 }
 
 const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
+
+/** A run's working folder: its path, its identity (device and inode), and the identities of it and its parents. */
+interface Folder {
+  path: string;
+  id: string;
+  /** `id` and every parent's, up to and including the task's folder. */
+  chain: Set<string>;
+}
+
+/** `p` (a real path inside `top`, no link in it) as a Folder; refuses (throws) when a folder of it can't be read. */
+function folderOf(p: string, top: string): Folder {
+  const idOf = (d: string) => {
+    try {
+      const s = statSync(d, { bigint: true });
+      return `${s.dev}:${s.ino}`;
+    } catch (e) {
+      throw new Error(`not started: ${d} can't be read (${(e as NodeJS.ErrnoException).code ?? 'error'})`);
+    }
+  };
+  const id = idOf(p);
+  const chain = new Set([id]);
+  for (let d = p; d !== top && d !== posix.dirname(d); ) {
+    d = posix.dirname(d);
+    chain.add(idOf(d));
+  }
+  return { path: p, id, chain };
+}
 
 /**
  * `allowed` with every file-writing tool confined to `cwd`, the run's own working folder, which must be in `workDir`,
@@ -164,9 +191,9 @@ export class TaskMeter implements AgentRunner {
   /** The task's runs still going. */
   private inflight = new Set<Promise<unknown>>();
   /** The working folder of each run still going (one entry per run). */
-  private cwds: string[] = [];
+  private cwds: Folder[] = [];
   /** The working folder of every run this task has started, ended ones included. */
-  private earlier = new Set<string>();
+  private earlier: Folder[] = [];
   constructor(
     private m: UsageMeter,
     readonly perTaskUsd: number,
@@ -206,12 +233,15 @@ export class TaskMeter implements AgentRunner {
     if (!within(realCwd, realWork)) throw new Error(`not started: the run's working folder ${req.cwd} is really ${realCwd}, outside the task's folder ${this.workDir} (really ${realWork})`);
     // No link anywhere in it, even one that stays inside: the Edit rule then names the real folder (round 6).
     if (realCwd !== req.cwd) throw new Error(`not started: the run's working folder ${req.cwd} is really ${realCwd}: a working folder through a link is refused`);
-    const nested = this.cwds.find((c) => within(req.cwd, c) || within(c, req.cwd));
-    if (nested !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is nested with ${nested}, the working folder of a run of this task still going (its commands could swap a folder of this one)`);
+    // Compared by path and by device and inode (round 7), so two spellings of one folder (a case- or
+    // normalisation-insensitive filesystem) are still the same folder.
+    const folder = folderOf(req.cwd, this.workDir);
+    const nested = this.cwds.find((c) => within(req.cwd, c.path) || within(c.path, req.cwd) || c.chain.has(folder.id) || folder.chain.has(c.id));
+    if (nested !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is nested with ${nested.path}, the working folder of a run of this task still going (its commands could swap a folder of this one)`);
     // An ended run may have left a process behind (a background command, say) that can still write its working folder:
     // no later run starts strictly inside it. The same folder again is fine: swapping it needs its parent.
-    const under = [...this.earlier].find((c) => c !== req.cwd && within(req.cwd, c));
-    if (under !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is inside ${under}, the working folder of an earlier run of this task (a process it left could swap a folder of this one)`);
+    const under = this.earlier.find((c) => (c.path !== req.cwd && within(req.cwd, c.path)) || (c.id !== folder.id && folder.chain.has(c.id)));
+    if (under !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is inside ${under.path}, the working folder of an earlier run of this task (a process it left could swap a folder of this one)`);
     req = { ...req, allowedTools };
     const refused = (reason: TerminalReason, detail: string): RunResult => ({ reason, detail, costUsd: 0, turns: 0, model: req.model });
     if (this.m.limited) return refused('rate_limited', `not started: the bench stopped at a usage limit (${this.m.limited.detail})`);
@@ -223,9 +253,8 @@ export class TaskMeter implements AgentRunner {
     }
     const signal = this.stop ? AbortSignal.any([this.stop, ...(req.signal ? [req.signal] : [])]) : req.signal;
     // Registered before the first await: from here until the run has ended, no nested run of this task starts.
-    const cwd = req.cwd;
-    this.cwds.push(cwd);
-    this.earlier.add(cwd);
+    this.cwds.push(folder);
+    this.earlier.push(folder);
     // The whole run, its record included: what settled() waits for.
     const whole = (async () => {
       const r = await this.m.meter({ ...req, maxBudgetUsd: cap, ...(signal ? { signal } : {}) });
@@ -239,7 +268,7 @@ export class TaskMeter implements AgentRunner {
       return await whole;
     } finally {
       this.inflight.delete(whole);
-      this.cwds.splice(this.cwds.indexOf(cwd), 1);
+      this.cwds.splice(this.cwds.indexOf(folder), 1);
     }
   }
   /** Waits (at most `ms`) for the task's runs in flight to end and be recorded; whether they all did. */
