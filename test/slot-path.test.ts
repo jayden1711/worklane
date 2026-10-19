@@ -31,6 +31,7 @@ import { test } from 'node:test';
 import { inspect } from 'node:util';
 import ts from 'typescript';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // tsc over src/, with fixture text in place of (or beside) its files
@@ -980,6 +981,10 @@ test('run time: no call of slotsDir, however made, marks a guess as the system s
 test("run time: the machine's own system slot dir is still the system one: root's drain file and the system config (principle 3)", async () => {
   const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
+  // Rule A (#806 round 8): this test makes and recursively removes the system slot dir and config, so it first checks
+  // both are inside the test's own system root (test/isolate.ts). onRealMachine throws for anything else, before a
+  // file is made, written or removed.
+  for (const p of [os.SYSTEM_SLOTS.dir, os.SYSTEM_SLOTS.config, dirname(os.SYSTEM_SLOTS.config)]) onRealMachine(p);
   const saved = process.env.AGENT_SLOTS_DIR;
   delete process.env.AGENT_SLOTS_DIR;
   const madeConfigDir = !existsSync(dirname(os.SYSTEM_SLOTS.config));
@@ -988,10 +993,14 @@ test("run time: the machine's own system slot dir is still the system one: root'
     const d = os.slotsDir();
     assert.equal(os.slotsDir(), d, 'slotsDir() is one value while the slot dir stays put');
     // Where it points: a marker made in SYSTEM_SLOTS.dir with plain fs is seen through it, read-only (a slot path has
-    // nothing else to compare; nothing is written through it: rule A, #806 round 7).
-    const marker = `.p3-${randomBytes(6).toString('hex')}`;
-    writeFileSync(join(os.SYSTEM_SLOTS.dir, marker), '');
-    assert.ok(sf.slotFileExists(sf.slotFile(d, marker)), 'slotsDir() is the machine system dir');
+    // nothing else to compare; nothing is written through it: rule A, #806 round 7), then removed.
+    const marker = join(os.SYSTEM_SLOTS.dir, `.p3-${randomBytes(6).toString('hex')}`);
+    writeFileSync(marker, '');
+    try {
+      assert.ok(sf.slotFileExists(sf.slotFile(d, basename(marker))), 'slotsDir() is the machine system dir');
+    } finally {
+      rmSync(marker, { force: true });
+    }
     assert.equal(os.updateDrainPath(), os.UPDATE_DRAIN_FILE);
     assert.equal(typeof os.slotsConfigPath(), 'object', 'no system config yet: config.json in the slot dir');
     mkdirSync(dirname(os.SYSTEM_SLOTS.config), { recursive: true });

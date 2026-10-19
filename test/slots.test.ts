@@ -86,7 +86,7 @@ test('slot locations: durable system paths when present, env overrides, the old 
   delete process.env.AGENT_SLOTS_CONFIG;
   try {
     // The machine's /var/tmp, inside the test's own root (test/isolate.ts): a test never uses the real one.
-    // A slot path (#772) has no identity or text to compare: a marker written through it shows where it points (`names`).
+    // A slot path (#772) has no identity or text to compare: a marker made in the expected dir is read through it (`names`).
     assert.equal(onRealMachine(devSlotsPath()), '/var/tmp/agent-slots');
     assert.ok(names(machineSlotsDir(system), devSlotsPath()), 'no system dir: the development default');
     mkdirSync(system.dir, { recursive: true });

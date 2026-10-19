@@ -247,6 +247,7 @@ test('the engine started outside a test run is never one: no sign, no mark on wh
     ].join('\n'),
   );
   const r = spawnSync(process.execPath, [probe], { cwd: live.home, env, encoding: 'utf8' });
+  rmSync(join(live.slots, marker), { force: true });
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout), { sign: null, own: null, child: null, slots: live.slots });
   // The CLI itself, on a command that reads the slot directory.
@@ -258,7 +259,7 @@ test('the engine started outside a test run is never one: no sign, no mark on wh
 
 test("in a test process every slot-directory default is the test machine's slot directory, and nothing outside it (#669)", () => {
   assert.equal(process.env[TEST_MACHINE_VAR], testMachine);
-  // The slot dir is a slot path (#772): a marker written through it shows where it is (`names`).
+  // The slot dir is a slot path (#772): a marker made in the expected dir is seen through it, read-only (`names`).
   assert.ok(names(slotsDir(), isolatedEnv.AGENT_SLOTS_DIR!), 'slotsDir() is the isolated AGENT_SLOTS_DIR');
   assert.ok(names(budgetFor('tok').dir as SlotPath, isolatedEnv.AGENT_SLOTS_DIR!), "budgetFor's dir is it");
   assert.ok(names(new GitHubBudget('0123456789abcdef').dir as SlotPath, isolatedEnv.AGENT_SLOTS_DIR!), "GitHubBudget's default dir is it");
