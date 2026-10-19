@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
-import { basename, delimiter, dirname, join, resolve as resolvePath, sep } from 'node:path';
+import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
@@ -708,7 +708,9 @@ const LINUX_SANDBOX = [
   'walk() { local todo=${1#/} cur= c d t n=0',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
-  '    case $c in ""|.) continue ;; ..) cur=${cur%/*}; continue ;; esac',
+  // A `..` (only from a root-made link's target: projectCommand refuses one in a hide path) leaves a directory: bound
+  // onto itself first, so no command can remove or rename it to make the path resolve elsewhere for the next.
+  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; continue ;; esac',
   '    if [ -L "$cur/$c" ]; then',
   '      n=$((n + 1)); [ "$n" -le 40 ] || refuse "$cur/$c"',
   '      d=${cur:-/}; if [ -O "$d" ] || [ -w "$d/" ]; then refuse "$cur/$c"; fi',
@@ -729,6 +731,9 @@ const LINUX_SANDBOX = [
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
+
+/** An absolute path in normal form, and not `/` itself: what a project command's sandbox may be asked to hide. */
+export const normalAbsolute = (p: string): boolean => p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/');
 
 /** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
 export function seatbeltProfile(home: string, hide: readonly string[]): string {
@@ -753,12 +758,17 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   // Fail closed: a runAs without its hide list (a job file an older engine wrote, a caller outside the type) is refused,
   // never run with the default masks only.
   if (!Array.isArray(runAs.hide)) throw new Error(`a project command as ${runAs.user} needs its sandbox's hide list (runAs.hide); refusing to run it without`);
-  const hide = runAs.hide.filter((p) => p.startsWith('/'));
+  // Normal form only (absolute, no //, /./, .. or trailing /), so the wrapper's checks on a path's text (/proc, /sys,
+  // /dev) and its walk see the path the kernel would; anything else is refused, never dropped or rewritten.
+  const bad = runAs.hide.find((p) => !normalAbsolute(p));
+  if (bad !== undefined) throw new Error(`a project command's hidden path must be an absolute path in normal form (no //, /./, .. or trailing /): ${JSON.stringify(bad)}; refusing to run it`);
+  const hide = [...runAs.hide];
   if (!runAs.home.startsWith('/')) throw new Error(`the agent user's home must be an absolute path: ${runAs.home}`);
+  const home = posixPath.normalize(runAs.home).replace(/(.)\/$/, '$1');
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
     ...own,
-    HOME: runAs.home,
+    HOME: home,
     USER: runAs.user,
     LOGNAME: runAs.user,
     // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
@@ -776,7 +786,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
   const full = outboundEnv(env);
   if (process.platform === 'darwin') {
-    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(runAs.home, hide), file, ...args], full);
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
     return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
   }
   // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
@@ -784,7 +794,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     .filter((e): e is [string, string] => typeof e[1] === 'string')
     .map(([k, v]) => `${k}=${v}`);
   const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
-  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', ...inner], {});
+  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 

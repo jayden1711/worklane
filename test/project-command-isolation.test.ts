@@ -190,7 +190,7 @@ test('a browser check\'s reasons (the page\'s console errors, a step\'s error) c
   assert.match(text, /new console error: fetch failed with key sk-\[REDACTED\]/);
 });
 
-test('check.sh probes the exact sandbox a project command starts in, and the command\'s sandbox uses the same flags', { skip: !posix && 'bubblewrap is Linux only' }, () => {
+test('check.sh runs the probe the engine runs before every project command, and the command\'s sandbox uses the same flags', { skip: !posix && 'bubblewrap is Linux only' }, () => {
   const probe = osAdapter.PROJECT_SANDBOX_PROBE;
   assert.ok(probe, 'one shared probe argv (src/os/index.ts)');
   const check = readFileSync(join(repoRoot, 'scripts', 'setup', 'check.sh'), 'utf8');
@@ -246,6 +246,12 @@ test('credentials.yaml refuses a relative path: the sandbox hides each by its ab
   assert.equal(r.success, false);
   assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['github.path', 'must be an absolute path'], ['agent_api_key', 'must be an absolute path']]);
   assert.equal(instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/srv/i/gh' } }).success, true);
+});
+
+test('credentials.yaml refuses a path with `..`: resolved lexically, it could name a different file than the kernel reaches', () => {
+  const r = instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/srv/i/gh' }, agent_api_key: '/opt/link/../key' });
+  assert.equal(r.success, false);
+  assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['agent_api_key', "must not contain '..': name the credential's real path"]]);
 });
 
 test('the wrapper\'s bash runs no ~/.bashrc a sandboxed command planted, even with a socket on stdin (bash\'s rshd check)', { skip: realSkip }, () => {
@@ -307,11 +313,41 @@ test('a hide path under /proc (another name for a file, per process) is refused,
   mkdirSync(join(home, 'keys'), { recursive: true });
   writeFileSync(join(home, 'keys', 'open'), `${value}\n`, { mode: 0o600 });
   // /proc/1/root: this user can't stat it (it isn't pid 1's), so the hidden file looked absent and nothing was hidden.
-  for (const p of [`/proc/1/root${home}/keys/open`, `/proc/self/root${home}/keys/open`]) {
-    const r = asStandIn(`cat ${join(home, 'keys', 'open')} 2>&1; true`, { user: 'shop-agent', home, hide: [p] }, root);
-    assert.ok(!r.stdout.includes(value), `${p}: the secret was read`);
-    assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, `${p}: ${r.stderr}`);
+  // `//proc/...` and `/./proc/...` (round 5): the same path, spelled so the wrapper's /proc check didn't match it.
+  for (const p of [`/proc/1/root${home}/keys/open`, `/proc/self/root${home}/keys/open`, `//proc/1/root${home}/keys/open`, `/./proc/1/root${home}/keys/open`]) {
+    const r = refusedOrRun(`cat ${join(home, 'keys', 'open')} 2>&1; true`, { user: 'shop-agent', home, hide: [p] }, root);
+    assert.ok(!r.out.includes(value), `${p}: the secret was read`);
+    assert.ok(r.refused, `${p}: not refused (${r.out})`);
   }
+});
+
+/** A command refused before it runs (projectCommand throws, or the wrapper exits 125), or what it printed. */
+function refusedOrRun(command: string, runAs: { user: string; home: string; hide: readonly string[] }, cwd: string): { refused: boolean; out: string } {
+  try {
+    const r = asStandIn(command, runAs, cwd);
+    return { refused: r.status === osAdapter.SANDBOX_UNAVAILABLE, out: `${r.stdout}${r.stderr}` };
+  } catch (e) {
+    return { refused: /normal form/.test((e as Error).message), out: '' };
+  }
+}
+
+test('a hide path not in normal form is refused; a `..` can\'t be emptied by one command to unmask the secret for the next', { skip: realSkip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-dd-'));
+  const home = join(root, 'agent');
+  mkdirSync(home);
+  const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(root, 'keys', 'sub', 'x'), { recursive: true });
+  writeFileSync(join(root, 'keys', 'sub', 'key'), `${value}\n`, { mode: 0o600 });
+  // The reviewer's R4b: one command removes the directory a `..` leaves, and the next skipped the path as absent.
+  const runAs = { user: 'shop-agent', home, hide: [`${root}/keys/sub/x/../key`] };
+  const control = refusedOrRun(`cat ${root}/keys/sub/key 2>&1; true`, runAs, root);
+  refusedOrRun(`rmdir ${root}/keys/sub/x; true`, runAs, root);
+  const next = refusedOrRun(`cat ${root}/keys/sub/key 2>&1; true`, runAs, root);
+  for (const r of [control, next]) assert.ok(!r.out.includes(value), `the secret was read: ${r.out}`);
+  assert.ok(control.refused && next.refused, 'refused, never run with a path the wrapper might resolve differently');
+  for (const p of [`${root}/keys/./sub/key`, `${root}//keys/sub/key`, `${root}/keys/sub/`, '/']) assert.ok(refusedOrRun('true', { ...runAs, hide: [p] }, root).refused, p);
+  // The agent's home is normalized, not refused: an instance.yaml home with a trailing slash runs as before.
+  assert.equal(asStandIn('echo "$HOME"', { user: 'shop-agent', home: `${home}/`, hide: [] }, root).stdout.trim(), home);
 });
 
 // The reviewer's round-4 layouts (#787): a symlink the agent could still change by another route. Each is followed and

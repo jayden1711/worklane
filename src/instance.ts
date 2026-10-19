@@ -176,7 +176,13 @@ export const PolicyFile = z.strictObject({
 
 // Absolute only: a relative one would depend on the coordinator's working directory, and a project command's sandbox
 // (projectCommandHides) hides each by its absolute path (#713).
-const path = z.string().min(1).refine((p) => isAbsolute(p), { message: 'must be an absolute path' });
+// No `..` either: projectCommandHides normalizes lexically (path.resolve), and through a symlink the kernel's `..`
+// can land elsewhere, so the sandbox would hide the wrong file.
+const path = z
+  .string()
+  .min(1)
+  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
+  .refine((p) => !p.split('/').includes('..'), { message: "must not contain '..': name the credential's real path" });
 export const CredentialsFile = z.strictObject({
   version: z.literal(1),
   // A dedicated gh config dir (its own login) or a GitHub App key. Never the operator's personal login.

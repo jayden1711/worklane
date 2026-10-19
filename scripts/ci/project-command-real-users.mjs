@@ -5,14 +5,16 @@
 // API key file where credentials.sh puts one; the agent user itself can read both. The project command can't.
 //
 //   node project-command-real-users.mjs <dir with dist/src> <agent user> <agent home> <a git checkout> [<root-owned symlink>]
-// The last: a symlink in a root-owned directory to <agent home>/secret-store (root makes both in the workflow).
+// The last two: a symlink in a root-owned directory to <agent home>/secret-store, and one to <agent home>/secret-store/x/..
+// (root makes them in the workflow).
+//   node project-command-real-users.mjs <dist> <agent user> <agent home> <checkout> [<root-owned symlink> [<one with ..>]]
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const [dist, user, home, checkout, linkPath] = process.argv.slice(2);
+const [dist, user, home, checkout, linkPath, dotdotLink] = process.argv.slice(2);
 if (!dist || !user || !home || !checkout) {
   console.error('usage: project-command-real-users.mjs <dist dir> <agent user> <agent home> <checkout>');
   process.exit(2);
@@ -58,6 +60,19 @@ if (linkPath) {
   const r3 = run(again.file, again.args, checkout);
   assert.ok(!/sk-ant-/.test(r2.stdout + r2.stderr + r3.stdout + r3.stderr), 'a command moved the secret out from under its mask');
   console.log('root-owned symlink: followed and masked; neither it nor its target could be moved away');
+}
+// A root-owned symlink whose target goes through `<store>/x/..`: the directory the `..` leaves is bound onto itself, so
+// one command can't remove it to make the path resolve to nothing (and hide nothing) for the next.
+if (dotdotLink) {
+  const store = join(home, 'secret-store', 'key');
+  const runAs = { user, home, hide: [join(dotdotLink, 'key')] };
+  const attack = projectCommand(`rmdir ${join(home, 'secret-store', 'x')} 2>&1; true`, runAs);
+  console.log(`root-owned link with a '..': the attack says ${JSON.stringify(run(attack.file, attack.args, checkout).stdout.slice(0, 200))}`);
+  const read = projectCommand(`cat ${store}; true`, runAs);
+  const r = run(read.file, read.args, checkout);
+  assert.equal(r.status, 0, `still followed, not refused: ${r.stderr}`);
+  assert.ok(!/sk-ant-/.test(r.stdout + r.stderr), 'the directory a `..` left was removed and the secret unmasked');
+  console.log("root-owned link with a '..': the directory it leaves can't be removed; the secret stays masked");
 }
 
 // And a check that runs git in the coordinator's checkout still gets git's answer inside the sandbox.

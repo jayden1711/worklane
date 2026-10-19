@@ -2931,6 +2931,9 @@ jobs:
           unset k
           sudo install -d -o root -g root -m 0755 /opt/wl-713-link
           sudo ln -s "$a/secret-store" /opt/wl-713-link/store
+          # And one whose target leaves a directory of the agent's with `..` (the walk binds what a `..` leaves).
+          sudo -u wl-probe-agent mkdir -p "$a/secret-store/x"
+          sudo ln -s "$a/secret-store/x/.." /opt/wl-713-link/dotdot
           t="$(mktemp -d /tmp/wl-project-command-XXXXXX)"
           mkdir -p "$t/node_modules"
           cp -r dist package.json "$t/"
@@ -2941,7 +2944,7 @@ jobs:
           chmod -R a+rX "$t"
           sudo chown -R wl-probe "$t/checkout"
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
-            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout" /opt/wl-713-link/store' _ "$t" "$a" < /dev/null
+            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout" /opt/wl-713-link/store /opt/wl-713-link/dotdot' _ "$t" "$a" < /dev/null
           # The unit tests' real-sandbox cases, here required to run (elsewhere they skip without bubblewrap): the
           # isolation tests, and separate-users' check that runs git as another user (nobody) in a checkout it doesn't own.
           PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js dist/test/separate-users.test.js
