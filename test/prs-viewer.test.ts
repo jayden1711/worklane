@@ -146,11 +146,24 @@ test('the page as a viewer sees it: each PR\'s state, a note that the reasons an
   assert.doesNotMatch(viewer, /data-testid="prs-auto-merge"/, 'no auto-merge card, so no "off" it can\'t know');
   assert.doesNotMatch(viewer, /no reason recorded/, 'a held PR has reasons; the viewer is told they are the writers\'');
   assert.match(viewer, /data-pr="101"[^]*?owners and writers/);
+  // Nothing a viewer's answer can't support (#826 review): no blank head, no check or fix-run claims, and no
+  // auto-merged / merged-by-a-person split (a viewer's answer doesn't say which merged itself).
+  const shownText = viewer.replace(/<!-- -->/g, '');
+  const falseClaims = [/no check results on/, /checks not in yet/, /no fix runs/, /Nothing auto-merged yet/, /Merged by a person/, /Auto-merged \(/, /<span>head /, /required checks pass/, /data-testid="pr-checks"/, /data-testid="pr-fixes"/];
+  assert.deepEqual(falseClaims.filter((c) => c.test(shownText)).map(String), [], "a viewer's page claims nothing its answer can't support");
+  for (const n of [105, 106]) assert.match(shownText, new RegExp(`Merged or closed \\(2\\)[^]*data-task-row="pr-${n}"`), `one list holds #105 (merged) and #106 (closed): #${n}`);
   // The writers' page is as before: the reasons and the auto-merge card.
   const writer = r.renderPrs({ ...full, autoMerge: { on: false, policy: true, repo: true, stopped: 'stopfile-reason-qq', why: 'stopped: stopfile-reason-qq' } });
   assert.match(writer, /L3-REVIEW-LEVEL/);
   assert.match(writer, /data-testid="prs-auto-merge"/);
   assert.doesNotMatch(writer, /prs-viewer-note/);
+  // The writers keep the split and the cells.
+  const writerText = writer.replace(/<!-- -->/g, '');
+  assert.match(writerText, /Auto-merged \(1\)/);
+  assert.match(writerText, /Merged by a person, or closed \(1\)/);
+  assert.match(writerText, /data-testid="pr-checks"/);
+  assert.match(writerText, /<span>head /);
+  assert.doesNotMatch(writerText, /Merged or closed \(/);
 });
 
 test('the viewer\'s PR is built field by field: a field added to a PR later stays the writers\', and every phase maps to a viewer\'s', () => {
