@@ -42,8 +42,11 @@ export interface Backlog {
   openPr(head: string, base: string, title: string, body: string, opts?: { draft?: boolean; headSha?: string }): Promise<{ url: string; number: number; draft: boolean }>;
   /** A pull request's current state. */
   pullRequest(n: number): Promise<PullRequest>;
-  /** Every check on a commit: check runs (latest per name) and commit statuses. */
-  checks(sha: string): Promise<CommitCheck[]>;
+  /**
+   * Every check on a commit: check runs (latest per name) and commit statuses. `pinned` (#727): some required check is
+   * pinned to its source, so read what judging it needs (more pages, failing closed); without it, read as before pins.
+   */
+  checks(sha: string, opts?: { pinned?: boolean }): Promise<CommitCheck[]>;
   /**
    * #727: the App GitHub's branch protection or ruleset requires for each required check on `branch`. Present only
    * where checks come from GitHub, and then every pinned check judged must come from its source (src/check-source.ts).

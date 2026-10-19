@@ -257,6 +257,11 @@ export class PinnedChecks {
       repo: () => string;
       configured: () => Record<string, CheckPin>;
       now?: () => number;
+      /**
+       * The required checks judged now. When none is pinned (and GitHub's rules have answered), the backlog reads exactly
+       * as before pins. Absent: read as for a pinned check (tests' stand-ins).
+       */
+      required?: () => string[];
       /** No CI: the live config and the event log the test runs are recorded in. Absent: GitHub's checks only. */
       local?: { project: () => Pick<ProjectConfig, 'ci'>; tests: () => Pick<TestsConfig, 'test_run'>; log: { read(from: number, types: EventType[]): StoredEvent[] } };
     },
@@ -268,8 +273,19 @@ export class PinnedChecks {
   }
 
   async of(sha: string): Promise<JudgedChecks> {
-    const all = await this.d.backlog.checks(sha);
-    const github = this.enforced ? pinnedChecks(all, { configured: this.d.configured(), github: await this.githubApps(), repo: this.d.repo(), sha }) : all;
+    if (!this.enforced) return this.withLocal(await this.d.backlog.checks(sha), sha);
+    const configured = this.d.configured();
+    const apps = await this.githubApps();
+    // #727: the reads a pinned check needs (more pages, failing closed) only when a required check is pinned, or may
+    // be (GitHub's rules not read yet). With every required check bare, exactly main's reads, so main's verdict.
+    const required = this.d.required?.();
+    const pinned = !required || apps === null || required.some((n) => pinOf(n, configured, apps) !== null);
+    const all = await this.d.backlog.checks(sha, { pinned });
+    return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha }), sha);
+  }
+
+  /** The judged checks, under No CI with this instance's own test runs in place of any check of their names. */
+  private withLocal(github: CommitCheck[], sha: string): JudgedChecks {
     const l = this.d.local;
     if (!l || !ciIsNone(l.project())) return judged(github);
     // No CI: the event log's test-run checks, in place of any check of their names (src/ci-none.ts INVARIANT).

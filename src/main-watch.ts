@@ -112,8 +112,9 @@ export interface MainWatchApi {
   protection(branch: string): Promise<'enforced' | 'none'>;
   commitPulls(sha: string): Promise<MergedPull[]>;
   pull(n: number): Promise<MergedPull>;
-  checkRuns(sha: string): Promise<CheckRunAt[]>;
-  statuses(sha: string): Promise<StatusAt[]>;
+  /** `pinned` (#727): every page (TooManyPages past the cap); else the first page only, as before pins. */
+  checkRuns(sha: string, opts?: { pinned?: boolean }): Promise<CheckRunAt[]>;
+  statuses(sha: string, opts?: { pinned?: boolean }): Promise<StatusAt[]>;
   role(login: string): Promise<Role | null>;
   compare(base: string, head: string): Promise<Compared>;
   /**
@@ -161,7 +162,8 @@ export class TooManyPages extends Error {
   }
 }
 
-export type Need ={ call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string } | { call: 'rules' };
+/** `pinned` (#727) on runs and statuses: read every page (a required check is pinned); else one page, as main. */
+export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string; pinned: boolean } | { call: 'statuses'; sha: string; pinned: boolean } | { call: 'sources'; sha: string } | { call: 'rules' };
 
 /** Required checks pinned to their source (#727, src/check-source.ts): config.yaml's at the commit, GitHub's, the repo. */
 export interface WatchPins {
@@ -348,27 +350,30 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   // #727: GitHub's rules have never answered, so which checks they pin is unknown: wait here, at the checks, never
   // judging them by name meanwhile. Everything above (a direct push, an unknown actor, a bot) is judged as before.
   if (o.rulesUnknown) return { done: false, need: { call: 'rules' } };
-  if (!f.runs) return { done: false, need: { call: 'runs', sha: head } };
+  // #727: the required names pinned to a source. With none, every read below is main's (one page each) and so is the
+  // verdict; with one, every page is read (more reads, failing closed), and only a pinned name is judged with the extra.
+  const pins = o.pins;
+  const pinnedNames = pins ? o.required.filter((n) => pinOf(n, pins.configured, pins.github) !== null) : [];
+  const allPages = pinnedNames.length > 0;
+  if (!f.runs) return { done: false, need: { call: 'runs', sha: head, pinned: allPages } };
   // By name, exactly as before pins: only what main read (the first page; #727's later pages are `extra`).
   const firstRuns = f.runs.filter((r) => !r.extra);
   const firstStatuses = f.statuses ? f.statuses.filter((s) => !s.extra) : null;
   let out = outcomesAt(o.required, firstRuns, firstStatuses, at);
   if (out.some((c) => c.outcome === 'unknown')) {
-    if (!f.statuses) return { done: false, need: { call: 'statuses', sha: head } };
+    if (!f.statuses) return { done: false, need: { call: 'statuses', sha: head, pinned: allPages } };
     out = outcomesAt(o.required, firstRuns, firstStatuses, at);
   }
-  const pins = o.pins;
-  if (pins) {
+  if (pins && allPages) {
     // #727 (src/check-source.ts): a pinned name is judged by pinnedVerdict, the one function readiness judges it by,
     // over its checks as they stood at merge time (checksAt). An unpinned one is judged by name, as before.
     const pinned = (n: string) => pinOf(n, pins.configured, pins.github);
-    const pinnedNames = o.required.filter((n) => pinned(n) !== null);
     // An Actions run is grouped by its workflow file, so its suite's workflow run is read, as readiness reads it.
     if (f.sources === undefined && f.runs.some((r) => pinnedNames.includes(r.name) && r.app === ACTIONS_APP_ID)) return { done: false, need: { call: 'sources', sha: head } };
-    if (!f.statuses && pinnedNames.length) return { done: false, need: { call: 'statuses', sha: head } };
+    if (!f.statuses) return { done: false, need: { call: 'statuses', sha: head, pinned: true } };
     // More pages than the watch reads: an unread run or status could block a pinned check, so it can't be judged
     // accounted. Unaccounted (a trip and an alert), never a stall: the watch goes on to the next merge.
-    if (f.truncated && pinnedNames.length) return { done: true, accounted: false, number, reason: `${who} into ${o.branch}, but its pinned required checks (${pinnedNames.join(', ')}) can't be judged on ${head.slice(0, 8)}: ${f.truncated}` };
+    if (f.truncated) return { done: true, accounted: false, number, reason: `${who} into ${o.branch}, but its pinned required checks (${pinnedNames.join(', ')}) can't be judged on ${head.slice(0, 8)}: ${f.truncated}` };
     out = out.map((byName) => {
       const pin = pinned(byName.name);
       if (pin === null) return byName;
@@ -862,9 +867,9 @@ export class MainWatch {
       } else if (n.call === 'compare') p.facts.compare = { ...(await this.d.api.compare(n.base, n.head)), base: n.base, head: n.head };
       else if (n.call === 'pull') p.facts.pr = await this.d.api.pull(n.number);
       else if (n.call === 'role') p.facts.role = await this.d.api.role(n.login);
-      else if (n.call === 'runs') p.facts.runs = await pagesRead(p.facts, () => this.d.api.checkRuns(n.sha));
+      else if (n.call === 'runs') p.facts.runs = await pagesRead(p.facts, () => this.d.api.checkRuns(n.sha, { pinned: n.pinned }));
       else if (n.call === 'sources') p.facts.sources = (await this.d.api.runSources?.(n.sha)) ?? null;
-      else if (n.call === 'statuses') p.facts.statuses = await pagesRead(p.facts, () => this.d.api.statuses(n.sha));
+      else if (n.call === 'statuses') p.facts.statuses = await pagesRead(p.facts, () => this.d.api.statuses(n.sha, { pinned: n.pinned }));
       writeWatchState(this.d.stateFile, s);
       v = judge(p.sha, p.facts, ctx);
       if (!v.done) return;

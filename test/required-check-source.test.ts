@@ -317,7 +317,10 @@ test("GitHub's protection and rules are read once per 10 minutes; an error keeps
 
 test('GitHub checks carry who posted each check run, and the workflow run behind an Actions one (read once per suite)', async () => {
   const gh = github({ runs: [{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'lint', app: CI_APP, suite: 71 }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml')] });
-  const checks = await gh.backlog.checks(HEAD);
+  // Round 8: no required check pinned: main's reads only, no workflow runs.
+  assert.deepEqual((await gh.backlog.checks(HEAD)).map((c) => c.workflow), [undefined, undefined]);
+  assert.equal(gh.calls.filter((p) => p.includes('/actions/runs')).length, 0, 'nothing pinned: no workflow-run read');
+  const checks = await gh.backlog.checks(HEAD, { pinned: true });
   assert.deepEqual(
     checks.map((c) => ({ name: c.name, app: c.app, workflow: c.workflow })),
     [
@@ -325,7 +328,7 @@ test('GitHub checks carry who posted each check run, and the workflow run behind
       { name: 'lint', app: CI_APP, workflow: undefined },
     ],
   );
-  await gh.backlog.checks(HEAD);
+  await gh.backlog.checks(HEAD, { pinned: true });
   assert.equal(gh.calls.filter((p) => p.includes('/actions/runs')).length, 1, 'a known suite is not asked again');
 });
 
