@@ -31,6 +31,11 @@ export { POLICY_ROOT_DIR };
 export interface PolicyRecord {
   file: string;
   sha256: string;
+  /**
+   * The values root set (at takeover, or an admin's `policy set`) of each CEILING_KEYS key: the coordinator's route
+   * (the helper, the dashboard) may keep one there or tighten it, never loosen it past (#726 round 10, principle 3).
+   */
+  ceilings?: Record<string, unknown>;
 }
 
 export const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -55,7 +60,10 @@ export function policyRecord(instance: string, dir = POLICY_ROOT_DIR): PolicyRec
   }
   try {
     const r = JSON.parse(text) as Partial<PolicyRecord>;
-    if (typeof r.file === 'string' && r.file.startsWith('/') && typeof r.sha256 === 'string' && /^[0-9a-f]{64}$/.test(r.sha256)) return { file: r.file, sha256: r.sha256 };
+    if (typeof r.file === 'string' && r.file.startsWith('/') && typeof r.sha256 === 'string' && /^[0-9a-f]{64}$/.test(r.sha256)) {
+      const c = r.ceilings;
+      return { file: r.file, sha256: r.sha256, ...(c && typeof c === 'object' && !Array.isArray(c) ? { ceilings: c } : {}) };
+    }
   } catch {
     // below
   }
@@ -63,7 +71,7 @@ export function policyRecord(instance: string, dir = POLICY_ROOT_DIR): PolicyRec
 }
 
 /** The record's text, as root writes it. */
-export const recordText = (r: PolicyRecord) => `${JSON.stringify({ file: r.file, sha256: r.sha256 })}\n`;
+export const recordText = (r: PolicyRecord) => `${JSON.stringify({ file: r.file, sha256: r.sha256, ...(r.ceilings ? { ceilings: r.ceilings } : {}) })}\n`;
 
 /** The uid that owns a root policy: root. Tests stand another in (no test runs as root). */
 let rootUid = 0;
@@ -205,6 +213,53 @@ export function decodePolicyValue(key: string, arg: string): unknown {
   if (kind === 'word') return /^[a-z][a-z-]{0,15}$/.test(arg) ? arg : undefined;
   if (kind === 'windows') return WINDOWS.test(arg) ? (arg === 'none' ? [] : arg.split('+').map((w) => ({ from: `${w.slice(0, 2)}:${w.slice(2, 4)}`, to: `${w.slice(5, 7)}:${w.slice(7, 9)}` }))) : undefined;
   return undefined;
+}
+
+/**
+ * The keys whose value root last set is a ceiling for the coordinator's route on a root policy (#726 round 10,
+ * principles 3 and 6): every key `policy set` takes but the HELPER_ONLY ones (those only ever tighten). How each
+ * loosens: a number up (budget, workers, every cap, attachment size and retention), a switch on (automations,
+ * ci_repair, research.repo_access), `stuck_guard` toward off (on, dry-run, off), `run_windows` to any time root's
+ * windows don't cover (none means any time).
+ */
+export const CEILING_KEYS: readonly string[] = Object.keys(POLICY_SET_KEYS).filter((k) => !Object.hasOwn(HELPER_ONLY, k));
+const STUCK_RANK: Readonly<Record<string, number>> = { off: 0, 'dry-run': 1, on: 2 };
+/** The minutes of a day a run_windows value allows ([] or none: all of them). */
+function windowMinutes(v: unknown): Set<number> | null {
+  if (!Array.isArray(v)) return null;
+  const all = new Set<number>();
+  if (!v.length) for (let m = 0; m < 1440; m++) all.add(m);
+  for (const w of v as { from?: unknown; to?: unknown }[]) {
+    const at = (s: unknown) => (typeof s === 'string' && /^\d\d:\d\d$/.test(s) ? Number(s.slice(0, 2)) * 60 + Number(s.slice(3)) : null);
+    const [a, b] = [at(w?.from), at(w?.to)];
+    if (a === null || b === null) return null;
+    for (let m = a; m !== b; m = (m + 1) % 1440) all.add(m);
+  }
+  return all;
+}
+/** Whether `value` is looser than root's `ceiling` for `key` (anything this can't compare counts as looser). */
+export function looserThan(key: string, value: unknown, ceiling: unknown): boolean {
+  const kind = POLICY_SET_KEYS[key];
+  if (kind === 'number') return typeof value !== 'number' || typeof ceiling !== 'number' || value > ceiling;
+  if (kind === 'bool') return value === true && ceiling !== true;
+  if (key === 'settings.stuck_guard') return !(String(value) in STUCK_RANK) || STUCK_RANK[String(value)]! < (STUCK_RANK[String(ceiling)] ?? 2);
+  if (kind === 'windows') {
+    const [v, c] = [windowMinutes(value), windowMinutes(ceiling)];
+    return !v || !c || [...v].some((m) => !c.has(m));
+  }
+  return true;
+}
+/**
+ * Why the coordinator's route (the helper, the dashboard) may not set `key` to `value` on a root policy: past the
+ * value root set (its record's ceiling), or null. A record from before ceilings has none: then the file's value now
+ * is the ceiling (fail closed: it can only go down).
+ */
+export function ceilingProblem(instance: string, key: string, value: unknown, rec: PolicyRecord, current: unknown): string | null {
+  if (!CEILING_KEYS.includes(key)) return null;
+  const ceiling = rec.ceilings ? rec.ceilings[key] : current;
+  if (ceiling === undefined || !looserThan(key, value, ceiling)) return null;
+  const shown = (v: unknown) => (typeof v === 'object' ? JSON.stringify(v) : String(v));
+  return `${key} ${shown(value)} is past what root set (${shown(ceiling)}): the dashboard may keep it there or tighten it; an admin loosens it at a root shell (${policySetCommand(instance, key, encodePolicyValue(key, value) ?? '<value>')})`;
 }
 
 /**

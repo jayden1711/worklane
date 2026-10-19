@@ -10,7 +10,7 @@ import { policyViolations, PolicyFile } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { ceilingProblem, DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
 import { autoMergeKilled } from './policy-kill.js';
 
 /**
@@ -157,9 +157,13 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   // (each other change named as its root command).
   if (root) {
     const instance = policyInstance(o.path);
+    const rec = policyRecord(instance);
     for (const c of changes) {
       const arg = encodePolicyValue(c.key, c.to);
       if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) && arg !== null ? `loosening it is an admin's, at a root shell (${policySetCommand(instance, c.key, arg)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
+      // Never past what root set (#726 round 10): root's helper refuses it too; up front, nothing is asked.
+      const past = rec && !('problem' in rec) ? ceilingProblem(instance, c.key, c.to, rec, c.from) : null;
+      if (past) problems.push(past);
     }
     const blocked = problems.length ? [] : changes.map((c) => ({ c, arg: encodePolicyValue(c.key, c.to)! })).map((x) => ({ ...x, why: policyHelperMissing(o.helperRulesFile, [x.c.key, x.arg]) })).filter((x) => x.why);
     if (blocked.length) problems.push(`${o.path} is root's, and ${blocked[0]!.why}: an admin changes it at a root shell (${blocked.map((x) => policySetCommand(instance, x.c.key, x.arg)).join('; ')})`);

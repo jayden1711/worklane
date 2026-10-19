@@ -19,6 +19,7 @@ import { aliasInstance, armedSwitches, autoMergeKilled, idDir, instanceId, killA
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
 import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
+import * as gate from '../src/policy-gate.js';
 import { ownPolicy, policyCommand, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
 import { checkRootStep } from '../src/console/root-steps.js';
@@ -92,7 +93,8 @@ test('an admin makes an existing coordinator-owned policy.yaml root\'s with its 
   const st = statSync(m.file);
   assert.equal(st.mode & 0o777, 0o644);
   assert.notEqual(st.ino, ino, 'a new file root wrote, not the old one chmodded');
-  assert.deepEqual(JSON.parse(readFileSync(join(POLICY_ROOT_DIR, 'reown'), 'utf8')), { file: m.file, sha256: createHash('sha256').update(loose).digest('hex') }, "root's record names exactly this file, and what root wrote there");
+  // Round 10: the record also holds root's ceilings, the values taken over (#726).
+  assert.deepEqual(JSON.parse(readFileSync(join(POLICY_ROOT_DIR, 'reown'), 'utf8')), { file: m.file, sha256: createHash('sha256').update(loose).digest('hex'), ceilings: { 'budget.daily_usd': 50, 'agents.max_workers': 4, 'automations.enabled': false } }, "root's record names exactly this file, what root wrote there, and its ceilings");
   assert.deepEqual(r.loose, ['sandbox: false'], 'what a coordinator-user process may have loosened is shown');
   assert.equal(asRoot(() => readPolicy(m.file).policy?.sandbox), false);
   // A link planted under the name is never followed: refused, and its target untouched.
@@ -120,7 +122,8 @@ test("the coordinator user's write to a root policy.yaml is refused", { skip }, 
   // The engine's own writers (Settings, the Policy form) never write it.
   asRoot(() => {
     assert.throws(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true }), (e: Error) => e instanceof SettingsError && /is root's/.test(e.message));
-    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 60 }, eventsDb: join(m.T, 'events.db'), by: 'olive' }), (e: Error) => e instanceof PolicyEditError && /is root's/.test(e.message));
+    // (A lowering: round 10 refuses a raise past root's value before this, #726.)
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'events.db'), by: 'olive' }), (e: Error) => e instanceof PolicyEditError && /is root's/.test(e.message));
   });
   assert.equal(readFileSync(m.file, 'utf8'), text, 'nothing written');
   // A file the coordinator user puts in its place (here: a file of a uid that isn't root's) is never read.
@@ -324,7 +327,7 @@ test("turning auto_merge off (and land_mode back to pr, main_watch back to auto)
   assert.deepEqual([p.auto_merge, p.land_mode, p.main_watch], [false, 'pr', 'auto']);
   // A change only the pattern rule takes is still refused up front, nothing asked.
   let asked = 0;
-  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 60 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked), helperRulesFile: rules })), /older than 1\.9\.10/);
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked), helperRulesFile: rules })), /older than 1\.9\.10/);
   assert.equal(asked, 0);
   // The machine CLI turns it off too: an admin at a root shell, or a coordinator through sudo.
   setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
@@ -370,12 +373,12 @@ test("on a sudo older than 1.9.10 (helper-rules.json leaves set-policy out), Set
   let asked = 0;
   const request = () => String(++asked);
   const settings = () => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'workers', value: 3, by: cfg.project.owners.default, owner: true, request, helperRulesFile: rules }));
-  const form = () => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 60 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request, helperRulesFile: rules }));
+  const form = () => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request, helperRulesFile: rules }));
   // As machine-helper.sh writes it on such a sudo; and as an earlier one wrote it, before set-policy existed.
   for (const leftOut of [['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'], ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins']]) {
     writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: leftOut }));
     assert.throws(settings, new RegExp(`sudo \\(1\\.9\\.9\\) is older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set oldsudo settings\\.workers 3`));
-    assert.throws(form, new RegExp(`sudo \\(1\\.9\\.9\\) is older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set oldsudo budget\\.daily_usd 60`));
+    assert.throws(form, new RegExp(`sudo \\(1\\.9\\.9\\) is older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set oldsudo budget\\.daily_usd 40`));
     assert.equal(asked, 0, 'no request recorded');
   }
   // A sudo that takes the pattern (nothing left out), or no record at all: asked of the coordinator, as before.
@@ -615,7 +618,8 @@ test("rename: a recorded instance's policy.yaml is root's and recorded under the
   // The engine's `policy own newname`, as the script runs it (no flag): the carried bytes are root's content.
   ownPolicy('newname', { ...n.deps, markerDir: markers });
   assert.equal(statSync(n.file).mode & 0o777, 0o644);
-  assert.deepEqual(JSON.parse(readFileSync(join(markers, 'newname'), 'utf8')), { file: n.file, sha256: createHash('sha256').update(LOOSE).digest('hex') });
+  // Round 10: root's ceilings are carried with the record (#726).
+  assert.deepEqual(JSON.parse(readFileSync(join(markers, 'newname'), 'utf8')), { file: n.file, sha256: createHash('sha256').update(LOOSE).digest('hex'), ceilings: { 'budget.daily_usd': 50, 'agents.max_workers': 4, 'automations.enabled': false } });
   const gate = asRoot(() => readPolicyChecked(n.file, markers));
   assert.ok(gate && 'text' in gate && gate.text === LOOSE);
   // Carried, but changed on the way: refused, the rename stops at its home step.
@@ -897,4 +901,72 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   renameSync(flag, join(m.T, 'gone-dir'));
   writeFileSync(join(d, 'auto-merge-off.disarmed'), '');
   assert.equal(autoMergeKilled('kill'), true, 'an armed name, whatever follows');
+});
+
+// Every loosening key the coordinator's route takes, with root's value, one looser and (where there is one) one tighter.
+const CEILING_CASES: [key: string, root: string, looser: string[], tighter: string | null][] = [
+  ['budget.daily_usd', '10', ['11'], '5'],
+  ['agents.max_workers', '1', ['2'], null],
+  ['automations.enabled', 'off', ['on'], null],
+  ['settings.workers', '1', ['2'], null],
+  ['settings.daily_budget_usd', '10', ['11'], '5'],
+  ['settings.ci_repair.enabled', 'off', ['on'], null],
+  ['settings.ci_repair.max_fixes_per_pr', '2', ['3'], '1'],
+  ['settings.run_windows', '0900-1700', ['0800-1700', '0900-1800', 'none', '2200-0600'], '1000-1600'],
+  ['settings.research.max_searches_per_day', '5', ['6'], '4'],
+  ['settings.research.max_fetches_per_day', '5', ['6'], '4'],
+  ['settings.research.max_usd_per_day', '2', ['3'], '1'],
+  ['settings.research.repo_access', 'off', ['on'], null],
+  ['settings.intake.reports_per_sender_per_day', '5', ['6'], '4'],
+  ['settings.intake.drafts_per_day', '5', ['6'], '4'],
+  ['settings.intake.max_usd_per_day', '2', ['3'], '1'],
+  ['settings.stuck_guard', 'dry-run', ['off'], 'on'],
+  ['settings.chat_attachments.max_file_mb', '5', ['6'], '4'],
+  ['settings.chat_attachments.max_message_mb', '10', ['11'], '9'],
+  ['settings.chat_attachments.retention_days', '7', ['8'], '6'],
+];
+
+test("root's closed settings never reopen: on a root policy every value root set (at takeover, or an admin's `policy set`) is a ceiling for the coordinator's route, which may keep it or tighten it but never loosen it; an admin's own change moves it (#726 round 10, principles 3 and 6)", { skip }, () => {
+  const CEILING_KEYS = (gate as Record<string, unknown>).CEILING_KEYS as string[] | undefined;
+  assert.ok(CEILING_KEYS, "root's ceilings (src/policy-gate.ts CEILING_KEYS)");
+  assert.deepEqual([...CEILING_KEYS].sort(), Object.keys(POLICY_SET_KEYS).filter((k) => !Object.hasOwn(HELPER_ONLY, k)).sort(), 'every key policy set takes but the tighten-only ones');
+  assert.deepEqual(CEILING_CASES.map(([k]) => k).sort(), [...CEILING_KEYS].sort(), 'every ceiling key is tested');
+  const m = machineInstance('ceil');
+  ownPolicy('ceil', m.deps);
+  for (const [key, root, looser, tighter] of CEILING_CASES) {
+    // An admin, at a root shell: root's value.
+    setPolicy('ceil', key, root, null, m.deps);
+    // The coordinator's route (the helper runs `policy set` with SUDO_USER wl-<instance>): never past it.
+    for (const l of looser) assert.throws(() => setPolicy('ceil', key, l, 'wl-ceil', m.deps), /is past what root set/, `${key} ${l}`);
+    // Tighter, and back up to root's value: allowed.
+    if (tighter) assert.equal(setPolicy('ceil', key, tighter, 'wl-ceil', m.deps).key, key, `${key} ${tighter}`);
+    assert.equal(setPolicy('ceil', key, root, 'wl-ceil', m.deps).key, key, `${key} back to ${root}`);
+    // An admin's raise moves the ceiling: then the coordinator's route may go there.
+    setPolicy('ceil', key, looser[0]!, null, m.deps);
+    assert.equal(setPolicy('ceil', key, looser[0]!, 'wl-ceil', m.deps).key, key, `${key} ${looser[0]} after root raised it`);
+  }
+});
+
+test("the reviewer's case: an admin's budget, workers, automations off and ci_repair off at a root shell stay so; the helper's route, the Policy form and Settings can't set any of them back (#726 round 10)", { skip }, () => {
+  // (The reviewer's admin set budget 10 and workers 1; here 45 and 4, so this example repo's own config, which asks
+  // for at least 40 and 4, still loads.)
+  const m = machineInstance('reopen');
+  ownPolicy('reopen', m.deps);
+  for (const [k, v] of [['budget.daily_usd', '45'], ['agents.max_workers', '4'], ['automations.enabled', 'off'], ['settings.ci_repair.enabled', 'off']] as const) setPolicy('reopen', k, v, null, m.deps);
+  const text = readFileSync(m.file, 'utf8');
+  for (const [k, v] of [['budget.daily_usd', '50'], ['agents.max_workers', '5'], ['automations.enabled', 'on'], ['settings.ci_repair.enabled', 'on']] as const) assert.throws(() => setPolicy('reopen', k, v, 'wl-reopen', m.deps), /is past what root set/, `${k} ${v}`);
+  assert.equal(readFileSync(m.file, 'utf8'), text, 'nothing written');
+  // Up front, nothing asked: the Policy form and Settings.
+  let asked = 0;
+  const request = () => String(++asked);
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 50 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), /budget\.daily_usd 50 is past what root set \(45\)/);
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'automations.enabled': true }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), /automations\.enabled true is past what root set \(false\)/);
+  assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'ci_repair.enabled', value: true, by: cfg.project.owners.default, owner: true, request })), /settings\.ci_repair\.enabled true is past what root set \(false\)/);
+  assert.equal(asked, 0, 'nothing asked');
+  // Lowering still goes: queued for the helper.
+  asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 42 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request }));
+  assert.equal(asked, 1);
+  // An unrecorded install, as on main: no ceiling (the owner decides that separately).
+  const u = machineInstance('unrec-ceil');
+  assert.deepEqual(applyPolicy({ path: u.file, cfg, values: { 'budget.daily_usd': 90 }, eventsDb: join(u.T, 'e.db'), by: 'olive', machine: true }), [{ key: 'budget.daily_usd', from: 50, to: 90 }]);
 });

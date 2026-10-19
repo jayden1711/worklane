@@ -18,7 +18,7 @@ import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
-import { encodePolicyValue, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { ceilingProblem, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -263,6 +263,10 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     if (arg === null) throw new SettingsError(`refused: ${key} ${JSON.stringify(o.value)} can't be passed to root's helper`);
     const root = policySetCommand(policyInstance(o.policyPath), `settings.${key}`, arg);
     if (!policySetOk([`settings.${key}`, arg])) throw new SettingsError(`refused: settings.${key} ${arg} is root's to set, at a root shell (${root})`);
+    // Never past what root set (#726 round 10): root's helper refuses it too; up front, nothing is asked.
+    const rec = policyRecord(policyInstance(o.policyPath));
+    const past = rec && !('problem' in rec) ? ceilingProblem(policyInstance(o.policyPath), `settings.${key}`, decodePolicyValue(`settings.${key}`, arg), rec, undefined) : null;
+    if (past) throw new SettingsError(`refused: ${past}`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
     const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);
     if (missing) throw new SettingsError(`${o.policyPath} is root's, and ${missing}: an admin changes it at a root shell (${root})`);

@@ -249,14 +249,15 @@ test("a root policy.yaml (#726): the Policy form and Settings only queue a chang
     }
     assert.equal(s.events(['machine.requested']).length, 0, 'nothing asked');
     // A change the helper takes: queued, and said so; the dashboard writes nothing.
-    const form = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60 }, confirm: true });
+    // (A lowering: round 10 refuses a raise past root's value up front, #726.)
+    const form = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 40 }, confirm: true });
     assert.equal(form.status, 200, JSON.stringify(form.body));
     assert.equal(form.body.queued, true);
     const set = await s.post('/api/instance-settings', 'example-owner', { key: 'workers', value: 3 });
     assert.equal(set.status, 200, JSON.stringify(set.body));
     assert.equal(set.body.queued, true);
     assert.equal(readFileSync(policyFile, 'utf8'), before);
-    assert.deepEqual(s.events(['machine.requested']).map((e) => e.args), [['set-policy', 'budget.daily_usd', '60'], ['set-policy', 'settings.workers', '3']]);
+    assert.deepEqual(s.events(['machine.requested']).map((e) => e.args), [['set-policy', 'budget.daily_usd', '40'], ['set-policy', 'settings.workers', '3']]);
     assert.equal(s.events(['settings.changed']).length, 0, 'changed only once the helper ran it (the coordinator logs that)');
     const audits = s.events(['dashboard.audit']).map((a) => [a.action, (a.detail as { note?: string }).note]);
     assert.deepEqual(audits.filter(([a]) => a === 'first_run.policy' || a === 'settings.queued' || a === 'settings.changed'), [['first_run.policy', 'queued for the coordinator'], ['settings.queued', 'queued for the coordinator']]);
