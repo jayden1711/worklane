@@ -53,8 +53,9 @@ ensure_instance_home() {
   echo "ensure_instance_home $*" >> "$T/calls"
 }
 claude_login_ok() { :; }
-# The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's.
-own_policy() { echo "own_policy $1" >> "$T/owned"; touch "$T/owned-$1"; }
+# The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's;
+# while <root>/own-refuses exists, refused as the engine refuses (its message on stderr, exit 1).
+own_policy() { echo "own_policy $*" >> "$T/owned"; if [ -e "$T/own-refuses" ]; then cat "$T/own-refuses" >&2; return 1; fi; touch "$T/owned-$1"; }
 policy_root_ok() { [ -e "$T/owned-$1" ]; }
 install_claude_token() {
   mkdir -p "$T/homes/$1/.claude"
@@ -423,4 +424,20 @@ test("the policy step makes the instance's policy.yaml root's, and a rerun on an
   assert.deepEqual(owned(), ['own_policy alpha', 'own_policy alpha']);
   assert.ok(r.events.some((e) => e.step === 'policy' && e.state === 'done' && / policy set alpha /.test(e.detail)), JSON.stringify(r.events));
   assert.equal(readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8'), before, 'the setup step itself never rewrites it');
+});
+
+test("P6: a rerun through the machine helper on a policy the engine won't take over (loose, or changed since root wrote it) stops at the policy step, naming the admin's command; no flag is ever passed (#726)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  assert.equal(m.run().status, 0);
+  // Since then the coordinator user put its own file there (sandbox: false): no longer root's, so the step runs again.
+  rmSync(join(m.T, 'owned-alpha'));
+  writeFileSync(join(m.T, 'own-refuses'), "/x/policy.yaml is looser than its coordinator could make it (sandbox: false), so it is left as it is, not root's: an admin checks it at a root shell, then changes it, or takes it over as it is with sudo worklane policy own alpha --retake --accept-loose\n");
+  // The machine helper runs add-project with no terminal and no token on stdin.
+  const r = m.run(['alpha', 'example/alpha'], '');
+  assert.equal(r.status, 1, r.stderr);
+  const failed = r.events.find((e) => e.step === 'policy' && e.state === 'failed');
+  assert.ok(failed, JSON.stringify(r.events));
+  assert.match(failed.detail, /policy own alpha --retake --accept-loose$/);
+  assert.equal(r.events.some((e) => e.step === 'service' && e.state === 'started'), false, 'nothing after it runs');
+  assert.deepEqual(readFileSync(join(m.T, 'owned'), 'utf8').trim().split('\n'), ['own_policy alpha', 'own_policy alpha'], 'setup asks for `policy own alpha` alone, never a flag');
 });

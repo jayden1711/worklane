@@ -9,14 +9,59 @@
 //     coordinator, nor sandbox or allow_same_user at all.
 // An instance with no such record (a laptop, a cloud or VM install, a machine whose setup hasn't run again since)
 // reads policy.yaml as before; doctor says when it is a machine install whose policy the coordinator can rewrite.
+//
+// INVARIANT (fail closed): the record is keyed on the instance's name, never on a path string, so how the engine
+// spells the path (a home under a link) can't turn the check off. Any answer but "no record" (ENOENT) that isn't a
+// record this engine reads refuses the policy. A recorded policy is read only when the file opened is the one the
+// record names (the kernel's path for the opened file: a link in a directory on the way is refused) and its content
+// hashes to what root last wrote, so an earlier root file the coordinator kept aside is refused too.
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { readRootFile } from './os/root-file.js';
 import { etcPath } from './os/system-paths.js';
 
-/** Root's record of the instances whose policy.yaml is root's: one file per instance, holding that policy.yaml's path. */
+/** Root's record of the instances whose policy.yaml is root's: one file per instance (policyRecord). */
 export const POLICY_ROOT_DIR = etcPath('policy-root');
+
+/** What root's record of an instance holds: its policy.yaml's real path, and the sha256 of what root last wrote there. */
+export interface PolicyRecord {
+  file: string;
+  sha256: string;
+}
+
+export const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+/** The instance a policy.yaml belongs to: its directory's name (<instances>/<name>/policy.yaml). */
+export const policyInstance = (file: string) => basename(dirname(resolve(file)));
+
+/**
+ * Root's record of `instance`: null only when there is none (ENOENT, or a name no file in the record directory can
+ * have); else the record, or why it can't be used (unreadable, or not one this engine reads), which refuses the policy.
+ */
+export function policyRecord(instance: string, dir = POLICY_ROOT_DIR): PolicyRecord | { problem: string } | null {
+  if (!instance || instance === '.' || instance === '..' || /[/\\\0]/.test(instance)) return null;
+  const at = join(dir, instance);
+  let text: string;
+  try {
+    text = readFileSync(at, 'utf8');
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return null;
+    return { problem: `root's record of it (${at}) can't be read (${code ?? (e as Error).message})` };
+  }
+  try {
+    const r = JSON.parse(text) as Partial<PolicyRecord>;
+    if (typeof r.file === 'string' && r.file.startsWith('/') && typeof r.sha256 === 'string' && /^[0-9a-f]{64}$/.test(r.sha256)) return { file: r.file, sha256: r.sha256 };
+  } catch {
+    // below
+  }
+  return { problem: `root's record of it (${at}) isn't one this engine reads` };
+}
+
+/** The record's text, as root writes it. */
+export const recordText = (r: PolicyRecord) => `${JSON.stringify({ file: r.file, sha256: r.sha256 })}\n`;
 
 /** The uid that owns a root policy: root. Tests stand another in (no test runs as root). */
 let rootUid = 0;
@@ -24,29 +69,44 @@ export function setPolicyRootUid(uid: number): void {
   rootUid = uid;
 }
 
-/** The root shell command that makes an instance's policy.yaml root's again, keeping its content and showing its keys. */
-export const ownCommand = (instance: string) => `sudo ${BRAND.cli} policy own ${instance}`;
+/**
+ * The root shell command that makes an instance's policy.yaml root's, keeping its content and showing its keys. A
+ * flag says what an admin checked first (policyCommand): `--retake`, a recorded file that changed since root wrote
+ * it; `--accept-loose`, a policy looser than a coordinator could make it. Setup never passes either.
+ */
+export const ownCommand = (instance: string, ...flags: ('--retake' | '--accept-loose')[]) => `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
 
-/** Whether root's record says this policy.yaml is root's (its instance's record names exactly this file). */
-export function policyRootRequired(file: string, dir = POLICY_ROOT_DIR): boolean {
-  const path = resolve(file);
-  try {
-    return readFileSync(join(dir, basename(dirname(path))), 'utf8').trim() === path;
-  } catch {
-    return false;
-  }
+/** Whether root's record covers this instance (any answer but "none" does: an unreadable record refuses, never skips). */
+export function policyRootRequired(instance: string, dir = POLICY_ROOT_DIR): boolean {
+  return policyRecord(instance, dir) !== null;
 }
 
 /**
- * A policy.yaml as the engine may read it: null when root's record doesn't cover it (read it as before); its text when
- * the record does and the file is root's alone (checked on the file opened: nothing swapped in after the check is
- * read); else why it is refused, and never read.
+ * Why `opened` (read from the file opened, with the kernel's path for it) isn't the file root's record names, with
+ * the content root last wrote there; null when it is.
  */
-export function readPolicyChecked(file: string, dir = POLICY_ROOT_DIR): { text: string } | { refused: string } | null {
-  if (!policyRootRequired(file, dir)) return null;
+export function recordMismatch(rec: PolicyRecord, opened: { text: string; at: string | null }): string | null {
+  if (opened.at === null) return "where the opened file really is can't be checked on this system";
+  if (opened.at !== rec.file) return `the file opened is ${opened.at}, not ${rec.file} as root's record says (a link on the way)`;
+  if (sha256(opened.text) !== rec.sha256) return "its content isn't what root last wrote there (an earlier or other file put back in its place)";
+  return null;
+}
+
+/**
+ * A policy.yaml as the engine may read it: null when root's record doesn't cover its instance (read it as before);
+ * its text when the record does, the file is root's alone (checked on the file opened: nothing swapped in after the
+ * check is read), it is the file the record names, and its content is what root last wrote; else why it is refused,
+ * and never read.
+ */
+export function readPolicyChecked(file: string, dir = POLICY_ROOT_DIR, instance = policyInstance(file)): { text: string } | { refused: string } | null {
+  const rec = policyRecord(instance, dir);
+  if (rec === null) return null;
+  const refused = (why: string) => ({ refused: `refused: on this machine ${file} is root's and only root changes it, but ${why}, so the coordinator user (or something running as it) may have changed it. An admin checks it, then makes it root's again: ${ownCommand(instance, '--retake')}` });
+  if ('problem' in rec) return refused(rec.problem);
   const r = readRootFile(resolve(file), rootUid);
-  if ('text' in r) return r;
-  return { refused: `refused: on this machine ${file} is root's and only root changes it, but ${r.problem.replace(`${resolve(file)} `, 'it ')}, so the coordinator user (or something running as it) wrote it. An admin checks it, then makes it root's again: ${ownCommand(basename(dirname(resolve(file))))}` };
+  if ('problem' in r) return refused(r.problem.replace(`${resolve(file)} `, 'it '));
+  const why = recordMismatch(rec, r);
+  return why ? refused(why) : { text: r.text };
 }
 
 /** How a value is written as one plain-word argument. */

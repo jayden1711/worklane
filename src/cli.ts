@@ -140,9 +140,10 @@ usage: ${BRAND.cli} <command> [options]
   slots                            machine-wide agent slots in use (all harnesses) and the cap
   plugins show --instance name     the instance's approved plugins (root's allowlist, checked);
                                    fetch, stage, confirm and remove are root's (scripts/setup/plugins.sh)
-  policy own <instance> | policy set <instance> <key> <value>
+  policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value>
                                    root: make a machine instance's policy.yaml root's (its content
-                                   kept), or change one key of it (the machine helper's set-policy)
+                                   kept; a changed or loose one only with the flag, an admin's), or
+                                   change one key of it (the machine helper's set-policy)
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]

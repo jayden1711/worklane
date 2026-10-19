@@ -17,8 +17,8 @@ export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; m
   for (const name of listInstances(dir)) {
     const file = join(dir, name, 'policy.yaml');
     const check = (level: DoctorCheck['level'], detail: string) => out.push({ name: `policy owner ${name}`, level, detail });
-    if (policyRootRequired(file, markers)) {
-      const r = readPolicyChecked(file, markers);
+    if (policyRootRequired(name, markers)) {
+      const r = readPolicyChecked(file, markers, name);
       if (r && 'refused' in r) check('fail', `${r.refused}. Until then the coordinator won't start.`);
       else check('ok', `${file} is root's; only root changes it`);
     } else if (machine) {
