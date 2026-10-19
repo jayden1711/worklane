@@ -16,7 +16,8 @@ const run = (id: number, name: string, app: number, conclusion = 'success') => (
 /** 100 passing runs of other names: a full page. */
 const filler = (page: number) => Array.from({ length: 100 }, (_, i) => run(page * 1000 + i, `other-${page}-${i}`, OTHER_APP));
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers });
-const RATE_LIMITED = () => json({ message: 'API rate limit exceeded for installation' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 3600) });
+// A reset far ahead (2100-01-01), fixed: no wall clock read, and the limit never looks lifted.
+const RATE_LIMITED = () => json({ message: 'API rate limit exceeded for installation' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' });
 const NO_ACCESS = () => json({ message: 'Resource not accessible by integration' }, 403);
 let token = 0;
 
