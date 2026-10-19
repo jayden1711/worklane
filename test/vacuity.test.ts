@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { copyFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkVacuity, countAssertions } from '../src/vacuity.js';
-import { exampleProject } from './helpers.js';
+import { engineCli, exampleProject } from './helpers.js';
 
 const opts = { assertionPattern: '\\b(assert|expect)\\b', appPaths: ['src/**'], dynamic: true, runOne: 'node --test {file}' };
 
@@ -35,4 +36,13 @@ test('a test that asserts but never executes app code is vacuous, even if it imp
   const r = checkVacuity(dir, 'test/fixture-only.test.js', opts);
   assert.equal(r.vacuous, true);
   assert.match(r.why.join(), /executed no function under src/);
+});
+
+test('the vacuity command prints "file: N assertion(s)", the name as shownPath shows it (#683)', () => {
+  const { dir } = exampleProject();
+  copyFileSync(join(dir, 'test', 'price.test.js'), join(dir, 'test', 'a​b.test.js'));
+  const r = spawnSync(process.execPath, [engineCli, '--root', dir, 'vacuity', 'test/price.test.js', 'test/a​b.test.js'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  const n = checkVacuity(dir, 'test/price.test.js', opts).assertions;
+  assert.deepEqual(r.stdout.trimEnd().split('\n'), [`ok      test/price.test.js: ${n} assertion(s), touched 1 app file(s)`, `ok      "test/a\\u200bb.test.js": ${n} assertion(s), touched 1 app file(s)`]);
 });
