@@ -5,12 +5,16 @@ name: installed-engine-config
 # naming the key and the version, instead of stopping every agent once merged (scripts/ci/installed-engine-config.mjs).
 # It fails closed when the version can't be found or its tag doesn't verify. There is no skip: a PR meant to land
 # after an engine upgrade stays a draft until main's pin includes it, then passes on its next push.
-# It runs on every pull request, with no paths filter: a required check whose workflow a paths filter skips stays
-# pending and holds the PR. On a PR that changes nothing under .worklane/ the script prints so and passes at once,
-# before fetching any engine. It is a required check only once the owner adds it to the main ruleset.
+# It runs only on a pull request that changes .worklane/ (the paths filter), so it is in no required list
+# (test/update-checks.test.ts: those hold exactly the checks every PR runs). Making it required is the owner's
+# change: GitHub leaves a required check pending on a PR its paths filter skips, so that change drops the filter
+# (the script itself passes a PR with no .worklane/ change at once) and adds it to .worklane/config.yaml's
+# required_checks and the main ruleset together.
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+    paths:
+      - '.worklane/**'
 concurrency:
   group: installed-engine-config-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true

@@ -16,8 +16,9 @@
 //   - every top-level .worklane/*.yaml the change adds or edits must be one that loader reads.
 // No skip label and no exception (#810): a PR meant to land after an engine upgrade waits, as a draft, until the pin
 // on main includes that upgrade, and passes then.
-// A change outside .worklane/ has nothing to load: it prints so and exits 0, so the check can be required without
-// holding every other PR. Exit 1: refused, or it couldn't check.
+// A change outside .worklane/ has nothing to load: it prints so and exits 0, before fetching any engine (the
+// workflow's paths filter already skips such PRs; this keeps the script right without it). Exit 1: refused, or it
+// couldn't check.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -66,17 +67,17 @@ async function main() {
   const root = gitText('rev-parse', '--show-toplevel');
   if (!root) fail('not inside a git checkout');
 
-  // What the change touches under .worklane/. Nothing: nothing to load, and no engine is fetched.
-  const diff = git('diff', '--name-only', '--no-renames', '-z', base, head, '--', `${CONFIG_DIR}/`);
-  if (diff.status !== 0) fail(`can't diff ${base} against ${head}: ${lastLine(diff.stderr)}`);
-  const changed = diff.stdout.split('\0').filter(Boolean);
-  if (!changed.length) {
+  // Whether the change touches .worklane/ at all: the same tree id at both ends (or none at either) means nothing to
+  // load, and no engine is fetched.
+  const treeAt = (rev) => gitText('rev-parse', '-q', '--verify', `${rev}:${CONFIG_DIR}`);
+  if (treeAt(base) === treeAt(head)) {
     say(`no change under ${CONFIG_DIR}/ between ${base.slice(0, 12)} and ${head.slice(0, 12)}: nothing to load`);
     return;
   }
-  // The top-level config files the change adds or edits (a deleted one has nothing to load; the loader itself
-  // names a required one that is gone).
-  const changedYaml = changed.filter((f) => /^[^/]+\/[^/]+\.ya?ml$/.test(f) && has(head, f)).map((f) => f.slice(CONFIG_DIR.length + 1));
+  // The top-level config files the change adds or edits: a *.yaml/*.yml entry at --head whose mode or blob differs
+  // from --base's (a deleted one has nothing to load; the loader itself names a required one that is gone).
+  const atBase = entriesAt(base);
+  const changedYaml = [...entriesAt(head)].filter(([name, id]) => /\.ya?ml$/.test(name) && atBase.get(name) !== id).map(([name]) => name);
 
   const { tag, commit, source } = installed(base);
   // Signed by a release signer the base lists, and pointing at the pinned commit: the release workflow's own check.
@@ -101,6 +102,20 @@ async function main() {
     );
   }
   say(`${CONFIG_DIR}/ at ${head.slice(0, 12)} loads with the installed engine ${engine}${changedYaml.length ? `; changed: ${changedYaml.join(', ')}` : ''}`);
+}
+
+/** The files directly in .worklane/ at `rev`, as name -> "mode object id" (none when it has no .worklane/). */
+function entriesAt(rev) {
+  const out = new Map();
+  if (!has(rev, CONFIG_DIR)) return out;
+  const r = git('ls-tree', '-z', rev, `${CONFIG_DIR}/`);
+  if (r.status !== 0) fail(`can't list ${CONFIG_DIR}/ at ${rev.slice(0, 12)}: ${lastLine(r.stderr)}`);
+  for (const entry of r.stdout.split('\0').filter(Boolean)) {
+    const tab = entry.indexOf('\t');
+    const [mode, type, id] = entry.slice(0, tab).split(' ');
+    if (type === 'blob') out.set(entry.slice(tab + 1).slice(CONFIG_DIR.length + 1), `${mode} ${id}`);
+  }
+  return out;
 }
 
 /** The engine this repo's machines run: the pin as committed at `base`, else the newest release tag. */

@@ -238,12 +238,12 @@ test("the workflow's step runs the base's copy of the check: a PR that rewrites 
   f.done();
 });
 
-test('the workflow runs the check on every pull request, from the base, with no skip', () => {
+test('the workflow runs the check on every pull request that changes .worklane/, from the base, with no skip', () => {
   const text = workflow();
   const wf = parse(text) as { on: Record<string, Record<string, unknown>>; permissions: Record<string, string>; jobs: Record<string, { if?: unknown; steps: { run?: string; if?: unknown }[] }> };
-  // No paths filter: a required check skipped by one stays pending and holds every other PR; the script decides.
   assert.deepEqual(Object.keys(wf.on), ['pull_request']);
-  assert.equal(wf.on.pull_request!.paths, undefined);
+  assert.deepEqual(wf.on.pull_request!.paths, ['.worklane/**'], 'every PR that changes .worklane/, and only those');
+  assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened'], 'each push to such a PR');
   assert.equal(wf.on.pull_request!['paths-ignore'], undefined);
   assert.deepEqual(wf.permissions, { contents: 'read' });
   const job = wf.jobs['installed-engine-config']!;
