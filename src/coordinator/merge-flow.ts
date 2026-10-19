@@ -1058,7 +1058,7 @@ export abstract class MergeFlow extends FixRuns {
       branch: this.branch,
       required: () => this.d.cfg.project.required_checks,
       // #727: checks from GitHub count only from their pinned source, as for a PR's readiness (src/check-source.ts).
-      ...(this.pinned.enforced || w.api.runSources ? { pins: { sources: () => this.d.cfg.project.required_check_sources, github: () => this.pinned.githubApps(), repo: this.d.cfg.project.project.repo } } : {}),
+      ...(this.pinned.enforced || w.api.runSources ? { pins: { sources: () => this.d.cfg.project.required_check_sources, github: (judging, configured) => this.pinned.githubAppsFor(judging, configured), repo: this.d.cfg.project.project.repo } } : {}),
       // No CI: the watch is off, and says what that means (src/ci-none.ts).
       offWhy: () => (ciIsNone(this.d.cfg.project) ? CI_NONE_MAIN_WATCH : null),
       api: w.api,

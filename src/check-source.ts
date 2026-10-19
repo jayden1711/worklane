@@ -264,6 +264,17 @@ export function checkSourceDoctor(p: { land_mode: string; ci?: string | undefine
 export const CHECK_APPS_TTL_MS = 10 * 60_000;
 
 /**
+ * Backlog.checkApps when GitHub refused the branch read for permission or answered 404: `rules` is what the rules name.
+ * Not an answer for a judgement with a pinned name (that stays unknown, fail closed); for one with none, no App named
+ * by classic protection (the owner's decision (a), 2026-10-19). A rate limit or a 5xx is a plain error: it waits.
+ */
+export class BranchDenied extends Error {
+  constructor(readonly rules: GithubCheckApps) {
+    super('the branch read was refused (a 403 for permission, or a 404)');
+  }
+}
+
+/**
  * The checks on a commit as the engine judges them (pinnedChecks), and the one maker of JudgedChecks. It reads its
  * facts itself: GitHub's checks from the backlog it is built over, and under No CI (src/ci-none.ts) this instance's
  * own test runs from its event log, which take the place of any check of their names (never GitHub's). It takes no
@@ -272,6 +283,8 @@ export const CHECK_APPS_TTL_MS = 10 * 60_000;
  */
 export class PinnedChecks {
   private apps: { at: number; apps: GithubCheckApps } | null = null;
+  /** The branch read refused for permission or 404 while GitHub has never answered (BranchDenied): what the rules name. */
+  private denied: { at: number; rules: GithubCheckApps } | null = null;
   constructor(
     private readonly d: {
       backlog: Pick<Backlog, 'checks' | 'checkApps'>;
@@ -303,8 +316,8 @@ export class PinnedChecks {
   async of(sha: string, opts: { judging?: readonly string[] } = {}): Promise<JudgedChecks> {
     if (!this.enforced) return this.withLocal(await this.d.backlog.checks(sha), sha);
     const configured = this.d.configured();
-    const apps = await this.githubApps();
     const judging = opts.judging ?? this.d.required?.();
+    const apps = judging ? await this.githubAppsFor(judging, configured) : await this.githubApps();
     const pinned = !judging || apps === null || judging.some((n) => pinOf(n, configured, apps) !== null);
     const all = await this.d.backlog.checks(sha, { pinned });
     return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha }), sha);
@@ -326,13 +339,29 @@ export class PinnedChecks {
   async githubApps(): Promise<GithubCheckApps | null> {
     if (!this.d.backlog.checkApps) return {};
     const now = (this.d.now ?? Date.now)();
-    if (!this.apps || now - this.apps.at >= CHECK_APPS_TTL_MS) {
+    const fresh = (x: { at: number } | null) => !!x && now - x.at < CHECK_APPS_TTL_MS;
+    if (!fresh(this.apps) && !(this.apps === null && fresh(this.denied))) {
       try {
         this.apps = { at: now, apps: await this.d.backlog.checkApps(this.d.branch()) };
-      } catch {
-        // kept: the last answer, asked again next time
+        this.denied = null;
+      } catch (e) {
+        // The branch read refused for permission or 404 (BranchDenied): kept apart, for githubAppsFor. Anything else:
+        // the last answer is kept, and asked again next time.
+        if (e instanceof BranchDenied) this.denied = { at: now, rules: e.rules };
       }
     }
     return this.apps?.apps ?? null;
+  }
+
+  /**
+   * GitHub's App per check for a judgement of `judging`: githubApps(), or, when GitHub has never answered because the
+   * branch read was refused for permission or 404 (BranchDenied), what the rules name (no App named by classic
+   * protection), but only when no judged name is pinned by config.yaml or those rules: the owner's decision (a),
+   * 2026-10-19, so a bare-names install gets main's verdict. With a judged name pinned, null as before (fail closed).
+   */
+  async githubAppsFor(judging: readonly string[], configured: Record<string, CheckPin> = this.d.configured()): Promise<GithubCheckApps | null> {
+    const apps = await this.githubApps();
+    if (apps !== null || !this.denied) return apps;
+    return judging.some((n) => pinOf(n, configured, this.denied!.rules) !== null) ? null : this.denied.rules;
   }
 }
