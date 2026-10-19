@@ -684,9 +684,15 @@ export interface ProjectRunAs {
 // through its symlinks: an empty tmpfs over a directory, /dev/null over a file. Its own PID namespace and /proc, so no
 // process outside it (a `claude` holding a login) can be read through /proc/<pid>. The devices and network stay
 // (GPU checks, installs). A tool that can't start is refused with SANDBOX_UNAVAILABLE, before the command runs.
+// INVARIANT: this bash starts with an empty environment (projectCommand), so nothing a project sets (SHELLOPTS,
+// BASHOPTS, GLOBIGNORE, IFS, ...) reaches it; the project's variables are the inner `env -i` after `--`, which it
+// passes on as words. Its glob and shell options are reset all the same.
 const LINUX_SANDBOX = [
+  'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
+  // readlink by its path (no function or PATH entry can stand in for it); none at all: refused, never nothing hidden.
+  `rl=/usr/bin/readlink; [ -x "$rl" ] || rl=/bin/readlink; [ -x "$rl" ] || { printf '%s\\n' "project command not run: no readlink to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
   'b=$1 h=$2; shift 2; hide=()',
-  'add() { local r; r=$(PATH=/usr/bin:/bin readlink -f -- "$1" 2>/dev/null) || return 0',
+  'add() { local r; r=$("$rl" -f -- "$1" 2>/dev/null) || return 0',
   '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); fi; }',
   'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
@@ -715,11 +721,12 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
-  const hide = (runAs.hide ?? []).filter((p) => p.startsWith('/'));
+  // Fail closed: a runAs without its hide list (a job file an older engine wrote, a caller outside the type) is refused,
+  // never run with the default masks only.
+  if (!Array.isArray(runAs.hide)) throw new Error(`a project command as ${runAs.user} needs its sandbox's hide list (runAs.hide); refusing to run it without`);
+  const hide = runAs.hide.filter((p) => p.startsWith('/'));
   if (!runAs.home.startsWith('/')) throw new Error(`the agent user's home must be an absolute path: ${runAs.home}`);
   if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
-  const boxed: [string, string[]] =
-    process.platform === 'darwin' ? ['/usr/bin/sandbox-exec', ['-p', seatbeltProfile(runAs.home, hide), file, ...args]] : [file, ['-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', file, ...args]];
   const env = {
     ...own,
     HOME: runAs.home,
@@ -738,7 +745,17 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     GIT_CONFIG_VALUE_1: '*',
   };
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
-  const [f, a] = asUser(runAs.user, boxed[0], boxed[1], outboundEnv(env));
+  const full = outboundEnv(env);
+  if (process.platform === 'darwin') {
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(runAs.home, hide), file, ...args], full);
+    return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+  }
+  // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
+  const vars = Object.entries(full)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => `${k}=${v}`);
+  const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
+  const [f, a] = asUser(runAs.user, file, ['-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 

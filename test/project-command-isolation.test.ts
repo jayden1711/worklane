@@ -23,6 +23,7 @@ import { judgeFlow, type runBrowserCheck } from '../src/browser/check.js';
 import type { FlowEvidence, runFlow } from '../src/browser/run.js';
 import { baselineSource, browserChecks } from '../src/coordinator/browser.js';
 import { repoRoot } from './helpers.js';
+import { projectEnvProblem } from '../src/project-env.js';
 
 const { projectCommand } = osAdapter;
 const posix = process.platform === 'linux';
@@ -191,9 +192,51 @@ test('check.sh probes the exact sandbox a project command starts in, and the com
   const probe = osAdapter.PROJECT_SANDBOX_PROBE;
   assert.ok(probe, 'one shared probe argv (src/os/index.ts)');
   const check = readFileSync(join(repoRoot, 'scripts', 'setup', 'check.sh'), 'utf8');
-  assert.ok(check.split('\n').some((l) => l.endsWith(`check sudo -u "$agent" ${probe.join(' ')}`)), 'check.sh runs PROJECT_SANDBOX_PROBE as the agent user');
+  assert.ok(check.split('\n').includes(`label="$agent can start a project command's sandbox"; check sudo -u "$agent" ${probe.join(' ')}`), 'check.sh runs PROJECT_SANDBOX_PROBE as the agent user, a live line');
+  // CI's test shards check the same probe as another user before the tests that need it.
+  const ci = readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8');
+  assert.ok(ci.split('\n').some((l) => l.trim() === `sudo -n -u nobody ${probe.join(' ')}`), 'ci.yml probes PROJECT_SANDBOX_PROBE as nobody');
   const pc = projectCommand('true', { user: 'shop-agent', home: '/var/agent', hide: [] });
   assert.ok(pc.args.some((a) => a.includes(`box=(${osAdapter.PROJECT_SANDBOX_ARGS.join(' ')})`)), 'the wrapper starts bubblewrap with those flags');
+});
+
+test('the project\'s environment never reaches the sandbox wrapper\'s own shell: only the command inside bubblewrap gets it', { skip: !posix && 'bubblewrap is Linux only' }, () => {
+  const pc = projectCommand('true', { user: 'shop-agent', home: '/var/agent', hide: ['/srv/i/key'] }, { WORKERS: '4' });
+  // sudo -n -u <agent> -- /usr/bin/env -i <the wrapper's bash>: no variable at all before it.
+  assert.deepEqual(pc.args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
+  assert.ok(!pc.args[6]!.includes('='), `the wrapper's shell gets no environment: ${pc.args[6]}`);
+  assert.equal(pc.args[7], '-c');
+  const sep = pc.args.indexOf('--', 8);
+  assert.ok(sep > 0, 'the wrapper\'s own words end at --');
+  assert.deepEqual(pc.args.slice(sep + 1, sep + 3), ['/usr/bin/env', '-i'], 'the command\'s environment is set inside bubblewrap');
+  for (const v of ['WORKERS=4', 'HOME=/var/agent', 'GIT_CONFIG_COUNT=2']) assert.ok(pc.args.indexOf(v) > sep, `${v} only after --`);
+});
+
+for (const [what, env] of [
+  ['SHELLOPTS=noglob', { SHELLOPTS: 'noglob' }],
+  ['BASHOPTS=failglob (no API key file)', { BASHOPTS: 'failglob' }],
+] as const) {
+  test(`a tests.yaml variable can't turn the masks off: ${what}`, { skip: realSkip }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'wl-713-env-'));
+    const home = join(root, 'agent');
+    const login = `PLANTED-${randomBytes(12).toString('hex')}`;
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', '.credentials.json'), `${login}\n`, { mode: 0o600 });
+    const pc = projectCommand('cat ~/.claude/.credentials.json 2>&1; true', { user: 'shop-agent', home, hide: [] }, { ...env });
+    const r = spawnSync(pc.args[4]!, pc.args.slice(5), { cwd: root, env: {}, encoding: 'utf8', timeout: 60_000 });
+    assert.ok(!`${r.stdout}${r.stderr}`.includes(login), `the login was read: ${r.stdout}`);
+    assert.equal(r.status, 0, r.stderr);
+  });
+}
+
+test('bash\'s own expansion and startup variables are reserved: a project can\'t set them', () => {
+  for (const name of ['SHELLOPTS', 'BASHOPTS', 'GLOBIGNORE', 'EXECIGNORE', 'BASH_ENV', 'ENV', 'BASH_FUNC_x%%', 'BASH_XTRACEFD', 'BASH_COMPAT', 'IFS']) {
+    assert.match(projectEnvProblem(name) ?? 'accepted', /harness or the system|not a variable name/, name);
+  }
+});
+
+test('a runAs without its hide list is refused, never run with the default masks only', { skip: !posix && 'bubblewrap is Linux only' }, () => {
+  assert.throws(() => projectCommand('true', { user: 'shop-agent', home: '/var/agent' } as unknown as ProjectRunAs), /hide list/);
 });
 
 test('credentials.yaml refuses a relative path: the sandbox hides each by its absolute path', () => {

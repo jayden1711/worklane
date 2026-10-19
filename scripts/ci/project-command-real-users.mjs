@@ -40,7 +40,7 @@ assert.ok(!/sk-ant-/.test(r.stdout + r.stderr), 'a project command read a creden
 assert.equal(r.stdout.trim().split('\n').pop(), user, 'it ran as the agent user');
 
 // And a check that runs git in the coordinator's checkout still gets git's answer inside the sandbox.
-const g = projectCommand('git diff --exit-code && git log -1 --format=%s', { user, home });
+const g = projectCommand('git diff --exit-code && git log -1 --format=%s', { user, home, hide: [] });
 const gr = run(g.file, g.args, checkout);
 assert.equal(gr.status, 0, gr.stderr);
 console.log(`git in the checkout: ${gr.stdout.trim()}`);
