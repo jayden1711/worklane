@@ -695,44 +695,63 @@ export interface ProjectRunAs {
 // cost the sandbox its devices.)
 const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
-  // readlink by its path (no function or PATH entry can stand in for it); none at all: refused, never nothing hidden.
-  `rl=/usr/bin/readlink; [ -x "$rl" ] || rl=/bin/readlink; [ -x "$rl" ] || { printf '%s\\n' "project command not run: no readlink to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
-  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=(); maxd=0; bad=()',
+  // readlink, stat and find by their paths (no function or PATH entry can stand in for them); a missing one: refused,
+  // never nothing hidden.
+  `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
+  `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}`,
+  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
-  // Each hidden path is resolved here, one component and one symlink at a time, so every symlink met at any hop
-  // (also one reached through another) is checked. One this user could change, or swap by renaming a directory, would
-  // let one command unmask the credential for the next. So a symlink is followed only when this user neither owns
-  // nor can write its directory, and every directory above it is then bound onto itself (it can't be renamed). Any
-  // other symlink, or a chain over 40 links, is refused, as a missing sandbox is. Every refusal is collected first,
-  // so one message names every path to fix.
-  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); bad+=("project command not run: $1 is a symlink (to \${t:-?}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"); }`,
-  `unres() { bad+=("project command not run: $1 $2; name the credential's real path in credentials.yaml"); }`,
-  // A path is absent (nothing to hide) only when a component really isn't there, or sits in a directory this user
-  // neither can search nor owns (the coordinator's: it can't reach it by that name at all). Any other failure to look
-  // is refused: a name too long to check, or a directory this user owns but made unsearchable (it could chmod it
-  // back after the masks were set).
-  'walk() { local todo=${1#/} cur= c d t n=0',
+  // Every refusal is collected first (each once), so one message names every path to fix. Paths and link targets are
+  // shown quoted: they are the agent's to name, and a newline in one can't start a line of its own.
+  'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
+  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
+  `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  // INVARIANT (#787 rounds 7, 8): every decision about a component rests on ONE observation of it, one lstat (stat
+  // without -L) giving its type and owner, or its error, never two tests the agent could change in between. What the
+  // agent can't change is what makes a decision stable: who owns a directory, and whether one it doesn't own is
+  // writable to it. Each hidden path is resolved one component and one symlink at a time, so every symlink at any hop
+  // is checked:
+  // - a symlink is followed only from a directory the agent neither owns nor can write (it can't swap it), and every
+  //   directory above it is bound onto itself (it can't be renamed); any other symlink, or over 40, is refused;
+  // - a component that isn't there (ENOENT, ENOTDIR): nothing to hide;
+  // - EACCES: nothing to hide only when no directory walked so far is the agent's (owned or writable): it is then the
+  //   coordinator's, which the agent can't open by that name at all. Under one of the agent's own, it could make the
+  //   directory searchable again after the masks were set: refused, whatever the mode now;
+  // - any other error, or a name too long to check: refused.
+  `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
+  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0',
+  '  if [ -w / ]; then cw=1 own=1; fi',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
   // A `..` (only from a root-made link's target: projectCommand refuses one in a hide path) leaves a directory: bound
   // onto itself first, so no command can remove or rename it to make the path resolve elsewhere for the next.
-  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; continue ;; esac',
+  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
+  '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
+  '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; continue ;; esac',
   `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
-  '    if [ -L "$cur/$c" ]; then',
-  '      n=$((n + 1)); [ "$n" -le 40 ] || { refuse "$cur/$c"; return 2; }',
-  '      d=${cur:-/}; if [ -O "$d" ] || [ -w "$d/" ]; then refuse "$cur/$c"; return 2; fi',
-  '      above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
-  '      case $t in /*) cur= ;; esac; todo=${t#/}${todo:+/$todo}',
-  '    elif [ -e "$cur/$c" ]; then cur=$cur/$c',
-  '    else d=${cur:-/}',
-  `      if [ -d "$d" ] && [ ! -x "$d" ] && [ -O "$d" ]; then unres "$1" "goes through $d, which the agent user owns but can't search (it could make it searchable again)"; return 2; fi`,
-  '      return 1; fi',
-  '  done; R=${cur:-/}; }',
+  '    st "$cur/$c"',
+  '    if [ "$S" -ne 0 ]; then',
+  '      case $E in "No such file or directory"|"Not a directory") return 1 ;; "Permission denied") if [ "$own" = 0 ]; then return 1; fi',
+  '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; return 2 ;; esac',
+  '      unres "$1" "cannot be checked ($E)"; return 2',
+  '    fi',
+  '    case $T in',
+  '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
+  '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
+  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi ;; esac; todo=${t#/}${todo:+/$todo} ;;',
+  '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi ;;',
+  '      *) cur=$cur/$c cw=0 ;;',
+  '    esac',
+  '  done; R=${cur:-/} RT=$T; }',
   'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "is under /proc, /sys or /dev"; return ;; esac',
   '  walk "$1"; case $? in 1|2) return ;; esac; r=$R',
   '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "resolves under /proc, /sys or /dev"; return ;; esac',
-  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); above "$r"; elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); above "$r"; else unres "$1" "does not resolve to a file its sandbox can hide"; fi; }',
-  'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
+  '  if [ "$RT" = directory ]; then hide+=(--tmpfs "$r"); else hide+=(--ro-bind /dev/null "$r"); fi; above "$r"; }',
+  // The default masks: listed by find, whose failure shows. A glob that can't read its directory says nothing, and a
+  // home or ~/.config made searchable but unreadable would hide nothing (#787 round 7). Any failure: refused.
+  'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
+  // (A home or ~/.config that isn't a directory holds nothing to list: nothing is hidden there, and nothing could be.)
+  'walk "$h"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi; fi',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
   `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',

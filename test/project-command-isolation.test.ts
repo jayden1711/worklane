@@ -6,7 +6,7 @@
 // without the `sudo -n -u <agent> --` in front of it), and its "home" is a temp dir holding planted stand-in keys.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
@@ -303,7 +303,67 @@ test('a hide path in a directory the agent owns but made unsearchable is refused
   chmodSync(join(home, 'keys'), 0o700);
   assert.ok(!next.stdout.includes(value), `the key was read: ${next.stdout}`);
   assert.equal(next.status, osAdapter.SANDBOX_UNAVAILABLE, next.stderr);
-  assert.match(next.stderr, /owns but can't search/);
+  assert.match(next.stderr, /owns or can write but cannot search now/);
+});
+
+// The reviewer's round-7 E2: a home or ~/.config made searchable but unreadable. A glob there said nothing, so the
+// default masks were skipped, while a command needs only search permission to open ~/.claude/.credentials.json.
+for (const [where, mode] of [['~', 0o311], ['~', 0o100], ['~/.config', 0o311], ['~/.config', 0o100]] as const) {
+  test(`a ${where} made searchable but unreadable (${mode.toString(8)}) can't unmask the default credential paths for the next command`, { skip: realSkip }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'wl-713-e2-'));
+    const home = join(root, 'agent');
+    const login = `PLANTED-${randomBytes(12).toString('hex')}`;
+    const key = `PLANTED-${randomBytes(12).toString('hex')}`;
+    mkdirSync(join(home, '.claude'), { recursive: true });
+    writeFileSync(join(home, '.claude', '.credentials.json'), `${login}\n`, { mode: 0o600 });
+    mkdirSync(join(home, '.config', 'shop-claude-key'), { recursive: true });
+    writeFileSync(join(home, '.config', 'shop-claude-key', 'api_key'), `${key}\n`, { mode: 0o600 });
+    const dir = where === '~' ? home : join(home, '.config');
+    const runAs = { user: 'shop-agent', home, hide: [] };
+    try {
+      asStandIn(`chmod ${mode.toString(8)} ${JSON.stringify(dir)}`, runAs, root);
+      const next = asStandIn(`cat ${join(home, '.claude', '.credentials.json')} ${join(home, '.config', 'shop-claude-key', 'api_key')} 2>&1; true`, runAs, root);
+      for (const v of [login, key]) assert.ok(!next.stdout.includes(v), `read: ${next.stdout}`);
+      assert.equal(next.status, osAdapter.SANDBOX_UNAVAILABLE, next.stderr);
+      assert.match(next.stderr, /cannot be listed for its credential files|cannot search now/);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  });
+}
+
+// The reviewer's round-7 E3: a command still running flips a directory of its own between 000 and 700 while the next
+// command's walk looks. Every decision now rests on one lstat's own result, and EACCES under the agent's own
+// directory refuses whatever the mode is a moment later: refused or masked, never read.
+test('a command flipping its own directory\'s mode while the next starts never unmasks a credential', { skip: realSkip, timeout: 120_000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-race-'));
+  const home = join(root, 'agent');
+  const key = `PLANTED-${randomBytes(12).toString('hex')}`;
+  const login = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(home, 'keys', 'provider'), { recursive: true });
+  writeFileSync(join(home, 'keys', 'provider', 'open'), `${key}\n`, { mode: 0o600 });
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(join(home, '.claude', '.credentials.json'), `${login}\n`, { mode: 0o600 });
+  const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'provider', 'open')] };
+  const flip = (dir: string) => {
+    const pc = projectCommand(`end=$((SECONDS + 4)); while [ "$SECONDS" -lt "$end" ]; do chmod 000 ${JSON.stringify(dir)}; chmod 700 ${JSON.stringify(dir)}; done`, runAs);
+    return new Promise<void>((res) => spawn(pc.args[4]!, pc.args.slice(5), { cwd: root, env: {}, stdio: 'ignore' }).on('close', () => res()));
+  };
+  let runs = 0;
+  let leaks = 0;
+  for (const dir of [join(home, 'keys', 'provider'), home]) {
+    const a = flip(dir);
+    const t0 = performance.now();
+    while (performance.now() - t0 < 3_000) {
+      const b = asStandIn(`for i in $(seq 200); do cat ${join(home, 'keys', 'provider', 'open')} ${join(home, '.claude', '.credentials.json')} 2>/dev/null && break; done; true`, runAs, root);
+      runs++;
+      if (b.stdout.includes(key) || b.stdout.includes(login)) leaks++;
+    }
+    await a;
+    chmodSync(dir, 0o700);
+  }
+  assert.equal(leaks, 0, `${leaks} of ${runs} runs read a credential`);
+  assert.ok(runs >= 4, `the race ran (${runs} runs)`);
 });
 
 test('a refusal names every symlink to fix, where each points, and how to remove it as the agent user', { skip: realSkip }, () => {
@@ -317,9 +377,11 @@ test('a refusal names every symlink to fix, where each points, and how to remove
   assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE);
   assert.equal(r.stdout, '');
   for (const [link, target] of [[join(home, '.claude-x'), '/'], [join(home, '.config', 'z-claude-key'), '/etc']] as const) {
-    assert.ok(r.stderr.includes(`${link} is a symlink (to ${target})`), `${link} not named: ${r.stderr}`);
-    assert.ok(r.stderr.includes(`sudo -u shop-agent rm -- ${link}`) || r.stderr.includes(`sudo -u shop-agent rm -- '${link}'`), r.stderr);
+    // Quoted (round 8): the agent names the link and its target, so neither can start a line of its own.
+    assert.ok(r.stderr.includes(`'${link}' is a symlink (to '${target}')`), `${link} not named: ${r.stderr}`);
+    assert.ok(r.stderr.includes(`sudo -u shop-agent rm -- '${link}'`), r.stderr);
   }
+  assert.equal(r.stderr.trim().split('\n').length, 2, `one line per link: ${r.stderr}`);
   assert.doesNotMatch(r.stderr, /replace it with the directory it points to/);
 });
 
@@ -373,7 +435,8 @@ test('a symlink on the way to a hidden path, in a directory the agent can write,
   assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, r.stderr);
   assert.ok(!existsSync(join(root, 'ran.txt')), 'nothing of the command ran');
   const esc = (s: string) => s.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&');
-  assert.match(r.stderr, new RegExp(`${esc(join(home, '.config'))} is a symlink \\(to ${esc(join(home, 'realcfg'))}\\) the agent user could change.*remove it as the agent user: sudo -u shop-agent rm -- .*replace it with a real directory the agent may read`));
+  assert.match(r.stderr, new RegExp(`'${esc(join(home, '.config'))}' is a symlink \\(to '${esc(join(home, 'realcfg'))}'\\) the agent user could change.*remove it as the agent user: sudo -u shop-agent rm -- '${esc(join(home, '.config'))}'.*replace it with a real directory the agent may read`));
+  assert.equal(r.stderr.trim().split('\n').length, 1, `named once: ${r.stderr}`);
 });
 
 test('a hide path under /proc (another name for a file, per process) is refused, never skipped as unreadable', { skip: realSkip }, () => {
