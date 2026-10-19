@@ -170,7 +170,8 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   const setupErrors: string[] = [];
   for (const step of o.setup) {
     const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
-    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
+    // No stdin (a setup step reads none): never a socket, which bash's rshd check treats as a remote login.
+    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000, stdio: ['ignore', 'pipe', 'pipe'] });
     // A setup step's words go into events and prompts: credential-shaped text redacted (#713).
     if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${redactString(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }

@@ -98,6 +98,11 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
     job = { ...job, ...patch };
     writeJob(stateDir, job);
   };
+  // A job an older engine queued has no sandbox hide list: projectCommand refuses it (#713). Say so by name, at once.
+  if (job.runAs && !Array.isArray((job.runAs as Partial<ProjectRunAs>).hide)) {
+    update({ status: 'error', runnerPid: process.pid, finishedAt: new Date().toISOString(), error: 'queued before this engine version: it has no sandbox hide list for its agent user (#713), so it was not run; queue it again' });
+    return job;
+  }
   update({ status: 'waiting', runnerPid: process.pid, waitingFor: 'machine-wide full-run lock' });
   for (;;) {
     const got = await fullRunLock(`${job.kind} job ${id} (pid ${process.pid})`, 24 * 3600_000);

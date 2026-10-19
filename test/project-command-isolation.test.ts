@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 // Namespace imports: run against the code before #713 (the fail-without), a name it lacks is undefined, not a load error.
@@ -24,6 +24,7 @@ import type { FlowEvidence, runFlow } from '../src/browser/run.js';
 import { baselineSource, browserChecks } from '../src/coordinator/browser.js';
 import { repoRoot } from './helpers.js';
 import { projectEnvProblem } from '../src/project-env.js';
+import { readJob, runJob } from '../src/queue.js';
 
 const { projectCommand } = osAdapter;
 const posix = process.platform === 'linux';
@@ -38,7 +39,8 @@ function asStandIn(command: string, runAs: { user: string; home: string; hide?: 
   const pc = projectCommand(command, { ...runAs, hide: runAs.hide ?? [] }, {}, o);
   assert.equal(pc.file, 'sudo');
   assert.deepEqual(pc.args.slice(0, 5), ['-n', '-u', runAs.user, '--', '/usr/bin/env']);
-  return spawnSync(pc.args[4]!, pc.args.slice(5), { cwd, env: {}, encoding: 'utf8', timeout: 60_000 });
+  // stdin /dev/null: never a socket (bash's rshd check would read this machine's ~/.bashrc in a wrapper without --norc).
+  return spawnSync(pc.args[4]!, pc.args.slice(5), { cwd, env: {}, encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 /** An agent home with a stand-in key at every credential path, and one more key outside it (credentials.yaml's). */
@@ -54,22 +56,25 @@ function plantedHome() {
   const keys = {
     login: key(join(home, '.claude', '.credentials.json')),
     state: key(join(home, '.claude.json')),
-    profile: key(join(root, 'elsewhere', 'p1', '.credentials.json')),
+    profile: key(join(home, '.claude-profiles', 'p1', '.credentials.json')),
     apiKey: key(join(home, '.config', 'shop-claude-key', 'api_key')),
     provider: key(join(root, 'keys', 'provider')),
+    linked: key(join(root, 'elsewhere', 'p2', '.credentials.json')),
   };
-  // A profiles dir that is a symlink: what it points at is hidden, not just the link.
-  symlinkSync(join(root, 'elsewhere'), join(home, '.claude-profiles'));
+  // A symlink to a credential, in a directory the agent can't write (it can't be swapped): what it points at is hidden.
+  mkdirSync(join(root, 'ro'));
+  symlinkSync(join(root, 'elsewhere'), join(root, 'ro', 'profiles'));
+  chmodSync(join(root, 'ro'), 0o555);
   writeFileSync(join(home, 'notes.txt'), 'ordinary\n');
   const work = join(root, 'work');
   mkdirSync(work);
-  return { root, home, keys, work, provider: join(root, 'keys', 'provider') };
+  return { root, home, keys, work, provider: join(root, 'keys', 'provider'), viaLink: join(root, 'ro', 'profiles', 'p2', '.credentials.json') };
 }
 
 test('a check run as the agent user reads nothing at its credential paths; its own work and files are as before', { skip: realSkip }, () => {
   const p = plantedHome();
-  const runAs = { user: 'shop-agent', home: p.home, hide: [p.provider] };
-  const paths = [join(p.home, '.claude', '.credentials.json'), join(p.home, '.claude.json'), join(p.home, '.claude-profiles', 'p1', '.credentials.json'), join(p.root, 'elsewhere', 'p1', '.credentials.json'), join(p.home, '.config', 'shop-claude-key', 'api_key'), p.provider];
+  const runAs = { user: 'shop-agent', home: p.home, hide: [p.provider, p.viaLink] };
+  const paths = [join(p.home, '.claude', '.credentials.json'), join(p.home, '.claude.json'), join(p.home, '.claude-profiles', 'p1', '.credentials.json'), p.viaLink, join(p.root, 'elsewhere', 'p2', '.credentials.json'), join(p.home, '.config', 'shop-claude-key', 'api_key'), p.provider];
   const r = asStandIn(`for f in ${paths.map((x) => JSON.stringify(x)).join(' ')}; do cat "$f"; done; grep -rh PLANTED "$HOME" 2>/dev/null; cat ~/notes.txt; echo built > out.txt`, runAs, p.work);
   const seen = `${r.stdout}\n${r.stderr}`;
   for (const [what, v] of Object.entries(p.keys)) assert.ok(!seen.includes(v), `the ${what} key was read: ${seen}`);
@@ -205,7 +210,7 @@ test('the project\'s environment never reaches the sandbox wrapper\'s own shell:
   // sudo -n -u <agent> -- /usr/bin/env -i <the wrapper's bash>: no variable at all before it.
   assert.deepEqual(pc.args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
   assert.ok(!pc.args[6]!.includes('='), `the wrapper's shell gets no environment: ${pc.args[6]}`);
-  assert.equal(pc.args[7], '-c');
+  assert.deepEqual(pc.args.slice(7, 10), ['--norc', '--noprofile', '-c'], 'and reads no startup file');
   const sep = pc.args.indexOf('--', 8);
   assert.ok(sep > 0, 'the wrapper\'s own words end at --');
   assert.deepEqual(pc.args.slice(sep + 1, sep + 3), ['/usr/bin/env', '-i'], 'the command\'s environment is set inside bubblewrap');
@@ -223,7 +228,7 @@ for (const [what, env] of [
     mkdirSync(join(home, '.claude'), { recursive: true });
     writeFileSync(join(home, '.claude', '.credentials.json'), `${login}\n`, { mode: 0o600 });
     const pc = projectCommand('cat ~/.claude/.credentials.json 2>&1; true', { user: 'shop-agent', home, hide: [] }, { ...env });
-    const r = spawnSync(pc.args[4]!, pc.args.slice(5), { cwd: root, env: {}, encoding: 'utf8', timeout: 60_000 });
+    const r = spawnSync(pc.args[4]!, pc.args.slice(5), { cwd: root, env: {}, encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'] });
     assert.ok(!`${r.stdout}${r.stderr}`.includes(login), `the login was read: ${r.stdout}`);
     assert.equal(r.status, 0, r.stderr);
   });
@@ -244,4 +249,67 @@ test('credentials.yaml refuses a relative path: the sandbox hides each by its ab
   assert.equal(r.success, false);
   assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['github.path', 'must be an absolute path'], ['agent_api_key', 'must be an absolute path']]);
   assert.equal(instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/srv/i/gh' } }).success, true);
+});
+
+test('the wrapper\'s bash runs no ~/.bashrc a sandboxed command planted, even with a socket on stdin (bash\'s rshd check)', { skip: realSkip }, () => {
+  // The wrapper's bash takes HOME from passwd (its environment is empty): this user's real home. An outer bubblewrap
+  // binds a stand-in over it in a private mount namespace, so the real home is never read or written.
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-rc-'));
+  const fake = join(root, 'home');
+  const login = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(fake, '.claude'), { recursive: true });
+  writeFileSync(join(fake, '.claude', '.credentials.json'), `${login}\n`, { mode: 0o600 });
+  const loot = join(root, 'loot');
+  // What one sandboxed command can write (~/.bashrc isn't masked); the next command's wrapper must not run it.
+  writeFileSync(join(fake, '.bashrc'), `cat ~/.claude/.credentials.json >> ${JSON.stringify(loot)} 2>/dev/null\n`);
+  writeFileSync(join(fake, '.bash_profile'), `cat ~/.claude/.credentials.json >> ${JSON.stringify(loot)} 2>/dev/null\n`);
+  const passwdHome = userInfo().homedir;
+  const pc = projectCommand('true', { user: 'shop-agent', home: passwdHome, hide: [] });
+  const outer = [PROJECT_SANDBOX_TOOL, '--dev-bind', '/', '/', '--unshare-user', '--bind', fake, passwdHome, '--', ...pc.args.slice(4)];
+  // stdin 'pipe': a socketpair, as a node spawn's default is.
+  const r = spawnSync(outer[0]!, outer.slice(1), { cwd: root, env: {}, encoding: 'utf8', timeout: 60_000, stdio: ['pipe', 'pipe', 'pipe'] });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!(existsSync(loot) && readFileSync(loot, 'utf8').includes(login)), 'the wrapper ran the planted ~/.bashrc outside the sandbox and read the login');
+});
+
+test('a sandboxed command can\'t rename a directory above a hidden path to unmask it for the next command', { skip: realSkip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-mv-'));
+  const home = join(root, 'agent');
+  const key = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(home, '.config', 'shop-claude-key'), { recursive: true });
+  writeFileSync(join(home, '.config', 'shop-claude-key', 'api_key'), `${key}\n`, { mode: 0o600 });
+  const prov = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(home, 'keys', 'provider'), { recursive: true });
+  writeFileSync(join(home, 'keys', 'provider', 'open'), `${prov}\n`, { mode: 0o600 });
+  const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'provider', 'open')] };
+  const mv = asStandIn('mv ~/.config ~/cfg2; mv ~/keys ~/k2; mv ~/keys/provider ~/p2; echo touched > ~/.config/still-writable', runAs, root);
+  const r = asStandIn('cat ~/cfg2/shop-claude-key/api_key ~/k2/provider/open ~/p2/open ~/.config/shop-claude-key/api_key ~/keys/provider/open 2>&1; true', runAs, root);
+  for (const v of [key, prov]) assert.ok(!r.stdout.includes(v), `a renamed parent unmasked a secret: ${r.stdout}`);
+  assert.match(mv.stderr, /busy/i, 'each rename is refused');
+  assert.equal(readFileSync(join(home, '.config', 'still-writable'), 'utf8'), 'touched\n', 'the directory\'s contents stay writable');
+});
+
+test('a symlink on the way to a hidden path, in a directory the agent can write, is refused: a command could swap it', { skip: !posix && 'bubblewrap is Linux only' }, () => {
+  // An admin's layout: ~/.config a symlink to ~/realcfg, where credentials.sh's key dir is. Refused before anything
+  // runs (no bubblewrap needed), naming the symlink and the fix.
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-ln-'));
+  const home = join(root, 'agent');
+  mkdirSync(join(home, 'realcfg', 'shop-claude-key'), { recursive: true });
+  writeFileSync(join(home, 'realcfg', 'shop-claude-key', 'api_key'), 'PLANTED\n');
+  symlinkSync(join(home, 'realcfg'), join(home, '.config'));
+  const r = asStandIn('echo ran > ran.txt', { user: 'shop-agent', home, hide: [] }, root);
+  assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, r.stderr);
+  assert.ok(!existsSync(join(root, 'ran.txt')), 'nothing of the command ran');
+  assert.match(r.stderr, new RegExp(`${join(home, '.config').replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')} is a symlink in a directory the agent user can write.*replace it with the directory it points to`));
+});
+
+test('a full run queued before this version (no hide list) ends with a named reason, not "runner died"', async () => {
+  const state = mkdtempSync(join(tmpdir(), 'wl-713-q-'));
+  mkdirSync(join(state, 'jobs'));
+  const job = { id: 'old-1', kind: 'full-run', cwd: state, command: 'true', createdAt: new Date().toISOString(), status: 'queued', log: join(state, 'jobs', 'old-1.log'), runAs: { user: 'shop-agent', home: '/var/agent' } };
+  writeFileSync(join(state, 'jobs', 'old-1.json'), JSON.stringify(job));
+  const done = await runJob(state, 'old-1');
+  assert.equal(done.status, 'error');
+  assert.match(done.error ?? '', /no sandbox hide list .*queue it again/);
+  assert.equal(readJob(state, 'old-1').status, 'error');
 });

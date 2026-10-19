@@ -686,19 +686,28 @@ export interface ProjectRunAs {
 // (GPU checks, installs). A tool that can't start is refused with SANDBOX_UNAVAILABLE, before the command runs.
 // INVARIANT: this bash starts with an empty environment (projectCommand), so nothing a project sets (SHELLOPTS,
 // BASHOPTS, GLOBIGNORE, IFS, ...) reaches it; the project's variables are the inner `env -i` after `--`, which it
-// passes on as words. Its glob and shell options are reset all the same.
+// passes on as words. Its glob and shell options are reset all the same. It is started with --norc --noprofile and
+// stdin from /dev/null (projectCommand), so it reads no startup file: not the agent's ~/.bashrc, which a sandboxed
+// command can write, and which bash's rshd check sources for `bash -c` with a socket on stdin.
+// Every directory above a hidden path is bound onto itself first (shallowest first, before any mask), so it is a
+// mount point in the sandbox: renaming it fails (EBUSY), and the secret can't be moved out from under its mask.
 const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
   // readlink by its path (no function or PATH entry can stand in for it); none at all: refused, never nothing hidden.
   `rl=/usr/bin/readlink; [ -x "$rl" ] || rl=/bin/readlink; [ -x "$rl" ] || { printf '%s\\n' "project command not run: no readlink to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
-  'b=$1 h=$2; shift 2; hide=()',
-  'add() { local r; r=$("$rl" -f -- "$1" 2>/dev/null) || return 0',
-  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); fi; }',
+  'b=$1 h=$2; shift 2; hide=(); dirs=(); declare -A seen=(); maxd=0',
+  'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
+  // A symlink on the way to a hidden path, in a directory this user can write, could be swapped by one command to
+  // unmask the credential for the next: refused, as a missing sandbox is.
+  `nosym() { local q= c rest=\${1#/}; while [ -n "$rest" ]; do c=\${rest%%/*}; if [ "$c" = "$rest" ]; then rest=; else rest=\${rest#*/}; fi; q=$q/$c; if [ -L "$q" ] && [ -w "\${q%/*}/" ]; then printf '%s\\n' "project command not run: $q is a symlink in a directory the agent user can write, on the way to a credential its sandbox hides, so a project command could swap it; replace it with the directory it points to (or name the real path in credentials.yaml)" >&2; exit ${SANDBOX_UNAVAILABLE}; fi; done; }`,
+  'add() { local r; [ -e "$1" ] || [ -L "$1" ] || return 0; nosym "$1"; r=$("$rl" -f -- "$1" 2>/dev/null) || return 0',
+  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); above "$r"; elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); above "$r"; fi; }',
   'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
+  'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
   `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
-  'exec "$b" "${box[@]}" "${hide[@]}" -- "$@"',
+  'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
 
 /** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
@@ -755,7 +764,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     .filter((e): e is [string, string] => typeof e[1] === 'string')
     .map(([k, v]) => `${k}=${v}`);
   const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
-  const [f, a] = asUser(runAs.user, file, ['-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', ...inner], {});
+  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 
