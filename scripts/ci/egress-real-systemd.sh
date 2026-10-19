@@ -17,11 +17,15 @@
 #              back, loads the rule again, and the pull works.
 #   join:      MEASURED, NOT ASSERTED: whether a test run (the real helper's exec, its real sandbox) can join the Docker
 #              daemon's user+net namespaces, and reach the stand-in from there (through Docker's exempt slirp4netns).
-#              The answer is printed and put in the job summary either way.
+#              The containers' netns is looked for in every thread of every test-user process, not only its main one,
+#              and joined through each such thread. The answer is printed and put in the job summary either way, and
+#              so is whether a join through a thread other than a main one gets out (Docker restarted until a start
+#              comes up where no main thread is in that netns).
 #   upgrade:   an install that covered test users before #543 (the pre-#543 egress-firewall.sh, apply --with-test-users,
 #              and a Docker unit with no NFTSet=) keeps dropping their Docker after the new test-user.sh install and
 #              apply: no NFTSet=, no cgroup accept, the pull dropped, and the join probe, run before and after, reaches
-#              the stand-in from nowhere it didn't before (asserted: the job fails if any blocked attempt opens).
+#              the stand-in from nowhere it didn't before (asserted: the job fails if any blocked attempt opens, or if
+#              any join, through any thread, reaches it after).
 # Usage: bash scripts/ci/egress-real-systemd.sh   (as the runner user, with sudo)
 set -euo pipefail
 : "${DB_IMAGE:?the pinned database image}"
@@ -189,7 +193,12 @@ in_set || fail "after test-user.sh install Docker isn't in the set"
 pull 300 || fail "Docker couldn't pull after test-user.sh install"
 
 # The join probe's attempts, the same from a plain test-user unit and from a run: <probe> <pub> <port> <dockerd pid>
-# <netns file|-> <pid>...
+# <netns file|-> <pid>:<tid>:<netns inode>...
+# Each thread is joined through its own namespace files, /proc/<pid>/task/<tid>/ns/{user,net}: rootlesskit's
+# detach-netns puts only some threads of its child in the containers' netns, and /proc/<pid>/ns/net is the main
+# thread's alone (#543). The user ns is the same for every thread of a process (setns into a user ns needs a
+# single-threaded caller), and it's the one dockerd runs in, so this is the same join as dockerd's user ns plus the
+# pid's net ns before, aimed at a thread.
 cat > "$t/join.sh" <<'EOF'
 p="$1" pub="$2" port="$3" d="$4" f="$5"; shift 5
 try() { local what="$1" out; shift; if out="$("$@" python3 "$p" "$pub" "$port" 2>&1)"; then echo "$what: joined; -> $pub: $out"; else echo "$what: refused: $out"; fi; }
@@ -200,7 +209,11 @@ if [ "$f" != - ]; then
   if [ -e "$f" ]; then try "the containers' netns (file)" nsenter --user="/proc/$d/ns/user" --net="$f" --preserve-credentials
   else echo "the containers' netns (file): refused: $f isn't visible here"; fi
 fi
-for n in "$@"; do try "the containers' netns (pid $n)" nsenter --user="/proc/$d/ns/user" --net="/proc/$n/ns/net" --preserve-credentials; done
+for x in "$@"; do
+  pp="${x%%:*}" rest="${x#*:}"
+  tt="${rest%%:*}" nn="${rest#*:}"
+  try "the containers' netns (pid $pp, tid $tt, net:[$nn])" nsenter --user="/proc/$pp/task/$tt/ns/user" --net="/proc/$pp/task/$tt/ns/net" --preserve-credentials
+done
 EOF
 chmod 0644 "$t/join.sh"
 as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
@@ -212,9 +225,26 @@ as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
 # Two targets. The daemon's own namespaces: its user namespace, and its network namespace (with rootlesskit's
 # detach-netns, the host's: it pulls from there, in its exempt cgroup). And the network namespace its containers get,
 # which its slirp4netns (in the exempt cgroup) gives a way out: a bind-mounted file under its runtime directory, and
-# any process of the test user's in a network namespace other than the host's.
+# any thread of any process of the test user's in a network namespace other than the host's.
+# Every thread of every test-user process in a network namespace other than the host's, as <pid>:<tid>:<netns inode>,
+# one a line, in $t/threads-<tag>. Each thread, not each pid: rootlesskit's detach-netns puts only some threads of its
+# child in the containers' netns, and which ones depends on Go's thread scheduling when Docker starts, so a pid's
+# /proc/<pid>/ns/net (its main thread's) can miss it (#543: the job once found no pid there after a restart).
+netns_threads() {
+  local tag="$1" hostnet p tid n
+  hostnet="$(sudo readlink /proc/1/ns/net)"
+  : > "$t/threads-$tag"
+  for p in $(pgrep -u "$U"); do
+    for tid in $(sudo ls "/proc/$p/task" 2>/dev/null || true); do
+      n="$(sudo readlink "/proc/$p/task/$tid/ns/net" 2>/dev/null || true)"
+      if [ -n "$n" ] && [ "$n" != "$hostnet" ]; then echo "$p:$tid:$(echo "$n" | tr -dc 0-9)" >> "$t/threads-$tag"; fi
+    done
+  done
+}
+# Whether threads file $1 has a thread in a non-host netns and no process's main thread (tid = pid) among them.
+no_main_thread() { [ -s "$1" ] && ! grep -q '^\([0-9]*\):\1:' "$1"; }
 join_probe() {
-  local tag="$1" id="egress-join-$1" dpid hostnet nsfile npids="" p n r probe64 join64 cmd
+  local tag="$1" id="egress-join-$1" dpid hostnet nsfile npids="" p tid n main r probe64 join64 cmd
   local id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
   dpid="$(pgrep -u "$U" -x dockerd | head -n 1)"
   [ -n "$dpid" ] || fail "no dockerd of $U's"
@@ -222,15 +252,23 @@ join_probe() {
   echo "  host: net ns $hostnet; dockerd: pid $dpid, user ns $(sudo readlink "/proc/$dpid/ns/user"), net ns $(sudo readlink "/proc/$dpid/ns/net")"
   nsfile="$(sudo find /run/worklane-test-ci-docker -maxdepth 3 -name netns 2>/dev/null | head -n 1)"
   echo "  Docker's container netns file: ${nsfile:-none found} $([ -z "$nsfile" ] || sudo stat -c '(%U:%G %a)' "$nsfile")"
-  for p in $(pgrep -u "$U"); do
-    n="$(sudo readlink "/proc/$p/ns/net" 2>/dev/null || true)"
-    if [ -n "$n" ] && [ "$n" != "$hostnet" ]; then npids="$npids $p"; echo "  $U's pid $p ($(ps -o comm= -p "$p")) is in net ns $n"; fi
+  netns_threads "$tag"
+  JOIN_THREADS=""
+  while IFS=: read -r p tid n; do
+    npids="$npids $p:$tid:$n"
+    if [ "$p" = "$tid" ]; then main=", its main thread"; else main=""; fi
+    echo "  $U's pid $p ($(ps -o comm= -p "$p" || true)) tid $tid$main, user ns $(sudo readlink "/proc/$p/task/$tid/ns/user" || true), is in net ns net:[$n]"
+    JOIN_THREADS="$JOIN_THREADS pid $p ($(ps -o comm= -p "$p" || true)) tid $tid$main in net:[$n];"
+  done < "$t/threads-$tag"
+  for p in $(sed 's/:.*//' "$t/threads-$tag" | sort -u); do
+    echo "  $U's pid $p: main thread in net ns $(sudo readlink "/proc/$p/ns/net" 2>/dev/null || echo gone), $(sudo ls "/proc/$p/task" 2>/dev/null | wc -l) threads in all"
   done
   # Control: root in that netns reaches the stand-in (so a process of the test user's that joins it would too).
   if [ -n "$nsfile" ]; then
     echo "  control, root in Docker's container netns -> $PUB: $(sudo nsenter --net="$nsfile" python3 "$t/probe.py" "$PUB" "$PORT" 2>&1 || true)"
   fi
-  sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=60 \
+  # 300 s: one attempt a thread, each up to the probe's 4 s connect timeout where it's dropped.
+  sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p RuntimeMaxSec=300 \
     /bin/bash "$t/join.sh" "$t/probe.py" "$PUB" "$PORT" "$dpid" "${nsfile:--}" $npids < /dev/null > "$t/join-$tag-plain.out" 2>&1 || true
   sed 's/^/  plain test-user unit: /' "$t/join-$tag-plain.out"
   r="$(mktemp -d)"
@@ -243,16 +281,16 @@ join_probe() {
   join64="$(base64 -w0 < "$t/join.sh")"
   # No ${...}: systemd would expand those.
   cmd="printf %s $probe64 | base64 -d > \"\$TMPDIR/p.py\"; printf %s $join64 | base64 -d > \"\$TMPDIR/j.sh\"; bash \"\$TMPDIR/j.sh\" \"\$TMPDIR/p.py\" $PUB $PORT $dpid ${nsfile:--}$npids"
-  as_ exec "$id" 60 -- "$cmd" < /dev/null > "$t/join-$tag-run.out" 2> "$t/join-$tag-run.err" || true
+  as_ exec "$id" 300 -- "$cmd" < /dev/null > "$t/join-$tag-run.out" 2> "$t/join-$tag-run.err" || true
   sed 's/^/  run: /' "$t/join-$tag-run.out"
   as_ wipe "$id" > /dev/null
   grep -q '^own netns: ' "$t/join-$tag-run.out" || { cat "$t/join-$tag-run.err" >&2; fail "the run's probe didn't run"; }
   [ "$(sed -n "s/^own netns: -> $PUB: //p" "$t/join-$tag-run.out")" != OK ] || fail "the run reached $PUB from its own namespace"
-  JOIN_INFO="Host net ns $hostnet; dockerd pid $dpid in net ns $(sudo readlink "/proc/$dpid/ns/net"); containers' netns file: ${nsfile:-none}; other test-user pids in a non-host netns:${npids:- none}."
+  JOIN_INFO="Host net ns $hostnet; dockerd pid $dpid in net ns $(sudo readlink "/proc/$dpid/ns/net"); containers' netns file: ${nsfile:-none}; test-user threads in a non-host netns (each joined below):${JOIN_THREADS:- none.}"
 }
-# The attempts in join probe output $1 that reached the stand-in, by what was tried (a pid's number left out: it
-# changes when Docker restarts), sorted.
-opened() { { grep -- "-> $PUB: OK\$" "$1" || true; } | sed -E 's/ \(pid [0-9]+\)/ (pid)/; s/: .*//' | sort -u; }
+# The attempts in join probe output $1 that reached the stand-in, by what was tried (a thread's pid, tid and netns left
+# out: they change when Docker restarts), sorted.
+opened() { { grep -- "-> $PUB: OK\$" "$1" || true; } | sed -E 's/ \(pid [0-9]+, tid [0-9]+, net:\[[0-9]+\]\)/ (a thread)/; s/: .*//' | sort -u; }
 
 echo "== join (measured, not asserted): can a test run join the Docker daemon's user+net namespaces?"
 join_probe default
@@ -264,6 +302,39 @@ if grep -q ": joined; -> $PUB: OK$" "$t/join-default-run.out"; then
   summary "ANSWER: a test run CAN get out through Docker's namespaces: $(grep ": joined; -> $PUB: OK$" "$t/join-default-run.out" | head -n 1)."
 else
   summary "ANSWER: a test run can NOT get out through Docker's namespaces here (each attempt above was refused or reached nothing)."
+fi
+
+echo "== join through a thread other than a main one (measured, not asserted), on the default (exempt) install"
+# Whether, on a Docker start where no test-user process's main thread is in a non-host netns (so a probe of
+# /proc/<pid>/ns/net alone finds none), a join through another thread still gets out. Docker is restarted, at most 8
+# times, until such a start comes up; the join probe then runs on it. The route was open on default installs before
+# #543 too; this only measures it.
+tag=default
+for i in 1 2 3 4 5 6 7 8; do
+  if no_main_thread "$t/threads-$tag"; then break; fi
+  sudo systemctl restart "$DU"
+  docker_up
+  tag="restart$i"
+  netns_threads "$tag"
+  echo "  restart $i: threads in a non-host netns: $(tr '\n' ' ' < "$t/threads-$tag")"
+done
+summary "### #543: a join through a thread other than a main one, on the default (exempt) install (measured)"
+if no_main_thread "$t/threads-$tag"; then
+  [ "$tag" = default ] || join_probe "$tag"
+  if no_main_thread "$t/threads-$tag"; then
+    summary "Docker start: $tag (the first start, or the restart it took). No test-user process's main thread was in a non-host netns. $JOIN_INFO"
+    while IFS= read -r l; do summary "- from a run: $l"; done < "$t/join-$tag-run.out"
+    while IFS= read -r l; do summary "- from a plain test-user unit: $l"; done < "$t/join-$tag-plain.out"
+    if grep -q ": joined; -> $PUB: OK$" "$t/join-$tag-run.out"; then
+      summary "ANSWER: yes, through a thread other than a main one a test run gets out: $(grep ": joined; -> $PUB: OK$" "$t/join-$tag-run.out" | head -n 1)."
+    else
+      summary "ANSWER: no, through a thread other than a main one a test run did NOT get out here (each attempt above was refused or reached nothing)."
+    fi
+  else
+    summary "NOT MEASURED: between the restart and the join probe a main thread came into the netns ($(tr '\n' ' ' < "$t/threads-$tag"))."
+  fi
+else
+  summary "NOT MEASURED: in 9 Docker starts every one had a main thread in a non-host netns, or no thread there at all (last: $(tr '\n' ' ' < "$t/threads-$tag"))."
 fi
 
 echo "== check (the default: test users covered, their Docker the one exception)"
@@ -291,6 +362,7 @@ if grep -Eq 'socket cgroupv2|egress_ok' "$t/old-table"; then fail "the pre-#543 
 if pull 90 2> /dev/null; then fail "Docker pulled under the pre-#543 opt-in: there was no closed route to keep closed"; fi
 echo "  before: Docker's pull was dropped"
 join_probe old
+JOIN_INFO_OLD="$JOIN_INFO"
 echo "  the new test-user.sh install (it loads the rule again), then the new apply, with no flags"
 n="$(nproc)"
 sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G > "$t/upgrade-install.log" 2>&1 || { tail -n 40 "$t/upgrade-install.log"; fail "the new test-user.sh install failed on the pre-#543 opt-in"; }
@@ -310,15 +382,22 @@ if pull 90 2> /dev/null; then fail "after the upgrade Docker pulled: the route t
 echo "  after: Docker's pull was dropped"
 join_probe new
 summary "### #543 upgrade: an install that covered test users before #543 keeps dropping their Docker (asserted)"
-summary "Before: $PRE543's apply --with-test-users, Docker's unit without NFTSet=. After: the new test-user.sh install and apply. Both: no cgroup exception, Docker's pull dropped. $JOIN_INFO"
+summary "Before: $PRE543's apply --with-test-users, Docker's unit without NFTSet=. After: the new test-user.sh install and apply. Both: no cgroup exception, Docker's pull dropped."
+summary "Before: $JOIN_INFO_OLD"
+summary "After: $JOIN_INFO"
 for w in run plain; do
   while IFS= read -r l; do summary "- before, from a $w: $l"; done < "$t/join-old-$w.out"
   while IFS= read -r l; do summary "- after, from a $w: $l"; done < "$t/join-new-$w.out"
   newly="$(comm -13 <(opened "$t/join-old-$w.out") <(opened "$t/join-new-$w.out"))"
   [ -z "$newly" ] || fail "upgrade: from a $w, what the pre-#543 opt-in blocked now reaches $PUB: $newly"
+  # Both installs drop Docker: every join, through every thread, must reach nothing.
+  if grep -q -- "-> $PUB: OK\$" "$t/join-old-$w.out"; then fail "before the upgrade (the pre-#543 opt-in), from a $w, a join reaches $PUB: $(opened "$t/join-old-$w.out")"; fi
   if grep -q -- "-> $PUB: OK\$" "$t/join-new-$w.out"; then fail "upgrade: from a $w, a join still reaches $PUB: $(opened "$t/join-new-$w.out")"; fi
 done
-grep -q "^the containers' netns (pid [0-9]*): joined; " "$t/join-new-run.out" || fail "after the upgrade the run couldn't join Docker's containers' netns at all: this probe can't tell whether that route is dropped"
+# The probe has to have something to measure: some thread of a test-user process in a non-host netns (any thread, not
+# only a main one: which threads are there depends on the start), and the run joining it.
+[ -s "$t/threads-new" ] || fail "after the upgrade no thread of any $U process is in a non-host netns: this probe can't tell whether the containers' netns route is dropped"
+grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; " "$t/join-new-run.out" || fail "after the upgrade the run couldn't join any $U thread's non-host netns: this probe can't tell whether that route is dropped"
 sudo bash "$EF" check > "$t/check-upgrade.log" || { cat "$t/check-upgrade.log"; fail "check fails after the upgrade"; }
 cat "$t/check-upgrade.log"
 echo "OK: test users covered by default on real systemd; Docker's pull the one exception, kept across reloads and restarts; an install that covered test users before #543 keeps dropping their Docker"
