@@ -2840,7 +2840,8 @@ jobs:
     # The watchdog's Claude sign-in probe on a real host: instance.sh's coordinator and agent users (separate homes,
     # 0700) and its real sudoers rule; the agent user signed in to a stand-in claude that reads the login under the
     # HOME it is given; the probe run as the coordinator through sudo, as its service runs it, finds it signed in.
-    # scripts/ci/auth-probe-real-users.mjs has the assertions.
+    # scripts/ci/auth-probe-real-users.mjs has the assertions; scripts/ci/project-command-real-users.mjs has those of a
+    # project command's sandbox there (#713).
     name: Claude sign-in probe (real users)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' auth-probe-real-users ') }}
@@ -2911,6 +2912,27 @@ jobs:
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
             sh -c 'cd "$HOME" && exec node "$1/auth-probe-real-users.mjs" "$1/dist" wl-probe-agent "$2"' _ "$t" "$a"
+      - name: "a project command (#713), as the coordinator through sudo to the agent user, reads neither the agent's Claude login nor its API key: bubblewrap from machine.sh, the real sandbox"
+        run: |
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          a="$(getent passwd wl-probe-agent | cut -d: -f6)"
+          # A stand-in API key where credentials.sh <name> api-key puts one (never a real key).
+          k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"
+          printf '%s' "$k" | sudo -u wl-probe-agent sh -c 'umask 077 && mkdir -p "$1" && cat > "$1/api_key"' _ "$a/.config/probe-claude-key"
+          unset k
+          t="$(mktemp -d /tmp/wl-project-command-XXXXXX)"
+          mkdir -p "$t/node_modules"
+          cp -r dist package.json "$t/"
+          cp -r node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp scripts/ci/project-command-real-users.mjs "$t/"
+          git init -q -b main "$t/checkout"
+          git -C "$t/checkout" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q --allow-empty -m 'the coordinator checkout'
+          chmod -R a+rX "$t"
+          sudo chown -R wl-probe "$t/checkout"
+          sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
+            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout"' _ "$t" "$a"
+          # The unit tests' real-sandbox cases, here required to run (elsewhere they skip without bubblewrap).
+          PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js
 
   wizard-e2e-real-systemd:
     # The first-run wizard end to end, the way a person walks it, on a fresh runner with real systemd: the one install
