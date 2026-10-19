@@ -15,8 +15,9 @@ import { redactString } from './events/redact.js';
 import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { GIT_HOOK_MARKER, githubRepoOf } from './install.js';
+import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
+import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
@@ -574,7 +575,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     automation: 'git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin',
     detect: (k) => {
       const url = k.p.run('git', ['remote', 'get-url', 'origin'], { cwd: k.c.root });
-      const r = url.status === 0 ? githubRepoOf(url.stdout) : null;
+      const r = url.status === 0 ? githubRepoOf(url.stdout.trim()) : null;
       return r ? ok(`origin is github.com/${r}`) : no(url.status === 0 ? `origin isn't on GitHub (${url.stdout.trim()})` : 'no GitHub origin on this checkout');
     },
   },
