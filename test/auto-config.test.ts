@@ -342,26 +342,3 @@ test('init: the questions in the checklist and on the First-run page with their 
   assert.ok(existsSync(join(p.root, '.claude', 'settings.json')), 'the hooks for local runs, from it');
   assert.match(readFileSync(join(p.root, BRAND.configDir, 'tests.yaml'), 'utf8'), /full: node -e "process\.exit\(0\)"/);
 });
-
-const CI_WORKFLOW = 'on: [push, pull_request]\njobs:\n  test:\n    strategy:\n      matrix:\n        node: [22, 24]\n    runs-on: ubuntu-latest\n    steps: []\n  lint:\n    name: lint\n    runs-on: ubuntu-latest\n    steps: []\n';
-
-test("#727: a new project's drafted config.yaml (init, add-project) starts with each check its workflow files post pinned to that file", async () => {
-  const p = project({ 'README.md': 'shop\n', '.github/workflows/ci.yml': CI_WORKFLOW });
-  const g = ghStandIn();
-  const r = await autoConfigure({ root: p.root, repo: 'example-org/example-shop', io: acIo(g.gh, ['custom', PASSES, 'none']), state: emptyAutoConfig(), save: () => undefined });
-  assert.equal(r.kind, 'proposed', JSON.stringify(r));
-  execFileSync('git', ['fetch', '-q', 'origin', SETUP_BRANCH], { cwd: p.root });
-  const cfg = loadConfigAt(p.root, `origin/${SETUP_BRANCH}`);
-  assert.deepEqual(cfg.project.required_check_sources, { lint: { workflow: '.github/workflows/ci.yml' }, 'test (22)': { workflow: '.github/workflows/ci.yml' }, 'test (24)': { workflow: '.github/workflows/ci.yml' } });
-});
-
-test('#727: an existing config.yaml is never rewritten with pins: auto-config leaves a repo that has one alone', async () => {
-  const config = 'version: 1\n';
-  const p = project({ 'README.md': 'shop\n', '.github/workflows/ci.yml': CI_WORKFLOW, [`${BRAND.configDir}/config.yaml`]: config });
-  const before = p.mainSha();
-  const r = await autoConfigure({ root: p.root, repo: 'example-org/example-shop', io: acIo(ghStandIn().gh), state: emptyAutoConfig(), save: () => undefined });
-  assert.equal(r.kind, 'merged');
-  assert.equal(p.mainSha(), before);
-  assert.equal(readFileSync(join(p.root, BRAND.configDir, 'config.yaml'), 'utf8'), config);
-  assert.equal(spawnSync('git', ['rev-parse', '--verify', '-q', `refs/remotes/origin/${SETUP_BRANCH}`], { cwd: p.root }).status, 1, 'nothing proposed');
-});

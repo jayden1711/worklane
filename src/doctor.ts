@@ -6,7 +6,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { checkSourceDoctor, workflowFiles, type TipRun } from './check-pin-block.js';
+import { checkSourceDoctor } from './check-source.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
@@ -56,7 +56,7 @@ export function apiKeyCheck(file: string, agentUser: string | null, access = fil
   return { level: 'ok', detail: `${file}: ${agentUser}'s only (${a.mode})` };
 }
 
-export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo; /** For tests: the disk's free and total GB at a path. */ disk?: (path: string) => { freeGb: number; totalGb: number }; /** #727: the default branch tip's check runs (the CLI reads them with gh); absent: not read. */ tipRuns?: (repo: string, branch: string) => { sha: string; runs: TipRun[] } | null } = {}): DoctorCheck[] {
+export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A policy.yaml to check the config against, besides any local instance's. */ policy?: string; /** An instance whose agent settings to check, besides those of any local instance running this repo. */ instance?: string; /** The setup's mode, when init's state doesn't say (or to see another's). */ mode?: Mode; /** For tests: init's world. */ initIo?: InitIo; /** For tests: the disk's free and total GB at a path. */ disk?: (path: string) => { freeGb: number; totalGb: number } } = {}): DoctorCheck[] {
   const root = resolve(rootArg);
   const out: DoctorCheck[] = [];
   const add = (name: string, level: Level, detail: string) => out.push({ name, level, detail });
@@ -73,10 +73,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     // WHY (#468): a model the engine doesn't list is a warning, never a refusal (the config still loads).
     const models = modelWarnings(cfg.agents);
     add('config models', models.length ? 'warn' : 'ok', models.length ? models.join('\n') : 'every model named is one the engine lists');
-    // #727: a required check with no recorded source is accepted only from the App GitHub names for it, else refused.
-    const p = cfg.project;
-    const pinsNeeded = p.land_mode === 'pr' && p.ci !== 'none' && p.required_checks.some((n) => !Object.hasOwn(p.required_check_sources, n));
-    const pins = checkSourceDoctor(p, pinsNeeded ? workflowFiles(root) : {}, pinsNeeded ? (opts.tipRuns?.(p.project.repo, p.project.default_branch) ?? null) : null);
+    // #727: a required check with no recorded source is judged by name, unless GitHub's rules name its App.
+    const pins = checkSourceDoctor(cfg.project);
     add('required check sources', pins.level, pins.detail);
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);

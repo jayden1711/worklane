@@ -11,7 +11,6 @@ import { BRAND } from './brand.js';
 import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
-import { ghTipRuns } from './check-pin-block.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { renamedFrom } from './instance-rename.js';
 import { revokeAllDevices } from './siri/tokens.js';
@@ -501,7 +500,7 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       const instance = instanceOpt;
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}), tipRuns: ghTipRuns });
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}) });
       if (json) console.log(JSON.stringify(checks, null, 2));
       else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : c.level === 'off' ? 'off ' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
