@@ -593,6 +593,8 @@ test('weakening: a deleted test file waits; a pure rename does not, unless it le
     ['test/x.test.ts', 'test/node_modules/x.test.ts', MATH_TEST],
     ['test/x.test.ts', 'test/.old/x.test.ts', MATH_TEST],
     ['test/x.test.ts', 'test/__mocks__/x.test.ts', MATH_TEST],
+    // Round 7's review: a leading-dot file name, as a dot folder (tsc and the dist/test glob skip it).
+    ['test/x.test.ts', 'test/.x.test.ts', MATH_TEST],
     ['test/unit/fixtures/a.json', 'test/core/fixtures/a.json', '{ "a": 1 }\n'],
   ] as [string, string, string][]) assert.ok(moved(from, to, text).includes(DELETED), `${from} -> ${to}: ${moved(from, to, text).join(' | ')}`);
   // A guard, lint, allowlist or table file is never rename-exempt, even inside the test paths.
@@ -695,6 +697,13 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   // A one-line table is one line; its entries changing is a change.
   // Round 6's review: a declaring line that opens no bracket (its list on the next line) isn't a one-line table: the
   // change waits.
+  // Round 7's review: a declaring line whose brackets balance but hold no list after the `=` (a type, a comment, an
+  // empty constructor), with the list on the next lines: unreadable, the change waits.
+  for (const decl of ['const ALLOWED: string[] =\n  [', 'const ALLOWED = // see [docs]\n  [', 'const ALLOWED = new Set()\n  .add(']) {
+    const close = decl.endsWith('(') ? '  );' : '  ];';
+    const text = `${decl}\n    'a',\n${close}\nconst BAD_SHAPE = [];\n`;
+    assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': text }, { 'test/instance-name.test.ts': text.replace("    'a',\n", "    'a',\n    'b',\n") })), [UNREADABLE], decl);
+  }
   const split = "const ALLOWED:\n  string[] = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': split }, { 'test/instance-name.test.ts': split.replace("  'a',\n", "  'a',\n  'b',\n") })), [UNREADABLE], 'a declaration with its bracket on the next line');
   const one = "const ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
@@ -886,7 +895,21 @@ function repoFiles(dirs: string[], re: RegExp): string[] {
 test('weakening backstop: each registered table is found where it is registered, and every check-shaped table in test/ and scripts/ is registered or says why not', () => {
   for (const t of weakening.CHECK_TABLES) {
     assert.ok(existsSync(join(repoRoot, t.path)), `${t.path} is a real file`);
-    assert.ok(weakening.tableLines(readFileSync(join(repoRoot, t.path), 'utf8'), t.table)?.length, `${t.path} ${t.table} is found`);
+    const text = readFileSync(join(repoRoot, t.path), 'utf8');
+    const read = weakening.tableLines(text, t.table);
+    assert.ok(read?.length, `${t.path} ${t.table} is found`);
+    if (read!.length !== 1) continue;
+    // A one-line table holds its whole list on that line: a bracket after its `=` (or its key's `:`), every bracket
+    // closed, and the next line no deeper (round 7's review).
+    const lines = text.split('\n');
+    const at = lines.findIndex((l) => new RegExp(`^\\s*(?:export\\s+)?(?:(?:const|let|var)\\s+${t.table}|"${t.table}"\\s*:)(?![\\w$])`).test(l));
+    const line = lines[at]!;
+    const value = line.slice(line.search(/=(?!>)|":/) + 1);
+    const count = (s: string, set: string) => [...s].filter((c) => set.includes(c)).length;
+    assert.ok(count(value, '[({') > 0 && count(value, '[({') === count(value, '])}'), `${t.path} ${t.table}: its list is on its declaring line`);
+    const next = lines.slice(at + 1).find((l) => l.trim());
+    const indent = (l: string) => l.length - l.trimStart().length;
+    assert.ok(next === undefined || indent(next) <= indent(line), `${t.path} ${t.table}: nothing of it on the next line`);
   }
   const named = new Set(weakening.CHECK_TABLES.map((t) => `${t.path} ${t.table}`));
   const notChecks = new Set(NOT_A_CHECK.map((t) => `${t.path} ${t.table}`));

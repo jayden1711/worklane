@@ -372,10 +372,19 @@ export function tableLines(text: string, table: string): string[] | null {
   if (starts.length > 1) throw new Error(`${table} is declared ${starts.length} times`);
   const start = starts[0]!;
   const first = lines[start]!;
-  // A declaring line that opens no bracket (its list on the next line) is a shape this reader doesn't read.
-  if (!brackets(first, '[({')) throw new Error(`${table}: its declaring line opens no bracket`);
-  if (brackets(first, '[({') === brackets(first, '])}')) return [entry(first)];
   const at = indent(first);
+  // Its value: what follows the `=` (not an arrow's `=>`), or a JSON key's `:`. The list's opening bracket must be
+  // there: a declaring line with none after it (a type, `= // see [docs]` with the list below) isn't read.
+  const json = first.trimStart().startsWith('"');
+  const eq = json ? first.indexOf('":') + 1 : first.search(/=(?!>)/);
+  const value = eq < 1 ? '' : first.slice(eq + 1);
+  if (!brackets(value, '[({')) throw new Error(`${table}: no bracket opens its list on the line that declares it`);
+  if (brackets(value, '[({') === brackets(value, '])}')) {
+    // A one-line table: nothing of it may follow on a deeper line (`= new Set()` with `.add(...)` below).
+    const next = lines.slice(start + 1).find((l) => l.trim());
+    if (next !== undefined && indent(next) > at) throw new Error(`${table}: its line closes, but the next line is deeper`);
+    return [entry(first)];
+  }
   for (let k = start + 1; k < lines.length; k++) {
     const l = lines[k]!;
     if (!l.trim() || indent(l) > at) continue;
@@ -418,6 +427,8 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const runner = runnerOf(from);
     if (runner === -1 || runnerOf(to) !== runner || runnerSuffix(from) !== runnerSuffix(to)) continue;
     if (!isTest(from) || !isTest(to) || testRoot(from) !== testRoot(to) || NOT_RUN.test(to) || checkFile(from) || checkFile(to)) continue;
+    // A leading-dot name, like a dot folder: compilers and runners' globs skip it.
+    if (to.slice(to.lastIndexOf('/') + 1).startsWith('.')) continue;
     renamed.add(from).add(to);
   }
   const text = (l: string) => !l.includes('\0') && !l.includes('�');
