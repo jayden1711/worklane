@@ -172,6 +172,46 @@ test('auto_merge off needs no new space: with every create in root\'s directory 
   }
 });
 
+test("`set on` on a full filesystem is refused before it changes anything (it needs room for the next OFF's spare), so auto_merge stays off; after a `set on` that went through, OFF needs no space (#726 round 5 adversarial pass)", { skip }, () => {
+  const name = 'fullon';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const orig = { writeFileSync: fs.writeFileSync, openSync: fs.openSync };
+  const full = (on: boolean) => {
+    if (!on) return Object.assign(fs, orig), syncBuiltinESMExports();
+    const err = () => Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    fs.writeFileSync = (p: unknown, ...r: unknown[]) => {
+      if (String(p).startsWith(POLICY_ROOT_DIR)) throw err();
+      return (orig.writeFileSync as (...a: unknown[]) => unknown)(p, ...r);
+    };
+    fs.openSync = (p: unknown, flag?: unknown, ...r: unknown[]) => {
+      if (String(p).startsWith(POLICY_ROOT_DIR) && (typeof flag === 'string' ? /[wa]/.test(flag) : typeof flag === 'number' && (flag & 0o100) !== 0)) throw err();
+      return (orig.openSync as (...a: unknown[]) => unknown)(p, flag, ...r);
+    };
+    syncBuiltinESMExports();
+  };
+  full(true);
+  try {
+    // OFF on the full filesystem arms the spare, and has no room for another.
+    setPolicy(name, 'auto_merge', 'off', null, m.deps);
+    assert.equal(readdirSync(POLICY_ROOT_DIR).includes(`${name}.auto-merge-spare`), false, 'no spare left');
+    assert.throws(() => setPolicy(name, 'auto_merge', 'on', null, m.deps), /ENOSPC/);
+  } finally {
+    full(false);
+  }
+  assert.equal(autoMergeKilled(name), true, 'refused: still off');
+  setPolicy(name, 'auto_merge', 'on', null, m.deps); // room again: ON goes through, and leaves a spare
+  assert.equal(autoMergeKilled(name), false);
+  full(true);
+  try {
+    setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps);
+  } finally {
+    full(false);
+  }
+  assert.equal(autoMergeKilled(name), true, 'OFF on a full filesystem after ON');
+});
+
 test('repeated auto_merge OFFs (a coordinator looping the helper\'s set-policy) never add files to root\'s directory: one switch, moved to each new name, and the spare (#726 round 5 adversarial pass)', { skip }, () => {
   const name = 'loop';
   const m = machineInstance(name);
