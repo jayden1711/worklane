@@ -13,7 +13,7 @@
 set -euo pipefail
 
 BOOTSTRAP="bootstrap bootstrap-windows"
-MACHINE="testrun-real-systemd add-project-real-systemd auth-probe-real-users"
+MACHINE="testrun-real-systemd add-project-real-systemd auth-probe-real-users egress-real-systemd"
 WIZARD="wizard-e2e-real-systemd"
 ALL="$BOOTSTRAP $MACHINE $WIZARD"
 
