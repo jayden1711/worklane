@@ -3,7 +3,6 @@
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
 import { TooManyPages, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type StatusAt, type WorkflowAt } from '../main-watch.js';
 import type { WorkflowSource } from '../check-source.js';
-import { classifyGitHubError } from './errors.js';
 
 /** Pages of 100 check runs or statuses read for one commit (#727); past them the merge isn't judged yet. */
 const PAGES_MAX = 10;
@@ -97,10 +96,9 @@ export class GitHubMainWatchApi implements MainWatchApi {
   }
 
   /**
-   * The statuses on `sha`, newest first: the first page of 100 as main read it, then (#727) later pages as checkRuns
-   * reads them (TooManyPages past PAGES_MAX). Statuses need their own permission: a first page refused as a token that
-   * may not read them (a 403 that isn't a rate limit) or none (404) means no statuses, as on main. Any other refusal, a
-   * rate-limited 403 or a refusal of a later page, throws (the watch asks again): never a partial list.
+   * The statuses on `sha`, newest first. No required check pinned: the first page of 100 as main read it (a 403 or 404:
+   * none). Pinned (#727): later pages as checkRuns reads them (TooManyPages past PAGES_MAX), and any refusal, a first
+   * page's 403 or 404 included, throws (the watch asks again): never a partial or missing list.
    */
   async statuses(sha: string, opts: { pinned?: boolean } = {}): Promise<StatusAt[]> {
     const out: StatusAt[] = [];
@@ -113,10 +111,8 @@ export class GitHubMainWatchApi implements MainWatchApi {
         if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}`);
         return ((await res.json()) as { context: string; state: string; created_at: string }[]).map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at }));
       }
-      if (!res.ok && page === 1 && (res.status === 403 || res.status === 404)) {
-        const kind = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), await res.json().catch(() => ({}))).kind;
-        if (kind !== 'rate_limited' && kind !== 'secondary_rate_limited') return out;
-      }
+      // A required check pinned: any refusal throws (the watch asks again), a first page's 403 or 404 included (the
+      // owner's decision, round 8): a pinned check is never judged without its name's statuses.
       if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}${page > 1 ? ` (page ${page})` : ''}`);
       const list = (await res.json()) as { context: string; state: string; created_at: string }[];
       out.push(...list.map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at, ...(page > 1 ? { extra: true as const } : {}) })));

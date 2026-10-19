@@ -72,7 +72,7 @@ test('readiness reads 10 pages of check runs, a failing run of another source on
   assert.equal(await ready({ runs: (p) => (p === 1 ? [pinnedPass] : []) }), 'ready');
 });
 
-test("a status read refused part-way, or rate-limited, throws; only a first page refused as a token's permission (403) or none (404) means no statuses", async () => {
+test('a required check pinned: any refused status read throws, a first page refused as the permission (403) or none (404) too (round 8, the owner)', async () => {
   const runs = (p: number) => (p === 1 ? [run(1, 'ci', PINNED_APP)] : []);
   const failingFirst = () => json({ statuses: [{ context: 'ci', state: 'failure' }, ...Array.from({ length: 29 }, (_, i) => ({ context: `s${i}`, state: 'success' }))] });
   // A failing pinned status on page 1, then page 2 refused (rate limit) or gone (404): throws (READY on 961ecbad).
@@ -80,9 +80,11 @@ test("a status read refused part-way, or rate-limited, throws; only a first page
   await assert.rejects(ready({ runs, status: (p) => (p === 1 ? failingFirst() : json({ message: 'Not Found' }, 404)) }), /404/);
   // Page 1 rate-limited: throws (READY on 961ecbad).
   await assert.rejects(ready({ runs, status: () => RATE_LIMITED() }), /403/);
-  // Page 1 refused as the token's permission, or 404: no statuses, as on main.
-  assert.equal(await ready({ runs, status: () => NO_ACCESS() }), 'ready');
-  assert.equal(await ready({ runs, status: () => json({ message: 'Not Found' }, 404) }), 'ready');
+  // Page 1 refused as the token's permission, or 404: throws too (round 8, the owner's decision; 9c1c8bd5 read no
+  // statuses and was READY). With nothing pinned these are main's "no statuses" (the round-8 bare test).
+  await assert.rejects(ready({ runs, status: () => NO_ACCESS() }), /403/);
+  await assert.rejects(ready({ runs, status: () => json({ message: 'Not Found' }, 404) }), /404/);
+  assert.equal(await ready({ bare: true, runs: (p) => (p === 1 ? [run(1, 'ci', OTHER_APP)] : []), status: () => NO_ACCESS() }), 'ready', 'nothing pinned: none, as on main');
   // Read in full, the failing status blocks.
   assert.match(await ready({ runs, status: (p) => (p === 1 ? failingFirst() : json({ statuses: [] })) }), /ci: fail/);
 });
@@ -99,7 +101,7 @@ function watchApi(o: { runs?: (page: number) => unknown[]; statuses?: (page: num
   return new GitHubMainWatchApi('o/r', async () => 't', f);
 }
 
-test("the main watch's statuses, a required check pinned: refused part-way or rate-limited throws; a first page refused as the token's permission, or 404, is none", async () => {
+test("the main watch's statuses, a required check pinned: any refusal throws, a first page's 403 or 404 too (round 8); nothing pinned: main's read", async () => {
   const full = () => json(Array.from({ length: 100 }, (_, i) => ({ context: `s${i}`, state: 'success', created_at: '2026-10-12T09:00:00Z' })));
   const pinned = { pinned: true };
   // Page 2 refused: throws (961ecbad returned the 100 read so far).
@@ -107,9 +109,10 @@ test("the main watch's statuses, a required check pinned: refused part-way or ra
   await assert.rejects(watchApi({ statuses: (p) => (p === 1 ? full() : json({ message: 'Not Found' }, 404)) }).statuses(HEAD, pinned), /404/);
   // Page 1 rate-limited: throws (961ecbad returned none).
   await assert.rejects(watchApi({ statuses: () => RATE_LIMITED() }).statuses(HEAD, pinned), /403/);
-  // Page 1 refused as the token's permission, or 404: none, as on main.
-  assert.deepEqual(await watchApi({ statuses: () => NO_ACCESS() }).statuses(HEAD, pinned), []);
-  assert.deepEqual(await watchApi({ statuses: () => json({ message: 'Not Found' }, 404) }).statuses(HEAD, pinned), []);
+  // Page 1 refused as the token's permission, or 404: throws too (round 8, the owner's decision; 9c1c8bd5 gave none).
+  await assert.rejects(watchApi({ statuses: () => NO_ACCESS() }).statuses(HEAD, pinned), /403/);
+  await assert.rejects(watchApi({ statuses: () => json({ message: 'Not Found' }, 404) }).statuses(HEAD, pinned), /404/);
+  assert.deepEqual(await watchApi({ statuses: () => NO_ACCESS() }).statuses(HEAD), [], 'nothing pinned: none, as on main');
   // Round 8: nothing pinned: main's read (page 1 only; any 403 or 404 is none).
   assert.equal((await watchApi({ statuses: (p) => (p === 1 ? full() : NO_ACCESS()) }).statuses(HEAD)).length, 100);
   assert.deepEqual(await watchApi({ statuses: () => RATE_LIMITED() }).statuses(HEAD), []);

@@ -124,11 +124,13 @@ test("owner rule: a pinned check is its source's latest run on the head; any non
   const otherHead = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { sha: OTHER })];
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], otherHead), ['test fail']);
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }], otherHead), ['test fail']);
-  // An App pin that isn't Actions (round 6, fail closed): it can't be split by file, so its earlier failure in another
-  // check suite still blocks, whatever its later run says; a re-run GitHub lists in place of it (same suite) is the one there is.
-  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test fail']);
-  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 12 }, { id: 1, name: 'test', app: CI_APP, suite: 11, status: 'in_progress', conclusion: null }] }), pin)), ['test pending']);
-  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }] }), pin)), ['test pass']);
+  // An App pin that isn't Actions (round 8, the owner's decision; round 6 failed these closed across suites): the
+  // App's latest check run of the name decides, in whatever suite. An earlier suite's failure, then a later suite's
+  // pass: ready. A later suite failing, or still running: not. Another App's failure still blocks.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test pass']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 12, conclusion: 'failure' }, { id: 1, name: 'test', app: CI_APP, suite: 11 }] }), pin)), ['test fail']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11 }, { id: 2, name: 'test', app: CI_APP, suite: 12, status: 'in_progress', conclusion: null }] }), pin)), ['test pending']);
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }, { id: 3, name: 'test', app: SPOOF_APP, suite: 13, conclusion: 'failure' }] }), pin)), ['test fail']);
   // A same-name commit status that isn't success (fail closed), or one still pending.
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'failure' }] }), pin)), ['test fail']);
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }], statuses: [{ context: 'test', state: 'pending' }] }), pin)), ['test pending']);
