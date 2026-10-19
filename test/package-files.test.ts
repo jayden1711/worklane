@@ -111,10 +111,7 @@ test('the scan finds the paths the engine reads relative to itself', () => {
  * purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in its body.
  * Never to get a PR green without looking at what grew.
  */
-// #727 (2026-10-19, the owner's practice: the new size + 2%, rounded up to the next 10,000 as above): measured
-// 1,918,697 / 5,990,181 on #803 (doctor's pin block, stacked on #788) with main d4b45039; the growth over #788 is
-// check-pin-block.js (the PR body breaks it down).
-const PACKAGE_BUDGET = { size: 1_960_000, unpackedSize: 6_110_000 };
+const PACKAGE_BUDGET = { size: 1_950_000, unpackedSize: 6_060_000 };
 
 /** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
 function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {
