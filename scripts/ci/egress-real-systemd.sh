@@ -228,9 +228,8 @@ as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
 # any thread of any process of the test user's in a network namespace other than the host's.
 # Every thread of every test-user process in a network namespace other than the host's, as <pid>:<tid>:<netns inode>,
 # one a line, in $t/threads-<tag>. Each thread, not each pid: rootlesskit's detach-netns puts only some threads of its
-# child in the containers' netns (measured: 1 of 10, the main one, on 11 starts in one run), and the job once found no
-# pid's main thread there after a restart; which threads end up there may depend on the start (inferred, not
-# confirmed), so a pid's /proc/<pid>/ns/net (its main thread's) alone can miss it.
+# child in the containers' netns (measured: its main one, 1 of 10 or 11, on 21 of 22 starts in two runs; on the 22nd
+# no thread at all), so a pid's /proc/<pid>/ns/net (its main thread's) alone could miss one that is; this misses none.
 netns_threads() {
   local tag="$1" hostnet p tid n
   hostnet="$(sudo readlink /proc/1/ns/net)"
