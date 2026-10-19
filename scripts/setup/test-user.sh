@@ -17,6 +17,10 @@
 #     and a sudoers rule letting wl-<name> run it for <name> only. Each run is a transient unit in
 #     worklane-test.slice, as the test user, sandboxed (the helper's header lists how), in a workspace of its own
 #     that is wiped after the run with its containers and temp files.
+#   - The wrapper that gives each run a user and network namespace of its own (#545),
+#     /usr/local/libexec/worklane-testrun-userns: a root-owned copy of this machine's unshare (util-linux 2.38 or later),
+#     and where user namespaces are restricted (Ubuntu 24.04), an AppArmor profile letting it, and nothing else of
+#     worklane's but the pinned rootlesskit, make one. Shared by every instance, like the helper.
 #   - Rootless Docker for the runs' databases (pinned static release, sha256-checked): one daemon, as the test
 #     user, so no root daemon and no docker group. Ports it publishes bind 127.0.0.1. The runs themselves can't
 #     reach its socket: only the helper starts containers, each with a unique name and a port the daemon picks.
@@ -85,6 +89,9 @@ user="wl-test-$name"
 coord="wl-$name"
 root="/var/lib/worklane-test/$name"
 helper=/usr/local/libexec/worklane-testrun
+# The helper's USERNS and USERNS_PROFILE (a test keeps them equal).
+userns_bin=/usr/local/libexec/worklane-testrun-userns
+userns_profile=worklane-testrun-userns
 docker_dir="/opt/worklane-test/docker-$docker_version"
 docker_unit_name="worklane-test-$name-docker.service"
 lock=/run/lock/worklane-full-run.lock
@@ -177,6 +184,49 @@ profile worklane-test-rootlesskit $docker_dir/rootlesskit flags=(unconfined) {
 EOF
 }
 
+# The same allowance for the test runs' own wrapper (#545): it makes each run a user and network namespace of its own.
+userns_apparmor_profile() {
+  cat <<EOF
+abi <abi/4.0>,
+include <tunables/global>
+
+# Lets only the test runs' wrapper (a root-owned copy of unshare) create user namespaces: each test run's own, which
+# keeps it out of every other process's namespaces (#545). The restriction stays on.
+profile $userns_profile $userns_bin flags=(unconfined) {
+  userns,
+  include if exists <local/$userns_profile>
+}
+EOF
+}
+
+# Whether this machine's unshare can be the wrapper: the helper's prelude needs --map-current-user and --keep-caps
+# (util-linux 2.38 or later), and setpriv beside it.
+userns_supported() {
+  local help
+  help="$(unshare --help 2>/dev/null || true)"
+  grep -q -- '--map-current-user' <<<"$help" && grep -q -- '--keep-caps' <<<"$help" && command -v setpriv >/dev/null 2>&1
+}
+
+# The wrapper (a copy of this machine's unshare), atomically, root:root 0755; and its AppArmor profile where user
+# namespaces are restricted. On a machine whose unshare is too old, a note: the helper then runs each run in the host's
+# user namespace, as before #545, and its check says so.
+install_userns() {
+  if ! userns_supported; then
+    echo "note: this machine's unshare ($(unshare --version 2>/dev/null | head -n 1)) has no --map-current-user or --keep-caps, or there's no setpriv: test runs share the host's user namespace (docs/test-runs.md, \"Known gap\")"
+    return 0
+  fi
+  install -o root -g root -m 0755 "$(command -v unshare)" "$userns_bin.tmp"
+  mv -f "$userns_bin.tmp" "$userns_bin"
+  echo "installed $userns_bin (a copy of $(command -v unshare))"
+  if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+    userns_apparmor_profile > "/etc/apparmor.d/.$userns_profile.tmp"
+    apparmor_parser -Q "/etc/apparmor.d/.$userns_profile.tmp" || { rm -f "/etc/apparmor.d/.$userns_profile.tmp"; echo "AppArmor profile $userns_profile refused; nothing installed" >&2; exit 1; }
+    mv -f "/etc/apparmor.d/.$userns_profile.tmp" "/etc/apparmor.d/$userns_profile"
+    apparmor_parser -r "/etc/apparmor.d/$userns_profile"
+    echo "loaded the AppArmor profile $userns_profile: $userns_bin may make a user namespace (the restriction stays on for everything else)"
+  fi
+}
+
 # wl-<name> may run the helper for <name> only; the helper checks every other argument itself.
 sudoers_rule() {
   printf '# %s runs its test runs as %s, through one validating helper, and nothing else.\n' "$coord" "$user"
@@ -188,7 +238,9 @@ if [ -n "$print" ]; then
   echo "# /etc/systemd/system/$docker_unit_name"; docker_unit; echo
   echo "# sudoers rule worklane-test-$name"; sudoers_rule; echo
   echo "# $helper (scripts/machine/worklane-testrun.sh)"; cat "$machine_dir/worklane-testrun.sh"; echo
-  echo "# /etc/apparmor.d/worklane-test-rootlesskit (only where user namespaces are restricted)"; apparmor_profile
+  echo "# /etc/apparmor.d/worklane-test-rootlesskit (only where user namespaces are restricted)"; apparmor_profile; echo
+  echo "# $userns_bin: a copy of this machine's unshare (util-linux 2.38 or later), root:root 0755"
+  echo "# /etc/apparmor.d/$userns_profile (only where user namespaces are restricted)"; userns_apparmor_profile
   exit 0
 fi
 as_root "${all_args[@]}"
@@ -291,6 +343,10 @@ service_checks() {
   if systemctl is-active -q "$docker_unit_name"; then echo "PASS $docker_unit_name is active"; else echo "FAIL $docker_unit_name is not active (journalctl -u $docker_unit_name)"; fail=1; fi
   docker_cgroup_check || fail=1
   if [ -x "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-testrun.sh"; then echo "PASS $helper matches this checkout's"; else echo "FAIL $helper is missing or differs from scripts/machine/worklane-testrun.sh (run install)"; fail=1; fi
+  # Each run's own user namespace (#545): the helper's own check (below) proves a run is in one.
+  if ! userns_supported; then echo "NOTE this machine's unshare can't be the test runs' wrapper (it needs util-linux 2.38 or later, and setpriv): runs share the host's user namespace"
+  elif [ -f "$userns_bin" ] && [ ! -L "$userns_bin" ] && [ "$(stat -c '%U:%G %a' "$userns_bin")" = "root:root 755" ]; then echo "PASS $userns_bin is root:root 0755"
+  else echo "FAIL $userns_bin is missing or not root:root 0755, so runs share the host's user namespace (run install)"; fail=1; fi
   return "$fail"
 }
 
@@ -371,6 +427,8 @@ install_cmd() {
     mv -f /etc/apparmor.d/.worklane-test-rootlesskit.tmp /etc/apparmor.d/worklane-test-rootlesskit
     apparmor_parser -r /etc/apparmor.d/worklane-test-rootlesskit
   fi
+  say "each test run's own user and network namespace: the wrapper $userns_bin"
+  install_userns
 
   say "the sandbox helper, root-owned, in $helper"
   install_helper
@@ -440,8 +498,9 @@ remove_cmd() {
   if id -u "$user" >/dev/null 2>&1; then userdel -r "$user" 2>/dev/null || userdel "$user"; fi
   if [ -z "$(ls -A /var/lib/worklane-test 2>/dev/null)" ]; then
     echo "no other test users here: removing the shared parts too"
-    rm -f /etc/systemd/system/worklane-test.slice "$helper"
+    rm -f /etc/systemd/system/worklane-test.slice "$helper" "$userns_bin"
     if [ -f /etc/apparmor.d/worklane-test-rootlesskit ]; then apparmor_parser -R /etc/apparmor.d/worklane-test-rootlesskit 2>/dev/null || true; rm -f /etc/apparmor.d/worklane-test-rootlesskit; fi
+    if [ -f "/etc/apparmor.d/$userns_profile" ]; then apparmor_parser -R "/etc/apparmor.d/$userns_profile" 2>/dev/null || true; rm -f "/etc/apparmor.d/$userns_profile"; fi
     rm -rf /opt/worklane-test /var/lib/worklane-test
   fi
   systemctl daemon-reload

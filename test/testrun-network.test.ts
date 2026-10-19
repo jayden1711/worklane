@@ -121,7 +121,7 @@ function netHelper() {
   const sd = join(dir, 'sd');
   mkdirSync(sd);
   // systemd-run: its argv per call, and each BindReadOnlyPaths= source's content as it was then (the helper removes them after).
-  stub('systemd-run', `[ "$1" = --version ] && { echo "systemd 255 (test)"; exit 0; }
+  stub('systemd-run', `[ "$1" = --version ] && { echo "systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)"; exit 0; }
 n="$(date +%s%N)-$$"
 printf '%s\\n' "$@" > "${sd}/$n.argv"
 for a in "$@"; do case "$a" in BindReadOnlyPaths=*) f="\${a#BindReadOnlyPaths=}"; f="\${f%%:*}"; { echo "== $f"; cat "$f"; } >> "${sd}/$n.binds" ;; esac; done
@@ -132,6 +132,7 @@ echo ran`);
   // ip: this host's addresses, a loopback and a public one.
   stub('ip', 'printf "1: lo    inet 127.0.0.1/8 scope host lo\\n2: eth0    inet 203.0.113.5/24 brd x scope global eth0\\n2: eth0    inet6 2001:db8::5/64 scope global\\n"');
   stub('getent', 'exit 0');
+  stub('setpriv', 'exit 0');
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
@@ -174,6 +175,44 @@ echo ran`);
     assert.match(src, re);
     src = src.replace(re, to);
   }
+  // A run's own user namespace (#545): the wrapper (none until userns() makes one), the AppArmor sysctl and profile
+  // list, /proc (the run's main process 4242 and pid 1), and the egress rule's record. Replaced where the helper has
+  // them (an older helper, for a fail-without, has none).
+  const usernsBin = join(dir, 'userns');
+  const restrict = join(dir, 'restrict');
+  const profiles = join(dir, 'profiles');
+  const proc = join(dir, 'proc');
+  const record = join(dir, 'egress.users');
+  for (const [re, to] of [
+    [/^USERNS=\S+$/m, `USERNS=${usernsBin}`],
+    [/^USERNS_RESTRICT=\S+$/m, `USERNS_RESTRICT=${restrict}`],
+    [/^AA_PROFILES=\S+$/m, `AA_PROFILES=${profiles}`],
+    [/^PROC=\S+$/m, `PROC=${proc}`],
+    [/^EGRESS_RECORD=\S+$/m, `EGRESS_RECORD=${record}`],
+  ] as const) {
+    src = src.replace(re, to);
+  }
+  const bashPath = spawnSync('readlink', ['-f', '/bin/bash'], { encoding: 'utf8' }).stdout.trim();
+  /** The run's main process (4242) in a user namespace of its own (else the host's, as pid 1), running bash. */
+  const procNs = (own: boolean) => {
+    rmSync(proc, { recursive: true, force: true });
+    for (const p of ['1', '4242']) mkdirSync(join(proc, p, 'ns'), { recursive: true });
+    symlinkSync('user:[4026531837]', join(proc, '1', 'ns', 'user'));
+    symlinkSync(own ? 'user:[4026532999]' : 'user:[4026531837]', join(proc, '4242', 'ns', 'user'));
+    symlinkSync(bashPath, join(proc, '4242', 'exe'));
+  };
+  procNs(true);
+  /** The wrapper: ok (root's here: this user's, 0755, taking both options), or one that is wrong in one way. */
+  const userns = (kind: 'ok' | 'old' | 'mode' | 'link') => {
+    rmSync(usernsBin, { force: true });
+    if (kind === 'link') {
+      symlinkSync(real('true')!, usernsBin);
+      return;
+    }
+    const opts = kind === 'old' ? 'echo " -r, --map-root-user"' : 'echo " -c, --map-current-user    map current user to itself"; echo " --keep-caps               retain capabilities"';
+    writeFileSync(usernsBin, `#!/bin/sh\n[ "$1" = --help ] && { ${opts}; }\nexit 0\n`);
+    chmodSync(usernsBin, kind === 'mode' ? 0o775 : 0o755);
+  };
   const helper = join(dir, 'worklane-testrun');
   writeFileSync(helper, src);
   mkdirSync(tmpBase, { mode: 0o711 });
@@ -213,7 +252,19 @@ echo ran`);
   const lastProps = () => withProps(calls().filter((a) => !a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(x))).pop() ?? []);
   /** The network units' systemd-run calls (slirp_start), oldest first. */
   const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
-  return { dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''), done: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, bin, usernsBin, proc, procNs, userns,
+    noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''),
+    /** kernel.apparmor_restrict_unprivileged_userns, and whether the wrapper's profile is loaded. */
+    restrict: (on: boolean, loaded: boolean) => {
+      writeFileSync(restrict, on ? '1\n' : '0\n');
+      writeFileSync(profiles, `${loaded ? 'worklane-testrun-userns (unconfined)\n' : ''}worklane-test-rootlesskit (unconfined)\n`);
+    },
+    /** The host egress rule's record (egress-firewall.sh apply writes it), or none. */
+    record: (text: string | null) => (text === null ? rmSync(record, { force: true }) : writeFileSync(record, text)),
+    sysd: (v: number) => writeFileSync(join(dir, 'sysd'), String(v)),
+    done: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 // The LAN ranges a granted run or a fetch never reaches (RFC 1918, RFC 6598, ULA), with link-local, multicast and
@@ -394,6 +445,176 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
   } finally {
     h.done();
   }
+});
+
+/** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
+const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$') => [
+  h.usernsBin, '--user', '--map-current-user', '--net', '--keep-caps', '--', '/bin/sh', '-c',
+  `${join(h.bin, 'ip')} link set lo up && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "${dollar}@"`, 'sh',
+];
+
+test('#545: with the wrapper, a run\'s unit makes the run a user and network namespace of its own (its uid mapped to itself, lo up, every capability dropped) before its command; without a usable one, the command alone, as before', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    // No wrapper (a helper the updater installed before test-user.sh install ran again): as before #545.
+    const before = h.exec('fast-u-0', [], 'echo hi');
+    assert.equal(before.status, 0, before.stderr);
+    assert.deepEqual(h.lastProps().argv.slice(-5), ['/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
+    assert.ok(!h.lastProps().argv.includes(h.usernsBin));
+    // The wrapper: the run's own namespaces first, then setpriv hands over to the command. Every other property as before.
+    h.userns('ok');
+    const r = h.exec('fast-u-1', [], 'echo hi');
+    assert.equal(r.status, 0, r.stderr);
+    const { argv, props } = h.lastProps();
+    assert.deepEqual(argv.slice(-15), [...usernsArgv(h), '/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
+    assert.ok(argv.includes('--expand-environment=no'), 'systemd 254 or later expands nothing of it');
+    const norm = (ps: string[]) => ps.map((p) => p.replace(/fast-u-\d/g, 'ID').replace(/\/t\/[0-9a-f]{8}/g, '/t/HASH'));
+    h.exec('fast-u-2', [], 'echo hi');
+    assert.deepEqual(norm(h.lastProps().props), norm(props), 'the same unit');
+    for (const p of [...NO_NET, 'NoNewPrivileges=yes', 'ProtectSystem=strict']) assert.ok(props.includes(p), p);
+    assert.ok(!props.some((p) => /^(AmbientCapabilities|CapabilityBoundingSet|User)=/.test(p)), 'the unit itself gets no capability');
+    // An older systemd expands $ in a command line: the wrapper's "$@" goes as "$$@", systemd's escape for a literal $.
+    h.sysd(253);
+    h.exec('fast-u-3', [], 'echo hi');
+    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$$'));
+    h.sysd(255);
+    // Not root's own 0755, a symlink, an unshare without --map-current-user and --keep-caps: the command alone.
+    for (const kind of ['mode', 'link', 'old'] as const) {
+      h.userns(kind);
+      const x = h.exec(`fast-u-${kind}`, [], 'echo hi');
+      assert.equal(x.status, 0, `${kind}: ${x.stderr}`);
+      assert.deepEqual(h.lastProps().argv.slice(-5), ['/bin/bash', '-o', 'pipefail', '-c', 'echo hi'], kind);
+      assert.ok(!h.lastProps().argv.includes(h.usernsBin), kind);
+    }
+    // Where the kernel restricts user namespaces, only with its AppArmor profile loaded.
+    h.userns('ok');
+    h.restrict(true, false);
+    h.exec('fast-u-4', [], 'echo hi');
+    assert.ok(!h.lastProps().argv.includes(h.usernsBin), 'restricted, no profile: the command alone');
+    h.restrict(true, true);
+    h.exec('fast-u-5', [], 'echo hi');
+    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), 'restricted, the profile loaded');
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: a granted run\'s slirp4netns runs as the test user, with no capability, joining the run\'s own namespaces by path, in the egress rule\'s set (systemd 255+); as root, as before, where the egress rule drops every test-user socket or the run has no namespace of its own', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.grant({ shop: ['e2e'] });
+    h.userns('ok');
+    const me = userInfo().username;
+    const r = h.exec('fast-s-1', ['--network', 'e2e'], 'echo hi');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^worklane-testrun: network granted \(e2e; public addresses and the machine's DNS only\)\n/);
+    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), 'the run makes its own namespaces');
+    assert.match(h.lastProps().argv.at(-1)!, /^n=0; until grep -qs "\^tap0" \/proc\/net\/route; do .*; done; echo hi$/, 'and waits for its network in them');
+    let [net] = h.netCalls();
+    assert.ok(net, 'a network unit');
+    assert.ok(net.argv.includes(`--uid=${me}`) && net.argv.includes(`--gid=${me}`), `as the test user: ${net.argv.join(' ')}`);
+    assert.deepEqual(net.argv.slice(-9), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-seccomp', `--userns-path=${join(h.proc, '4242', 'ns', 'user')}`, '--netns-type=path', join(h.proc, '4242', 'ns', 'net'), 'tap0']);
+    assert.ok(!net.argv.includes('--enable-sandbox'), 'slirp4netns\'s own sandbox needs root (its unit\'s does that job)');
+    for (const p of ['CapabilityBoundingSet=', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes', 'PrivateTmp=yes', 'TemporaryFileSystem=/etc:ro', 'TemporaryFileSystem=/run:ro', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK', 'SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal', 'NFTSet=cgroup:inet:worklane_egress:egress_ok']) {
+      assert.ok(net.props.includes(p), `${p} in ${net.props.join(' | ')}`);
+    }
+    assert.ok(!net.props.some((p) => p.startsWith('CapabilityBoundingSet=CAP')), 'no capability at all');
+    // The boundary is the same: its unit's address rules.
+    assert.ok(net.props.includes(`IPAddressDeny=127.0.0.0/8 ::1/128 ${LAN_DENY} 127.0.0.1/32 203.0.113.5/32 2001:db8::5/128`), net.props.join(' | '));
+    assert.ok(net.props.includes('IPAddressAllow=198.51.100.53'));
+    assert.ok(net.props.some((p) => /^BindsTo=worklane-test-shop_fast-s-1_\d+\.service$/.test(p)));
+    // systemd older than 255: no NFTSet= (it has none; the rule doesn't cover test users there without dropping them).
+    h.sysd(254);
+    h.exec('fast-s-2', ['--network', 'e2e']);
+    net = h.netCalls().at(-1)!;
+    assert.ok(net.argv.includes(`--uid=${me}`) && !net.props.some((p) => p.startsWith('NFTSet=')), net.props.join(' | '));
+    h.sysd(255);
+    // An install whose egress rule drops every socket of the test user's (its record says dropped, or a record from
+    // before #543 with --with-test-users): root's slirp4netns, exactly as before #545; the run still gets its own namespaces.
+    for (const rec of ['# docker: dropped\n1003\n', '# --with-test-users\n1003\n']) {
+      h.record(rec);
+      h.exec('fast-s-3', ['--network', 'e2e']);
+      net = h.netCalls().at(-1)!;
+      assert.deepEqual(net.argv.slice(-8), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-sandbox', '--enable-seccomp', '4242', 'tap0'], rec);
+      assert.ok(!net.argv.some((a) => a.startsWith('--uid=')) && !net.props.some((p) => p.startsWith('NFTSet=')), rec);
+      assert.ok(net.props.includes('CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE'), rec);
+      assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), `${rec}: the run's own namespaces still`);
+    }
+    h.record('# docker: exempt\n1003\n');
+    h.exec('fast-s-4', ['--network', 'e2e']);
+    assert.ok(h.netCalls().at(-1)!.argv.includes(`--uid=${me}`), 'exempt: the test user\'s');
+    // No wrapper: root's slirp4netns into the unit's namespace, as before.
+    h.record(null);
+    h.userns('old');
+    h.exec('fast-s-5', ['--network', 'e2e']);
+    net = h.netCalls().at(-1)!;
+    assert.deepEqual(net.argv.slice(-3), ['--enable-seccomp', '4242', 'tap0']);
+    assert.ok(!net.argv.some((a) => a.startsWith('--uid=')));
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: the fetch gets its own namespaces and a test-user slirp4netns too; slirp4netns waits for the run\'s own user namespace, and never joins the unit\'s', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.userns('ok');
+    h.mkRun('fast-w-1');
+    const key = 'e'.repeat(32);
+    mkdirSync(join(h.base, 'shop', 'cache', `npm-${key}`), { recursive: true });
+    const f = h.run('fetch', 'fast-w-1', 'npm', 'npm', key, '600');
+    assert.equal(f.status, 0, f.stderr);
+    const { argv } = h.lastProps();
+    const at = argv.indexOf(h.usernsBin);
+    assert.ok(at > 0, argv.join(' '));
+    assert.deepEqual(argv.slice(at, at + 10), usernsArgv(h));
+    assert.deepEqual(argv.slice(at + 10, at + 14), ['/bin/bash', '-o', 'pipefail', '-c']);
+    assert.deepEqual(argv.slice(-2), ['fetch', join(h.base, 'shop', 'runs', 'fast-w-1', 'work')]);
+    const [net] = h.netCalls();
+    assert.ok(net && net.argv.includes(`--uid=${userInfo().username}`) && net.argv.includes('--netns-type=path'), net?.argv.join(' '));
+    // The run's main process still in the host's user namespace (the wrapper hasn't run yet, or failed): no slirp4netns
+    // is started on it, and the line says so (here the run's systemd-run is already over, so it isn't waited for).
+    h.procNs(false);
+    h.grant({ shop: ['e2e'] });
+    const r = h.exec('fast-w-2', ['--network', 'e2e']);
+    assert.match(r.stderr, /worklane-testrun: the run's network could not be started/);
+    assert.equal(h.netCalls().length, 1, 'no second network unit');
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: the helper\'s egress names and egress_docker_mode are lib.sh\'s, word for word; its wrapper and profile are test-user.sh\'s', () => {
+  const src = readFileSync(helperSrc, 'utf8');
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  for (const k of ['EGRESS_TABLE', 'EGRESS_SET', 'EGRESS_NFTSET_SYSTEMD', 'EGRESS_RECORD']) {
+    const re = new RegExp(`^${k}=(\\S+)$`, 'm');
+    assert.equal(re.exec(src)?.[1], re.exec(lib)?.[1], k);
+  }
+  const fn = (s: string) => s.slice(s.indexOf('egress_docker_mode() {'), s.indexOf('\n}\n', s.indexOf('egress_docker_mode() {')));
+  assert.ok(fn(src).length > 50);
+  assert.equal(fn(src), fn(lib));
+  assert.equal(/^USERNS=(\S+)$/m.exec(src)?.[1], /^userns_bin=(\S+)$/m.exec(tu)?.[1]);
+  assert.equal(/^USERNS_PROFILE=(\S+)$/m.exec(src)?.[1], /^userns_profile=(\S+)$/m.exec(tu)?.[1]);
+  // The helper's check: a run in its own user namespace, or a note (never a FAIL) where there is no wrapper, so a
+  // helper the updater installed before test-user.sh install ran again keeps test runs on.
+  const check = src.slice(src.indexOf('\ncheck() {'), src.indexOf('\n}\n', src.indexOf('\ncheck() {')));
+  assert.match(check, /if userns_ok; then\n[\s\S]*echo "PASS a sandboxed run is in a user namespace of its own[\s\S]*else\n\s+echo "NOTE a sandboxed run shares the host's user namespace/);
+  assert.match(check, /printf "uid_map %s %s %s\\n" \$\(cat \/proc\/self\/uid_map\)/);
+});
+
+test('#545: test-user.sh installs the wrapper (a copy of unshare, root:root 0755) and its AppArmor profile where user namespaces are restricted; --print shows the profile; remove takes both away with the last test user', { skip: !posix && 'bash' }, () => {
+  const r = spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'test-user.sh'), '--print', 'install', 'shop'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^profile worklane-testrun-userns \/usr\/local\/libexec\/worklane-testrun-userns flags=\(unconfined\) \{\n {2}userns,\n {2}include if exists <local\/worklane-testrun-userns>\n\}$/m);
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
+  assert.match(install, /install -o root -g root -m 0755 "\$\(command -v unshare\)" "\$userns_bin\.tmp"\n\s+mv -f "\$userns_bin\.tmp" "\$userns_bin"/);
+  assert.match(install, /kernel\.apparmor_restrict_unprivileged_userns[\s\S]*apparmor_parser -r "\/etc\/apparmor\.d\/\$userns_profile"/);
+  assert.match(tu, /\n {2}install_userns\n/, 'install calls it');
+  assert.match(tu, /rm -f \/etc\/systemd\/system\/worklane-test\.slice "\$helper" "\$userns_bin"/);
+  assert.match(tu, /apparmor_parser -R "\/etc\/apparmor\.d\/\$userns_profile"/);
 });
 
 test('the helper\'s FETCH_NPM is the engine\'s npmFetchScript, byte for byte', () => {
