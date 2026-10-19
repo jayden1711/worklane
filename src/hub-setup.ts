@@ -27,6 +27,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
+import { CREDENTIAL_REFUSED, holdsClaudeCredential } from './claude-credential-guard.js';
 import { GITHUB_WEB } from './github-hosts.js';
 import { assertLoopbackHost, breakGlassAllowed, parseCookies } from './dashboard-auth.js';
 import { fileAccess, installOwnerOnlySecret, ownerOnlyDir, writeOwnerOnly } from './os/index.js';
@@ -206,7 +207,10 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
       if (size > 4_000) throw new FlowError('too large');
       chunks.push(c as Buffer);
     }
-    return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
+    // INVARIANT (issue #711): no form here takes a Claude credential either.
+    if (holdsClaudeCredential(Object.fromEntries(form))) throw new FlowError(CREDENTIAL_REFUSED);
+    return form;
   };
 
   const unlockPage = (res: ServerResponse, status = 200, note = '') =>

@@ -7,6 +7,7 @@
 // Writes are the owner's, except a question that lets writers answer. A secret's value appears in no event,
 // response or error: the secret route's errors are fixed texts or AskErrors, which never quote the body.
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { EventLog } from '../events/log.js';
 import { ASK_EVENTS, AskError, asks, asksFrom, mayAnswerAsk } from './asks.js';
 import { requestRootStep } from './root-steps.js';
@@ -41,12 +42,15 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
     if (size > 16_000) throw new AskError('body too large');
     chunks.push(c as Buffer);
   }
+  let v: unknown;
   try {
-    const v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
-    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+    v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
   } catch {
     throw new AskError('the body must be JSON');
   }
+  // INVARIANT (issue #711): no setup-console route takes a Claude credential.
+  if (holdsClaudeCredential(v)) throw new AskError(CREDENTIAL_REFUSED);
+  return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
 }
 
 /** Handle a setup-console route; false when the path isn't one. */

@@ -213,7 +213,7 @@ test('local: the paste-a-code link is never relayed; a sign-in that ends, is can
   }
 });
 
-test("server: the dashboard never runs claude auth login; the agents' token goes into add-project's open paste box, and a cached account is said to be cached", { skip: !posix }, async () => {
+test("server: the dashboard never runs claude auth login and never takes the agents' token (issue #711): it shows root's commands, and a cached account is said to be cached", { skip: !posix }, async () => {
   const { s, deps } = standIn(LOCAL_URL);
   const accountDir = mkdtempSync(join(tmpdir(), 'claude-signin-account-'));
   const probe = { status: s.status };
@@ -223,24 +223,22 @@ test("server: the dashboard never runs claude auth login; the agents' token goes
     const refused = await t.call('/api/first-run/claude-signin', 'example-owner', { confirm: true });
     assert.equal(refused.status, 409);
     assert.match(String(refused.body.error), /setup-token/);
+    assert.match(String(refused.body.error), /never takes a Claude credential/);
     assert.equal(s.started, 0);
-    const none = (await t.call('/api/first-run/claude-signin', 'example-owner')).body as { mode: string; ask: unknown; status: unknown; agentUser: string; command: string };
-    assert.deepEqual([none.mode, none.ask, none.status, none.agentUser], ['server', null, null, `wl-${name}-agent`]);
+    const none = (await t.call('/api/first-run/claude-signin', 'example-owner')).body as { mode: string; ask?: unknown; status: unknown; agentUser: string; command: string; signinCommand: string };
+    assert.deepEqual([none.mode, none.status, none.agentUser], ['server', null, `wl-${name}-agent`]);
     assert.match(none.command, new RegExp(`claude setup-token[\\s\\S]*scripts/setup/credentials\\.sh ${name} claude`));
+    assert.match(none.signinCommand, new RegExp(`^sudo -u wl-${name}-agent -i claude auth login`));
 
-    // add-project's claude-token step is waiting: its paste box, for the owners.
+    // An open paste box an earlier version made for add-project's claude-token step: never offered.
     const log = new EventLog(t.eventsDb);
-    let id: string;
     try {
-      asks(log).create({ kind: 'paste_secret', instance: 'another', title: 'not this one', detail: 'x', credential: 'claude-token', where: 'x' }, 'add-project');
-      asks(log).create({ kind: 'paste_secret', instance: name, title: 'the intake token', detail: 'x', credential: 'intake-discord', where: 'x' }, 'add-project');
-      id = asks(log).create({ kind: 'paste_secret', instance: name, title: `The Claude login for ${name}'s agents`, detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: `wl-${name}-agent's Claude login` }, 'add-project').id;
+      asks(log).create({ kind: 'paste_secret', instance: name, title: `The Claude login for ${name}'s agents`, detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: `wl-${name}-agent's Claude login` }, 'add-project');
     } finally {
       log.close();
     }
-    const open = (await t.call('/api/first-run/claude-signin', 'example-owner')).body as { ask: { id: string; canAnswer: boolean } };
-    assert.deepEqual([open.ask.id, open.ask.canAnswer], [id, true]);
-    assert.equal(((await t.call('/api/first-run/claude-signin', 'example-collaborator')).body as { ask: { canAnswer: boolean } }).ask.canAnswer, false);
+    const open = (await t.call('/api/first-run/claude-signin', 'example-owner')).body as { ask?: unknown };
+    assert.equal(open.ask, undefined, 'no paste box');
 
     writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-13T00:00:00Z', users: [{ instance: name, kind: 'agent', user: `wl-${name}-agent`, stored: true, logged_in: true, auth_method: 'claude.ai', account: 'previous@example.com', installed_at: '2026-10-13T01:00:00Z' }] }));
     const st = (await t.call('/api/first-run/claude-signin', 'example-owner')).body as { status: { loggedIn: boolean; cachedAccount: string; installedAt: string } };
