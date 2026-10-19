@@ -9,8 +9,8 @@
 //   2. else the App GitHub's own branch protection (app_id) or ruleset (integration_id) requires for that name;
 //   3. else none: the check is judged by name, exactly as before pins (the owner's choice, 2026-10-19: an existing
 //      install keeps working), and doctor prints a paste-ready pin block for it (src/check-pin-block.ts).
-// A commit status never satisfies a pin: statuses carry no App. Pinning only ever turns a match into missing: a
-// same-name check that isn't a pass as judged by name (any source) still blocks the pinned one's pass.
+// A commit status never satisfies a pin: statuses carry no App. Pinning only ever turns a match into missing: it never
+// turns a check that isn't a pass, as judged by name (the one judging by name picks, from any source), into a pass.
 // Gating PRs nobody here wrote is governance mode's job (#704): it refuses to turn on while any required check is
 // unpinned (governanceRefusal). An existing install is protected once its owner pastes doctor's block.
 // Without GitHub (a file backlog: Backlog.checkApps absent) nobody else can post a check, and names match as before.
@@ -119,7 +119,8 @@ export function githubCheckApps(branch: unknown, rules: unknown): GithubCheckApp
     const list = r?.type === 'required_status_checks' ? r.parameters?.required_status_checks : null;
     if (Array.isArray(list)) for (const c of list) named.push([c?.context, c?.integration_id]);
   }
-  const out: GithubCheckApps = {};
+  // WHY: no prototype, so a check GitHub's rules pin under the name "__proto__" keeps its pin (a {} would drop it).
+  const out: GithubCheckApps = Object.create(null) as GithubCheckApps;
   const conflicting = new Set<string>();
   for (const [name, id] of named) {
     // -1 or none: GitHub takes any source, so it names no App.

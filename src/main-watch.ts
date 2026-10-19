@@ -141,7 +141,7 @@ export interface Facts {
   sources?: Record<string, WorkflowSource> | null;
 }
 
-export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string };
+export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string } | { call: 'rules' };
 
 /** Required checks pinned to their source (#727, src/check-source.ts): config.yaml's at the commit, GitHub's, the repo. */
 export interface WatchPins {
@@ -205,7 +205,7 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins; rulesUnknown?: boolean }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -269,6 +269,9 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     who = `#${number} was merged`;
   }
   if (!o.required.length) return { done: true, accounted: false, number, reason: `${who}, but no required_checks are configured to judge it by` };
+  // #727: GitHub's rules have never answered, so which checks they pin is unknown: wait here, at the checks, never
+  // judging them by name meanwhile. Everything above (a direct push, an unknown actor, a bot) is judged as before.
+  if (o.rulesUnknown) return { done: false, need: { call: 'rules' } };
   if (!f.runs) return { done: false, need: { call: 'runs', sha: head } };
   let out = outcomesAt(o.required, f.runs, f.statuses ?? null, at);
   if (out.some((c) => c.outcome === 'unknown')) {
@@ -761,13 +764,13 @@ export class MainWatch {
     // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
     const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
     const github = this.d.pins ? await this.d.pins.github() : null;
-    // #727: GitHub's rules never answered: which checks they pin is unknown, so the commit waits to be judged (never
-    // judged by name meanwhile, and never unaccounted for a read that failed).
-    if (this.d.pins && github === null) return;
+    // #727: GitHub's rules never answered: judge waits at the checks (need 'rules', no call to make), and everything
+    // before them is judged as before.
     const pins = this.d.pins && github ? { pins: { configured: sources, github, repo: this.d.pins.repo } } : {};
-    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins };
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins, ...(this.d.pins && github === null ? { rulesUnknown: true } : {}) };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
+      if (v.need.call === 'rules') return;
       if (!this.take(s)) return;
       const n = v.need;
       if (n.call === 'pulls') {
@@ -779,7 +782,7 @@ export class MainWatch {
       else if (n.call === 'role') p.facts.role = await this.d.api.role(n.login);
       else if (n.call === 'runs') p.facts.runs = await this.d.api.checkRuns(n.sha);
       else if (n.call === 'sources') p.facts.sources = (await this.d.api.runSources?.(n.sha)) ?? null;
-      else p.facts.statuses = await this.d.api.statuses(n.sha);
+      else if (n.call === 'statuses') p.facts.statuses = await this.d.api.statuses(n.sha);
       writeWatchState(this.d.stateFile, s);
       v = judge(p.sha, p.facts, ctx);
       if (!v.done) return;

@@ -245,6 +245,23 @@ test("main watch (#727): while GitHub's rules have never answered, a merge waits
   assert.match(s.unaccounted[0]?.reason ?? '', /: ci missing$/, "judged once GitHub answers: its App pin applies");
 });
 
+test("main watch (#727): while GitHub's rules have never answered, a direct push and a bot's merge are still unaccounted, as on main", async () => {
+  const pins = { sources: () => ({}), github: async () => null, repo: 'example-org/example-shop' };
+  const d = await started({ pins, config: 'required_checks: [ci]\n' });
+  const sha = d.w.directPush();
+  await run(d.gh, d.watch, 8);
+  assert.equal(d.unaccounted.length, 1, 'the direct push');
+  assert.equal(d.unaccounted[0]!.sha, sha);
+  assert.match(d.unaccounted[0]!.reason, /pushed to main directly/);
+
+  const b = await started({ pins, config: 'required_checks: [ci]\n' });
+  const m = b.w.mergedPr();
+  b.gh.pr(7, m.merge, m.head, iso(T), 'example-bot[bot]', true);
+  b.gh.runs.set(m.head, [ci({ app: 1111, suite: 1 })]);
+  await run(b.gh, b.watch, 8);
+  assert.match(b.unaccounted[0]?.reason ?? '', /merged into main by a bot/);
+});
+
 test('main watch (#727): with no pin recorded and none named by GitHub, a check is judged by name, exactly as before pins', async () => {
   const pins = { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' };
   const judged = async (withPins: boolean, runs: CheckRunAt[], statuses: StatusAt[] = []) => {

@@ -13,7 +13,7 @@ import { ProjectConfig } from '../src/config/schema.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { readiness } from '../src/pr-watch.js';
 import { asJudged, repoRoot } from './helpers.js';
-import { RAW_READS_ALLOWED, rawCheckReads, typeErrors } from './raw-check-reads.js';
+import { JUDGED_CASTS_ALLOWED, judgedCasts, RAW_READS_ALLOWED, rawCheckReads, testImports, typeErrors } from './raw-check-reads.js';
 
 const HEAD = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -123,10 +123,18 @@ test("a check with no recorded source takes the App GitHub's protection or rules
 test("GitHub's Apps per check: none, -1 or a non-number names no App; two rules naming different Apps name none; own keys only", () => {
   const branch = { protection: { required_status_checks: { checks: [{ context: 'a', app_id: 5 }, { context: 'b', app_id: -1 }, { context: 'c', app_id: null }, { context: 'd', app_id: 5 }, { context: 'e', app_id: '5' }] } } };
   const rules = [{ type: 'pull_request' }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'a', integration_id: 5 }, { context: 'd', integration_id: 6 }, { context: 'f' }] } }];
-  assert.deepEqual(githubCheckApps(branch, rules), { a: 5 });
-  assert.deepEqual(githubCheckApps(null, 'junk'), {});
+  assert.deepEqual({ ...githubCheckApps(branch, rules) }, { a: 5 });
+  assert.deepEqual({ ...githubCheckApps(null, 'junk') }, {});
   assert.equal(pinOf('constructor', {}, {}), null, 'no inherited key is a pin');
   assert.equal(pinOf('toString', {}, githubCheckApps(branch, rules)), null);
+});
+
+test('a check GitHub\'s ruleset pins under the name __proto__ keeps its pin: another App\'s is missing', async () => {
+  const rules = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: '__proto__', integration_id: CI_APP }] } }];
+  const spoof = await judged(github({ runs: [{ id: 1, name: '__proto__', app: SPOOF_APP, suite: 10 }], rules }), {}, ['__proto__']);
+  assert.deepEqual(outcomes(spoof), ['__proto__ missing']);
+  const real = await judged(github({ runs: [{ id: 2, name: '__proto__', app: CI_APP, suite: 11 }], rules }), {}, ['__proto__']);
+  assert.deepEqual(outcomes(real), ['__proto__ pass']);
 });
 
 test('without GitHub (no checkApps) every check is judged by name exactly as before', async () => {
@@ -270,6 +278,44 @@ test('the raw-read scan catches every spelling of a raw read of GitHub\'s checks
   assert.deepEqual(hits.filter((h) => h.file === 'test/raw-fixture-clean.ts'), [], 'a `checks` that is not GitHub\'s is not a raw read');
   // The old text-only check (kept below) catches only the plain call.
   assert.equal(Object.values(RAW_FIXTURES).filter((body) => /backlog\.checks\(/.test(body)).length, 1);
+});
+
+// The reviewer's round-2 ways around the brand, each a src/ file, fed as data.
+const CAST_PRELUDE = [
+  "import type { Backlog } from './backlog/types.js';",
+  "import { readiness } from './pr-watch.js';",
+  "import type { JudgedChecks } from './check-source.js';",
+  'export async function f(backlog: Backlog, sha: string, other: { list(): Promise<never[]> }) {',
+].join('\n');
+const CAST_FIXTURES: Record<string, { body: string; catches: ('cast' | 'raw')[] }> = {
+  'cast as JudgedChecks': { body: "  const raw = await backlog.checks(sha);\n  return readiness({ required: ['ci'], checks: raw as JudgedChecks, head: sha, evaluated: null });", catches: ['cast', 'raw'] },
+  'cast as never at a judging call': { body: "  const raw = await backlog.checks(sha);\n  return readiness({ required: ['ci'], checks: raw as never, head: sha, evaluated: null });", catches: ['cast', 'raw'] },
+  'structural alias, then as never': { body: "  const b: { checks(s: string): Promise<unknown[]> } = backlog;\n  const raw = await b.checks(sha);\n  return readiness({ required: ['ci'], checks: raw as never, head: sha, evaluated: null });", catches: ['cast', 'raw'] },
+  'computed key from a const': { body: "  const k = 'checks' as const;\n  const raw = await backlog[k](sha);\n  return raw;", catches: ['raw'] },
+  'Reflect.get': { body: "  const raw = await Reflect.get(backlog, 'checks').call(backlog, sha);\n  return raw;", catches: ['raw'] },
+  'data from elsewhere, as unknown as JudgedChecks': { body: "  const raw = await other.list();\n  return readiness({ required: ['ci'], checks: raw as unknown as JudgedChecks, head: sha, evaluated: null });", catches: ['cast'] },
+};
+
+test('every way around the JudgedChecks brand in src/ is caught: a cast into it, or a raw read however spelled (fixtures)', () => {
+  for (const [name, f] of Object.entries(CAST_FIXTURES)) {
+    const file = `src/zz-fixture-${name.replace(/\W+/g, '-')}.ts`;
+    const files = { [file]: `${CAST_PRELUDE}\n${f.body}\n}\n` };
+    if (f.catches.includes('cast')) assert.ok(judgedCasts(files).some((h) => h.file === file), `cast caught: ${name}`);
+    if (f.catches.includes('raw')) assert.ok(rawCheckReads(files).some((h) => h.file === file), `raw read caught: ${name}`);
+  }
+  // Not casts into JudgedChecks: an ordinary cast, and the judged answer itself.
+  const clean = { 'src/zz-fixture-clean.ts': `${CAST_PRELUDE}\n  const n = (sha as string).length;\n  return [n, other];\n}\n` };
+  assert.deepEqual(judgedCasts(clean), []);
+  // A src/ import from test/ (asJudged lives there), static, re-export or dynamic.
+  const imports = { 'src/zz-imp.ts': "import { asJudged } from '../test/helpers.js';\nexport { repoRoot } from '../test/helpers.js';\nexport const m = () => import('../test/raw-check-reads.js');\nexport { asJudged };\n", 'src/zz-ok.ts': "import { BRAND } from './brand.js';\nexport { BRAND };\n" };
+  assert.deepEqual(testImports(imports).map((h) => `${h.file} ${h.spec}`), ['src/zz-imp.ts ../test/helpers.js', 'src/zz-imp.ts ../test/helpers.js', 'src/zz-imp.ts ../test/raw-check-reads.js']);
+});
+
+test('src/ casts into JudgedChecks only in check-source.ts, and imports nothing from test/', () => {
+  const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
+  const src = Object.fromEntries(files(join(repoRoot, 'src')).map((p) => [relative(repoRoot, p).split('\\').join('/'), readFileSync(p, 'utf8')]));
+  assert.deepEqual(judgedCasts(src).filter((h) => !Object.hasOwn(JUDGED_CASTS_ALLOWED, h.file)), []);
+  assert.deepEqual(testImports(src), []);
 });
 
 test("src/ reads GitHub's checks raw only where RAW_READS_ALLOWED says why (check-source.ts, the main watch, the canary)", () => {
