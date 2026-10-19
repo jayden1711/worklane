@@ -12,20 +12,28 @@
 // Every container has a memory (no extra swap), CPU and pids limit, read back from the daemon and from the
 // container's own cgroup (memory.max, memory.swap.max = 0, cpu.max, pids.max) before anything runs in it: a limit
 // that didn't apply refuses the run (checkLimits).
-// Every docker command passes checkDockerArgs, then (for a task) hiddenLeaks on its argv and on its stdin (a tar
-// stream: only what its base tree lacks counts): refused, nothing sent, on any match.
+// Every docker command passes checkDockerArgs, then (for a task) a scan for the task's hidden fields: hiddenLeaks on
+// its argv, stdinCarriesHidden on its stdin (a tar stream, against its base tree). Refused, nothing sent, on a match.
+// That scan is narrow, a second wall behind taskView: hidden.ts says exactly what it checks and what it can't see
+// (compressed or binary content, other encodings, short lines).
 import { spawnSync } from 'node:child_process';
 import { cpus, totalmem } from 'node:os';
 import { posix } from 'node:path';
 import { BRAND } from '../../src/brand.js';
-import { hiddenLeaks, type TaskRow } from './hidden.js';
+import { daemonHost } from './agent.js';
+import { hiddenLeaks, stdinCarriesHidden, type TaskRow } from './hidden.js';
 
 /** Environment names that may carry a credential or reach a daemon: never passed into a container. */
 export const SECRET_NAME = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION|^DOCKER_|^XDG_RUNTIME_DIR$/i;
 
-/** This process's environment for the docker CLI: without any variable that may carry a credential (DOCKER_HOST kept). */
+/**
+ * This process's environment for the docker CLI: without any variable that may carry a credential, and with
+ * DOCKER_HOST always set (daemonHost: the bench user's DOCKER_HOST, else the rootless socket in the runtime dir), so
+ * the CLI never takes its daemon from a docker context. Refuses a relative unix:// DOCKER_HOST and DOCKER_CONTEXT.
+ */
 export function dockerEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(env).filter(([k]) => k === 'DOCKER_HOST' || k === 'XDG_RUNTIME_DIR' || !SECRET_NAME.test(k)));
+  const host = daemonHost(env);
+  return { ...Object.fromEntries(Object.entries(env).filter(([k]) => k === 'XDG_RUNTIME_DIR' || !SECRET_NAME.test(k))), DOCKER_HOST: host };
 }
 
 export interface TaskContainer {
@@ -178,18 +186,21 @@ export interface DockerOptions {
   call?: DockerCall;
 }
 
+/** What a refused stdin says: the same words whatever matched, so a refusal relayed to an agent tells it nothing. */
+export const STDIN_REFUSED = "refused: this docker command's input carries hidden task content that its base tree lacks";
+
 /**
- * The one way anything reaches docker: checkDockerArgs, then refused when the argv, or the stdin, carries any of
- * `row`'s hidden fields. The stdin (a worktree's tar stream) is checked against `base`, the text of the task's base
- * tree: only a hidden piece the base lacks counts. No base: every piece counts.
+ * The one way anything reaches docker: checkDockerArgs, then refused when the argv carries a piece of `row`'s hidden
+ * fields (hiddenLeaks), or the stdin (a worktree's tar stream) carries what stdinCarriesHidden looks for and `base`,
+ * the text of the task's base tree, lacks. A task's stdin with no base is refused outright.
  */
 function send(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow | null, timeoutMs: number, input?: Buffer, base?: Buffer): Sent {
   checkDockerArgs(args, verbs);
   if (row) {
     const leaks = hiddenLeaks(args.join('\n'), row);
     if (leaks.length) throw new Error(`refused: this docker command would carry the task's hidden ${leaks.join(', ')}`);
-    const inLeaks = input ? hiddenLeaks(input.toString('utf8'), row, base?.toString('utf8') ?? '') : [];
-    if (inLeaks.length) throw new Error(`refused: this docker command's input would carry the task's hidden ${inLeaks.join(', ')} (not in its base tree)`);
+    if (input && !base) throw new Error("refused: a task's input is checked against its base tree, and there is none");
+    if (input && base && stdinCarriesHidden(input.toString('utf8'), row, base.toString('utf8'))) throw new Error(STDIN_REFUSED);
   }
   return (o.call ?? spawnDocker)(o.docker, args, { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}) });
 }
@@ -304,9 +315,9 @@ export class TaskRunner {
     private row: TaskRow,
     /**
      * The task's base tree as a tar stream of its base commit, made by the driver before any agent runs: what a tar
-     * sent to the container is checked against (a hidden piece already in it doesn't count). None: every piece counts.
+     * sent to the container is checked against (a hidden piece already in it doesn't count). Required.
      */
-    private base?: Buffer,
+    private base: Buffer,
   ) {}
 
   /** argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. */

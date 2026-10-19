@@ -1,7 +1,7 @@
 // The sandbox probe (#748, owner's requirement and choice of 2026-10-18): before every bench run, from inside the
 // agents' sandbox (benchLane's settings), try to reach what the sandbox must keep from them: connect to the Docker
-// daemon's sockets, read ~/.claude.json, ~/.netrc, ~/.npmrc and ~/.pypirc. The run starts only if every attempt is
-// refused.
+// daemon's sockets, the user bus and the rootless containerd socket, read ~/.claude.json, ~/.netrc, ~/.npmrc and
+// ~/.pypirc. The run starts only if every attempt is refused.
 //
 // Which sandbox: Claude Code 2.1.303 has no model-free command that runs a command in its own sandbox, so the probe
 // runs under sandbox-runtime's `srt` (the library Claude Code's sandbox is built on), at SRT_VERSION, installed for
@@ -12,8 +12,8 @@
 // srt is run as `srt --settings <file> -- <argv...>`, `file` holding the lane's sandbox as sandbox-runtime's own
 // configuration: the same denyRead, the same (no) allowed hosts. The bench's model-call confirmation in Claude Code's
 // own sandbox is the driver's (driver.ts).
-import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { lstatSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { dockerHostSocket, type LaneInput } from './agent.js';
@@ -45,9 +45,20 @@ export interface ProbeReport {
   ok: boolean;
 }
 
-/** What the probe tries: every daemon socket the lane denies, and the login and credential files. */
+/**
+ * What the probe tries: every daemon socket the lane denies, the user bus and the rootless containerd socket (each
+ * reaches as far as the daemon: `systemd-run --user` through the bus runs a command outside the sandbox; both are
+ * denied with the runtime dir), and the login and credential files.
+ */
 export function probeAttempts(o: LaneInput): ProbeAttempt[] {
-  const sockets = [join(o.runtimeDir, 'docker.sock'), '/run/docker.sock', '/var/run/docker.sock', dockerHostSocket(o.dockerHost)];
+  const sockets = [
+    join(o.runtimeDir, 'docker.sock'),
+    join(o.runtimeDir, 'bus'),
+    join(o.runtimeDir, 'docker', 'containerd', 'containerd.sock'),
+    '/run/docker.sock',
+    '/var/run/docker.sock',
+    dockerHostSocket(o.dockerHost),
+  ];
   const files = ['.claude.json', '.netrc', '.npmrc', '.pypirc'].map((f) => join(o.home, f));
   const connects: ProbeAttempt[] = [...new Set(sockets.filter((s): s is string => Boolean(s)))].map((target) => ({ kind: 'connect', target }));
   return [...connects, ...files.map((target): ProbeAttempt => ({ kind: 'read', target }))];
@@ -124,9 +135,16 @@ export function sandboxProbe(o: LaneInput & { settings: unknown; srt?: string; t
   const s = o.settings as { sandbox?: { filesystem?: { denyRead?: string[] }; network?: { allowedDomains?: string[] } } };
   // The lane's sandbox, as sandbox-runtime's configuration: the same reads denied, the same (no) hosts allowed.
   const config = { network: { allowedDomains: s.sandbox?.network?.allowedDomains ?? [], deniedDomains: [] }, filesystem: { denyRead: s.sandbox?.filesystem?.denyRead ?? [], allowRead: [], allowWrite: [], denyWrite: [] } };
-  const file = join(mkdtempSync(join(tmpdir(), 'bench-probe-')), 'settings.json');
-  writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
-  const r = spawnSync(srt, ['--settings', file, '--', process.execPath, '-e', PROBE_JS, JSON.stringify(attempts)], { encoding: 'utf8', timeout: o.timeoutMs ?? 120_000 });
+  const dir = mkdtempSync(join(tmpdir(), 'bench-probe-'));
+  const file = join(dir, 'settings.json');
+  let r: SpawnSyncReturns<string>;
+  try {
+    writeFileSync(file, JSON.stringify(config), { mode: 0o600 });
+    r = spawnSync(srt, ['--settings', file, '--', process.execPath, '-e', PROBE_JS, JSON.stringify(attempts)], { encoding: 'utf8', timeout: o.timeoutMs ?? 120_000 });
+  } finally {
+    // The settings file (and its folder) go once srt is done with them, whatever happened.
+    rmSync(dir, { recursive: true, force: true });
+  }
   let seen: unknown;
   try {
     seen = JSON.parse((r.stdout ?? '').trim().split('\n').at(-1) ?? '');
