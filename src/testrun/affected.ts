@@ -13,6 +13,7 @@
 // Pure: no fs, no git; the caller hands in the files and their contents (scripts/ci/affected.mjs from the working
 // tree, ./select.ts from a commit).
 import { posix } from 'node:path';
+import { shownPath } from '../path-text.js';
 
 export const CODE_EXT = /\.(?:[cm]?[jt]s|[jt]sx)$/;
 /** Files that run as programs of their own (what they source or call is invisible here), or have no extension. */
@@ -517,10 +518,11 @@ export function selectTests(g: Graph, changed: readonly string[], o: SelectOptio
   const everything = (why: string): Plan => ({ all: why, tests, why: {} });
   const reached = new Map(tests.map((t) => [t, reach(g, t)]));
   for (const f of changed) {
-    if (!g.files.has(f)) return everything(`${f} was deleted or renamed`);
+    // The reason is text (the run's summary and its check-run output): each path as shownPath shows it (#683).
+    if (!g.files.has(f)) return everything(`${shownPath(f)} was deleted or renamed`);
     const forced = o.forceAll?.(f);
-    if (forced) return everything(`${f}: ${forced}`);
-    if (SCRIPT_EXT.test(f) || !posix.extname(f)) return everything(`${f} is a script or has no extension: what runs it, or what it runs, isn't traced`);
+    if (forced) return everything(`${shownPath(f)}: ${forced}`);
+    if (SCRIPT_EXT.test(f) || !posix.extname(f)) return everything(`${shownPath(f)} is a script or has no extension: what runs it, or what it runs, isn't traced`);
   }
   const why: Record<string, string[]> = {};
   const pick = (t: string, by: string) => (why[t] ??= []).push(by);
@@ -543,11 +545,11 @@ export function selectTests(g: Graph, changed: readonly string[], o: SelectOptio
     for (const [file, facts] of g.facts) {
       if (file === f || facts.edges.has(f) || [...facts.reads].some((p) => covers(p, f))) continue;
       const s = facts.strings.find((x) => names(x, f));
-      if (s !== undefined) return everything(`${f} is named in ${file} ('${s}'), and no import or read this can follow reaches it`);
+      if (s !== undefined) return everything(`${shownPath(f)} is named in ${shownPath(file)} ('${s}'), and no import or read this can follow reaches it`);
     }
     // Reached by nothing: a file this can't place (an entry point, a fixture read some other way), unless it is
     // documentation that no code names.
-    if (!placed && !/\.md$/i.test(f)) return everything(`no import or read this can follow reaches ${f}`);
+    if (!placed && !/\.md$/i.test(f)) return everything(`no import or read this can follow reaches ${shownPath(f)}`);
   }
   const sel = Object.keys(why).sort();
   return { all: null, tests: sel, why };
