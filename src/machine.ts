@@ -69,15 +69,15 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
 
 /**
  * The agents' Claude account through the helper (scripts/setup/claude-account.sh, src/claude-account.ts): status
- * refreshes each agent user's account and expiry; switch starts the switch as its own unit, which then takes the token
- * from this instance's dashboard.
+ * refreshes each agent user's account and expiry. Nothing here switches the account: that takes a Claude credential,
+ * a root admin's at a root shell on the machine (issue #711).
  */
-export function claudeAccount(action: 'status' | 'switch', exec: Exec = defaultExec): MachineResult {
+export function claudeAccount(action: 'status', exec: Exec = defaultExec): MachineResult {
   return runHelper(['claude-account', action], exec);
 }
 
 /**
- * A Claude account profile step through the helper (src/claude-profiles.ts): profile-add|remove|use <profile>, for
+ * A Claude account profile step through the helper (src/claude-profiles.ts): remove|use <profile>, for
  * this coordinator's own instance (the helper takes it from sudo). It starts the step as its own unit and returns at
  * once; the caller checked the shape.
  */

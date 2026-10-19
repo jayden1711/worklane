@@ -1,7 +1,7 @@
 // Add project from the dashboard, the root half: the dashboard records it only for a machine owner freshly signed in
 // on an allowed device (src/machine-owners.ts, the same gate as any machine change); the coordinator runs the machine
-// helper's add-project and relays each progress line as an add_project.step event, the GitHub clicks and the Claude
-// token as setup-console asks; the pasted token goes to the script's stdin once and nowhere else.
+// helper's add-project and relays each progress line as an add_project.step event, the GitHub clicks as setup-console
+// asks. Never the Claude token (issue #711): no paste box takes it, and nothing goes to the script's stdin.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { asks } from '../src/console/asks.js';
 import { secretsDir, storeSecret } from '../src/console/secrets.js';
-import { runningAddProjects, CLAUDE_TOKEN_CREDENTIAL } from '../src/coordinator/add-project.js';
+import { runningAddProjects } from '../src/coordinator/add-project.js';
 import { runMachineRequests, STALE_CLAIM_MS } from '../src/coordinator/machine-requests.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
@@ -87,7 +87,10 @@ test('the dashboard records an add-project only for a machine owner on an allowe
   }
 });
 
-/** The helper as the coordinator starts it, played by a script: the lines add-project.sh prints, reading the token on stdin. */
+/**
+ * The helper as the coordinator starts it, played by a script: the lines an earlier add-project.sh printed, its
+ * claude-token step asking for a pasted token and reading stdin, which says what it got there.
+ */
 const FAKE_HELPER = `
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 out({ step: 'instance', state: 'started', detail: '' });
@@ -102,43 +105,48 @@ let got = '';
 process.stdin.on('data', (c) => (got += c));
 process.stdin.on('end', () => {
   const t = got.trim();
-  out({ step: 'claude-token', state: 'done', detail: 'stored, ' + t.length + ' characters, ' + (t === process.argv[1] ? 'the pasted one' : 'not the pasted one') });
+  out({ step: 'claude-token', state: 'done', detail: 'stdin gave ' + t.length + ' characters' });
   out({ step: 'checkout', state: 'started', detail: '' });
   out({ step: 'checkout', state: 'failed', detail: 'the clone was refused', retry: 'sudo bash /opt/x/add-project.sh alpha example/alpha' });
   process.exit(1);
 });
 `;
 
-test('the coordinator runs add-project through the helper, relays each step, makes the asks, and hands the pasted token to it once', { skip: !posix }, async () => {
+test('the coordinator runs add-project through the helper, relays each step, makes the GitHub asks; issue #711: never a paste box for the Claude token, and nothing on the script\'s stdin', { skip: !posix }, async () => {
   const owners = machineOwnersFile('olive');
   const log = new EventLog(':memory:');
   const home = mkdtempSync(join(tmpdir(), 'add-project-home-'));
   const r = requestAddProject(log, { name: 'alpha', repo: 'example/alpha', requester: ownerRequester('olive'), ownersFile: owners });
   const started: string[][] = [];
-  const fakeSpawn = (file: string, args: string[]) => (started.push([file, ...args]), spawn(process.execPath, ['-e', FAKE_HELPER, TOKEN], { stdio: ['pipe', 'pipe', 'pipe'] }));
-  assert.equal(runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: fakeSpawn, home, pollMs: 20 }), 1);
-  assert.deepEqual(started, [['sudo', '-n', MACHINE_HELPER, 'add-project', 'alpha', 'example/alpha']]);
-  const run = runningAddProjects.get(r.id)!;
-  assert.ok(run, 'running alongside the ticks');
-
-  // The token ask shows up; the owner pastes it in the dashboard, which stores it for this user.
-  let secretAsk = '';
-  for (let i = 0; i < 300 && !secretAsk; i++) {
-    secretAsk = asks(log).list({ status: 'open' }).find((a) => a.kind === 'paste_secret')?.id ?? '';
-    if (!secretAsk) await new Promise((res) => setTimeout(res, 10));
+  const children: ReturnType<typeof spawn>[] = [];
+  const fakeSpawn = (file: string, args: string[]) => {
+    started.push([file, ...args]);
+    const c = spawn(process.execPath, ['-e', FAKE_HELPER, TOKEN], { stdio: ['pipe', 'pipe', 'pipe'] });
+    children.push(c);
+    return c;
+  };
+  try {
+    assert.equal(runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: fakeSpawn }), 1);
+    assert.deepEqual(started, [['sudo', '-n', MACHINE_HELPER, 'add-project', 'alpha', 'example/alpha']]);
+    const run = runningAddProjects.get(r.id)!;
+    assert.ok(run, 'running alongside the ticks');
+    // The script's claude-token ask comes, and opens no paste box.
+    const asked = () => log.read(0, ['add_project.step']).some((e) => (e.payload as { step: string; state: string }).step === 'claude-token' && (e.payload as { state: string }).state === 'ask');
+    for (let i = 0; i < 300 && !asked(); i++) await new Promise((res) => setTimeout(res, 10));
+    assert.ok(asked(), 'the step line is relayed');
+    assert.deepEqual(asks(log).list({}).filter((a) => a.kind === 'paste_secret'), [], 'no paste_secret ask: no paste box takes the token');
+    // A later tick, long after the claim, while it runs: still running, not marked interrupted, not started twice.
+    runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: fakeSpawn, now: () => Date.now() + STALE_CLAIM_MS + MIN });
+    assert.equal(started.length, 1);
+    await run;
+  } finally {
+    for (const c of children) c.kill();
   }
-  assert.ok(secretAsk, 'a paste_secret ask');
-  // A later tick, long after the claim, while it runs: still running, not marked interrupted, not started twice.
-  runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: fakeSpawn, home, now: () => Date.now() + STALE_CLAIM_MS + MIN });
-  assert.equal(started.length, 1);
-  assert.equal(machineRequests(log.read(0)).find((x) => x.id === r.id)!.status, 'running');
-  storeSecret(log, secretAsk, { by: 'olive', role: 'owner', value: TOKEN, dir: secretsDir('alpha', home) });
-  await run;
 
   const steps = log.read(0, ['add_project.step']).map((e) => e.payload as { request_id: string; name: string; repo: string; step: string; state: string; detail: string; ask?: string; retry?: string });
   assert.deepEqual(steps.map((s) => `${s.step} ${s.state}`), ['instance started', 'instance done', 'app started', 'app ask', 'app done', 'claude-token started', 'claude-token ask', 'claude-token done', 'checkout started', 'checkout failed']);
   assert.ok(steps.every((s) => s.request_id === r.id && s.name === 'alpha' && s.repo === 'example/alpha'));
-  assert.match(steps.find((s) => s.step === 'claude-token' && s.state === 'done')!.detail, new RegExp(`stored, ${TOKEN.length} characters, the pasted one`));
+  assert.equal(steps.find((s) => s.step === 'claude-token' && s.state === 'done')!.detail, 'stdin gave 0 characters', 'the script\'s stdin is closed at once, nothing written');
   assert.equal(steps.at(-1)!.retry, 'sudo bash /opt/x/add-project.sh alpha example/alpha');
   // The App's link: an approve_link ask, answered once the App step was done, by who asked.
   const appAsk = asks(log).get(steps.find((s) => s.step === 'app' && s.state === 'ask')!.ask!)!;
@@ -148,10 +156,30 @@ test('the coordinator runs add-project through the helper, relays each step, mak
   const done = machineRequests(log.read(0)).find((x) => x.id === r.id)!;
   assert.equal(done.status, 'failed');
   assert.equal(done.detail, 'checkout: the clone was refused; retry: sudo bash /opt/x/add-project.sh alpha example/alpha');
-  // The token: nowhere in the log, and its file gone.
+  // The token: nowhere in the log, and never stored for this user.
   assert.ok(!JSON.stringify(log.read(0)).includes(TOKEN), 'never in an event');
-  assert.ok(!existsSync(join(secretsDir('alpha', home), CLAUDE_TOKEN_CREDENTIAL)), 'the stored copy is deleted once handed over');
+  assert.ok(!existsSync(join(secretsDir('alpha', home), 'claude-token')), 'nothing stored');
   assert.equal(runningAddProjects.size, 0);
+});
+
+test('issue #711: no paste box stores a Claude credential: an ask an earlier version opened for the token is never answered, and a token-shaped secret is refused for any ask', () => {
+  const log = new EventLog(':memory:');
+  const home = mkdtempSync(join(tmpdir(), 'add-project-secret-'));
+  const a = asks(log);
+  // As an earlier coordinator opened it, still open in an existing install's log.
+  const claude = a.create({ kind: 'paste_secret', instance: 'alpha', title: "The Claude login for alpha's agents", detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: "wl-alpha-agent's Claude login" }, 'add-project').id;
+  const other = a.create({ kind: 'paste_secret', instance: 'alpha', title: 'A bot token', detail: 'Paste it.', credential: 'discord-token', where: 'the bot' }, 'add-project').id;
+  const refused = (id: string, value: string) =>
+    assert.throws(() => storeSecret(log, id, { by: 'olive', role: 'owner', value, dir: secretsDir('alpha', home) }), (e: Error) => /never takes one/.test(e.message) && !e.message.includes(value.slice(14)));
+  refused(claude, TOKEN);
+  refused(claude, `not-a-token-${'x'.repeat(30)}`);
+  refused(other, TOKEN);
+  refused(other, `${'a'.repeat(24)}#${'b'.repeat(24)}`);
+  assert.ok(!existsSync(secretsDir('alpha', home)), 'nothing stored');
+  assert.deepEqual([a.get(claude)!.status, a.get(other)!.status], ['open', 'open']);
+  // Any other secret, as before.
+  storeSecret(log, other, { by: 'olive', role: 'owner', value: 'a-bot-token.with.dots', dir: secretsDir('alpha', home) });
+  assert.equal(a.get(other)!.status, 'answered');
 });
 
 test('the coordinator refuses an add-project written to the log by someone who is not a machine owner, or with bad arguments, and starts nothing', () => {

@@ -194,3 +194,24 @@ test("writers and viewers can't answer owner asks; a writer may answer a questio
     await s.d.close();
   }
 });
+
+test("issue #711: a Claude token's paste box an earlier add-project left open is never offered, not even to the owner, and nothing pasted there is stored", async () => {
+  const s = await site();
+  try {
+    // As an earlier coordinator opened it, still open (it stopped mid-run, and hasn't started again yet).
+    const left = s.a.create({ kind: 'paste_secret', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: "wl-demo-agent's Claude login" }, 'add-project');
+    const other = s.a.create({ kind: 'paste_secret', instance: 'demo', title: 'The chat bot token', detail: 'For intake.', credential: 'intake-discord', where: 'credentials.yaml intake.discord_token' });
+    const listed = (await s.call('/api/asks', 'olive')).json.asks as { id: string; status: string; canAnswer: boolean }[];
+    assert.deepEqual(Object.fromEntries(listed.map((a) => [a.id, `${a.status} canAnswer=${a.canAnswer}`])), { [left.id]: 'open canAnswer=false', [other.id]: 'open canAnswer=true' });
+    // Answered anyway, with a value that isn't token-shaped: refused with the fixed text, nothing stored.
+    const r = await s.call(`/api/asks/${left.id}/secret`, 'olive', JSON.stringify({ value: SECRET }));
+    assert.equal(r.status, 400);
+    assert.match(String(r.json.error), /never takes one/);
+    assert.ok(!existsSync(join(secretsDir('demo', s.home), 'claude-token')), 'nothing stored');
+    assert.equal(s.a.get(left.id)!.status, 'open');
+    for (const b of s.bodies) assert.ok(!b.includes(SECRET), 'never echoed');
+  } finally {
+    s.log.close();
+    await s.d.close();
+  }
+});
