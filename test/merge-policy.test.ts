@@ -13,7 +13,8 @@ import { repoRoot } from './helpers.js';
 import { BRAND } from '../src/brand.js';
 import { rolePrompt, VERDICT_SCHEMA } from '../src/roles.js';
 import { exampleProject } from './helpers.js';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import * as changes from '../src/coordinator/change-files.js';
 import { dirname, join } from 'node:path';
 import { FileBacklog } from '../src/backlog/file.js';
 import type { PullRequest } from '../src/backlog/types.js';
@@ -588,6 +589,10 @@ test('weakening: a deleted test file waits; a pure rename does not, unless it le
     ['test/x.test.ts', 'docs/x.test.ts', MATH_TEST],
     ['test/x.test.ts', 'test/fixtures/x.test.ts', MATH_TEST],
     ['test/x.test.ts', 'test/__snapshots__/x.test.ts', MATH_TEST],
+    // Round 6's review: folders runners skip.
+    ['test/x.test.ts', 'test/node_modules/x.test.ts', MATH_TEST],
+    ['test/x.test.ts', 'test/.old/x.test.ts', MATH_TEST],
+    ['test/x.test.ts', 'test/__mocks__/x.test.ts', MATH_TEST],
     ['test/unit/fixtures/a.json', 'test/core/fixtures/a.json', '{ "a": 1 }\n'],
   ] as [string, string, string][]) assert.ok(moved(from, to, text).includes(DELETED), `${from} -> ${to}: ${moved(from, to, text).join(' | ')}`);
   // A guard, lint, allowlist or table file is never rename-exempt, even inside the test paths.
@@ -688,6 +693,10 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   const spaced = "var  ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': spaced }, { 'test/instance-name.test.ts': spaced.replace("  'a',\n", "  'a',\n  'b',\n") })), [GROWN], '`var` with two spaces is read');
   // A one-line table is one line; its entries changing is a change.
+  // Round 6's review: a declaring line that opens no bracket (its list on the next line) isn't a one-line table: the
+  // change waits.
+  const split = "const ALLOWED:\n  string[] = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': split }, { 'test/instance-name.test.ts': split.replace("  'a',\n", "  'a',\n  'b',\n") })), [UNREADABLE], 'a declaration with its bracket on the next line');
   const one = "const ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
   // Since round 6 its declaring line changing makes it wait as unreadable (a decoy can't stand in for it).
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': one }, { 'test/instance-name.test.ts': one.replace("['a']", "['a', 'b']") })), [UNREADABLE]);
@@ -795,6 +804,32 @@ test('weakening: weakeningOf reads the deleted paths from git and never a table 
   ], undefined);
   assert.deepEqual(kinds(r), [UNREADABLE, DELETED]);
   assert.match(r[0]!, /over 500000: not read/);
+});
+
+test('weakening (round 6 review): only a regular file can be a pure rename; a symlink moved deeper, its link text kept, waits', () => {
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(join(dir, 'test', 'sub'), { recursive: true });
+  writeFileSync(join(dir, 'test', 'real.test.ts'), MATH_TEST);
+  writeFileSync(join(dir, 'test', 'plain.test.ts'), `${MATH_TEST}\n`);
+  symlinkSync('real.test.ts', join(dir, 'test', 'link.test.ts'));
+  g('add', '-A');
+  g('commit', '-q', '-m', 'base');
+  const base = g('rev-parse', 'HEAD');
+  // The link keeps its text (`real.test.ts`), so one level down it now points at a new, empty test.
+  g('mv', 'test/link.test.ts', 'test/sub/link.test.ts');
+  writeFileSync(join(dir, 'test', 'sub', 'real.test.ts'), "import { test } from 'node:test';\n");
+  g('mv', 'test/plain.test.ts', 'test/sum.test.ts');
+  g('add', '-A');
+  g('commit', '-q', '-m', 'moved');
+  const head = g('rev-parse', 'HEAD');
+  const moves = changes.exactMoves(dir, base, head);
+  assert.equal(moves.get('test/plain.test.ts'), 'test/sum.test.ts', 'a regular file is paired');
+  assert.equal(moves.has('test/link.test.ts'), false, 'a symlink is not');
+  const r = weakening.weakeningOf(dir, base, head, changes.changeFiles(dir, base, head), undefined);
+  assert.ok(kinds(r).includes(DELETED), r.join(' | '));
+  assert.ok(r.some((x) => x.includes('test/link.test.ts')), r.join(' | '));
+  assert.ok(!r.some((x) => x.includes('plain.test.ts') || x.includes('sum.test.ts')), r.join(' | '));
 });
 
 test('weakening: the merge decision waits on it whatever the level, so it still holds if a lock is ever narrowed', () => {

@@ -280,8 +280,8 @@ const testRoot = (p: string) => {
   const at = parts.findIndex((s, k) => k < parts.length - 1 && ['test', 'tests', 'spec', 'Tests', '__tests__'].includes(s));
   return at === -1 ? '' : parts.slice(0, at + 1).join('/');
 };
-/** A folder a runner doesn't run tests from: fixtures, snapshots, test data, docs. */
-const NOT_RUN = /(?:^|\/)(?:fixtures|__fixtures__|__snapshots__|testdata|docs)\//;
+/** A folder a runner doesn't run tests from: fixtures, snapshots, mocks, test data, docs, node_modules, a dot folder. */
+const NOT_RUN = /(?:^|\/)(?:fixtures|__fixtures__|__snapshots__|__mocks__|testdata|docs|node_modules|\.[^/]+)\//;
 /** An expected output or fixture, whatever its extension. */
 const isFixture = (p: string) => /(?:^|\/)(?:fixtures|__snapshots__|testdata)\//.test(p) || p.endsWith('.snap') || !TEST_CODE.test(p);
 
@@ -372,6 +372,8 @@ export function tableLines(text: string, table: string): string[] | null {
   if (starts.length > 1) throw new Error(`${table} is declared ${starts.length} times`);
   const start = starts[0]!;
   const first = lines[start]!;
+  // A declaring line that opens no bracket (its list on the next line) is a shape this reader doesn't read.
+  if (!brackets(first, '[({')) throw new Error(`${table}: its declaring line opens no bracket`);
   if (brackets(first, '[({') === brackets(first, '])}')) return [entry(first)];
   const at = indent(first);
   for (let k = start + 1; k < lines.length; k++) {

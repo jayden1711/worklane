@@ -432,10 +432,11 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
 }
 
 /**
- * The pure renames of base..head, old path to new: a deleted path whose exact blob (same id, same mode) the change
- * adds at a new path. Content match by blob id, no similarity guess; a rename with any edit isn't one. Each added path
- * pairs with one deleted path at most. For the weakening check (src/merge-policy-weakening.ts): a test file only
- * renamed doesn't wait.
+ * The pure renames of base..head, old path to new: a deleted regular file (mode 100644 or 100755) whose exact blob
+ * (same id, same mode) the change adds at a new path. A symlink (its text points elsewhere once moved) or a submodule
+ * is never one. Content match by blob id, no similarity guess; a rename with any edit isn't one. Each added path pairs
+ * with one deleted path at most. For the weakening check (src/merge-policy-weakening.ts): a test file only renamed
+ * doesn't wait.
  */
 export function exactMoves(cwd: string, base: string, head: string): Map<string, string> {
   // -z: ":mode mode old new status NUL path NUL" for each path (renames off: a move is a D and an A).
@@ -445,6 +446,9 @@ export function exactMoves(cwd: string, base: string, head: string): Map<string,
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const [oldMode = '', newMode = '', old = '', now = '', status = ''] = parts[i]!.toString('latin1').replace(/^:/, '').split(' ');
     const path = nameOf(parts[i + 1]!);
+    const regular = (mode: string) => mode === '100644' || mode === '100755';
+    if (status === 'D' && !regular(oldMode)) continue;
+    if (status === 'A' && !regular(newMode)) continue;
     if (status === 'D') gone.set(`${oldMode} ${old}`, [...(gone.get(`${oldMode} ${old}`) ?? []), path]);
     else if (status === 'A') came.push({ key: `${newMode} ${now}`, path });
   }
