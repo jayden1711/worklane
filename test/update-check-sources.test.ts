@@ -35,7 +35,7 @@ const checkRun = (r: Run, id: number) => ({
   app: { id: r.app ?? ACTIONS, slug: (r.app ?? ACTIONS) === ACTIONS ? 'github-actions' : `app-${r.app}` },
   check_suite: { id: r.suite },
 });
-const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
+const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'example-org/engine'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
 
 /** A GitHub that answers the updater's reads for commit SHA; `rules`: the branch's rulesets. Every URL asked is kept. */
 function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unknown[] | null }) {
@@ -78,6 +78,9 @@ test('a same-name check from another workflow, a run for another commit, another
     // one of that run's jobs.
     ['a check run in the pinned suite that is not one of its jobs', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://github.com/example-org/engine/runs/5' }, { name: 'scan', suite: 2 }], legit],
     ["a job of another run's page", [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://github.com/example-org/engine/actions/runs/999/job/0' }, { name: 'scan', suite: 2 }], legit],
+    // Adversarial pass: the job's path on another host, or over plain http, isn't its run's job page.
+    ['the right path on another host', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://evil.example/example-org/engine/actions/runs/10/job/0' }, { name: 'scan', suite: 2 }], legit],
+    ['the right page over http', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'http://github.com/example-org/engine/actions/runs/10/job/0' }, { name: 'scan', suite: 2 }], legit],
   ];
   for (const [what, runs, workflowRuns] of spoofs) {
     const r = await choose(engine, gitHub({ runs, workflowRuns }));
@@ -159,6 +162,13 @@ test("the release channel judges the release's main commit the same way", async 
   assert.notEqual(await u.run(spoofed.deps), 'installed');
   assert.match(spoofed.notes.join('\n'), /"scan" hasn't run on this commit from its pinned source/);
   assert.equal(await u.run(machine([{ name: 'scan', suite: 2 }]).deps), 'installed');
+});
+
+test('adversarial pass: turning updates off works whatever the pins say (an invalid one included), and reads nothing', async () => {
+  const gh = gitHub({ runs: [] });
+  const deps = { ...gh.deps, config: () => ({ enabled: false, repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['scan'], required_check_sources: { scan: 'junk', __proto__x: 1 } }), log: () => undefined, note: (e: string) => e, checked: () => undefined, stuck: () => null, saveStuck: () => undefined };
+  assert.equal(await u.run(deps), 'disabled');
+  assert.deepEqual(gh.calls, [], 'no GitHub read');
 });
 
 test('the installed updater always judges by source: realDeps turns it on', () => {

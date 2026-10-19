@@ -456,18 +456,21 @@ function fromPinnedSource(r, pin, o) {
   if (pin.invalid) return false;
   if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id;
   const w = r.app && r.app.slug === 'github-actions' && r.check_suite && o.suites.get(r.check_suite.id);
-  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(r.html_url, r.id, w.repo, w.run);
+  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(r.html_url, r.id, w);
 }
 
 /**
- * Is `url` (a check run's html_url) the page of job `id` in workflow run `run` of `repo`? Each job of an Actions run
- * has exactly that page (measured: .../actions/runs/39197227793/job/117883963166 for check run 117883963166). A check
- * run made through the API into an Actions suite has another page (guess: /<repo>/runs/<id>; not measured).
+ * Is `url` (a check run's html_url) the page of job `id` in workflow run `w`: the run's own page (w.url) plus
+ * /job/<id>, over https on the same host? Each job of an Actions run has exactly that page (measured:
+ * .../actions/runs/39197227793/job/117883963166 for check run 117883963166). A check run made through the API into an
+ * Actions suite has another page (guess: /<repo>/runs/<id>; not measured).
  */
-function isJobOfRun(url, id, repo, run) {
+function isJobOfRun(url, id, w) {
   if (typeof url !== 'string' || typeof id !== 'number') return false;
   try {
-    return new URL(url).pathname.toLowerCase() === `/${repo}/actions/runs/${run}/job/${id}`.toLowerCase();
+    const page = new URL(url);
+    const run = new URL(w.url);
+    return page.protocol === 'https:' && page.host === run.host && page.pathname.toLowerCase() === `${run.pathname.replace(/\/+$/, '')}/job/${id}`.toLowerCase() && run.pathname.endsWith(`/actions/runs/${w.run}`);
   } catch {
     return false;
   }
@@ -506,7 +509,7 @@ async function checkPins(deps, cfg, api) {
         const data = await deps.fetchJson(`${api}/actions/runs?head_sha=${sha}&per_page=100`);
         if (!data || !Array.isArray(data.workflow_runs)) return null;
         for (const w of data.workflow_runs) {
-          if (w && typeof w.id === 'number' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
         }
       }
       return { pinOf, suites, repo, sha };
