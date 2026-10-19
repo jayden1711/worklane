@@ -4,7 +4,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
-import { basename, delimiter, dirname, join, resolve as resolvePath, sep } from 'node:path';
+import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
@@ -289,6 +289,14 @@ export function loopbackPeerIsMe(clientPort: number, serverPort: number, platfor
   if (platform !== 'linux') return null;
   const uid = loopbackPeerUid(clientPort, serverPort);
   return uid !== null && typeof process.getuid === 'function' && uid === process.getuid();
+}
+
+/**
+ * The uid this process acts as (its effective uid), from the kernel through Node, never from a program found on PATH
+ * or the environment (#715). Null on native Windows, which has no uids.
+ */
+export function currentUid(): number | null {
+  return typeof process.geteuid === 'function' ? process.geteuid() : null;
 }
 
 /** The OS user this process runs as. */
@@ -614,12 +622,6 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
 }
 
 /**
- * How to spawn a project command (a check, a test suite, a setup step):
- * under bash with pipefail, and as the instance's agent user when there is
- * one, with a clean environment. Project commands run code agents wrote, so
- * they never run as the user that holds the instance's credentials.
- */
-/**
  * A command wrapped to record its largest single process's peak memory (a test worker's), where the OS can:
  * GNU time on Linux writes the peak resident size in KB to `outFile`. Elsewhere the command is unchanged and
  * nothing is recorded (peakMemoryMb then reads null).
@@ -653,7 +655,6 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
   return platform === 'darwin' ? '/Users' : '/home';
 }
 
-/** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
 /**
  * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
  * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
@@ -688,13 +689,142 @@ export function homeOf(user: string, platform: NodeJS.Platform = process.platfor
   return null;
 }
 
-export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+/** Bubblewrap at its fixed, root-owned path: never PATH's, where a directory the agent user can write could hold a fake. */
+export const PROJECT_SANDBOX_TOOL = '/usr/bin/bwrap';
+/** The exit code of a project command whose sandbox couldn't start: nothing of the command ran. */
+export const SANDBOX_UNAVAILABLE = 125;
+export const SANDBOX_FIX = 'install bubblewrap and its AppArmor rule with scripts/setup/machine.sh, then check with scripts/setup/check.sh <name>';
+/** The sandbox's flags: one source for it and its probe (check.sh). */
+export const PROJECT_SANDBOX_ARGS = ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--die-with-parent', '--proc', '/proc'] as const;
+/** Whether this user can start it: check.sh's probe, and the wrapper's first step. */
+export const PROJECT_SANDBOX_PROBE: readonly string[] = [PROJECT_SANDBOX_TOOL, ...PROJECT_SANDBOX_ARGS, '--', '/bin/sh', '-c', ':'];
+
+/** A project command's agent user and what its sandbox hides beyond ~/.claude*; `hide` required, never dropped. */
+export interface ProjectRunAs {
+  user: string;
+  home: string;
+  path?: string;
+  hide: readonly string[];
+}
+
+// Run as the agent user before any project code: hides each path given (the command follows `--`), every ~/.claude*
+// and ~/.config/*-claude-key (credentials.sh's API key): a tmpfs over a directory, /dev/null over a file. Its own PID
+// namespace and /proc: no outside process (a `claude` holding a login) is readable through /proc/<pid>. Devices and
+// network stay. A tool that can't start is refused (SANDBOX_UNAVAILABLE) before the command runs.
+// INVARIANT: this bash gets an empty environment, so nothing a project sets (SHELLOPTS, BASHOPTS, IFS, ...) reaches
+// it; the project's variables are the inner `env -i` after `--`, passed on as words. Glob and shell options are reset
+// anyway. --norc --noprofile: it reads no startup file, such as the agent's ~/.bashrc (writable by a sandboxed
+// command; sourced by bash's rshd check for `bash -c` with a socket on stdin).
+// Every directory above a hidden path is bound onto itself first (shallowest first, before any mask): renaming it
+// fails (EBUSY), so the secret can't be moved out from under its mask. (--bind adds nosuid,nodev: a hidden path
+// under /dev would cost the sandbox its devices.)
+const LINUX_SANDBOX = [
+  'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
+  // Tools by fixed path (no function or PATH entry stands in); a missing one refuses.
+  `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
+  `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}`,
+  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
+  'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
+  // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
+  'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
+  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
+  `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
+  // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
+  // directory, or whether one it doesn't own is writable to it. Resolved one component and symlink at a time:
+  // - a symlink is followed only from a directory the agent neither owns nor can write, and the directories above it
+  //   are bound onto themselves; any other symlink, or over 40, is refused;
+  // - ENOENT, ENOTDIR: nothing to hide;
+  // - EACCES: nothing to hide only if no directory walked so far is the agent's (owned or writable): then it is the
+  //   coordinator's, unopenable by that name. Under the agent's own, it could make it searchable again: refused;
+  // - any other error, or a name too long to check: refused.
+  `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
+  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0',
+  '  if [ -w / ]; then cw=1 own=1; fi',
+  '  while [ -n "$todo" ]; do',
+  '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
+  // A `..` (only in a root link's target; hide paths with one are refused) binds the directory it leaves first: no
+  // command can remove or rename it.
+  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
+  '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
+  '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; continue ;; esac',
+  `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
+  '    st "$cur/$c"',
+  '    if [ "$S" -ne 0 ]; then',
+  '      case $E in "No such file or directory"|"Not a directory") return 1 ;; "Permission denied") if [ "$own" = 0 ]; then return 1; fi',
+  '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; return 2 ;; esac',
+  '      unres "$1" "cannot be checked ($E)"; return 2',
+  '    fi',
+  '    case $T in',
+  '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
+  '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
+  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi ;; esac; todo=${t#/}${todo:+/$todo} ;;',
+  '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi ;;',
+  '      *) cur=$cur/$c cw=0 ;;',
+  '    esac',
+  '  done; R=${cur:-/} RT=$T; }',
+  'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "is under /proc, /sys or /dev"; return ;; esac',
+  '  walk "$1"; case $? in 1|2) return ;; esac; r=$R',
+  '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "resolves under /proc, /sys or /dev"; return ;; esac',
+  '  if [ "$RT" = directory ]; then hide+=(--tmpfs "$r"); else hide+=(--ro-bind /dev/null "$r"); fi; above "$r"; }',
+  // Default masks listed by find, whose failure refuses (a glob in an unreadable directory hid nothing, #787 r7).
+  'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
+  // (A home or ~/.config that isn't a directory holds nothing to hide.)
+  'walk "$h"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi; fi',
+  'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
+  `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
+  'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
+  `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
+  `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
+  'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
+].join('\n');
+
+/**
+ * What a sandbox may hide and a configured path must be: absolute, normal form (no `..`, `//`, `/./`, trailing `/`),
+ * not `/`, no NUL or newline, under PATH_MAX and NAME_MAX (else "name too long" reads as absent). Refused, never
+ * rewritten.
+ */
+export const normalAbsolute = (p: string): boolean =>
+  p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/') && !/[\0\n]/.test(p) && Buffer.byteLength(p) < 4096 && p.split('/').every((c) => Buffer.byteLength(c) <= 255);
+/** A user's home: the same rule, but `/` is a home some users have (it is never a path to hide). */
+export const normalHome = (p: string): boolean => p === '/' || normalAbsolute(p);
+export const NOT_NORMAL_ABSOLUTE ='must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
+
+/** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
+export function seatbeltProfile(home: string, hide: readonly string[]): string {
+  const bad = [home, ...hide].find((p) => !/^\/[^"\\\n]*$/.test(p));
+  if (bad !== undefined) throw new Error(`can't sandbox a project command around ${JSON.stringify(bad)}: not a plain absolute path`);
+  const re = (s: string) => s.replace(/[.*+?^$()[\]{}|]/g, '\\$&');
+  const h = re(home.replace(/\/$/, ''));
+  const rules = [`(regex #"^${h}/\\.claude")`, `(regex #"^${h}/\\.config/[^/]*-claude-key(/|$)")`, ...hide.map((p) => `(subpath "${p}")`)];
+  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n`;
+}
+
+/**
+ * How to spawn a project command: bash with pipefail and a clean environment. With `runAs`, as the agent user and
+ * always in a sandbox hiding its Claude logins, its API key and `runAs.hide` (#713): bubblewrap, or macOS's
+ * sandbox-exec. No way to run one as the agent user without it; `sandboxTool` is for tests.
+ */
+export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
+  // Fail closed: a runAs without its hide list (a job file an older engine wrote, a caller outside the type) is refused,
+  // never run with the default masks only.
+  if (!Array.isArray(runAs.hide)) throw new Error(`a project command as ${runAs.user} needs its sandbox's hide list (runAs.hide); refusing to run it without`);
+  // Normal form only (absolute, no //, /./, .. or trailing /), so the wrapper's checks on a path's text (/proc, /sys,
+  // /dev) and its walk see the path the kernel would; anything else is refused, never dropped or rewritten.
+  const bad = runAs.hide.find((p) => !normalAbsolute(p));
+  if (bad !== undefined) throw new Error(`a project command's hidden path ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(bad)}; refusing to run it`);
+  const hide = [...runAs.hide];
+  // The home too: refused, never rewritten. A lexical rewrite of `..` after a symlink names a directory the kernel
+  // never reaches, and the masks would miss the real one (#787 round 6).
+  if (!normalHome(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
+  const home = runAs.home;
+  if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
     ...own,
-    HOME: runAs.home,
+    HOME: home,
     USER: runAs.user,
     LOGNAME: runAs.user,
     // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
@@ -710,7 +840,17 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     GIT_CONFIG_VALUE_1: '*',
   };
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
-  const [f, a] = asUser(runAs.user, file, args, outboundEnv(env));
+  const full = outboundEnv(env);
+  if (process.platform === 'darwin') {
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
+    return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+  }
+  // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
+  const vars = Object.entries(full)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => `${k}=${v}`);
+  const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
+  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, runAs.user, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 
@@ -780,12 +920,7 @@ export function shellCommand(command: string): [file: string, args: string[]] {
   return [commandBash(), ['-o', 'pipefail', '-c', command]];
 }
 
-/**
- * Environment for project commands the engine runs (checks, tests). Drops
- * variables that change how a nested runner behaves when the engine itself
- * runs under a test runner (node --test sets NODE_TEST_CONTEXT, which makes a
- * nested `node --test` report to the parent instead of exiting non-zero).
- */
+/** Environment for project commands, without NODE_TEST_CONTEXT (a nested `node --test` would report to the parent). */
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
@@ -799,14 +934,8 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
 }
 
 /**
- * Machine-wide slot directory shared by every agent harness on the box (not
- * just this one), so the name is deliberately unbranded. Override with
- * AGENT_SLOTS_DIR. See docs/slots.md.
- */
-/**
- * Durable system locations for the slots and their config. /var/tmp is
- * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
- * days), which would drop the cap and lock files of a long-running machine.
+ * The machine-wide slot directory every agent harness shares (so unbranded; AGENT_SLOTS_DIR overrides; docs/slots.md),
+ * in durable locations: /var/tmp's cleaners would drop a long-running machine's cap and lock files.
  */
 // Frozen: a module that set SYSTEM_SLOTS.dir to a guess would have slotsDir mark the slot dir by it (#806 round 4).
 export const SYSTEM_SLOTS = Object.freeze({ dir: varLibPath('agent-slots'), config: etcPath('slots.json') });
