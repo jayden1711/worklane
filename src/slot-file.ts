@@ -116,17 +116,12 @@ export function slotSibling(file: SlotPathLike, suffix: string): SlotPathLike {
   return nameOf(like(file, `${raw(file)}${plainName(suffix, 'a suffix')}`));
 }
 
-/** The directory `file` is in. */
-export function slotParent(file: SlotPath): SlotPath;
-export function slotParent(file: string): string;
-export function slotParent(file: SlotPathLike): SlotPathLike;
-export function slotParent(file: SlotPathLike): SlotPathLike {
-  return like(file, dirname(raw(file)));
-}
+// Nothing here gives a slot path's parent: a value for a directory above the slot dir could be listed, and its
+// entries told apart by `===` with slotFile, spelling the path out. Only a file's own directory is made (below).
 
 /**
  * The file's own name, without its directory: only for a slot path made by slotFile or slotSibling, whose name its
- * caller gave. Never a directory's (the slot dir, a parent), so walking up with slotParent spells out no path.
+ * caller gave. Never a directory's (the slot dir), so no name of where the slot dir is comes out.
  */
 export function slotFileName(file: SlotPathLike): string {
   if (typeof file !== 'string' && !named.has(file)) throw new TypeError(OPAQUE);
@@ -164,6 +159,8 @@ export const lstatSlotFile = (file: SlotPathLike) => onPath(file, (f) => lstatSy
 export const slotFileExists = (file: SlotPathLike): boolean => onPath(file, (f) => existsSync(f));
 /** The directory, and its parents, if missing. */
 export const makeSlotDir = (dir: SlotPathLike): void => void onPath(dir, (d) => mkdirSync(d, { recursive: true }));
+/** The directory `file` is in, and its parents, if missing. */
+export const makeSlotFileDir = (file: SlotPathLike): void => void onPath(file, (f) => mkdirSync(dirname(f), { recursive: true }));
 /** Remove a file (`force`: no error when it is missing). */
 export const removeSlotFile = (file: SlotPathLike, o: { force?: boolean } = {}): void => onPath(file, (f) => rmSync(f, { force: o.force === true }));
 export const renameSlotFile = (from: SlotPathLike, to: SlotPathLike): void => onPaths(from, to, (a, b) => renameSync(a, b));

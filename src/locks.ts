@@ -4,7 +4,7 @@
 // A lock in the slot dir is a slot path (#772): every file operation on it here goes through src/slot-file.ts.
 import { createHash } from 'node:crypto';
 import { pidAlive } from './os/index.js';
-import { makeSlotDir, readSlotFile, removeSlotFile, slotParent, slotSibling, writeSlotFile, type SlotPathLike } from './slot-file.js';
+import { makeSlotFileDir, readSlotFile, removeSlotFile, slotSibling, writeSlotFile, type SlotPathLike } from './slot-file.js';
 
 export interface LockInfo {
   pid: number;
@@ -66,7 +66,7 @@ export interface TakeoverHooks {
 }
 
 export function tryLock(path: SlotPathLike, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
-  makeSlotDir(slotParent(path));
+  makeSlotFileDir(path);
   const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString(), ...extra };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {

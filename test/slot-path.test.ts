@@ -462,20 +462,21 @@ test('run time: a slot file name is one plain name, and a slot path is one value
   for (const bad of ['', '.', '..', '../x', 'a/b', 'a\\b', 'a\0b']) assert.throws(() => sf.slotFile(d, bad), TypeError, JSON.stringify(bad));
   assert.throws(() => sf.slotSibling(d, '/../x'), TypeError);
   assert.equal(sf.slotFile(d, 'a'), sf.slotFile(d, 'a'));
-  assert.equal(sf.slotParent(sf.slotFile(d, 'a')), d);
   assert.equal(sf.slotFileName(sf.slotFile(d, 'a.lock')), 'a.lock');
   sf.writeSlotFile(sf.slotFile(d, 'a'), 'text');
   assert.equal(sf.readSlotFile(sf.slotFile(d, 'a')), 'text');
 });
 
-test('run time: no name of a directory, so walking up from a slot path spells out none of its path', async () => {
+test('run time: nothing walks up from the slot dir or names it, so nothing spells out where it is', async () => {
   const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
-  assert.throws(() => sf.slotFileName(os.slotsDir()), TypeError, 'not the slot dir\'s');
-  let up = os.slotsDir();
-  for (let i = 0; i < 4; i++) {
-    up = sf.slotParent(up);
-    assert.throws(() => sf.slotFileName(up), TypeError, `not a parent's (${i + 1} up)`);
+  const d = os.slotsDir();
+  assert.throws(() => sf.slotFileName(d), TypeError, "not the slot dir's name");
+  // No export gives a directory above one: listing it, then `===` with slotFile, would tell its entries apart.
+  assert.deepEqual(Object.keys(sf).filter((k) => /parent|dirname|up$/i.test(k)), []);
+  for (const up of ['..', '../', '/..', '.']) {
+    assert.throws(() => sf.slotFile(d, up), TypeError, `slotFile(${up})`);
+    assert.throws(() => sf.slotSibling(d, up), TypeError, `slotSibling(${up})`);
   }
 });
 
