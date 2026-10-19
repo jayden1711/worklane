@@ -13,7 +13,7 @@
 # A Claude credential comes in only here, at a root shell on this machine (the hidden prompt, or stdin): never from a
 # dashboard (issue #711). No command takes one through the machine helper, and each run removes, unread, any file an
 # earlier version had a dashboard store for this script (a switch's token, a profile's token, a sign-in's code,
-# add-project's token) from every instance's secrets dir, as that instance's coordinator user.
+# add-project's token) from every secrets dir in each coordinator user's ~/.config (*-secrets), as that user.
 #
 # switch, for every instance on the machine (the machine helper's and the dashboard hub's), or the ones named:
 #   pause    each instance's coordinator is asked to stop starting runs (SIGTERM to its main process: the runs it has
@@ -123,19 +123,24 @@ if [[ "$cmd" == profile-add || "$cmd" == use || "$cmd" == remove || "$cmd" == co
 fi
 
 # Issue #711: what an earlier version had a dashboard store for this script to read once (a switch's token, a new
-# profile's token, a relayed sign-in's code, add-project's token) is removed, unread, from every instance's secrets
-# dir on every run: a step that stopped before reading one left it there. As that instance's coordinator user (the dir
-# is its own: root never follows a path it could have changed), and the sign-in link root kept for it.
+# profile's token, a relayed sign-in's code, add-project's token) is removed, unread, on every run: a step that
+# stopped before reading one left it there. From every secrets dir in each coordinator user's ~/.config
+# (~wl-<n>/.config/*-secrets/), not only its own instance's: add-project's token went to the asking coordinator's
+# ~/.config/<new instance>-secrets/. Only those four names, only regular files: find, as that coordinator user (the
+# dirs are its own: root never follows a path it could have changed), follows no link, a *-secrets dir that is one
+# included, and goes no deeper. And the sign-in link root kept for it.
 drop_pasted_credentials() {
-  local n d f
+  local n cfg f
   { helper_instances; hub_instances; } 2>/dev/null | sort -u | while read -r n; do
     instance_name_ok "$n" && user_exists "wl-$n" || continue
-    d="$(home_of "wl-$n")/.config/$n-secrets"
-    for f in "$CLAUDE_ACCOUNT_CREDENTIAL" "$CLAUDE_PROFILE_CREDENTIAL" "$CLAUDE_LOGIN_CREDENTIAL" claude-token; do
-      if [ -e "$d/$f" ] || [ -L "$d/$f" ]; then
-        if (cd / && sudo -H -u "wl-$n" rm -f -- "$d/$f"); then echo "removed $d/$f, unread: a dashboard no longer takes a Claude credential" >&2; fi
-      fi
-    done
+    cfg="$(home_of "wl-$n")/.config"
+    # Names only (the four all start claude-): no sudo at all when there is nothing of the kind.
+    compgen -G "$cfg/*-secrets/claude-*" >/dev/null || continue
+    (cd / && sudo -H -u "wl-$n" find -P "$cfg" -mindepth 2 -maxdepth 2 -path "$cfg/*-secrets/*" -type f \
+      \( -name "$CLAUDE_ACCOUNT_CREDENTIAL" -o -name "$CLAUDE_PROFILE_CREDENTIAL" -o -name "$CLAUDE_LOGIN_CREDENTIAL" -o -name claude-token \) \
+      -delete -print 2>/dev/null) | while IFS= read -r f; do
+      echo "removed $f, unread: a dashboard no longer takes a Claude credential" >&2
+    done || true # no ~/.config, or a dir find can't open: nothing of these left there
   done
   rm -f -- "$CLAUDE_ACCOUNT_DIR/login-url"
   return 0
