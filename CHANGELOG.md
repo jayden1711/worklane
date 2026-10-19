@@ -20,10 +20,11 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - each run variable the sandbox helper is given.
 
   So a config that sets, for example, `MALLOC_ARENA_MAX` or `TZDIR` is valid on v0.5.2 and fails the config check on this release. Before installing, remove these names from the config on the default branch.
-- **In a test run that has a user namespace of its own (#780), bash's own variables are left out.** If a project's `env` sets `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `PPID` or `BASH_VERSINFO`, the run doesn't get the project's value, and its stderr says `worklane-testrun: not set: <NAME> is the shell's own`. Bash keeps these as read-only variables of its own, so the step that hands a run its variables can't export them. What a child of the run's commands then sees (measured with a fixture of that step):
+- **In a test run that has a user namespace of its own (#780), any project variable bash treats as its own is left out, with a note.** The step that hands a run its variables (a bash, after every capability is dropped) decides this on the bash it runs under, never from a list: it doesn't pass on a name that bash holds as integer, read-only, an array or a nameref, or sets itself, or one it couldn't export with the value given. For each, the run's stderr says `worklane-testrun: not set: <NAME> is the shell's own`, and the run goes on. Measured on bash 5.2.21, these lose the project's value this way, though v0.5.2 handed it to the run's bash: `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `PPID`, `BASH_VERSINFO`, `GROUPS`, `FUNCNAME`, `DIRSTACK`, `BASH_ARGC`, `BASH_ARGV`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ALIASES`, `BASH_CMDS` and `PIPESTATUS`. So do the names bash sets itself, such as `HOSTNAME`, `SHLVL`, `PWD`, `OSTYPE`, `RANDOM`, `SECONDS`, `OPTIND` and `SRANDOM`. Other bash versions may differ. Measured with a fixture of that step, what a child of the run's commands then sees:
   - `SHELLOPTS` and `BASHOPTS`: bash's default options, so the project's (`xtrace`, `extglob`, ...) lose their effect;
   - `UID` and `EUID`: the run's real uid, where v0.5.2 passed the project's value on;
-  - `PPID` and `BASH_VERSINFO`: nothing, as on v0.5.2.
+  - `HOSTNAME`: bash's own, where v0.5.2 passed the project's value on;
+  - the rest of the sixteen above: nothing, where v0.5.2 handed the project's value to the run's bash.
 
 ### After install
 

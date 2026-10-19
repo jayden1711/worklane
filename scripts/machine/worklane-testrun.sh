@@ -1138,10 +1138,20 @@ wrapper_acl_problem() {
 # the mounts it was copied from are locked to it (round 3). The test-run CI job asserts a run running the wrapper is refused.
 # USERNS_LOAD: the step after setpriv (no capability left, the unconfined label) that gives the run's command its
 # variables: it reads them from its stdin, each NAME=value ended by a NUL (exec_run feeds the root-only file there),
-# exports each, and runs the command with /dev/null as its stdin, as before. A name bash keeps as its own read-only
-# variable (SHELLOPTS, BASHOPTS, UID, EUID, PPID, BASH_VERSINFO) can't be exported: it is left out, with a note on
-# stderr, and the run goes on. Nothing of it reaches a step with a capability: sh and setpriv before it read no stdin,
-# and ip and mount get /dev/null.
+# exports each, and runs the command with /dev/null as its stdin, as before. All decided on the bash it runs under,
+# never from a list kept here (round 7):
+#   - a name this bash already holds as integer, read-only, an array or a nameref (${!name@a} has i, r, a, A or n:
+#     RANDOM, OPTIND, UID, GROUPS, ...), or one it set itself, not from the environment it started with
+#     (/proc/$$/environ: SHLVL, HOSTNAME, PWD, OSTYPE, ...), is never assigned. WHY: assigning an integer one evaluates
+#     the value as arithmetic, and a[$(...)] in it runs code (measured on bash 5.2: OPTIND, RANDOM, SRANDOM, HISTCMD),
+#     which bash importing the same value from its environment, as before #545, didn't; and bash changes some of its
+#     own on the way to the command (exec lowers SHLVL), so a check here couldn't vouch for them;
+#   - then each name it was given must be exported, not an array or a nameref, and hold the last value given
+#     (${!name@a}, ${!name}: no child per name).
+# A name that fails either (bash's own: read-only like SHELLOPTS, arrays like FUNCNAME, dynamic like SECONDS) gets a
+# note on stderr; the run goes on. Its own variables are WORKLANE_*, which valid_env never lets a run set, so no
+# project variable can collide with them. Nothing of it reaches a step with a capability: sh and setpriv before it read
+# no stdin, and ip and mount get /dev/null.
 USERNS_ARGV=()
 USERNS_LOAD=()
 userns_argv() {
@@ -1151,7 +1161,7 @@ userns_argv() {
   # locale's) reaches them.
   s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up < /dev/null && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS < /dev/null && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
   USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
-  s="$(systemd_command "$v" 'while IFS= read -r -d "" kv; do export "$kv" 2> /dev/null || echo "worklane-testrun: not set: ${kv%%=*} is the shell'"'"'s own" >&2; done; exec "$@" < /dev/null')"
+  s="$(systemd_command "$v" 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]=1; done < "/proc/$$/environ"; while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && [[ -z "${WORKLANE_o[$WORKLANE_n]-}" ]]; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]=1; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell'"'"'s own" >&2; fi; done; exec "$@" < /dev/null')"
   USERNS_LOAD=(/bin/bash -c "${s#*$'\n'}" load)
 }
 

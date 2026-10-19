@@ -486,7 +486,7 @@ const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) =
   // Round 4: the loader, after setpriv, gives the command the run's variables from its stdin.
   '/bin/bash', '-c', LOADER.replaceAll('$', () => dollar), 'load',
 ];
-const LOADER = 'while IFS= read -r -d "" kv; do export "$kv" 2> /dev/null || echo "worklane-testrun: not set: ${kv%%=*} is the shell\'s own" >&2; done; exec "$@" < /dev/null';
+const LOADER = 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]=1; done < "/proc/$$/environ"; while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && [[ -z "${WORKLANE_o[$WORKLANE_n]-}" ]]; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]=1; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell\'s own" >&2; fi; done; exec "$@" < /dev/null';
 
 /** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
 const prelude = (h: ReturnType<typeof netHelper>) => h.lastProps().argv.slice(-(usernsArgv(h).length + 5), -5);
@@ -663,6 +663,61 @@ test('#545 round 4: no variable of the run\'s reaches a step that holds a capabi
     assert.match(l.stderr, /not set: SHELLOPTS is the shell's own/);
   } finally {
     h.done();
+  }
+});
+
+/** The sixteen names measured on bash 5.2 to reach a child on v0.5.2 but not through the loader (rounds 6-7). */
+const BASH_OWN_52 = ['SHELLOPTS', 'BASHOPTS', 'UID', 'EUID', 'PPID', 'BASH_VERSINFO', 'GROUPS', 'FUNCNAME', 'DIRSTACK', 'BASH_ARGC', 'BASH_ARGV', 'BASH_SOURCE', 'BASH_LINENO', 'BASH_ALIASES', 'BASH_CMDS', 'PIPESTATUS'];
+
+test('#545 round 7: the loader notes every variable it can\'t pass on, decided on the bash it runs under (no list); never assigns one bash holds as integer, read-only, array or nameref, so no value runs as arithmetic', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  const marks = tmp('loader-marks-');
+  try {
+    h.userns('ok');
+    assert.equal(h.execEnv('fast-l-1', [], 'true', { FOO: 'x' }).status, 0);
+    const argv = h.lastProps().argv;
+    const loader = argv[argv.indexOf('load') - 1]!;
+    // No hand-kept list of names in it.
+    for (const n of [...BASH_OWN_52, 'RANDOM', 'SRANDOM', 'OPTIND']) assert.ok(!new RegExp(`\\b${n}\\b`).test(loader), `the loader names ${n}`);
+    const load = (vars: string[], cmd = 'true') => spawnSync('bash', ['-c', loader, 'load', 'bash', '-c', cmd], { encoding: 'utf8', input: vars.map((v) => `${v}\0`).join(''), env: { PATH: '/usr/bin:/bin' } });
+    const noted = (stderr: string) => [...stderr.matchAll(/^worklane-testrun: not set: (\S+) is the shell's own$/gm)].map((m) => m[1]!).sort();
+    // The sixteen each get a note; an ordinary name gets none and reaches the command.
+    const r = load([...BASH_OWN_52.map((n) => `${n}=v`), 'PLAIN=ok'], 'printf %s "$PLAIN"');
+    assert.equal(r.stdout, 'ok');
+    assert.deepEqual(noted(r.stderr), [...BASH_OWN_52].sort());
+    // What the loader hands over is the environment the command starts with (the command is then the run's bash, which
+    // treats its own names as v0.5.2's did, given the same environment). Checked with printenv as the command itself.
+    const handed = (n: string) => spawnSync('bash', ['-c', loader, 'load', 'printenv', n], { encoding: 'utf8', input: `${n}=12345\0`, env: { PATH: '/usr/bin:/bin' } });
+    // Names special on some bash versions only (SRANDOM: 5.1 and later; EPOCHSECONDS, EPOCHREALTIME, BASH_ARGV0: 5.0
+    // and later; COMP_WORDBREAKS, BASHPID) are decided by the bash the loader runs under: each is either handed over
+    // with its value (and not noted) or noted (and not handed over), never lost silently, whatever bash runs this test.
+    for (const n of ['SRANDOM', 'EPOCHSECONDS', 'EPOCHREALTIME', 'BASH_ARGV0', 'COMP_WORDBREAKS', 'BASHPID', 'HOSTNAME', 'SHLVL', 'POSIXLY_CORRECT', 'BASH_COMPAT']) {
+      const x = handed(n);
+      const passed = x.stdout.trim() === '12345';
+      const isNoted = noted(x.stderr).includes(n);
+      assert.ok(passed !== isNoted, `${n}: handed over ${passed}, noted ${isNoted} (exactly one)`);
+    }
+    // A name the unit's own environment set before the loader (CI, LANG: the helper's --setenv) is the project's to
+    // replace, with no note, as with EnvironmentFile= before.
+    const pre = spawnSync('bash', ['-c', loader, 'load', 'printenv', 'CI', 'LANG'], { encoding: 'utf8', input: 'CI=0\0LANG=C\0', env: { PATH: '/usr/bin:/bin', CI: '1', LANG: 'C.UTF-8' } });
+    assert.equal(pre.stdout, '0\nC\n');
+    assert.deepEqual(noted(pre.stderr), []);
+    // Every one of the sixteen, the same way: noted, and not handed over.
+    for (const n of BASH_OWN_52) {
+      const x = handed(n);
+      assert.ok(x.stdout.trim() !== '12345' && noted(x.stderr).includes(n), `${n}: ${x.stdout} ${x.stderr}`);
+    }
+    // Values a bash integer variable would evaluate as arithmetic run nothing (bash's own import of them, as before #545, didn't either).
+    const evil = ['OPTIND', 'RANDOM', 'SRANDOM', 'HISTCMD', 'SECONDS', 'LINENO'].map((n) => `${n}=a[$(touch ${join(marks, n)})]`);
+    const e = load(evil);
+    assert.deepEqual(spawnSync('ls', [marks], { encoding: 'utf8' }).stdout.trim(), '', `no value ran: ${e.stderr}`);
+    // A duplicate: the last value wins, and is what's checked (no note).
+    const d = load(['D=1', 'D=2'], 'printf %s "$D"');
+    assert.equal(d.stdout, '2');
+    assert.deepEqual(noted(d.stderr), []);
+  } finally {
+    h.done();
+    rmSync(marks, { recursive: true, force: true });
   }
 });
 
