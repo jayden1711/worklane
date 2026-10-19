@@ -1,15 +1,8 @@
-// Auto-config: init's "Repo config" step for a repo with no config folder yet. It reads the default branch (in a
-// scratch worktree, never the person's checkout), detects the project's ecosystems and their test commands
-// (package.json scripts and the package manager from the lockfile, pytest/pyproject, go.mod, Cargo.toml, Makefile
-// targets), drafts tests.yaml (runner.changed / full / one, the test globs, the worktree setup) and config.yaml, runs
-// each drafted command on the default branch through the project-command path (src/coordinator/shared.ts sh: the
-// project env only, no credentials, a time limit), and proposes the result as a PR from a branch of its own. It never
-// commits to or pushes the default branch.
-//
-// Never a silent guess: anything ambiguous or unknown (two test commands, none, a monorepo, two lockfiles, no way to
-// run one test file, a command that fails on the default branch) is a question with its choices. Init asks it on the
-// terminal, or records it for `init --answer <id>=<choice>` and the dashboard's First-run page; the answers are kept
-// in init's state, and the next run picks up from them.
+// Auto-config: init's "Repo config" step for a repo with no config folder. In a scratch worktree of the default branch
+// it detects the ecosystems and test commands, drafts tests.yaml and config.yaml, runs each drafted command through
+// the project-command path (sh: the project env only, no credentials, a time limit) and proposes the result as a PR
+// from its own branch. It never commits to or pushes the default branch. Never a silent guess: anything ambiguous is a
+// question with its choices (on the terminal, or `init --answer <id>=<choice>` and the First-run page).
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify } from 'yaml';
@@ -19,7 +12,7 @@ import { loadConfig } from './config/load.js';
 import { TestsConfig } from './config/schema.js';
 import { sh } from './coordinator/shared.js';
 import type { Config } from './config/load.js';
-import type { RunAs } from './runner.js';
+import type { ProjectRunAs } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { scaffoldConfig } from './install.js';
 import { defaultBranchRefusal } from './push-guard.js';
@@ -77,11 +70,7 @@ export interface AutoConfigState {
   base: string | null;
   /** The setup PR, once opened; `head`: the commit this run pushed for it (null: an open PR kept from before, not pushed here). */
   pr: { number: number | null; url: string; branch: string; head?: string | null } | null;
-  /**
-   * WHY (#468): the drafted config held for the person to preview before any PR (the dashboard's draft): the top-level
-   * YAML files as drafted (and edited on the page), the commit it was drafted on, and the PR body. Absent from the
-   * terminal's init, which proposes at once.
-   */
+  /** WHY (#468): the draft held for preview before any PR (the dashboard's): files, base commit, PR body. */
   draft?: HeldDraft | null;
 }
 
@@ -545,7 +534,7 @@ export interface AutoConfigOptions {
   /** Keep the state (each answer and result is saved as it comes). */
   save(): void;
   /** Server mode: the drafted commands run as the instance's agent user, never as the user holding the credentials. */
-  runAs?: RunAs;
+  runAs?: ProjectRunAs;
   /** Where the scratch worktree goes (default: under the project's state dir), and where its ownership record is kept. */
   worktreeRoot?: string;
   worktreeStateDir?: string;
@@ -811,9 +800,8 @@ function prBody(p: Plan, s: AutoConfigState, branch: string, base: string, owner
 }
 
 /**
- * WHY (#468): Confirm on the preview. The held draft (as previewed, with any change made there) is committed on a
- * scratch worktree of the commit it was drafted on, pushed to the setup branch and opened as the setup PR, as init's
- * own proposal is. Nothing is pushed to the default branch. The draft is let go once its PR is open.
+ * WHY (#468): Confirm on the preview: the held draft is committed on a scratch worktree of its base, pushed to the
+ * setup branch and opened as the setup PR. Nothing is pushed to the default branch.
  */
 export async function proposeHeldDraft(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' | 'state' | 'save' | 'worktreeRoot' | 'worktreeStateDir'>): Promise<AutoConfigResult> {
   const d = o.state.draft;

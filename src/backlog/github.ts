@@ -231,7 +231,7 @@ export class GitHubBacklog implements Backlog {
   }
 
   /**
-   * Every check on `sha`. Without `pinned` (no required check is pinned), exactly main's reads: up to 9 pages of check
+   * Every check on `sha`. Without `pinned` (no check being judged is pinned), exactly main's reads: up to 9 pages of check
    * runs, judged as read, and the combined status's first page (a 403 or 404: none). With `pinned` (#727), the reads a
    * pinned check needs, failing closed: see below and statusPages.
    */
@@ -256,7 +256,7 @@ export class GitHubBacklog implements Backlog {
       if (r.check_runs.length < 100) break;
     }
     // #727: which workflow run, in which repo and for which commit, posted each Actions check (its suite's run). Read
-    // only when a required check is pinned: by name, nothing needs it.
+    // only when a check being judged is pinned (`pinned`): by name, nothing needs it.
     if (suites.size) {
       if (![...suites.values()].every((s) => this.suiteRuns.has(s))) await this.workflowRuns(sha);
       for (const [check, suite] of suites) check.workflow = this.suiteRuns.get(suite) ?? null;
@@ -269,7 +269,7 @@ export class GitHubBacklog implements Backlog {
   }
 
   /**
-   * The combined status's contexts on `sha` as main read them, with no required check pinned: the first page (GitHub's
+   * The combined status's contexts on `sha` as main read them, with no judged check pinned: the first page (GitHub's
    * default page size); commit statuses need their own permission, so a 403 or 404 means none.
    */
   private async firstStatusPage(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
@@ -282,7 +282,7 @@ export class GitHubBacklog implements Backlog {
   }
 
   /**
-   * #727, a required check pinned: the combined status's contexts on `sha`, the first page as main read it, then every
+   * #727, a check being judged is pinned: the combined status's contexts on `sha`, the first page as main read it, then every
    * later page while a page is full, whatever total_count says, marked `extra` (only a pinned name is judged with them).
    * Past STATUS_PAGES_MAX pages it throws: a status unread could be a pinned check's failure, so the commit isn't
    * judged (it waits). Any refusal throws too, a first page's 403 or 404 included (the owner's decision, round 8): a

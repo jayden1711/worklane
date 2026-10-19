@@ -9,9 +9,10 @@ import { type Backlog, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
+import { redactString } from '../events/redact.js';
 import type { SuiteOptions } from '../harness-evals/replay.js';
-import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
-import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } from '../runner.js';
+import { killTree, killTreeAs, projectCommand, spawnDetached, type ProjectRunAs } from '../os/index.js';
+import { type AgentRunner, type CommitIdentity, type RunControl } from '../runner.js';
 import { type PendingMessage } from '../console.js';
 import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
@@ -51,7 +52,8 @@ export interface CoordinatorDeps {
    */
   depCacheRoot?: { dir: string; gid: number };
   /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
-  commandsAs?: RunAs;
+  /** Project commands' agent user, with what their sandbox hides (src/os projectCommand). */
+  commandsAs?: ProjectRunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
   tokenExpiresAt?: string | null;
   /** The identity on every commit; agents' commits with any other are rejected. */
@@ -68,6 +70,12 @@ export interface CoordinatorDeps {
   reviewPollMs?: number;
   /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
   autoMerge?: () => boolean;
+  /**
+   * An instance's policy.yaml writers_approve_land, read on every approval (#715): off, throwing or absent, and writers
+   * never approve a high-risk merge, whatever review.yaml says (fail closed). A local site, which has no policy, is
+   * given `() => true` (service.ts runSite), so its review.yaml decides.
+   */
+  writersApproveLand?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
   settings?: () => { settings: InstanceSettings; error: string | null };
   /**
@@ -105,7 +113,7 @@ export interface CoordinatorDeps {
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */
-  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
+  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: ProjectRunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number; freeGb?: number } };
   /**
@@ -119,11 +127,9 @@ export interface CoordinatorDeps {
   /** How the machine helper is run for the dashboard's machine requests (sudo -n; tests inject it). */
   machineExec?: (file: string, args: string[]) => string;
   /**
-   * Work intake (docs/intake.md): the instance's intake config, read on every pass (null: intake is off), and its
-   * sources. `pullMs`: how often the sources are pulled (default 30 s). `roleOf`: a person's role on the instance's
-   * repo, read as the dashboard reads it (dashboard-auth.ts), for what a mapped chat sender may do (absent: nothing).
-   * `typingMs`: how often the typing indicator is sent again while a reply is on its way (default 8 s; tests).
-   * `name`: the instance's name, as the dashboard hub knows it (a setup step's one-time link names it).
+   * Work intake (docs/intake.md): its config, read every pass (null: off), and its sources, pulled every `pullMs`.
+   * `roleOf`: a person's repo role, as the dashboard reads it, for what a mapped chat sender may do (absent: nothing).
+   * `typingMs`: the typing indicator's repeat. `name`: the instance's name as the hub knows it.
    */
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf; typingMs?: number; name?: string };
   /**
@@ -200,12 +206,8 @@ export function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { k
 /** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
 export const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
-/**
- * Run a project command without blocking the event loop: with several agents
- * in flight, a blocking test run would starve their output streams and trip
- * their stall timers. Output is capped; the tail is kept for reports.
- */
-export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
+/** Run a project command without blocking the event loop (agents' streams and stall timers). Output capped. */
+export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
     // Aborted (the coordinator shutting down): never started, or killed like a timed-out command.
     if (signal?.aborted) return resolveRun({ code: null, tail: 'not run: the coordinator is shutting down', out: '' });
@@ -229,7 +231,9 @@ export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS,
     const finish = (code: number | null) => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', kill);
-      resolveRun({ code: timedOut ? null : code, tail: out.trim().split('\n').slice(-20).join('\n'), out });
+      // Project code printed it: credential-shaped text never reaches an event or a prompt (#713).
+      const clean = redactString(out);
+      resolveRun({ code: timedOut ? null : code, tail: clean.trim().split('\n').slice(-20).join('\n'), out: clean });
     };
     child.on('error', () => finish(null));
     child.on('close', (code) => finish(code));
@@ -272,20 +276,14 @@ export class Halted extends Error {
   }
 }
 
-/**
- * The coordinator is shutting down (SIGTERM or SIGINT: a restart, an update, a stop): its runs are aborted and their
- * tasks requeued to start again after the restart. A kind of halt, so every caller that requeues on a halt does here too.
- */
+/** The coordinator is shutting down (SIGTERM/SIGINT): runs aborted, tasks requeued. A kind of halt. */
 export class ShuttingDown extends Halted {
   constructor() {
     super('the coordinator is shutting down');
   }
 }
 
-/**
- * The instance is paused on the Claude usage limit (src/usage-limit.ts): a run that hit it, or one asked for while
- * the pause holds, which never starts. A kind of halt, so every caller that requeues on a halt requeues on this too.
- */
+/** Paused on the Claude usage limit (src/usage-limit.ts); a run asked for meanwhile never starts. A kind of halt. */
 export class UsagePaused extends Halted {
   constructor(readonly resetAt: string) {
     super(`paused on the Claude usage limit until ${resetAt}`);
@@ -293,9 +291,8 @@ export class UsagePaused extends Halted {
 }
 
 /**
- * The run's Claude login is held (src/claude-auth-failure.ts): the API refused it, on this run or an earlier one, and
- * no call on it has succeeded since. A run asked for while it holds never starts. A kind of halt, so every caller that
- * requeues on a halt requeues on this too; it never counts as an attempt.
+ * The run's Claude login is held (src/claude-auth-failure.ts): refused, no success since. A run asked for meanwhile
+ * never starts. A kind of halt; never counts as an attempt.
  */
 export class AuthPaused extends Halted {
   constructor(readonly login: string, readonly detail: string) {
