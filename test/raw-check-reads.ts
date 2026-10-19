@@ -77,9 +77,15 @@ export function rawCheckReads(files: Record<string, string>, root = repoRoot): {
     const t = checker.getTypeAtLocation(e);
     return t.isStringLiteral() ? t.value : null;
   };
-  // A type that has a raw member under its own declaration (not Backlog's): an alias that hides one.
-  const hidesRaw = (to: ts.Type, from: ts.Node): boolean =>
-    [...MEMBERS].some((m) => isRaw(from, m) && !!checker.getPropertyOfType(checker.getNonNullableType(to), m) && !rawProp(checker.getNonNullableType(to), m));
+  // A target type that hides a raw member of the value put into it: `any` or `unknown` (nothing to trace through), an
+  // object type with no members at all ({}, object), or a type that has the member under its own declaration (a
+  // structural alias). A type that drops the member (Pick<Backlog, 'comment'>) hides nothing: it can't be read through.
+  const opaque = (t: ts.Type) => !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) || (!!(t.flags & ts.TypeFlags.Object || t.flags & ts.TypeFlags.NonPrimitive) && checker.getPropertiesOfType(t).length === 0 && !checker.getIndexInfosOfType(t).length && !checker.getSignaturesOfType(t, ts.SignatureKind.Call).length) || (!!(t.flags & ts.TypeFlags.Object) && checker.getIndexInfosOfType(t).length > 0 && checker.getPropertiesOfType(t).length === 0);
+  const hidesRaw = (to: ts.Type | undefined, from: ts.Node): boolean => {
+    if (!to) return false;
+    const t = checker.getNonNullableType(to);
+    return [...MEMBERS].some((m) => isRaw(from, m) && (opaque(t) || (!!checker.getPropertyOfType(t, m) && !rawProp(t, m))));
+  };
   const rawProp = (type: ts.Type, member: string): boolean =>
     (checker.getPropertyOfType(type, member)?.declarations ?? []).some((d) => {
       const owner = d.parent;
@@ -101,6 +107,7 @@ export function rawCheckReads(files: Record<string, string>, root = repoRoot): {
       } else if (ts.isCallExpression(node) && node.expression.getText(sf).replace(/\s+/g, '') === 'Reflect.get' && node.arguments.length >= 2 && literal(node.arguments[1]!) !== null && isRaw(node.arguments[0]!, literal(node.arguments[1]!)!)) hit(node);
       else if (ts.isVariableDeclaration(node) && node.type && node.initializer && hidesRaw(checker.getTypeFromTypeNode(node.type), node.initializer)) hit(node);
       else if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && hidesRaw(checker.getTypeFromTypeNode(node.type), node.expression)) hit(node);
+      else if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.arguments ?? []).some((a) => hidesRaw(checker.getContextualType(a), a))) hit(node);
       ts.forEachChild(node, visit);
     };
     visit(sf);
@@ -112,8 +119,11 @@ export function rawCheckReads(files: Record<string, string>, root = repoRoot): {
 export const JUDGED_CASTS_ALLOWED: Record<string, string> = { 'src/check-source.ts': 'PinnedChecks.of and withTestRuns make JudgedChecks: the brand is theirs to give' };
 
 /**
- * Each type assertion in `files` whose target or expected type is JudgedChecks (`x as JudgedChecks`, `x as never` or
- * `x as unknown as JudgedChecks` where a judging function wants JudgedChecks): the one way around the brand.
+ * Each way in `files` around the JudgedChecks brand: a type assertion whose target or expected type is JudgedChecks
+ * (`x as JudgedChecks`, `x as never`, `x as unknown as JudgedChecks`); any value typed `any` or `never` where
+ * JudgedChecks is expected (`JSON.parse` data, `(b as any).checks(…)`, a `const raw = … as never`); a call of a
+ * generic whose return type is a type parameter where JudgedChecks is expected (`id<JudgedChecks>(x)`); and a type
+ * predicate or type argument that names JudgedChecks.
  */
 export function judgedCasts(files: Record<string, string>, root = repoRoot): { file: string; line: number; text: string }[] {
   const { byPath, program } = programOf(files, root);
@@ -130,9 +140,18 @@ export function judgedCasts(files: Record<string, string>, root = repoRoot): { f
     const sf = program.getSourceFile(path);
     if (!sf) continue;
     const file = relative(root, path).split('\\').join('/');
+    const hit = (node: ts.Node) => out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, text: node.getText(sf).replace(/\s+/g, ' ').slice(0, 120) });
+    const loose = (t: ts.Type) => !!(t.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never));
+    const genericReturn = (call: ts.CallExpression) => {
+      const decl = checker.getResolvedSignature(call)?.getDeclaration();
+      return !!decl && !!decl.type && !!(checker.getTypeFromTypeNode(decl.type).flags & ts.TypeFlags.TypeParameter);
+    };
     const visit = (node: ts.Node): void => {
-      if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && (judged(checker.getTypeFromTypeNode(node.type)) || judged(checker.getContextualType(node)))) {
-        out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, text: node.getText(sf).replace(/\s+/g, ' ').slice(0, 120) });
+      if ((ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) && (judged(checker.getTypeFromTypeNode(node.type)) || judged(checker.getContextualType(node)))) hit(node);
+      else if (ts.isTypePredicateNode(node) && node.type && judged(checker.getTypeFromTypeNode(node.type))) hit(node);
+      else if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && (node.typeArguments ?? []).some((a) => judged(checker.getTypeFromTypeNode(a)))) hit(node);
+      else if (ts.isExpression(node) && !ts.isParenthesizedExpression(node) && judged(checker.getContextualType(node))) {
+        if (loose(checker.getTypeAtLocation(node)) || (ts.isCallExpression(node) && genericReturn(node))) hit(node);
       }
       ts.forEachChild(node, visit);
     };

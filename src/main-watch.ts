@@ -202,6 +202,39 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
 }
 
 /**
+ * #727: a pinned check's outcome at merge time `at` (the owner's rule, 2026-10-19):
+ * - `own`, its pinned source's runs: only the latest started by then counts, by the runs' own order (the later
+ *   workflow run, then the later check run, as a re-run attempt is; never the list's order), so a later run of that
+ *   source supersedes its earlier or cancelled ones; none: missing;
+ * - when that one passed, any run of the name from another source (`other`: another App, another workflow, a run for
+ *   another head) that isn't a pass then, or the name's latest commit status that isn't success, blocks it.
+ */
+export function pinnedAt(own: CheckRunAt[], other: CheckRunAt[], statuses: StatusAt[], at: string, workflowOf: (r: CheckRunAt) => { run: number } | null | undefined = () => undefined): Outcome {
+  const t = Date.parse(at);
+  const started = (r: CheckRunAt) => {
+    const s = Date.parse(r.startedAt ?? r.completedAt ?? '');
+    return Number.isFinite(s) && s <= t;
+  };
+  const state = (r: CheckRunAt): Outcome => {
+    const done = Date.parse(r.completedAt ?? '');
+    if (r.status !== 'completed' || !Number.isFinite(done) || done > t) return 'pending';
+    return r.conclusion === 'success' ? 'pass' : 'fail';
+  };
+  const key = (r: CheckRunAt): [number, number, number] => [workflowOf(r)?.run ?? -1, r.id ?? -1, Date.parse(r.startedAt ?? r.completedAt ?? '')];
+  const latest = own.filter(started).sort((a, b) => key(b)[0] - key(a)[0] || key(b)[1] - key(a)[1] || key(b)[2] - key(a)[2])[0];
+  if (!latest) return 'missing';
+  const mine = state(latest);
+  if (mine !== 'pass') return mine;
+  for (const r of other.filter(started)) {
+    const s = state(r);
+    if (s !== 'pass') return s;
+  }
+  const st = statuses.filter((s) => Date.parse(s.createdAt) <= t).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  if (st && st.state !== 'success') return st.state === 'pending' ? 'pending' : 'fail';
+  return 'pass';
+}
+
+/**
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
@@ -280,18 +313,25 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   }
   const pins = o.pins;
   if (pins) {
-    // #727 (src/check-source.ts): a pinned check counts only from a run of its pinned source (a status never does),
-    // and still not when the check as judged by name isn't a pass. An unpinned one is judged by name, as before.
+    // #727 (src/check-source.ts): a pinned check is the latest run of its pinned source started by merge time (a status
+    // never is), and it passes only when that run passed and no check of its name from any other source, nor its
+    // latest status, is a non-pass then (pinnedAt). An unpinned one is judged by name, as before.
     const pinned = (n: string) => pinOf(n, pins.configured, pins.github);
     if (f.sources === undefined && o.required.some((n) => 'workflow' in (pinned(n) ?? {}))) return { done: false, need: { call: 'sources', sha: head } };
-    const runs = f.runs.filter((r) => {
-      const pin = pinned(r.name);
-      const workflow = r.suite === undefined ? undefined : (f.sources?.[String(r.suite)] ?? null);
+    if (!f.statuses && o.required.some((n) => pinned(n) !== null)) return { done: false, need: { call: 'statuses', sha: head } };
+    const workflowOf = (r: CheckRunAt) => (r.suite === undefined ? undefined : (f.sources?.[String(r.suite)] ?? null));
+    const isOwn = (r: CheckRunAt, pin: CheckPin) => {
+      const workflow = workflowOf(r);
       const c = { source: 'check_run' as const, ...(r.app !== undefined ? { app: r.app } : {}), ...(workflow !== undefined ? { workflow } : {}), ...(r.id !== undefined ? { id: r.id } : {}), ...(r.url !== undefined ? { url: r.url } : {}) };
-      return pin !== null && fromPinnedSource(c, pin, { repo: pins.repo, sha: head });
+      return fromPinnedSource(c, pin, { repo: pins.repo, sha: head });
+    };
+    out = out.map((byName) => {
+      const pin = pinned(byName.name);
+      if (pin === null) return byName;
+      const mine = f.runs!.filter((r) => r.name === byName.name);
+      const own = mine.filter((r) => isOwn(r, pin));
+      return { name: byName.name, outcome: pinnedAt(own, mine.filter((r) => !own.includes(r)), (f.statuses ?? []).filter((s) => s.context === byName.name), at, workflowOf) };
     });
-    const fromPin = outcomesAt(o.required, runs, [], at);
-    out = out.map((byName, i) => (pinned(byName.name) === null || (fromPin[i]!.outcome === 'pass' && byName.outcome !== 'pass') ? byName : fromPin[i]!));
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
   if (bad.length) return { done: true, accounted: false, number, reason: `${who} into ${o.branch} with required checks not green on ${head.slice(0, 8)} at merge time: ${bad.map((c) => `${c.name} ${c.outcome}`).join(', ')}` };

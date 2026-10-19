@@ -60,4 +60,11 @@ test("the merge flow's checks of a commit keep a pinned check only from the App 
   assert.deepEqual(await judged(), [ci(CI_APP), lint]);
   f.backlog.setChecks(sha, [ci(SPOOF_APP, 'failure'), ci(CI_APP), lint]);
   assert.deepEqual(await judged(), [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'failure' }, lint], "another App's failing ci still fails it (no id: it isn't the pinned run)");
+  // Owner rule: listed after the pinned pass, another App's failure still blocks (the check of main after a merge reads these).
+  f.backlog.setChecks(sha, [ci(CI_APP), ci(SPOOF_APP, 'failure'), lint]);
+  assert.deepEqual(await judged(), [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'failure' }, lint]);
+  // The pinned App's own later run supersedes its earlier cancelled or failed one.
+  const own = (id: number, conclusion: string): CommitCheck => ({ name: 'ci', source: 'check_run', status: 'completed', conclusion, id, app: CI_APP });
+  f.backlog.setChecks(sha, [own(7, 'success'), own(5, 'cancelled'), own(6, 'failure'), lint]);
+  assert.deepEqual(await judged(), [own(7, 'success'), lint]);
 });
