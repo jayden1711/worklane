@@ -236,7 +236,8 @@ const STILL_LOCKED: [string, string][] = [
   ['src/plugins/run.ts', 'what an agent run is given'], ['src/plugins/tree.ts', 'what an agent run is given'],
   // The run builders of the runs that read untrusted input: they set its role, lane and tools (#841 would free them).
   ['src/research.ts', 'what an agent run is given'], ['src/intake/run.ts', 'what an agent run is given'],
-  ['src/intake/chat.ts', 'what an agent run is given'],
+  ['src/intake/chat.ts', 'what an agent run is given'], ['src/intake/replier.ts', 'what an agent run is given'],
+  ['src/intake/explain.ts', 'what an agent run is given'],
   ['src/events/redact.ts', 'sign-in, credentials or secrets'],
   ['src/runner.ts', 'the evaluator and the agent runner'], ['src/sandbox.ts', 'the sandbox and test runs'],
 ];

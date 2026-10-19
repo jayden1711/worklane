@@ -355,13 +355,13 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but
   // each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the
   // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, and the role, lane and tools of the
-  // runs that read untrusted input (the research, intake and chat run builders; #841 would let those three go). So
-  // they stay locked here, exactly as before; only the part that names them changed.
+  // runs that read untrusted input (the research, intake, chat, replier and explainer run builders; #841 would let
+  // those five go). So they stay locked here, exactly as before; only the part that names them changed.
   {
     what: 'what an agent run is given',
     globs: [
       'src/agent-settings.ts', 'src/bundle.ts', 'src/domain-requests.ts', 'src/stuck.ts',
-      'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts',
+      'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts', 'src/intake/replier.ts', 'src/intake/explain.ts',
       'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts', 'src/plugins/run.ts', 'src/plugins/tree.ts',
     ],
   },
