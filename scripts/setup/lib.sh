@@ -614,18 +614,43 @@ forward_records_of() {
   done
   return 0
 }
+# A directory that is there but can't be listed fails the carry or the move (errexit stops the step), so a glob that
+# found nothing is never read as "no switch to carry" (#726 round 8).
+policy_root_listable() { [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null; }
 carry_auto_merge_off() {
   local f
+  policy_root_listable || return 1
   for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
     if [ -e "$f" ] || [ -L "$f" ]; then install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
   done
 }
-# The same, moving each switch (a rename: no new space) where $1 goes and never runs (--abort, before services).
+# The same, moving each switch (a rename: no new space), for --abort only once nothing of $1 can run
+# (instance_can_run empty). (Through b9d89224 this said "never runs (before services)": a failed services step left
+# $1's coordinator running, and the move took its switch.)
 move_auto_merge_off() {
   local f
+  policy_root_listable || return 1
   for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
     if [ -e "$f" ] || [ -L "$f" ]; then mv -f "$f" "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
   done
+}
+# What of instance $1 can run now, one line each (nothing when nothing can): a unit of its that systemd knows (its
+# file installed, whatever its state), a template's instance that isn't inactive or failed, or anything of it in
+# flight. A systemctl or registry that can't answer counts as "can run" (fail closed).
+instance_can_run() {
+  local items k u st
+  items="$("$(command -v node)" "$(dirname "${BASH_SOURCE[0]}")/instance-records.cjs" items "$1")" || { echo "the registry of $1's units can't be read"; return 0; }
+  while IFS=$'\t' read -r k u _; do
+    [ "$k" = unit ] || continue
+    if [[ "$u" == *@* ]]; then
+      st="$(systemctl show -p ActiveState --value "$u" 2>/dev/null)" || st=""
+      case "$st" in inactive | failed) ;; *) echo "unit $u: ${st:-no answer from systemd}" ;; esac
+    else
+      st="$(systemctl show -p LoadState --value "$u" 2>/dev/null)" || st=""
+      [ "$st" = not-found ] || echo "unit $u is installed (${st:-no answer from systemd})"
+    fi
+  done <<<"$items"
+  instance_in_flight "$1"
 }
 # Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
 # coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of

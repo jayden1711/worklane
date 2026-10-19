@@ -9,12 +9,9 @@
 // The instance is the coordinator user wl-<instance>'s; its home comes from the user database, never an argument.
 // Asked through sudo by a coordinator user (SUDO_USER wl-...), a loosening of land_mode or main_watch is refused.
 //
-// THREAT: a coordinator user reaches `policy own <its instance>` as root through the machine helper (add-project's
-// rerun), with no flag. So without a flag `own` never makes root's anything the coordinator couldn't have reached by
-// `policy set` itself: a policy looser than that (sandbox off, allow_same_user, land_mode direct, main_watch off,
-// lanes, allowlists, any key `policy set` doesn't take, a value over the machine's limits) is refused, and so is a
-// recorded policy that changed since root last wrote it (P5: an earlier root file put back). Those take an admin, at a
-// root shell, with --accept-loose or --retake. setup-scripts never pass either (test/policy-edit.test.ts holds that).
+// THREAT: a coordinator user reaches `policy own <its instance>` as root through the machine helper, with no flag. So
+// without a flag `own` refuses anything looser than `policy set` could make it, and a recorded policy changed since
+// root wrote it; those take an admin's --accept-loose or --retake (setup never passes either: test/policy-edit.test.ts).
 import { chmodSync, closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
@@ -22,9 +19,9 @@ import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
-import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userUid } from './os/index.js';
+import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { armedSwitches, clearKillSwitches, ensureSpare, killAutoMerge, recordDir, renamingTo } from './policy-kill.js';
+import { armedSwitches, clearKillSwitches, ensureSpare, forwardRecord, killAutoMerge, recordDir } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -38,6 +35,8 @@ const WATCHED = ['sandbox', 'allow_same_user', 'land_mode', 'main_watch', 'auto_
 export interface PolicyRootDeps {
   home?: (user: string) => string | null;
   uid?: (user: string) => number | null;
+  /** Whether a user exists, for auto_merge OFF (userPresence); a test's `uid` stand-in reads null as absent. */
+  presence?: (user: string) => 'exists' | 'absent' | 'unknown';
   rootUid?: number;
   rootGid?: number;
   markerDir?: string;
@@ -118,18 +117,9 @@ function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
 }
 
 /**
- * Run `fn` holding root's lock on one instance's policy: a file root creates (O_EXCL) in its own record directory,
- * which the coordinator user can't create, remove or write. `own` and `set` hold it from their read of policy.yaml to
- * their record write, so two root writers of one instance never interleave (THREAT: a coordinator's `set-policy`
- * reading before an admin's `policy set` and writing after it would put back what the admin changed, and record it).
- * Another live holder: wait (bounded), then refuse, naming it.
- *
- * A holder that stopped part way (killed, crashed, the machine rebooted) is stale, so it never blocks anyone: the lock
- * names its holder (pid, and processIdentity: this boot and the process's start time, through the OS adapter), and a
- * lock whose holder no longer runs, or whose pid now belongs to another process, is broken. THREAT (#726 round 3): an
- * `own` that died inside the lock left it for good, so no root writer, an admin's included, could change the policy
- * after it. Breaking it renames it aside and checks the renamed file is the stale one, so a fresh lock another writer
- * took meanwhile is put back, not broken; a holder removes the lock only while it is still its own.
+ * Run `fn` holding root's lock on one instance's policy (O_EXCL, in root's record directory), so two root writers
+ * never interleave (THREAT: a coordinator's `set-policy` putting back an admin's change). A live holder: wait, then
+ * refuse. A stale one (its pid and processIdentity no longer run: #726 round 3) is broken (breakLock).
  */
 function withPolicyLock<T>(dir: string, instance: string, waitMs: number, fn: () => T): T {
   recordDir(dir);
@@ -173,11 +163,7 @@ function readLock(lock: string): string | null {
   }
 }
 
-/**
- * Whether a lock's holder (its text: `<pid> <identity>`) no longer runs, or its pid is another process's now. An empty
- * lock is a holder still writing its line, live for EMPTY_LOCK_MS; older, it is one killed between creating and writing
- * it, and stale.
- */
+/** Whether a lock's holder (`<pid> <identity>`) no longer runs; an empty lock is stale once older than EMPTY_LOCK_MS. */
 function lockStale(text: string, lock: string): boolean {
   if (!text.trim()) {
     try {
@@ -197,12 +183,7 @@ function lockStale(text: string, lock: string): boolean {
   return was !== '' && now !== was;
 }
 
-/**
- * Break a stale lock. Breakers take turns through a second lock (`<lock>.break`, O_EXCL; one older than EMPTY_LOCK_MS
- * is a breaker that died and goes), and under it the lock is removed only while it is still the stale one. The lock
- * can't change under a breaker: no writer creates it while it is there, and its own holder is gone. So a fresh lock
- * another writer took is never broken, and no third writer slips in between.
- */
+/** Break a stale lock, under a second lock (`<lock>.break`), and only while it is still the stale one: a fresh lock is never broken. */
 function breakLock(lock: string, stale: string): void {
   const brk = `${lock}.break`;
   let fd: number;
@@ -235,12 +216,9 @@ export interface OwnFlags {
 }
 
 /**
- * Make an instance's policy.yaml root's, 0644, with its content as it is (setup's policy step, and an admin after a
- * refusal), and record it (its real path, and the sha256 of what root wrote) in root's directory, so the engine reads
- * it only while it stays exactly that. Returns the keys an admin should check, and which of them are loose.
- * Refused, nothing changed: a recorded policy whose content isn't what root last wrote (unless `retake`), and a
- * policy looser than its coordinator could make it (unless `acceptLoose`). Content root already wrote (its hash is the
- * record's: a rerun, or a rename's carried file) is taken as it is.
+ * Make an instance's policy.yaml root's, 0644, content kept, and record its real path and sha256. Refused, nothing
+ * changed: a recorded one that changed since root wrote it (unless `retake`), or one looser than its coordinator could
+ * make it (unless `acceptLoose`). Returns the keys an admin should check, and which are loose.
  */
 export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFlags = {}): { file: string; keys: Record<string, unknown>; loose: string[] } {
   const { dir, file, coordUid } = instancePolicy(instance, d);
@@ -282,9 +260,11 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
   // A name with a forward record is reached even once its user is gone (killAutoMerge says when it is done).
   if (key === 'auto_merge' && value === false) {
-    const uid = d.uid ?? userUid;
-    const canStart = (name: string) => uid(`wl-${name}`) !== null;
-    if (!instanceNameOk(instance) || (!canStart(instance) && renamingTo(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
+    // Only a definite "no such user" means a name can't start; a lookup that fails counts as can (round 8).
+    const uid = d.uid;
+    const presence = d.presence ?? (uid ? (u: string) => (uid(u) === null ? 'absent' : 'exists') : userPresence);
+    const canStart = (name: string) => presence(`wl-${name}`) !== 'absent';
+    if (!instanceNameOk(instance) || (!canStart(instance) && forwardRecord(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
     killAutoMerge(instance, markers, new Date(), canStart);
     return { key, from: null, to: false };
   }

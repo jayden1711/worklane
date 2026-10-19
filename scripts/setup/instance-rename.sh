@@ -133,6 +133,15 @@ if [ -n "$abort" ]; then
   done_step services && refuse "$new has started already: rename it back instead (instance-rename.sh $new $old)"
   exec 9> "$ADD_PROJECT_LOCK"
   flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
+  # Nothing changes while anything of <new> can run (a services step that failed after service.sh started its
+  # coordinator): the abort would take <new>'s auto_merge switches from a running instance (#726 round 8).
+  running="$(instance_can_run "$new")"
+  if [ -n "$running" ]; then
+    echo "refused: $new can run, so it may have run already; nothing changed:" >&2
+    printf '%s\n' "$running" | sed 's/^/  /' >&2
+    echo "Finish the rename instead (fix the failed step, then: sudo bash $here/instance-rename.sh $old $new --yes); to go back, rename it back once it is done. To stop $new meanwhile: sudo systemctl disable --now worklane-$new.service worklane-dashboard-$new.service" >&2
+    exit 1
+  fi
   say "abort: $new goes, $old's records and unit come back"
   # The forward ends first: from here an auto_merge off given to the old name arms the old name alone, and says done
   # only once it is (src/policy-kill.ts). One given during the rename armed the new name too: moved back to the old
@@ -205,12 +214,13 @@ install -d -o root -g root -m 0700 "$RENAMES" "$ARCHIVE"
 [ -n "$started" ] || printf 'repo=%s\n' "$repo" > "$progress"
 chmod 0600 "$progress"
 # From here until the old name's removal is done: an auto_merge off given to the old name arms the new name too.
-rename_forward "$old" "$new"
+# (Not again on a rerun once that removal is done: it would make a record and a spare for a name that is gone.)
+done_step remove || rename_forward "$old" "$new"
 step_failed() {
   local s="$1"
   echo >&2
   echo "the rename stopped at step $s (above). Go on, once that is fixed: sudo bash $here/instance-rename.sh $old $new --yes" >&2
-  if ! done_step services; then echo "Or undo it all ($new removed, $old as it was, stopped): sudo bash $here/instance-rename.sh $old $new --abort" >&2
+  if ! done_step services && [ -z "$(instance_can_run "$new")" ]; then echo "Or undo it all ($new removed, $old as it was, stopped): sudo bash $here/instance-rename.sh $old $new --abort" >&2
   else echo "$new runs already: to go back, rename it back once this one is done (instance-rename.sh $new $old)" >&2; fi
 }
 run_step() {
