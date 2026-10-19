@@ -59,22 +59,19 @@ function plantedHome() {
     profile: key(join(home, '.claude-profiles', 'p1', '.credentials.json')),
     apiKey: key(join(home, '.config', 'shop-claude-key', 'api_key')),
     provider: key(join(root, 'keys', 'provider')),
-    linked: key(join(root, 'elsewhere', 'p2', '.credentials.json')),
   };
-  // A symlink to a credential, in a directory the agent can't write (it can't be swapped): what it points at is hidden.
-  mkdirSync(join(root, 'ro'));
-  symlinkSync(join(root, 'elsewhere'), join(root, 'ro', 'profiles'));
-  chmodSync(join(root, 'ro'), 0o555);
+  // A symlink to a credential is followed only from a directory the agent neither owns nor can write: no test user
+  // can make one, so ci-slow's real-users job checks it with a root-owned directory (project-command-real-users.mjs).
   writeFileSync(join(home, 'notes.txt'), 'ordinary\n');
   const work = join(root, 'work');
   mkdirSync(work);
-  return { root, home, keys, work, provider: join(root, 'keys', 'provider'), viaLink: join(root, 'ro', 'profiles', 'p2', '.credentials.json') };
+  return { root, home, keys, work, provider: join(root, 'keys', 'provider') };
 }
 
 test('a check run as the agent user reads nothing at its credential paths; its own work and files are as before', { skip: realSkip }, () => {
   const p = plantedHome();
-  const runAs = { user: 'shop-agent', home: p.home, hide: [p.provider, p.viaLink] };
-  const paths = [join(p.home, '.claude', '.credentials.json'), join(p.home, '.claude.json'), join(p.home, '.claude-profiles', 'p1', '.credentials.json'), p.viaLink, join(p.root, 'elsewhere', 'p2', '.credentials.json'), join(p.home, '.config', 'shop-claude-key', 'api_key'), p.provider];
+  const runAs = { user: 'shop-agent', home: p.home, hide: [p.provider] };
+  const paths = [join(p.home, '.claude', '.credentials.json'), join(p.home, '.claude.json'), join(p.home, '.claude-profiles', 'p1', '.credentials.json'), join(p.home, '.config', 'shop-claude-key', 'api_key'), p.provider];
   const r = asStandIn(`for f in ${paths.map((x) => JSON.stringify(x)).join(' ')}; do cat "$f"; done; grep -rh PLANTED "$HOME" 2>/dev/null; cat ~/notes.txt; echo built > out.txt`, runAs, p.work);
   const seen = `${r.stdout}\n${r.stderr}`;
   for (const [what, v] of Object.entries(p.keys)) assert.ok(!seen.includes(v), `the ${what} key was read: ${seen}`);
@@ -300,8 +297,65 @@ test('a symlink on the way to a hidden path, in a directory the agent can write,
   const r = asStandIn('echo ran > ran.txt', { user: 'shop-agent', home, hide: [] }, root);
   assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, r.stderr);
   assert.ok(!existsSync(join(root, 'ran.txt')), 'nothing of the command ran');
-  assert.match(r.stderr, new RegExp(`${join(home, '.config').replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')} is a symlink in a directory the agent user can write.*replace it with the directory it points to`));
+  assert.match(r.stderr, new RegExp(`${join(home, '.config').replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')} is a symlink the agent user could change.*replace it with the directory it points to`));
 });
+
+test('a hide path under /proc (another name for a file, per process) is refused, never skipped as unreadable', { skip: realSkip }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'wl-713-proc-'));
+  const home = join(root, 'agent');
+  const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(home, 'keys'), { recursive: true });
+  writeFileSync(join(home, 'keys', 'open'), `${value}\n`, { mode: 0o600 });
+  // /proc/1/root: this user can't stat it (it isn't pid 1's), so the hidden file looked absent and nothing was hidden.
+  for (const p of [`/proc/1/root${home}/keys/open`, `/proc/self/root${home}/keys/open`]) {
+    const r = asStandIn(`cat ${join(home, 'keys', 'open')} 2>&1; true`, { user: 'shop-agent', home, hide: [p] }, root);
+    assert.ok(!r.stdout.includes(value), `${p}: the secret was read`);
+    assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, `${p}: ${r.stderr}`);
+  }
+});
+
+// The reviewer's round-4 layouts (#787): a symlink the agent could still change by another route. Each is followed and
+// masked once, then swapped by one command so the next command's masks miss the secret, unless it is refused.
+const swaps: [string, (root: string, home: string) => { secret: string; hide: string[]; attack: string; read: string }][] = [
+  ['G1: a symlink in an agent-owned 0555 directory (chmod, swap, chmod back)', (root) => {
+    mkdirSync(join(root, 'ro'));
+    symlinkSync(join(root, 'elsewhere'), join(root, 'ro', 'profiles'));
+    chmodSync(join(root, 'ro'), 0o555);
+    return { secret: join(root, 'elsewhere', 'p2', '.credentials.json'), hide: [join(root, 'ro', 'profiles', 'p2', '.credentials.json')], attack: `chmod u+w ${root}/ro && ln -sfn ${root}/decoy ${root}/ro/profiles && chmod 555 ${root}/ro`, read: join(root, 'elsewhere', 'p2', '.credentials.json') };
+  }],
+  ['G2: a symlink in a 0555 directory whose parent the agent can write (rename it, rebuild it)', (root) => {
+    mkdirSync(join(root, 'ro'));
+    symlinkSync(join(root, 'elsewhere'), join(root, 'ro', 'profiles'));
+    chmodSync(join(root, 'ro'), 0o555);
+    return { secret: join(root, 'elsewhere', 'p2', '.credentials.json'), hide: [join(root, 'ro', 'profiles', 'p2', '.credentials.json')], attack: `mv ${root}/ro ${root}/ro-old && mkdir ${root}/ro && ln -s ${root}/decoy ${root}/ro/profiles && chmod 555 ${root}/ro`, read: join(root, 'elsewhere', 'p2', '.credentials.json') };
+  }],
+  ['G3: a chain, fixed link -> a link in the agent\'s home -> the secret (swap the second hop)', (root, home) => {
+    symlinkSync(join(home, 'real'), join(home, 'hop'));
+    mkdirSync(join(root, 'fixed'));
+    symlinkSync(join(home, 'hop'), join(root, 'fixed', 'cfg'));
+    chmodSync(join(root, 'fixed'), 0o555);
+    return { secret: join(home, 'real', 'p', '.credentials.json'), hide: [join(root, 'fixed', 'cfg', 'p', '.credentials.json')], attack: `ln -sfn ${home}/decoy ${home}/hop`, read: join(home, 'real', 'p', '.credentials.json') };
+  }],
+];
+for (const [what, build] of swaps) {
+  test(`a symlink the agent could still change is refused, never followed and swapped: ${what}`, { skip: realSkip }, () => {
+    const root = mkdtempSync(join(tmpdir(), 'wl-713-sw-'));
+    const home = join(root, 'agent');
+    mkdirSync(home);
+    for (const d of [join(root, 'decoy', 'p2'), join(home, 'decoy', 'p')]) mkdirSync(d, { recursive: true });
+    const s = build(root, home);
+    const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+    mkdirSync(join(s.secret, '..'), { recursive: true });
+    writeFileSync(s.secret, `${value}\n`, { mode: 0o600 });
+    const runAs = { user: 'shop-agent', home, hide: s.hide };
+    const control = asStandIn(`cat ${JSON.stringify(s.read)} 2>&1; true`, runAs, root);
+    asStandIn(`${s.attack}; true`, runAs, root);
+    const next = asStandIn(`cat ${JSON.stringify(s.read)} 2>&1; true`, runAs, root);
+    for (const r of [control, next]) assert.ok(!`${r.stdout}${r.stderr}`.includes(value), `the secret was read: ${r.stdout}`);
+    assert.equal(control.status, osAdapter.SANDBOX_UNAVAILABLE, 'refused from the first command on');
+    assert.match(control.stderr, /is a symlink the agent user could change/);
+  });
+}
 
 test('a full run queued before this version (no hide list) ends with a named reason, not "runner died"', async () => {
   const state = mkdtempSync(join(tmpdir(), 'wl-713-q-'));

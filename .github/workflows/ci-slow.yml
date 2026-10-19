@@ -2915,7 +2915,8 @@ jobs:
       - name: "a project command (#713), as the coordinator through sudo to the agent user, reads neither the agent's Claude login nor its API key: bubblewrap from machine.sh, the real sandbox"
         run: |
           sudo apt-get update -q && sudo bash scripts/setup/machine.sh
-          # check.sh probes the exact sandbox project commands start in (its other lines need more setup than this job has).
+          # check.sh probes that the agent user can start bubblewrap with the flags project commands use (its other lines
+          # need more setup than this job has).
           sudo bash scripts/setup/check.sh probe | tee "$RUNNER_TEMP/check.log" || true
           grep -qx "PASS wl-probe-agent can start a project command's sandbox" "$RUNNER_TEMP/check.log"
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
@@ -2923,6 +2924,13 @@ jobs:
           k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"
           printf '%s' "$k" | sudo -u wl-probe-agent sh -c 'umask 077 && mkdir -p "$1" && cat > "$1/api_key"' _ "$a/.config/probe-claude-key"
           unset k
+          # A secret store of the agent's, reached through a symlink in a root-owned directory (which the agent can't
+          # change): the only layout whose symlink a project command's sandbox follows rather than refuses.
+          k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"
+          printf '%s' "$k" | sudo -u wl-probe-agent sh -c 'umask 077 && mkdir -p "$1" && cat > "$1/key"' _ "$a/secret-store"
+          unset k
+          sudo install -d -o root -g root -m 0755 /opt/wl-713-link
+          sudo ln -s "$a/secret-store" /opt/wl-713-link/store
           t="$(mktemp -d /tmp/wl-project-command-XXXXXX)"
           mkdir -p "$t/node_modules"
           cp -r dist package.json "$t/"
@@ -2933,7 +2941,7 @@ jobs:
           chmod -R a+rX "$t"
           sudo chown -R wl-probe "$t/checkout"
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
-            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout"' _ "$t" "$a"
+            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout" /opt/wl-713-link/store' _ "$t" "$a" < /dev/null
           # The unit tests' real-sandbox cases, here required to run (elsewhere they skip without bubblewrap): the
           # isolation tests, and separate-users' check that runs git as another user (nobody) in a checkout it doesn't own.
           PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js dist/test/separate-users.test.js

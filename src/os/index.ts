@@ -691,16 +691,36 @@ export interface ProjectRunAs {
 // command can write, and which bash's rshd check sources for `bash -c` with a socket on stdin.
 // Every directory above a hidden path is bound onto itself first (shallowest first, before any mask), so it is a
 // mount point in the sandbox: renaming it fails (EBUSY), and the secret can't be moved out from under its mask.
+// (bwrap's --bind adds nosuid,nodev to it and below: harmless for homes, /srv, /tmp; a hidden path under /dev would
+// cost the sandbox its devices.)
 const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
   // readlink by its path (no function or PATH entry can stand in for it); none at all: refused, never nothing hidden.
   `rl=/usr/bin/readlink; [ -x "$rl" ] || rl=/bin/readlink; [ -x "$rl" ] || { printf '%s\\n' "project command not run: no readlink to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
   'b=$1 h=$2; shift 2; hide=(); dirs=(); declare -A seen=(); maxd=0',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
-  // A symlink on the way to a hidden path, in a directory this user can write, could be swapped by one command to
-  // unmask the credential for the next: refused, as a missing sandbox is.
-  `nosym() { local q= c rest=\${1#/}; while [ -n "$rest" ]; do c=\${rest%%/*}; if [ "$c" = "$rest" ]; then rest=; else rest=\${rest#*/}; fi; q=$q/$c; if [ -L "$q" ] && [ -w "\${q%/*}/" ]; then printf '%s\\n' "project command not run: $q is a symlink in a directory the agent user can write, on the way to a credential its sandbox hides, so a project command could swap it; replace it with the directory it points to (or name the real path in credentials.yaml)" >&2; exit ${SANDBOX_UNAVAILABLE}; fi; done; }`,
-  'add() { local r; [ -e "$1" ] || [ -L "$1" ] || return 0; nosym "$1"; r=$("$rl" -f -- "$1" 2>/dev/null) || return 0',
+  // Each hidden path is resolved here, one component and one symlink at a time, so every symlink met at any hop
+  // (also one reached through another) is checked. One this user could change, or swap by renaming a directory, would
+  // let one command unmask the credential for the next. So a symlink is followed only when this user neither owns
+  // nor can write its directory, and every directory above it is then bound onto itself (it can't be renamed). Any
+  // other symlink, or a chain over 40 links, is refused, as a missing sandbox is.
+  `refuse() { printf '%s\\n' "project command not run: $1 is a symlink the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next; replace it with the directory it points to (or name the real path in credentials.yaml)" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
+  'walk() { local todo=${1#/} cur= c d t n=0',
+  '  while [ -n "$todo" ]; do',
+  '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
+  '    case $c in ""|.) continue ;; ..) cur=${cur%/*}; continue ;; esac',
+  '    if [ -L "$cur/$c" ]; then',
+  '      n=$((n + 1)); [ "$n" -le 40 ] || refuse "$cur/$c"',
+  '      d=${cur:-/}; if [ -O "$d" ] || [ -w "$d/" ]; then refuse "$cur/$c"; fi',
+  '      above "$cur/$c"; t=$("$rl" -- "$cur/$c") || refuse "$cur/$c"',
+  '      case $t in /*) cur= ;; esac; todo=${t#/}${todo:+/$todo}',
+  '    else cur=$cur/$c; fi',
+  '  done; R=${cur:-/}; }',
+  // A path that exists but resolves to nothing here (a /proc/self link resolves per process) or into /proc, /sys or
+  // /dev would hide nothing: refused, never skipped.
+  `unres() { printf '%s\\n' "project command not run: $1 doesn't resolve to a file its sandbox can hide; name the credential's real path in credentials.yaml" >&2; exit ${SANDBOX_UNAVAILABLE}; }`,
+  'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" ;; esac; [ -e "$1" ] || [ -L "$1" ] || return 0; walk "$1"; r=$R',
+  '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" ;; esac; [ -e "$r" ] || unres "$1"',
   '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); above "$r"; elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); above "$r"; fi; }',
   'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
