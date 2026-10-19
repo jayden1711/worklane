@@ -51,14 +51,25 @@ export function scrubTitle(title, denied) {
  * given; "Reverts #N" too), and the title's first #N ("Revert #N: ...") only when the body names none.
  */
 export function revertOf(pr, repo) {
-  if (!/^Revert\b/i.test(pr.title ?? '')) return null;
-  // A PR never reverts itself: a number that is its own is read as none, so it stays listed in its group.
-  const other = (n) => (n === pr.number ? null : n);
+  return revertsOf(pr, repo)[0] ?? null;
+}
+
+/**
+ * Every PR a revert PR reverts, in order, each once: all its body's "Reverts" lines for this repo, else the title's
+ * first #N (see revertOf). Empty for a PR whose title doesn't start "Revert". A PR never reverts itself: its own
+ * number is left out, so it stays listed in its group.
+ */
+export function revertsOf(pr, repo) {
+  if (!/^Revert\b/i.test(pr.title ?? '')) return [];
+  const named = [];
   for (const m of String(pr.body ?? '').matchAll(/^[ \t]*Reverts[ \t]+(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/gim)) {
-    if (!m[1] || !repo || m[1].toLowerCase() === repo.toLowerCase()) return other(Number(m[2]));
+    if (!m[1] || !repo || m[1].toLowerCase() === repo.toLowerCase()) named.push(Number(m[2]));
   }
-  const t = /^Revert\b.*?#(\d+)/i.exec(pr.title);
-  return t ? other(Number(t[1])) : null;
+  if (!named.length) {
+    const t = /^Revert\b.*?#(\d+)/i.exec(pr.title);
+    if (t) named.push(Number(t[1]));
+  }
+  return [...new Set(named)].filter((n) => n !== pr.number);
 }
 
 const isGuardrail = (pr) => (pr.files ?? []).some((f) => GUARDRAIL_PATHS.some((re) => re.test(f)));
@@ -80,9 +91,13 @@ export function groupOf(pr) {
 export function changelogSection(version, date, prs, repo) {
   const line = (pr) => `- ${pr.title.replace(/\s*\(#\d+\)\s*$/, '')} (#${pr.number})`;
   const numbers = new Set(prs.map((pr) => pr.number));
-  const of = (pr) => revertOf(pr, repo);
-  const revertedBy = new Map(prs.filter((pr) => numbers.has(of(pr))).map((pr) => [of(pr), pr]));
-  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !numbers.has(of(pr)));
+  // Each PR reverted in this release, by the first revert that names it. A revert is left out of the groups only
+  // when every PR it reverts is in this release; one that also reverts an earlier release's PR stays listed.
+  const targets = new Map(prs.map((pr) => [pr.number, revertsOf(pr, repo)]));
+  const revertedBy = new Map();
+  for (const pr of prs) for (const n of targets.get(pr.number)) if (numbers.has(n) && !revertedBy.has(n)) revertedBy.set(n, pr);
+  const hidden = (pr) => targets.get(pr.number).length > 0 && targets.get(pr.number).every((n) => numbers.has(n));
+  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !hidden(pr));
   const out = [`## v${version} (${date})`, ''];
   const groups = [['features', 'Features'], ['fixes', 'Fixes'], ['security', 'Security and guardrails']];
   for (const [key, heading] of groups) {

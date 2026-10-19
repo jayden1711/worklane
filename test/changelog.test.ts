@@ -12,6 +12,7 @@ const c = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelo
   prNumbers(subjects: string[]): number[];
   groupOf(pr: Pr): string;
   revertOf(pr: Pr, repo?: string): number | null;
+  revertsOf(pr: Pr, repo?: string): number[];
   tagNotes(changelog: string, version: string): { notes?: string; problem?: string };
   changelogSection(version: string, date: string, prs: Pr[], repo?: string): string;
   withSection(existing: string, version: string, section: string): string;
@@ -81,6 +82,26 @@ test("regression (#712): a GitHub-button revert is read from its body's \"Revert
   assert.match(sec, /### Features\n\n- Docs: a release checklist \(#330\)\n\n/, '#330 shipped, and is listed as shipped');
   assert.doesNotMatch(sec, /\(#330\): reverted/);
   assert.doesNotMatch(sec, /\(#700\)/, 'the revert is named beside what it reverted, not listed on its own');
+});
+
+test('a revert whose body names several of this repo\'s PRs lists each one as reverted, never one as shipped', () => {
+  // WHY (#831 review): only the first "Reverts" line was read, so the second reverted PR was listed as shipped.
+  const prs: Pr[] = [
+    { number: 60, title: 'Queue: retry' },
+    { number: 61, title: 'Queue: back off' },
+    { number: 62, title: 'Docs: unrelated' },
+    { number: 70, title: 'Revert "Queue: retry" and "Queue: back off"', body: 'Reverts acme/widgets#60\nReverts acme/widgets#61\nReverts other/repo#62' },
+  ];
+  const sec = c.changelogSection('9.9.9', '2026-12-31', prs, 'acme/widgets');
+  assert.match(sec, /### Reverted in this release\n\n- Queue: retry \(#60\): reverted by #70\n- Queue: back off \(#61\): reverted by #70\n/);
+  assert.match(sec, /### Features\n\n- Docs: unrelated \(#62\)\n\n/, "another repo's line reverts nothing here");
+  assert.doesNotMatch(sec, /\(#70\)/, 'a revert of PRs all in this release is named beside them, not listed on its own');
+  // A revert of one PR in this release and one in an earlier release is also listed on its own, so the earlier
+  // release's revert is never hidden.
+  const mixed = c.changelogSection('9.9.9', '2026-12-31', [prs[0]!, { number: 71, title: 'Revert two', body: 'Reverts acme/widgets#60\nReverts acme/widgets#12' }], 'acme/widgets');
+  assert.match(mixed, /- Queue: retry \(#60\): reverted by #71/);
+  assert.match(mixed, /### Features\n\n- Revert two \(#71\)\n/);
+  assert.deepEqual(c.revertsOf({ number: 70, title: 'Revert x', body: 'Reverts acme/widgets#60\nReverts #61\nReverts acme/widgets#60\nReverts acme/widgets#70' }, 'acme/widgets'), [60, 61], 'each named once, never itself');
 });
 
 test('revertOf: only a PR titled "Revert..." is a revert; its body names it (this repo only, when given), else its title', () => {
