@@ -8,8 +8,9 @@
 // hand is written back by the coordinator (coordinator/merge-flow.ts stopGoneByHand) while main isn't measured green.
 // Fail closed: a stop with no `by`, an unknown one, or an unreadable stop file waits for green main; main with no
 // required checks configured, a tip that can't be read, or checks that can't be read is not green.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { CommitCheck } from './backlog/types.js';
+import { killTree, spawnDetached } from './os/index.js';
 import { requiredOutcomes } from './pr-watch.js';
 
 /** Who stopped auto-merge, as the stop file and `merge.stopped` record it. */
@@ -63,14 +64,44 @@ export const MAIN_TIP_TIMEOUT_MS = 10_000;
 export function remoteTip(repo: string, remote: string, branch: string, o: { timeoutMs?: number } = {}): Promise<string | null> {
   const ref = `refs/heads/${branch}`;
   return new Promise((done) => {
-    execFile('git', ['ls-remote', remote, ref], { cwd: repo, encoding: 'utf8', timeout: o.timeoutMs ?? MAIN_TIP_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
-      if (err) return done(null);
-      const exact = String(stdout)
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (sha: string | null) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      done(sha);
+    };
+    // In its own process group, so a timeout kills git and everything it started (the transport: git-remote-https,
+    // ssh, upload-pack), never leaving one holding a connection.
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn('git', ['ls-remote', remote, ref], { cwd: repo, detached: spawnDetached, stdio: ['ignore', 'pipe', 'ignore'] });
+    } catch {
+      return finish(null);
+    }
+    timer = setTimeout(() => {
+      killTree(child.pid, () => child.kill('SIGKILL'));
+      finish(null);
+    }, o.timeoutMs ?? MAIN_TIP_TIMEOUT_MS);
+    let out = '';
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (d: string) => {
+      out += d;
+      if (out.length > 4 * 1024 * 1024) {
+        killTree(child.pid, () => child.kill('SIGKILL'));
+        finish(null);
+      }
+    });
+    child.on('error', () => finish(null));
+    child.on('close', (code) => {
+      if (code !== 0) return finish(null);
+      const exact = out
         .split('\n')
         .map((l) => l.split('\t'))
         .filter((p) => p.length === 2 && p[1] === ref);
       const sha = exact.length === 1 ? exact[0]![0]! : '';
-      done(SHA.test(sha) ? sha : null);
+      finish(SHA.test(sha) ? sha : null);
     });
   });
 }

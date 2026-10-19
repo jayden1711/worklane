@@ -306,6 +306,33 @@ test('resume (#776): reading main never blocks: a hung remote times out as not g
   }
 });
 
+test('resume (#776): a timed-out read of main leaves nothing running: git and everything it started (the transport, its children) are killed', async () => {
+  const w = world();
+  await w.watch(2);
+  // The transport stand-in records its own pid and its child's, then waits on the child, as a hung connection would.
+  const pids = join(w.f.base, 'upload-pack.pids');
+  const script = join(w.f.base, 'hang-upload-pack-tree');
+  writeFileSync(script, `#!/bin/sh\necho $$ >> '${pids}'\nsleep 30 &\necho $! >> '${pids}'\nwait\n`);
+  chmodSync(script, 0o755);
+  git(w.f.repo, 'config', 'remote.origin.uploadpack', script);
+  assert.equal(await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 }), null, 'timed out: unreadable');
+  const started = readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
+  assert.equal(started.length, 2, 'the transport and its child had started');
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Killed processes are reaped by their new parent shortly after; give it a moment.
+  for (let i = 0; i < 20 && started.some(alive); i++) await new Promise((r) => setTimeout(r, 100));
+  const left = started.filter(alive);
+  for (const pid of left) process.kill(pid, 'SIGKILL'); // never leave them behind, even when the test fails
+  assert.deepEqual(left, [], 'no descendant of git survives the timeout');
+});
+
 test('resume (#776): characters that print as blanks (Hangul fillers, the braille blank, other default-ignorables) never count toward the minimum', () => {
   for (const [what, ch] of [['U+3164', 'ㅤ'], ['U+115F', 'ᅟ'], ['U+1160', 'ᅠ'], ['U+FFA0', 'ﾠ'], ['U+2800', '⠀']] as const) {
     assert.ok('error' in acknowledgement({ acknowledge: { reason: ch.repeat(12) } }), `${what} alone is refused`);
