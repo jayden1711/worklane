@@ -10,12 +10,12 @@
 // channels) refuses this instance's Discord at start-up, naming it. A claim holds no ids: each server+channel pair
 // is a hash, so the shared directory names no server, channel or person.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { tryLock } from '../locks.js';
 import { pidAlive } from '../os/index.js';
-import { writeSlotFile } from '../slot-file.js';
+import { listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, slotFile, slotFileExists, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 import { INTAKE_FILE } from './config.js';
 import { IntakeConfig } from './report.js';
 
@@ -38,13 +38,13 @@ interface Claim {
   places: string[];
 }
 
-function readClaims(dir: string): Claim[] {
-  if (!existsSync(dir)) return [];
+function readClaims(dir: SlotPathLike): Claim[] {
+  if (!slotFileExists(dir)) return [];
   const out: Claim[] = [];
-  for (const f of readdirSync(dir)) {
+  for (const f of listSlotDir(dir)) {
     if (!f.startsWith(CLAIM_PREFIX) || !f.endsWith('.json')) continue;
     try {
-      const c = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Claim;
+      const c = JSON.parse(readSlotFile(slotFile(dir, f))) as Claim;
       if (typeof c.instance === 'string' && Number.isInteger(c.pid) && Array.isArray(c.places)) out.push(c);
     } catch {
       // half-written or unreadable: not a claim
@@ -68,7 +68,7 @@ function otherConfig(file: string): IntakeConfig | null {
  * pairs), or null. `instancesDir`: where the instances' homes are (each `<name>/intake.yaml`); `claimsDir`: the
  * machine-wide directory of running bots' claims.
  */
-export function discordClash(o: { instance: string; config: IntakeConfig; instancesDir: string; claimsDir: string; alive?: (pid: number) => boolean }): string | null {
+export function discordClash(o: { instance: string; config: IntakeConfig; instancesDir: string; claimsDir: SlotPathLike; alive?: (pid: number) => boolean }): string | null {
   const mine = discordPlaces(o.config);
   if (!mine) return null;
   const keys = new Map(mine.channels.map((c) => [placeKey(mine.guild, c), c]));
@@ -96,15 +96,15 @@ export function discordClash(o: { instance: string; config: IntakeConfig; instan
 }
 
 /** Record this instance's places while its bot runs; returns the release. */
-export function writeDiscordClaim(o: { instance: string; config: IntakeConfig; claimsDir: string }): () => void {
+export function writeDiscordClaim(o: { instance: string; config: IntakeConfig; claimsDir: SlotPathLike }): () => void {
   const p = discordPlaces(o.config);
   if (!p || !INSTANCE_NAME.test(o.instance)) return () => {};
-  const file = join(o.claimsDir, `${CLAIM_PREFIX}${o.instance}.json`);
+  const file = slotFile(o.claimsDir, `${CLAIM_PREFIX}${o.instance}.json`);
   writeSlotFile(file, JSON.stringify({ instance: o.instance, pid: process.pid, places: p.channels.map((c) => placeKey(p.guild, c)) } satisfies Claim));
   return () => {
     try {
-      const c = JSON.parse(readFileSync(file, 'utf8')) as Claim;
-      if (c.pid === process.pid) unlinkSync(file);
+      const c = JSON.parse(readSlotFile(file)) as Claim;
+      if (c.pid === process.pid) removeSlotFile(file);
     } catch {
       // gone already
     }
@@ -115,11 +115,11 @@ export function writeDiscordClaim(o: { instance: string; config: IntakeConfig; c
  * Check and claim in one step, under a machine-wide lock, so two instances starting at once can't both pass the
  * check: the claim's release, or why this instance's Discord is refused.
  */
-export async function claimDiscord(o: { instance: string; config: IntakeConfig; instancesDir: string; claimsDir: string; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void> }): Promise<{ release: () => void } | { error: string }> {
-  mkdirSync(o.claimsDir, { recursive: true });
+export async function claimDiscord(o: { instance: string; config: IntakeConfig; instancesDir: string; claimsDir: SlotPathLike; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void> }): Promise<{ release: () => void } | { error: string }> {
+  makeSlotDir(o.claimsDir);
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   for (let i = 0; i < 200; i++) {
-    const r = tryLock(join(o.claimsDir, 'discord-claims.lock'), `discord claim ${o.instance}`);
+    const r = tryLock(slotFile(o.claimsDir, 'discord-claims.lock'), `discord claim ${o.instance}`);
     if (!('lock' in r)) {
       await sleep(100);
       continue;

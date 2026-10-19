@@ -30,6 +30,9 @@ function instance(landMode: 'direct' | 'pr') {
   const { dir: repo } = exampleProject();
   const cfg = join(repo, BRAND.configDir);
   writeFileSync(join(cfg, 'config.yaml'), readFileSync(join(cfg, 'config.yaml'), 'utf8').replace(/^backlog: github/m, 'backlog: file').replace(/^land_mode: pr/m, `land_mode: ${landMode}`));
+  // Committed, as an instance's config is: with none on a default branch, the coordinator starts on the checkout's
+  // committed config, never an uncommitted edit (#715).
+  execFileSync('git', ['commit', '-q', '-am', `land_mode: ${landMode}`], { cwd: repo, stdio: 'ignore' });
   const home = initInstance('alpha', repo, 'example-org/example-shop', dir);
   agentIsSelf(home);
   writeFileSync(join(home, 'policy.yaml'), `version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: ${landMode}\n`);

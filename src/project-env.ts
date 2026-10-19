@@ -15,6 +15,8 @@ const RESERVED_NAMES = [
   // project variable, and these are refused besides.
   'GCONV_PATH', 'GETCONF_DIR', 'GLIBC_TUNABLES', 'HOSTALIASES', 'LOCALDOMAIN', 'LOCPATH', 'MALLOC_.*', 'NIS_PATH', 'NLSPATH',
   'RESOLV_HOST_CONF', 'RES_OPTIONS', 'TZDIR', 'LIBMOUNT_.*', 'LANGUAGE',
+  // How bash expands and runs words: never the project's (#713, the sandbox wrapper's own globs).
+  'SHELLOPTS', 'BASHOPTS', 'GLOBIGNORE', 'EXECIGNORE', 'BASH_.*',
   // Credentials and the agent's no-push setup, the agent runtime, sudo.
   'GIT_.*', 'GH_.*', 'GITHUB_.*', 'SSH_.*', 'CLAUDE_.*', 'ANTHROPIC_.*', 'SUDO_.*', `${BRAND.envPrefix}_.*`,
   // The sandbox's network proxy and trust store.

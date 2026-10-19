@@ -10,6 +10,7 @@
 //   viewer  the allowlisted fields only (viewer-events.ts)
 import { incidentsForViewer } from '../viewer-events.js';
 import { healthStatus, readIncidents, type HealthStatus, type Incident } from './incidents.js';
+import type { SlotPathLike } from '../slot-file.js';
 
 export interface IncidentsView {
   instance: string | null;
@@ -29,7 +30,7 @@ function whole(x: Incident, audience: 'owner' | 'writer'): Partial<Incident> {
   return audience === 'owner' && ownerDetail ? { ...rest, detail: ownerDetail } : rest;
 }
 
-export function incidentsView(o: { dir?: string; instance: string | null; audience: IncidentsAudience }): IncidentsView {
+export function incidentsView(o: { dir?: SlotPathLike; instance: string | null; audience: IncidentsAudience }): IncidentsView {
   const mine = readIncidents(o.dir).incidents.filter((x) => x.instance === null || x.instance === o.instance);
   const open = mine.filter((x) => !x.resolvedAt).sort((a, b) => a.since.localeCompare(b.since));
   const resolved = mine.filter((x) => x.resolvedAt).sort((a, b) => b.resolvedAt!.localeCompare(a.resolvedAt!)).slice(0, 50);

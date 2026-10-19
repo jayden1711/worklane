@@ -17,11 +17,9 @@
 // the state is never written in place: a new copy (0660) is renamed over it. No subdirectory either: one made by one
 // user would follow that user's umask and could shut the others out.
 import { createHash, randomBytes } from 'node:crypto';
-import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
 import { tryLock, type Lock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
-import { writeSlotFile } from '../slot-file.js';
+import { linkSlotFile, listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, renameSlotFile, slotFile, slotSibling, statSlotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 
 /** How long take() waits out a pause or an exhausted budget before refusing (the caller sees GitHub's own kind of error). */
 export const DEFAULT_MAX_WAIT_MS = 10_000;
@@ -110,24 +108,25 @@ export interface BudgetOptions {
   pollMs?: number;
 }
 
-const lastPrune = new Map<string, number>();
+/** By directory: slotsDir() is one value while the slot dir stays put (src/os/index.ts), so it keys as the path did. */
+const lastPrune = new Map<SlotPathLike, number>();
 
 export class GitHubBudget {
-  private readonly file: string;
-  private readonly lockPath: string;
+  private readonly file: SlotPathLike;
+  private readonly lockPath: SlotPathLike;
 
   constructor(
     readonly key: string,
-    readonly dir: string = slotsDir(),
+    readonly dir: SlotPathLike = slotsDir(),
     private readonly opts: BudgetOptions = {},
   ) {
-    this.file = join(dir, `github-budget-${key}.json`);
-    this.lockPath = join(dir, `github-budget-${key}.lock`);
+    this.file = slotFile(dir, `github-budget-${key}.json`);
+    this.lockPath = slotFile(dir, `github-budget-${key}.lock`);
   }
 
   read(now = Date.now()): BudgetState {
     try {
-      return sanitize(JSON.parse(readFileSync(this.file, 'utf8')), now);
+      return sanitize(JSON.parse(readSlotFile(this.file)), now);
     } catch {
       return { resources: {}, pausedUntil: 0 }; // missing or unreadable: start afresh
     }
@@ -206,20 +205,20 @@ export class GitHubBudget {
     try {
       const r = tryLock(path, `github-budget pid ${process.pid}`);
       if ('lock' in r) return r.lock;
-      const seen = readFileSync(path, 'utf8');
+      const seen = readSlotFile(path);
       const at = Date.parse((JSON.parse(seen) as { acquiredAt?: string }).acquiredAt ?? '');
       // Fresh only if dated within LOCK_STALE_MS of now, either way: a lock dated in the future is planted, not held.
       if (Number.isFinite(at) && Math.abs(Date.now() - at) <= LOCK_STALE_MS) return null;
-      const aside = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.stale`;
-      renameSync(path, aside);
-      if (readFileSync(aside, 'utf8') !== seen) {
+      const aside = slotSibling(path, `.${process.pid}.${randomBytes(4).toString('hex')}.stale`);
+      renameSlotFile(path, aside);
+      if (readSlotFile(aside) !== seen) {
         try {
-          linkSync(aside, path); // a fresh lock was taken in between: give it back
+          linkSlotFile(aside, path); // a fresh lock was taken in between: give it back
         } catch {
           // taken again since: theirs stands
         }
       }
-      rmSync(aside, { force: true });
+      removeSlotFile(aside, { force: true });
       const again = tryLock(path, `github-budget pid ${process.pid}`);
       return 'lock' in again ? again.lock : null;
     } catch {
@@ -233,7 +232,7 @@ export class GitHubBudget {
       const now = Date.now();
       const s = this.read(now);
       const out = fn(s, now);
-      mkdirSync(this.dir, { recursive: true });
+      makeSlotDir(this.dir);
       writeSlotFile(this.file, JSON.stringify(s), { mode: 0o660, exactMode: true });
       return out;
     } catch {
@@ -253,26 +252,26 @@ export class GitHubBudget {
     lastPrune.set(this.dir, now);
     let names: string[] = [];
     try {
-      names = readdirSync(this.dir);
+      names = listSlotDir(this.dir);
     } catch {
       return;
     }
     for (const name of names) {
       const m = /^github-budget-([0-9a-f]{16})\.json$/.exec(name);
       if (!m || m[1] === this.key) continue;
-      const file = join(this.dir, name);
+      const file = slotFile(this.dir, name);
       const old = () => {
         try {
-          return now - statSync(file).mtimeMs > PRUNE_AFTER_MS;
+          return now - statSlotFile(file).mtimeMs > PRUNE_AFTER_MS;
         } catch {
           return false;
         }
       };
       if (!old()) continue;
-      const lock = this.lock(join(this.dir, `github-budget-${m[1]}.lock`));
+      const lock = this.lock(slotFile(this.dir, `github-budget-${m[1]}.lock`));
       if (!lock) continue;
       try {
-        if (old()) rmSync(file, { force: true });
+        if (old()) removeSlotFile(file, { force: true });
       } catch {
         // another user's file we may not remove: left
       } finally {
@@ -283,6 +282,6 @@ export class GitHubBudget {
 }
 
 /** The machine's budget for this token. */
-export function budgetFor(token: string, dir?: string, opts?: BudgetOptions): GitHubBudget {
+export function budgetFor(token: string, dir?: SlotPathLike, opts?: BudgetOptions): GitHubBudget {
   return new GitHubBudget(credentialKey(token), dir ?? slotsDir(), opts);
 }

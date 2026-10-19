@@ -6,7 +6,7 @@ import { type DoneWhenList } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
-import { computeLevel, loadMoneyPaths } from '../review.js';
+import { computeLevel } from '../review.js';
 import type { ReviewConfig } from '../config/schema.js';
 import { waitCategoriesOf } from '../merge-policy.js';
 import { effectiveClass, prBodyHead, prBodyProblems, riskClassOf } from '../pr-rules.js';
@@ -91,7 +91,7 @@ export abstract class Landing extends Decisions {
 
   private gateTiers(batch: EventPayload<'land.queued'>[]): string[] {
     const gates = this.d.cfg.tests.gates;
-    const money = loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+    const money = this.moneyPaths();
     const touchesMoney = batch.some((q) => this.filesOf(q.issue, q.head).some((f) => money.some((re) => re.test(f))) || this.events(q.issue).some((e) => e.type === 'issue.seen' && (e.payload as { labels: string[] }).labels.includes('money-path')));
     return [...new Set([...gates.land, ...(touchesMoney ? gates.money_path : [])])];
   }
@@ -310,7 +310,7 @@ export abstract class Landing extends Decisions {
     // raised (never lowered) by the worker's own claim. A body without both is refused: no PR opens.
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const files = this.changeFiles(this.d.repo, claimedBase, q.head);
-    const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const level = computeLevel({ files, labels: issue.labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
     const claims = last<EventPayload<'worker.claims'>>('worker.claims');
     const cls = effectiveClass(computed.cls, claims?.risk_class);
