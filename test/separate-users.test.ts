@@ -264,7 +264,8 @@ test('project commands (checks, gates, setup, full runs) run as the agent user w
 
 // A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password), and
 // that can start a project command's sandbox (#713: bubblewrap, which machine.sh installs; ci-slow's real-users job
-// runs a check that runs git there, and runs this test with PROJECT_SANDBOX_REQUIRED=1, where it can't skip for it).
+// runs a check that runs git there). CI's test shards and ci-slow's real-users job install it and set
+// PROJECT_SANDBOX_REQUIRED=1, so there this test can't skip for it.
 const canSudoNobody = process.platform !== 'win32' && spawnSync('sudo', ['-n', '-u', 'nobody', 'true']).status === 0;
 const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync('sudo', ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
 
