@@ -9,6 +9,8 @@ import { pathToFileURL } from 'node:url';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
+import type { StoredEvent } from '../src/events/types.js';
+import { testRunsView } from '../src/testrun/status.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 interface Render {
@@ -135,6 +137,15 @@ test('the Machine page\'s test runs: queue, the running slot and its holder, who
   assert.match(board, /data-testid="test-runs-live"/);
   assert.doesNotMatch(board, /test-runs-slots|test-runs-tier-stats/);
   assert.match(r.renderTestRuns({ configured: false, viewer: false, cap: 2, inUse: 0, queue: [], running: [], recent: [] }), /data-configured="no"[^>]*>Test runs: off/);
+});
+
+test('#545 round 9 (c): the Machine page shows a machine that can\'t give runs a user namespace of their own as a red problem with the fix, with test runs on', () => {
+  const why = "this machine's unshare can't be the test runs' wrapper (no setpriv): install util-linux 2.38 or later and setpriv, then run scripts/setup/test-user.sh install shop again";
+  const events = [{ id: 1, ts: new Date().toISOString(), type: 'testrun.sandbox', actor: 'shop', source: 'engine', payload: { ok: true, detail: 'all checks passed', unsupported: why } }] as unknown as StoredEvent[];
+  const view = testRunsView({ events, configured: true, writer: true, cap: 2, slots: [], lock: { path: '/x', holders: [] } });
+  const html = r.renderTestRuns(view);
+  assert.match(html, /data-testid="test-runs-problem"[^>]*>Test runs share the host&#x27;s user namespace[^<]*install util-linux 2\.38 or later and setpriv, then run scripts\/setup\/test-user\.sh install shop again\. Test runs go on meanwhile; this doesn&#x27;t turn them off\.</);
+  assert.equal((view as { sandbox: { ok: boolean } }).sandbox.ok, true);
 });
 
 test('the Machine page\'s test runs: root\'s network grants, read-only with the root command; none of it on the Board', () => {

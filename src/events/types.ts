@@ -882,8 +882,12 @@ export const EventSchemas = {
   'testrun.checks_failed': z.strictObject({ id: z.string(), sha, reason: z.enum(['no_permission', 'error']), detail: z.string().max(1000) }),
   /** The App's Checks permission on the repo, as GitHub reports it. */
   'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
-  /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
-  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
+  /**
+   * The sandbox's own check (the helper's `check`): no run starts until it passed. `unsupported`: this machine can't
+   * give a run a user namespace of its own, with the fix (src/testrun/host.ts SandboxCheck); shown only, never read
+   * for `ok`, a run or an update.
+   */
+  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000), unsupported: z.string().max(500).optional() }),
   /**
    * WHY: `<cli> testrun measure` (src/testrun/measure.ts), one tests.yaml test_run env value per sandboxed run. Its own
    * type, never testrun.queued/started/finished: the PR runs, the batcher and the test-run view never read it.

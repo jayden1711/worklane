@@ -434,11 +434,36 @@ cat "$t/gpu-on-ask.err" | head -n 3
 head -n 1 "$t/gpu-on-ask.err" | grep -Eqx 'worklane-testrun: gpu 0 \(devices /dev/nvidiactl /dev/nvidia-uvm /dev/nvidia0; max 300 s; waited [0-9]+ s\)' || fail "the grant line (max 300 s: the file's 5 min under the tier's 600 s)"
 for p in "${GRANTED[@]}"; do expect gpu-on-ask "$p" ENXIO ENODEV; done
 # Through the 0660 nodes by the unit's own device group, never the locks' group; and no lock of its own.
-g="$(seen gpu-on-ask groups)"
-echo "  gpu-on-ask's groups: $g"
+# WHY read from the host: a run is in a user namespace of its own (#545), where only the test user's own gid is mapped,
+# so it sees every supplementary group as nogroup (its probe's own line, printed below). The kernel still checks the
+# real groups, so root reads them from the run's main process (/proc/<pid>/status, as the host sees it) while it runs.
+echo "  gpu-on-ask's groups, as the run sees them: $(seen gpu-on-ask groups)"
+[[ ",$(seen gpu-on-ask groups)," != *,worklane-gpu,* ]] || fail "gpu-on-ask sees the locks' group: $(seen gpu-on-ask groups)"
+host_groups() { # <id> [--gpu]: a run of ci's that sleeps; its main process's groups (names), read by root while it runs
+  local id="$1" pid u="" main="" i names="" g; shift
+  mkrun ci "$id"
+  as_ ci exec "$id" 120 "$@" -- 'sleep 6' < /dev/null > "$t/$id.out" 2> "$t/$id.err" &
+  pid=$!
+  for i in $(seq 100); do
+    u="$(systemctl list-units --plain --no-legend --full "worklane-test-ci_${id}_[0-9]*.service" | awk '{ print $1 }' | head -n 1)"
+    if [ -n "$u" ]; then main="$(systemctl show -p MainPID --value "$u")"; fi
+    if [ -n "$main" ] && [ "$main" != 0 ] && [ "$(sudo readlink "/proc/$main/exe" 2>/dev/null)" = "$(readlink -f /usr/bin/sleep)" ]; then break; fi
+    main=""; sleep 0.1
+  done
+  [ -n "$main" ] || { wait "$pid" || true; cat "$t/$id.err" >&2; fail "$id: no running sleep to read the groups of"; }
+  for g in $(sudo sed -n 's/^Groups:\t*//p' "/proc/$main/status") $(sudo awk '/^Gid:/ { print $2 }' "/proc/$main/status"); do
+    names="$names,$(getent group "$g" | cut -d: -f1)"
+  done
+  wait "$pid" || { cat "$t/$id.err" >&2; fail "$id exited non-zero"; }
+  wipe ci "$id"
+  echo "${names#,}"
+}
+g="$(host_groups gpu-groups-ask --gpu)"
+echo "  gpu-on-ask's groups, as the host sees them: $g"
 [[ ",$g," == *,worklane-gpu-dev,* && ",$g," != *,worklane-gpu,* ]] || fail "gpu-on-ask's groups: $g"
 expect gpu-on-ask lock EACCES ENOENT
-g="$(seen gpu-on-plain groups)"
+g="$(host_groups gpu-groups-plain)"
+echo "  a run that didn't ask, its groups as the host sees them: $g"
 [[ ",$g," != *,worklane-gpu-dev,* ]] || fail "a run that didn't ask has the device group: $g"
 for p in "${NEVER[@]}"; do expect gpu-on-ask "$p" ENOENT; done
 expect gpu-on-ask mknod EPERM
