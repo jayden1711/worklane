@@ -844,9 +844,10 @@ function placeFile(bytes, dest, tmpName, o, check = null, before = null) {
 }
 
 /**
- * A release's updater, only as this machine verifies it: the tag's signature checked again (git verify-tag against the
- * allowed signers, as verifyRelease), the signed tag object naming itself `tag` and pointing at `commit` (the engine
- * just installed), and the file read from that commit's tree in the root-owned clone, never from the build.
+ * A release's updater, only as this machine verifies it: refs/tags/<tag> resolved once to one tag object; that object's
+ * signature checked again (git verify-tag against the allowed signers, as verifyRelease), the same object naming itself
+ * `tag` and pointing at `commit` (the engine just installed), and the file read from that commit's tree in the
+ * root-owned clone, never from the build.
  * `exec` returns a Buffer. { ok: true, version, tag, commit, bytes } or { ok: false, reason }.
  */
 function verifiedUpdater(signers, tag, commit, exec, gitDir = VERIFY_GIT, exists = fs.existsSync) {
@@ -854,23 +855,34 @@ function verifiedUpdater(signers, tag, commit, exec, gitDir = VERIFY_GIT, exists
   if (!m) return { ok: false, reason: `${tag} isn't a release tag vX.Y.Z` };
   if (!exists(signers)) return { ok: false, reason: `no allowed signers file at ${signers}` };
   const g = (...a) => exec('git', ['--git-dir', gitDir, ...a]);
+  // INVARIANT: the ref is resolved once, here. Every check and the read below use this object id (or the commit id it
+  // peels to), never the name, so a ref moved after verify-tag can't swap in another object (objects are immutable).
+  let oid;
   try {
-    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', tag);
+    oid = String(g('rev-parse', '--verify', '-q', `refs/tags/${tag}`)).trim();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) throw new Error(`not an object id: ${oid.slice(0, 80)}`);
+    const type = String(g('cat-file', '-t', oid)).trim();
+    if (type !== 'tag') return { ok: false, reason: `${tag} is a ${type || 'missing'} object, not a signed tag object` };
+  } catch (e) {
+    return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
+  }
+  try {
+    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', oid);
   } catch (e) {
     return { ok: false, reason: `${tag}'s signature doesn't verify against ${signers}: ${String((e && e.stderr) || (e && e.message) || e).split('\n').filter(Boolean).slice(-1)[0] || 'no signature'}` };
   }
   let at;
   let named;
   try {
-    at = String(g('rev-parse', '--verify', '-q', `refs/tags/${tag}^{commit}`)).trim();
-    named = (/^tag (\S+)$/m.exec(String(g('cat-file', 'tag', `refs/tags/${tag}`))) || [])[1] || null;
+    at = String(g('rev-parse', '--verify', '-q', `${oid}^{commit}`)).trim();
+    named = (/^tag (\S+)$/m.exec(String(g('cat-file', 'tag', oid))) || [])[1] || null;
   } catch (e) {
     return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
   }
   if (at !== commit) return { ok: false, reason: `${tag} points at ${short(at)}, not at the engine just installed (${short(commit)})` };
   if (named !== tag) return { ok: false, reason: `${tag}'s signed tag object names itself ${named || 'nothing'}` };
   try {
-    return { ok: true, version: m[1], tag, commit, bytes: Buffer.from(g('cat-file', 'blob', `${commit}:${SELF_SRC}`)) };
+    return { ok: true, version: m[1], tag, commit: at, bytes: Buffer.from(g('cat-file', 'blob', `${at}:${SELF_SRC}`)) };
   } catch {
     return { ok: false, reason: `${tag} has no ${SELF_SRC}` };
   }

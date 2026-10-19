@@ -161,6 +161,9 @@ function origin() {
   const keys = mkdtempSync(join(tmpdir(), 'self-keys-'));
   const key = join(keys, 'release');
   spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'release', '-f', key]);
+  // A key that isn't in allowed_signers: its signatures are real, but no principal matches them.
+  const stranger = join(keys, 'stranger');
+  spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'stranger', '-f', stranger]);
   const signers = join(keys, 'allowed_signers');
   writeFileSync(signers, `owner@example.com namespaces="git" ${readFileSync(`${key}.pub`, 'utf8').trim()}\n`);
   git(dir, 'init', '-q', '-b', 'main');
@@ -170,16 +173,23 @@ function origin() {
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'main');
   const main = git(dir, 'rev-parse', 'HEAD');
-  const tag = (name: string, signed: boolean) => {
+  /** A commit off main whose updater is `body`, untagged. */
+  const commit = (label: string, body: string) => {
     git(dir, 'checkout', '-q', '--detach', main);
+    writeFileSync(join(dir, 'scripts', 'machine', 'worklane-update.cjs'), body);
     mkdirSync(join(dir, 'dist'), { recursive: true });
-    writeFileSync(join(dir, 'dist', 'cli.js'), `// ${name}\n`);
-    git(dir, 'add', '-f', 'dist');
-    git(dir, 'commit', '-q', '-m', `Release ${name}`);
-    git(dir, 'tag', signed ? '-s' : '-a', name, '-m', name);
-    const commit = git(dir, 'rev-parse', 'HEAD');
+    writeFileSync(join(dir, 'dist', 'cli.js'), `// ${label}\n`);
+    git(dir, 'add', '-f', '-A');
+    git(dir, 'commit', '-q', '-m', label);
+    const c = git(dir, 'rev-parse', 'HEAD');
     git(dir, 'checkout', '-q', 'main');
-    return commit;
+    return c;
+  };
+  /** A release commit tagged `name`: signed by the release key (signed), by `signingKey`, or unsigned (annotated). */
+  const tag = (name: string, signed: boolean, signingKey = key) => {
+    const c = commit(`Release ${name}`, NEW);
+    git(dir, '-c', `user.signingkey=${signingKey}`, 'tag', signed ? '-s' : '-a', name, '-m', name, c);
+    return c;
   };
   /** The root-owned clone the updater verifies in, fetched as verifyRelease fetches it. */
   const clone = (name: string) => {
@@ -187,7 +197,7 @@ function origin() {
     u.verifyRelease(dir, name, signers, strExec, gitDir);
     return gitDir;
   };
-  return { dir, signers, tag, clone };
+  return { dir, signers, stranger, commit, tag, clone };
 }
 
 test('the verified source: only a release tag whose signature verifies, pointing at the engine just installed and naming itself, gives an updater; an unverified one is refused', { skip: posix }, () => {
@@ -210,6 +220,50 @@ test('the verified source: only a release tag whose signature verifies, pointing
   const renamed = u.verifiedUpdater(o.signers, 'v9.9.9', signed, bufExec, o.clone('v9.9.9'));
   assert.equal(renamed.ok, false);
   assert.match((renamed as { reason: string }).reason, /v9\.9\.9's signed tag object names itself v0\.5\.1/);
+  // A real signature by a key that isn't in allowed_signers: refused.
+  const stranger = o.tag('v0.5.3', true, o.stranger);
+  const wrong = u.verifiedUpdater(o.signers, 'v0.5.3', stranger, bufExec, o.clone('v0.5.3'));
+  assert.equal(wrong.ok, false);
+  assert.match((wrong as { reason: string }).reason, /v0\.5\.3's signature doesn't verify against .*allowed_signers/);
+});
+
+test('the verified source is one tag object: the clone\'s ref moved after verify-tag, to an unsigned or wrong-signer tag object of the same name at another commit, is refused', { skip: posix }, () => {
+  const o = origin();
+  const signed = o.tag('v0.7.0', true);
+  const gitDir = o.clone('v0.7.0');
+  const good = u.verifiedUpdater(o.signers, 'v0.7.0', signed, bufExec, gitDir);
+  assert.equal(good.ok, true, (good as { reason?: string }).reason);
+  const goodTag = git(o.dir, 'rev-parse', 'refs/tags/v0.7.0');
+  // Another commit with another updater, and the engine "installed" from it: only a moved ref could make it pass.
+  const other = o.commit('other', '// not the release\'s updater\n');
+  const unsigned = execFileSync('git', ['--git-dir', join(o.dir, '.git'), 'mktag'], { input: `object ${other}\ntype commit\ntag v0.7.0\ntagger X <x@example.com> 0 +0000\n\nx\n`, encoding: 'utf8' }).trim();
+  git(o.dir, 'update-ref', 'refs/swap/unsigned', unsigned);
+  git(o.dir, '-c', `user.signingkey=${o.stranger}`, 'tag', '-s', '-f', 'v0.7.0', '-m', 'v0.7.0', other);
+  const wrongSigner = git(o.dir, 'rev-parse', 'refs/tags/v0.7.0');
+  git(o.dir, 'update-ref', 'refs/swap/wrong-signer', wrongSigner);
+  git(o.dir, 'update-ref', 'refs/tags/v0.7.0', goodTag);
+  execFileSync('git', ['--git-dir', gitDir, 'fetch', '-q', o.dir, 'refs/swap/unsigned:refs/swap/unsigned', 'refs/swap/wrong-signer:refs/swap/wrong-signer'], { stdio: 'ignore' });
+  const outcomes = ([['unsigned', unsigned], ['wrong signer', wrongSigner]] as const).map(([label, to]) => {
+    git(gitDir, 'update-ref', 'refs/tags/v0.7.0', goodTag);
+    let swapped = false;
+    // A racing writer: the ref moves the moment verify-tag has passed on the signed object.
+    const racing = (f: string, a: string[]) => {
+      const out = bufExec(f, a);
+      if (!swapped && a.includes('verify-tag')) {
+        git(gitDir, 'update-ref', 'refs/tags/v0.7.0', to);
+        swapped = true;
+      }
+      return out;
+    };
+    const r = u.verifiedUpdater(o.signers, 'v0.7.0', other, racing, gitDir);
+    assert.equal(swapped, true, `${label}: the ref moved after verify-tag`);
+    assert.equal(git(gitDir, 'rev-parse', 'refs/tags/v0.7.0'), to, `${label}: the clone's ref is the swapped object`);
+    return [label, r.ok ? `accepted: ${r.bytes.toString().trim()}` : r.reason.replace(/[0-9a-f]{7}/g, 'x')];
+  });
+  assert.deepEqual(outcomes, [
+    ['unsigned', 'v0.7.0 points at x, not at the engine just installed (x)'],
+    ['wrong signer', 'v0.7.0 points at x, not at the engine just installed (x)'],
+  ]);
 });
 
 test('updates.sh\'s steps: never over a newer updater taken from a release; otherwise the installed one kept as .prev and the new one recorded', { skip: posix }, () => {
