@@ -135,14 +135,14 @@ test("who may approve is read from main's review.yaml, never the checkout's work
   assert.equal(decide.approvalsAt(f.repo, 'origin/main', true), undefined, 'an invalid config on main: the owners alone');
 });
 
-test("letting writers approve a high-risk merge is root's: off by default, read on every approval, and turning it off never refuses the config", { skip }, async () => {
+test("letting writers approve a high-risk merge needs the instance's policy.yaml too: off by default, read on every approval, and turning it off never refuses the config", { skip }, async () => {
   const cfg = fixture().cfg;
   cfg.project.land_mode = 'pr';
   cfg.review = { ...(cfg.review ?? DEFAULT_REVIEW), approvals: { land: 'writers' } } as ReviewConfig;
   const policy = PolicyFile.parse({ version: 1, budget: { daily_usd: 1_000_000 }, agents: { max_workers: 32 } });
   assert.equal(policy.writers_approve_land, false, 'off unless root turns it on');
   assert.deepEqual(policyViolations(cfg, policy), [], 'the instance still starts: the setting is ignored, not refused');
-  // The coordinator reads root's switch on every approval: off, a writer's comment approves nothing.
+  // The coordinator reads the policy's switch on every approval: off, a writer's comment approves nothing.
   const f = fixture();
   f.cfg.review = cfg.review;
   let on = true;
@@ -212,7 +212,10 @@ test("CLI: `decide` from an unprivileged user (not root, not the instance's coor
 test("CLI: `decide` by the user whose event log it is records the instance's owner, the CLI and the OS user", { skip: isRoot() && 'runs as root' }, () => {
   const { dir, answers } = localDecision();
   assert.equal(statSync(logPath(dir)).uid, process.getuid?.());
-  const r = cli('decide', 'd-cli', 'approve', '--root', dir);
+  // A fake `id` first on PATH, printing another uid, changes nothing: the caller's uid is the kernel's (geteuid).
+  const bin = mkdtempSync(join(tmpdir(), 'fake-id-'));
+  writeFileSync(join(bin, 'id'), '#!/bin/sh\necho 4242\n', { mode: 0o755 });
+  const r = spawnSync(process.execPath, [engineCli, 'decide', 'd-cli', 'approve', '--root', dir], { encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` } });
   assert.equal(r.status, 0, r.stderr);
   const got = answers();
   assert.deepEqual(got.answered.map((a) => [a.id, a.by, a.answer, a.role]), [['d-cli', loadConfig(dir).project.owners.default, 'approve', 'owner']]);
@@ -264,5 +267,21 @@ test("config at start: main's config invalid, the checkout's committed one runs,
   writeFileSync(local, `${readFileSync(local, 'utf8').replace(/^required_checks:.*\n/m, '')}required_checks: [hand-edited]\n`);
   const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
   assert.match(start.note ?? '', /is invalid, started with the checkout's/);
+  assert.deepEqual(start.cfg.project.required_checks, committed);
+});
+
+test("config at start: no config on main at all, the checkout's committed one runs, never a hand edit to its working tree", { skip }, () => {
+  const f = fixture();
+  const p = person(f);
+  const file = join(BRAND.configDir, 'config.yaml');
+  const committed = loadConfig(f.repo).project.required_checks;
+  git(p.dir, 'rm', '-q', '-r', '--', BRAND.configDir);
+  git(p.dir, ...ident, 'commit', '-q', '-m', 'drop the config');
+  git(p.dir, 'push', '-q', 'origin', 'HEAD:main');
+  git(f.repo, 'fetch', '-q', 'origin');
+  const local = join(f.repo, file);
+  writeFileSync(local, `${readFileSync(local, 'utf8').replace(/^required_checks:.*\n/m, '')}required_checks: [hand-edited]\n`);
+  const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
+  assert.match(start.note ?? '', /no \S+ at origin\/main: started with the checkout's/);
   assert.deepEqual(start.cfg.project.required_checks, committed);
 });

@@ -20,10 +20,11 @@ const approvalsRead = new Map<string, { tree: string; approvals: ReviewConfig['a
  * Who may approve a high-risk merge (review.yaml `approvals`) as the default branch says it: read at `ref` in `repo`
  * with git, never from a working tree, as the coordinator's live config is (#715). Missing, invalid or unreadable:
  * undefined, so it is the owners' alone (fail closed). Read again only when the config's tree there changes.
- * `rootLetsWriters`: an instance's policy.yaml writers_approve_land (a loosening is root's: without it, as the
- * coordinator refuses such a config, writers are never let in); a local site, which has no policy, passes true.
+ * `policyLetsWriters`: an instance's policy.yaml writers_approve_land (never settable from the dashboard; root's or
+ * the coordinator user's file today, root's alone once #769 lands). Without it writers are never let in, as the
+ * coordinator ignores the setting too; a local site, which has no policy, passes true.
  */
-export function approvalsAt(repo: string, ref: string, rootLetsWriters: boolean): ReviewConfig['approvals'] {
+export function approvalsAt(repo: string, ref: string, policyLetsWriters: boolean): ReviewConfig['approvals'] {
   const tree = configTree(repo, ref);
   if (tree === null) return undefined;
   let hit = approvalsRead.get(repo);
@@ -37,7 +38,7 @@ export function approvalsAt(repo: string, ref: string, rootLetsWriters: boolean)
     hit = { tree, approvals };
     approvalsRead.set(repo, hit);
   }
-  return hit.approvals?.land === 'writers' && !rootLetsWriters ? undefined : hit.approvals;
+  return hit.approvals?.land === 'writers' && !policyLetsWriters ? undefined : hit.approvals;
 }
 
 export interface Answerer {

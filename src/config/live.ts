@@ -162,16 +162,10 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
   spawnSync('git', ['fetch', '-q', o.remote, `+refs/heads/${branch}:refs/remotes/${o.remote}/${branch}`], { cwd: o.repo, stdio: 'ignore', timeout: 60_000 });
   const ref = `refs/remotes/${o.remote}/${branch}`;
   const tree = configTree(o.repo, ref);
-  if (tree === null) return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: `no ${BRAND.configDir}/ at ${o.remote}/${branch}: started with the checkout's` };
-  try {
-    const cfg = loadConfigAt(o.repo, ref);
-    const extra = o.check?.(cfg) ?? [];
-    if (extra.length) throw new ConfigInvalid(extra);
-    return { cfg, tree, note: null };
-  } catch (e) {
-    // WHY (#715): the checkout's config as committed (the default branch as the clone last saw it), never its working
-    // tree, where a hand edit could loosen the policy the merges are judged by; the working tree only when HEAD has none valid.
-    const why = `${BRAND.configDir}/ at ${o.remote}/${branch} is invalid, started with the checkout's: ${(e as Error).message.slice(0, 1000)}`;
+  // WHY (#715): whenever main's config can't run (none there, or invalid), the checkout's config as committed (the
+  // default branch as the clone last saw it) runs, never its working tree, where a hand edit could loosen the policy the
+  // merges are judged by. The working tree only when HEAD has no valid config either (a first run before any commit).
+  const checkout = (why: string) => {
     try {
       const committed = loadConfigAt(o.repo, 'HEAD');
       if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), note: why };
@@ -179,5 +173,14 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
       // none valid at HEAD either
     }
     return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: why };
+  };
+  if (tree === null) return checkout(`no ${BRAND.configDir}/ at ${o.remote}/${branch}: started with the checkout's`);
+  try {
+    const cfg = loadConfigAt(o.repo, ref);
+    const extra = o.check?.(cfg) ?? [];
+    if (extra.length) throw new ConfigInvalid(extra);
+    return { cfg, tree, note: null };
+  } catch (e) {
+    return checkout(`${BRAND.configDir}/ at ${o.remote}/${branch} is invalid, started with the checkout's: ${(e as Error).message.slice(0, 1000)}`);
   }
 }

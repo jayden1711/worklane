@@ -589,6 +589,9 @@ export abstract class MergeFlow extends FixRuns {
       if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
       return;
     }
+    // Again right before merging (#715): the checks and the fetch above take time, and an emergency stop or an auto-merge
+    // stop raised meanwhile holds this merge too, an owner's approval (by review or from Discord) included.
+    if (this.emergencyInForce() || this.autoMergeStopped()) return;
     const m = await this.trainMerge(w, pr);
     if (!m) return;
     if (!m.ok) {

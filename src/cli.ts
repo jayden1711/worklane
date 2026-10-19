@@ -1075,10 +1075,13 @@ async function main(argv: string[]): Promise<number> {
       // WHY (#715): only root or the coordinator user may answer from here, checked before anything is read; the
       // answer is the instance's owner's, through the one decide path (src/decide.ts), audited with the OS user.
       const { cliDecideRefusal, answerDecision } = await import('./decide.js');
-      const { currentUser, fileAccess, isRoot, userUid } = await import('./os/index.js');
+      const { currentUid, currentUser, fileAccess, isRoot } = await import('./os/index.js');
       const { coordinatorUser } = await import('./setup/app-manifest.js');
-      const user = currentUser();
-      const caller = { user, uid: user ? userUid(user) : null, root: isRoot() };
+      // The caller's uid is the kernel's (geteuid), never a program on PATH. INVARIANT: on a local site the owner check
+      // is on the very file then written, so steering logPath (<PREFIX>_PROJECT_STATE_DIR, --root) only picks which log
+      // the caller writes, and passes only for a log the caller already owns and could write anyway: an instance's
+      // log is its coordinator user's, so it is refused.
+      const caller = { user: currentUser(), uid: currentUid(), root: isRoot() };
       const localDb = logPath(root);
       const db = instanceOpt ? null : fileAccess(localDb);
       const refused = cliDecideRefusal(caller, { instance: instanceOpt ?? null, coordinatorUser: instanceOpt ? coordinatorUser(instanceOpt) : null, logUid: db?.kind === 'file' ? db.uid : null });

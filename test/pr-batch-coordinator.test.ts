@@ -194,6 +194,24 @@ test("batching: an owner's approving review merges nothing while auto-merge is s
   assert.ok(t.pr().merged, 'merged once the stop is cleared');
 });
 
+test('batching: a stop raised while an approved merge is under way (during its checks) holds it, right before the merge call (#715)', { skip }, async () => {
+  const { t } = await batched({ edit: highRisk });
+  await fastGreen(t);
+  approveAsOwner(t);
+  const stop = join(t.f.stateDir, 'auto-merge-stopped.json');
+  // The main watch stops auto-merge while mergeTested reads the head's checks: the batched and Discord-batched paths both go through it.
+  const c = t.c as unknown as { headChecksOf(sha: string): Promise<unknown>; mergeTested(w: unknown, pr: unknown, how: 'approved'): Promise<void> };
+  const read = c.headChecksOf.bind(c);
+  c.headChecksOf = async (sha) => {
+    writeFileSync(stop, JSON.stringify({ reason: 'unaccounted commit on main' }));
+    return read(sha);
+  };
+  const w = t.f.log.read(0, ['pr.opened']).at(-1)!.payload;
+  await c.mergeTested(w, await t.f.backlog.pullRequest(t.opened.number), 'approved');
+  assert.ok(!t.pr().merged, 'not merged: the stop came in before the merge call');
+  assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
+});
+
 test("batching: the issue's owner approving by review merges only if the one rule lets their repo role approve a high-risk merge (#715)", { skip }, async () => {
   // The issue's owner is only a writer on the repo: their review approves nothing, as on every other surface.
   const { t } = await batched({ edit: highRisk, roleOf: async () => 'writer' });
@@ -201,7 +219,7 @@ test("batching: the issue's owner approving by review merges only if the one rul
   approveAsOwner(t);
   await settle(t, 2);
   assert.ok(!t.pr().merged, "a writer's review doesn't merge a high-risk PR");
-  // review.yaml on main lets writers, and root's switch does too: it merges.
+  // review.yaml on main lets writers, and the instance's policy switch does too: it merges.
   const lets = await batched({ edit: (cfg) => (highRisk(cfg), (cfg.review!.approvals = { land: 'writers' })), roleOf: async () => 'writer', writersApproveLand: () => true });
   await fastGreen(lets.t);
   approveAsOwner(lets.t);

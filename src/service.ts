@@ -110,7 +110,7 @@ export interface Site {
   root: string;
   stateDir: string;
   logPath: string;
-  /** An instance's root-owned policy.yaml, read on each approval for writers_approve_land (#715); a local site has none. */
+  /** An instance's policy.yaml, read on each approval for writers_approve_land (#715); a local site has none. */
   policyFile?: string;
 }
 

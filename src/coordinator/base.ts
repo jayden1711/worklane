@@ -279,7 +279,7 @@ export abstract class CoordinatorBase {
 
   /**
    * Who may approve a high-risk merge, for the one rule (dashboard-auth.ts mayAnswerKind): review.yaml's `approvals`
-   * from the default branch (the live config), writers only while root's policy lets them, read now (#715).
+   * from the default branch (the live config), writers only while the instance's policy.yaml lets them, read now (#715).
    */
   protected approvals(): ReviewConfig['approvals'] {
     const a = this.d.cfg.review?.approvals;

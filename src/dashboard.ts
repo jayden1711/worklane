@@ -1081,15 +1081,15 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const repo = opts.cfg.project.project.repo;
   /** The default branch as this checkout last fetched it: where the money paths and who may approve are read (#715). */
   const mainRef = () => `origin/${opts.cfg.project.project.default_branch}`;
-  /** Who may approve a high-risk merge: main's review.yaml, writers only where root's policy.yaml lets them (unreadable: not). */
+  /** Who may approve a high-risk merge: main's review.yaml, writers only where the instance's policy.yaml lets them (unreadable: not). */
   const approvals = () => {
-    let rootLetsWriters = !opts.policyFile;
+    let policyLetsWriters = !opts.policyFile;
     try {
-      if (opts.policyFile) rootLetsWriters = readPolicy(opts.policyFile).policy?.writers_approve_land === true;
+      if (opts.policyFile) policyLetsWriters = readPolicy(opts.policyFile).policy?.writers_approve_land === true;
     } catch {
-      rootLetsWriters = false;
+      policyLetsWriters = false;
     }
-    return approvalsAt(opts.root, mainRef(), rootLetsWriters);
+    return approvalsAt(opts.root, mainRef(), policyLetsWriters);
   };
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
