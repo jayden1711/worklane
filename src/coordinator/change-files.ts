@@ -432,6 +432,31 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
 }
 
 /**
+ * The pure renames of base..head, old path to new: a deleted path whose exact blob (same id, same mode) the change
+ * adds at a new path. Content match by blob id, no similarity guess; a rename with any edit isn't one. Each added path
+ * pairs with one deleted path at most. For the weakening check (src/merge-policy-weakening.ts): a test file only
+ * renamed doesn't wait.
+ */
+export function exactMoves(cwd: string, base: string, head: string): Map<string, string> {
+  // -z: ":mode mode old new status NUL path NUL" for each path (renames off: a move is a D and an A).
+  const parts = fields(must(runBytes(cwd, ['diff', '--raw', '-z', '--no-abbrev', '--no-renames', `${base}..${head}`])));
+  const gone = new Map<string, string[]>();
+  const came: { key: string; path: string }[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const [oldMode = '', newMode = '', old = '', now = '', status = ''] = parts[i]!.toString('latin1').replace(/^:/, '').split(' ');
+    const path = nameOf(parts[i + 1]!);
+    if (status === 'D') gone.set(`${oldMode} ${old}`, [...(gone.get(`${oldMode} ${old}`) ?? []), path]);
+    else if (status === 'A') came.push({ key: `${newMode} ${now}`, path });
+  }
+  const out = new Map<string, string>();
+  for (const { key, path } of came) {
+    const from = gone.get(key)?.shift();
+    if (from !== undefined) out.set(from, path);
+  }
+  return out;
+}
+
+/**
  * The text of each of `paths` that is a file in `rev`'s tree, keyed by path; a path that isn't there is left out. For
  * the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts), which compares a
  * changed file before and after. Paths are from the top of the repo. A blob over `maxBytes` isn't read: its path is

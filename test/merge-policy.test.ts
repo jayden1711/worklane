@@ -474,7 +474,14 @@ function weakens(before: Record<string, string | null>, after: Record<string, st
     return { path, added: added.length, removed: removed.length, addedLines: added, removedLines: removed };
   });
   const deleted = new Set(paths.filter((p) => typeof before[p] === 'string' && (after[p] ?? null) === null));
-  return weakening.weakeningReasons({ files, deleted, before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope });
+  // A deleted path whose exact text reappears at a new path: a move, as git's blob ids give it (weakeningOf).
+  const moved = new Map<string, string>();
+  const fresh = paths.filter((p) => (before[p] ?? null) === null && typeof after[p] === 'string');
+  for (const p of deleted) {
+    const to = fresh.find((q) => after[q] === before[p] && ![...moved.values()].includes(q));
+    if (to) moved.set(p, to);
+  }
+  return weakening.weakeningReasons({ files, deleted, moved, before: (p) => before[p] ?? null, after: (p) => after[p] ?? null, scope });
 }
 const weakensRaw = weakens;
 /** Each reason's kind, without the common start and the places. */
@@ -527,7 +534,25 @@ test('weakening: the assertion and test words of the other languages the rule na
     ['src/test/MathTest.java', 'class MathTest {\n  @Test\n  void adds() {}\n}\n', 'class MathTest {\n  void adds() {}\n}\n'],
     ['web/src/math.test.tsx', "it('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n", "it('adds', () => {\n  expect(add(1, 2)).toBeTruthy();\n});\n"],
     ['test/math.spec.js', "describe('math', () => {\n  it('adds', () => add(1, 2).should.equal(3));\n});\n", "describe('math', () => {\n  it('adds', () => add(1, 2));\n});\n"],
+    // Round 4's review: every language whose test files are read as code has its words.
+    ['tests/MathTests.cs', 'public class MathTests {\n  [Fact]\n  public void Adds() {\n    Assert.Equal(3, Add(1, 2));\n  }\n}\n', 'public class MathTests {\n  [Fact]\n  public void Adds() {\n  }\n}\n'],
+    ['tests/MathTests.cs', 'public class MathTests {\n  [Fact]\n  public void Adds() {}\n}\n', 'public class MathTests {\n  public void Adds() {}\n}\n'],
+    ['tests/MathTests.cs', 'public class MathTests {\n  [Theory]\n  public void Adds() {}\n}\n', 'public class MathTests {\n  public void Adds() {}\n}\n'],
+    ['Tests/MathTests.swift', 'func testAdd() {\n  XCTAssertEqual(add(1, 2), 3)\n}\n', 'func testAdd() {\n}\n'],
+    ['test/math_test.rb', "it 'adds' do\n  _(add(1, 2)).must_equal 3\nend\n", "it 'adds' do\nend\n"],
+    ['test/math_test.rb', 'def test_nil\n  refute_nil add(1, 2)\nend\n', 'def test_nil\nend\n'],
+    ['test/cli.bats', '@test "adds" {\n  run add 1 2\n  [ "$output" = 3 ]\n}\n', '@test "adds" {\n  run add 1 2\n}\n'],
+    ['test/cli.bats', '@test "adds" {\n  true\n}\n', 'true\n'],
+    // Test folders at any depth (mocha's default `test/` naming has no `.test.` suffix).
+    ['packages/x/test/math.js', "it('adds', () => {\n  assert.equal(add(1, 2), 3);\n});\n", "it('adds', () => {\n});\n"],
+    ['packages/x/spec/math.js', "it('adds', () => {\n  expect(add(1, 2)).toBe(3);\n});\n", "it('adds', () => {\n});\n"],
   ] as [string, string, string][]) assert.deepEqual(change(path, was, now), [ASSERTION], `${path}: ${now}`);
+  // A shell test file isn't read by words: every removed line waits, as an expected output's.
+  assert.deepEqual(change('test/cli.sh', '[ "$(add 1 2)" = 3 ]\n', 'true\n'), [EXPECTED]);
+  // Nested fixtures are expected outputs.
+  assert.deepEqual(change('packages/x/test/fixtures/expected.json', '{ "total": 3 }\n', '{ "total": 4 }\n'), [EXPECTED]);
+  // Rust's inline `#[cfg(test)]` tests in src/ aren't a test path: a named gap.
+  assert.deepEqual(change('src/lib.rs', '#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n', '#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n    }\n}\n'), []);
   // Go's own comparison line has none of the words: a named gap (its t.Fatal line is held).
   assert.deepEqual(change('pkg/math_test.go', 'func TestAdd(t *testing.T) {\n\tif Add(1, 2) != 3 {\n\t\tt.Fatal("add")\n\t}\n}\n', 'func TestAdd(t *testing.T) {\n\tif Add(1, 2) != 4 {\n\t\tt.Fatal("add")\n\t}\n}\n'), []);
   // A word that only holds one of them is no assertion: `.test(` on a regex is held (it reads as a test call), `latest.` isn't.
@@ -536,9 +561,15 @@ test('weakening: the assertion and test words of the other languages the rule na
   assert.deepEqual(change('test/a.test.ts', '// they read it, and never run it.\n// so it passes the test.\nx();\n', 'x();\n'), []);
 });
 
-test('weakening: a deleted test file waits, a moved one too (it deletes its old path); an added one does not', () => {
+test('weakening: a deleted test file waits; a pure rename does not, unless it leaves the test paths or its runner suffix, or edits the file; an added one does not', () => {
   assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null })), [DELETED, ASSERTION]);
-  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST })), [DELETED, ASSERTION]);
+  // The same text at a new test path with the same runner suffix: a rename (#783's deliverable, owner's decision 1).
+  assert.deepEqual(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), []);
+  assert.deepEqual(weakens({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/fixtures/a.json': '{ "a": 1 }\n' }, { 'test/unit/math.test.ts': null, 'test/unit/fixtures/a.json': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/fixtures/a.json': '{ "a": 1 }\n' }), [], 'a folder moved');
+  // Not a rename: the text edited, another runner suffix, out of the test paths.
+  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST.replace('3);', '4);') })), [DELETED, ASSERTION]);
+  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/math.spec.ts': MATH_TEST })), [DELETED, ASSERTION]);
+  assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'src/math-check.ts': MATH_TEST })), [DELETED, ASSERTION]);
   // A test helper with no assertion on any line: deleting it is deleting a test file all the same.
   assert.deepEqual(kinds(weakens({ 'test/numbers.ts': 'export const two = 2;\n' }, { 'test/numbers.ts': null })), [DELETED]);
   assert.deepEqual(weakens({}, { 'test/numbers.ts': 'export const two = 2;\n' }), []);
@@ -560,7 +591,7 @@ test("weakening: a snapshot, an expected output or a fixture waits on any line r
 
 test('weakening: a guard or lint file waits on any line removed or changed, a line added (with no mark) does not; the engine-only ones stand aside in an app repo', () => {
   for (const path of [
-    `${BRAND.configDir}/review.yaml`, `${BRAND.configDir}/config.yaml`, `${BRAND.configDir}/tests.yaml`, '.github/workflows/ci.yml', '.github/actions/test/action.yml', '.husky/pre-commit',
+    `${BRAND.configDir}/review.yaml`, `${BRAND.configDir}/config.yaml`, `${BRAND.configDir}/tests.yaml`, '.github/workflows/ci.yml', '.github/actions/setup/action.yml', '.husky/pre-commit',
     'tsconfig.json', 'eslint.config.js', '.eslintrc.json', 'vitest.config.ts', 'jest.config.js', 'cypress.config.ts', '.lintstagedrc.json', '.semgrep.yml', '.rubocop.yml', 'deno.json',
     'mypy.ini', '.pre-commit-config.yaml', '.github/CODEOWNERS', `${BRAND.configDir}/checks/lint.mjs`, 'scripts/ci/affected.mjs', 'src/push-guard.ts', 'test/pipefail.test.ts',
   ]) {
@@ -603,6 +634,18 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   assert.deepEqual(weakens({ 'package.json': pkg }, { 'package.json': pkg.replace('"a": "1.0.0"', '"a": "1.1.0"').replace('"test": "node --test",', '"test": "node --test",\n    "fmt": "prettier .",') }), []);
   // The owner's accepted false hold: a line that names the linter (`eslint `) is a mark.
   assert.deepEqual(kinds(weakens({ 'package.json': pkg }, { 'package.json': pkg.replace('"lint": "eslint ."', '"lint": "eslint .",\n    "fmt": "prettier ."') })), [MARKER]);
+  // Round 4's review: the reader fails closed, never reads around a trick. A decoy declaration (in a comment) before
+  // the table, an entry or a comment at column 0 inside it: the change waits.
+  const allowed = "const ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  const decoy = `/*\nconst ALLOWED = [\n  'a',\n];\n*/\n${allowed}`;
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': decoy }, { 'test/instance-name.test.ts': decoy.replace("];\nconst BAD_SHAPE", "  'b',\n];\nconst BAD_SHAPE") })), [UNREADABLE], 'a decoy, then an entry added');
+  const names = "/*\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\n*/\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\nconst REPOS_BAD = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/add-project.test.ts': names }, { 'test/add-project.test.ts': names.replace("  '../up',\n];\nconst REPOS_BAD", "];\nconst REPOS_BAD") })), [UNREADABLE], 'a decoy, then an entry removed');
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n'b',\n") })), [UNREADABLE], 'an entry at column 0');
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n// fine\n  'b',\n") })), [UNREADABLE], 'a comment at column 0');
+  // A one-line table is one line; its entries changing is a change.
+  const one = "const ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': one }, { 'test/instance-name.test.ts': one.replace("['a']", "['a', 'b']") })), [GROWN]);
   // A table only after the change is new (a new lint and its allowlist): nothing to loosen. On neither side: nothing
   // to read (the backstop test keeps every registered table on the default branch).
   assert.deepEqual(weakensRaw({ 'test/slot-dir-writes.test.ts': 'const x = 1;\n' }, { 'test/slot-dir-writes.test.ts': "const x = 1;\nconst REVIEWED = {\n  'src/a.ts': 1,\n};\n" }), []);
@@ -621,6 +664,26 @@ test("weakening (owner's rule, 2026-10-19): an added line with a skip, only or s
   for (const m of ['.only(', 'test.only', 'it.only', 'describe.only', 'fit(', 'fdescribe(', '.skip(', 'skip:', 't.skip', 'test.skip', 'it.skip', 'xit(', 'xdescribe(', '@pytest.mark.skip', '@unittest.skip', 't.Skip(', 'eslint-disable', 'eslint ', '@ts-ignore', '@ts-expect-error', '@ts-nocheck', 'NOLINT', 'noqa', 'type: ignore', '#[allow(', '#[expect(', 'swiftlint:disable', 'rubocop:disable', 'rubocop:todo', 'nolint', 'istanbul ignore', 'c8 ignore']) {
     assert.ok(MARKERS.some((x) => m.includes(x)), `${m} is a marker`);
   }
+  // Round 4's review: the common "similar" forms, measured passing then.
+  for (const line of [
+    't.Skipf("slow")', 't.SkipNow()', 'self.skipTest("slow")', 'raise unittest.SkipTest("slow")', 'np = pytest.importorskip("numpy")', '#[ignore]', '@Disabled', '@Ignore',
+    "describe.skipIf(isWin)('x', () => {", "describe.skip.each(rows)('x', () => {", 'test.runIf(false)("x", () => {', "xcontext('x', () => {", 'pending();', 'throw XCTSkip("slow")',
+    '[Fact(Skip = "slow")]', '[Fact(Skip="slow")]', '#pragma warning disable CS0168', '@Suppress("UNCHECKED_CAST")', '// @phpstan-ignore-next-line', '/** @psalm-suppress InvalidReturnType */',
+    'x = eval(s)  # pylint:disable=eval-used', 'x = f()  # type:ignore', "  xit 'adds' do", "  skip 'later'", "\tskip 'later'", "xit 'adds' do",
+  ]) {
+    assert.deepEqual(kinds(weakens({ 'test/a.test.ts': 'one\n' }, { 'test/a.test.ts': `one\n${line}\n` })), [MARKER], line);
+  }
+  // RSpec's bare `xit`/`skip` need a non-identifier character before them.
+  for (const line of ['  exit 0', 'const skipped = 1;', '  # it skips nothing', "  this.skipper = 'x'"]) {
+    assert.deepEqual(weakens({ 'test/a.test.ts': 'one\n' }, { 'test/a.test.ts': `one\n${line}\n` }), [], line);
+  }
+  // A mark can't hide beside a line that isn't text: a NUL, a literal U+FFFD, or a byte that isn't UTF-8 (read as U+FFFD).
+  for (const odd of ['const z = "\0";', 'const z = "�";', 'const z = "caf�";']) {
+    assert.deepEqual(kinds(weakens({ 'app/a.js': 'one\n' }, { 'app/a.js': `one\n// eslint-disable-next-line\n${odd}\n` })), [UNREADABLE, MARKER], odd);
+    assert.deepEqual(kinds(weakens({ 'app/a.js': 'one\n' }, { 'app/a.js': `one\n${odd}\n` })), [UNREADABLE], `${odd} alone: a source that isn't text waits`);
+  }
+  // A test file under docs/ is a test file: its marks are read.
+  assert.deepEqual(kinds(weakens({ 'docs/examples/a.test.js': 'one\n' }, { 'docs/examples/a.test.js': "one\ntest.only('x', () => {});\n" })), [MARKER]);
   for (const m of MARKERS) {
     for (const path of ['src/a.ts', 'test/math.test.ts', '.github/workflows/ci.yml', 'tools/a.py', 'Cargo.toml']) {
       assert.deepEqual(kinds(weakens({ [path]: 'one\n' }, { [path]: `one\nrun(x); ${m} y\n` })), [MARKER], `${path}: ${m}`);
@@ -651,6 +714,12 @@ test("weakening: bounded and fail closed: too many changed characters, a diff th
   assert.deepEqual(one({ removed: 1, removedLines: ['a\uFFFDb'] }), [UNREADABLE], 'not UTF-8');
   // An image or other asset outside the files it checks has no marks to read.
   assert.deepEqual(kinds(weakening.weakeningReasons({ files: [{ path: 'web/logo.png', added: 1, removed: 0, addedLines: ['\0PNG skip: '] , removedLines: [] }], deleted: new Set(), before: () => null, after: () => null, scope: undefined })), []);
+  // Over the cap is known before any file is read: four files each a quarter of it and a bit, one reason.
+  const quarter = 'x'.repeat(Math.ceil(MAX / 4) + 1);
+  const four = Array.from({ length: 4 }, (_, k): ChangeFile => ({ path: `.github/workflows/w${k}.yml`, added: 0, removed: 1, addedLines: [], removedLines: [quarter] }));
+  const over = weakening.weakeningReasons({ files: four, deleted: new Set(), before: () => null, after: () => null, scope: undefined });
+  assert.deepEqual(kinds(over), [UNREADABLE]);
+  assert.match(over[0]!, /pass 4000000 characters/);
   const boom = () => {
     throw new Error('no blob');
   };
@@ -760,10 +829,10 @@ test('weakening backstop: every test that lists src/ or scripts/ files is a regi
  * The merge decision for a PR that turns `base` files into `head` ones (null: deleted), as merge-flow makes it, in a
  * real repo, with an approving evaluator and a review.yaml where only secrets wait.
  */
-function decideChange(base: Record<string, string>, head: Record<string, string | null>) {
+function decideChange(base: Record<string, string>, head: Record<string, string | Buffer | null>) {
   const dir = exampleProject().dir;
   const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  const commit = (files: Record<string, string | null>) => {
+  const commit = (files: Record<string, string | Buffer | null>) => {
     for (const [p, t] of Object.entries(files)) {
       if (t === null) g('rm', '-q', '--', p);
       else {
@@ -821,4 +890,19 @@ test('acceptance (#783): a PR that weakens a guard file waits for the owner, on 
 test('acceptance (#783): a PR that only adds tests does not wait', () => {
   const more = `${MATH_TEST}test('multiplies', () => {\n  assert.equal(add(2, 2), 4);\n});\n`;
   assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': more, 'test/sub.test.ts': MATH_TEST }), { auto: true, reasons: [], why: [] });
+});
+
+test('acceptance (#783): a PR that only renames a test file or a test folder (same content) does not wait; a rename with an edit does', () => {
+  const pure = { auto: true, reasons: [], why: [] };
+  assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), pure);
+  assert.deepEqual(decideChange({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/fixtures/a.json': '{ "a": 1 }\n' }, { 'test/unit/math.test.ts': null, 'test/unit/fixtures/a.json': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/fixtures/a.json': '{ "a": 1 }\n' }), pure);
+  const edited = decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.equal(sub(3, 1), 3)') });
+  assert.equal(edited.auto, false);
+  assert.ok(edited.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${DELETED}`)), edited.reasons.join(' | '));
+});
+
+test('acceptance (#783): a mark beside a byte that is not UTF-8 waits for the owner (it is never skipped as an asset)', () => {
+  const d = decideChange({ 'app/a.js': 'one\n' }, { 'app/a.js': Buffer.concat([Buffer.from('one\n// @ts-nocheck\nconst s = "caf'), Buffer.from([0xe9]), Buffer.from('";\n')]) });
+  assert.equal(d.auto, false);
+  assert.ok(d.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${MARKER}`)), d.reasons.join(' | '));
 });

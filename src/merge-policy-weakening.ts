@@ -19,7 +19,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, filesAt } from './coordinator/change-files.js';
+import { changedNames, exactMoves, filesAt } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -207,8 +207,8 @@ export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleak
  * category doesn't narrow this).
  */
 export const TEST_PATHS: readonly string[] = [
-  'test/**', 'tests/**', 'spec/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**', '**/test_*.py', '**/*_test.py', '**/*_test.go',
-  '**/src/test/**', '**/__snapshots__/**', '**/*.snap', '**/testdata/**',
+  'test/**', 'tests/**', 'spec/**', '**/test/**', '**/tests/**', '**/spec/**', 'Tests/**', '**/Tests/**', '**/*.test.*', '**/*.spec.*', '**/__tests__/**',
+  '**/test_*.py', '**/*_test.py', '**/*_test.go', '**/*.bats', '**/__snapshots__/**', '**/*.snap', '**/testdata/**',
 ];
 
 /** The most characters of changed lines, in the files the hold reads, it checks in one change; over it, the change waits. */
@@ -217,38 +217,53 @@ export const MAX_CHANGED_CHARS = 4_000_000;
 export const MAX_TABLE_FILE = 500_000;
 
 /**
- * A line with an assertion or a test on it, in any language the rule names: `assert*` (and `self.assert*`), `expect`,
- * `should`, `fail(`, a test context's `t.` (node, ava, Go's `t.Error`/`t.Fatal`), testify's `require.`, `pytest.`,
- * a `.toBe`-style or chai `.to.` matcher, and a test: `test(`, `it(`, `describe(`, `suite(` (and their `.skip`/`.only`
- * forms), `def test`, `class Test`, `func Test`, `@Test`. Literal alternatives with a one-character look-behind, no
- * quantifier: linear in the line. A word list, not a proof: an assertion through another name (an alias, a helper)
- * gets past it.
+ * A line with an assertion or a test on it, in each language whose test files are read as code (TEST_CODE):
+ * `assert*` (and `self.assert*`, minitest's `assert_`), `expect`, `should`, `fail(`, a test context's `t.` (node, ava,
+ * Go's `t.Error`/`t.Fatal`), testify's `require.`, `pytest.`, a `.toBe`-style or chai `.to.` matcher, xUnit's
+ * `Assert.`, `[Fact`, `[Theory`, `[Test`, XCTest's `XCTAssert`/`XCTFail`, minitest's `must_`/`wont_`/`refute`, and a
+ * test: `test(`, `it(`, `describe(`, `suite(` (and their `.skip`/`.only` forms), `def test`, `class Test`,
+ * `func Test`, `@Test`. Literal alternatives with a one-character look-behind, no quantifier: linear in the line. A word
+ * list, not a proof: an assertion through another name (an alias, a helper) gets past it.
  */
-export const CHECK_LINE = /(?<![\w$])(?:assert|expect|should|fail\(|require\.|pytest\.|@Test|def test|class Test|func Test|func Benchmark|func Fuzz|func Example)|(?<![\w$.])(?:t\.[A-Za-z]|test\(|test\.[a-z]|it\(|it\.[a-z]|describe\(|describe\.[a-z]|suite\(|suite\.[a-z])|\.to[A-Z.]/;
+export const CHECK_LINE = /(?<![\w$])(?:assert|expect|should|fail\(|require\.|pytest\.|@Test|def test|class Test|func Test|func Benchmark|func Fuzz|func Example|Assert\.|\[Fact|\[Theory|\[Test|XCTAssert|XCTFail|must_|wont_|refute)|(?<![\w$.])(?:t\.[A-Za-z]|test\(|test\.[a-z]|it\(|it\.[a-z]|describe\(|describe\.[a-z]|suite\(|suite\.[a-z])|\.to[A-Z.]/;
+/** In a bats file, also a test (`@test`), a command it checks (`run `) and a check (`[ `). */
+const BATS_LINE = /(?<![\w$])(?:@test|run )|\[ /;
 
 /**
  * Marks that make a test run less or turn a lint or type check off: an added line holding one waits, in any file but
  * docs. Plain substrings, so a word that only holds one (`profit(` holds `fit(`) waits too (owner, 2026-10-19: the
- * false holds are accepted). The one list of them.
+ * false holds are accepted). Each line is read with a space before it, so ` xit ` and ` skip ` (RSpec's forms with no
+ * parentheses) also match at the start of a line. The one list of them; the long tail of other runners' and linters'
+ * forms is a named gap.
  */
 export const MARKERS: readonly string[] = [
   // A test run alone, the rest not run.
-  '.only(', 'test.only', 'it.only', 'describe.only', 'fit(', 'fdescribe(',
+  '.only(', 'test.only', 'it.only', 'describe.only', 'fit(', 'fdescribe(', '.runIf(',
   // A test skipped or left to do.
-  '.skip(', 'skip:', 't.skip', 'test.skip', 'it.skip', 'xit(', 'xtest(', 'xdescribe(', '.todo(', 'todo:', '@pytest.mark.skip', '@pytest.mark.xfail', '@unittest.skip', 't.Skip(', 't.SkipNow(',
+  '.skip(', '.skip.', 'skip:', 't.skip', 'test.skip', 'it.skip', 'xit(', 'xtest(', 'xdescribe(', 'xcontext(', '.todo(', 'todo:', 'pending(', '.skipIf(',
+  ' xit ', '\txit ', ' skip ', '\tskip ',
+  '@pytest.mark.skip', '@pytest.mark.xfail', '@unittest.skip', 'skipTest(', 'SkipTest', 'pytest.importorskip',
+  't.Skip(', 't.Skipf(', 't.SkipNow(', '#[ignore', '@Disabled', '@Ignore', 'XCTSkip', 'Skip =', 'Skip=',
   // A lint or type check off for a line, a block or a file.
   'eslint-disable', 'eslint ', '@ts-ignore', '@ts-expect-error', '@ts-nocheck', 'biome-ignore', 'oxlint-disable', 'tslint:disable', 'deno-lint-ignore',
-  'NOLINT', 'nolint', 'noqa', 'type: ignore', 'pyright: ignore', 'mypy: ignore', 'pylint: disable', '#[allow(', '#![allow(', '#[expect(',
+  'NOLINT', 'nolint', 'noqa', 'type: ignore', 'type:ignore', 'pyright: ignore', 'mypy: ignore', 'pylint: disable', 'pylint:disable', '#[allow(', '#![allow(', '#[expect(',
   'swiftlint:disable', 'rubocop:disable', 'rubocop:todo', 'istanbul ignore', 'c8 ignore', 'v8 ignore', 'pragma: no cover',
-  'nosec', 'nosemgrep', 'NOSONAR', 'gitleaks:allow', '@SuppressWarnings', 'phpcs:ignore', 'shellcheck disable', 'stylelint-disable',
-  'yamllint disable', 'hadolint ignore',
+  'nosec', 'nosemgrep', 'NOSONAR', 'gitleaks:allow', '@SuppressWarnings', '@Suppress(', '#pragma warning disable', 'phpcs:ignore', '@phpstan-ignore', '@psalm-suppress',
+  'shellcheck disable', 'stylelint-disable', 'yamllint disable', 'hadolint ignore',
 ];
+/** MARKERS as one regex of escaped literal alternatives (no quantifier): the same substrings, in one pass per line. */
+const MARK = new RegExp(MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));
+const marked = (line: string) => MARK.test(` ${line}`);
 
-/** Docs: neither code nor a test; a doc that names a marker adds none. */
+/** Docs: neither code nor a test; a doc that names a marker adds none. A test file under docs/ is a test file. */
 const isDoc = (p: string) => /\.(?:md|txt)$/i.test(p) || p.startsWith('docs/');
+/** A file that isn't text by its kind (an image, an archive, a font, a binary): skipped, never read for marks. */
+const ASSET = /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|tiff?|pdf|zip|gz|tgz|bz2|xz|7z|jar|woff2?|ttf|otf|eot|mp3|mp4|webm|wav|ogg|mov|wasm|so|dylib|dll|exe|bin|sqlite|db)$/i;
 
-/** Test code, read by CHECK_LINE; any other test file (JSON, text, a snapshot) is an expected output, every line held. */
-const TEST_CODE = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|swift|php|cs|sh)$/;
+/** Test code, read by CHECK_LINE; any other test file (JSON, text, a shell script, a snapshot) is an expected output, every line held. */
+const TEST_CODE = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|swift|php|cs|bats)$/;
+/** A test file's name from its first `.test.`/`.spec.` on (`.test.ts`), or its extension: what a runner selects it by. */
+const runnerSuffix = (p: string) => /(\.(?:test|spec)\..*|\.[^./]*)$/.exec(p.slice(p.lastIndexOf('/') + 1))?.[1] ?? '';
 /** An expected output or fixture, whatever its extension. */
 const isFixture = (p: string) => /(?:^|\/)(?:fixtures|__snapshots__|testdata)\//.test(p) || p.endsWith('.snap') || !TEST_CODE.test(p);
 
@@ -271,6 +286,8 @@ export interface WeakeningInput {
   files: ChangeFile[];
   /** The paths the change deletes. */
   deleted: ReadonlySet<string>;
+  /** Deleted paths whose exact blob the change adds at a new path, old path to new (a pure rename). */
+  moved?: ReadonlyMap<string, string>;
   /** A file's text before the change (null: it wasn't there), for the files with a registered table only. */
   before: (path: string) => string | null;
   /** A file's text after the change (null: it isn't there), for the files with a registered table only. */
@@ -317,11 +334,15 @@ const entry = (l: string) => {
   return t.endsWith(',') ? t.slice(0, -1).trimEnd() : t;
 };
 
+const brackets = (l: string, set: string) => [...l].filter((c) => set.includes(c)).length;
+
 /**
- * A registered table's lines (as entries, blanks left out): from the line that declares it (`const NAME`,
- * `export const NAME`, `let NAME`, or a `"NAME":` key) to the first later line at its indent or less, that line
- * included when it closes (`]`, `}`, `)`); null when the text doesn't declare it or it never closes. Lines, not a
- * parse: a table closed at its declaration's indent, as the formatter writes it.
+ * A registered table's lines (as entries, blanks left out), or null when the text doesn't declare it. It is declared
+ * by a line that starts `const NAME`, `export const NAME`, `let NAME` or `"NAME":`. It is that line alone when the line
+ * closes every bracket it opens; else it runs to the first later line at the declaration's indent or less, which must
+ * close it (`]`, `}`, `)`). Lines, not a parse, and never read around a surprise: a name declared twice (a decoy in a
+ * comment), a line at the table's indent inside it (an entry or a comment at column 0), or no close throws, and the
+ * change waits.
  */
 export function tableLines(text: string, table: string): string[] | null {
   const lines = text.split('\n');
@@ -329,17 +350,20 @@ export function tableLines(text: string, table: string): string[] | null {
     const t = l.trimStart().replace(/^export /, '');
     return [`const ${table}`, `let ${table}`, `"${table}":`].some((h) => t.startsWith(h) && !/[\w$]/.test(t.charAt(h.length)));
   };
-  const start = lines.findIndex(declares);
-  if (start === -1) return null;
-  const at = indent(lines[start]!);
+  const starts = lines.flatMap((l, k) => (declares(l) ? [k] : []));
+  if (!starts.length) return null;
+  if (starts.length > 1) throw new Error(`${table} is declared ${starts.length} times`);
+  const start = starts[0]!;
+  const first = lines[start]!;
+  if (brackets(first, '[({') === brackets(first, '])}')) return [entry(first)];
+  const at = indent(first);
   for (let k = start + 1; k < lines.length; k++) {
     const l = lines[k]!;
     if (!l.trim() || indent(l) > at) continue;
-    const end = ']})'.includes(l.trim().charAt(0)) ? k : k - 1;
-    return lines.slice(start, end + 1).filter((x) => x.trim()).map(entry);
+    if (!']})'.includes(l.trim().charAt(0))) throw new Error(`${table}: line ${k + 1} is at its indent but doesn't close it`);
+    return lines.slice(start, k + 1).filter((x) => x.trim()).map(entry);
   }
-  // The end of the text: the table is the rest of it.
-  return lines.slice(start).filter((x) => x.trim()).map(entry);
+  throw new Error(`${table} never closes`);
 }
 
 /**
@@ -347,55 +371,63 @@ export function tableLines(text: string, table: string): string[] | null {
  * the line). Empty: it removes or loosens none of them. Pure: the caller reads the diff and the files (weakeningOf).
  */
 export function weakeningReasons(i: WeakeningInput): string[] {
-  // Each kind's places, kept raw and told apart by path and line; only the first three are written out.
-  const found = new Map<Kind, Map<string, [string, string | undefined]>>();
+  // Each kind's first three places and how many there are: nothing kept per line.
+  const found = new Map<Kind, { first: string[]; n: number }>();
   const hit = (kind: Kind, path: string, what?: string) => {
-    const at = found.get(kind) ?? found.set(kind, new Map()).get(kind)!;
-    at.set(`${path}\n${what ?? ''}`, [path, what]);
+    const at = found.get(kind) ?? found.set(kind, { first: [], n: 0 }).get(kind)!;
+    at.n++;
+    if (at.first.length < 3) {
+      const place = what === undefined ? shownPath(path) : `${shownPath(path)}: ${escapedPath(what.length > 100 ? `${what.slice(0, 100)}...` : what)}`;
+      if (!at.first.includes(place)) at.first.push(place);
+      else at.n--;
+    }
   };
-  const shown = ([path, what]: [string, string | undefined]) => (what === undefined ? shownPath(path) : `${shownPath(path)}: ${escapedPath(what.length > 100 ? `${what.slice(0, 100)}...` : what)}`);
   // Tests are tests in every repo: TEST_PATHS isn't the engine's own source.
   const isTest = matcher(TEST_PATHS, undefined);
   const isGuard = matcher([...GUARD_FILES, ...LINT_TESTS], i.scope);
   const isAllow = matcher(NEVER_GROW_FILES, i.scope);
   const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
-  const strict = (f: ChangeFile) => isTest(f.path) || isGuard(f.path) || isAllow(f.path) || tables.some((t) => t.path === f.path);
+  const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
+  // A pure rename of a test (#783's deliverable): the same blob at a new test path with the same runner suffix. Both
+  // paths count as nothing. Any other move is a delete and an add.
+  const renamed = new Set<string>();
+  for (const [from, to] of i.moved ?? []) {
+    if (isTest(from) && isTest(to) && runnerSuffix(from) === runnerSuffix(to)) renamed.add(from).add(to);
+  }
+  const text = (l: string) => !l.includes('\0') && !l.includes('�');
+  // Read: every file but a doc, a pure rename, and an asset that isn't text.
+  const asset = (f: ChangeFile) => ASSET.test(f.path) && !strict(f.path) && !(f.addedLines ?? []).concat(f.removedLines ?? []).every(text);
+  const read = i.files.filter((f) => !renamed.has(f.path) && (!isDoc(f.path) || strict(f.path)) && !asset(f));
 
+  // The bound, before any line is read: over it, one reason and nothing else.
   let chars = 0;
-  for (const f of i.files) {
-    if (isDoc(f.path) && !strict(f)) continue;
+  for (const f of read) for (const ls of [f.addedLines ?? [], f.removedLines ?? []]) for (const l of ls) chars += l.length + 1;
+  if (chars > MAX_CHANGED_CHARS) return [`${WEAKENING_REASON}${KINDS.unreadable} (the changed lines pass ${MAX_CHANGED_CHARS} characters)`];
+
+  for (const f of read) {
     const added = f.addedLines ?? [];
     const removed = f.removedLines ?? [];
-    const text = (l: string) => !l.includes('\0') && !l.includes('�');
-    const binary = !added.every(text) || !removed.every(text);
-    if (strict(f)) {
-      // The diff's lines against git's own counts: fewer means it was cut short or not read (a name git can't be handed).
-      if (added.length !== f.added || removed.length !== f.removed) {
-        hit('unreadable', f.path, `its diff has ${added.length} added and ${removed.length} removed lines, git counts ${f.added} and ${f.removed}`);
-        continue;
-      }
-      // A file that isn't text (a NUL, or bytes that aren't UTF-8) can't be read line by line.
-      if (binary) {
-        hit('unreadable', f.path, 'not text');
-        continue;
-      }
-    } else if (binary) continue; // an image or other asset: no marks to read
-    for (const l of added) chars += l.length + 1;
-    for (const l of removed) chars += l.length + 1;
-    if (chars > MAX_CHANGED_CHARS) {
-      hit('unreadable', f.path, `the changed lines pass ${MAX_CHANGED_CHARS} characters`);
-      break;
+    // Marks are read on every added line, whatever else the file holds.
+    for (const l of added) if (marked(l)) hit('marker', f.path, l.trim());
+    // A file that isn't text (a NUL, or bytes that aren't UTF-8) can't be read line by line: it waits.
+    if (!added.every(text) || !removed.every(text)) {
+      hit('unreadable', f.path, 'not text');
+      continue;
     }
-    if (!isDoc(f.path)) for (const l of added) if (MARKERS.some((m) => l.includes(m))) hit('marker', f.path, l.trim());
-    if (!strict(f)) continue;
-    const [test, fixture, guard] = [isTest(f.path), isFixture(f.path), isGuard(f.path)];
+    if (!strict(f.path)) continue;
+    // The diff's lines against git's own counts: fewer means it was cut short or not read (a name git can't be handed).
+    if (added.length !== f.added || removed.length !== f.removed) {
+      hit('unreadable', f.path, `its diff has ${added.length} added and ${removed.length} removed lines, git counts ${f.added} and ${f.removed}`);
+      continue;
+    }
+    const [test, fixture, guard, bats] = [isTest(f.path), isFixture(f.path), isGuard(f.path), f.path.endsWith('.bats')];
     if (test && i.deleted.has(f.path)) hit('test-file-deleted', f.path);
     for (const l of removed) {
       const t = l.trim();
       if (!t) continue;
       if (test && fixture) hit('test-lines', f.path, t);
-      else if (test && CHECK_LINE.test(l)) hit('test-assertion', f.path, t);
+      else if (test && (CHECK_LINE.test(l) || (bats && BATS_LINE.test(l)))) hit('test-assertion', f.path, t);
       if (guard) hit('guard-lines', f.path, t);
     }
     if (isAllow(f.path)) for (const l of added) if (l.trim()) hit('allow-file', f.path, l.trim());
@@ -412,8 +444,14 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       hit('unreadable', t.path, String((e as Error).message ?? e));
       continue;
     }
-    const was = b === null ? null : tableLines(b, t.table);
-    const now = a === null ? null : tableLines(a, t.table);
+    let was: string[] | null;
+    let now: string[] | null;
+    try {
+      [was, now] = [b === null ? null : tableLines(b, t.table), a === null ? null : tableLines(a, t.table)];
+    } catch (e) {
+      hit('unreadable', t.path, String((e as Error).message ?? e));
+      continue;
+    }
     // A table only after the change is new (a new lint and its list): nothing was loosened. The backstop test keeps
     // every registered table on the default branch.
     if (was === null) continue;
@@ -425,9 +463,8 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   const out: string[] = [];
   for (const kind of Object.keys(KINDS) as Kind[]) {
     const at = found.get(kind);
-    if (!at?.size) continue;
-    const first = [...at.values()].slice(0, 3).map(shown);
-    out.push(`${WEAKENING_REASON}${KINDS[kind]} (${first.join('; ')}${at.size > 3 ? `; and ${at.size - 3} more` : ''})`);
+    if (!at?.n) continue;
+    out.push(`${WEAKENING_REASON}${KINDS[kind]} (${at.first.join('; ')}${at.n > at.first.length ? `; and ${at.n - at.first.length} more` : ''})`);
   }
   return out;
 }
@@ -439,6 +476,7 @@ export function weakeningReasons(i: WeakeningInput): string[] {
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined): string[] {
   try {
     const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${base}..${head}`]));
+    const moved = exactMoves(cwd, base, head);
     const paths = [...new Set(CHECK_TABLES.map((t) => t.path))].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
     // A file over the cap isn't read at all: the change waits.
     const side = (rev: string) => {
@@ -448,7 +486,7 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
         return texts.get(p) ?? null;
       };
     };
-    return weakeningReasons({ files, deleted, before: side(base), after: side(head), scope });
+    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope });
   } catch (e) {
     return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
   }
