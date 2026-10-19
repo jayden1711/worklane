@@ -202,7 +202,8 @@ function outsideTestMachine(o: { what: string; unset: string; fix: string; rootl
   }
   if (!dir) return no(o.unset);
   // A `..` after a link goes up from where the link points, not where it is written; resolve() would hide that.
-  if (dir.split(/[\\/]/).includes('..')) return no(`${dir} has a '..' part: written with one, a link before it could lead out of the machine`);
+  // A RegExp, not dir.split(): no String or Array method is ever handed the slot dir (test/slot-path.test.ts, #806 A5).
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(dir)) return no(`${dir} has a '..' part: written with one, a link before it could lead out of the machine`);
   if (!inside(machine, dir)) return no(`${dir} is outside ${machine}`);
   const link = linkInside(machine, dir);
   if (link) return no(link);
