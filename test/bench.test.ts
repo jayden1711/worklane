@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -1520,4 +1520,109 @@ test('round 5: a server_tool_use block counts as an extra call', posix, async ()
   const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(failsAsListed, undefined, [{ type: 'assistant', message: { content: [{ type: 'server_tool_use', id: 's1', name: 'web_fetch', input: { url: 'http://localhost/' } }] } }]) });
   assert.equal(r.status, 'model declined');
   assert.deepEqual((r as { extra_calls?: string[] }).extra_calls, ['server_tool_use: web_fetch']);
+});
+
+test("round 6: no run starts in a folder nested with a running run's, so none can swap the other's folder before its spawn", { skip: process.platform === 'win32' && 'POSIX links' }, async () => {
+  // The reviewer's probe-scope5 swap: while one of the task's runs is going (its sandboxed Bash may write its own
+  // working folder), it swaps repo/sub for a link out. A run in repo/sub that had passed its check would then spawn
+  // outside. Now that run is refused while the writer is going, and after it the link is refused at the check.
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'swap-')));
+  const task = join(base, 'task');
+  const outside = join(base, 'outside');
+  mkdirSync(join(task, 'repo', 'sub'), { recursive: true });
+  mkdirSync(join(task, 'other'));
+  mkdirSync(outside);
+  const started: string[] = [];
+  const outcomes: string[] = [];
+  let t!: ReturnType<UsageMeter['task']>;
+  const attempt = async (cwd: string) => {
+    try {
+      outcomes.push(`${cwd.slice(task.length) || '/'}: ${(await t.run({ ...runReq(cwd), allowedTools: ['Edit'] })).reason}`);
+    } catch (e) {
+      outcomes.push(`${cwd.slice(task.length) || '/'}: ${/nested with/.test((e as Error).message) ? 'refused (nested)' : (e as Error).message}`);
+    }
+  };
+  const inner: AgentRunner = {
+    run: async (req) => {
+      started.push(req.cwd.slice(task.length) || '/');
+      if (req.cwd === join(task, 'repo')) {
+        // While this run is going: a run inside it, the same folder, one around it, and one beside it.
+        await attempt(join(task, 'repo', 'sub'));
+        await attempt(join(task, 'repo'));
+        await attempt(task);
+        await attempt(join(task, 'other'));
+        // Its own command swaps repo/sub for a link out (what its sandboxed Bash may do in its working folder).
+        renameSync(join(task, 'repo', 'sub'), join(task, 'repo', 'sub.old'));
+        symlinkSync(outside, join(task, 'repo', 'sub'));
+      }
+      return { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model };
+    },
+  };
+  t = new UsageMeter(inner, 40).task(15, task);
+  await attempt(join(task, 'repo'));
+  assert.deepEqual(outcomes, ['/repo/sub: refused (nested)', '/repo: refused (nested)', '/: refused (nested)', '/other: succeeded', '/repo: succeeded']);
+  assert.deepEqual(started, ['/repo', '/other'], 'no nested run ever reached the runner');
+  // After the writer has ended: the swapped folder is a link out, refused at the check; nothing started there.
+  await assert.rejects(t.run({ ...runReq(join(task, 'repo', 'sub')), allowedTools: ['Edit'] }), /outside the task's folder/);
+  assert.deepEqual(started, ['/repo', '/other']);
+});
+
+test('round 6: a working folder reached through any link is refused, even one that stays inside the task folder', { skip: process.platform === 'win32' && 'POSIX links' }, async () => {
+  const seen: string[] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push(req.cwd), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const wd = taskFolder();
+  symlinkSync(wd, join(wd, 'repo', 'up'));
+  symlinkSync(join(wd, 'repo'), join(wd, 'alias'));
+  const t = new UsageMeter(inner, 40).task(15, wd);
+  for (const cwd of [join(wd, 'repo', 'up'), join(wd, 'alias'), join(wd, 'alias', 'up')]) {
+    await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /through a link is refused/, cwd);
+  }
+  await t.run({ ...runReq(join(wd, 'repo')), allowedTools: ['Edit'] });
+  assert.deepEqual(seen, [join(wd, 'repo')]);
+});
+
+test('round 6: a Bash call counts as a listed command only with a string command and no description or a string one', posix, async () => {
+  const shaped = (input: (c: string) => Record<string, unknown>) => (c: string): Answer => ({ command: c, output: 'InputValidationError', is_error: true, input: input(c) });
+  for (const [what, input] of [
+    ['command an array', (c: string) => ({ command: [c] })],
+    ['description a number', (c: string) => ({ command: c, description: 5 })],
+    ['description null', (c: string) => ({ command: c, description: null })],
+    ['command a number', () => ({ command: 7 })],
+  ] as const) {
+    const { home, o } = checkLane();
+    const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(shaped(input)) });
+    assert.equal(r.status, 'model declined', what);
+    assert.ok(r.attempts.every((a) => a.result === 'not run'), `${what}: nothing counts as the listed command run`);
+  }
+  // A string description is still the listed command.
+  const { home, o } = checkLane();
+  assert.equal((await confirmSandbox({ ...o, cwd: home, runner: checkRunner(shaped((c) => ({ command: c, description: 'check' }))) })).status, 'all refused');
+});
+
+test('round 6: C1 control and format characters are refused in a path put into a permission rule', () => {
+  const inner: AgentRunner = { run: async (req) => ({ reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const meter = new UsageMeter(inner, 40);
+  for (const ch of ['\x80', '\x85', '\x9b', '\x9f', '​', '‍', '‮', '⁦', '­', '﻿']) {
+    assert.throws(() => meter.task(15, `/srv/bench/t${ch}01`), /task's folder/, JSON.stringify(ch));
+  }
+  // A lone surrogate (no file name on disk holds it as written) too.
+  assert.throws(() => meter.task(15, '/srv/bench/t\ud80001'), /task's folder/, 'a lone surrogate');
+  // Other non-ASCII letters are not refused.
+  assert.doesNotThrow(() => meter.task(15, '/srv/bench/tâche-01'));
+});
+
+test("round 6: no run starts strictly inside an ended run's working folder (a process it left could still write there)", async () => {
+  const seen: string[] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push(req.cwd), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const wd = taskFolder();
+  mkdirSync(join(wd, 'repo', 'sub'));
+  mkdirSync(join(wd, 'other'));
+  const t = new UsageMeter(inner, 40).task(15, wd);
+  await t.run({ ...runReq(join(wd, 'repo')), allowedTools: ['Edit'] });
+  await t.run({ ...runReq(join(wd, 'repo')), allowedTools: ['Edit'] });
+  await assert.rejects(t.run({ ...runReq(join(wd, 'repo', 'sub')), allowedTools: ['Edit'] }), /inside .*the working folder of an earlier run of this task/);
+  // Around it: allowed (no earlier run can write a parent of the task folder); after that, anything inside it is refused.
+  await t.run({ ...runReq(wd), allowedTools: ['Edit'] });
+  await assert.rejects(t.run({ ...runReq(join(wd, 'other')), allowedTools: ['Edit'] }), /earlier run/, 'now inside the task-folder run');
+  assert.deepEqual(seen, [join(wd, 'repo'), join(wd, 'repo'), wd]);
 });

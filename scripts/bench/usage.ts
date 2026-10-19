@@ -36,10 +36,12 @@ function toolNames(entry: string): string[] {
 
 /**
  * Characters a path put into a permission rule may not hold: glob syntax (`*`, `?`, `[`, `]`, `{`, `}`, `!`), the rule's
- * own parentheses, a backslash, the separators an allowed-tools list splits on (a comma, whitespace), and every control
- * character (NUL to US, and DEL).
+ * own parentheses, a backslash, the separators an allowed-tools list splits on (a comma, whitespace), every control
+ * character (C0, DEL and C1: \p{Cc}), and every format character (\p{Cf}: zero-width ones, bidi overrides such as
+ * U+202E, U+FEFF), which can make a rule read as something it isn't, and lone surrogates (\p{Cs}), which no file name
+ * on disk can hold as written.
  */
-export const RULE_UNSAFE = /[*?[\]{}!()\\,\s\x00-\x1f\x7f]/;
+export const RULE_UNSAFE = /[*?[\]{}!()\\,\s\p{Cc}\p{Cf}\p{Cs}]/u;
 
 /** Refuses (throws) unless `p` is a plain path a rule can hold: absolute, normalized, no trailing slash, not `/`. */
 function rulePath(p: string, what: string): string {
@@ -161,6 +163,10 @@ export class TaskMeter implements AgentRunner {
   capHit = false;
   /** The task's runs still going. */
   private inflight = new Set<Promise<unknown>>();
+  /** The working folder of each run still going (one entry per run). */
+  private cwds: string[] = [];
+  /** The working folder of every run this task has started, ended ones included. */
+  private earlier = new Set<string>();
   constructor(
     private m: UsageMeter,
     readonly perTaskUsd: number,
@@ -172,8 +178,16 @@ export class TaskMeter implements AgentRunner {
   }
   /**
    * Throws (refuses the run, unstarted) when its working folder is missing, outside the task's folder by path or where
-   * it really is (realpath: a link can't lead out), or its allowed tools grant a file-writing tool outside that
-   * working folder.
+   * it really is (realpath: a link can't lead out), reached through a link at all (its realpath must be itself), or
+   * nested with a run of this task still going (the same folder, one inside the other, either way), strictly inside an
+   * earlier run's working folder, or its allowed tools grant a file-writing tool outside that working folder.
+   *
+   * Why the nesting rule (round 6): the folder is checked here, and the engine's runner spawns claude in it later,
+   * after awaits (the login lock, MCP registration). In between, whatever can write a parent of one of its components
+   * could swap that component for a link out. In the bench that is another of the task's runs, whose sandboxed Bash may
+   * write its own working folder; with no two runs of a task in nested folders at once, none can. A process an ended
+   * run left behind could do the same, so no run starts strictly inside an earlier one's folder either. The check and the
+   * registration below run with no await between them, so two runs started together can't both pass it.
    */
   async run(req: RunRequest): Promise<RunResult> {
     // The cwd as given, never a default: a missing one is refused by rulePath.
@@ -190,6 +204,14 @@ export class TaskMeter implements AgentRunner {
     // The driver builds the task folder on the bench root's real path (paths.ts benchRoot), so it is never a link.
     if (realWork !== this.workDir) throw new Error(`not started: the task's folder ${this.workDir} is really ${realWork}: a task folder through a link is refused`);
     if (!within(realCwd, realWork)) throw new Error(`not started: the run's working folder ${req.cwd} is really ${realCwd}, outside the task's folder ${this.workDir} (really ${realWork})`);
+    // No link anywhere in it, even one that stays inside: the Edit rule then names the real folder (round 6).
+    if (realCwd !== req.cwd) throw new Error(`not started: the run's working folder ${req.cwd} is really ${realCwd}: a working folder through a link is refused`);
+    const nested = this.cwds.find((c) => within(req.cwd, c) || within(c, req.cwd));
+    if (nested !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is nested with ${nested}, the working folder of a run of this task still going (its commands could swap a folder of this one)`);
+    // An ended run may have left a process behind (a background command, say) that can still write its working folder:
+    // no later run starts strictly inside it. The same folder again is fine: swapping it needs its parent.
+    const under = [...this.earlier].find((c) => c !== req.cwd && within(req.cwd, c));
+    if (under !== undefined) throw new Error(`not started: the run's working folder ${req.cwd} is inside ${under}, the working folder of an earlier run of this task (a process it left could swap a folder of this one)`);
     req = { ...req, allowedTools };
     const refused = (reason: TerminalReason, detail: string): RunResult => ({ reason, detail, costUsd: 0, turns: 0, model: req.model });
     if (this.m.limited) return refused('rate_limited', `not started: the bench stopped at a usage limit (${this.m.limited.detail})`);
@@ -200,6 +222,10 @@ export class TaskMeter implements AgentRunner {
       return refused('budget_exhausted', `not started: the task's $${this.perTaskUsd} cap or the run's ceiling is spent`);
     }
     const signal = this.stop ? AbortSignal.any([this.stop, ...(req.signal ? [req.signal] : [])]) : req.signal;
+    // Registered before the first await: from here until the run has ended, no nested run of this task starts.
+    const cwd = req.cwd;
+    this.cwds.push(cwd);
+    this.earlier.add(cwd);
     // The whole run, its record included: what settled() waits for.
     const whole = (async () => {
       const r = await this.m.meter({ ...req, maxBudgetUsd: cap, ...(signal ? { signal } : {}) });
@@ -213,6 +239,7 @@ export class TaskMeter implements AgentRunner {
       return await whole;
     } finally {
       this.inflight.delete(whole);
+      this.cwds.splice(this.cwds.indexOf(cwd), 1);
     }
   }
   /** Waits (at most `ms`) for the task's runs in flight to end and be recorded; whether they all did. */

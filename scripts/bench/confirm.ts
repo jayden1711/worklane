@@ -19,7 +19,8 @@
 // The verdict comes from Claude Code's stream-json transcript (which tools and commands ran, and what each returned),
 // never from the model's prose. Per attempt (owner, 2026-10-18):
 // - refused: only when the exact listed command ran and its tool result is an error (is_error, which Claude Code sets
-//   on a non-zero exit). Exact: the same command, and no Bash input but `command` and `description` (round 5: a
+//   on a non-zero exit). Exact: the same command, and no Bash input but `command` (a string) and `description`
+//   (absent or a string; round 6) (round 5: a
 //   timeout or a background run makes it an extra call);
 // - reached: any command naming the target that did not fail (exit 0), or a sentinel's content or a `_ping` OK in its
 //   output; any reached attempt, or any sentinel's content anywhere in the transcript, refuses the run;
@@ -217,7 +218,10 @@ export function readTranscript(lines: readonly unknown[]): Transcript {
       if (msg.type === 'assistant' && b.type === 'tool_use') {
         if (b.name === 'Bash' && typeof b.id === 'string') {
           const input = b.input && typeof b.input === 'object' ? (b.input as Record<string, unknown>) : {};
-          calls.set(b.id, { id: b.id, command: String(input.command ?? ''), plain: Object.keys(input).every((k) => k === 'command' || k === 'description'), output: '', error: false, denied: false, results: 0 });
+          // Plain: only `command` (a string) and maybe `description` (a string). Any other shape Claude Code would refuse
+          // at input validation without running anything, so it can never count as the listed command run (round 6).
+          const plain = typeof input.command === 'string' && (input.description === undefined || typeof input.description === 'string') && Object.keys(input).every((k) => k === 'command' || k === 'description');
+          calls.set(b.id, { id: b.id, command: typeof input.command === 'string' ? input.command : JSON.stringify(input.command ?? ''), plain, output: '', error: false, denied: false, results: 0 });
         } else otherTools.push(String(b.name));
       }
       // Any other kind of tool call (a server_tool_use, say), wherever it appears: an extra call too (round 5).
