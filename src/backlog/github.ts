@@ -266,16 +266,10 @@ export class GitHubBacklog implements Backlog {
   }
 
   /**
-   * The combined status's contexts on `sha`: the first page as main read it (GitHub's default page size), then, #727,
-   * every later page while a page is full, whatever total_count says, marked `extra` (only a pinned name is judged with
-   * them). Past STATUS_PAGES_MAX pages it throws: a status unread could be a pinned check's failure, so the commit isn't
-   * judged (it waits).
-   * Commit statuses need their own permission: a first page GitHub refuses as a token that may not read them (a 403
-   * that isn't a rate limit) or has none (404) means no statuses, as on main. Any other refusal, a rate-limited 403 or
-   * a refusal of a later page, throws (#727): a status read refused part-way never reads as "no statuses".
+   * The combined status's contexts on `sha` as main read them, with no required check pinned: the first page (GitHub's
+   * default page size); commit statuses need their own permission, so a 403 or 404 means none.
    */
   private async firstStatusPage(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
-    // Main's read, unchanged: commit statuses need their own permission; without it (403) or with none (404), none.
     try {
       return (await this.req<{ statuses: { context: string; state: string; target_url?: string | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/status`)).statuses;
     } catch (e) {
@@ -284,15 +278,16 @@ export class GitHubBacklog implements Backlog {
     }
   }
 
+  /**
+   * #727, a required check pinned: the combined status's contexts on `sha`, the first page as main read it, then every
+   * later page while a page is full, whatever total_count says, marked `extra` (only a pinned name is judged with them).
+   * Past STATUS_PAGES_MAX pages it throws: a status unread could be a pinned check's failure, so the commit isn't
+   * judged (it waits). Any refusal throws too, a first page's 403 or 404 included (the owner's decision, round 8): a
+   * pinned check is never judged without its name's statuses.
+   */
   private async statusPages(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
     type Page = { total_count?: number; statuses: { context: string; state: string; target_url?: string | null }[] };
-    let first: Page;
-    try {
-      first = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status`);
-    } catch (e) {
-      if (e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited'))) return [];
-      throw e;
-    }
+    const first = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status`);
     const all: { context: string; state: string; target_url?: string | null; extra?: true }[] = [...first.statuses];
     let page = first;
     for (let n = 2; page.statuses.length >= STATUS_PAGE_DEFAULT; n++) {

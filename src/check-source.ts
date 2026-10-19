@@ -14,13 +14,14 @@
 // workflow run's file; one whose workflow run wasn't read is a group of its own), and in each file's group both its
 // latest run (by workflow run, then check run) and its newest check run must pass, so a later run of that file
 // supersedes its earlier failed or cancelled runs, but one file never supersedes another, and a re-run that failed
-// after a newer run passed still blocks. A pin to an App that isn't Actions can't be split by file, so every one of that
-// App's check runs of the name on the head must pass, as GitHub lists them: the latest per check suite, so any later
-// same-name run that App puts in the same suite replaces the earlier one (a re-run, or a second pipeline of that App
-// on the same commit: the listing can't tell them apart), while a failure in another suite blocks. Every check of its name from any OTHER source must pass too
-// (another App, another workflow, a run for another head, a commit status). The one way this is looser than judging by
-// name: a pinned workflow file's later run on the head supersedes its own earlier failed or cancelled runs (the owner's
-// decision). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
+// after a newer run passed still blocks. A pin to an App that isn't Actions can't be split by file: that App's latest
+// check run of the name on the head (the highest id) decides, in whatever check suite, so a later pipeline or re-run of
+// that App supersedes its earlier ones (the owner's decision, round 8; round 6 had a failure in another suite block).
+// Every check of its name from any OTHER source must pass too (another App, another workflow, a run for another head,
+// a commit status). The ways this is looser than judging by name, both the owner's decisions: a pinned workflow
+// file's later run on the head supersedes its own earlier failed or cancelled runs, and a pinned non-Actions App's
+// later run supersedes its earlier ones. With a required check pinned, a commit-status read GitHub refuses at all
+// (a 403 or 404 on page 1 too) waits; with none pinned, statuses are read as on main (the owner's decision, round 8). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
 // facts (GitHub's latest check run per check suite and name, the workflow run behind each Actions suite, and the
 // latest status per context); the watch takes them as they stood at merge time.
 // Gating PRs nobody here wrote is governance mode's job (#704): it refuses to turn on while any required check is
@@ -141,8 +142,8 @@ function worst<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(bad:
  * (one whose workflow run can't be read is a group of its own); every run of an App that isn't Actions in one group.
  * - A file's group: both the latest run (latestOwn) and the newest check run (the highest id: a re-run of an older
  *   workflow run is newer) must pass. One file never supersedes another, and a later re-run that failed blocks.
- * - The App group: every check run listed must pass (it can't be split by file). GitHub lists the latest per check
- *   suite, so a later same-name run the App puts in the same suite (a re-run or a second pipeline) replaces the earlier.
+ * - The App group: its latest check run of the name on the head (the highest id) decides, in whatever check suite: a
+ *   later pipeline or re-run of that App supersedes its earlier ones (the owner's decision, round 8).
  * Returns the run that decides: a run that isn't a pass (worst), else the latest of all; undefined when there is none.
  */
 export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion'>>(own: readonly C[]): C | undefined {
@@ -154,7 +155,8 @@ export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'stat
   const ok = (c: C) => c.status === 'completed' && c.conclusion === 'success';
   const bad: C[] = [];
   for (const [key, g] of groups) {
-    const decide = key === 'app' ? g : [latestOwn(g)!, [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!];
+    const newest = [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!;
+    const decide = key === 'app' ? [newest] : [latestOwn(g)!, newest];
     bad.push(...decide.filter((c) => !ok(c)));
   }
   return worst(bad) ?? latestOwn(own);
