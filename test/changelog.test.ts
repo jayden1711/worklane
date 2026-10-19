@@ -323,13 +323,31 @@ test("a dated section's hand-written line after its generated lists is never dro
   assert.throws(() => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), /would drop[\s\S]*A note written after the lists/);
 });
 
+test("the boundary in a dated section's lists: list-shaped lines there are the tool's and are replaced; anything else is refused", () => {
+  // Pinned as it stands (#829 round 2). In a dated section the tool wrote lists for, every line after the notes
+  // that has a generated line's shape is taken as the tool's: a generated heading, "- <text> (#N)" with or without
+  // ": <files>", "- none in this release", "- no merged PRs since the previous release". A rerun replaces them, as
+  // main always did, even one written by hand. Any other line there is refused.
+  const dated = (after: string) => `# Changelog\n\n## v9.9.9 (2026-12-01)\n\n### Highlights\n\n- a highlight\n\n### Features\n\n- A PR (#5)\n\n### Guardrail changes\n\n- none in this release\n\n${after}\n`;
+  const regen = (text: string) => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [{ number: 6, title: 'Another PR' }]));
+  for (const replaced of ['- Upgrade first (#77): run doctor', '- Extra note, see the PR (#77)', '- none in this release', '### Fixes\n\n- Something (#78)', '### Security and guardrails']) {
+    const out = regen(dated(replaced));
+    assert.ok(!out.includes(replaced.split('\n').at(-1)!) || replaced === '- none in this release', `replaced, not kept: ${replaced}`);
+    assert.ok(c.sectionFor(out, '9.9.9')!.startsWith('## v9.9.9 (2026-12-31)\n\n### Highlights\n\n- a highlight\n\n### Features\n\n- Another PR (#6)'), 'the notes stay; the lists are the new ones');
+  }
+  for (const refused of ['A plain note.', '- a note with no PR number', '### Fixes\n\nA plain line under it.', '### Upgrade notes']) {
+    assert.throws(() => regen(dated(refused)), /would drop/, `refused: ${refused}`);
+  }
+});
+
 test('two dated sections for the version are refused, never merged into one', () => {
   const text = '# Changelog\n\n## v9.9.9 (2026-12-02)\n\n### Highlights\n\n- first\n\n### Guardrail changes\n\n- none in this release\n\n## v9.9.9 (2026-12-01)\n\n### Highlights\n\n- second\n\n### Guardrail changes\n\n- none in this release\n';
   assert.throws(() => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), /more than one section for v9\.9\.9/);
 });
 
 test('a heading that names another version, even partly, is never taken as this release: it stays as it was', () => {
-  for (const h of ['## v0.6 (unreleased)', '## Unreleased (0.6.x)', '## Unreleased (9.9 or later)', '## v9.9.9 or v9.9.10 (unreleased)']) {
+  // Any numeric character counts, not only ASCII digits: full-width, Arabic-Indic, superscript (#829 round 2).
+  for (const h of ['## v0.6 (unreleased)', '## Unreleased (0.6.x)', '## Unreleased (9.9 or later)', '## v9.9.9 or v9.9.10 (unreleased)', '## v０.６ (unreleased)', '## Unreleased (v٠.٦)', '## Unreleased (v²)', '## Unreleased (Ⅵ)']) {
     const text = `# Changelog\n\n${h}\n\n### Guardrail changes\n\n- for later\n`;
     const out = c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', []));
     assert.equal(c.notesOf(c.sectionFor(out, '9.9.9')!), '', `${h}: not this release's notes`);
