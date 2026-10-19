@@ -16,8 +16,8 @@ import { blockedHost, hostOf, RESEARCH_DENIED, RESEARCH_MANIFEST, RESEARCH_TOOLS
 import { defaultRolePrompt } from './roles.js';
 
 // WHY (#785): the hook's research rules and the run's tool lists live in src/guard/research.ts (locked with the
-// guard), so the guard doesn't load this module and its bundle and roles imports. Re-exported for this module's callers.
-export { blockedHost, hostOf, RESEARCH_DENIED, RESEARCH_MANIFEST, RESEARCH_ROOT_ENV, RESEARCH_TOOLS, researchCallRefusal, researchModeRefusal } from './guard/research.js';
+// guard), so the guard doesn't load this module and its bundle and roles imports. INVARIANT: this module doesn't
+// re-export them: whoever needs them imports the locked module, so a change here can't swap them under a caller.
 
 export const RESEARCH_LABELS = ['type:research', 'type:investigation'] as const;
 

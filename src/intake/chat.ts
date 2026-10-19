@@ -15,10 +15,9 @@ import { REPLY_CHARS } from './discord.js';
 import { splitPosts } from './explain.js';
 import { URL } from './replier.js';
 
-// WHY (#785): the hook's chat rule and the lane's tool and key-file lists live in src/guard/chat.ts (locked with the
-// guard), so the guard doesn't load this module and the Discord, reply and role modules it imports. Re-exported for
-// this module's callers.
-export { CHAT_DENIED, CHAT_KEY_GLOBS, CHAT_ROLE, CHAT_ROOT_ENV, CHAT_TOOLS, chatModeRefusal, secretLike, WALK_LIMIT } from '../guard/chat.js';
+// WHY (#785): the hook's chat rule and the lane's role, tool and key-file lists live in src/guard/chat.ts (locked with
+// the guard), so the guard doesn't load this module and the Discord, reply and role modules it imports. INVARIANT: not
+// re-exported here (see src/research.ts).
 
 /** The lane chat runs in (src/instance.ts researchLanes): the agent user, read-only, its root the checkout. */
 export const CHAT_LANE = 'chat-repo';

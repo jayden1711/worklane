@@ -17,7 +17,8 @@ import { firstTaskBody } from '../first-task.js';
 import { personOf } from '../intake/people.js';
 import type { IncomingReport, IntakeConfig } from '../intake/report.js';
 import { markSeen, reportId } from '../intake/store.js';
-import { INTAKE_DENIED } from '../intake/run.js';
+// WHY (#785): from the guard's own locked module, not through src/intake/run.ts, which isn't locked.
+import { INTAKE_DENIED } from '../guard/intake.js';
 import { localDay } from '../local-day.js';
 import { latestSlot, parseCron } from '../automations/cron.js';
 import { capRefusal, chainRefusal, originOf, runBudget, slotFired, triggerText, type Origin } from '../automations/engine.js';

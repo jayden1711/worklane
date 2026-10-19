@@ -13,9 +13,8 @@ import type { Candidate } from './dedupe.js';
 import { INTAKE_SCHEMA } from './triage.js';
 import { INTAKE_DENIED, INTAKE_ROLE, INTAKE_TOOLS } from '../guard/intake.js';
 
-// WHY (#785): the run's tool lists live in src/guard/intake.ts (locked with the guard), so the guard doesn't load this
-// module and its imports. Re-exported for this module's callers.
-export { INTAKE_DENIED, INTAKE_ROLE, INTAKE_TOOLS } from '../guard/intake.js';
+// WHY (#785): the run's role and tool lists live in src/guard/intake.ts (locked with the guard), so the guard doesn't
+// load this module and its imports. INVARIANT: not re-exported here (see src/research.ts).
 
 /** The intake agent's instructions: kept with the other roles (src/roles.ts), where the instruction evals reach them. */
 export const INTAKE_PROMPT = defaultRolePrompt('intake');
