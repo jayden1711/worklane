@@ -33,7 +33,8 @@ test('safe default: an instance without a separate agent user is refused unless 
   writeFileSync(join(allowed.home, 'credentials.yaml'), `version: 1\ngithub: { kind: gh-config-dir, path: ${join(allowed.home, 'gh')} }\nclaude: { config_dir: ${join(allowed.home, 'claude')} }\n`);
   assert.equal(loadInstance('shop', allowed.dir).runAs, null);
   const separate = instance('run_as:\n  agent_user: shop-agent\n  agent_home: /home/shop-agent\n');
-  assert.deepEqual(loadInstance('shop', separate.dir).runAs, { user: 'shop-agent', home: '/home/shop-agent', path: defaultAgentPath() });
+  // Its project commands never see the instance home or the credentials it names (#713).
+  assert.deepEqual(loadInstance('shop', separate.dir).runAs, { user: 'shop-agent', home: '/home/shop-agent', path: defaultAgentPath(), hide: [separate.home, join(separate.home, 'gh')] });
 });
 
 test('an agent run as its own user gets its home and login, git trusts its worktrees, and no tokens', () => {
@@ -167,7 +168,7 @@ test('acceptance: an agent running `python -c "open(<token path>)"` fails; the c
     assert.match(r.stderr, /Permission denied|PermissionError/, r.stderr);
   }
   // A project command (a check or test suite, which runs agent-written code) is just as unable to read it.
-  const pc = projectCommand(`cat ${JSON.stringify(secret)}`, { user: agentUser!, home: `/home/${agentUser}` });
+  const pc = projectCommand(`cat ${JSON.stringify(secret)}`, { user: agentUser!, home: `/home/${agentUser}`, hide: [] });
   const pr = spawnSync(pc.file, pc.args, { encoding: 'utf8', env: pc.env, timeout: 30_000 });
   assert.notEqual(pr.status, 0, 'a project command read the secret');
   // And the agent user really runs: it can read a world-readable file.
@@ -247,10 +248,10 @@ test('the coordinator\'s git runs no hooks and no fsmonitor command, whatever a 
 
 test('project commands (checks, gates, setup, full runs) run as the agent user with a clean environment', () => {
   if (process.platform === 'win32') {
-    assert.throws(() => projectCommand('npm test', { user: 'shop-agent', home: '/home/shop-agent' }), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
+    assert.throws(() => projectCommand('npm test', { user: 'shop-agent', home: '/home/shop-agent', hide: [] }), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
     return;
   }
-  const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent' });
+  const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent', hide: [] });
   assert.equal(file, 'sudo');
   assert.deepEqual(args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
   assert.ok(args.includes('HOME=/home/shop-agent') && args.includes('USER=shop-agent'));
@@ -261,10 +262,14 @@ test('project commands (checks, gates, setup, full runs) run as the agent user w
   assert.deepEqual(Object.keys(env), ['PATH'], 'sudo itself gets only PATH');
 });
 
-// A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password).
+// A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password), and
+// that can start a project command's sandbox (#713: bubblewrap, which machine.sh installs; ci-slow's real-users job
+// runs a check that runs git there). CI's test shards and ci-slow's real-users job install it and set
+// PROJECT_SANDBOX_REQUIRED=1, so there this test can't skip for it.
 const canSudoNobody = process.platform !== 'win32' && spawnSync('sudo', ['-n', '-u', 'nobody', 'true']).status === 0;
+const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync('sudo', ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
 
-test('regression: a check that runs git, run as the agent user in the coordinator\'s checkout, gets git\'s answer (not "dubious ownership")', { skip: !canSudoNobody && 'needs passwordless sudo to another user' }, () => {
+test('regression: a check that runs git, run as the agent user in the coordinator\'s checkout, gets git\'s answer (not "dubious ownership")', { skip: !nobodySandbox && 'needs passwordless sudo to another user that can start bubblewrap' }, () => {
   // The checkout belongs to the coordinator user; checks run as the agent user. Git refuses a repository owned by
   // someone else unless it is trusted, so `git diff --exit-code` failed with 128 on a clean tree and failed the check.
   const repo = mkdtempSync('/tmp/wl-check-git-');
@@ -276,7 +281,7 @@ test('regression: a check that runs git, run as the agent user in the coordinato
   g('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'a');
   spawnSync('chmod', ['-R', 'a+rX', repo]);
   try {
-    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/' });
+    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/', hide: [] });
     const r = spawnSync(file, args, { cwd: repo, env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
   } finally {

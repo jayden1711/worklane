@@ -116,7 +116,7 @@ Settings read once at start to build something that lives as long as the process
 | agents.yaml, guardrails.yaml, review.yaml, deploy.yaml, app.yaml, benchmarks.yaml, `roles/*.md` | `backlog` (the backlog client), `agent_runtime.kind` (the agent runner) |
 | tests.yaml except the two on the right | `tests.worktree.root` (where worktrees and the pool live), `tests.test_run` (the sandbox set up and checked at start) |
 
-Instance-level files (`instance.yaml`, `credentials.yaml`, `intake.yaml`, ports and OS users) are not in the repo and are unaffected; `policy.yaml` is read on its own as before. Still read from the checkout: a review.yaml `money_path_source` file (a project file, not `.worklane/`), and the dashboard process's own copy of the config, loaded at its start.
+Instance-level files (`instance.yaml`, `credentials.yaml`, `intake.yaml`, ports and OS users) are not in the repo and are unaffected; `policy.yaml` is read on its own as before. A review.yaml `money_path_source` file (a project file, not `.worklane/`) is read at `<remote>/<default_branch>` too, with git, by every caller (#715); the list file itself counts as a money path. With main's config invalid or missing at start, the checkout's committed config runs, never its working tree (that only when nothing valid is committed, as on a first run). Still read from the checkout: the dashboard process's own copy of the config, loaded at its start, except who may approve (review.yaml `approvals`) and the money paths, which it reads at `origin/<default_branch>`.
 
 Precedence: engine defaults < project `.worklane/` < machine-local `~/.config/worklane/<repo>.yaml`. The local file holds things that differ per human: their GitHub token reference, their machine's slot cap, and their dashboard port. Secrets are never in YAML; config holds only env var names or keychain references.
 
@@ -316,7 +316,8 @@ roles:
 
 Example (`review.yaml`):
 ```yaml
-money_path_source: { file: <path to the project's own list> }   # single source of truth; never duplicated in config
+money_path_source: { file: <path to the project's own list> }   # single source of truth; never duplicated in config; read from main; the list itself is a money path
+# approvals: { land: writers }   # absent: only owners approve a high-risk merge; an instance needs policy.yaml writers_approve_land too
 levels:
   L0_auto:      { when: [docs-only, tests-only, comments, copy], max_lines: 200 }
   L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }
@@ -673,7 +674,7 @@ What exists, and where it deviates from the plan above:
 - **Claims:** compare-and-swap lease refs (`refs/worklane/claims/issue-<n>`). Verified against GitHub. Lease commits are parentless.
 - **Safe outputs, as built:** agents emit structured JSON (`--json-schema`) and commit on their own branch. The coordinator validates both and performs every outward action. Agents have no GitHub credentials (verified: `git credential fill` returns nothing in the agent environment). The MCP `propose` tool from §7 isn't needed for step 2's actions.
 - **Reproduction tests:** one candidate per issue (K=1). A test that passes on the unfixed code, or an issue the evaluator says can't be reproduced, is recorded as `repro.unavailable`, and the change goes to at least L2 instead of blocking.
-- **Decisions:** answered by `worklane decide <id> <option>`, or by a writer commenting `/worklane <option>` on the issue. The Decisions page arrives in step 3.
+- **Decisions:** answered by `worklane decide <id> <option>`, or by a writer commenting `/worklane <option>` on the issue. The Decisions page arrives in step 3. Since #715 one rule (`src/dashboard-auth.ts` `mayAnswerKind`) decides who may answer each kind on every surface: a comment counts only from a listed writer whose repo role may answer that kind (a held plan, a high-risk merge and an automation's run: owners; a high-risk merge also writers where review.yaml on main says `approvals: { land: writers }` and an instance's `policy.yaml` `writers_approve_land` allows it). `decide` runs only as root or the coordinator user (on a local site, the user whose event log it is) and records the instance's owner, audited via `cli`. A batched PR's approving review counts only under the same rule, and never while auto-merge is stopped.
 - **Landing:** direct mode is complete. In PR mode the coordinator records `rejected` with a pointer to step 3; opening and merging PRs ships with the dashboard.
 - **Gate at landing:** the project's `changed` test command must exit 0. The "no new failures against the recorded baseline" comparison needs a per-runner failure parser, and arrives with tiered tests in step 4. Until then, a red main blocks landing, so getting main green is the first backlog item.
 - **Runner:** `claude -p` with `--setting-sources project`, `--strict-mcp-config`, `--permission-mode dontAsk`, explicit allowed tools, and per-run turn and USD caps. `claude auth status` is checked before each run. The Agent SDK path (`agent_runtime.kind: sdk`) uses the same CLI with an API key. An in-process SDK runner is deferred.
