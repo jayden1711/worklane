@@ -5,11 +5,10 @@
 // left, once a new process gets the same pid. writeSlotFile writes a new temp file of its own (a random name, created
 // exclusively) and renames or hard-links it into place.
 //
-// Two checks:
+// Three checks:
 // - A lint over src/. Every module that names a slot-dir path, or hands one to another module, is reviewed in
-//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes. The lint doesn't
-//   judge the helper's own fs calls: test/slot-file.test.ts records every fs call writeSlotFile makes and asserts the
-//   exact sequence, which covers only the paths that test drives. A writer, and a module that only reads there or hands
+//   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes; the lint doesn't
+//   judge the helper's own fs calls (the last check does). A writer, and a module that only reads there or hands
 //   the path on, writes no file but through it, whatever the path: no fs write under the names this lint resolves
 //   (an fs import, renamed or destructured; `fs['...']`; `const w = fs.writeFileSync`), and no direct call of a
 //   function or method that writes a file named from one of its parameters. A module that also writes files
@@ -22,15 +21,27 @@
 //   local got by a later assignment (`let d; d = o.slotsDir`); a method called on a value not traced to its module
 //   (a parameter, `this.store`, a call's result) with a path not built from a slot-dir name, and any such call by
 //   element access (`o.st['save'](…)`); a slot-dir path kept in a property under another name (`this.dir = …`); a
-//   writer called through `.call`/`.apply`; fs bound to a local from `createRequire`, `getBuiltinModule` or
-//   `import()` and then destructured or read into a local.
+//   writer called through `.call`/`.apply`/`Reflect.apply`; fs bound to a local from `createRequire`,
+//   `getBuiltinModule` or `import()` and then destructured or read into a local; a descriptor write (`writeSync`,
+//   `ftruncateSync`, `fchmodSync`) on a descriptor the module didn't open (only the open is a write call here).
 // - Each writer, run against a temp slot dir in which every file is 0444 (what a removal leaves): it still succeeds,
 //   and the file's content is replaced. A 0444 temp file at the pid-only name a writer used before doesn't stop it.
+// - The helper, by what it does: every fs call writeSlotFile makes, in each mode and on each failure, recorded
+//   through wrappers on node:fs and node:fs/promises, with the exact sequence asserted (one exclusive create, every
+//   descriptor op on the descriptor it returned, nothing by name before the rename or link, nothing after the close
+//   but the rename, link or cleanup), and the check itself failed against wrong helpers. It sees each call of a
+//   function of those modules, however the helper got it (the helper is loaded with the wrappers in place). Not
+//   caught: fs reached past those modules (process.binding), and anything on a path the cases don't drive (another
+//   export of the helper, a branch none of them takes). The helper is in the hook import tree, so a change to it
+//   waits for the owner.
 import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { join, relative, resolve, sep } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
+import type { SlotWrite, writeSlotFile } from '../src/slot-file.js';
 import { GitHubBudget } from '../src/github/budget.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { claimDiscord } from '../src/intake/discord-claims.js';
@@ -566,9 +577,9 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
           const what = `${w.name}(${t?.getText() ?? ''})`;
           const key = `${ownerName(n)}: ${what}`;
           if (file === HELPER) {
-            // Not judged by its syntax: test/slot-file.test.ts records every fs call writeSlotFile makes, in each mode
-            // and on each failure, and asserts the exact sequence. The helper is in the hook import tree, so a change
-            // to it waits for the owner.
+            // Not judged by its syntax: the last check in this file records every fs call writeSlotFile makes, in
+            // each mode and on each failure, and asserts the exact sequence. The helper is in the hook import tree, so
+            // a change to it waits for the owner.
           } else if (t && mentionsSlot(t, m)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
           else if (review?.kind === 'mixed') {
             const listed = review.elsewhere[key]?.[0] ?? 0;
@@ -931,4 +942,247 @@ test("a token's GitHub budget is replaced when it is 0444", { skip }, async () =
   await budget.take('backlog');
   assert.equal(budget.read().resources.core?.used.backlog, 2);
   assert.deepEqual(temps(dir), []);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The helper, by what it does: every fs call writeSlotFile makes (#766 review, round 4: this replaced the lint's
+// syntax rule for the helper). It lives here, in an engine-guards file, so weakening it waits for the owner too.
+
+type SlotWriter = typeof writeSlotFile;
+type Fns = Record<string, (...a: never[]) => unknown>;
+
+interface Call {
+  name: string;
+  args: unknown[];
+  /** What an openSync returned. */
+  fd?: number;
+  /** The code of what it threw. */
+  error?: string;
+}
+
+/** Make the first `times` calls of fs's `name` throw `code` instead of running. */
+type Fail = { name: string; code: string; times?: number };
+
+const DATA = 'slot-file-call-test-data';
+
+/** The recording under way, if any. */
+let recording: { calls: Call[]; depth: number; fail: Fail | undefined; failed: number } | null = null;
+
+/**
+ * Every function of node:fs and node:fs/promises, with a wrapper that records its calls while `recording` is set and
+ * otherwise just calls it. Classes (Stats, ReadStream, ...) are left as they are. A call made inside another fs call
+ * (writeFileSync calling writeSync) is fs's own, not the caller's, and is not recorded. The wrappers are made once:
+ * a module loaded while they are in place keeps them in anything it took from fs then (`const w = writeFileSync`).
+ */
+const WRAPPERS = (() => {
+  const req = createRequire(import.meta.url);
+  const out: { mod: Fns; name: string; real: Fns[string]; wrapper: Fns[string] }[] = [];
+  for (const mod of [req('node:fs'), req('node:fs/promises')] as Fns[]) {
+    for (const name of Object.keys(mod)) {
+      const real = mod[name];
+      if (typeof real !== 'function' || /^[A-Z]/.test(name)) continue;
+      const wrapper = function (this: unknown, ...args: never[]): unknown {
+        const r = recording;
+        if (!r || r.depth > 0) return Reflect.apply(real, this, args);
+        const c: Call = { name, args: [...args] };
+        r.calls.push(c);
+        r.depth++;
+        try {
+          if (r.fail?.name === name && r.failed < (r.fail.times ?? 1)) {
+            r.failed++;
+            throw Object.assign(new Error(`simulated ${r.fail.code}`), { code: r.fail.code });
+          }
+          const result = Reflect.apply(real, this, args);
+          if (name === 'openSync') c.fd = result as number;
+          return result;
+        } catch (e) {
+          c.error = (e as NodeJS.ErrnoException).code ?? String(e);
+          throw e;
+        } finally {
+          r.depth--;
+        }
+      };
+      out.push({ mod, name, real, wrapper: Object.assign(wrapper, real) });
+    }
+  }
+  return out;
+})();
+
+/** Put the wrappers in place of fs's functions (their ESM bindings too, which is how the helper imports them), or back. */
+function wrappers(on: boolean): void {
+  for (const w of WRAPPERS) w.mod[w.name] = on ? w.wrapper : w.real;
+  syncBuiltinESMExports();
+}
+
+/** Load a module (a fresh instance) while the wrappers are in place. */
+async function loadWrapped(url: string): Promise<SlotWriter> {
+  wrappers(true);
+  try {
+    return ((await import(url)) as { writeSlotFile: SlotWriter }).writeSlotFile;
+  } finally {
+    wrappers(false);
+  }
+}
+
+/** The helper under test: a fresh instance of src/slot-file.ts, loaded with the wrappers in place. */
+const underTest = await loadWrapped(new URL('../src/slot-file.js?fs-calls', import.meta.url).href);
+
+/** Run `write` and return the fs calls it made, in order, and the code of what it threw. */
+function recordCalls(write: SlotWriter, file: string, o: SlotWrite, fail?: Fail): { calls: Call[]; error?: string } {
+  const r = (recording = { calls: [], depth: 0, fail, failed: 0 });
+  wrappers(true);
+  try {
+    write(file, DATA, o);
+    return { calls: r.calls };
+  } catch (e) {
+    return { calls: r.calls, error: (e as NodeJS.ErrnoException).code ?? String(e) };
+  } finally {
+    wrappers(false);
+    recording = null;
+  }
+}
+
+/**
+ * The calls as text: the temp names TMP, TMP2, ... in the order they appear; the target FILE; the content DATA; the
+ * descriptor the first open returned FD, any other `fd <n>`; any other number (a mode) in octal.
+ */
+function render(calls: Call[], file: string): string[] {
+  const tmpName = new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.${process.pid}\\.[0-9a-f]{16}\\.tmp$`);
+  const tmps: string[] = [];
+  const fd = calls.find((c) => c.name === 'openSync' && c.fd !== undefined)?.fd;
+  const showFd = (n: number) => (n === fd ? 'FD' : `fd ${n}`);
+  const show = (v: unknown, i: number): string => {
+    if (typeof v === 'number') return i === 0 ? showFd(v) : `0o${v.toString(8)}`;
+    if (typeof v !== 'string') return v === undefined ? 'undefined' : JSON.stringify(v);
+    if (v === file) return 'FILE';
+    if (v === DATA) return 'DATA';
+    if (!tmpName.test(v)) return JSON.stringify(v);
+    if (!tmps.includes(v)) tmps.push(v);
+    return tmps.indexOf(v) === 0 ? 'TMP' : `TMP${tmps.indexOf(v) + 1}`;
+  };
+  return calls.map((c) => `${c.name}(${c.args.map(show).join(', ')})${c.error ? ` throws ${c.error}` : c.fd !== undefined ? ` -> ${showFd(c.fd)}` : ''}`);
+}
+
+/**
+ * Which of the helper's rules a call sequence breaks, one line per offending call ([] when it keeps them all):
+ * - every call on a descriptor uses the one the exclusive open returned;
+ * - every open is an exclusive create (flag 'wx') of a new temp name beside the file;
+ * - nothing touches a file by name (the temp file, the target or any other) before the rename or link, but the
+ *   open and, once something has failed, the removal of its own temp file;
+ * - after the close, only the rename or link of the temp file to the target, and the removal of the temp file.
+ */
+function broken(calls: Call[], shown: string[], file: string): string[] {
+  const out: string[] = [];
+  const opened = calls.findIndex((c) => c.name === 'openSync' && c.fd !== undefined);
+  const fd = calls[opened]?.fd;
+  const tmp = calls[opened]?.args[0];
+  const place = calls.findIndex((c) => c.name === 'renameSync' || c.name === 'linkSync');
+  const closed = calls.findIndex((c) => c.name === 'closeSync' && c.args[0] === fd);
+  const cleanup = (c: Call, i: number) => c.name === 'rmSync' && c.args[0] === tmp && calls.slice(opened + 1, i).some((x) => x.error);
+  calls.forEach((c, i) => {
+    const byName = typeof c.args[0] !== 'number';
+    if (!byName && c.args[0] !== fd) out.push(`${shown[i]}: a descriptor other than the one its exclusive open returned`);
+    if (c.name === 'openSync' && (c.args[1] !== 'wx' || typeof c.args[0] !== 'string' || !shown[i]!.startsWith('openSync(TMP'))) out.push(`${shown[i]}: not an exclusive create (flag "wx") of a new temp name`);
+    if (byName && c.name !== 'openSync' && (place === -1 || i < place) && !cleanup(c, i)) out.push(`${shown[i]}: touches a file by name before the rename or link`);
+    if (closed !== -1 && i > closed && !(((c.name === 'renameSync' || c.name === 'linkSync') && c.args[0] === tmp && c.args[1] === file) || (c.name === 'rmSync' && c.args[0] === tmp))) out.push(`${shown[i]}: after its descriptor is closed`);
+  });
+  if (fd !== undefined && closed === -1) out.push('its descriptor is never closed');
+  return out;
+}
+
+interface Case {
+  name: string;
+  o: SlotWrite;
+  expected: string[];
+  fail?: Fail;
+  throws?: string;
+  /** The target exists before the write. */
+  exists?: boolean;
+}
+
+const OPEN = 'openSync(TMP, "wx", 0o666) -> FD';
+const RM = 'rmSync(TMP, {"force":true})';
+const CASES: Case[] = [
+  { name: 'by default: create, write, close, rename', o: {}, expected: [OPEN, 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'renameSync(TMP, FILE)'] },
+  { name: 'with a mode: it goes to the open (the umask applies)', o: { mode: 0o640 }, expected: ['openSync(TMP, "wx", 0o640) -> FD', 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'renameSync(TMP, FILE)'] },
+  { name: 'exactMode: fchmod on the descriptor, before the write', o: { mode: 0o660, exactMode: true }, expected: ['openSync(TMP, "wx", 0o660) -> FD', 'fchmodSync(FD, 0o660)', 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'renameSync(TMP, FILE)'] },
+  { name: 'replace false: link, then remove the temp name', o: { replace: false }, expected: [OPEN, 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'linkSync(TMP, FILE)', RM] },
+  { name: 'the open fails: nothing else', o: {}, fail: { name: 'openSync', code: 'EACCES' }, throws: 'EACCES', expected: ['openSync(TMP, "wx", 0o666) throws EACCES'] },
+  { name: 'the temp name is taken: a new one, the taken one never touched', o: {}, fail: { name: 'openSync', code: 'EEXIST' }, expected: ['openSync(TMP, "wx", 0o666) throws EEXIST', 'openSync(TMP2, "wx", 0o666) -> FD', 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'renameSync(TMP2, FILE)'] },
+  { name: 'three taken names: it gives up', o: {}, fail: { name: 'openSync', code: 'EEXIST', times: 3 }, throws: 'EEXIST', expected: ['TMP', 'TMP2', 'TMP3'].map((t) => `openSync(${t}, "wx", 0o666) throws EEXIST`) },
+  { name: 'the fchmod fails: close, remove the temp file', o: { mode: 0o660, exactMode: true }, fail: { name: 'fchmodSync', code: 'EPERM' }, throws: 'EPERM', expected: ['openSync(TMP, "wx", 0o660) -> FD', 'fchmodSync(FD, 0o660) throws EPERM', 'closeSync(FD)', RM] },
+  { name: 'the write fails: close, remove the temp file', o: {}, fail: { name: 'writeFileSync', code: 'ENOSPC' }, throws: 'ENOSPC', expected: [OPEN, 'writeFileSync(FD, DATA) throws ENOSPC', 'closeSync(FD)', RM] },
+  { name: 'the rename fails: remove the temp file', o: {}, fail: { name: 'renameSync', code: 'EXDEV' }, throws: 'EXDEV', expected: [OPEN, 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'renameSync(TMP, FILE) throws EXDEV', RM] },
+  { name: 'replace false and the file exists (a lock held): remove the temp file', o: { replace: false }, exists: true, throws: 'EEXIST', expected: [OPEN, 'writeFileSync(FD, DATA)', 'closeSync(FD)', 'linkSync(TMP, FILE) throws EEXIST', RM] },
+];
+
+/** Run one case against `write` in a fresh dir; throws an AssertionError naming what is wrong. */
+function checkCase(write: SlotWriter, c: Case): void {
+  const dir = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'calls-'));
+  const file = join(dir, 'f.json');
+  if (c.exists) writeFileSync(file, 'held');
+  const { calls, error } = recordCalls(write, file, c.o, c.fail);
+  const shown = render(calls, file);
+  const bad = broken(calls, shown, file);
+  assert.deepEqual(bad, [], `${c.name}:\n${bad.join('\n')}\n-- the calls:\n${shown.join('\n')}`);
+  assert.deepEqual(shown, c.expected, c.name);
+  assert.equal(error, c.throws, c.name);
+  assert.deepEqual(temps(dir), [], `${c.name}: no temp file left`);
+}
+
+for (const c of CASES) test(`writeSlotFile's fs calls, ${c.name}`, () => checkCase(underTest, c));
+
+/**
+ * A wrong helper, for the check to fail: the compiled helper with each `from` swapped for `to`, written as a module
+ * of its own in a temp dir (src/ is untouched) and loaded the way the helper under test is.
+ */
+async function variant(name: string, swaps: [from: string, to: string][]): Promise<SlotWriter> {
+  let text = readFileSync(new URL('../src/slot-file.js', import.meta.url), 'utf8').replace(/^\/\/# sourceMappingURL=.*$/m, '');
+  for (const [from, to] of swaps) {
+    assert.equal(text.split(from).length, 2, `${name}: ${from} is in the compiled helper exactly once (if the helper changed, update this variant)`);
+    text = text.replace(from, () => to);
+  }
+  const f = join(mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'variant-')), `${name}.mjs`);
+  writeFileSync(f, text);
+  return loadWrapped(pathToFileURL(f).href);
+}
+
+const checkAll = (write: SlotWriter) => {
+  for (const c of CASES) checkCase(write, c);
+};
+
+test('the fs-call check passes an unchanged copy of the helper, loaded the way the wrong variants below are (a control)', async () => {
+  checkAll(await variant('copy', []));
+});
+
+test('the fs-call check fails a helper that sets the mode by name (chmodSync(tmp))', async () => {
+  const w = await variant('chmod-by-name', [
+    ['import { closeSync, fchmodSync,', 'import { chmodSync, closeSync, fchmodSync,'],
+    ['fchmodSync(fd, exact);', 'chmodSync(tmp, exact);'],
+  ]);
+  assert.throws(() => checkAll(w), /chmodSync\(TMP, 0o660\): touches a file by name before the rename or link/);
+});
+
+test('the fs-call check fails a helper that writes to another descriptor', async () => {
+  const w = await variant('other-fd', [['writeFileSync(fd, data);', "{ const other = openSync(tmp, 'r+'); writeFileSync(other, data); closeSync(other); }"]]);
+  assert.throws(() => checkAll(w), /writeFileSync\(fd \d+, DATA\): a descriptor other than the one its exclusive open returned/);
+});
+
+test('the fs-call check fails a helper that uses its descriptor after closing it', async () => {
+  const w = await variant('op-after-close', [['closeSync(fd);', 'closeSync(fd); fchmodSync(fd, mode);']]);
+  assert.throws(() => checkAll(w), /fchmodSync\(FD, 0o666\) throws EBADF: after its descriptor is closed/);
+});
+
+test("the fs-call check fails a helper whose open is not exclusive (flag 'w', not 'wx')", async () => {
+  const w = await variant('no-wx', [["openSync(tmp, 'wx', mode)", "openSync(tmp, 'w', mode)"]]);
+  assert.throws(() => checkAll(w), /openSync\(TMP, "w", 0o666\) -> FD: not an exclusive create \(flag "wx"\) of a new temp name/);
+});
+
+test('the fs-call check fails a helper that keeps an fs function from load time and calls it through Reflect.apply', async () => {
+  const w = await variant('kept-chmod', [
+    ['import { closeSync, fchmodSync,', 'import { chmodSync, closeSync, fchmodSync,'],
+    ["from 'node:fs';", "from 'node:fs';\nconst keptChmod = chmodSync;"],
+    ['fchmodSync(fd, exact);', '{ fchmodSync(fd, exact); Reflect.apply(keptChmod, undefined, [tmp, exact]); }'],
+  ]);
+  assert.throws(() => checkAll(w), /chmodSync\(TMP, 0o660\): touches a file by name before the rename or link/);
 });
