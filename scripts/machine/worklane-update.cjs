@@ -366,13 +366,15 @@ function firstParentLine(cmp, current, head, max) {
 
 const short = (sha) => String(sha).slice(0, 7);
 /**
- * Every check run on a commit, page by page: 100 a page, the next page (CHECKS_SPACING_MS later) while a page is
- * full, whatever total_count says (#727: a missing or wrong total_count never makes a full page the last), at most
- * CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's
- * scheduled run adds one to main's tip every half hour, newest first, so the checks that matter can be on a later
- * page. Returns { check_runs }, or null when GitHub gives no answer for any page. Still full past CHECK_PAGES_MAX
- * pages: with `pinned` (pins are judged, #727), null too, since another source's failure on an unread page would block
- * a pinned check; without, the newest pages only, as before (a required check among the older ones reads as not run).
+ * Every check run on a commit, page by page: 100 a page, the next page (CHECKS_SPACING_MS later), at most
+ * CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's scheduled run adds one to main's tip every
+ * half hour, newest first, so the checks that matter can be on a later page. Returns { check_runs }, or null when
+ * GitHub gives no answer for any page.
+ * `pinned` (#727: some required check is pinned, checkPins' `pinned`): the next page while a page is full, whatever
+ * total_count says (a missing or wrong total_count never makes a full page the last), and still full past
+ * CHECK_PAGES_MAX pages, null too, since another source's failure on an unread page would block a pinned check.
+ * Without (every required check a bare name): exactly as before pins, the next page while total_count says there are
+ * more, and past CHECK_PAGES_MAX pages the newest only (a required check among the older ones reads as not run).
  */
 async function checkRunsOf(deps, api, sha, pinned = false) {
   const all = [];
@@ -382,6 +384,8 @@ async function checkRunsOf(deps, api, sha, pinned = false) {
     if (!data || !Array.isArray(data.check_runs)) return null; // a page missing could hide a red check
     all.push(...data.check_runs);
     if (data.check_runs.length < 100) return { check_runs: all };
+    // Every required check a bare name: main's stop, where total_count says this was the last page.
+    if (!pinned && !(data.total_count > all.length)) return { check_runs: all };
   }
   // #727: still full past CHECK_PAGES_MAX. Judging pins, any run of a pinned name from another source that isn't a
   // pass blocks it, so an unread page could hold the failure: no answer (the commit waits), as the other pagers do.
@@ -508,19 +512,25 @@ async function checkPins(deps, cfg, api) {
     rulesUnread = !branch || !Array.isArray(ruleset);
     rules = ruleApps(branch, ruleset);
   }
-  if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread };
+  // Unread rules: whether a required check is pinned is unknown, so it is taken as pinned (the commit waits anyway).
+  if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread, pinned: true };
   const pinOf = (n) => checkPinOf(n, own, rules);
   // WHY: an Actions-App pin needs the workflow runs too: its runs are judged per workflow file (evaluateChecks), so one
   // file never supersedes another.
   const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}) || (pinOf(n) || {}).app_id === ACTIONS_APP_ID);
   const pinned = required.some((n) => pinOf(n));
   return {
+    // Some required check is pinned: only then are the reads a pin needs made (checkRunsOf, forSha); with every
+    // required check a bare name, the reads and the verdict are main's.
+    pinned,
     /**
      * The pins on `sha`, or { noAnswer: what GitHub didn't answer } (the commit waits). `runs`: the commit's check
      * runs. When a pinned required check (not a retired one) has no check run of its name at all, the commit can't be
      * installed whatever its workflow runs or statuses say (it is missing), so neither is read (the read cost, #727).
      */
     forSha: async (sha, runs) => {
+      // No required check pinned: nothing to read, and no shortcut either (evaluateChecks judges every name as before).
+      if (!pinned) return { pinOf, suites: new Map(), repo, sha, statuses: [] };
       const list = (runs || []).filter((r) => r && typeof r.name === 'string');
       const passedOnce = (n) => list.some((r) => r.name === n && r.status === 'completed' && r.conclusion === 'success');
       const ran = (n) => list.some((r) => r.name === n);
@@ -615,7 +625,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
-      const data = await checkRunsOf(deps, api, c.sha, !!pinning);
+      const data = await checkRunsOf(deps, api, c.sha, !!pinning && pinning.pinned);
       const pins = data && pinning ? await pinning.forSha(c.sha, data.check_runs) : undefined;
       if (!data) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
       else if (pins && pins.noAnswer) v = { ok: false, final: false, noAnswer: true, reason: `GitHub gave no answer for ${pins.noAnswer}` };
@@ -1596,10 +1606,11 @@ async function update(deps, cfg, seen = {}) {
     if (v.object !== tag.object || v.commit !== head) {
       return deps.note('refused', head, `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(head)}, the one verified is ${short(v.object)} at ${short(v.commit)}`, true);
     }
-    // No answer (past the pages read while pins are judged, too): no runs, so the required checks haven't run: not installed.
-    const runs = ((await checkRunsOf(deps, api, v.base, !!deps.pinChecks)) || {}).check_runs;
     // #727: the release's commit's required checks, each only from its pinned source.
     const pinning = await checkPins(deps, cfg, api);
+    // No answer (past the pages read while a required check is pinned, too): no runs, so the required checks haven't
+    // run: not installed.
+    const runs = ((await checkRunsOf(deps, api, v.base, !!pinning && pinning.pinned)) || {}).check_runs;
     const pins = pinning ? await pinning.forSha(v.base, runs) : undefined;
     const checks = pins && pins.noAnswer ? { ok: false, final: false, reason: `GitHub gave no answer for ${pins.noAnswer.replace(/^its /, 'the ')} on ${short(v.base)}` } : evaluateChecks(runs, cfg.required_checks, pins);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);

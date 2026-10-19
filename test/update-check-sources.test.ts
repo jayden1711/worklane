@@ -258,6 +258,23 @@ test('check runs still full past CHECK_PAGES_MAX pages wait while pins are judge
   assert.match(await verdict(11), /^waits: GitHub gave no answer for its check runs/, 'past page 10: no answer, never an install (457e89b5 installed)');
 });
 
+test("round 8: with no required check pinned (a bare `custom`, no rules App), 11 full pages of check runs install as on main, with main's reads", async () => {
+  let clock = Date.parse('2026-10-18T12:00:00Z');
+  const calls: string[] = [];
+  const page = (n: number) => (n === 1 ? [checkRun({ name: 'custom', suite: 5, app: 4242 }, 0), ...Array.from({ length: 99 }, (_, i) => checkRun({ name: `other-${i}`, suite: 5, app: 4242 }, 1 + i))] : Array.from({ length: 100 }, (_, i) => checkRun({ name: `other-${n}-${i}`, suite: 5, app: 4242 }, n * 1000 + i)));
+  const fetchJson = async (url: string) => {
+    calls.push(url.replace(API, '').replace(/\?.*/, ''));
+    if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1100, check_runs: page(Number(new URL(url).searchParams.get('page') ?? '1')) };
+    if (url === `${API}/rules/branches/main`) return [];
+    if (url === `${API}/branches/main`) return { name: 'main', protection: { enabled: false } };
+    return null;
+  };
+  const r = await u.chooseCommit({ pinChecks: true, fetchJson, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, { branch: 'main', required_checks: ['custom'] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+  assert.equal(r.chosen?.sha, SHA, `installs, as on main (5520710c waited): ${r.reason ?? ''}`);
+  assert.equal(calls.filter((c) => c.endsWith('/check-runs')).length, 10, 'ten pages, as main');
+  assert.equal(calls.filter((c) => c.startsWith('/actions/') || c.endsWith('/status')).length, 0, 'no workflow-run or status read');
+});
+
 test('the read cost: a commit where a pinned required check has no run at all reads neither its workflow runs nor its statuses', async () => {
   const gh = gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit });
   const r = await choose(engine, gh);
