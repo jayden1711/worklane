@@ -1,13 +1,12 @@
 // Sign in to Claude, the first-run page's screen 2 (src/claude-signin.ts).
 // Local: Sign in runs `claude auth login` as this machine's user, after a confirmation; the page shows Anthropic's
 // sign-in link (owners only) and polls until `claude auth status` says signed in. Nothing is pasted.
-// Server: the agents' token from `claude setup-token`, pasted into add-project's paste box (the existing
-// paste_secret ask) when one is open, or at credentials.sh's hidden prompt.
+// Server: a root admin signs the agents in on the machine (claude auth login as the agent user, or a token from
+// `claude setup-token` at credentials.sh's hidden prompt); this page shows those commands and the status, and never
+// takes a Claude credential (issue #711).
 // The account email is Claude Code's cached one (#341): always labelled cached, never shown as the current account.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { cancelClaudeSignin, getClaudeSignin, startClaudeSignin, type ClaudeSigninData, type ClaudeStatusView } from '../api';
-import { navigate } from '../App';
-import { SecretForm } from '../pages/Setup';
 import { ago, Badge, Button, cx } from './ui';
 
 /** How often the panel asks again while a sign-in is waiting (the server checks claude auth status every 2 s). */
@@ -101,35 +100,18 @@ function LocalView({ v, confirming, setConfirming, onChanged }: { v: Extract<Cla
   );
 }
 
-function ServerView({ v, onChanged }: { v: Extract<ClaudeSigninData, { mode: 'server' }>; onChanged: () => void }) {
-  const [err, setErr] = useState<string | null>(null);
+/** Server mode: the status, and the root commands that sign the agents in on the machine. Nothing to paste here (#711). */
+function ServerView({ v }: { v: Extract<ClaudeSigninData, { mode: 'server' }> }) {
   const s = v.status;
   return (
     <div className="space-y-2 text-[12.5px] text-ink-2" data-testid="claude-signin" data-mode="server">
-      <p>
-        The agents ({v.agentUser}) sign in with a token from <code className="font-mono text-[12px] text-ink">claude setup-token</code>, run on a machine signed in to the Claude account they should use. Paste it once: it is stored for {v.agentUser} only (0600), never shown or logged.
+      <p data-testid="claude-signin-root">
+        The agents ({v.agentUser}) are signed in by a root admin on the machine. This page never takes a Claude credential: it shows only whether they are signed in. Either sign in as {v.agentUser}, through Anthropic's own page:
       </p>
-      {v.ask ? (
-        <div className="rounded-lg bg-surface p-3 shadow-hairline" data-testid="claude-signin-ask">
-          <div className="text-[13px] font-medium text-ink">{v.ask.title}</div>
-          <p className="break-words">{v.ask.detail}</p>
-          {v.ask.canAnswer ? (
-            <SecretForm a={v.ask} onDone={(e) => (e ? setErr(e) : onChanged())} />
-          ) : (
-            <p className="text-ink-3" data-testid="claude-signin-refused">
-              Only the instance's owners can paste it.
-            </p>
-          )}
-        </div>
-      ) : (
-        <div className="space-y-2" data-testid="claude-signin-no-ask">
-          <p>No paste box is open now. Add project, in the Setup console, asks for the token when the agents have none; run it again for this instance to get one.</p>
-          <Button size="sm" variant="outline" onClick={() => navigate('/setup')} data-testid="claude-signin-setup">
-            Open the Setup console
-          </Button>
-        </div>
-      )}
-      <p className="text-ink-3">Or at a root shell on the machine (a hidden prompt; for automation, the token on stdin):</p>
+      <code className={code} data-testid="claude-signin-login-command">
+        {v.signinCommand}
+      </code>
+      <p className="text-ink-3">Or install a token from <code className="font-mono text-[12px] text-ink">claude setup-token</code>, run on a machine signed in to the account they should use (a hidden prompt; for automation, the token on stdin):</p>
       <code className={code} data-testid="claude-signin-command">
         {v.command}
       </code>
@@ -139,7 +121,6 @@ function ServerView({ v, onChanged }: { v: Extract<ClaudeSigninData, { mode: 'se
         </p>
       )}
       {s?.loggedIn && <Cached account={s.cachedAccount} />}
-      {err && <p className="break-words text-red">{err}</p>}
     </div>
   );
 }
@@ -147,7 +128,7 @@ function ServerView({ v, onChanged }: { v: Extract<ClaudeSigninData, { mode: 'se
 /** The panel from its data (also what the render checks render). */
 export function ClaudeSigninView({ v, initialConfirming = false, onChanged }: { v: ClaudeSigninData; initialConfirming?: boolean; onChanged: () => void }) {
   const [confirming, setConfirming] = useState(initialConfirming);
-  return v.mode === 'server' ? <ServerView v={v} onChanged={onChanged} /> : <LocalView v={v} confirming={confirming} setConfirming={setConfirming} onChanged={onChanged} />;
+  return v.mode === 'server' ? <ServerView v={v} /> : <LocalView v={v} confirming={confirming} setConfirming={setConfirming} onChanged={onChanged} />;
 }
 
 /** The panel, loaded and kept current while a sign-in waits; `onDone` re-checks the page when it ends. */

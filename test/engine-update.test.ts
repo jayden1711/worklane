@@ -14,6 +14,7 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   repoFromUrl(url: string): { owner: string; repo: string } | null;
   fastForward(c: unknown): { ok: boolean; reason?: string };
   evaluateChecks(runs: Run[], required: string[]): { ok: boolean; final?: boolean; reason?: string };
+  RETIRED_CHECKS: readonly string[];
   quiet(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { quiet: boolean; why?: string };
   inFlight(e: { name: string; pid: unknown }[], alive: (p: number) => boolean): { tests: unknown[]; agents: unknown[] };
   slotPid(v: unknown): number | null;
@@ -68,6 +69,25 @@ test('checks: every one complete and green, every required one present and succe
   // A rerun that passed supersedes the earlier failure of the same check.
   assert.equal(u.evaluateChecks([ok('test', { conclusion: 'failure', started_at: '2026-01-01T00:00:00Z' }), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req).ok, true);
   assert.deepEqual(u.evaluateChecks([ok('test')], []), { ok: false, final: true, reason: 'no required checks configured in updates.json' });
+});
+
+test('a retired check (desktop, #744) an existing updates.json still requires: not waited for when absent, as strict as ever when it ran', () => {
+  // Every install made before #744 has "desktop" in required_checks (the old UPDATE_DEFAULT_CHECKS), and no main
+  // commit after it runs that job: without this, such an install would never take another update.
+  const req = ['test', 'desktop'];
+  assert.deepEqual(u.evaluateChecks([ok('test')], req), { ok: true }, 'absent: no longer waited for');
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], req), { ok: false, final: true, reason: 'required check "desktop" ended failure' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'skipped' })], req), { ok: false, final: true, reason: 'required check "desktop" was skipped' }, 'it ran: skipped still refuses');
+  assert.equal(u.evaluateChecks([ok('test'), ok('desktop', { status: 'in_progress', conclusion: null })], req).final, false, 'it is running: waited for');
+  // While CI still has the job, every commit gets a run, and it is judged exactly as before.
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop')], req), { ok: true }, 'it ran green: installs as before');
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { status: 'queued', conclusion: null })], req), { ok: false, final: false, reason: 'required check "desktop" is queued' }, 'it is queued: waited for');
+  // The other required checks lose nothing.
+  assert.match(u.evaluateChecks([ok('desktop')], req).reason!, /"test" hasn't run/);
+  // Retired names alone are no gate: refused as an empty list is, never installed on nothing.
+  assert.deepEqual(u.evaluateChecks([ok('test')], ['desktop']), { ok: false, final: true, reason: 'no required checks configured in updates.json but retired ones (desktop): add the checks to require at a root shell (updates.sh --add-check)' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], ['desktop']), { ok: false, final: true, reason: 'required check "desktop" ended failure' }, 'retired names alone, and it ran: judged as before');
+  assert.deepEqual(u.RETIRED_CHECKS, ['desktop'], 'a fixed list in the installed updater, never read from the commit it judges');
 });
 
 test('quiet only with no live agent or full-run lock and no emergency stop', () => {
@@ -554,4 +574,49 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
     sudo(['userdel', user]);
     sudo(['rm', '-rf', src, opt, bin, `/var/lib/private/${state}`, `/var/lib/${state}`]);
   }
+});
+
+// #760: the updater replaces itself only after a healthy install from a release tag the run verified; never on main,
+// never on a rollback; a refusal is in the installed line and the journal. (syncSelf itself: test/updater-self.test.ts)
+test('run: the updater takes the release\'s updater only after a healthy install from a verified release tag, never on main or a rollback', async () => {
+  type Self = { state: string; reason?: string };
+  const onRelease = (selfResult: Self, verified: { ok: boolean; base?: string; reason?: string } = { ok: true, base: 'c'.repeat(40) }) => {
+    const m = machine();
+    const self: string[][] = [];
+    const warned: string[] = [];
+    const base = m.deps.exec;
+    Object.assign(m.deps, {
+      config: () => ({ enabled: true, channel: 'release', allowed_signers: '/etc/worklane/allowed_signers', repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test'] }),
+      installedVersion: () => '0.4.1',
+      verifyRelease: () => verified,
+      exec: (file: string, args: string[]) => (file === 'git' ? `${'3'.repeat(40)}\trefs/tags/v0.5.0\n${NEW}\trefs/tags/v0.5.0^{}\n` : base(file, args)),
+      selfUpdate: (signers: string, tag: string, sha: string) => (m.calls.push('selfUpdate'), self.push([signers, tag, sha]), selfResult),
+      warn: (line: string) => warned.push(line),
+    });
+    return { ...m, self, warned };
+  };
+  const ok = onRelease({ state: 'updated' });
+  assert.equal(await u.run(ok.deps), 'installed');
+  assert.deepEqual(ok.self, [['/etc/worklane/allowed_signers', 'v0.5.0', NEW]], 'the verified tag, the engine just installed');
+  const order = ok.calls.filter((c) => /^(switchTo|selfUpdate)/.test(c));
+  assert.deepEqual(order, ['switchTo bbbb', 'selfUpdate'], 'after the switch and the health check');
+  assert.deepEqual(ok.logs.find((l) => l.event === 'installed')!.updater, { state: 'updated' });
+  // A refused one leaves it as it is (syncSelf), and says why in the installed line and the journal.
+  const no = onRelease({ state: 'refused', reason: 'not newer' });
+  assert.equal(await u.run(no.deps), 'installed');
+  assert.deepEqual(no.logs.find((l) => l.event === 'installed')!.updater, { state: 'refused', reason: 'not newer' });
+  assert.deepEqual(no.warned, ["the updater wasn't replaced: not newer"]);
+  // A release whose services don't come up: rolled back, the updater never asked.
+  const bad = onRelease({ state: 'updated' });
+  bad.states[NEW] = ['failed'];
+  assert.equal(await u.run(bad.deps), 'rolled_back');
+  assert.deepEqual(bad.self, []);
+  // An unverified tag: refused before anything is built, the updater never asked.
+  const unsigned = onRelease({ state: 'updated' }, { ok: false, reason: "v0.5.0's signature doesn't verify" });
+  assert.equal(await u.run(unsigned.deps), 'refused');
+  assert.deepEqual(unsigned.self, []);
+  // Main has no signature to check: never.
+  const main = machine({ selfUpdate: () => assert.fail('selfUpdate on the main channel') });
+  assert.equal(await u.run(main.deps), 'installed');
+  assert.equal(main.logs.find((l) => l.event === 'installed')!.updater, undefined);
 });

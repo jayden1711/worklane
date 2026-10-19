@@ -5,8 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir, tmpdir, userInfo } from 'node:os';
+import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { HELD_OUT_ENV } from '../src/held-out-paths.js';
 import type { InstanceSettings } from '../src/instance.js';
@@ -132,7 +132,8 @@ function fakeClaude(o: FakeClaude = {}) {
   chmodSync(bin, 0o755);
   const calls = (kind?: ClaudeCall['kind']) => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as ClaudeCall) : []).filter((c) => !kind || c.kind === kind);
   // Nothing of this machine's own that could switch the login (the check would refuse it): wider than the check.
-  const env: NodeJS.ProcessEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|AWS_|AZURE_|GOOGLE_|CLOUD_ML_)|_FILE_DESCRIPTOR$|_BASE_URL$|BEDROCK|VERTEX|FOUNDRY|MANTLE/i.test(k)));
+  // HOME is the bench user's home, as a login shell (sudo -iu) sets it.
+  const env: NodeJS.ProcessEnv = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|AWS_|AZURE_|GOOGLE_|CLOUD_ML_)|_FILE_DESCRIPTOR$|_BASE_URL$|BEDROCK|VERTEX|FOUNDRY|MANTLE/i.test(k))), HOME: home };
   return { base, home, bin, env, calls };
 }
 
@@ -175,7 +176,7 @@ test('acceptance: only a claude.ai login is accepted, whatever its plan; a token
   ];
   for (const [what, auth] of refusedShapes) {
     const c = fakeClaude({ auth });
-    assert.throws(() => requireSubscription(c.env, c.bin, home), /not a claude\.ai login|not Anthropic's own|not inside the bench user's home/, what);
+    assert.throws(() => requireSubscription({ ...c.env, HOME: home }, c.bin, home), /not a claude\.ai login|not Anthropic's own|not inside the bench user's home/, what);
   }
   // Every variable that can switch the login, by prefix: refused before claude is even asked, whatever claude says.
   const switching: Record<string, string>[] = [
@@ -196,8 +197,28 @@ test('acceptance: only a claude.ai login is accepted, whatever its plan; a token
   assert.deepEqual(requireSubscription({ ...c.env, DISABLE_TELEMETRY: '1', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8000' }, c.bin, c.home), { method: 'claude.ai', subscription_type: 'enterprise', config_directory: join(c.home, '.claude') });
   for (const plan of ['max', 'team', undefined]) {
     const f = fakeClaude({ auth: authStatus(home, 'claude.ai', { subscriptionType: plan }) });
-    assert.equal(requireSubscription(f.env, f.bin, home).subscription_type, plan ?? null);
+    assert.equal(requireSubscription({ ...f.env, HOME: home }, f.bin, home).subscription_type, plan ?? null);
   }
+});
+
+test("acceptance: the bench user's home is its passwd entry's, never $HOME: a HOME moved to another claude.ai login is refused", posix, () => {
+  const c = fakeClaude();
+  // Another folder holding a claude.ai login: claude follows $HOME there and reports that login, config dir and all.
+  const other = fakeClaude().home;
+  const moved = fakeClaude({ auth: authStatus(other, 'claude.ai') });
+  assert.throws(() => requireSubscription({ ...moved.env, HOME: other }, moved.bin, c.home), /HOME is .*not this user's home/, 'HOME at another login');
+  assert.throws(() => requireSubscription({ ...c.env, HOME: '' }, c.bin, c.home), /HOME is \(empty\)/, 'an empty HOME');
+  assert.equal(moved.calls().length, 0, 'claude not even asked');
+  assert.throws(() => benchRoot({ HOME: other }, c.home), /HOME is .*not this user's home/, 'the bench root: HOME at another folder');
+  // With no home given, it comes from the user database. This process's HOME is test/isolate.ts's temporary home,
+  // which the user database doesn't name: a claude.ai login there, and a root in it, were accepted when the home was
+  // $HOME (os.homedir()).
+  const tempHome = homedir();
+  if (tempHome === userInfo().homedir) return;
+  const here = fakeClaude({ auth: authStatus(tempHome, 'claude.ai') });
+  assert.throws(() => requireSubscription({ ...here.env, HOME: tempHome }, here.bin), /HOME is .*not this user's home/, "the default home: HOME at test/isolate's home");
+  assert.equal(here.calls().length, 0, 'claude not even asked');
+  assert.throws(() => benchRoot({ HOME: tempHome }), /HOME is .*not this user's home/, "the bench root's default home");
 });
 
 test('the bench runs only as its own user, on the pinned CLI, with updates off for every claude it starts', posix, async () => {
@@ -331,9 +352,9 @@ interface FakeDocker {
 
 /** An in-process docker that records every command and answers info, inspect and the cgroup files. */
 function fakeDocker(o: FakeDocker = {}) {
-  const sent: { args: string[]; input: string }[] = [];
+  const sent: { args: string[]; input: string; env: NodeJS.ProcessEnv }[] = [];
   const call: DockerCall = (_bin, args, opt) => {
-    sent.push({ args: [...args], input: opt.input?.toString('utf8') ?? '' });
+    sent.push({ args: [...args], input: opt.input?.toString('utf8') ?? '', env: opt.env });
     const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
     if (args[0] === 'info') return ok(JSON.stringify(['name=seccomp,profile=builtin', ...(o.rootless === false ? [] : ['name=rootless']), 'name=cgroupns']));
     if (args[0] === 'inspect') {
@@ -356,7 +377,7 @@ test("an agent gets neither the Docker socket nor the daemon's or bus's variable
   const layout = benchLayout(join(c.base, 'bench'));
   // The bench user's shell as the README sets it up: the daemon and the user bus are reachable from it.
   const env = { ...c.env, XDG_RUNTIME_DIR: runtime, DOCKER_HOST: `unix://${runtime}/docker.sock`, DOCKER_CONFIG: join(c.base, 'docker'), DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime}/bus` };
-  const agents = benchClaude(env, c.bin, benchLane({ home: process.env.HOME!, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state }));
+  const agents = benchClaude(env, c.bin, benchLane({ home: process.env.HOME!, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state, dockerHost: env.DOCKER_HOST, dataHome: undefined }));
   assert.equal((await agents.run({ ...runReq(c.base), env: { DOCKER_HOST: 'unix:///elsewhere' } })).reason, 'succeeded');
   requireSubscription(env, c.bin, c.home);
   requireClaudePin(env, c.bin);
@@ -381,12 +402,35 @@ test("the Read tool is denied each credential file itself, the daemon's data roo
   for (const p of ['/srv/docker/alt.sock', `${home}/.local/share/docker`, '/srv/data/docker', '/run/user/1001/docker.sock']) assert.ok(denyRead.includes(p), `commands denied ${p}`);
   assert.ok(deny.includes('Read(//srv/docker/alt.sock)'));
   // A tcp DOCKER_HOST names no socket.
-  assert.ok(!benchLane({ home, runtimeDir: '/run/user/1001', heldOut: '/h', state: '/s', dockerHost: 'tcp://127.0.0.1:2375' }).settings.sandbox.filesystem.denyRead.some((p) => p.includes('2375')));
+  assert.ok(!benchLane({ home, runtimeDir: '/run/user/1001', heldOut: '/h', state: '/s', dockerHost: 'tcp://127.0.0.1:2375', dataHome: undefined }).settings.sandbox.filesystem.denyRead.some((p) => p.includes('2375')));
+});
+
+test("the driver's docker always names its daemon: never a docker context, never a relative unix socket", () => {
+  const lane = (dockerHost: string) => benchLane({ home: '/home/u', runtimeDir: '/run/user/1001', heldOut: '/h', state: '/s', dockerHost, dataHome: undefined });
+  // A relative unix:// socket is relative to wherever docker runs: no deny rule can name it.
+  for (const rel of ['unix://docker.sock', 'unix://./run/alt.sock']) {
+    assert.throws(() => lane(rel), /absolute path/, `the lane: ${rel}`);
+    assert.throws(() => new Docker({ ...fakeDocker().opts, env: { DOCKER_HOST: rel } }, LIMITS).preflight(), /absolute path/, `the driver's docker: ${rel}`);
+  }
+  // No DOCKER_HOST: the rootless socket in the runtime dir, set explicitly, so a docker context never picks the daemon.
+  const d = fakeDocker();
+  new Docker({ ...d.opts, env: { PATH: '/usr/bin', XDG_RUNTIME_DIR: '/run/user/1001', DOCKER_CONFIG: '/home/u/.docker', GH_TOKEN: 'x' } }, LIMITS).preflight();
+  assert.equal(d.sent[0]!.env.DOCKER_HOST, 'unix:///run/user/1001/docker.sock');
+  assert.equal(d.sent[0]!.env.DOCKER_CONFIG, undefined);
+  assert.equal(d.sent[0]!.env.GH_TOKEN, undefined);
+  const alt = fakeDocker();
+  new Docker({ ...alt.opts, env: { DOCKER_HOST: 'unix:///srv/docker/alt.sock' } }, LIMITS).preflight();
+  assert.equal(alt.sent[0]!.env.DOCKER_HOST, 'unix:///srv/docker/alt.sock', 'the bench user DOCKER_HOST, the one the lane denies');
+  assert.ok(lane('unix:///srv/docker/alt.sock').settings.sandbox.filesystem.denyRead.includes('/srv/docker/alt.sock'));
+  // DOCKER_CONTEXT would pick a context's daemon: refused, nothing sent.
+  const ctx = fakeDocker();
+  assert.throws(() => new Docker({ ...ctx.opts, env: { DOCKER_CONTEXT: 'elsewhere' } }, LIMITS).preflight(), /DOCKER_CONTEXT elsewhere refused/);
+  assert.equal(ctx.sent.length, 0);
 });
 
 test('acceptance: the bench never retries a run: a 429 at startup is one session, reported, not waited out', posix, async () => {
   const c = fakeClaude({ run: '429' });
-  const lane = benchLane({ home: c.home, runtimeDir: join(c.base, 'run-user'), heldOut: join(c.base, 'held'), state: join(c.base, 'state') });
+  const lane = benchLane({ home: c.home, runtimeDir: join(c.base, 'run-user'), heldOut: join(c.base, 'held'), state: join(c.base, 'state'), dockerHost: undefined, dataHome: undefined });
   let retried = 0;
   const started = performance.now();
   // Bounded: an engine retry would wait a minute first; this stops it after 20 s.
@@ -447,7 +491,7 @@ test('the task runner sends docker exec into its own container only, with no mou
     assert.throws(() => checkDockerArgs([...make.slice(0, n), ...make.slice(n + 2)]), /without --name/);
   }
   const d = fakeDocker();
-  await new TaskRunner(d.opts, C, ROW).syncTree('/work/t', Buffer.from('tar'));
+  await new TaskRunner(d.opts, C, ROW, Buffer.from('')).syncTree('/work/t', Buffer.from('tar'));
   assert.deepEqual(d.sent[0]!.args.slice(0, 5), ['exec', '--interactive', '--workdir', '/work', 'bench-r1-t01']);
 });
 
@@ -490,7 +534,7 @@ test('acceptance: the hidden fields never reach a container', async () => {
   const d = fakeDocker();
   const docker = new Docker(d.opts, LIMITS);
   docker.start(C, ROW);
-  const r = new TaskRunner(d.opts, C, ROW);
+  const r = new TaskRunner(d.opts, C, ROW, Buffer.from(''));
   // A buggy caller that hands the container a hidden test name, or the gold line in a variable: refused, nothing sent.
   const before = d.sent.length;
   await assert.rejects(r.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']), /hidden FAIL_TO_PASS/);
@@ -510,7 +554,7 @@ function machine(o: FakeClaude & FakeDocker & { srt?: 'honors' | 'none' } = {}) 
   const layout = benchLayout(join(c.base, 'bench'));
   const runtime = join(c.base, 'run-user');
   const env: NodeJS.ProcessEnv = { ...c.env, XDG_RUNTIME_DIR: runtime, DOCKER_HOST: `unix://${runtime}/docker.sock`, [BENCH_USER_ENV]: currentUser() };
-  const laneInput = { home: c.home, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state, dockerHost: env.DOCKER_HOST };
+  const laneInput = { home: c.home, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state, dockerHost: env.DOCKER_HOST, dataHome: undefined };
   const lane = benchLane(laneInput);
   const srt = fakeSrt(o.srt ?? 'honors', '0.0.79', c.base);
   const opts = (runTask: RunTask, over: Partial<BenchOptions> = {}): BenchOptions => ({
@@ -523,6 +567,7 @@ function machine(o: FakeClaude & FakeDocker & { srt?: 'honors' | 'none' } = {}) 
     runner: benchClaude(env, c.bin, lane),
     lane: { ...laneInput, settings: lane.settings },
     docker: { ...d.opts, env },
+    baseTree: () => Buffer.from(''),
     runTask,
     ...over,
   });
@@ -720,6 +765,7 @@ function fakeSrt(kind: 'none' | 'honors', version = '0.0.79', confine = tmpdir()
       'const a = process.argv.slice(2);',
       `if (a[0] === '--version') { console.log(${JSON.stringify(version)}); process.exit(0); }`,
       "if (a[0] !== '--settings' || a[2] !== '--') { console.error('usage: srt --settings <file> -- <command...>'); process.exit(2); }",
+      `fs.appendFileSync(${JSON.stringify(join(dir, 'settings-files'))}, a[1] + '\\n');`,
       'const cfg = JSON.parse(fs.readFileSync(a[1], "utf8"));',
       'const cmd = a.slice(3);',
       kind === 'none'
@@ -746,17 +792,25 @@ test('acceptance: the sandbox probe refuses the run unless every attempt from in
   mkdirSync(home);
   mkdirSync(runtime);
   writeFileSync(join(home, '.claude.json'), '{"oauthAccount":"PROBE_SENTINEL"}');
-  const o = { home, runtimeDir: runtime, heldOut: join(base, 'held'), state: join(base, 'state') };
+  const o = { home, runtimeDir: runtime, heldOut: join(base, 'held'), state: join(base, 'state'), dockerHost: undefined, dataHome: undefined };
   const lane = benchLane(o);
   // srt missing, or another release: refused before any attempt.
   assert.throws(() => sandboxProbe({ ...o, settings: lane.settings, srt: join(base, 'no-srt') }), /srt --version is unreadable/);
   assert.throws(() => sandboxProbe({ ...o, settings: lane.settings, srt: fakeSrt('honors', '0.0.78') }), /srt --version is 0\.0\.78, not 0\.0\.79/);
   // Every attempt refused: the run may start, and the report says what each saw.
-  const report = sandboxProbe({ ...o, settings: lane.settings, srt: fakeSrt('honors') });
+  const honors = fakeSrt('honors');
+  const report = sandboxProbe({ ...o, settings: lane.settings, srt: honors });
   assert.equal(report.ok, true);
   assert.match(report.runner, /^sandbox-runtime 0\.0\.79: close to, not identical with, the build bundled in Claude Code 2\.1\.303$/);
+  // The settings file srt was given is gone once the probe returns, and so is its folder.
+  const given = readFileSync(join(dirname(honors), 'settings-files'), 'utf8').trim().split('\n');
+  assert.equal(given.length, 1);
+  assert.equal(existsSync(given[0]!), false, 'the settings file is removed');
+  assert.equal(existsSync(dirname(given[0]!)), false, 'and its folder');
   assert.deepEqual(report.results.map((r) => [r.kind, r.target.replace(base, '~'), r.seen, r.refused]), [
     ['connect', '~/run-user/docker.sock', 'ECONNREFUSED', true],
+    ['connect', '~/run-user/bus', 'ECONNREFUSED', true],
+    ['connect', '~/run-user/docker/containerd/containerd.sock', 'ECONNREFUSED', true],
     ['connect', '/run/docker.sock', 'ECONNREFUSED', true],
     ['connect', '/var/run/docker.sock', 'ECONNREFUSED', true],
     ['read', '~/u/.claude.json', 'opened char-device', true],
@@ -780,31 +834,6 @@ test('acceptance: the sandbox probe refuses the run unless every attempt from in
   } finally {
     server.close();
   }
-});
-
-test("acceptance: a tree's tar stream carries nothing hidden that its base tree lacks", async () => {
-  // The base tree (the base commit as a tar stream): it already holds a context line the test patch also adds, and
-  // the PASS_TO_PASS test, both in the container's image anyway.
-  const shared = 'assert total([(2, 3), (4, 1)]) == 10  # SHARED_BASE_LINE';
-  const row: TaskRow = { ...ROW, test_patch: `${ROW.test_patch}+    ${shared}\n` };
-  const base = Buffer.from(`tests/test_price.py\0def test_plain_totals_PASSMARK():\n    ${shared}\n`);
-  const d = fakeDocker();
-  const r = new TaskRunner(d.opts, C, row, base);
-  await r.syncTree('/work/t', Buffer.concat([base, Buffer.from('src/price.py\0def total(items):\n    return 0\n')]));
-  assert.equal(d.sent.length, 1, 'the base tree and an honest change go through');
-  for (const [what, extra, field] of [
-    ['an added line of the test patch', 'def test_negative_quantities_are_skipped_TESTMARK():\n    assert total([(5, -1)]) == 0\n', /test_patch|FAIL_TO_PASS/],
-    ['the gold patch', '    return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731\n', /hidden patch/],
-    ['the hints', 'HINTMARK: look at the generator in price.py\n', /hints_text/],
-    ['the instance id', '# from example__proj-4242\n', /instance_id/],
-    ['a FAIL_TO_PASS test by its name', 'def test_negative_quantities_are_skipped_TESTMARK(): pass\n', /FAIL_TO_PASS/],
-  ] as const) {
-    const before: number = d.sent.length;
-    await assert.rejects(r.syncTree('/work/t', Buffer.concat([base, Buffer.from(`tests/x.py\0${extra}`)])), (e: Error) => /input would carry the task's hidden/.test(e.message) && field.test(e.message), what);
-    assert.equal(d.sent.length, before, `${what}: nothing sent`);
-  }
-  // No base tree: every hidden piece counts, the shared context line too.
-  await assert.rejects(new TaskRunner(d.opts, C, row).syncTree('/work/t', base), /input would carry the task's hidden test_patch/);
 });
 
 test('acceptance: patch export runs nothing the clone configures, and exports the real diff with a/ b/ prefixes', posix, () => {
@@ -899,7 +928,7 @@ test("acceptance: the sandbox confirmation in Claude Code's own sandbox refuses 
   assert.equal(args[args.indexOf('--model') + 1], 'claude-haiku-5-5');
   assert.equal(agg.usage.sandbox_check, 0.02, 'its usage recorded');
   const attempts = (agg.sandbox!.confirmation as unknown as { attempts: { kind: string; refused: boolean }[] }).attempts;
-  assert.deepEqual(attempts.map((a) => [a.kind, a.refused]), [['connect', true], ['connect', true], ['connect', true], ['read', true], ['read', true], ['read', true], ['read', true]]);
+  assert.deepEqual(attempts.map((a) => [a.kind, a.refused]), [['connect', true], ['connect', true], ['connect', true], ['connect', true], ['connect', true], ['read', true], ['read', true], ['read', true], ['read', true]]);
   for (const f of ['.claude.json', '.netrc', '.npmrc', '.pypirc']) assert.ok(!existsSync(join(ok.home, f)), `the ${f} sentinel removed`);
   assert.match(readFileSync(join(ok.layout.runs, 'r1', 'sandbox.json'), 'utf8'), /"status": "all refused"/);
   // A sentinel read, or the daemon answering: the run refused, no task started, the sentinels still removed.
@@ -939,4 +968,63 @@ test('the sandbox confirmation: a declining model leaves the srt probe as the gu
   await assert.rejects(runBench(none.opts(engineTask)), /from inside the agents' sandbox, .*\.claude\.json: opened file/);
   assert.equal(none.calls('check').length + none.calls('run').length, 0, 'no model call');
   assert.equal(none.docker.length, 0, 'docker never ran');
+});
+
+test("acceptance: a tree's tar stream is refused only for the instance id, the hints or an applied test-patch run, and never says which", async () => {
+  // The test patch: a context line, a 3-line helper the base tree already holds (moved, say), and the new test.
+  const helper = ['def helper_rows_SHAREDRUN():', '    return [(2, 3), (4, 1), (7, 0)]', '    # the rows every total test starts from'];
+  const hunk = ['def test_negative_quantities_are_skipped_TESTMARK():', '    items = [(5, -1), (3, 2)]', '    assert total(items) == 6'];
+  const test_patch = ['diff --git a/tests/test_price.py b/tests/test_price.py', '--- a/tests/test_price.py', '+++ b/tests/test_price.py', '@@ -1,2 +1,9 @@', ' def test_plain_totals_PASSMARK():', ...helper.map((l) => `+${l}`), '+', ...hunk.map((l) => `+${l}`), ''].join('\n');
+  const row: TaskRow = { ...ROW, test_patch };
+  const base = Buffer.from(`tests/test_price.py\0def test_plain_totals_PASSMARK():\n    pass\n\0\0tests/helpers.py\0${helper.join('\n')}\n`);
+  const d = fakeDocker();
+  const r = new TaskRunner(d.opts, C, row, base);
+  const tar = (file: string, text: string) => Buffer.concat([base, Buffer.from(`${file}\0${text}`)]);
+  // What an agent may well write itself goes through.
+  for (const [what, file, text] of [
+    ['an honest change', 'src/price.py', 'def total(items):\n    return 0\n'],
+    ['its own fix, identical to the gold line', 'src/price.py', 'def total(items):\n    return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731\n'],
+    ["its own test, with the upstream test's name", 'tests/test_neg.py', 'def test_negative_quantities_are_skipped_TESTMARK():\n    assert total([(5, -1)]) == 0\n'],
+    ['two of the test patch lines in a row, then its own', 'tests/test_neg.py', `${hunk[0]}\n${hunk[1]}\n    assert total(items) == 5\n`],
+    ['a FAIL_TO_PASS id in a comment', 'tests/notes.py', '# tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK\n'],
+    ['the 3-line helper the base tree already holds', 'tests/test_price.py', `${helper.join('\n')}\n`],
+  ] as const) {
+    const before = d.sent.length;
+    await r.syncTree('/work/t', tar(file, text));
+    assert.equal(d.sent.length, before + 1, `${what}: sent`);
+  }
+  // What only a driver bug would carry: refused, nothing sent, and the same words whatever matched.
+  const said = new Set<string>();
+  for (const [what, file, text] of [
+    ['the applied test-patch hunk', 'tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n\n${hunk.join('\n')}\n`],
+    ['the hunk as the first lines of a new file', 'tests/test_new.py', `${hunk.join('\n')}\n`],
+    ['the hunk with CRLF line ends', 'tests/test_new.py', `${hunk.join('\r\n')}\r\n`],
+    ['the hints', 'NOTES.txt', 'HINTMARK: look at the generator in price.py\n'],
+    ['the instance id', 'src/price.py', '# from example__proj-4242\n'],
+  ] as const) {
+    const before = d.sent.length;
+    await assert.rejects(r.syncTree('/work/t', tar(file, text)), (e: Error) => (said.add(e.message), /input carries hidden task content/.test(e.message)), what);
+    assert.equal(d.sent.length, before, `${what}: nothing sent`);
+  }
+  assert.equal(said.size, 1, 'one message for every refusal');
+  for (const field of ['patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints', 'instance', 'test']) assert.ok(![...said][0]!.includes(field), `the refusal names no field (${field})`);
+  // No base tree: a task's input is refused outright.
+  await assert.rejects(new TaskRunner(d.opts, C, row, undefined as unknown as Buffer).syncTree('/work/t', base), /checked against its base tree, and there is none/);
+});
+
+test("a bench root through a link that doesn't resolve is refused; a dangling link at a credential place is followed", { skip: process.platform !== 'linux' && 'Linux only' }, () => {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'home-')));
+  mkdirSync(join(home, '.claude'));
+  symlinkSync(join(home, '.claude', 'not-yet'), join(home, 'bench'));
+  assert.throws(() => benchRoot({}, home), /doesn't resolve/, '~/bench -> ~/.claude/not-yet (dangling)');
+  assert.equal(existsSync(join(home, '.claude', 'not-yet')), false);
+  symlinkSync(join(home, 'gone'), join(home, 'mid'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(home, 'mid', 'bench') }, home), /doesn't resolve/, 'a dangling link further up the root');
+  symlinkSync(join(home, 'loop'), join(home, 'loop'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(home, 'loop', 'bench') }, home), /doesn't resolve/, 'a link loop');
+  // ~/.ssh -> a folder that doesn't exist yet: a root there would become the credential store once it's created.
+  const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'elsewhere-')));
+  symlinkSync(join(elsewhere, 'ssh'), join(home, '.ssh'));
+  assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'ssh', 'bench') }, home), /overlaps/, "a root where a dangling ~/.ssh points");
+  assert.equal(benchRoot({ [BENCH_ROOT_ENV]: join(elsewhere, 'bench') }, home).root, join(elsewhere, 'bench'));
 });

@@ -6,7 +6,7 @@
 // included), and its environment carries no DOCKER_*, XDG_RUNTIME_DIR or bus address (agentBase, auth.ts). Its
 // commands reach no host (allowedDomains empty): model traffic is claude's own, outside the sandbox. No retry: a
 // failed run is the bench's to record, never to wait out (a usage or rate limit stops the bench: usage.ts).
-import { join } from 'node:path';
+import { isAbsolute, join, posix } from 'node:path';
 import { CliRunner, type AgentRunner, type RetryOptions } from '../../src/runner.js';
 import { homeCredentialStores, sandboxSettings, withDeniedReads } from '../../src/sandbox.js';
 import { agentBase, BenchAgentRunner } from './auth.js';
@@ -15,21 +15,39 @@ import { credentialPlaces } from './paths.js';
 /** The runtime dir (the daemon's socket and the user bus live there). */
 export const runtimeDir = (env: NodeJS.ProcessEnv, uid: number = process.getuid?.() ?? -1): string => env.XDG_RUNTIME_DIR || `/run/user/${uid}`;
 
-/** The socket a `unix://` DOCKER_HOST names, if it names one. */
+/**
+ * The socket a `unix://` DOCKER_HOST names, if it names one. A relative one is refused (throws): it is relative to
+ * whichever folder the docker CLI runs in, so no deny rule can name it.
+ */
 export const dockerHostSocket = (dockerHost: string | undefined): string | null => {
-  const m = /^unix:\/\/(\/.+)$/.exec(dockerHost ?? '');
-  return m ? m[1]! : null;
+  const m = /^unix:\/\/(.*)$/s.exec(dockerHost ?? '');
+  if (!m) return null;
+  if (!isAbsolute(m[1]!)) throw new Error(`DOCKER_HOST ${dockerHost} refused: a unix socket must be an absolute path (unix:///...), which the agents' sandbox can deny`);
+  return posix.normalize(m[1]!);
 };
+
+/**
+ * The daemon the driver's docker CLI talks to, as a DOCKER_HOST: the bench user's DOCKER_HOST, else the rootless
+ * daemon's socket in the runtime dir. The driver always sets it, so the CLI never takes a daemon from a docker context
+ * (a context can name any socket, and ~/.docker, where contexts live, is a credential place the bench never reads).
+ * Refuses (throws) DOCKER_CONTEXT, which would pick a context, and a relative unix:// DOCKER_HOST.
+ */
+export function daemonHost(env: NodeJS.ProcessEnv, uid?: number): string {
+  if (env.DOCKER_CONTEXT) throw new Error(`DOCKER_CONTEXT ${env.DOCKER_CONTEXT} refused: a docker context can name a daemon socket the agents' sandbox doesn't deny; unset it (the bench uses DOCKER_HOST, or the rootless socket in XDG_RUNTIME_DIR)`);
+  const host = env.DOCKER_HOST || `unix://${join(runtimeDir(env, uid), 'docker.sock')}`;
+  dockerHostSocket(host);
+  return host;
+}
 
 export interface LaneInput {
   home: string;
   runtimeDir: string;
   heldOut: string;
   state: string;
-  /** The bench user's DOCKER_HOST, if set: a unix socket it names is denied too. */
-  dockerHost?: string | undefined;
-  /** The bench user's XDG_DATA_HOME, if set: the rootless daemon's data root is under it. */
-  dataHome?: string | undefined;
+  /** The bench user's DOCKER_HOST (undefined: unset); a unix socket it names is denied too. Required: never forgotten. */
+  dockerHost: string | undefined;
+  /** The bench user's XDG_DATA_HOME (undefined: unset); the rootless daemon's data root is under it. Required. */
+  dataHome: string | undefined;
 }
 
 /** Every path a bench agent may not read: what benchLane denies its commands and its Read tool. */

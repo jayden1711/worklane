@@ -134,6 +134,11 @@ export interface BenchOptions {
   /** After a wall-clock cap, how long runs in flight get to end (default SETTLE_MS). */
   settleMs?: number;
   docker: DockerOptions;
+  /**
+   * The task's base tree, as a tar stream of its base commit, made before any agent runs: what every tree sent to its
+   * container is checked against (container.ts TaskRunner). Required.
+   */
+  baseTree: (task: BenchTask) => Buffer | Promise<Buffer>;
   runTask: RunTask;
   settings?: InstanceSettings;
   /** Per task (default TASK_WALL_MS). */
@@ -224,7 +229,8 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
       // Its limits read back before any agent or command runs: a limit that didn't apply stops the run here.
       docker.start(c, t.row);
       applied = true;
-      const out = await Promise.race([o.runTask({ key: t.key, view: taskView(t.row, t.key), runner, signal, exec: new TaskRunner(o.docker, c, t.row, undefined, signal), workDir, settings }), capped]);
+      const base = await o.baseTree(t);
+      const out = await Promise.race([o.runTask({ key: t.key, view: taskView(t.row, t.key), runner, signal, exec: new TaskRunner(o.docker, c, t.row, base, signal), workDir, settings }), capped]);
       if (out === 'wall') {
         status = 'failed';
         detail = `the driver's wall-clock cap (${Math.round(wallMs / 60_000)} min) ended the task`;

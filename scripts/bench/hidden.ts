@@ -1,11 +1,21 @@
 // What a task may show and what it must hide (#748). A task container and the agents see only taskView(): the base
 // commit, the problem statement and which test runner its repo uses. The hidden fields (the gold patch, the test
 // patch, FAIL_TO_PASS, PASS_TO_PASS, the hints, the difficulty, and the instance id, which names the upstream PR) stay
-// in the bench's held-out store on the host. Everything sent to a container is also checked against the row's hidden
-// fields (hiddenLeaks, used by container.ts): a second wall, for a field taskView never had. That is every docker
-// argv, and every byte on a command's stdin (a worktree's tar stream included). The stdin check counts only what
-// differs from the task's base commit: a hidden piece the base tree already holds (a context line of the test patch,
-// a PASS_TO_PASS test) is in the container's image anyway, so it doesn't count; any other one refuses the command.
+// in the bench's held-out store on the host. That is the first wall, and the one that matters: no hidden field is
+// ever handed to an agent or a container.
+//
+// The second wall (container.ts) is a narrow text scan of what is sent to a container, for a driver bug that would
+// pass a hidden field on. It is a UTF-8 substring search, and it checks only these:
+// - every docker argv (hiddenLeaks): the added lines of the gold patch and the test patch that are at least 24
+//   characters long, the FAIL_TO_PASS and PASS_TO_PASS test ids of at least 12, the hints, the instance id, and a
+//   difficulty key;
+// - a command's stdin, a worktree's tar stream included (stdinCarriesHidden): only what an agent can't plausibly
+//   write itself (owner, 2026-10-18): the instance id, the hints, and the test patch as a run of STDIN_RUN or more
+//   consecutive added lines. Not the gold patch's lines and not test names or ids: an agent's own correct fix or test
+//   may match those. A piece the task's base tree already holds doesn't count (it is in the container's image anyway).
+// It can't see: compressed or binary content (a gzip member, a .git object pack), other encodings (UTF-16), shorter
+// lines (a changed expected value in an existing test), single test-patch lines or shorter runs on stdin. Those rely
+// on the first wall.
 
 /** One SWE-bench Verified row, as the pinned download writes it (one JSON object per line). */
 export interface TaskRow {
@@ -48,29 +58,25 @@ export function taskView(row: TaskRow, key: string): TaskView {
 /** The fields no container, agent or evaluator may see (design section 6.1), plus the instance id (it names the upstream PR). */
 export const HIDDEN_FIELDS = ['patch', 'test_patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints_text', 'instance_id', 'difficulty'] as const;
 
-/**
- * A test's own name from its id: pytest's `path::Class::test_x[param]` gives test_x, Django's `test_x (mod.Class)`
- * gives test_x; SymPy's ids are names already. What a file's text holds, where the id itself never appears.
- */
-export const testName = (id: string): string => (id.split('::').at(-1) ?? id).split(/[[\s(]/)[0] ?? id;
+/** A patch's added lines (`+x`, not the `+++ b/file` header), without the `+`. */
+const isAdded = (l: string) => l.startsWith('+') && !l.startsWith('+++ ');
 
 /**
- * Pieces of a hidden value worth looking for: the whole value, each added line of a patch, each test id (and with
- * `names`, each test's own name: what a file's text would hold).
+ * Pieces of a hidden value the argv scan looks for: the whole value (at least 8 characters), each added line of a
+ * patch (at least 24), each test id (at least 12).
  */
-function pieces(field: (typeof HIDDEN_FIELDS)[number], value: string, names: boolean): string[] {
+function pieces(field: (typeof HIDDEN_FIELDS)[number], value: string): string[] {
   if (field === 'patch' || field === 'test_patch') {
     return value
       .split('\n')
       // Added lines only: a removed line is in the base commit, which the container already holds.
-      .filter((l) => /^\+[^+]/.test(l))
+      .filter(isAdded)
       .map((l) => l.slice(1).trim())
       .filter((l) => l.length >= 24);
   }
   if (field === 'FAIL_TO_PASS' || field === 'PASS_TO_PASS') {
     try {
-      const ids = (JSON.parse(value) as string[]).filter((t) => typeof t === 'string');
-      return [...ids, ...(names ? ids.map(testName) : [])].filter((t) => t.length >= 12);
+      return (JSON.parse(value) as string[]).filter((t) => typeof t === 'string' && t.length >= 12);
     } catch {
       return [value];
     }
@@ -80,20 +86,90 @@ function pieces(field: (typeof HIDDEN_FIELDS)[number], value: string, names: boo
 }
 
 /**
- * The hidden fields of `row` whose content appears in `text` (what is about to reach a container). A piece the
- * problem statement itself contains doesn't count: the agents see that text anyway. With `base` (the text of the
- * task's base tree, as a tar stream of its base commit), a piece the base already holds doesn't count either, and test
- * names are looked for too: that is what a stdin tar stream is checked with.
+ * The hidden fields of `row` whose content appears in `text`, a docker argv about to reach a container (the pieces
+ * above, as UTF-8 substrings). A piece the problem statement itself contains doesn't count: the agents see that text
+ * anyway.
  */
-export function hiddenLeaks(text: string, row: TaskRow, base?: string): string[] {
+export function hiddenLeaks(text: string, row: TaskRow): string[] {
   const leaks: string[] = [];
-  const seen = (p: string) => text.includes(p) && !row.problem_statement.includes(p) && !(base !== undefined && base.includes(p));
+  const seen = (p: string) => text.includes(p) && !row.problem_statement.includes(p);
   for (const f of HIDDEN_FIELDS) {
     const v = row[f];
     if (typeof v !== 'string') continue;
-    if (pieces(f, v, base !== undefined).some(seen)) leaks.push(f);
+    if (pieces(f, v).some(seen)) leaks.push(f);
   }
-  const difficulty = /"[a-z_]*difficulty[a-z_]*"/i;
-  if (row.difficulty && difficulty.test(text) && !(base !== undefined && difficulty.test(base))) leaks.push('difficulty');
+  if (row.difficulty && /"[a-z_]*difficulty[a-z_]*"/i.test(text)) leaks.push('difficulty');
   return [...new Set(leaks)];
+}
+
+/** How many consecutive test-patch lines on a command's stdin count as the test patch (owner, 2026-10-18). */
+export const STDIN_RUN = 3;
+/** A run's lines together must hold at least this many non-space characters: three closing brackets are no patch. */
+const RUN_CHARS = 24;
+
+/** The non-blank lines of `text`, trailing space dropped; a NUL (tar padding, a header field) ends a line too. */
+const textLines = (text: string): string[] => text.split(/[\n\0]/).map((l) => l.trimEnd()).filter((l) => l.trim() !== '');
+
+/** Each STDIN_RUN consecutive lines of `lines`, joined: the keys a run is matched on. */
+function windows(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i + STDIN_RUN <= lines.length; i++) {
+    const w = lines.slice(i, i + STDIN_RUN);
+    if (w.join('').replace(/\s/g, '').length >= RUN_CHARS) out.push(w.join('\n'));
+  }
+  return out;
+}
+
+/**
+ * The test patch's runs of STDIN_RUN consecutive added lines, blank lines left out: a context or removed line, or a
+ * new hunk or file, ends a run.
+ */
+function testPatchRuns(patch: string): Set<string> {
+  const out = new Set<string>();
+  let run: string[] = [];
+  const flush = () => {
+    for (const w of windows(run)) out.add(w);
+    run = [];
+  };
+  for (const l of patch.split('\n')) {
+    if (!isAdded(l)) {
+      flush();
+      continue;
+    }
+    const line = l.slice(1).trimEnd();
+    if (line.trim() !== '') run.push(line);
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Whether `text` (a command's stdin: a worktree's tar stream) carries hidden content of `row` that `base` (the text
+ * of the task's base tree, a tar stream of its base commit) lacks. Only what an agent can't plausibly write itself
+ * counts (owner, 2026-10-18), as UTF-8 text:
+ * - the instance id, or the hints, as a substring (at least 8 characters, and not in the problem statement);
+ * - the test patch as STDIN_RUN or more consecutive added lines, matched as whole lines in a row (blank lines left
+ *   out on both sides): what a driver bug that applied the test patch would carry.
+ * Not the gold patch's lines, nor test names or ids: an agent's correct fix may equal the gold line, and its own
+ * regression test may share the upstream test's name. The answer is yes or no, never which field: a refusal relayed
+ * to an agent must not tell it which of its lines match the hidden patch.
+ */
+export function stdinCarriesHidden(text: string, row: TaskRow, base: string): boolean {
+  for (const v of [row.instance_id, row.hints_text]) {
+    const p = typeof v === 'string' ? v.trim() : '';
+    if (p.length >= 8 && text.includes(p) && !row.problem_statement.includes(p) && !base.includes(p)) return true;
+  }
+  const runs = testPatchRuns(row.test_patch);
+  if (!runs.size) return false;
+  const firsts = new Set([...runs].map((w) => w.split('\n')[0]!));
+  const lines = textLines(text);
+  let inBase: Set<string> | undefined;
+  for (let i = 0; i + STDIN_RUN <= lines.length; i++) {
+    if (!firsts.has(lines[i]!)) continue;
+    const w = lines.slice(i, i + STDIN_RUN).join('\n');
+    if (!runs.has(w)) continue;
+    inBase ??= new Set(windows(textLines(base)));
+    if (!inBase.has(w)) return true;
+  }
+  return false;
 }

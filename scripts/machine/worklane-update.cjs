@@ -24,7 +24,8 @@
 //     older fully green commit goes in at once. Otherwise a busy main, whose tip is rarely the batched commit, would keep every batched one waiting.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
-//     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
+//     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it (a retired check,
+//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS);
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
 // Drain: a machine that is never quiet (one instance running long test tiers back to back) would starve updates for
 // good. So once an update has waited updates.json "drain_after_minutes" (default 60) for a busy machine, the updater
@@ -76,6 +77,13 @@
 // renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
 // have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
+// The updater itself (#760) follows only the release channel: never main, which has no signature to check. Once an
+// install from a release tag is healthy (services steady, sandbox verdicts in), it takes that release's updater: read
+// from the tag's commit in the root-owned clone after the tag's signature is checked again, never from the build, and
+// only when the release is newer than the running updater's recorded version (release order, so an engine rollback
+// never takes it back). The running one is kept as worklane-update.prev for a manual rollback. Root's flag file
+// /etc/worklane/updater-no-self-update turns this off. A refusal leaves the running updater as it is, with the reason
+// in the "installed" log line.
 // Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl (a wait
 // or refusal once per commit and reason). Every run also prints one line to stdout, the journal: the result, and for
 // a wait, refusal, hold or failed build the commit and the reason (`waiting b9634df: required check "x" hasn't run
@@ -113,6 +121,15 @@ const HELPERS = [
   { dest: '/usr/local/libexec/worklane-gpu-devices', src: 'scripts/machine/worklane-gpu-devices.sh', check: 'bash' }, // gpu-devices.sh (run by udev)
   { dest: '/usr/local/libexec/worklane-exp', src: 'scripts/machine/worklane-exp.sh', check: 'bash' }, // experiments.sh
 ];
+// The updater itself (syncSelf): where it runs from, the copy it replaced, its release version and sha256 (root, 0644,
+// written by updates.sh and by each self-update), and root's switch to turn self-update off.
+const SELF = '/usr/local/libexec/worklane-update';
+const SELF_PREV = '/usr/local/libexec/worklane-update.prev';
+const SELF_RECORD = '/var/lib/worklane/updater.json';
+const SELF_OFF = '/etc/worklane/updater-no-self-update';
+const SELF_SRC = 'scripts/machine/worklane-update.cjs';
+const SELF_ROLLBACK = `sudo install -o root -g root -m 0755 ${SELF_PREV} ${SELF}`;
+const SELF_SETUP = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh';
 
 const HEALTH_MS = 120_000;
 const STABLE_MS = 30_000;
@@ -433,7 +450,16 @@ async function chooseCommit(deps, cfg, api, cands, held) {
 
 const GREEN = new Set(['success', 'neutral', 'skipped']);
 /**
- * Every check on the commit complete and green, and every required check present and successful.
+ * Checks the engine's CI no longer runs at all, whose names an existing updates.json may still require (an earlier
+ * UPDATE_DEFAULT_CHECKS listed them): desktop, the desktop window's job, removed with the window (#744). Such a check
+ * with no run on a commit isn't waited for, since no commit will ever get one; one that did run is judged like any
+ * other required check. A fixed list in this installed file, never read from the commit being judged, and it only
+ * ever covers a check of something the updater doesn't build or install (BUILD_SCRIPT never built the window).
+ */
+const RETIRED_CHECKS = Object.freeze(['desktop']);
+/**
+ * Every check on the commit complete and green, and every required check present and successful (a retired one only
+ * when it ran: RETIRED_CHECKS).
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
@@ -445,7 +471,10 @@ function evaluateChecks(runs, required) {
     const prev = latest.get(r.name);
     if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) latest.set(r.name, r);
   }
-  for (const name of required) {
+  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || latest.has(name));
+  // WHY: a list of retired names alone would otherwise pass on any green commit, with nothing actually required.
+  if (live.length === 0) return { ok: false, final: true, reason: `no required checks configured in updates.json but retired ones (${required.join(', ')}): add the checks to require at a root shell (updates.sh --add-check)` };
+  for (const name of live) {
     const r = latest.get(name);
     if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
@@ -720,6 +749,239 @@ function helpersBack(deps, sha) {
   } catch (e) {
     return { helpers_error: String((e && e.message) || e).slice(0, 500) };
   }
+}
+
+// ---------- the updater itself (#760) ----------
+
+const sha256 = (buf) => require('node:crypto').createHash('sha256').update(buf).digest('hex');
+const firstLine = (e) => String((e && e.stderr && String(e.stderr).trim()) || (e && e.message) || e).split('\n')[0].slice(0, 300);
+
+/**
+ * A file read as src/os readRegularFile reads one: through one descriptor opened without following a symlink, so what
+ * is checked is what is read. { kind: 'file', uid, mode, bytes }, or { kind }: missing, symlink, not-file, too-big,
+ * unreadable.
+ */
+function readRootFile(file, maxBytes = 4 * 1024 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | (fs.constants.O_NONBLOCK || 0));
+  } catch (e) {
+    const code = e && e.code;
+    return { kind: code === 'ELOOP' || code === 'EMLINK' ? 'symlink' : code === 'ENOENT' ? 'missing' : 'unreadable' };
+  }
+  try {
+    const s = fs.fstatSync(fd);
+    if (!s.isFile()) return { kind: 'not-file' };
+    if (s.size > maxBytes) return { kind: 'too-big' };
+    const buf = Buffer.alloc(maxBytes + 1);
+    const n = fs.readSync(fd, buf, 0, maxBytes + 1, 0);
+    return n > maxBytes ? { kind: 'too-big' } : { kind: 'file', uid: s.uid, mode: s.mode & 0o7777, bytes: buf.subarray(0, n) };
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Why a readRootFile result isn't root's own file (owned by `owner`, no group or other write), or null. */
+function rootFileProblem(f, owner, what) {
+  const kinds = { missing: 'missing', symlink: 'a symlink', 'not-file': 'not a regular file', 'too-big': 'too big', unreadable: 'unreadable' };
+  if (f.kind !== 'file') return `${what} is ${kinds[f.kind] || f.kind}`;
+  if (f.uid !== owner) return `${what} is owned by uid ${f.uid}, not ${owner}`;
+  if (f.mode & 0o022) return `${what} is writable by group or others (mode ${f.mode.toString(8)})`;
+  return null;
+}
+
+/** Root's off switch: anything at all at SELF_OFF turns self-update off (a flag that isn't root's own too). Null when on. */
+function selfUpdateOff(flag = SELF_OFF, owner = 0) {
+  try {
+    fs.lstatSync(flag);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return null;
+    return `${flag} can't be read (${(e && e.code) || e}), so self-update stays off`;
+  }
+  const why = rootFileProblem(readRootFile(flag, 4096), owner, flag);
+  return why ? `${why}; self-update stays off until root removes it` : `self-update is off (${flag}, root's switch)`;
+}
+
+/** The record of the running updater ({ version, sha256, ... }), only from root's own file, or null. */
+function readSelfRecord(record, owner) {
+  const f = readRootFile(record, 64 * 1024);
+  if (rootFileProblem(f, owner, record)) return null;
+  try {
+    const r = JSON.parse(f.bytes.toString('utf8'));
+    return r && semver(r.version) && /^[0-9a-f]{64}$/.test(String(r.sha256)) ? r : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write `bytes` beside `dest` and rename them over it, root's and 0755: a temp file (exclusive, 0600), chown, chmod,
+ * `check` on it, then read back through one O_NOFOLLOW descriptor (a regular file, root's, mode 0755, the same bytes)
+ * before the rename; `before()` runs between those checks and the rename. Throws, its temp file removed, with what
+ * failed; `dest` is then as it was.
+ */
+function placeFile(bytes, dest, tmpName, o, check = null, before = null) {
+  const tmp = path.join(path.dirname(dest), tmpName);
+  try {
+    fs.rmSync(tmp, { force: true });
+    fs.writeFileSync(tmp, bytes, { mode: 0o600, flag: 'wx' });
+    o.chown(tmp, o.owner, 0);
+    o.chmod(tmp, 0o755);
+    if (check) check(tmp);
+    const got = o.inspect(tmp);
+    const why = rootFileProblem(got, o.owner, tmp) || (got.mode !== 0o755 ? `${tmp} has mode ${got.mode.toString(8)}, not 755` : null) || (got.bytes.equals(bytes) ? null : `${tmp} isn't the bytes written`);
+    if (why) throw new Error(why);
+    if (before) before();
+    fs.renameSync(tmp, dest);
+  } catch (e) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // a directory put there: left for root to look at; dest is untouched either way
+    }
+    throw e;
+  }
+}
+
+/**
+ * A release's updater, only as this machine verifies it: refs/tags/<tag> resolved once to one tag object; that object's
+ * signature checked again (git verify-tag against the allowed signers, as verifyRelease), the same object naming itself
+ * `tag` and pointing at `commit` (the engine just installed), and the file read from that commit's tree in the
+ * root-owned clone, never from the build.
+ * `exec` returns a Buffer. { ok: true, version, tag, commit, bytes } or { ok: false, reason }.
+ */
+function verifiedUpdater(signers, tag, commit, exec, gitDir = VERIFY_GIT, exists = fs.existsSync) {
+  const m = /^v(\d+\.\d+\.\d+)$/.exec(String(tag));
+  if (!m) return { ok: false, reason: `${tag} isn't a release tag vX.Y.Z` };
+  if (!exists(signers)) return { ok: false, reason: `no allowed signers file at ${signers}` };
+  const g = (...a) => exec('git', ['--git-dir', gitDir, ...a]);
+  // INVARIANT: the ref is resolved once, here. Every check and the read below use this object id (or the commit id it
+  // peels to), never the name, so a ref moved after verify-tag can't swap in another object (objects are immutable).
+  let oid;
+  try {
+    oid = String(g('rev-parse', '--verify', '-q', `refs/tags/${tag}`)).trim();
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) throw new Error(`not an object id: ${oid.slice(0, 80)}`);
+    const type = String(g('cat-file', '-t', oid)).trim();
+    if (type !== 'tag') return { ok: false, reason: `${tag} is a ${type || 'missing'} object, not a signed tag object` };
+  } catch (e) {
+    return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
+  }
+  try {
+    g('-c', 'gpg.format=ssh', '-c', `gpg.ssh.allowedSignersFile=${signers}`, 'verify-tag', oid);
+  } catch (e) {
+    return { ok: false, reason: `${tag}'s signature doesn't verify against ${signers}: ${String((e && e.stderr) || (e && e.message) || e).split('\n').filter(Boolean).slice(-1)[0] || 'no signature'}` };
+  }
+  let at;
+  let named;
+  try {
+    at = String(g('rev-parse', '--verify', '-q', `${oid}^{commit}`)).trim();
+    named = (/^tag (\S+)$/m.exec(String(g('cat-file', 'tag', oid))) || [])[1] || null;
+  } catch (e) {
+    return { ok: false, reason: `couldn't read ${tag}: ${firstLine(e)}` };
+  }
+  if (at !== commit) return { ok: false, reason: `${tag} points at ${short(at)}, not at the engine just installed (${short(commit)})` };
+  if (named !== tag) return { ok: false, reason: `${tag}'s signed tag object names itself ${named || 'nothing'}` };
+  try {
+    return { ok: true, version: m[1], tag, commit: at, bytes: Buffer.from(g('cat-file', 'blob', `${at}:${SELF_SRC}`)) };
+  } catch {
+    return { ok: false, reason: `${tag} has no ${SELF_SRC}` };
+  }
+}
+
+/**
+ * Replace the running updater with a verified release's (verifiedUpdater's `src`), or say why not. Never throws.
+ * Refused, the running updater left as it is: root's switch is off; the running updater isn't root's regular file; its
+ * version isn't known (SELF_RECORD must name its sha256); the release isn't newer than it (release order, never hashes);
+ * the new file fails `node --check` or isn't root's regular 0755 file with the release's bytes (placeFile). The running
+ * one is copied to SELF_PREV first, for a manual rollback (SELF_ROLLBACK). The running process keeps its old file.
+ * Returns { state: 'updated' | 'same' | 'off' | 'refused', from, to, reason?, prev? }, from/to: { version, sha256 }.
+ */
+function syncSelf(src, opts = {}) {
+  const o = { dest: SELF, prev: SELF_PREV, record: SELF_RECORD, off: SELF_OFF, owner: 0, exec: execFileSync, chown: fs.chownSync, chmod: fs.chmodSync, inspect: readRootFile, now: Date.now, ...opts };
+  const to = { version: src.version, sha256: sha256(src.bytes), tag: src.tag };
+  const from = { version: null, sha256: null };
+  const no = (reason, state = 'refused') => ({ state, from, to, reason });
+  try {
+    const off = selfUpdateOff(o.off, o.owner);
+    if (off) return no(off, 'off');
+    const cur = o.inspect(o.dest);
+    const bad = rootFileProblem(cur, o.owner, o.dest);
+    if (bad) return no(`${bad}; not replacing it`);
+    from.sha256 = sha256(cur.bytes);
+    const rec = readSelfRecord(o.record, o.owner);
+    if (rec && rec.sha256 === from.sha256) from.version = rec.version;
+    if (from.sha256 === to.sha256) return { state: 'same', from, to };
+    if (!from.version) return no(`the running updater's version isn't known (${o.record} doesn't name its sha256): rerun ${SELF_SETUP} once`);
+    if (!newer(to.version, from.version)) return no(`${to.tag}'s updater (${to.version}) isn't newer than the running one (${from.version}): an updater is never replaced by an older or equal release's`);
+    const check = (tmp) => {
+      try {
+        o.exec(process.execPath, ['--check', tmp], { stdio: ['ignore', 'pipe', 'pipe'] });
+      } catch (e) {
+        throw new Error(`node --check failed: ${firstLine(e)}`);
+      }
+    };
+    // INVARIANT: the copy for a manual rollback is in place before the rename, the first change to the running updater.
+    const keep = () => placeFile(cur.bytes, o.prev, `.${path.basename(o.prev)}.tmp`, o);
+    try {
+      // node --check refuses an unknown extension, so the temp name ends in .cjs.
+      placeFile(src.bytes, o.dest, `.${path.basename(o.dest)}.new.cjs`, o, check, keep);
+    } catch (e) {
+      return no(`the new updater wasn't installed, the running one is as it was: ${firstLine(e)}`);
+    }
+    try {
+      saveJson(o.record, { version: to.version, sha256: to.sha256, tag: to.tag, commit: src.commit, source: 'release', at: iso(o.now()), previous: from }, 0o644);
+    } catch (e) {
+      return { state: 'updated', from, to, prev: o.prev, reason: `${o.record} couldn't be written (${firstLine(e)}): the next self-update is refused until ${SELF_SETUP} is rerun` };
+    }
+    return { state: 'updated', from, to, prev: o.prev };
+  } catch (e) {
+    return no(`couldn't replace the updater: ${firstLine(e)}`);
+  }
+}
+
+/** The version in package.json two levels above this checkout's updater (scripts/machine/), or null. */
+function checkoutVersion(src) {
+  try {
+    const v = JSON.parse(fs.readFileSync(path.join(path.dirname(src), '..', '..', 'package.json'), 'utf8')).version;
+    return semver(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * updates.sh, as root, before it installs this checkout's updater (this file): 3 to keep the installed one, when it is
+ * a release's updater newer than this checkout (its record names its sha256): never a downgrade, as for a self-update.
+ * Else 0, the installed one first copied to SELF_PREV (root's, 0755) when it is root's and differs from this one.
+ */
+function setupBefore(opts = {}) {
+  const o = { dest: SELF, prev: SELF_PREV, record: SELF_RECORD, owner: 0, chown: fs.chownSync, chmod: fs.chmodSync, inspect: readRootFile, src: __filename, print: (l) => process.stdout.write(`${l}\n`), ...opts };
+  const version = o.version === undefined ? checkoutVersion(o.src) : o.version;
+  const cur = o.inspect(o.dest);
+  if (rootFileProblem(cur, o.owner, o.dest) || cur.bytes.equals(fs.readFileSync(o.src))) return 0;
+  const rec = readSelfRecord(o.record, o.owner);
+  if (rec && rec.sha256 === sha256(cur.bytes) && newer(rec.version, version)) {
+    o.print(`kept the installed updater: ${rec.tag || rec.version}'s (${rec.version}), newer than this checkout's (${version || 'no version'}). To go back by hand: ${SELF_ROLLBACK}`);
+    return 3;
+  }
+  placeFile(cur.bytes, o.prev, `.${path.basename(o.prev)}.tmp`, o);
+  o.print(`kept the updater it replaces as ${o.prev} (sha256 ${sha256(cur.bytes).slice(0, 12)})`);
+  return 0;
+}
+
+/** updates.sh, as root, after it installed this checkout's updater: its version and sha256 recorded (kept when the record already names it). */
+function setupRecord(opts = {}) {
+  const o = { dest: SELF, record: SELF_RECORD, owner: 0, inspect: readRootFile, src: __filename, now: Date.now, ...opts };
+  const version = o.version === undefined ? checkoutVersion(o.src) : o.version;
+  const cur = o.inspect(o.dest);
+  const bad = rootFileProblem(cur, o.owner, o.dest);
+  if (bad) throw new Error(bad);
+  const hash = sha256(cur.bytes);
+  const rec = readSelfRecord(o.record, o.owner);
+  if (rec && rec.sha256 === hash) return;
+  // No version (a checkout without one): no record, so the updater never replaces itself until there is one.
+  if (!version) return void fs.rmSync(o.record, { force: true });
+  saveJson(o.record, { version, sha256: hash, source: 'updates.sh', at: iso(o.now()) }, 0o644);
 }
 
 /**
@@ -1139,6 +1401,8 @@ async function update(deps, cfg, seen = {}) {
       deps.log({ event: 'rolled_back', from: head, to: current, units, reason: failed.join('; '), sandbox, back: back.h, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
       return 'rolled_back';
     }
+    // The updater itself, now that the release is healthy: only from a release tag, verified again (#760).
+    const updater = release ? selfStep(deps, cfg, tag.tag, head) : null;
     try {
       for (const i of sandbox.passed) if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SANDBOX_INCIDENT, i);
       for (const i of sandbox.unconfirmed) {
@@ -1147,7 +1411,7 @@ async function update(deps, cfg, seen = {}) {
     } catch {
       // the installed line below is the record
     }
-    deps.log({ event: 'installed', from: current, to: head, units, ...(sandbox.passed.length || sandbox.unconfirmed.length ? { sandbox: { passed: sandbox.passed, unconfirmed: sandbox.unconfirmed } } : {}), ...(helpers.length ? { helpers } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
+    deps.log({ event: 'installed', from: current, to: head, units, ...(sandbox.passed.length || sandbox.unconfirmed.length ? { sandbox: { passed: sandbox.passed, unconfirmed: sandbox.unconfirmed } } : {}), ...(helpers.length ? { helpers } : {}), ...(updater ? { updater } : {}), ...(instances.length ? { migrated: migrated.map((m) => ({ instance: m.inst.name, applied: m.applied.length })) } : {}), ...(cfg.canary ? { canary: 'pending' } : {}) });
     if (!cfg.canary) return 'installed';
     // The install stands only once the canary passes: until then the backups and the old engine are kept to go back to.
     const filed = startCanary(deps, cfg, 'update', { from: current, to: head, migrated: migrated.map((m) => ({ inst: m.inst, made: m.made })) });
@@ -1179,6 +1443,19 @@ async function update(deps, cfg, seen = {}) {
   deps.hold({ sha: head, at, failed: down });
   deps.log({ event: 'rolled_back', from: head, to: current, units, failed: down, back: back.h, diagnosis, held: true, ...hb, ...(migrated.length ? { restored: migrated.map((m) => m.inst.name), unrestored } : {}) });
   return 'rolled_back';
+}
+
+/** deps.selfUpdate after a healthy release install, its result for the log (or null without one). Never throws. */
+function selfStep(deps, cfg, tag, sha) {
+  if (typeof deps.selfUpdate !== 'function') return null;
+  let r;
+  try {
+    r = deps.selfUpdate(cfg.allowed_signers || ALLOWED_SIGNERS, tag, sha);
+  } catch (e) {
+    r = { state: 'refused', reason: `couldn't replace the updater: ${firstLine(e)}` };
+  }
+  if (r && r.state === 'refused' && typeof deps.warn === 'function') deps.warn(`the updater wasn't replaced: ${r.reason}`);
+  return r;
 }
 
 /** The worklane-*.service units an update restarts, and the instances among them (each one's user and environment). */
@@ -1587,6 +1864,10 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     syncHelpers: (sha) => syncHelpers(path.join(OPT, sha)),
     installedVersion: () => (readJson(path.join(OPT, 'current', 'package.json')) || {}).version || null,
     verifyRelease: (repoUrl, tag, signers) => verifyRelease(repoUrl, tag, signers, (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 })),
+    selfUpdate: (signers, tag, sha) => {
+      const src = verifiedUpdater(signers, tag, sha, (file, args) => execFileSync(file, args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000, maxBuffer: 16 * 1024 * 1024 }));
+      return src.ok ? syncSelf(src) : { state: 'refused', reason: src.reason };
+    },
     sandboxStatus: (inst, sha) => {
       try {
         return parseSandbox(execFileSync(...splitCmd(sandboxCommand(inst, sha)), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 }));
@@ -1658,5 +1939,6 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
+Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
