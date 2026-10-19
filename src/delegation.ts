@@ -10,8 +10,9 @@
 import { LOCKED_CATEGORIES, ODD_PATH_CATEGORIES } from './review.js';
 
 /**
- * Never loosened: the default L3 categories, CI config and dependencies (design-level), a path with a control
- * character or one that isn't valid UTF-8, the locked ones (review.ts). The repo's own L3 too.
+ * Never loosened: the default L3 categories, CI config and dependencies (design-level), the odd paths (review.ts
+ * ODD_PATH_CATEGORIES: a control character, not valid UTF-8, an invisible or format character, a top-level name that
+ * isn't ASCII), the locked ones (review.ts). The repo's own L3 too.
  */
 export const NEVER_LOOSEN = ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data', 'ci-config', 'dependency', ...ODD_PATH_CATEGORIES] as const;
 

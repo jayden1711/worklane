@@ -4,7 +4,7 @@
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
-import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, hasControlCharacter, isNonUtf8Path, LOCKED_CATEGORIES, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, INVISIBLE_CHARACTER_PATH, isNonUtf8Path, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -147,25 +147,30 @@ const CATEGORY_WORDS: Record<string, string> = {
   'deletes-data': 'deletes data',
   [CONTROL_CHARACTER_PATH]: 'has a path with a control character',
   [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
+  [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
+  [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
 };
 
 /**
- * A path as a reason shows it: quoted (JSON) when it holds a control character, so a newline can't start a line of its
- * own, or a U+FFFD (a name that isn't valid UTF-8), so it reads as the odd name it is.
+ * A path as a reason shows it: escaped (review.ts escapedPath) when it holds an invisible or format character or its
+ * top-level name isn't ASCII, so the character shows as what it is; quoted (JSON) when it holds a control character,
+ * so a newline can't start a line of its own, or a U+FFFD (a name that isn't valid UTF-8), so it reads as the odd name
+ * it is.
  */
-const shown = (p: string) => (hasControlCharacter(p) || isNonUtf8Path(p) ? JSON.stringify(p) : p);
+const shown = (p: string) => (hasInvisibleCharacter(p) || hasNonAsciiTopLevel(p) ? escapedPath(p) : hasControlCharacter(p) || isNonUtf8Path(p) ? JSON.stringify(p) : p);
 const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
 /**
- * The floor: the locked categories, a path with a control character and a path that isn't valid UTF-8 (review.ts),
- * whatever any list says.
+ * The floor: the locked categories, and a path with a control character, one that isn't valid UTF-8, one with an
+ * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), whatever
+ * any list says.
  */
 const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES];
 
 /**
  * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;
- * no review.yaml removes it), a path with a control character or one that isn't valid UTF-8, and the repo's
- * merge.wait_categories.
+ * no review.yaml removes it), the odd paths (review.ts ODD_PATH_CATEGORIES: a control character, not valid UTF-8, an
+ * invisible or format character, a top-level name that isn't ASCII), and the repo's merge.wait_categories.
  */
 export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
   return [...new Set([...review.levels.L3_human.when, 'ci-config', ...FLOOR, ...review.merge.wait_categories])];

@@ -42,8 +42,38 @@ export const NON_UTF8_PATH = 'non-utf8-path';
  */
 export const isNonUtf8Path = (path: string): boolean => path.includes('�');
 
+/**
+ * A changed path with an invisible or format character in it: a bidi override or isolate (`docs/<U+202E>dm.exe.md`
+ * reads as `docs/md.exe.md`), a zero-width character, a soft hyphen, or any other character that shows as nothing or
+ * reorders what is around it. Such a name can read as another in a file list or a hold reason, so the change is
+ * always L3 ("path with an invisible or format character") and never auto-merges (merge-policy.ts waitCategoriesOf),
+ * whatever review.yaml says (#683, the owner's call).
+ */
+export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
+/**
+ * Whether a path holds a Unicode format character (General Category Cf: bidi controls, zero-width characters, the
+ * soft hyphen, ...) or a default-ignorable code point (Default_Ignorable_Code_Point: Cf's invisible kin outside it,
+ * like U+034F or the Hangul fillers, and the variation selectors). Both are Unicode properties, not a hand list.
+ */
+export const hasInvisibleCharacter = (path: string): boolean => /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(path);
+
+/**
+ * A changed path whose first segment (its top-level directory, or a file at the root) has a character outside ASCII:
+ * a look-alike of a real one, like Cyrillic `ѕrc/` beside `src/`. Further down, a name like `docs/naïve.md` is an
+ * ordinary name; at the top it can pass for a module the reader trusts. Always L3 ("top-level name that isn't ASCII")
+ * and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683, the owner's call).
+ */
+export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
+export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.test(path.split('/')[0]!);
+
+/**
+ * A path as a reason shows it when it can read as another: JSON-quoted with every character outside printable ASCII
+ * written as \uXXXX, so an invisible or look-alike character shows as what it is (`"ѕrc/x.ts"`).
+ */
+export const escapedPath = (path: string): string => JSON.stringify(path).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
-export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH];
+export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
 
 /**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
@@ -220,6 +250,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     if ((f.addedLines ?? []).some((l) => /\b(DROP\s+(TABLE|COLUMN|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/i.test(l))) add('deletes-data', f.path);
     if (hasControlCharacter(f.path)) add(CONTROL_CHARACTER_PATH, f.path);
     if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
+    if (hasInvisibleCharacter(f.path)) add(INVISIBLE_CHARACTER_PATH, f.path);
+    if (hasNonAsciiTopLevel(f.path)) add(NON_ASCII_TOP_LEVEL_PATH, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -255,6 +287,11 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
   const notUtf8 = categories[NON_UTF8_PATH] ?? [];
   if (notUtf8.length) raise('L3', `path that isn't valid UTF-8: ${notUtf8.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
+  // Escaped (\uXXXX), so the reason shows the character instead of hiding it or reordering the line around it.
+  const invisible = categories[INVISIBLE_CHARACTER_PATH] ?? [];
+  if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(escapedPath).join(', ')}`);
+  const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
+  if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(escapedPath).join(', ')}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

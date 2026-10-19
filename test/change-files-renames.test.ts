@@ -20,7 +20,7 @@ import { isProtectedPath } from '../src/guardrails/engine.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 // A namespace import, so the file still loads against a merge-base.ts without the stray check's helpers (fail-without).
 import * as mergeBase from '../src/merge-base.js';
-import { mergeDecision } from '../src/merge-policy.js';
+import { mergeDecision, waitCategoriesOf } from '../src/merge-policy.js';
 import { riskClassOf, sizeFiles, sizeVerdict } from '../src/pr-rules.js';
 import { computeLevel, type ChangeFile, type LevelInput } from '../src/review.js';
 import { repoRoot } from './helpers.js';
@@ -428,6 +428,120 @@ test('conflict fix: a resolver that drops a file the merge brought in cleanly is
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '--no-edit');
   assert.deepEqual(mergeBase.resolutionStrays(dir, ['x.ts'], merged.otherFiles, staged), ['0:lib/x.ts']);
+});
+
+// ---- A name that can read as another always waits (the owner's call); an ordinary odd name gets normal review
+
+/**
+ * Review.yaml files that would let a change through if anything could: the engine's own, one with no L3 category,
+ * and one that empties the look-alike categories and calls every path docs.
+ */
+const lenientReviews = () => [
+  ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8'))),
+  ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } }),
+  ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } }, categories: { 'invisible-character-path': [], 'non-ascii-top-level-path': [], docs: ['**'] } }),
+];
+
+/** What a scratch repo starts with: a top-level directory of each kind the cases below touch. */
+const START = { 'README.md': '# x\n', 'docs/guide.md': '# guide\n\nSome text.\n', 'web/app.ts': 'export const app = 1;\n', 'lib/a.ts': 'export const a = 1;\n', 'src/app.ts': 'export const s = 1;\n' };
+
+/**
+ * base..head as merge-flow's mergeDecisionFor reads and judges it, under each review.yaml above, with an approving
+ * verdict: the paths, the level, the odd-name reason, the risk class, whether it merges itself, and its high-risk
+ * reasons.
+ */
+function judgeRange(dir: string, base: string, head: string) {
+  const files = changeFiles(dir, base, head);
+  const paths = files.map((f) => f.path);
+  // merge-flow's new-top-level reading (a design hold): a top-level directory the base doesn't have.
+  const newTopLevel = [...new Set(paths.map((p) => p.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => spawnSync('git', ['cat-file', '-e', `${base}:${d}`], { cwd: dir }).status !== 0).map((d) => `${d}/`);
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const, design_change: false };
+  return lenientReviews().map((c) => {
+    const lvl = level(files, c);
+    const waitCategories = waitCategoriesOf(c);
+    const lines = files.reduce((n, f) => n + f.added + f.removed, 0);
+    const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories, limits: { max_lines: 800, max_files: 20 }, lines, files: files.length, verdict, newTopLevel, ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
+    const reason = lvl.reasons.find((r) => r.startsWith('path with an invisible') || r.startsWith('top-level name'));
+    return { paths, level: lvl.level, reason, cls: riskClassOf({ paths, level: lvl, waitCategories }).cls, auto: merge.auto, highRisk: merge.reasons.filter((r) => r.startsWith('high-risk: ')) };
+  });
+}
+
+/** A scratch repo holding START and `base`, then one commit adding `add`, judged (judgeRange). */
+function judgeAdd(add: Record<string, string>, base: Record<string, string> = {}) {
+  const r = repo({ ...START, ...base });
+  write(r.dir, add);
+  return judgeRange(r.dir, r.base, commit(r.dir, 'add'));
+}
+
+/** Each review.yaml above on a change the floor holds: L3 for `reason`, protected, waits, high-risk on `category`. */
+const held = (paths: string[], reason: string, category: string, shown: string) =>
+  Array(3).fill({ paths, level: 'L3', reason, cls: 'protected', auto: false, highRisk: [`high-risk: ${category} (${shown})`] });
+/** [level, risk class, merges itself] under each review.yaml above. */
+const brief = (r: ReturnType<typeof judgeRange>) => r.map((x) => [x.level, x.cls, x.auto]);
+
+test('a name with a bidi override or isolate is L3 "path with an invisible or format character" and never merges itself; its plain twin is as before', () => {
+  // U+202E RIGHT-TO-LEFT OVERRIDE: docs/read<U+202E>dm.txt shows as docs/readtxt.md.
+  assert.deepEqual(judgeAdd({ 'docs/read\u202edm.txt': 'notes\n' }), held(['docs/read\u202edm.txt'], 'path with an invisible or format character: "docs/read\\u202edm.txt"', 'invisible-character-path', '"docs/read\\u202edm.txt"'));
+  // U+2067 RIGHT-TO-LEFT ISOLATE.
+  assert.deepEqual(judgeAdd({ 'web/a\u2067b.ts': 'export {};\n' }), held(['web/a\u2067b.ts'], 'path with an invisible or format character: "web/a\\u2067b.ts"', 'invisible-character-path', '"web/a\\u2067b.ts"'));
+  // The plain twins: as on main (docs: L0, merges itself; web: L1, merges itself after the evaluator).
+  assert.deepEqual(brief(judgeAdd({ 'docs/readdm.txt': 'notes\n' })), Array(3).fill(['L0', 'docs-only', true]));
+  assert.deepEqual(brief(judgeAdd({ 'docs/ok.md': '# ok\n' })), Array(3).fill(['L0', 'docs-only', true]));
+  assert.deepEqual(brief(judgeAdd({ 'web/ab.ts': 'export {};\n' })), [['L1', 'logic', true], ['L1', 'logic', true], ['L0', 'logic', true]]);
+});
+
+test('a name with a zero-width space is L3 "path with an invisible or format character" and never merges itself; its plain twin is as before', () => {
+  // U+200B ZERO WIDTH SPACE: web/in<U+200B>dex.ts shows as web/index.ts.
+  assert.deepEqual(judgeAdd({ 'web/in\u200bdex.ts': 'export {};\n' }), held(['web/in\u200bdex.ts'], 'path with an invisible or format character: "web/in\\u200bdex.ts"', 'invisible-character-path', '"web/in\\u200bdex.ts"'));
+  assert.deepEqual(brief(judgeAdd({ 'web/index.ts': 'export {};\n' })), [['L1', 'logic', true], ['L1', 'logic', true], ['L0', 'logic', true]]);
+});
+
+test('a name with another format character (Cf) or a default-ignorable code point is L3 and never merges itself; the test is the Unicode properties, not a hand list', () => {
+  // U+2062 INVISIBLE TIMES (Cf, outside the bidi and zero-width ranges).
+  assert.deepEqual(judgeAdd({ 'lib/a\u2062b.ts': 'export {};\n' }), held(['lib/a\u2062b.ts'], 'path with an invisible or format character: "lib/a\\u2062b.ts"', 'invisible-character-path', '"lib/a\\u2062b.ts"'));
+  assert.deepEqual(brief(judgeAdd({ 'lib/ab.ts': 'export {};\n' })), [['L1', 'logic', true], ['L1', 'logic', true], ['L0', 'logic', true]]);
+  // Every character the owner named, and default-ignorables outside Cf (U+034F, U+3164 Hangul filler, U+FE0F): each
+  // makes a docs path L3. Accented and Cyrillic letters below the top level don't.
+  const named = [0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0x00ad, 0x0600, 0x2062, 0xe0001, 0x034f, 0x3164, 0xfe0f];
+  const lvl = (p: string) => level([{ path: p, added: 1, removed: 0 }]).level;
+  assert.deepEqual(named.map((c) => [c.toString(16), lvl(`docs/a${String.fromCodePoint(c)}b.md`)]), named.map((c) => [c.toString(16), 'L3']));
+  assert.deepEqual(['docs/caf\u00e9.md', 'docs/\u0455rc.md', 'docs/ab.md'].map(lvl), ['L0', 'L0', 'L0']);
+});
+
+test('a top-level directory whose name isn\'t ASCII (Cyrillic \u0455rc/) is L3 "top-level name that isn\'t ASCII" and never merges itself; the Latin twin is as before', () => {
+  const want = held(['\u0455rc/x.ts'], 'top-level name that isn\'t ASCII: "\\u0455rc/x.ts"', 'non-ascii-top-level-path', '"\\u0455rc/x.ts"');
+  assert.deepEqual(judgeAdd({ '\u0455rc/x.ts': 'export {};\n' }), want);
+  // Already at base, so no "new top-level module" design hold: the floor alone holds it.
+  assert.deepEqual(judgeAdd({ '\u0455rc/x.ts': 'export {};\n' }, { '\u0455rc/old.ts': 'export {};\n' }), want);
+  // The Latin twin: as on main (the engine's own src/ waits as engine code; elsewhere src/ is app code).
+  assert.deepEqual(brief(judgeAdd({ 'src/x.ts': 'export {};\n' })), [['L3', 'protected', false], ['L1', 'logic', true], ['L0', 'logic', true]]);
+  // And review.yaml can loosen neither look-alike category.
+  assert.deepEqual(loosenedProblems({ levels: { L3_human: { when: [] } }, merge: { loosened: ['invisible-character-path', 'non-ascii-top-level-path'] } }), [
+    'merge.loosened: invisible-character-path is high-risk or a safety floor and can never be loosened',
+    'merge.loosened: non-ascii-top-level-path is high-risk or a safety floor and can never be loosened',
+  ]);
+});
+
+test('a move into a top-level directory whose name isn\'t ASCII is L3 and never merges itself; the same move into a Latin-named one is as before', () => {
+  const move = (to: string) => {
+    const { dir, base } = repo(START);
+    return judgeRange(dir, base, renameWithEdit(dir, 'docs/guide.md', to, (t) => t));
+  };
+  // U+0501 CYRILLIC SMALL LETTER KOMI DE: \u0501ocs/ shows as docs/.
+  assert.deepEqual(move('\u0501ocs/guide.md'), held(['docs/guide.md', '\u0501ocs/guide.md'], 'top-level name that isn\'t ASCII: "\\u0501ocs/guide.md"', 'non-ascii-top-level-path', '"\\u0501ocs/guide.md"'));
+  assert.deepEqual(brief(move('docs-old/guide.md')), Array(3).fill(['L0', 'docs-only', false]), 'a new top-level module: the design hold, as on main');
+});
+
+test('ordinary odd names get normal review: an accent below the top level, a quote, a backslash, a move between top-level directories that exist', { skip: process.platform === 'win32' && 'a quote or backslash in a file name' }, () => {
+  // On main each of these waited by accident: git C-quoted the name (or wrote the move as {docs => web}/x.md), and
+  // merge-flow took the quoted first segment for a new top-level module. The owner accepted these as normal.
+  const each = (r: ReturnType<typeof judgeRange>) => r.map((x) => ({ reason: x.reason, highRisk: x.highRisk, auto: x.auto }));
+  const normal = Array(3).fill({ reason: undefined, highRisk: [], auto: true });
+  for (const name of ['docs/na\u00efve.md', 'docs/caf\u00e9.md', 'web/say"hi".ts', 'lib/back\\slash.ts']) assert.deepEqual(each(judgeAdd({ [name]: 'x\n' })), normal, name);
+  const { dir, base } = repo(START);
+  const head = renameWithEdit(dir, 'docs/guide.md', 'web/guide.md', (t) => t);
+  assert.deepEqual(each(judgeRange(dir, base, head)), normal);
+  assert.deepEqual(brief(judgeRange(dir, base, head)), Array(3).fill(['L0', 'docs-only', true]));
 });
 
 // ---- One way to list changed names or counts
