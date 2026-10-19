@@ -222,7 +222,7 @@ test('installed-engine-config: a config file the installed engine never reads is
   f.done();
 });
 
-test("the workflow's step runs the base's copy of the check: a PR that rewrites it to pass is still refused", { skip }, () => {
+test("the workflow's step runs the base's copy of the check's script: a PR that rewrites the script to pass is still refused", { skip }, () => {
   const f = fixture();
   const steps = (parse(workflow()) as { jobs: Record<string, { steps: { run?: string }[] }> }).jobs['installed-engine-config']!.steps;
   const step = steps.find((s) => s.run?.includes('installed-engine-config.mjs'))!.run!;
@@ -238,7 +238,7 @@ test("the workflow's step runs the base's copy of the check: a PR that rewrites 
   f.done();
 });
 
-test('the workflow runs the check on every pull request that changes .worklane/, from the base, with no skip', () => {
+test("the workflow runs the check on every pull request that changes .worklane/, with the base's script and no skip", () => {
   const text = workflow();
   const wf = parse(text) as { on: Record<string, Record<string, unknown>>; permissions: Record<string, string>; jobs: Record<string, { if?: unknown; steps: { run?: string; if?: unknown }[] }> };
   assert.deepEqual(Object.keys(wf.on), ['pull_request']);

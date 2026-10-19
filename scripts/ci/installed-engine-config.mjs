@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // A pull request that changes .worklane/ (#810): its config, as it would be on main, is loaded with the engine this
 // repo's machines run (the release scripts/bootstrap.sh pins), not only with the PR's own engine. A key the installed
-// engine refuses fails here, naming the key and the engine version, instead of stopping every agent once merged.
+// engine refuses fails this check, naming the key and the engine version. The check blocks a merge only once the owner
+// makes it required (.github/workflows/installed-engine-config.yml); until then it is advisory.
 //
 //   node scripts/ci/installed-engine-config.mjs --base <rev> --head <rev>      (from the repo root; CI: HEAD^1 HEAD)
 //
