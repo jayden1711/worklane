@@ -1,31 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
 import { slotsConfigPath, slotsDirFor as machineSlotsDir } from '../src/os/index.js';
 import { devSlotsPath } from '../src/os/system-paths.js';
-import { makeSlotDir, makeSlotFileDir, removeSlotFile, slotFile, writeSlotFile, type SlotPath, type SlotPathLike } from '../src/slot-file.js';
+import { readSlotFile, slotFile, type SlotPath, type SlotPathLike } from '../src/slot-file.js';
 
-/** Whether slot path `p` names the file `file`: written through it, it shows up there (and is removed again). */
+/**
+ * Whether slot path `p` names the file `file`: a random text written to `file` with plain fs is read back through
+ * `p`, read-only (then removed). Nothing is written through `p`: if it pointed elsewhere, nothing lands there (rule A,
+ * #806 round 7). A slot path has no identity or text to compare (#806 round 6).
+ */
 function namesFile(p: SlotPathLike, file: string): boolean {
-  makeSlotFileDir(p);
-  writeSlotFile(p, 'names');
+  const text = `names ${randomBytes(6).toString('hex')}`;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, text);
   try {
-    return existsSync(file) && readFileSync(file, 'utf8') === 'names';
+    return readSlotFile(p) === text;
+  } catch {
+    return false;
   } finally {
-    removeSlotFile(p, { force: true });
+    rmSync(file, { force: true });
   }
 }
 
-/** Whether slot path `p` names the directory `dir` (a slot path has no identity or text to compare: #806 round 6). */
-function names(p: SlotPath, dir: string): boolean {
-  makeSlotDir(p);
-  return namesFile(slotFile(p, `.names-${process.pid}`), join(dir, `.names-${process.pid}`));
-}
+/** Whether slot path `p` names the directory `dir`. */
+const names = (p: SlotPath, dir: string): boolean => namesFile(slotFile(p, `.names-${process.pid}`), join(dir, `.names-${process.pid}`));
 import { repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
 

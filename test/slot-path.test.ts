@@ -23,6 +23,7 @@
 // - the value at run time: fs, path.join, String() and a template literal refuse it, nothing prints its path, an
 //   error from a slot file names no path, and a forged one (its prototype, its constructor, a Proxy) is refused.
 import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, isBuiltin } from 'node:module';
 import { basename, dirname, join, posix, relative, sep } from 'node:path';
@@ -986,9 +987,11 @@ test("run time: the machine's own system slot dir is still the system one: root'
     mkdirSync(os.SYSTEM_SLOTS.dir, { recursive: true });
     const d = os.slotsDir();
     assert.equal(os.slotsDir(), d, 'slotsDir() is one value while the slot dir stays put');
-    // Where it points: a marker written through it is in SYSTEM_SLOTS.dir (a slot path has nothing else to compare).
-    sf.writeSlotFile(sf.slotFile(d, '.p3'), '');
-    assert.ok(existsSync(join(os.SYSTEM_SLOTS.dir, '.p3')), 'slotsDir() is the machine system dir');
+    // Where it points: a marker made in SYSTEM_SLOTS.dir with plain fs is seen through it, read-only (a slot path has
+    // nothing else to compare; nothing is written through it: rule A, #806 round 7).
+    const marker = `.p3-${randomBytes(6).toString('hex')}`;
+    writeFileSync(join(os.SYSTEM_SLOTS.dir, marker), '');
+    assert.ok(sf.slotFileExists(sf.slotFile(d, marker)), 'slotsDir() is the machine system dir');
     assert.equal(os.updateDrainPath(), os.UPDATE_DRAIN_FILE);
     assert.equal(typeof os.slotsConfigPath(), 'object', 'no system config yet: config.json in the slot dir');
     mkdirSync(dirname(os.SYSTEM_SLOTS.config), { recursive: true });

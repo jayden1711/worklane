@@ -18,18 +18,20 @@ import { LOCAL_DASHBOARD_PORT } from '../src/dashboard.js';
 import { machineInitDir } from '../src/init.js';
 import { instancesDir } from '../src/instance.js';
 import { childEnv, slotsDir, stateDir } from '../src/os/index.js';
-import { makeSlotDir, slotFile, writeSlotFile, type SlotPath } from '../src/slot-file.js';
+import { slotFile, slotFileExists, type SlotPath } from '../src/slot-file.js';
 
 /**
- * Whether slot path `p` names the directory `dir`: a marker written through it shows up there. A slot path has no
- * identity or text to compare (#772, #806 round 6), so this is how a test tells where one points.
+ * Whether slot path `p` names the directory `dir`: a marker made in `dir` with plain fs (a random name, so nothing
+ * stale answers) is seen through `p`, read-only. A slot path has no identity or text to compare (#772, #806 round 6).
+ * Nothing is written through `p`: if it pointed somewhere else (the machine's own slot dir, say), this writes nothing
+ * there (rule A, #806 round 7).
  */
 function names(p: SlotPath, dir: string): boolean {
   const marker = `.names-${randomBytes(6).toString('hex')}`;
-  makeSlotDir(p);
-  writeSlotFile(slotFile(p, marker), '');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, marker), '');
   try {
-    return existsSync(join(dir, marker));
+    return slotFileExists(slotFile(p, marker));
   } finally {
     rmSync(join(dir, marker), { force: true });
   }
@@ -230,17 +232,18 @@ test('the engine started outside a test run is never one: no sign, no mark on wh
   // A service's environment: built from scratch, nothing of a test run in it (as `up` writes one).
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: live.home, AGENT_SLOTS_DIR: live.slots };
   const dist = (p: string) => JSON.stringify(pathToFileURL(join(repoRoot, 'dist', 'src', p)).href);
+  // slotsDir() is a slot path (#772) with no identity or text to compare. A marker made here in the expected dir, under a
+  // random name, is looked for through it, read-only: the child (outside a test run, with nothing to refuse it) writes
+  // nothing where its slotsDir() points (rule A, #806 round 7).
+  const marker = `.where-${randomBytes(6).toString('hex')}`;
+  writeFileSync(join(live.slots, marker), '');
   const probe = fixtureTest(
     'engine.mjs',
     [
       `import { childEnv, slotsDir } from ${dist('os/index.js')};`,
-      `import { slotFile, writeSlotFile } from ${dist('slot-file.js')};`,
-      "import { existsSync } from 'node:fs';",
-      "import { join } from 'node:path';",
+      `import { slotFile, slotFileExists } from ${dist('slot-file.js')};`,
       `import { testRunSign, TEST_RUN_VAR } from ${dist('os/system-paths.js')};`,
-      // slotsDir() is a slot path (#772) with no identity or text to compare: a marker written through it shows where.
-      "writeSlotFile(slotFile(slotsDir(), 'where.marker'), '');",
-      `console.log(JSON.stringify({ sign: testRunSign(), own: process.env[TEST_RUN_VAR] ?? null, child: childEnv()[TEST_RUN_VAR] ?? null, slots: existsSync(join(${JSON.stringify(live.slots)}, 'where.marker')) ? ${JSON.stringify(live.slots)} : 'another' }));`,
+      `console.log(JSON.stringify({ sign: testRunSign(), own: process.env[TEST_RUN_VAR] ?? null, child: childEnv()[TEST_RUN_VAR] ?? null, slots: slotFileExists(slotFile(slotsDir(), ${JSON.stringify(marker)})) ? ${JSON.stringify(live.slots)} : 'another' }));`,
     ].join('\n'),
   );
   const r = spawnSync(process.execPath, [probe], { cwd: live.home, env, encoding: 'utf8' });
