@@ -259,6 +259,56 @@ test("auto_merge on is root's alone (#770, the owner's decision): the dashboard 
   assert.throws(() => ownPolicy('am-own', n.deps), /auto_merge: true.*--accept-loose/);
 });
 
+test("auto_merge on is never the dashboard's on ANY install: an unrecorded policy (laptop, cloud, VM, or a machine not taken over) refuses it too, naming the admin's route, writing and logging nothing; off is still written, and the form offers only off (#770)", { skip }, () => {
+  const m = machineInstance('unrec', POLICY.replace('auto_merge: false', 'auto_merge: true'));
+  const events = join(m.T, 'events.db');
+  const changed = () => (existsSync(events) ? new EventLog(events).read(0, ['settings.changed']).length : 0);
+  // Its coordinator's file, read as before (no record); turning auto_merge off is written there, as before.
+  assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: events, by: 'olive', machine: false }), [{ key: 'auto_merge', from: true, to: false }]);
+  assert.match(readFileSync(m.file, 'utf8'), /auto_merge: false/);
+  assert.equal(changed(), 1);
+  const off = readFileSync(m.file, 'utf8');
+  // On: refused, nothing written or logged. A laptop, cloud or VM install: an admin edits the file (or the Helm value).
+  assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: events, by: 'olive', machine: false }), new RegExp(`auto_merge true: that is an admin's alone, never this form's \\(edit ${m.file.replace(/[.]/g, '\\.')} \\(auto_merge: true\\), or its Helm value\\); here it may only be false`));
+  // A machine install not taken over yet: root takes it over, then sets it.
+  assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: events, by: 'olive', machine: true }), new RegExp(`\\(sudo ${BRAND.cli} policy own unrec, then sudo ${BRAND.cli} policy set unrec auto_merge on\\)`));
+  assert.equal(readFileSync(m.file, 'utf8'), off, 'nothing written');
+  assert.equal(changed(), 1, 'nothing logged');
+  // The form offers only off, naming the route.
+  const f = policyForm(m.file, undefined, true).fields.find((x) => x.key === 'auto_merge')!;
+  assert.deepEqual([f.only, f.root], [false, `sudo ${BRAND.cli} policy own unrec, then sudo ${BRAND.cli} policy set unrec auto_merge on`]);
+  // land_mode and main_watch stay as they were on an unrecorded policy (the brief: auto_merge only).
+  assert.equal(policyForm(m.file, undefined, true).fields.find((x) => x.key === 'land_mode')!.only, undefined);
+});
+
+test("turning auto_merge off (and land_mode back to pr, main_watch back to auto) works on a sudo older than 1.9.10 too: listed whole in sudoers, so the dashboard asks and the helper runs it; anything else is still refused up front (#770)", { skip }, () => {
+  const m = machineInstance('oldoff');
+  ownPolicy('oldoff', m.deps);
+  // An admin's loosenings, at a root shell.
+  for (const [k, v] of [['auto_merge', 'on'], ['land_mode', 'direct'], ['main_watch', 'off']] as const) setPolicy('oldoff', k, v, null, m.deps);
+  const rules = join(m.T, 'helper-rules.json');
+  writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'] }));
+  const log = new EventLog(':memory:');
+  const request = (args: string[]) => requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id;
+  asRoot(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: false, land_mode: 'pr', main_watch: 'auto' }, eventsDb: join(m.T, 'e.db'), by: 'olive', request, helperRulesFile: rules }));
+  assert.deepEqual(machineRequests(log.read(0)).map((r) => r.args), [['set-policy', 'land_mode', 'pr'], ['set-policy', 'auto_merge', 'off'], ['set-policy', 'main_watch', 'auto']]);
+  // The coordinator's next tick, through the helper (as root's sudo lets it on that sudo: the literal rules).
+  const calls: string[][] = [];
+  assert.equal(runMachineRequests({ log, instance: 'oldoff', exec: helperStandIn('oldoff', m.deps, calls) }), 3);
+  const p = asRoot(() => readPolicy(m.file).policy)!;
+  assert.deepEqual([p.auto_merge, p.land_mode, p.main_watch], [false, 'pr', 'auto']);
+  // A change only the pattern rule takes is still refused up front, nothing asked.
+  let asked = 0;
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 60 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked), helperRulesFile: rules })), /older than 1\.9\.10/);
+  assert.equal(asked, 0);
+  // The machine CLI turns it off too: an admin at a root shell, or a coordinator through sudo.
+  setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
+  assert.equal(quietly(() => policyCommand('set', ['oldoff', 'auto_merge', 'off'], m.deps, true)).code, 0);
+  assert.equal(asRoot(() => readPolicy(m.file).policy)!.auto_merge, false);
+  setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
+  assert.deepEqual(setPolicy('oldoff', 'auto_merge', 'off', 'wl-oldoff', m.deps), { key: 'auto_merge', from: true, to: false });
+});
+
 test("on a sudo older than 1.9.10 (helper-rules.json leaves set-policy out), Settings and the Policy form refuse up front, naming the root command, and record no request", { skip }, () => {
   const m = machineInstance('oldsudo');
   ownPolicy('oldsudo', m.deps);

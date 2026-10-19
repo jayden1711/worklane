@@ -39,7 +39,8 @@ export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: F
     <div className="space-y-3" data-testid="policy-form">
       <ul className="space-y-2.5">
         {p.fields.map((f) => {
-          // A root policy (f.only): only toward its one value here, so at that value already nothing can change.
+          // f.only (a root policy, and auto_merge on every install): only toward its one value here, so at that value
+          // already nothing can change.
           const locked = f.only !== undefined && f.value === f.only;
           const choices = f.only !== undefined ? [...new Set([String(f.value), String(f.only)])] : f.choices!;
           return (
@@ -64,7 +65,7 @@ export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: F
               <p className="text-[12px] text-ink-3">{f.why}</p>
               {f.root && (
                 <p className="break-words text-[12px] text-ink-3" data-testid="policy-root-only">
-                  Here only {show(f.only)}; anything else is root's, at a root shell: <code className="font-mono text-[11.5px]">{f.root}</code>
+                  Here only {show(f.only)}; anything else is an admin's: <code className="font-mono text-[11.5px]">{f.root}</code>
                 </p>
               )}
             </li>

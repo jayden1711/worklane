@@ -2,14 +2,27 @@
 // doesn't: each change is checked against the schema, the machine's limits and the repo's config before it is
 // shown, then written only after an owner confirms that exact change. Isolation keys (sandbox, allow_same_user,
 // lanes, allowlists) are never editable here: loosening them is a root-shell decision.
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { parseDocument } from 'yaml';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { policyViolations, PolicyFile } from './instance.js';
+import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { decodePolicyValue, encodePolicyValue, HELPER_ONLY, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+
+/**
+ * Who sets `key` to `arg` when this form may not, and how: on a root policy, root's `policy set`; on a machine
+ * instance not taken over yet (the machine helper is installed), root takes it over first; elsewhere (a laptop, cloud
+ * or VM install) an admin edits policy.yaml, or its Helm value.
+ */
+function adminRoute(path: string, key: string, arg: string, root: boolean, machine: boolean): string {
+  const instance = policyInstance(path);
+  if (root) return policySetCommand(instance, key, arg);
+  if (machine) return `${ownCommand(instance)}, then ${policySetCommand(instance, key, arg)}`;
+  return `edit ${path} (${key}: ${String(decodePolicyValue(key, arg))}), or its Helm value`;
+}
 
 export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
@@ -24,8 +37,9 @@ export interface PolicyField {
   choices?: string[];
   why: string;
   /**
-   * A root policy.yaml (src/policy-gate.ts): the one value this form may set this key to (HELPER_ONLY: its tightening),
-   * and the root shell command for any other. The form offers nothing else.
+   * The one value this form may set this key to (HELPER_ONLY: its tightening), on a root policy.yaml
+   * (src/policy-gate.ts), and for auto_merge on every install; and the admin's route for any other (adminRoute). The
+   * form offers nothing else.
    */
   only?: number | boolean | string;
   root?: string;
@@ -51,7 +65,7 @@ function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: Po
   return { doc, policy: r.data, root: !!checked };
 }
 
-export function policyForm(path: string, limitsPath?: string): PolicyFormView {
+export function policyForm(path: string, limitsPath?: string, machine = existsSync(MACHINE_HELPER)): PolicyFormView {
   let policy: PolicyFile;
   let root: boolean;
   let limits;
@@ -61,12 +75,13 @@ export function policyForm(path: string, limitsPath?: string): PolicyFormView {
   } catch (e) {
     return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable' };
   }
-  // A root policy: a HELPER_ONLY key only toward its one value here; any other is root's, named as its command.
+  // A HELPER_ONLY key only toward its one value here, on a root policy; auto_merge (DASHBOARD_TIGHTEN_ONLY) on every
+  // install. Any other value is an admin's, named as its route.
   const tightenOnly = (f: PolicyField): PolicyField => {
-    if (!root || !Object.hasOwn(HELPER_ONLY, f.key)) return f;
+    if (!Object.hasOwn(HELPER_ONLY, f.key) || !(root || DASHBOARD_TIGHTEN_ONLY.includes(f.key))) return f;
     const only = decodePolicyValue(f.key, HELPER_ONLY[f.key]!) as PolicyField['value'];
     const other = f.kind === 'boolean' ? !only : f.choices!.find((c) => c !== only)!;
-    return { ...f, only, root: policySetCommand(policyInstance(path), f.key, encodePolicyValue(f.key, other)!) };
+    return { ...f, only, root: adminRoute(path, f.key, encodePolicyValue(f.key, other)!, root, machine) };
   };
   return {
     fields: ([
@@ -95,7 +110,7 @@ export interface PolicyChange {
 }
 
 /** The change these values make, or why it is refused; nothing is written. */
-export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string; helperRulesFile?: string }): { changes: PolicyChange[]; text: string; root: boolean } {
+export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string; helperRulesFile?: string; machine?: boolean }): { changes: PolicyChange[]; text: string; root: boolean } {
   const unknown = Object.keys(o.values).filter((k) => !(POLICY_KEYS as readonly string[]).includes(k));
   if (unknown.length) throw new PolicyEditError(`not editable here: ${unknown.join(', ')}; the form changes ${POLICY_KEYS.join(', ')}`);
   const { doc, policy, root } = read(o.path);
@@ -114,16 +129,26 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   if (parsed.data.agents.max_workers > limits.workers.max) problems.push(`agents.max_workers ${parsed.data.agents.max_workers} is over ${limits.workers.max} (machine limits)`);
   // INVARIANT: a policy the repo's config already loosens would stop the instance from loading at its next start.
   problems.push(...policyViolations(o.cfg, parsed.data).map((v) => `${v.file} ${v.path}: ${v.message}`));
+  const machine = o.machine ?? existsSync(MACHINE_HELPER);
+  // On every install, root's policy or not: auto_merge only off here (the owner's decision on #770); turning it on is
+  // an admin's alone, named as the route this install has.
+  if (!root) {
+    for (const c of changes) {
+      const arg = encodePolicyValue(c.key, c.to);
+      if (DASHBOARD_TIGHTEN_ONLY.includes(c.key) && arg !== HELPER_ONLY[c.key]) problems.push(`${c.key} ${String(c.to)}: that is an admin's alone, never this form's (${adminRoute(o.path, c.key, arg ?? '<value>', false, machine)}); here it may only be ${String(decodePolicyValue(c.key, HELPER_ONLY[c.key]!))}`);
+    }
+  }
   // A root policy.yaml (src/policy-gate.ts): only what root's helper takes, so a loosening is refused before anything is
-  // asked; and nothing at all on a sudo whose rule leaves set-policy out (each change named as its root command).
+  // asked; and, on a sudo whose rule leaves set-policy's pattern out, nothing but the tightenings listed whole there
+  // (each other change named as its root command).
   if (root) {
     const instance = policyInstance(o.path);
     for (const c of changes) {
       const arg = encodePolicyValue(c.key, c.to);
       if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) && arg !== null ? `loosening it is an admin's, at a root shell (${policySetCommand(instance, c.key, arg)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
     }
-    const missing = problems.length ? null : policyHelperMissing(o.helperRulesFile);
-    if (missing) problems.push(`${o.path} is root's, and ${missing}: an admin changes it at a root shell (${changes.map((c) => policySetCommand(instance, c.key, encodePolicyValue(c.key, c.to)!)).join('; ')})`);
+    const blocked = problems.length ? [] : changes.map((c) => ({ c, arg: encodePolicyValue(c.key, c.to)! })).map((x) => ({ ...x, why: policyHelperMissing(o.helperRulesFile, [x.c.key, x.arg]) })).filter((x) => x.why);
+    if (blocked.length) problems.push(`${o.path} is root's, and ${blocked[0]!.why}: an admin changes it at a root shell (${blocked.map((x) => policySetCommand(instance, x.c.key, x.arg)).join('; ')})`);
   }
   if (problems.length) throw new PolicyEditError(`refused: ${problems.join('; ')}`);
   return { changes, text: doc.toString(), root };
@@ -134,7 +159,7 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
  * policy.yaml (src/policy-gate.ts) is never written here: each change goes to `request` (root's helper's arguments),
  * and the coordinator records settings.changed once the helper has run it; without one, refused.
  */
-export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string; helperRulesFile?: string }): PolicyChange[] {
+export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string; helperRulesFile?: string; machine?: boolean }): PolicyChange[] {
   const plan = planPolicy(o);
   if (plan.root) {
     if (!o.request) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (${plan.changes.map((c) => policySetCommand(policyInstance(o.path), c.key, encodePolicyValue(c.key, c.to) ?? '<value>')).join('; ')})`);

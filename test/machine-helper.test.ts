@@ -7,6 +7,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MACHINE_HELPER, machineChanges, setSlotCap, setUpdates } from '../src/machine.js';
+import { HELPER_ONLY } from '../src/policy-gate.js';
 import { repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
 
@@ -132,7 +133,7 @@ const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; s
 /** The helper as root's sudoers rules name it (lib.sh), and the engine's, on a real machine. */
 const HELPER_AS_ROOT = onRealMachine(MACHINE_HELPER);
 
-test('the sudoers rule lists exactly the 34 commands, no patterns but add-project\'s, the staged signer\'s two and the six Claude account profile, sign-in and failover steps\', for the named coordinators only', { skip: !posix && 'bash' }, () => {
+test('the sudoers rule lists exactly the 37 commands, no patterns but add-project\'s, the staged signer\'s two and the six Claude account profile, sign-in and failover steps\', for the named coordinators only', { skip: !posix && 'bash' }, () => {
   const r = sudoers('wl-alpha', 'wl-beta');
   assert.equal(r.status, 0, r.stderr);
   const cmds = [...r.stdout.matchAll(new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim());
@@ -145,9 +146,11 @@ test('the sudoers rule lists exactly the 34 commands, no patterns but add-projec
   // The plugin steps: an id, an https URL and a commit, a digest and roles; never an instance, never confirm.
   // One key of the asking coordinator's root policy.yaml (#726): plain words, no instance; the helper checks each exactly.
   const policy = `${HELPER_AS_ROOT} ^set-policy [a-z][a-z_.]* [a-z0-9.+-]+$`;
+  // Its three tightenings, listed whole, so every sudo matches them exactly (#726: auto_merge off on any sudo).
+  const tightenings = ['set-policy auto_merge off', 'set-policy land_mode pr', 'set-policy main_watch auto'].map((c) => `${HELPER_AS_ROOT} ${c}`);
   const plugins = ['^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$', '^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$', '^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$', '^plugin-withdraw [a-z0-9][a-z0-9-]*$', '^plugin-remove [a-z0-9][a-z0-9-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$', '^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$', '^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$', '^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$', '^mcp-snapshot [a-z0-9][a-z0-9-]*$', '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'].map((p) => `${HELPER_AS_ROOT} ${p}`);
-  const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), stage, discard, ...profiles, ...plugins, policy, addProject];
-  assert.equal(want.length - 10 - plugins.length, 34);
+  const want = [...Array.from({ length: 16 }, (_, i) => `${HELPER_AS_ROOT} set-slots ${i + 1}`), `${HELPER_AS_ROOT} set-updates on`, `${HELPER_AS_ROOT} set-updates off`, ...Array.from({ length: 8 }, (_, i) => `${HELPER_AS_ROOT} set-test-slots ${i + 1}`), `${HELPER_AS_ROOT} claude-account status`, `${HELPER_AS_ROOT} claude-account switch`, `${HELPER_AS_ROOT} install-updater`, `${HELPER_AS_ROOT} set-update-channel release`, ...['install', 'up', 'serve', 'public-url'].map((a) => `${HELPER_AS_ROOT} tailscale ${a}`), ...tightenings, stage, discard, ...profiles, ...plugins, policy, addProject];
+  assert.equal(want.length - 10 - plugins.length, 37);
   for (const p of plugins) assert.doesNotMatch(p, /confirm|--|,|:|=/, p);
   // No profile pattern takes a second word: never an instance, never every instance.
   for (const p of profiles) assert.doesNotMatch(p, /\* \[|(back|stay) /, p);
@@ -476,6 +479,20 @@ function sudoersWithSudo(version: string | null) {
   writeFileSync(join(bin, 'sudo'), `#!/bin/sh\n[ "$1" = -V ] && ${version ? `echo "Sudo version ${version}" && echo "Sudoers policy plugin version ${version}" &&` : ''} exit 0\nexit 1\n`, { mode: 0o755 });
   return spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), 'wl-alpha'], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } });
 }
+
+test("set-policy's three tightenings (the engine's HELPER_ONLY: auto_merge off, land_mode pr, main_watch auto) are listed whole on every sudo, old or new, and machine-helper.sh checks them with sudo -l (#726)", { skip: !posix && 'bash' }, () => {
+  const want = Object.entries(HELPER_ONLY).map(([k, v]) => `${HELPER_AS_ROOT} set-policy ${k} ${v}`).sort();
+  for (const v of ['1.9.9', '1.8.31', null, '1.9.10', '1.9.15p5']) {
+    const r = sudoersWithSudo(v);
+    assert.equal(r.status, 0, r.stderr);
+    const literal = [...r.stdout.matchAll(new RegExp(`${HELPER_AS_ROOT.replace(/[/.]/g, '\\$&')} set-policy [^,\\\\\n]+`, 'g'))].map((m) => m[0].trim()).sort();
+    assert.deepEqual(literal, want, `sudo ${v}`);
+  }
+  const helperSh = readFileSync(join(setup, 'machine-helper.sh'), 'utf8');
+  // Outside every `if sudo_regex_ok`: checked on every sudo.
+  assert.match(helperSh, /\n {2}for ok in "auto_merge off" "land_mode pr" "main_watch auto"; do\n[^\n]*\n {4}sudo -n -l -U "\$u" "\$MACHINE_HELPER" set-policy \$ok /);
+  assert.match(helperSh, /if ! sudo_regex_ok; then\n {4}for bad in "auto_merge on" "land_mode direct" "main_watch off" "budget\.daily_usd 30"; do/);
+});
 
 test('the pattern rules (add-project, stage-update-signer, discard-update-signer, the Claude account profile steps) are installed only for sudo 1.9.10 or later; below, they are left out, said so, and every other rule stays', { skip: !posix && 'bash' }, () => {
   const k = /\^(stage-update-signer|discard-update-signer|add-project|set-policy|claude-account [a-z-]+|plugin-[a-z]+|mcp-[a-z]+) /g;

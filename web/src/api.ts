@@ -1254,7 +1254,7 @@ export interface FirstRunPolicyField {
   step?: number;
   choices?: string[];
   why: string;
-  /** A root policy.yaml: the one value the form may set this key to, and the root shell command for any other. */
+  /** The one value the form may set this key to (a root policy.yaml; auto_merge on every install), and the admin's route for any other. */
   only?: number | boolean | string;
   root?: string;
 }

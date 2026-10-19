@@ -30,8 +30,8 @@
 #     And `set-policy <key> <value>` (issue #726): one key of the asking coordinator's own root policy.yaml, through the
 #     installed engine as root; never sandbox or allow_same_user, and land_mode, main_watch and auto_merge only toward
 #     pr, auto and off.
-#   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
-#     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
+#   - Lets each coordinator user wl-<name> run exactly those 37 commands as root (sudoers,
+#     listed one by one, set-policy's three tightenings among them, on every sudo), and add-project, set-policy, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
 #     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
@@ -71,7 +71,7 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, and claude-account profile-add|remove|use <profile> (its own instance only)"
+say "sudoers: ${users[*]} may run exactly the helper's 37 commands (set-policy auto_merge off, land_mode pr and main_watch auto among them), add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, and claude-account profile-add|remove|use <profile> (its own instance only)"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 if sudo_regex_ok; then
   echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are installed"
@@ -149,6 +149,22 @@ for u in "${users[@]}"; do
     for bad in "set-policy auto_merge" "set-policy auto_merge on x" "set-policy Auto on" "set-policy auto_merge ON" "set-policy auto_merge on;id"; do
       # shellcheck disable=SC2086 # each case is its words
       if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+    done
+  fi
+  # set-policy's three tightenings are listed whole on every sudo: each runs, nothing may follow one, and on an older
+  # sudo (no pattern) no other set-policy does.
+  for ok in "auto_merge off" "land_mode pr" "main_watch auto"; do
+    # shellcheck disable=SC2086 # each case is its words
+    sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $ok >/dev/null 2>&1 || { echo "FAIL: $u can't run set-policy $ok, which every sudo should list whole" >&2; exit 1; }
+  done
+  for bad in "auto_merge off x" "land_mode pr --x"; do
+    # shellcheck disable=SC2086 # each case is its words
+    if sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $bad >/dev/null 2>&1; then echo "FAIL: $u may run set-policy $bad" >&2; exit 1; fi
+  done
+  if ! sudo_regex_ok; then
+    for bad in "auto_merge on" "land_mode direct" "main_watch off" "budget.daily_usd 30"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $bad >/dev/null 2>&1; then echo "FAIL: $u may run set-policy $bad on sudo $(sudo_version || echo unknown), which has no set-policy pattern" >&2; exit 1; fi
     done
   fi
   if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then

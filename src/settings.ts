@@ -264,7 +264,7 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     const root = policySetCommand(policyInstance(o.policyPath), `settings.${key}`, arg);
     if (!policySetOk([`settings.${key}`, arg])) throw new SettingsError(`refused: settings.${key} ${arg} is root's to set, at a root shell (${root})`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
-    const missing = policyHelperMissing(o.helperRulesFile);
+    const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);
     if (missing) throw new SettingsError(`${o.policyPath} is root's, and ${missing}: an admin changes it at a root shell (${root})`);
     if (!o.request) throw new SettingsError(`${o.policyPath} is root's: an admin changes it at a root shell (${root})`);
     return { from, to, requested: o.request(['set-policy', `settings.${key}`, arg]) };

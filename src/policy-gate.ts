@@ -151,17 +151,26 @@ export const POLICY_SET_KEYS: Readonly<Record<string, Kind>> = {
  */
 export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
 
+/**
+ * Keys whose HELPER_ONLY value is the only one a dashboard sets on EVERY install, whether its policy.yaml is root's or
+ * the coordinator's (a laptop, cloud or VM install, or a machine not taken over yet): turning auto_merge on is an
+ * admin's alone (the owner's decision on #770). Elsewhere the HELPER_ONLY limits apply to a root policy only.
+ */
+export const DASHBOARD_TIGHTEN_ONLY: readonly string[] = ['auto_merge'];
+
 /** The root shell command that sets one key of an instance's policy.yaml. */
 export const policySetCommand = (instance: string, key: string, arg: string) => `sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}`;
 
 /**
- * Why root's machine helper can't take a `set-policy` on this machine, or null when it can (or nothing says it
- * can't). machine-helper.sh records the rules it left out in helper-rules.json's left_out: a sudo older than 1.9.10
+ * Why root's machine helper can't take `set-policy <key> <arg>` on this machine, or null when it can (or nothing says
+ * it can't). machine-helper.sh records the rules it left out in helper-rules.json's left_out: a sudo older than 1.9.10
  * reads a command's argument pattern as literal text, so every pattern rule is left out together (lib.sh
- * machine_sudoers), set-policy among them. A record from before set-policy existed lists add-project instead, which
- * means the same sudo.
+ * machine_sudoers), set-policy's among them. A record from before set-policy existed lists add-project instead, which
+ * means the same sudo. The HELPER_ONLY tightenings (auto_merge off, land_mode pr, main_watch auto) are listed whole on
+ * every sudo, so they are never missing: turning auto_merge off works on any sudo.
  */
-export function policyHelperMissing(rulesFile = HELPER_RULES): string | null {
+export function policyHelperMissing(rulesFile = HELPER_RULES, change?: readonly [string, string]): string | null {
+  if (change && Object.hasOwn(HELPER_ONLY, change[0]) && HELPER_ONLY[change[0]] === change[1]) return null;
   const r = helperRules(rulesFile);
   if (!r || !(r.leftOut.includes('set-policy') || r.leftOut.includes('add-project'))) return null;
   return `this machine's sudo (${r.sudo ?? 'version unknown'}) is older than 1.9.10, so root's helper has no set-policy rule here and a dashboard request would only fail`;

@@ -1677,7 +1677,7 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
     ],
   });
   const off = r.renderFirstRun({ ...f, policy: rootPolicy(false), canAct: true }, { open: 'policy' });
-  assert.match(off, /data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*disabled=""[\s\S]*?data-testid="policy-root-only"[^>]*>Here only false; anything else is root(&#x27;|')s, at a root shell: <code[^>]*>sudo engine policy set shop auto_merge on</);
+  assert.match(off, /data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*disabled=""[\s\S]*?data-testid="policy-root-only"[^>]*>Here only false; anything else is an admin(&#x27;|')s: <code[^>]*>sudo engine policy set shop auto_merge on</);
   assert.match(off, /data-key="land_mode"[\s\S]*?<select[^>]*disabled=""[\s\S]*?<\/select>/);
   assert.doesNotMatch(off.match(/data-key="land_mode"[\s\S]*?<\/select>/)![0], /direct/, 'no loosening offered');
   const on = r.renderFirstRun({ ...f, policy: rootPolicy(true), canAct: true }, { open: 'policy' });

@@ -164,20 +164,26 @@ test('the Policy form: each key with its bounds; Review shows the change and wri
     assert.equal(p.fields[0]!.max, 100, "the machine's limit");
     assert.deepEqual(p.fixed.map((f) => f.key), ['sandbox', 'allow_same_user', 'lanes', 'network_allow', 'pre_approved']);
     const before = readFileSync(policyFile, 'utf8');
-    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, auto_merge: true, land_mode: 'pr' } });
+    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true, land_mode: 'pr' } });
     assert.equal(preview.status, 200);
     assert.equal(preview.body.confirmed, false);
-    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 60 }, { key: 'auto_merge', from: false, to: true }]);
+    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 60 }, { key: 'automations.enabled', from: false, to: true }]);
     assert.equal(readFileSync(policyFile, 'utf8'), before, 'Review writes nothing');
     assert.equal((await s.post('/api/first-run/policy', 'example-collaborator', { values: { auto_merge: true }, confirm: true })).status, 403);
-    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, auto_merge: true }, confirm: true });
+    // auto_merge on is an admin's alone on every install, this unrecorded one too (#770): refused, nothing written.
+    const on = await s.post('/api/first-run/policy', 'example-owner', { values: { auto_merge: true }, confirm: true });
+    assert.equal(on.status, 400);
+    assert.match(on.body.error!, /auto_merge true: that is an admin's alone, never this form's/);
+    assert.equal(readFileSync(policyFile, 'utf8'), before);
+    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true }, confirm: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     const after = readFileSync(policyFile, 'utf8');
     assert.match(after, /daily_usd: 60/);
-    assert.match(after, /auto_merge: true/);
+    assert.match(after, /enabled: true/);
+    assert.match(after, /auto_merge: false/);
     assert.match(after, /# kept: a person wrote this/);
-    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 60, 'example-owner'], ['policy.auto_merge', true, 'example-owner']]);
-    assert.deepEqual(s.events(['dashboard.audit']).map((a) => a.action), ['first_run.policy_refused', 'first_run.policy']);
+    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 60, 'example-owner'], ['policy.automations.enabled', true, 'example-owner']]);
+    assert.deepEqual(s.events(['dashboard.audit']).map((a) => a.action), ['first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy']);
   } finally {
     await s.d.close();
   }
