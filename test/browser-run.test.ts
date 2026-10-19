@@ -176,6 +176,8 @@ function mockClock(t: TestContext) {
     for (let i = 0; !settled; i++) {
       await new Promise((r) => setImmediate(r));
       if (settled) break;
+      // The test's real-time timeout (BUDGET_TEST_TIMEOUT_MS) aborts it: stop moving the clock with it.
+      if (t.signal.aborted) throw new Error('the test was stopped (its real-time timeout) before the extra shots ended');
       if (i > 60_000) throw new Error('the extra shots still ran after a minute of mock time');
       t.mock.timers.tick(1);
     }
@@ -184,11 +186,21 @@ function mockClock(t: TestContext) {
   };
 }
 
+/**
+ * The budget tests' bound in real time: node:test's per-test timeout, which fires on the real clock even while
+ * t.mock.timers holds setTimeout. WHY: the mock clock moves once per event-loop turn, so a regression that never
+ * settles is otherwise stopped only by the 60 000-turn guard above, which a starved runner could stretch to hours
+ * (the required shards set no --test-timeout). WHY 60 s: on a normal runner each budget test takes under 0.4 s, and on
+ * a runner whose loop is blocked 200 ms in every 250 ms both took 2 s together (measured on #835), so 60 s is some
+ * 30 times that; it is also the bound this file already gives its real-Chrome tests.
+ */
+const BUDGET_TEST_TIMEOUT_MS = 60_000;
+
 /** A slow runner, simulated in the stand-ins: the event loop blocked for `ms` of real time, which the mock clock never sees. */
 const SLOW_RUNNER_MS = 40;
 const stall = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SLOW_RUNNER_MS);
 
-test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', async (t) => {
+test('the dark and phone shots share a short budget: a page that stalls them costs seconds, and a view not reached says so; their commands get the short timeout', { timeout: BUDGET_TEST_TIMEOUT_MS }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
   const run = mockClock(t);
   // The page answers the dark view's frame wait late: the budget ends while it waits, so the dark view is cut off
@@ -210,7 +222,7 @@ test('the dark and phone shots share a short budget: a page that stalls them cos
   assert.ok(extra.length > 0 && extra.every((s) => s.ms === 1234), JSON.stringify(extra));
 });
 
-test('the dark and phone shots never take longer than their budget together, however slow each command is: one cut off is listed as skipped and never fails the run', async (t) => {
+test('the dark and phone shots never take longer than their budget together, however slow each command is: one cut off is listed as skipped and never fails the run', { timeout: BUDGET_TEST_TIMEOUT_MS }, async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'browser-shots-'));
   const run = mockClock(t);
   // Chrome answers each extra emulation and screenshot just inside the per-command timeout (the frame wait is quick).
