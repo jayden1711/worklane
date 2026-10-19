@@ -62,19 +62,27 @@ export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, N
 /**
  * A change to a .gitattributes (any directory's) that can hide or change what a review of a file sees: `-diff` or
  * `binary` ("Binary files differ", no lines), `linguist-generated` (GitHub folds the file away in a PR), a `filter`
- * (git-lfs: the review sees a pointer, a checkout gets other content), a diff driver git doesn't ship (its textconv
- * or binary setting lives in a config the review can't see), or any name not known to be harmless (a macro, defined
- * here or earlier: `[attr]quiet -diff`). Taking away a line that turned one of those off (`*.sql -filter`) counts
- * too. The harness's own readers ignore attributes (coordinator/change-files.ts), but the owner reviewing on GitHub
- * and a checkout don't, so such a change is always L3 (".gitattributes can hide ...") and never auto-merges
- * (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#693). Fails closed: only the names below pass.
+ * (git-lfs: the review sees a pointer, a checkout gets other content), a `working-tree-encoding` (the blob a review
+ * reads is the file re-encoded: `IBM037` turns ASCII code into one line of noise, and a checkout turns it back), a
+ * diff driver git doesn't ship (its textconv or binary setting lives in a config the review can't see), any name not
+ * known to be harmless, a macro definition (`[attr]quiet -diff`), or a name some .gitattributes in the base or head
+ * tree defines as a macro (`[attr]eol -diff` on main makes `*.job eol` hide the file). Taking away a line that turned
+ * one of those off (`*.sql -filter`), or a macro definition, counts too. The same for a .gitmodules line that hides a
+ * submodule's changes (`ignore = all`, anything but `none`). Any case of either name (`.GitAttributes`): a
+ * case-insensitive file system opens it as the real one. The harness's own readers ignore attributes and submodule
+ * settings (coordinator/change-files.ts), but the owner reviewing on GitHub and a checkout don't, so such a change is
+ * always L3 and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#693). Fails
+ * closed: only the names below pass.
  */
 export const DIFF_HIDING_ATTRIBUTES = 'diff-hiding-attributes';
 
-const GITATTRIBUTES = /(?:^|\/)\.gitattributes$/;
+/** A .gitattributes in any directory, in any case. */
+export const isGitattributesPath = (path: string): boolean => /(?:^|\/)\.gitattributes$/i.test(path);
+/** A .gitmodules in any directory, in any case. */
+const isGitmodulesPath = (path: string): boolean => /(?:^|\/)\.gitmodules$/i.test(path);
 /** Attributes that change line endings, whitespace checks, archives, merges or GitHub's language stats: nothing a review reads. */
 const HARMLESS_ATTRIBUTES = new Set([
-  'text', 'eol', 'crlf', 'whitespace', 'export-ignore', 'ident', 'delta', 'encoding', 'working-tree-encoding', 'merge', 'conflict-marker-size',
+  'text', 'eol', 'crlf', 'whitespace', 'export-ignore', 'ident', 'delta', 'encoding', 'merge', 'conflict-marker-size',
   'linguist-language', 'linguist-detectable', 'linguist-vendored', 'linguist-documentation',
 ]);
 /** The diff drivers git ships (hunk headers and word splitting only): `diff=python` changes no line a review sees. */
@@ -95,9 +103,17 @@ function attributesOf(line: string): { sign: string; name: string; value: string
   });
 }
 
-/** Whether a line a change adds to a .gitattributes can hide or change what a review sees (fails closed). */
-export function hidesDiff(line: string): boolean {
+/** A `[attr]name ...` line: a macro definition. */
+const isMacroDefinition = (line: string): boolean => line.trim().startsWith('[attr]');
+
+/**
+ * Whether a line a change adds to a .gitattributes can hide or change what a review sees (fails closed). `macros`: the
+ * names any .gitattributes in the base or head tree defines with `[attr]` (ChangeFile.attributeMacros).
+ */
+export function hidesDiff(line: string, macros: readonly string[] = []): boolean {
+  if (isMacroDefinition(line)) return true;
   return attributesOf(line).some(({ sign, name, value }) => {
+    if (macros.includes(name)) return true;
     if (HARMLESS_ATTRIBUTES.has(name)) return false;
     // `diff` set (always text), unspecified, or a driver git ships; `-diff` and any other driver hide or change lines.
     if (name === 'diff') return sign === '-' || (value !== undefined && !BUILTIN_DIFF_DRIVERS.has(value));
@@ -107,13 +123,29 @@ export function hidesDiff(line: string): boolean {
   });
 }
 
-/** Whether a line a change takes out of a .gitattributes had turned off something that hides (`*.sql -filter`, `*.sql diff`). */
+/**
+ * Whether a line a change takes out of a .gitattributes had turned off something that hides (`*.sql -filter`, `*.sql
+ * diff`), or defined a macro (the lines that use it now mean something else).
+ */
 export function unhidLine(line: string): boolean {
+  if (isMacroDefinition(line)) return true;
   return attributesOf(line).some(({ sign, name, value }) => {
     if (HARMLESS_ATTRIBUTES.has(name)) return false;
     if (name === 'diff') return sign === '!' || (sign === '' && value === undefined);
     return sign !== '' || value === 'false';
   });
+}
+
+/**
+ * Whether a line a change adds to a .gitmodules hides a submodule's changes from `git diff` and `git status`: `ignore`
+ * set to anything but `none` (git config syntax: any case, spaces, quotes, a comment after it, even after a
+ * `[submodule "x"]` header on the same line). Fails closed: a value that doesn't read as `none` is flagged.
+ */
+export function hidesSubmodule(line: string): boolean {
+  const m = /^\s*ignore\s*(?:=(.*))?$/i.exec(line.replace(/^\s*\[[^\]]*\]/, '').replace(/\r$/, ''));
+  if (!m) return false;
+  const value = (m[1] ?? '').replace(/\s*[#;].*$/, '').trim().replace(/^"(.*)"$/, '$1').trim().toLowerCase();
+  return value !== 'none';
 }
 
 /**
@@ -240,6 +272,11 @@ export interface ChangeFile {
   addedLines?: string[];
   /** Removed lines, for telling a comment-only change from a code change. */
   removedLines?: string[];
+  /**
+   * On a .gitattributes only: every macro name (`[attr]name`) any .gitattributes in the base or the head tree
+   * defines, so a line using one is judged as the macro, not as the harmless name it may shadow (#693).
+   */
+  attributeMacros?: string[];
 }
 
 export interface LevelInput {
@@ -294,7 +331,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
     if (hasInvisibleCharacter(f.path)) add(INVISIBLE_CHARACTER_PATH, f.path);
     if (hasNonAsciiTopLevel(f.path)) add(NON_ASCII_TOP_LEVEL_PATH, f.path);
-    if (GITATTRIBUTES.test(f.path) && ((f.addedLines ?? []).some(hidesDiff) || (f.removedLines ?? []).some(unhidLine))) add(DIFF_HIDING_ATTRIBUTES, f.path);
+    if (isGitattributesPath(f.path) && ((f.addedLines ?? []).some((l) => hidesDiff(l, f.attributeMacros)) || (f.removedLines ?? []).some(unhidLine))) add(DIFF_HIDING_ATTRIBUTES, f.path);
+    if (isGitmodulesPath(f.path) && (f.addedLines ?? []).some(hidesSubmodule)) add(DIFF_HIDING_ATTRIBUTES, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -340,7 +378,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
   if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(shownPath).join(', ')}`);
   const hiding = categories[DIFF_HIDING_ATTRIBUTES] ?? [];
-  if (hiding.length) raise('L3', `.gitattributes can hide what a review sees (-diff, binary, linguist-generated, a filter, a diff driver or a macro): ${shownPaths(hiding.slice(0, 3))}`);
+  if (hiding.length) raise('L3', `.gitattributes or .gitmodules can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore): ${shownPaths(hiding.slice(0, 3))}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

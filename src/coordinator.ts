@@ -1637,7 +1637,9 @@ export class Coordinator extends AutomationRuns {
     // A change to a protected surface: the evaluator answers the compromised-component question for each actor.
     const surface = this.protectedSurface(issue, files);
     const extra = [
-      `Base commit: ${base}. Head: ${head}. Inspect with: git diff ${base}..${head}`,
+      // As text, with no textconv or external diff: a `-diff` or `binary` mark in the change's .gitattributes would
+      // otherwise show the evaluator "Binary files differ" for the very file it must read (#693).
+      `Base commit: ${base}. Head: ${head}. Inspect with: git diff --text --no-textconv --no-ext-diff ${base}..${head}`,
       `Reproduction test: ${repro?.path || 'none'}`,
       `Coordinator's check results: ${checks.map((c) => `${c.check}=${c.status}`).join(', ') || 'none'}`,
       ...(worker?.labeled?.length ? [`The worker's claims as it labeled them (inferred and guess are not evidence): ${worker.labeled.map((c) => `[${c.label}] ${c.claim}${c.basis ? ` (${c.basis})` : ''}`).join('; ')}`] : []),

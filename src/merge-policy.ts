@@ -152,7 +152,7 @@ const CATEGORY_WORDS: Record<string, string> = {
   [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
   [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
   [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
-  [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, a diff driver or a macro)',
+  [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes or .gitmodules in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)',
 };
 
 /** A path as a reason shows it: src/path-text.ts shownPath, the one rule every reason, event and comment uses. */

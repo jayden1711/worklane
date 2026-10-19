@@ -19,14 +19,15 @@
 //
 // A change's lines are read whatever the repo's attributes say (#693). The change's own branch controls its
 // .gitattributes, and a file marked `-diff` or `binary` there shows as `-` in --numstat and "Binary files differ" in
-// a patch: no lines, no content. So every git call here ignores the user's attributes file (ATTRIBUTES_OFF), every
-// patch is read as text with no textconv or external diff (AS_TEXT), and a file numstat calls binary is counted
-// from those lines (or, for a name that can't be handed back to git, from its blobs). review.ts flags a change that
-// adds such a mark, since GitHub still hides the file from the owner.
+// a patch: no lines, no content. So every git call here ignores the user's attributes file and replace refs (GIT),
+// every diff sees every submodule link whatever .gitmodules or the config say (DIFF_COMMANDS), every patch is read as
+// text with no textconv or external diff (AS_TEXT), and a file numstat calls binary is counted from those lines (or,
+// for a name that can't be handed back to git, from its blobs). review.ts flags a change that adds such a mark, since
+// GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
 import type { SizeFile } from '../pr-rules.js';
-import type { ChangeFile } from '../review.js';
+import { isGitattributesPath, type ChangeFile } from '../review.js';
 
 const MAX_BUFFER = 256 * 1024 * 1024;
 
@@ -38,10 +39,23 @@ const MAX_BUFFER = 256 * 1024 * 1024;
 const GIT = ['--literal-pathspecs', '--no-replace-objects', '-c', 'core.attributesFile=/dev/null'];
 /** Every patch read here: as text whatever the attributes say (`-diff`, `binary`), with no command a config names. */
 const AS_TEXT = ['--text', '--no-textconv', '--no-ext-diff'];
+/**
+ * The commands that compare trees. Each gets `--ignore-submodules=none` right after it, in withGit, so no call here can
+ * leave it out: a branch's .gitmodules (`ignore = all`) or the config (`diff.ignoreSubmodules`) would otherwise hide a
+ * submodule link, its path and its commit from every list and count (#693).
+ */
+const DIFF_COMMANDS = new Set(['diff', 'diff-tree', 'show']);
+
+/** GIT, then `args` with `--ignore-submodules=none` after the command when it compares trees (`-c k=v` pairs skipped). */
+function withGit(args: string[]): string[] {
+  let i = 0;
+  while (args[i] === '-c') i += 2;
+  return DIFF_COMMANDS.has(args[i] ?? '') ? [...GIT, ...args.slice(0, i + 1), '--ignore-submodules=none', ...args.slice(i + 1)] : [...GIT, ...args];
+}
 
 /** Run git; its stdout, untrimmed (a path may start or end with a space), or an Error saying why it failed. */
 function run(cwd: string, args: string[], timeout?: number): string | Error {
-  const r = spawnSync('git', [...GIT, ...args], { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -49,7 +63,7 @@ function run(cwd: string, args: string[], timeout?: number): string | Error {
 
 /** run, with stdout as bytes: for output that holds paths. */
 function runBytes(cwd: string, args: string[], timeout?: number): Buffer | Error {
-  const r = spawnSync('git', [...GIT, ...args], { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+  const r = spawnSync('git', withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -196,6 +210,34 @@ function blobsOf(cwd: string, range: string): Map<string, { old: string; new: st
 
 /** Each file the change base..head touches (a rename as its old and its new path), with its line counts and lines. */
 export function changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
+  const files = changeFileLines(cwd, base, head);
+  // A .gitattributes line is judged with every macro the base or head tree defines (review.ts hidesDiff), so a
+  // harmless-looking name a macro shadows (`[attr]eol -diff` on main, then `*.job eol`) is read as the macro.
+  if (files.some((f) => isGitattributesPath(f.path))) {
+    const macros = [...new Set([...attributeMacros(cwd, base), ...attributeMacros(cwd, head)])];
+    for (const f of files) if (isGitattributesPath(f.path)) f.attributeMacros = macros;
+  }
+  return files;
+}
+
+/** Every macro name (`[attr]name`) any .gitattributes (any directory, any case) of `rev`'s tree defines. */
+function attributeMacros(cwd: string, rev: string): string[] {
+  const out: string[] = [];
+  // -z: "mode SP type SP object TAB path NUL" for each file of the tree.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', rev, '--'])))) {
+    const tab = rec.indexOf(9);
+    const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
+    if (type !== 'blob' || !sha || !isGitattributesPath(rec.subarray(tab + 1).toString('latin1'))) continue;
+    for (const line of must(runBytes(cwd, ['cat-file', 'blob', sha])).toString('utf8').split('\n')) {
+      const m = /^\s*\[attr\](\S+)/.exec(line);
+      if (m) out.push(m[1]!);
+    }
+  }
+  return out;
+}
+
+/** changeFiles' lists and counts, before the .gitattributes macros. */
+function changeFileLines(cwd: string, base: string, head: string): ChangeFile[] {
   const range = `${base}..${head}`;
   let blobs: Map<string, { old: string; new: string }> | null = null;
   // -z: "added TAB removed TAB path NUL" for each file (renames off, so never the two-path form).
@@ -224,9 +266,12 @@ export function changeFiles(cwd: string, base: string, head: string): ChangeFile
  * The change base..head as the size limit reads it (pr-rules.ts sizeVerdict): one `git diff -M -U0`, each file under
  * its new path, a rename's old path in `from`. Rename detection is on here on purpose: a pure rename counts 0 lines.
  * Read as text (AS_TEXT): a file marked `-diff` or `binary`, or one with a NUL byte, counts its lines (#693).
+ * `renames: 'configured'` pairs renames only as the git config says (diff.renames: on by default, off, or copies too),
+ * as the push limit's plain `git diff` count always did: under diff.renames=false a pure rename counts in full there.
  */
-export function sizeFiles(cwd: string, base: string, head: string): SizeFile[] {
-  const diff = must(run(cwd, ['-c', 'core.quotePath=false', 'diff', '-M', '-U0', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]));
+export function sizeFiles(cwd: string, base: string, head: string, o: { renames?: 'on' | 'configured' } = {}): SizeFile[] {
+  const pairing = o.renames === 'configured' ? [] : ['-M'];
+  const diff = must(run(cwd, ['-c', 'core.quotePath=false', 'diff', ...pairing, '-U0', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]));
   const out: SizeFile[] = [];
   let cur: SizeFile | null = null;
   let inHunk = false;

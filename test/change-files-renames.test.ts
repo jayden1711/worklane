@@ -851,6 +851,8 @@ test('one helper is the only way src/ lists changed names or counts; scripts/ on
 const jobLines = (n: number, special?: string) => `${Array.from({ length: n }, (_, i) => (i === 2 && special !== undefined ? special : `step ${i};`)).join('\n')}\n`;
 const engineReview = () => ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
 const counts = (files: ChangeFile[]) => files.map((f) => [f.path, f.added, f.removed]);
+/** The reason a diff-hiding-attributes change is L3 for, before the paths. */
+const HIDING_REASON = '.gitattributes or .gitmodules can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)';
 
 for (const mark of ['-diff', 'binary']) {
   test(`a file marked ${mark} in .gitattributes that holds DROP TABLE comes out L3 deletes-data, under the engine's review.yaml too`, () => {
@@ -950,33 +952,150 @@ test('a change that marks a path -diff, binary or linguist-generated in a .gitat
     write(dir, { [at]: after });
     const lvl = level(changeFiles(dir, base, commit(dir, 'attributes')), plain);
     const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
-    return { level: lvl.level, hiding: lvl.categories['diff-hiding-attributes'] ?? [], reason: lvl.reasons.find((r) => r.startsWith('.gitattributes')) ?? null, cls: riskClassOf({ paths: [at], level: lvl, waitCategories: [] }).cls, auto: merge.auto };
+    return { level: lvl.level, hiding: lvl.categories['diff-hiding-attributes'] ?? [], reason: lvl.reasons.find((r) => r.startsWith('.gitattributes or .gitmodules')) ?? null, cls: riskClassOf({ paths: [at], level: lvl, waitCategories: [] }).cls, auto: merge.auto };
   };
-  const flagged = (at: string) => ({ level: 'L3', hiding: [at], reason: `.gitattributes can hide what a review sees (-diff, binary, linguist-generated, a filter, a diff driver or a macro): ${at}`, cls: 'protected', auto: false });
+  const flagged = (at: string) => ({ level: 'L3', hiding: [at], reason: `${HIDING_REASON}: ${at}`, cls: 'protected', auto: false });
   const hiding = [
     '*.sql -diff', '*.sql binary', '*.sql -binary', 'gen/** linguist-generated', 'gen/** linguist-generated=true', '*.sql text -diff', '*.sql\t-diff', '"db dumps/*.sql" -diff', '  *.sql -diff  ',
-    // A macro, defined here or used here (its definition may be on main already), and a name git doesn't know.
-    '[attr]quiet -diff', '*.sql quiet', '*.sql made-up',
+    // A macro definition (even one of harmless names: what uses it is judged as the name it looks like), a name a
+    // macro may stand for (its definition may be on main already), and a name git doesn't know.
+    '[attr]quiet -diff', '[attr]plain text eol=lf', '*.sql quiet', '*.sql made-up',
     // A filter (git-lfs: a review reads a pointer, a checkout gets the content), a diff driver git doesn't ship.
     '*.sql filter=lfs diff=lfs merge=lfs -text', '*.sql filter=strip', '*.sql diff=sql',
+    // An encoding the checkout converts from: the blob a review reads is the file re-encoded (R1, round 2).
+    '*.job working-tree-encoding=IBM037', '*.job working-tree-encoding=UTF-16LE',
   ];
   for (const line of hiding) assert.deepEqual(judge(`${line}\n`), flagged('.gitattributes'), JSON.stringify(line));
-  // In any directory, and added to a .gitattributes main already has.
+  // In any directory, in any case (a case-insensitive file system opens .GitAttributes as the real one), and added to a
+  // .gitattributes main already has.
   assert.deepEqual(judge('*.sql -diff\n', undefined, 'db/.gitattributes'), flagged('db/.gitattributes'));
+  for (const at of ['.GitAttributes', 'db/.GITATTRIBUTES', '.gitAttributes']) assert.deepEqual(judge('*.sql -diff\n', undefined, at), flagged(at), at);
   assert.deepEqual(judge('* text=auto eol=lf\n*.sql -diff\n', '* text=auto eol=lf\n'), flagged('.gitattributes'));
   // Taking away a line that turned a filter off, or forced text, turns it back on.
   assert.deepEqual(judge('* filter=lfs\n', '* filter=lfs\n*.sql -filter\n'), flagged('.gitattributes'));
   assert.deepEqual(judge('*.sql binary\n', '*.sql binary\n*.sql diff\n'), flagged('.gitattributes'));
+  // Taking away a macro definition: the lines that use it now mean something else.
+  assert.deepEqual(judge('*.sql keep\n', '[attr]keep -filter\n*.sql keep\n'), flagged('.gitattributes'));
   // Lines that hide nothing get the review they had: a comment, a path named "binary", line endings, a diff driver git
   // ships, forcing text, GitHub's language marks, turning a fold or a filter off, the engine's own .gitattributes, and
   // taking a mark away.
   const plainReview = { level: 'L1', hiding: [], reason: null };
   const harmless = [
     '# *.sql -diff', 'binary/** text', '* text=auto eol=lf', '/dist/** -text', '*.py diff=python', '*.sql diff', '*.sql !diff', 'vendor/** linguist-vendored',
-    'gen/** -linguist-generated', 'gen/** linguist-generated=false', '*.sql -filter', '[attr]plain text eol=lf', readFileSync(join(repoRoot, '.gitattributes'), 'utf8'),
+    'gen/** -linguist-generated', 'gen/** linguist-generated=false', '*.sql -filter', readFileSync(join(repoRoot, '.gitattributes'), 'utf8'),
   ];
   for (const text of harmless) assert.deepEqual((({ level, hiding, reason }) => ({ level, hiding, reason }))(judge(`${text}\n`)), plainReview, JSON.stringify(text));
   assert.deepEqual((({ level, hiding, reason }) => ({ level, hiding, reason }))(judge('* text=auto\n', '* text=auto\n*.sql -diff\n')), plainReview);
   // And review.yaml can't loosen it.
   assert.deepEqual(loosenedProblems({ levels: { L3_human: { when: [] } }, merge: { loosened: ['diff-hiding-attributes'] } }), ['merge.loosened: diff-hiding-attributes is high-risk or a safety floor and can never be loosened']);
+});
+
+test('a working-tree-encoding mark (IBM037) on a file holding DROP TABLE: the blob is noise, a checkout runs the SQL, so the change is L3 diff-hiding-attributes', () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { '.gitattributes': '*.job working-tree-encoding=IBM037\n', 'src/jobs/purge.job': jobLines(30, 'DROP TABLE users;') });
+  const head = commit(dir, 'add a job');
+  // What git stored: the ASCII file read as EBCDIC, so no DROP TABLE in any line a review reads.
+  const files = changeFiles(dir, base, head);
+  assert.ok(!files.some((f) => f.addedLines?.some((l) => /DROP TABLE/.test(l))), JSON.stringify(counts(files)));
+  // What a checkout gets back: the SQL.
+  const clone = mkdtempSync(join(tmpdir(), 'wte-clone-'));
+  git(clone, 'clone', '-q', dir, 'c');
+  assert.equal(readFileSync(join(clone, 'c', 'src/jobs/purge.job'), 'latin1').split('\n')[2], 'DROP TABLE users;');
+  const lvl = level(files, ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } }));
+  assert.equal(lvl.level, 'L3', lvl.reasons.join('; '));
+  assert.deepEqual(lvl.categories['diff-hiding-attributes'], ['.gitattributes']);
+  assert.ok(lvl.reasons.includes(`${HIDING_REASON}: .gitattributes`), lvl.reasons.join('; '));
+});
+
+test('a name a macro on main stands for (`[attr]eol -diff`, then `*.job eol`) is judged as the macro, in the same .gitattributes or another', () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  // git itself hides the file through the shadowing macro.
+  const same = repo({ 'README.md': '# x\n', '.gitattributes': '[attr]eol -diff\n' });
+  write(same.dir, { '.gitattributes': '[attr]eol -diff\n*.job eol\n', 'src/jobs/purge.job': jobLines(30, 'DROP TABLE users;') });
+  const sameHead = commit(same.dir, 'use the macro');
+  assert.match(git(same.dir, 'diff', '--numstat', `${same.base}..${sameHead}`), /^-\t-\tsrc\/jobs\/purge\.job$/m);
+  const sameFiles = changeFiles(same.dir, same.base, sameHead);
+  assert.deepEqual(sameFiles.find((f) => f.path === '.gitattributes')?.attributeMacros, ['eol']);
+  assert.deepEqual(level(sameFiles, plain).categories['diff-hiding-attributes'], ['.gitattributes']);
+  // The macro in the top-level file on main, its use in a nested one the change adds.
+  const other = repo({ 'README.md': '# x\n', '.gitattributes': '[attr]eol -diff\n' });
+  write(other.dir, { 'db/.gitattributes': '*.job eol\n' });
+  assert.deepEqual(level(changeFiles(other.dir, other.base, commit(other.dir, 'nested')), plain).categories['diff-hiding-attributes'], ['db/.gitattributes']);
+  // With no macro of that name anywhere, `eol` is git's own: the review it had.
+  const none = repo({ 'README.md': '# x\n' });
+  write(none.dir, { '.gitattributes': '*.job eol=lf\n' });
+  const noneFiles = changeFiles(none.dir, none.base, commit(none.dir, 'eol'));
+  assert.deepEqual([noneFiles[0]!.attributeMacros, level(noneFiles, plain).level, level(noneFiles, plain).categories['diff-hiding-attributes']], [[], 'L1', undefined]);
+});
+
+test('a .gitmodules line that hides a submodule\'s changes (ignore = anything but none) is L3 diff-hiding-attributes; ignore = none is not', () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const judge = (text: string, at = '.gitmodules') => {
+    const { dir, base } = repo({ 'README.md': '# x\n' });
+    write(dir, { [at]: text });
+    const lvl = level(changeFiles(dir, base, commit(dir, 'modules')), plain);
+    return [lvl.level, lvl.categories['diff-hiding-attributes'] ?? []];
+  };
+  const section = (line: string) => `[submodule "m"]\n\tpath = vendor/m\n\turl = ./m\n${line}\n`;
+  for (const line of ['\tignore = all', '\tignore = dirty', '\tignore=untracked', '\tIgnore = ALL', '\tignore = "all"', '\tignore = all ; why', '\tignore', '\tignore = \\']) assert.deepEqual(judge(section(line)), ['L3', ['.gitmodules']], JSON.stringify(line));
+  assert.deepEqual(judge('[submodule "m"] ignore = all\n'), ['L3', ['.gitmodules']], 'after a header on the same line');
+  assert.deepEqual(judge(section('\tignore = all'), 'lib/.GitModules'), ['L3', ['lib/.GitModules']]);
+  for (const line of ['\tignore = none', '\tignore = "none" # always', '\t# ignore = all', '\tbranch = main']) assert.deepEqual(judge(section(line)), ['L1', []], JSON.stringify(line));
+});
+
+/** A commit's id in a scratch repo of its own: the commit a submodule link points at (`n` makes each one different). */
+function submoduleCommit(n: number): string {
+  const { dir } = repo({ 'a.txt': `${n}\n` });
+  return git(dir, 'rev-parse', 'HEAD');
+}
+
+test('a submodule link is seen whatever .gitmodules says (ignore = all committed in the change) or the config says (diff.ignoreSubmodules=all)', () => {
+  const migration = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: ['migration'], over_lines: 800 } } });
+  // .gitmodules with ignore = all, committed in the same change as the link.
+  const a = repo({ 'README.md': '# x\n' });
+  git(a.dir, 'update-index', '--add', '--cacheinfo', `160000,${submoduleCommit(1)},db/migrations/0042`);
+  write(a.dir, { '.gitmodules': '[submodule "m"]\n\tpath = db/migrations/0042\n\turl = ./m\n\tignore = all\n' });
+  git(a.dir, 'add', '.gitmodules');
+  git(a.dir, 'commit', '-q', '-m', 'add a migration as a submodule');
+  const aHead = git(a.dir, 'rev-parse', 'HEAD');
+  // git itself hides the link.
+  assert.equal(git(a.dir, 'diff', '--name-only', `${a.base}..${aHead}`), '.gitmodules');
+  const aFiles = changeFiles(a.dir, a.base, aHead);
+  assert.deepEqual(aFiles.map((f) => f.path).sort(), ['.gitmodules', 'db/migrations/0042']);
+  assert.deepEqual(changeFilesModule.changedNames(a.dir, [`${a.base}..${aHead}`]).sort(), ['.gitmodules', 'db/migrations/0042']);
+  assert.deepEqual(changeFilesModule.changedNames(a.dir, ['-r', a.base, aHead], { tree: true }).sort(), ['.gitmodules', 'db/migrations/0042']);
+  const aLevel = level(aFiles, migration);
+  assert.equal(aLevel.level, 'L3');
+  assert.deepEqual(aLevel.categories.migration, ['db/migrations/0042']);
+  assert.deepEqual(aLevel.categories['diff-hiding-attributes'], ['.gitmodules']);
+  // diff.ignoreSubmodules=all in the repo's config, and a bump of a link already on main.
+  const b = repo({ 'README.md': '# x\n' });
+  git(b.dir, 'update-index', '--add', '--cacheinfo', `160000,${submoduleCommit(1)},db/migrations/0042`);
+  git(b.dir, 'commit', '-q', '-m', 'link');
+  const bBase = git(b.dir, 'rev-parse', 'HEAD');
+  git(b.dir, 'update-index', '--cacheinfo', `160000,${submoduleCommit(2)},db/migrations/0042`);
+  git(b.dir, 'commit', '-q', '-m', 'bump');
+  const bHead = git(b.dir, 'rev-parse', 'HEAD');
+  git(b.dir, 'config', 'diff.ignoreSubmodules', 'all');
+  assert.equal(git(b.dir, 'diff', '--name-only', `${bBase}..${bHead}`), '');
+  assert.deepEqual(changeFiles(b.dir, bBase, bHead).map((f) => [f.path, f.added, f.removed]), [['db/migrations/0042', 1, 1]]);
+  assert.deepEqual(changeFilesModule.changedNames(b.dir, [`${bBase}..${bHead}`]), ['db/migrations/0042']);
+  assert.deepEqual(changeFilesModule.changedStatuses(b.dir, [bBase, bHead]), [{ status: 'M', path: 'db/migrations/0042' }]);
+  assert.deepEqual(sizeFiles(b.dir, bBase, bHead).map((f) => [f.path, f.added.length, f.removed.length]), [['db/migrations/0042', 1, 1]]);
+  assert.deepEqual(pushProblems(b.dir, bBase, bHead, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 1 }), ['changes 2 lines, over the 1-line limit (push.max_changed_lines); split it into smaller changes']);
+  assert.equal(level(changeFiles(b.dir, bBase, bHead), migration).level, 'L3');
+});
+
+test('the push limit pairs renames only as the config says: under diff.renames=false a pure rename of 40 lines counts 80, as the plain count it replaced did', () => {
+  const { dir, base } = repo({ 'README.md': '# x\n', 'src/long.ts': jobLines(40) });
+  renameSync(join(dir, 'src/long.ts'), join(dir, 'src/longer.ts'));
+  const head = commit(dir, 'move');
+  // Paired by default: 0.
+  assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 0 }), []);
+  git(dir, 'config', 'diff.renames', 'false');
+  // What the old reader counted under that config.
+  assert.equal(git(dir, 'diff', '--numstat', `${base}..${head}`), '0\t40\tsrc/long.ts\n40\t0\tsrc/longer.ts');
+  assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 79 }), ['changes 80 lines, over the 79-line limit (push.max_changed_lines); split it into smaller changes']);
+  // The size limit (review.yaml max_pr_lines) pairs renames whatever the config says, as before.
+  assert.equal(sizeVerdict(sizeFiles(dir, base, head), { maxLines: 600, generated: DEFAULT_GENERATED }).lines, 0);
 });

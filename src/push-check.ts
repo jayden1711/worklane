@@ -60,9 +60,10 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
     if (big.length) problems.push(`has files over the ${limits.max_file_mb} MB limit (${list(big)}) in its commits; remove them from every commit on the branch`);
   }
 
-  // Through the one changed-files reader (#693): a file a `-diff` or `binary` attribute marks counts its lines. Its
-  // size read pairs renames like the plain `git diff` count it replaces, so a pure rename still counts 0.
-  const lines = sizeFiles(cwd, base, head).reduce((s, f) => s + f.added.length + f.removed.length, 0);
+  // Through the one changed-files reader (#693): a file a `-diff` or `binary` attribute marks counts its lines. It pairs
+  // renames only as the git config says, like the plain `git diff` count it replaces: a pure rename counts 0 by
+  // default and in full where the config turns pairing off, never fewer lines than before.
+  const lines = sizeFiles(cwd, base, head, { renames: 'configured' }).reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
 
   // Skills the change adds or edits must pass the skill lint as they stand at head.
