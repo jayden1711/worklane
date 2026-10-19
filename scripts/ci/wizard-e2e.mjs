@@ -458,7 +458,7 @@ async function server() {
     return { why };
   });
 
-  await screen('screen 8: the instance\'s policy (budget changed, the change shown, then written)', async () => {
+  await screen('screen 8: the instance\'s policy (budget changed, the change shown; root\'s file, so the dashboard writes nothing)', async () => {
     await open('/first-run?step=policy');
     const p = `${row('policy')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('policy-form')}`);
@@ -474,11 +474,12 @@ async function server() {
     await click(`${p} ${tid('policy-review')}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
-    // The write's own result, then the file checked once.
-    await waitText(`${p} ${tid('policy-result')}`, /./);
-    assert.match(sudoOk('cat', file), /daily_usd: 30\b/);
-    assert.equal(stat(file), `wl-${instance} 600`);
-    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
+    // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard refuses to write it, naming the root
+    // command; the file is unchanged and still root's.
+    const root = await waitText(`${p} ${tid('policy-result')}`, /is root's: an admin changes it at a root shell/);
+    assert.equal(sudoOk('cat', file), before, 'the dashboard wrote nothing');
+    assert.equal(stat(file), 'root 644');
+    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), root, file: stat(file) };
   });
 
   // WHY skipped: since #387 the channel listing runs the engine's own CLI against Discord's API (a constant host); its
