@@ -9,6 +9,7 @@ import { instancesDir, listInstances } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { readRootFile } from './os/root-file.js';
 import { ownCommand, POLICY_ROOT_DIR, policyRootRequired, readPolicyChecked } from './policy-gate.js';
+import { renameForwardPath, renamingTo } from './policy-kill.js';
 
 export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; markers?: string } = {}): DoctorCheck[] {
   const machine = o.machine ?? existsSync(MACHINE_HELPER);
@@ -26,6 +27,11 @@ export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; m
       const why = 'problem' in r ? r.problem : `${file} is root's, but not recorded as such`;
       check('warn', `${why}: the coordinator user, or anything running as it, can rewrite it (sandbox, allow_same_user, land_mode). An admin makes it root's, its content kept and its keys shown: ${ownCommand(name)} (or reruns add-project.sh)`);
     }
+    // Root's forward record of a rename of this instance (#726 round 7): while it is there, auto_merge off for it turns
+    // the other name off too. Expected only while a rename of it runs; otherwise one stopped, or a crash left the record.
+    // It never blocks an OFF (src/policy-kill.ts arms this name first, whatever the record says).
+    const to = renamingTo(name, markers);
+    if (to) out.push({ name: `rename record ${name}`, level: 'warn', detail: `root's ${renameForwardPath(name, markers)} says ${name} is being renamed to ${to}, so auto_merge off for ${name} turns ${to}'s off too. If no rename is under way: an admin finishes it or undoes it (sudo bash scripts/setup/instance-rename.sh ${name} ${to} --yes, or --abort), or removes that file` });
   }
   return out;
 }

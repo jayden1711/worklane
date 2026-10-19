@@ -24,7 +24,7 @@ import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { armedSwitches, clearKillSwitches, ensureSpare, killAutoMerge, recordDir } from './policy-kill.js';
+import { armedSwitches, clearKillSwitches, ensureSpare, killAutoMerge, recordDir, renamingTo } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -280,9 +280,14 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   // auto_merge off: root's kill switch alone (src/policy-kill.ts), before any lock or read of policy.yaml, so nothing
   // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
+  // A name with root's forward record (a rename in progress, or one left behind) is reached even once its user is
+  // gone (inside its removal): the OFF goes on to the name it forwards to. Done only when every name it reached that
+  // can still start (its coordinator user is there) is armed; otherwise refused, naming each (KillSwitchError).
   if (key === 'auto_merge' && value === false) {
-    if (!instanceNameOk(instance) || (d.uid ?? userUid)(`wl-${instance}`) === null) throw new Error(`no instance ${instance} on this machine`);
-    killAutoMerge(instance, markers);
+    const uid = d.uid ?? userUid;
+    const canStart = (name: string) => uid(`wl-${name}`) !== null;
+    if (!instanceNameOk(instance) || (!canStart(instance) && renamingTo(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
+    killAutoMerge(instance, markers, new Date(), canStart);
     return { key, from: null, to: false };
   }
   // auto_merge on: the kill switches there now, before anything waits (root's lock included), are the only ones it may

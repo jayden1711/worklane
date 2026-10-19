@@ -4,8 +4,10 @@
 //   - A switch is any file whose name starts with `<instance>.auto-merge-off`: each OFF leaves one under a new name of
 //     its own, `<instance>.auto-merge-off.<id>`, moving an armed one there, or the spare, by rename. OFFs one after
 //     another, or many at once, add no files and report no failure while a switch is armed (armOne); only an OFF
-//     that finds no switch and no spare at all writes one. While a rename is in progress, an OFF given to the old name
-//     arms the new name's too (`<old>.rename-to`, which instance-rename.sh writes first and removes last). The engine
+//     that finds no switch and no spare at all writes one. While root's forward record `<old>.rename-to` is there
+//     (instance-rename.sh writes it first; removes it last, or first thing on --abort; instance-remove.sh removes any
+//     naming the instance it removes), an OFF given to the old name arms the new name's too. OFF says done only when
+//     every name it reached that can still start is armed (killAutoMerge). The engine
 //     checks for any BEFORE it reads the policy (autoMergeKilled): while
 //     one is there, auto_merge is off, whatever policy.yaml says. Any error reading the directory but "no such
 //     directory" counts as off.
@@ -92,9 +94,26 @@ function fsyncPath(p: string): void {
   }
 }
 
-/** How old a temp file of ours is before it counts as a root writer's that crashed between writing and renaming it. */
-const TEMP_STALE_MS = 60_000;
-/** Temp files a root writer killed before its rename left behind (`.<hex>.auto-merge.tmp`): gone on the next write. */
+/**
+ * How old a temp file of ours is before it counts as abandoned whatever its writer: one whose writer is still alive
+ * (or can't be told, an earlier name with no pid) is never swept sooner, so a root writer stalled between its write
+ * and its rename (a slow disk, a stopped process) never loses its file under it. (Through ae00a348 a minute was enough.)
+ */
+const TEMP_ABANDONED_MS = 24 * 60 * 60 * 1000;
+/** Whether process `pid` is gone (it can't be writing): signal 0, which only checks; EPERM means it is there. */
+function pidGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+/**
+ * Temp files a root writer killed before its rename left behind, gone on the next write: `.<pid>-<hex>.auto-merge.tmp`
+ * as soon as that pid is gone (root's writers share the host's pid space: the helper's transient unit has no
+ * PrivatePIDs), and any (`.<hex>.auto-merge.tmp` too, which names no pid) once it is a day old.
+ */
 function sweepTemps(dir: string): void {
   let names: string[];
   try {
@@ -103,19 +122,20 @@ function sweepTemps(dir: string): void {
     return;
   }
   for (const n of names) {
-    if (!/^\.[0-9a-f]{12}\.auto-merge\.tmp$/.test(n)) continue;
+    const m = /^\.(?:([1-9][0-9]{0,9})-)?[0-9a-f]{12}\.auto-merge\.tmp$/.exec(n);
+    if (!m) continue;
     try {
-      if (Date.now() - statSync(join(dir, n)).mtimeMs > TEMP_STALE_MS) unlinkSync(join(dir, n));
+      if ((m[1] && pidGone(Number(m[1]))) || Date.now() - statSync(join(dir, n)).mtimeMs > TEMP_ABANDONED_MS) unlinkSync(join(dir, n));
     } catch {
       // gone already
     }
   }
 }
 
-/** A new file in `dir`, 0644: a temp file renamed to `to`. */
+/** A new file in `dir`, 0644: a temp file (named for this process, so a sweep knows when it is abandoned) renamed to `to`. */
 function writeNew(dir: string, to: string, text: string): void {
   sweepTemps(dir);
-  const tmp = join(dir, `.${randomBytes(6).toString('hex')}.auto-merge.tmp`);
+  const tmp = join(dir, `.${process.pid}-${randomBytes(6).toString('hex')}.auto-merge.tmp`);
   writeFileSync(tmp, text, { mode: 0o644, flag: 'wx' });
   chmodSync(tmp, 0o644);
   renameSync(tmp, to);
@@ -143,8 +163,11 @@ export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR): void {
 /** Where a rename in progress forwards an instance's auto_merge off (instance-rename.sh writes it first, removes it last). */
 export const renameForwardPath = (instance: string, dir = POLICY_ROOT_DIR) => join(dir, `${instance}.rename-to`);
 
-/** The new name a rename of `instance` in progress forwards its OFF to, or null (read only: no lock, no parse). */
-function renamedTo(instance: string, dir: string): string | null {
+/**
+ * The new name root's forward record of `instance` names (a rename in progress, or one a crash or a stopped rename
+ * left), or null: read only, no lock, no parse. A record that names nothing an instance could be is ignored.
+ */
+export function renamingTo(instance: string, dir = POLICY_ROOT_DIR): string | null {
   try {
     const to = readFileSync(renameForwardPath(instance, dir), 'utf8').trim();
     return /^[a-z][a-z0-9-]{0,40}$/.test(to) && to !== instance ? to : null;
@@ -197,39 +220,60 @@ function armOne(instance: string, dir: string, at: Date): void {
   fsyncPath(dir);
 }
 
+/** An OFF that couldn't arm a name that can still start: each such name, with why, so nothing reports it done. */
+export class KillSwitchError extends Error {
+  constructor(readonly stillOn: readonly { name: string; why: string }[]) {
+    super(stillOn.map(({ name, why }) => `${name}'s auto_merge switch couldn't be armed (${why}), so ${name} can still merge on its own: free space in ${POLICY_ROOT_DIR}, then run \`policy set ${name} auto_merge off\` as root again`).join('; '));
+  }
+}
+
 /**
- * Turn this instance's auto_merge off (as root): arm a switch of its own name (armOne: by rename, no new space; a new
- * file only with no switch and no spare at all); fsync it and the directory; then, if space allows, a new spare for
- * the next OFF. While a rename of the instance is in progress (renamedTo), the new name's switch is armed too, the
- * same way, before OFF says done: an OFF given to the old name at any step reaches the instance that runs. No lock,
- * no policy.yaml: nothing else can hold this up.
+ * Turn this instance's auto_merge off (as root). THE RULE (#726 round 7): arm every name the OFF can reach before
+ * deciding anything, and say done only when every one of them that can still start is armed; nothing throws before
+ * every arm has been tried.
+ *   - The names: the one given, always first; then, while root's forward record of it is there (renamingTo: a rename
+ *     in progress, or one a crash or a stopped rename left), the name it forwards to, even when the given name's user
+ *     is gone already (inside its removal), so an OFF given then still reaches the instance that runs.
+ *   - Each is armed by armOne (by rename, no new space; a new file only with no switch and no spare at all), the
+ *     switch and the directory fsynced; then, if space allows, a new spare for the next OFF.
+ *   - `canStart(name)`: whether an instance can still run under that name (src/policy-root.ts: its coordinator user is
+ *     there). A failure to arm such a name is reported (KillSwitchError, naming it); one that can't start any more
+ *     (the old name inside its removal, a forward record naming no instance) is not, since nothing will run there.
+ * No lock, no policy.yaml: nothing else can hold this up.
  */
-export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): void {
+export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date(), canStart: (name: string) => boolean = () => true): void {
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
-  recordDir(dir);
-  const forward = renamedTo(instance, dir);
-  if (forward) {
-    // The new name first: it is the one that runs (or will). The old name's coordinator is parked from the rename's
-    // first step, and its switches may be gone already (its removal takes them before its user), so its own switch
-    // is armed where it can be; an --abort carries the new name's back to it (instance-rename.sh).
+  const failed: { name: string; why: string }[] = [];
+  let dirWhy: string | null = null;
+  try {
+    recordDir(dir);
+  } catch (e) {
+    dirWhy = (e as Error).message; // each arm below still tried: reported only with a name it couldn't arm
+  }
+  const forward = renamingTo(instance, dir);
+  const names = forward ? [instance, forward] : [instance];
+  for (const name of names) {
     try {
-      armOne(forward, dir, at);
+      armOne(name, dir, at);
     } catch (e) {
-      throw new Error(`${instance} is being renamed to ${forward}, and ${forward}'s auto_merge switch couldn't be armed (${(e as Error).message}): run \`policy set ${forward} auto_merge off\` as root`);
+      failed.push({ name, why: dirWhy ? `${(e as Error).message}; ${dirWhy}` : (e as Error).message });
     }
-    try {
-      armOne(instance, dir, at);
-    } catch {
-      // the new name is off; the old one is parked
-    }
-  } else armOne(instance, dir, at);
-  for (const n of forward ? [instance, forward] : [instance]) {
+  }
+  for (const n of names) {
     try {
       ensureSpare(n, dir);
     } catch {
       // no space for the next spare: the next OFF moves the armed switch, which needs none
     }
   }
+  const stillOn = failed.filter(({ name }) => {
+    try {
+      return canStart(name);
+    } catch {
+      return true; // can't tell: it can start
+    }
+  });
+  if (stillOn.length) throw new KillSwitchError(stillOn);
 }
 
 /**
