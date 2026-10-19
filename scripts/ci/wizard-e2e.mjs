@@ -496,7 +496,10 @@ async function server() {
     // written with no lock and no read of policy.yaml, which it leaves as it was.
     const off = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', 'auto_merge', 'off']);
     assert.equal(off.status, 0, `set-policy auto_merge off: ${off.out}`);
-    const kill = `/etc/worklane/policy-root/${instance}.auto-merge-off`;
+    // Each OFF leaves a switch of its own name, <instance>.auto-merge-off.<id> (src/policy-kill.ts).
+    const found = sh('sudo', ['find', '/etc/worklane/policy-root', '-maxdepth', '1', '-name', `${instance}.auto-merge-off*`]);
+    const kill = found.out.split('\n').filter(Boolean)[0];
+    assert.ok(kill, `no kill switch for ${instance}: ${found.out} ${found.err}`);
     assert.equal(stat(kill), 'root 644');
     assert.equal(sudoOk('cat', file), after, 'auto_merge off never touches policy.yaml');
     return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file), killSwitch: stat(kill) };
