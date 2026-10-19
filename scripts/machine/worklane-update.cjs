@@ -608,10 +608,10 @@ const RETIRED_CHECKS = Object.freeze(['desktop']);
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
- * pins (checkPins, #727): a pinned required check counts only from its pinned source, and one nothing pins by name, as
- * before; the latest run of every name on the commit, whatever its source, must still be green, so a pin never turns
- * a check that isn't a pass, as judged by name (the latest run of that name), into a pass. Absent: by name alone
- * (tests' stand-ins only).
+ * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is the latest run from its pinned
+ * source on this commit (a later run of that source supersedes its earlier or cancelled ones), and every run of its
+ * name from any other source must be a pass too. One nothing pins is judged by name, as before, and every other name's
+ * latest run must still be green. Absent: by name alone (tests' stand-ins only).
  */
 function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
@@ -628,9 +628,21 @@ function evaluateChecks(runs, required, pins) {
   if (pins) {
     const invalid = required.filter((name) => (pins.pinOf(name) || {}).invalid);
     if (invalid.length) return { ok: false, final: true, reason: `updates.json required_check_sources has an invalid pin for ${invalid.map((n) => `"${n}"`).join(', ')} ({ "app_id": N } or { "workflow": ".github/workflows/<file>" }): refused` };
-    // A pinned check only from its source; one nothing pins by name, as before pins (the owner's choice, 2026-10-19).
-    judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name) || fromPinnedSource(r, pins.pinOf(r.name), pins)));
+    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: the latest run from its
+    // pinned source on this commit, by the runs' own order (the later workflow run, then the later check run, as a
+    // re-run attempt is), so a later run of that source supersedes its earlier or cancelled ones (the owner's rule).
+    judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name)));
+    const order = (r) => [(pins.suites.get(r.check_suite && r.check_suite.id) || {}).run ?? -1, r.id ?? -1];
+    for (const r of runs || []) {
+      if (!pins.pinOf(r.name) || !fromPinnedSource(r, pins.pinOf(r.name), pins)) continue;
+      const prev = judged.get(r.name);
+      const [a, b] = [order(r), prev ? order(prev) : null];
+      if (!b || a[0] > b[0] || (a[0] === b[0] && a[1] > b[1])) judged.set(r.name, r);
+    }
   }
+  // A pinned required check: any run of its name from any OTHER source that isn't a pass blocks it.
+  const isOwn = (r) => !!pins && !!pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins);
+  const pinnedRequired = (name) => !!pins && !!pins.pinOf(name) && required.includes(name);
   const from = (name) => (pins && pins.pinOf(name) ? ' from its pinned source' : '');
   const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || judged.has(name));
   // WHY: a list of retired names alone would otherwise pass on any green commit, with nothing actually required.
@@ -641,8 +653,15 @@ function evaluateChecks(runs, required, pins) {
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
     if (r.conclusion === 'skipped') return { ok: false, final: true, reason: `required check "${name}" was skipped` };
     if (r.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" ended ${r.conclusion}` };
+    if (!pinnedRequired(name)) continue;
+    for (const o of (runs || []).filter((x) => x.name === name && !isOwn(x))) {
+      if (o.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" from another source is ${o.status}` };
+      if (o.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" from another source ended ${o.conclusion}` };
+    }
   }
   for (const [name, r] of latest) {
+    // A pinned required check was judged above, by its own source's latest run and every other source's runs.
+    if (pinnedRequired(name)) continue;
     if (r.status !== 'completed') return { ok: false, final: false, reason: `check "${name}" is ${r.status}` };
     if (!GREEN.has(r.conclusion)) return { ok: false, final: true, reason: `check "${name}" ended ${r.conclusion}` };
   }

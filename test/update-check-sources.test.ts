@@ -119,7 +119,40 @@ test("the branch's rules unread (a rate limit, say): a check they might pin wait
 test("a pin never turns a fail into a pass: another App's newer failing run of a pinned check still refuses the commit", async () => {
   const r = await choose(engine, gitHub({ runs: [{ name: 'test (ubuntu-latest, 22)', suite: 1 }, { name: 'test (ubuntu-latest, 22)', suite: 8, app: 4242, conclusion: 'failure', started: '2026-10-18T10:05:00Z' }, { name: 'scan', suite: 2 }], workflowRuns: legit }));
   assert.equal(r.chosen, false);
-  assert.match(r.reason ?? '', /check "test \(ubuntu-latest, 22\)" ended failure/);
+  assert.match(r.reason ?? '', /check "test \(ubuntu-latest, 22\)" (from another source )?ended failure/);
+});
+
+test("owner rule: a pinned check is its source's latest run on the commit; any non-pass of its name from another source refuses it", async () => {
+  const name = 'test (ubuntu-latest, 22)';
+  // ci.yml ran twice on this commit: run 10 (suite 1) and the later run 30 (suite 3).
+  const twice = [...legit, workflowRun(3, '.github/workflows/ci.yml')];
+  const verdict = async (runs: Run[], workflowRuns: unknown[] = twice) => {
+    const r = await choose({ required_checks: [name] }, gitHub({ runs, workflowRuns }));
+    return r.chosen ? 'installs' : (r.reason ?? '');
+  };
+  // 1. Cancelled, then passed in the later run: installs. 2. Failed, then passed: installs. List order doesn't matter.
+  assert.equal(await verdict([{ name, suite: 1, conclusion: 'cancelled' }, { name, suite: 3, started: '2026-10-18T09:00:00Z' }]), 'installs');
+  assert.equal(await verdict([{ name, suite: 3, started: '2026-10-18T09:00:00Z' }, { name, suite: 1, conclusion: 'failure' }]), 'installs');
+  // Passed, then cancelled in the later run: refused (the later run decides, by the runs' own order).
+  assert.match(await verdict([{ name, suite: 1, started: '2026-10-18T11:00:00Z' }, { name, suite: 3, conclusion: 'cancelled' }]), /ended cancelled/);
+  // 3. The pinned run passed, and another App's same-name run failed: refused.
+  assert.match(await verdict([{ name, suite: 3 }, { name, suite: 8, app: 4242, conclusion: 'failure', started: '2026-10-18T09:00:00Z' }]), /from another source ended failure/);
+  // A later ci.yml run for ANOTHER commit never supersedes: its failure refuses, its pass never rescues.
+  const otherHead = [...legit, workflowRun(3, '.github/workflows/ci.yml', { sha: OTHER })];
+  assert.match(await verdict([{ name, suite: 1 }, { name, suite: 3, conclusion: 'failure' }], otherHead), /from another source ended failure/);
+  assert.match(await verdict([{ name, suite: 1, conclusion: 'failure' }, { name, suite: 3 }], otherHead), /ended failure/);
+});
+
+test('owner rule: a re-run attempt in the same workflow run counts as the newer; an unpinned --add-check name is judged as before', async () => {
+  const name = 'test (ubuntu-latest, 22)';
+  // Both check runs are jobs of run 10 (suite 1): ids 0 (failed) and 1 (the re-run's pass), listed failure last.
+  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1 }, { name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }], workflowRuns: legit }))).chosen, false, 'id 1 is the failure: the newer attempt failed');
+  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }, { name, suite: 1 }], workflowRuns: legit }))).chosen, true, 'id 1 is the pass: the newer attempt passed');
+  // Unpinned: the latest run by name decides, from any source, exactly as before pins.
+  const gh = gitHub({ runs: [{ name: 'extra', suite: 5, app: 4242 }, { name: 'extra', suite: 6, app: 5555, conclusion: 'failure', started: '2026-10-18T09:00:00Z' }], workflowRuns: legit });
+  const pinned = await choose({ required_checks: ['extra'] }, gh);
+  assert.deepEqual(pinned, await choose({ required_checks: ['extra'] }, { ...gh, deps: { ...gh.deps, pinChecks: undefined } }));
+  assert.equal(pinned.chosen, true, 'the older failure is not its latest run: installs, as before');
 });
 
 test("updates.json required_check_sources pins a check (over the updater's own list); the branch rules' App pins one it doesn't name", async () => {
