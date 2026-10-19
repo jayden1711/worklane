@@ -123,7 +123,7 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
   },
   {
     command: 'set-policy',
-    what: "change one key of this instance's root policy.yaml (issue #726): never sandbox or allow_same_user, and land_mode and main_watch only toward pr and auto",
+    what: "change one key of this instance's root policy.yaml (issue #726): never sandbox or allow_same_user, and land_mode, main_watch and auto_merge only toward pr, auto and off",
     usage: 'set-policy <key> <value>',
     allows: (a) => policySetOk(a),
     run: (a, exec) => policyStep(a, exec),

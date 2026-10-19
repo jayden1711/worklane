@@ -213,7 +213,12 @@ policy_text() {
   usd="$(sed -n 's/.*daily_usd: *\([0-9.]*\).*/\1/p' "$f" | head -1)"
   w="$(sed -n 's/.*max_workers: *\([0-9]*\).*/\1/p' "$f" | head -1)"
   [ "$am" = true ] && am=on || am=off
-  echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them in the dashboard's Settings (through root's helper), or as root with $ENGINE_CLI policy set $name <key> <value>"
+  # The dashboard's route is root's helper's set-policy, whose sudoers rule a sudo older than 1.9.10 leaves out (lib.sh).
+  if sudo_regex_ok; then
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them in the dashboard's Settings (through root's helper), or as root with $ENGINE_CLI policy set $name <key> <value>; turning auto_merge on is root's alone"
+  else
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them as root with $ENGINE_CLI policy set $name <key> <value> (this machine's sudo is older than 1.9.10, so the dashboard can't)"
+  fi
 }
 # Done only once the policy is root's (issue #726): an earlier install's, which its coordinator user could rewrite, is
 # made root's on a rerun, its content kept, and its isolation and merge keys shown.

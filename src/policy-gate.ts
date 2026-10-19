@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { HELPER_RULES, helperRules } from './machine.js';
 import { readRootFile } from './os/root-file.js';
 import { etcPath } from './os/system-paths.js';
 
@@ -143,8 +144,28 @@ export const POLICY_SET_KEYS: Readonly<Record<string, Kind>> = {
   'settings.chat_attachments.retention_days': 'number',
 };
 
-/** The one value of each of these a coordinator may set (tightening); any other is an admin's, at a root shell (#698 decision 1). */
-export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', main_watch: 'auto' };
+/**
+ * The one value of each of these a coordinator may set (tightening); any other is an admin's, at a root shell (#698
+ * decision 1; auto_merge on is root's only, the owner's decision on #770). The machine helper holds the same table
+ * (POLICY_ONLY), and test/policy-edit.test.ts holds them equal. `policy own` derives what is loose from it too.
+ */
+export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
+
+/** The root shell command that sets one key of an instance's policy.yaml. */
+export const policySetCommand = (instance: string, key: string, arg: string) => `sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}`;
+
+/**
+ * Why root's machine helper can't take a `set-policy` on this machine, or null when it can (or nothing says it
+ * can't). machine-helper.sh records the rules it left out in helper-rules.json's left_out: a sudo older than 1.9.10
+ * reads a command's argument pattern as literal text, so every pattern rule is left out together (lib.sh
+ * machine_sudoers), set-policy among them. A record from before set-policy existed lists add-project instead, which
+ * means the same sudo.
+ */
+export function policyHelperMissing(rulesFile = HELPER_RULES): string | null {
+  const r = helperRules(rulesFile);
+  if (!r || !(r.leftOut.includes('set-policy') || r.leftOut.includes('add-project'))) return null;
+  return `this machine's sudo (${r.sudo ?? 'version unknown'}) is older than 1.9.10, so root's helper has no set-policy rule here and a dashboard request would only fail`;
+}
 
 const NUMBER = /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/;
 const WINDOWS = /^(none|[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9](\+[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9]){0,7})$/;

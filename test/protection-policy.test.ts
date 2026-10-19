@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -13,6 +13,8 @@ import { startDashboard, type DashboardOptions } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
+import { setPolicyRootUid } from '../src/policy-gate.js';
+import { ownPolicy } from '../src/policy-root.js';
 import { protectionBody, type ActionPlan } from '../src/setup-actions.js';
 import type { RunResult, SetupProbe, SetupView } from '../src/setup-steps.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
@@ -60,12 +62,12 @@ async function dashboard(dir: string, over: Partial<DashboardOptions> & { protec
   const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'pp-slots-')), limitsPath: join(mkdtempSync(join(tmpdir(), 'pp-limits-')), 'none.json'), setupProbe: probe(protectedNow ?? (() => false)), ...rest });
   const base = d.url.split('/?')[0]!;
   const h = (user: string) => ({ authorization: `Bearer ${d.token}`, ...asPerson(user), 'content-type': 'application/json' });
-  const get = async (user = 'example-owner') => (await (await fetch(`${base}/api/first-run?fresh=1`, { headers: h(user) })).json()) as { setup: SetupView; actions: Record<string, ActionPlan>; policy: { fields: { key: string; value: unknown; max?: number }[]; fixed: { key: string }[]; error: string | null } | null };
+  const get = async (user = 'example-owner') => (await (await fetch(`${base}/api/first-run?fresh=1`, { headers: h(user) })).json()) as { setup: SetupView; actions: Record<string, ActionPlan>; policy: { fields: { key: string; value: unknown; max?: number; only?: unknown; root?: string }[]; fixed: { key: string }[]; error: string | null } | null };
   const post = async (path: string, user: string, body: unknown) => {
     const r = await fetch(`${base}${path}`, { method: 'POST', headers: h(user), body: JSON.stringify(body) });
-    return { status: r.status, body: (await r.json()) as { ok?: boolean; detail?: string; error?: string; changes?: { key: string; from: unknown; to: unknown }[]; confirmed?: boolean } };
+    return { status: r.status, body: (await r.json()) as { ok?: boolean; detail?: string; error?: string; changes?: { key: string; from: unknown; to: unknown }[]; confirmed?: boolean; queued?: boolean; requested?: string } };
   };
-  const events = (types: ('settings.changed' | 'dashboard.audit')[]) => {
+  const events = (types: ('settings.changed' | 'dashboard.audit' | 'machine.requested')[]) => {
     const log = new EventLog(join(stateDir, 'events.db'));
     try {
       return log.read(0, types).map((e) => e.payload as unknown as Record<string, unknown>);
@@ -213,5 +215,53 @@ test("the Policy form refuses, writing nothing: an isolation key, over the machi
     assert.equal((await local.post('/api/first-run/policy', 'example-owner', { values: { auto_merge: true }, confirm: true })).status, 400);
   } finally {
     await local.d.close();
+  }
+});
+
+test("a root policy.yaml (#726): the Policy form and Settings only queue a change for the coordinator and say so, in the answer and the audit; auto_merge on is root's alone and never asked; an old sudo is refused up front", { skip: process.platform !== 'linux' && 'a Linux machine install' }, async () => {
+  const { dir } = fixture();
+  // A machine instance whose policy.yaml setup made root's ("root" here: this test's own uid, a stand-in).
+  const T = realpathSync(mkdtempSync(join(tmpdir(), 'pp-root-')));
+  const home = join(T, 'wl-shop');
+  const inst = join(home, '.local', 'state', BRAND.cli, 'instances', 'shop');
+  mkdirSync(inst, { recursive: true });
+  const policyFile = join(inst, 'policy.yaml');
+  writeFileSync(policyFile, 'version: 1\nbudget: { daily_usd: 50 }\nagents: { max_workers: 4 }\nland_mode: pr\nauto_merge: false\n', { mode: 0o600 });
+  const me = process.getuid!();
+  ownPolicy('shop', { home: () => home, uid: () => me, rootUid: me, rootGid: process.getgid!(), limitsPath: join(T, 'none.json') });
+  setPolicyRootUid(me);
+  const rules = join(T, 'helper-rules.json');
+  const s = await dashboard(dir, { instance: 'shop', policyFile, machine: { helperRulesPath: rules }, setupContext: { instanceFacts: () => ({ error: 'not here' }) } });
+  const before = readFileSync(policyFile, 'utf8');
+  try {
+    const am = (await s.get()).policy!.fields.find((f) => f.key === 'auto_merge')!;
+    assert.deepEqual([am.only, am.root], [false, `sudo ${BRAND.cli} policy set shop auto_merge on`], 'the form offers only off, and names the root command');
+    for (const confirm of [false, true]) {
+      const r = await s.post('/api/first-run/policy', 'example-owner', { values: { auto_merge: true }, confirm });
+      assert.equal(r.status, 400);
+      assert.match(r.body.error!, new RegExp(`auto_merge true: loosening it is an admin's, at a root shell \\(sudo ${BRAND.cli} policy set shop auto_merge on\\)`));
+    }
+    assert.equal(s.events(['machine.requested']).length, 0, 'nothing asked');
+    // A change the helper takes: queued, and said so; the dashboard writes nothing.
+    const form = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60 }, confirm: true });
+    assert.equal(form.status, 200, JSON.stringify(form.body));
+    assert.equal(form.body.queued, true);
+    const set = await s.post('/api/instance-settings', 'example-owner', { key: 'workers', value: 3 });
+    assert.equal(set.status, 200, JSON.stringify(set.body));
+    assert.equal(set.body.queued, true);
+    assert.equal(readFileSync(policyFile, 'utf8'), before);
+    assert.deepEqual(s.events(['machine.requested']).map((e) => e.args), [['set-policy', 'budget.daily_usd', '60'], ['set-policy', 'settings.workers', '3']]);
+    assert.equal(s.events(['settings.changed']).length, 0, 'changed only once the helper ran it (the coordinator logs that)');
+    const audits = s.events(['dashboard.audit']).map((a) => [a.action, (a.detail as { note?: string }).note]);
+    assert.deepEqual(audits.filter(([a]) => a === 'first_run.policy' || a === 'settings.queued' || a === 'settings.changed'), [['first_run.policy', 'queued for the coordinator'], ['settings.queued', 'queued for the coordinator']]);
+    // A sudo older than 1.9.10: refused up front, naming the root command, and nothing more asked.
+    writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'] }));
+    const old = await s.post('/api/instance-settings', 'example-owner', { key: 'workers', value: 2 });
+    assert.equal(old.status, 400);
+    assert.match(old.body.error!, new RegExp(`older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set shop settings\\.workers 2`));
+    assert.equal(s.events(['machine.requested']).length, 2);
+  } finally {
+    setPolicyRootUid(0);
+    await s.d.close();
   }
 });

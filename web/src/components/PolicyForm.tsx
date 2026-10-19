@@ -25,7 +25,8 @@ export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: F
       const r = await changePolicy(values, confirm);
       if (confirm) {
         setChanges(null);
-        setMsg({ ok: true, text: `written: ${r.changes.map((c) => `${c.key} ${show(c.from)} → ${show(c.to)}`).join('; ')}` });
+        // A root policy.yaml: only asked of the coordinator, which has root's helper write it.
+        setMsg({ ok: true, text: `${r.queued ? 'queued for the coordinator' : 'written'}: ${r.changes.map((c) => `${c.key} ${show(c.from)} → ${show(c.to)}`).join('; ')}` });
         onDone?.();
       } else setChanges(r.changes);
     } catch (e) {
@@ -37,28 +38,38 @@ export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: F
   return (
     <div className="space-y-3" data-testid="policy-form">
       <ul className="space-y-2.5">
-        {p.fields.map((f) => (
-          <li key={f.key} className="space-y-1" data-testid="policy-field" data-key={f.key}>
-            <label className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink">
-              <code className="font-mono text-[12px]">{f.key}</code>
-              {f.kind === 'number' && (
-                <input type="number" min={f.min} max={f.max} step={f.step} value={String(values[f.key])} disabled={!canEdit || busy} onChange={(e) => set(f.key, Number(e.target.value))} className={cx(field, 'w-24')} aria-label={f.key} />
+        {p.fields.map((f) => {
+          // A root policy (f.only): only toward its one value here, so at that value already nothing can change.
+          const locked = f.only !== undefined && f.value === f.only;
+          const choices = f.only !== undefined ? [...new Set([String(f.value), String(f.only)])] : f.choices!;
+          return (
+            <li key={f.key} className="space-y-1" data-testid="policy-field" data-key={f.key}>
+              <label className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink">
+                <code className="font-mono text-[12px]">{f.key}</code>
+                {f.kind === 'number' && (
+                  <input type="number" min={f.min} max={f.max} step={f.step} value={String(values[f.key])} disabled={!canEdit || busy} onChange={(e) => set(f.key, Number(e.target.value))} className={cx(field, 'w-24')} aria-label={f.key} />
+                )}
+                {f.kind === 'boolean' && <input type="checkbox" checked={values[f.key] === true} disabled={!canEdit || busy || locked} onChange={(e) => set(f.key, e.target.checked)} aria-label={f.key} />}
+                {f.kind === 'choice' && (
+                  <select value={String(values[f.key])} disabled={!canEdit || busy || locked} onChange={(e) => set(f.key, e.target.value)} className={cx(field, 'w-28')} aria-label={f.key}>
+                    {choices.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {f.kind === 'number' && <span className="text-[11.5px] text-ink-3">{f.min}–{f.max}</span>}
+              </label>
+              <p className="text-[12px] text-ink-3">{f.why}</p>
+              {f.root && (
+                <p className="break-words text-[12px] text-ink-3" data-testid="policy-root-only">
+                  Here only {show(f.only)}; anything else is root's, at a root shell: <code className="font-mono text-[11.5px]">{f.root}</code>
+                </p>
               )}
-              {f.kind === 'boolean' && <input type="checkbox" checked={values[f.key] === true} disabled={!canEdit || busy} onChange={(e) => set(f.key, e.target.checked)} aria-label={f.key} />}
-              {f.kind === 'choice' && (
-                <select value={String(values[f.key])} disabled={!canEdit || busy} onChange={(e) => set(f.key, e.target.value)} className={cx(field, 'w-28')} aria-label={f.key}>
-                  {f.choices!.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              )}
-              {f.kind === 'number' && <span className="text-[11.5px] text-ink-3">{f.min}–{f.max}</span>}
-            </label>
-            <p className="text-[12px] text-ink-3">{f.why}</p>
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
       <p className="break-words text-[12px] text-ink-3" data-testid="policy-fixed">
         Not changed here (isolation; set at a root shell): {p.fixed.map((x) => `${x.key} ${show(x.value)}`).join(' · ')}

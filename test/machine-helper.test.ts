@@ -516,7 +516,7 @@ test('every step that writes system paths runs in a transient unit of its own, s
   const h = createRequire(import.meta.url)(helperSrc) as { needsUnit: (a: string[]) => boolean; unitCommand: (a: string[], user?: string, self?: string, node?: string, pid?: number) => string[]; IN_UNIT: string };
   const k = ed25519();
   // The coordinator's own unit runs with ProtectSystem=full: /usr, /boot and /etc read-only for sudo and this helper.
-  const writes = [['set-slots', '3'], ['set-test-slots', '2'], ['set-updates', 'on'], ['set-updates', 'off'], ['set-update-channel', 'release'], ['install-updater'], ['add-project', 'alpha', 'example/alpha'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['discard-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['claude-account', 'status'], ['set-policy', 'auto_merge', 'on']];
+  const writes = [['set-slots', '3'], ['set-test-slots', '2'], ['set-updates', 'on'], ['set-updates', 'off'], ['set-update-channel', 'release'], ['install-updater'], ['add-project', 'alpha', 'example/alpha'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['discard-update-signer', 'owner@example.com', 'ssh-ed25519', k], ['claude-account', 'status'], ['set-policy', 'auto_merge', 'off']];
   for (const a of writes) assert.equal(h.needsUnit(a), true, JSON.stringify(a));
   // Already units of their own (systemd-run --no-block), and anything the helper refuses: never wrapped.
   for (const a of [['tailscale', 'up'], ['claude-account', 'switch'], ['set-slots', '17'], ['install-updater', 'x'], ['rm', '-rf', '/'], []]) assert.equal(h.needsUnit(a), false, JSON.stringify(a));

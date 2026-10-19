@@ -4,13 +4,12 @@
 // lanes, allowlists) are never editable here: loosening them is a root-shell decision.
 import { readFileSync } from 'node:fs';
 import { parseDocument } from 'yaml';
-import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { policyViolations, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { encodePolicyValue, HELPER_ONLY, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { decodePolicyValue, encodePolicyValue, HELPER_ONLY, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
 
 export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
@@ -24,6 +23,12 @@ export interface PolicyField {
   step?: number;
   choices?: string[];
   why: string;
+  /**
+   * A root policy.yaml (src/policy-gate.ts): the one value this form may set this key to (HELPER_ONLY: its tightening),
+   * and the root shell command for any other. The form offers nothing else.
+   */
+  only?: number | boolean | string;
+  root?: string;
 }
 
 export interface PolicyFormView {
@@ -48,22 +53,30 @@ function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: Po
 
 export function policyForm(path: string, limitsPath?: string): PolicyFormView {
   let policy: PolicyFile;
+  let root: boolean;
   let limits;
   try {
-    policy = read(path).policy;
+    ({ policy, root } = read(path));
     limits = loadLimits(limitsPath);
   } catch (e) {
     return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable' };
   }
+  // A root policy: a HELPER_ONLY key only toward its one value here; any other is root's, named as its command.
+  const tightenOnly = (f: PolicyField): PolicyField => {
+    if (!root || !Object.hasOwn(HELPER_ONLY, f.key)) return f;
+    const only = decodePolicyValue(f.key, HELPER_ONLY[f.key]!) as PolicyField['value'];
+    const other = f.kind === 'boolean' ? !only : f.choices!.find((c) => c !== only)!;
+    return { ...f, only, root: policySetCommand(policyInstance(path), f.key, encodePolicyValue(f.key, other)!) };
+  };
   return {
-    fields: [
+    fields: ([
       { key: 'budget.daily_usd', value: policy.budget.daily_usd, kind: 'number', min: 1, max: limits.daily_budget_usd.max, step: 1, why: "the instance's daily spend ceiling (estimated); the repo's agents.yaml may only be lower" },
       { key: 'agents.max_workers', value: policy.agents.max_workers, kind: 'number', min: limits.workers.min, max: limits.workers.max, step: 1, why: 'the most workers at once; the repo may only ask for fewer' },
       { key: 'land_mode', value: policy.land_mode, kind: 'choice', choices: ['pr', 'direct'], why: 'pr: every change lands through a PR; direct: the harness may push the default branch (needs branch protection)' },
       { key: 'auto_merge', value: policy.auto_merge, kind: 'boolean', why: "on: the harness merges its own PRs that review.yaml's merge rules allow; off: every PR waits for a person" },
       { key: 'main_watch', value: policy.main_watch, kind: 'choice', choices: ['auto', 'off'], why: "auto: the main watch guards the default branch whenever GitHub doesn't protect it" },
       { key: 'automations.enabled', value: policy.automations.enabled, kind: 'boolean', why: `on: the automations on Extend may run, within ${policy.automations.max_runs_per_day} runs a day, ${policy.automations.max_concurrent} at once and ${Math.round(policy.automations.budget_share * 100)}% of the daily budget; off: none runs` },
-    ],
+    ] as PolicyField[]).map(tightenOnly),
     fixed: [
       { key: 'sandbox', value: policy.sandbox },
       { key: 'allow_same_user', value: policy.allow_same_user },
@@ -82,7 +95,7 @@ export interface PolicyChange {
 }
 
 /** The change these values make, or why it is refused; nothing is written. */
-export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string }): { changes: PolicyChange[]; text: string; root: boolean } {
+export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string; helperRulesFile?: string }): { changes: PolicyChange[]; text: string; root: boolean } {
   const unknown = Object.keys(o.values).filter((k) => !(POLICY_KEYS as readonly string[]).includes(k));
   if (unknown.length) throw new PolicyEditError(`not editable here: ${unknown.join(', ')}; the form changes ${POLICY_KEYS.join(', ')}`);
   const { doc, policy, root } = read(o.path);
@@ -101,12 +114,16 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   if (parsed.data.agents.max_workers > limits.workers.max) problems.push(`agents.max_workers ${parsed.data.agents.max_workers} is over ${limits.workers.max} (machine limits)`);
   // INVARIANT: a policy the repo's config already loosens would stop the instance from loading at its next start.
   problems.push(...policyViolations(o.cfg, parsed.data).map((v) => `${v.file} ${v.path}: ${v.message}`));
-  // A root policy.yaml (src/policy-gate.ts): only what root's helper takes, so a loosening is refused before anything is asked.
+  // A root policy.yaml (src/policy-gate.ts): only what root's helper takes, so a loosening is refused before anything is
+  // asked; and nothing at all on a sudo whose rule leaves set-policy out (each change named as its root command).
   if (root) {
+    const instance = policyInstance(o.path);
     for (const c of changes) {
       const arg = encodePolicyValue(c.key, c.to);
-      if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) ? `loosening it is an admin's, at a root shell (sudo ${BRAND.cli} policy set <instance> ${c.key} ${String(c.to)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
+      if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) && arg !== null ? `loosening it is an admin's, at a root shell (${policySetCommand(instance, c.key, arg)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
     }
+    const missing = problems.length ? null : policyHelperMissing(o.helperRulesFile);
+    if (missing) problems.push(`${o.path} is root's, and ${missing}: an admin changes it at a root shell (${changes.map((c) => policySetCommand(instance, c.key, encodePolicyValue(c.key, c.to)!)).join('; ')})`);
   }
   if (problems.length) throw new PolicyEditError(`refused: ${problems.join('; ')}`);
   return { changes, text: doc.toString(), root };
@@ -117,10 +134,10 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
  * policy.yaml (src/policy-gate.ts) is never written here: each change goes to `request` (root's helper's arguments),
  * and the coordinator records settings.changed once the helper has run it; without one, refused.
  */
-export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string }): PolicyChange[] {
+export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string; helperRulesFile?: string }): PolicyChange[] {
   const plan = planPolicy(o);
   if (plan.root) {
-    if (!o.request) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> <key> <value>)`);
+    if (!o.request) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (${plan.changes.map((c) => policySetCommand(policyInstance(o.path), c.key, encodePolicyValue(c.key, c.to) ?? '<value>')).join('; ')})`);
     for (const c of plan.changes) o.request(['set-policy', c.key, encodePolicyValue(c.key, c.to)!]);
     return plan.changes;
   }

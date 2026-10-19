@@ -2074,9 +2074,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!opts.policyFile) return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
           const body = (await readBody(req)) as { key?: string; value?: unknown };
           try {
-            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, request: policyRequester(who), ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
-            audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
-            return json(res, 200, { ok: true, ...r });
+            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, request: policyRequester(who), ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) });
+            // A root policy.yaml: only queued for the coordinator (root's helper runs it; it logs settings.changed then).
+            if (r.requested) audit(who, 'settings.queued', { key: String(body.key ?? ''), from: r.from, to: r.to, request: r.requested, note: 'queued for the coordinator' });
+            else audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
+            return json(res, 200, { ok: true, ...r, ...(r.requested ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
             throw e;
@@ -2285,13 +2287,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!opts.policyFile) return refused(400, "the policy is a server instance's: this dashboard serves a checkout");
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may change its policy; @${who.login} is a ${who.role}`);
-          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) };
+          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) };
           try {
             if (body.confirm !== true) return json(res, 200, { ok: true, changes: planPolicy(o).changes, confirmed: false });
-            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login, request: policyRequester(who) });
+            // A root policy.yaml: each change only queued for the coordinator (root's helper runs it).
+            const requests: string[] = [];
+            const ask = policyRequester(who);
+            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login, request: (args) => { const id = ask(args); requests.push(id); return id; } });
             setupCache.delete('policy');
-            audit(who, 'first_run.policy', { changes });
-            return json(res, 200, { ok: true, changes, confirmed: true });
+            audit(who, 'first_run.policy', { changes, ...(requests.length ? { requests, note: 'queued for the coordinator' } : {}) });
+            return json(res, 200, { ok: true, changes, confirmed: true, ...(requests.length ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof PolicyEditError) return refused(400, e.message);
             throw e;

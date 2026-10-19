@@ -28,7 +28,8 @@
 #     server steps: `mcp-fetch <id> <npm package> <x.y.z>`, `mcp-preview <id> <plugin> <server>`, `mcp-snapshot <id>` and
 #     `mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>`, confirmed the same way.
 #     And `set-policy <key> <value>` (issue #726): one key of the asking coordinator's own root policy.yaml, through the
-#     installed engine as root; never sandbox or allow_same_user, and land_mode and main_watch only toward pr and auto.
+#     installed engine as root; never sandbox or allow_same_user, and land_mode, main_watch and auto_merge only toward
+#     pr, auto and off.
 #   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
 #     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
 #     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.

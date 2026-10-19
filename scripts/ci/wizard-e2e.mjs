@@ -465,6 +465,8 @@ async function server() {
     await open('/first-run?step=policy');
     const p = `${row('policy')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('policy-form')}`);
+    // auto_merge on is root's alone (#770): the form names the root command for it.
+    await waitText(`${p} [data-testid="policy-field"][data-key="auto_merge"] ${tid('policy-root-only')}`, /policy set \S+ auto_merge on/);
     const budget = `${p} [data-testid="policy-field"][data-key="budget.daily_usd"] input`;
     const file = `${home(`wl-${instance}`)}/.local/state/worklane/instances/${instance}/policy.yaml`;
     const before = sudoOk('cat', file);
@@ -479,12 +481,13 @@ async function server() {
     await click(`${p} ${tid('policy-confirm')}`);
     // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard writes nothing itself: the change goes
     // to the coordinator, which runs the machine helper's set-policy (the engine as root); then the file has it, root's.
-    await waitText(`${p} ${tid('policy-result')}`, /written: .*budget\.daily_usd/);
+    await waitText(`${p} ${tid('policy-result')}`, /queued for the coordinator: .*budget\.daily_usd/);
     await until('the coordinator to run set-policy through the helper', async () => /daily_usd: 30\b/.test(sudoOk('cat', file)), 120_000, 1000);
     assert.equal(stat(file), 'root 644');
-    // The helper itself, as the coordinator user through sudo: sandbox off and allow_same_user on are refused, nothing written.
+    // The helper itself, as the coordinator user through sudo: sandbox off, allow_same_user on, land_mode direct and
+    // auto_merge on are refused, nothing written.
     const after = sudoOk('cat', file);
-    for (const [k, v] of [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct']]) {
+    for (const [k, v] of [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct'], ['auto_merge', 'on']]) {
       const r = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', k, v]);
       assert.notEqual(r.status, 0, `set-policy ${k} ${v} ran: ${r.out}`);
     }

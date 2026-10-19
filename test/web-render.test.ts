@@ -1667,6 +1667,23 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
   const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
   assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
   assert.match(writer, /type="number"[^>]*disabled=""/);
+  // A root policy.yaml (#726): auto_merge on and land_mode direct are root's alone; the form offers only the
+  // tightening, disabled where the value is that already, and names the root command. Off stays on offer when on.
+  const rootPolicy = (autoMerge: boolean) => ({
+    ...policy,
+    fields: [
+      policy.fields[0]!,
+      { ...policy.fields[1]!, only: 'pr', root: 'sudo engine policy set shop land_mode direct' },
+      { ...policy.fields[2]!, value: autoMerge, only: false, root: 'sudo engine policy set shop auto_merge on' },
+    ],
+  });
+  const off = r.renderFirstRun({ ...f, policy: rootPolicy(false), canAct: true }, { open: 'policy' });
+  assert.match(off, /data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*disabled=""[\s\S]*?data-testid="policy-root-only"[^>]*>Here only false; anything else is root(&#x27;|')s, at a root shell: <code[^>]*>sudo engine policy set shop auto_merge on</);
+  assert.match(off, /data-key="land_mode"[\s\S]*?<select[^>]*disabled=""[\s\S]*?<\/select>/);
+  assert.doesNotMatch(off.match(/data-key="land_mode"[\s\S]*?<\/select>/)![0], /direct/, 'no loosening offered');
+  const on = r.renderFirstRun({ ...f, policy: rootPolicy(true), canAct: true }, { open: 'policy' });
+  assert.match(on, /data-key="auto_merge"[\s\S]*?type="checkbox"/);
+  assert.doesNotMatch(on.match(/data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*>/)![0], /disabled/, 'turning it off stays on offer');
 });
 
 test("the first-run page, Repo config form: writers, required checks, budget and workers from the default branch's config; Review then the change and Propose as a PR; writers can't; why not when the config isn't on the default branch", () => {

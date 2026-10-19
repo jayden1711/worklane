@@ -1262,6 +1262,9 @@ export interface FirstRunPolicyField {
   step?: number;
   choices?: string[];
   why: string;
+  /** A root policy.yaml: the one value the form may set this key to, and the root shell command for any other. */
+  only?: number | boolean | string;
+  root?: string;
 }
 export interface FirstRunPolicy {
   fields: FirstRunPolicyField[];
@@ -1273,8 +1276,11 @@ export interface PolicyChange {
   from: unknown;
   to: unknown;
 }
-/** Preview (confirm false: nothing written) or write the policy change these values make. */
-export const changePolicy = (values: Record<string, unknown>, confirm: boolean) => api<{ ok: boolean; changes: PolicyChange[]; confirmed: boolean }>('/api/first-run/policy', { method: 'POST', body: JSON.stringify({ values, confirm }) });
+/**
+ * Preview (confirm false: nothing written) or write the policy change these values make. `queued`: a root policy.yaml,
+ * so the change is only asked of the coordinator, which has root's helper write it.
+ */
+export const changePolicy = (values: Record<string, unknown>, confirm: boolean) => api<{ ok: boolean; changes: PolicyChange[]; confirmed: boolean; queued?: boolean }>('/api/first-run/policy', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 export interface FirstRunActionPlan {
   id: string;
   step: string;

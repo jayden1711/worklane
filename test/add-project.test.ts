@@ -53,6 +53,8 @@ ensure_instance_home() {
   echo "ensure_instance_home $*" >> "$T/calls"
 }
 claude_login_ok() { :; }
+# The machine's sudo: 1.9.10 or later, unless <root>/old-sudo exists (then the helper's pattern rules are left out).
+sudo_regex_ok() { [ ! -e "$T/old-sudo" ]; }
 # The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's;
 # while <root>/own-refuses exists, refused as the engine refuses (its message on stderr, exit 1).
 own_policy() { echo "own_policy $*" >> "$T/owned"; if [ -e "$T/own-refuses" ]; then cat "$T/own-refuses" >&2; return 1; fi; touch "$T/owned-$1"; }
@@ -433,6 +435,20 @@ test('the sudoers rule lets coordinators run set-policy with one anchored patter
   const re = new RegExp(line.split(' ').slice(1).join(' '));
   for (const a of ['set-policy auto_merge on', 'set-policy settings.workers 3', 'set-policy settings.run_windows 0900-1700+2200-0600']) assert.match(a, re, a);
   for (const a of ['set-policy auto_merge', 'set-policy auto_merge on x', 'set-policy Auto on', 'set-policy auto_merge on;id', 'set-policy auto_merge {"x":1}']) assert.doesNotMatch(a, re, a);
+});
+
+test("the policy step names the dashboard's route only where root's helper has its set-policy rule (sudo 1.9.10 or later) (#726)", { skip: !posix && 'bash' }, () => {
+  const detail = (m: ReturnType<typeof machine>) => {
+    const r = m.run();
+    assert.equal(r.status, 0, r.stderr);
+    return r.events.find((e) => e.step === 'policy' && e.state === 'done')!.detail;
+  };
+  assert.match(detail(machine()), /workers: change them in the dashboard's Settings \(through root's helper\), or as root with \S+ policy set alpha <key> <value>; turning auto_merge on is root's alone$/);
+  const old = machine();
+  writeFileSync(join(old.T, 'old-sudo'), '');
+  const d = detail(old);
+  assert.match(d, /workers: change them as root with \S+ policy set alpha <key> <value> \(this machine's sudo is older than 1\.9\.10, so the dashboard can't\)$/);
+  assert.doesNotMatch(d, /dashboard's Settings/);
 });
 
 test("P6: a rerun through the machine helper on a policy the engine won't take over (loose, or changed since root wrote it) stops at the policy step, naming the admin's command; no flag is ever passed (#726)", { skip: !posix && 'bash' }, () => {

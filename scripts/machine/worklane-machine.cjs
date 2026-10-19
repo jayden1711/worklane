@@ -620,8 +620,9 @@ function plugin(p) {
 // One key of the asking coordinator's own instance's policy.yaml (from SUDO_USER, never an argument), which setup made
 // root's: the installed engine's `policy set` runs as root, checks it against the schema and the machine's limits, and
 // writes it root's, 0644. Only these keys, each in its shape (src/policy-gate.ts holds the same table; a test holds them
-// equal); never sandbox, allow_same_user, lanes or an allowlist; land_mode only to pr and main_watch only to auto.
-// Loosening any of those is an admin's, at a root shell (sudo <cli> policy set <instance> <key> <value>).
+// equal); never sandbox, allow_same_user, lanes or an allowlist; land_mode only to pr, main_watch only to auto, and
+// auto_merge only off (POLICY_ONLY, held equal to the engine's HELPER_ONLY). Loosening any of those is an admin's, at a
+// root shell (sudo <cli> policy set <instance> <key> <value>).
 const POLICY_SET_KEYS = {
   'budget.daily_usd': 'number', 'agents.max_workers': 'number', land_mode: 'word', auto_merge: 'bool', main_watch: 'word', 'automations.enabled': 'bool',
   'settings.workers': 'number', 'settings.daily_budget_usd': 'number', 'settings.ci_repair.enabled': 'bool', 'settings.ci_repair.max_fixes_per_pr': 'number', 'settings.run_windows': 'windows',
@@ -629,7 +630,7 @@ const POLICY_SET_KEYS = {
   'settings.intake.reports_per_sender_per_day': 'number', 'settings.intake.drafts_per_day': 'number', 'settings.intake.max_usd_per_day': 'number', 'settings.stuck_guard': 'word',
   'settings.chat_attachments.max_file_mb': 'number', 'settings.chat_attachments.max_message_mb': 'number', 'settings.chat_attachments.retention_days': 'number',
 };
-const POLICY_ONLY = { land_mode: 'pr', main_watch: 'auto' };
+const POLICY_ONLY = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
 const POLICY_SHAPES = {
   number: /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/,
   bool: /^(on|off)$/,
@@ -763,4 +764,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePolicySet, POLICY_SET_KEYS, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
