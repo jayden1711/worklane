@@ -18,8 +18,8 @@ const job = (name: string) => `  ${JSON.stringify(name)}:\n    runs-on: ubuntu-l
 const wf = (...names: string[]) => `on: [push, pull_request]\njobs:\n${names.map(job).join('')}`;
 const files = (f: Record<string, string>, skipped: Workflows['skipped'] = []): Workflows => ({ at: 'c'.repeat(40), files: f, skipped });
 const tip = (runs: TipRun[], partial = false): Tip => ({ sha: 'c'.repeat(40), runs, partial });
-const actions = (name: string, workflow: string | null): TipRun => ({ name, app: 15368, actions: true, workflow });
-const app = (name: string, id: number): TipRun => ({ name, app: id, actions: false, workflow: null });
+const actions = (name: string, workflow: string | null): TipRun => ({ name, app: 15368, slug: 'github-actions', actions: true, workflow });
+const app = (name: string, id: number, slug: string | null = `app-${id}`): TipRun => ({ name, app: id, slug, actions: false, workflow: null });
 const ch = (code: number) => String.fromCharCode(code);
 
 /** A repo whose committed tree has ci.yml, a symlink out of the repo, an oversize file and a subfolder; plus an untracked file and a file only on another branch. */
@@ -126,6 +126,11 @@ test('the plan: confirmed on the tip, from the files only, an App only from a fu
   assert.deepEqual(plan.manual.map((m) => m.name), ['apimade', 'test', 'mixed', 'nowhere']);
   assert.match(plan.manual[0]!.why, /GitHub Actions outside a run that passes the workflow-pin test/);
   assert.ok(!plan.pins.some((p) => 'app_id' in p.pin && p.pin.app_id === 15368), 'never the Actions App');
+  // An App it can't prove is never a pin: the Actions id under another slug, no slug, or the Actions slug under another id.
+  for (const r of [app('a', 15368, 'something-else'), app('a', 4242, null), app('a', 4242, 'github-actions')]) {
+    const p = pinPlan({ names: ['a'], workflows: w, tip: tip([r]) });
+    assert.deepEqual([p.pins, p.manual.map((m) => m.name)], [[], ['a']], JSON.stringify(r));
+  }
   // A partial tip read proposes no App pin.
   const partial = pinPlan({ names: ['deploy'], workflows: w, tip: tip([app('deploy', 4242)], true) });
   assert.deepEqual([partial.pins, partial.manual.map((m) => m.name)], [[], ['deploy']]);
@@ -151,13 +156,14 @@ test("the block is always valid: duplicates once, names the schema or YAML can't
 
 test('the tip is read page by page; past the cap it is partial and says so', () => {
   const mkRuns = (n: number) => Array.from({ length: n }, (_, i) => ({ id: i + 1, name: `c${i}`, head_sha: 'c'.repeat(40), html_url: `https://github.com/o/r/actions/runs/700/job/${i + 1}`, app: { id: 15368, slug: 'github-actions' }, check_suite: { id: 70 } }));
-  const api = (total: number) => {
+  const api = (total: number, withTotal = true) => {
     const runs = mkRuns(total);
     const asked: string[] = [];
     const f = (path: string) => {
       asked.push(path);
+      if (path === 'repos/o/r/commits/main') return { sha: 'c'.repeat(40) };
       const page = Number(/[?&]page=(\d+)/.exec(path)![1]);
-      if (path.includes('/check-runs')) return { total_count: total, check_runs: runs.slice((page - 1) * 100, page * 100) };
+      if (path.includes('/check-runs')) return { ...(withTotal ? { total_count: total } : {}), check_runs: runs.slice((page - 1) * 100, page * 100) };
       return { total_count: 1, workflow_runs: [{ id: 700, html_url: 'https://github.com/o/r/actions/runs/700', check_suite_id: 70, path: '.github/workflows/ci.yml', head_sha: 'c'.repeat(40), repository: { full_name: 'o/r' } }] };
     };
     return { f, asked };
@@ -166,10 +172,17 @@ test('the tip is read page by page; past the cap it is partial and says so', () 
   const t = ghTipRuns('o/r', 'main', a.f)!;
   assert.equal(t.runs.length, 150);
   assert.equal(t.partial, false);
-  assert.equal(a.asked.filter((p) => p.includes('/check-runs')).length, 2);
+  // The tip resolved once; every page reads that commit, never the branch name (which could move between pages).
+  assert.deepEqual(a.asked.filter((p) => p.includes('/check-runs')).map((p) => p.split('?')[0]), [`repos/o/r/commits/${'c'.repeat(40)}/check-runs`, `repos/o/r/commits/${'c'.repeat(40)}/check-runs`]);
   assert.equal(t.runs[149]!.workflow, '.github/workflows/ci.yml');
+  assert.equal(t.runs[0]!.slug, 'github-actions');
   const big = ghTipRuns('o/r', 'main', api(TIP_PAGES_MAX * 100 + 5).f)!;
   assert.equal(big.partial, true);
+  // Full pages with no total_count: it keeps reading; past the cap it says partial.
+  const noTotal = api(250, false);
+  const nt = ghTipRuns('o/r', 'main', noTotal.f)!;
+  assert.deepEqual([nt.runs.length, nt.partial], [250, false]);
+  assert.equal(ghTipRuns('o/r', 'main', api(TIP_PAGES_MAX * 100 + 5, false).f)!.partial, true);
   assert.equal(
     ghTipRuns('o/r', 'main', () => {
       throw new Error('gh: 502');

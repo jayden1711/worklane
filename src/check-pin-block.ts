@@ -26,9 +26,16 @@ export const NAME_MAX = 1000;
 export interface TipRun {
   name: string;
   app: number | null;
+  /** The App's slug as GitHub gave it (null: none given). */
+  slug: string | null;
   actions: boolean;
   workflow: string | null;
 }
+
+/** The GitHub Actions App's id on github.com: any workflow posts as it, so it is never a pin. */
+export const ACTIONS_APP_ID = 15368;
+/** An App this run provably comes from, one that isn't GitHub Actions: a number, not 15368, with a slug, not Actions'. */
+const provableApp = (r: TipRun) => r.app !== null && r.app !== ACTIONS_APP_ID && !r.actions && !!r.slug && r.slug !== 'github-actions';
 /** Main's tip as read: its commit, its check runs, and whether the read is partial (more runs than were read). */
 export interface Tip {
   sha: string;
@@ -174,7 +181,7 @@ export function pinPlan(o: { names: string[]; workflows: Workflows | null; tip: 
     }
     const files = [...(byName.get(name) ?? [])].sort();
     const runs = (o.tip?.runs ?? []).filter((r) => r.name === name);
-    const seen = [...new Set(runs.map((r) => (r.workflow ? `workflow ${r.workflow}` : r.actions ? 'GitHub Actions outside a run that passes the workflow-pin test' : `App ${r.app ?? 'unknown'}`)))].sort();
+    const seen = [...new Set(runs.map((r) => (r.workflow ? `workflow ${r.workflow}` : r.actions || r.app === ACTIONS_APP_ID ? 'GitHub Actions outside a run that passes the workflow-pin test' : provableApp(r) ? `App ${r.app}` : `an App it can't prove (id ${r.app ?? 'none'}, slug ${r.slug ?? 'none'})`)))].sort();
     if (files.length > 1) {
       plan.manual.push({ name, why: `posted by more than one workflow file (${files.join(', ')})` });
     } else if (files.length === 1) {
@@ -182,7 +189,7 @@ export function pinPlan(o: { names: string[]; workflows: Workflows | null; tip: 
       if (!runs.length) plan.pins.push({ name, pin: { workflow: file }, evidence: `from the workflow files${filesAt} only: ${o.tip ? `main's tip${tipAt} has no run of it` : "main's tip couldn't be read"}` });
       else if (seen.length === 1 && seen[0] === `workflow ${file}`) plan.pins.push({ name, pin: { workflow: file }, evidence: `confirmed: its run on main's tip${tipAt} is a job of a ${file} run` });
       else plan.manual.push({ name, why: `the workflow files${filesAt} say ${file}, but main's tip${tipAt} has it from ${seen.join(' and ')}` });
-    } else if (o.tip && !o.tip.partial && seen.length === 1 && seen[0]!.startsWith('App ') && runs[0]!.app !== null && !runs[0]!.actions) {
+    } else if (o.tip && !o.tip.partial && seen.length === 1 && seen[0]!.startsWith('App ') && runs.every(provableApp) && runs[0]!.app !== null) {
       plan.pins.push({ name, pin: { app_id: runs[0]!.app }, evidence: `from main's tip${tipAt} only: no workflow file posts it, and only App ${runs[0]!.app} does there` });
     } else {
       plan.manual.push({ name, why: seen.length ? `no workflow file${filesAt} posts it, and main's tip${tipAt} has it from ${seen.join(' and ')}` : `no workflow file${filesAt} posts it${o.tip ? `, and main's tip${tipAt} has no run of it` : ''}` });
@@ -251,15 +258,18 @@ export const TIP_PAGES_MAX = 10;
 /** Every page of a GitHub list (`key`), up to TIP_PAGES_MAX; partial when total_count says there are more. */
 function pages<T>(api: Api, path: string, key: string): { items: T[]; partial: boolean } {
   const items: T[] = [];
-  let total = 0;
+  let total: number | null = null;
+  let more = false;
   for (let page = 1; page <= TIP_PAGES_MAX; page++) {
     const r = api(`${path}${path.includes('?') ? '&' : '?'}per_page=100&page=${page}`) as Record<string, unknown>;
     const list = Array.isArray(r[key]) ? (r[key] as T[]) : [];
-    total = typeof r.total_count === 'number' ? r.total_count : total;
+    if (typeof r.total_count === 'number') total = r.total_count;
     items.push(...list);
-    if (list.length < 100 || items.length >= total) break;
+    // A full page with no total_count, or a total above what was read: there may be more.
+    more = list.length >= 100 && (total === null || items.length < total);
+    if (!more) break;
   }
-  return { items, partial: total > items.length };
+  return { items, partial: more || (total !== null && total > items.length) };
 }
 
 /**
@@ -269,16 +279,18 @@ function pages<T>(api: Api, path: string, key: string): { items: T[]; partial: b
  */
 export function ghTipRuns(repo: string, branch: string, api: Api = ghApi): Tip | null {
   try {
-    const cr = pages<{ id: number; name: string; head_sha: string; html_url?: string; app?: { id?: number; slug?: string }; check_suite?: { id?: number } }>(api, `repos/${repo}/commits/${encodeURIComponent(branch)}/check-runs?filter=latest`, 'check_runs');
-    const sha = cr.items[0]?.head_sha ?? '';
+    // The tip resolved once, so every page reads the same commit even if the branch moves meanwhile.
+    const tip = api(`repos/${repo}/commits/${encodeURIComponent(branch)}`) as { sha?: unknown };
+    const sha = typeof tip.sha === 'string' && /^[0-9a-f]{40}$/.test(tip.sha) ? tip.sha : '';
     if (!sha) return null;
+    const cr = pages<{ id: number; name: string; head_sha: string; html_url?: string; app?: { id?: number; slug?: string }; check_suite?: { id?: number } }>(api, `repos/${repo}/commits/${sha}/check-runs?filter=latest`, 'check_runs');
     const wr = pages<{ id: number; html_url: string; check_suite_id: number; path: string; head_sha: string; repository?: { full_name?: string } }>(api, `repos/${repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
     const bySuite = new Map(wr.items.map((w) => [w.check_suite_id, w]));
     const runs = cr.items.map((c) => {
       const actions = c.app?.slug === 'github-actions';
       const w = actions && c.check_suite?.id !== undefined ? bySuite.get(c.check_suite.id) : undefined;
       const ok = !!w && w.head_sha === sha && w.repository?.full_name?.toLowerCase() === repo.toLowerCase() && isJobOfRun(c.html_url, c.id, { run: w.id, url: w.html_url });
-      return { name: c.name, app: c.app?.id ?? null, actions, workflow: ok ? w!.path : null };
+      return { name: c.name, app: typeof c.app?.id === 'number' ? c.app.id : null, slug: typeof c.app?.slug === 'string' ? c.app.slug : null, actions, workflow: ok ? w!.path : null };
     });
     return { sha, runs, partial: cr.partial || wr.partial };
   } catch {
