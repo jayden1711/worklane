@@ -276,9 +276,9 @@ sudo setfacl -m o::--- "$W"
 [ "$wrc" = 0 ] || fail "with the wrapper world-executable a DynamicUser unit still couldn't use it: this check can't tell"
 # A run's own command, making a namespace of its own and using a capability in it: refused, as before #545.
 nested="unshare --user --map-root-user --net $IPB link add d0 type dummy 2>&1; echo \"nested rc \$?\""
-nest() { # <id> <helper label>: a run doing that; its output in $t/<id>.out
+nest() { # <id> <helper label> [<command>]: a run doing that (or <command>); its output in $t/<id>.out
   mkrun ci "$1"
-  as_ ci exec "$1" 60 -- "$nested" < /dev/null > "$t/$1.out" 2> "$t/$1.err" || { cat "$t/$1.err" >&2; fail "$1 exited non-zero"; }
+  as_ ci exec "$1" 60 -- "${3:-$nested}" < /dev/null > "$t/$1.out" 2> "$t/$1.err" || { cat "$t/$1.err" >&2; fail "$1 exited non-zero"; }
   sed "s/^/  $2: /" "$t/$1.out"
   as_ ci wipe "$1" > /dev/null
 }
@@ -290,6 +290,21 @@ sudo install -o root -g root -m 0755 "$t/helper-pre545.sh" "$H"
 nest net-nested-old "main's helper"
 sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
 grep -qx 'nested rc 0' "$t/net-nested-old.out" && fail "main's helper's run used a capability in a namespace of its own: the restriction isn't what this checks"
+# Round 3: a run running the wrapper itself (its uid is in the wrapper's ACL) must not get the profile's allowance back.
+# The prelude binds /dev/null over the wrapper in the run's own mount namespace. Fail-without: #780's helper at
+# $R1 (round 1, no such bind) lets the run make the namespace and add the dummy link.
+R1=6cfc5436884bbffa24a8cb01b04f4292af5648c4
+wrapped="$W --user --map-root-user --net $IPB link add d0 type dummy 2>&1; echo \"nested rc \$?\""
+nest net-wrapper "this helper, the run running the wrapper" "$wrapped"
+grep -qx 'nested rc 0' "$t/net-wrapper.out" && fail "a run ran the wrapper and used a capability in a namespace of its own (round 3)"
+grep -q 'Permission denied' "$t/net-wrapper.out" || fail "the run's exec of the wrapper wasn't refused with EACCES: $(cat "$t/net-wrapper.out")"
+echo "  fail-without: #780's helper at $R1 (round 1), the same run running the wrapper"
+git fetch -q --depth=1 origin "$R1"
+git show "$R1:scripts/machine/worklane-testrun.sh" > "$t/helper-r1.sh"
+sudo install -o root -g root -m 0755 "$t/helper-r1.sh" "$H"
+nest net-wrapper-r1 "round 1's helper, the run running the wrapper" "$wrapped"
+sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+grep -qx 'nested rc 0' "$t/net-wrapper-r1.out" || fail "with round 1's helper the run's exec of the wrapper was refused anyway: this check can't tell"
 # Fail-without for the switch: the run's prelude exactly, as the test user in a NoNewPrivileges unit, with and without
 # setpriv's --apparmor-profile=unconfined: without it the command keeps the wrapper's allowance.
 prelude() { # [<setpriv option>]: the prelude, then the nested namespace's capability use
