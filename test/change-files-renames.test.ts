@@ -808,7 +808,15 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
     must: [/'--name-only', '--no-renames', '-z'/, /'--name-only', '--no-renames', '--diff-filter=A', '-z'/, /'ls-files', '-z', '--cached', '--others'/],
   },
   'scripts/push-gate.mjs': { words: { 'name-only': 1, 'patch headers': 2 }, why: '`ls-tree --name-only`: a tree; `show --no-renames` added lines: the denylist scan of what is pushed (a follow-up: its `+++ ` header parse)' },
-  'scripts/bench/hidden.ts': { words: { 'patch headers': 2 }, why: 'the bench: finds a task\'s hidden test-patch lines in what an agent sends, skipping a patch\'s `+++ ` header; lists no changed files' },
+  'scripts/bench/hidden.ts': {
+    words: { 'patch headers': 2 },
+    why: 'the bench: finds a task\'s hidden test-patch lines in what an agent sends, skipping a file\'s `+++ ` name line (only right after its `--- ` line, outside a hunk); lists no changed files and reads no path',
+    // One pin per allowed line (#797): rewording one of them can't free its count for a new header reader.
+    must: [
+      /^ \* INVARIANT: a `\+\+\+ ` line is a file name only right after its file's `--- ` line, outside any hunk \(#797\)\.$/m,
+      /^ {4}return !h && l\.startsWith\('\+'\) && !\(nameLine && l\.startsWith\('\+\+\+ '\)\);$/m,
+    ],
+  },
   'scripts/ci/testrun-real-systemd.mjs': { words: { 'name-only': 1, porcelain: 1 }, why: 'shell lines a slow CI job runs in its VM (`ls-tree`, `status --porcelain`: is it clean)' },
   'scripts/release.mjs': { words: { porcelain: 1 }, why: '`status --porcelain`: is the tree clean before a release' },
   'scripts/check-denylist.mjs': { words: { 'ls-files': 1 }, why: '`ls-files -co`: every file of the checkout, to scan; not a change' },
