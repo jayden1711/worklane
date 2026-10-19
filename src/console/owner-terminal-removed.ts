@@ -34,7 +34,7 @@ export function ownerTerminalLeftovers(o: TerminalPaths = {}): string[] {
   }
   if (/^ExecStart=.* --console-user \S/m.test(unit)) out.push("the dashboard hub's unit still names a console user and runs without its sandbox (NoNewPrivileges, ProtectSystem=strict, ProtectHome=read-only)");
   const shell = o.consoleShell ?? CONSOLE_SHELL;
-  // An older engine updater replaces it with a stub that refuses everything (scripts/machine/worklane-console-shell.sh);
+  // An older engine updater replaces it with a stub that refuses everything (scripts/machine/<cli>-console-shell.sh);
   // the sudoers rule naming it stays until the rerun either way, so it is said the same.
   if (existsSync(shell)) out.push(`the console shell ${shell} is still installed, with the sudoers rule that lets the hub's user start it as the admin user`);
   return out;
