@@ -9,12 +9,13 @@
 // Any other instance on the same server with a channel in common (its ideas channels, asks channel or chat
 // channels) refuses this instance's Discord at start-up, naming it. A claim holds no ids: each server+channel pair
 // is a hash, so the shared directory names no server, channel or person.
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { tryLock } from '../locks.js';
 import { pidAlive } from '../os/index.js';
+import { writeSlotFile } from '../slot-file.js';
 import { INTAKE_FILE } from './config.js';
 import { IntakeConfig } from './report.js';
 
@@ -99,9 +100,7 @@ export function writeDiscordClaim(o: { instance: string; config: IntakeConfig; c
   const p = discordPlaces(o.config);
   if (!p || !INSTANCE_NAME.test(o.instance)) return () => {};
   const file = join(o.claimsDir, `${CLAIM_PREFIX}${o.instance}.json`);
-  const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify({ instance: o.instance, pid: process.pid, places: p.channels.map((c) => placeKey(p.guild, c)) } satisfies Claim));
-  renameSync(tmp, file);
+  writeSlotFile(file, JSON.stringify({ instance: o.instance, pid: process.pid, places: p.channels.map((c) => placeKey(p.guild, c)) } satisfies Claim));
   return () => {
     try {
       const c = JSON.parse(readFileSync(file, 'utf8')) as Claim;
