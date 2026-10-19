@@ -3,10 +3,10 @@
 // (audited); a writer's PR gets the full run and check on its head, is never auto-merged, and merging it trips nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acknowledgement, measureMain } from '../src/auto-merge-resume.js';
+import { acknowledgement, measureMain, remoteTip } from '../src/auto-merge-resume.js';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
 import type { Role } from '../src/dashboard-auth.js';
@@ -225,15 +225,93 @@ const watchMerges = (w: ReturnType<typeof world>) => (w.c as unknown as { watchM
 const f776Last = (w: ReturnType<typeof world>, type: 'merge.resumed' | 'merge.stopped') => w.f.log.read(0, [type]).at(-1)!;
 
 /** A dashboard over the world, its backlog the one the checks are read from; `cfg` stands in for the instance's config. */
-async function resumeDashboard(w: ReturnType<typeof world>, cfg = w.f.cfg) {
-  const d = await startDashboard({ root: w.f.repo, cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice', backlog: () => w.f.backlog });
+async function resumeDashboard(w: ReturnType<typeof world>, cfg = w.f.cfg, extra: Record<string, unknown> = {}) {
+  const d = await startDashboard({ root: w.f.repo, cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice', backlog: () => w.f.backlog, ...extra });
   const base = d.url.split('/?')[0]!;
   const resume = async (body: unknown = {}, who = 'example-owner') => {
     const r = await fetch(`${base}/api/auto-merge/clear`, { method: 'POST', headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(who) }, body: JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as { ok?: boolean; how?: string; error?: string; needsAck?: boolean } };
   };
-  return { d, resume };
+  const get = (path: string) => fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } });
+  return { d, resume, get };
 }
+
+/** A remote whose upload-pack hangs for `seconds` (a stand-in for a remote that stops answering). */
+const hangRemote = (w: ReturnType<typeof world>, seconds: number) => {
+  const script = join(w.f.base, 'hang-upload-pack');
+  writeFileSync(script, `#!/bin/sh\nsleep ${seconds}\n`);
+  chmodSync(script, 0o755);
+  git(w.f.repo, 'config', 'remote.origin.uploadpack', script);
+};
+
+test("resume (#776): main's tip is the exact ref refs/heads/<branch>: a green decoy branch or tag whose name ends in refs/heads/main never stands in for a red main", async () => {
+  const w = world();
+  await w.watch(2);
+  const green = git(w.f.remote, 'rev-parse', 'main');
+  w.f.backlog.setChecks(green, passing);
+  // Main goes red; anyone who can push a branch or a tag plants green decoys.
+  const tip = w.commit('red.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  w.f.backlog.setChecks(tip, failing(11));
+  git(w.person, 'push', '-q', 'origin', `${green}:refs/heads/a/refs/heads/main`, `${green}:refs/tags/refs/heads/main`);
+  assert.match(git(w.f.repo, 'ls-remote', 'origin', 'refs/heads/main'), /refs\/heads\/a\/refs\/heads\/main[\s\S]*refs\/heads\/main[\s\S]*refs\/tags\/refs\/heads\/main/, 'git itself lists the decoys for that pattern');
+  assert.equal(await remoteTip(w.f.repo, 'origin', 'main'), tip, 'the exact ref only');
+  redMainStop(w);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    const r = await resume();
+    assert.equal(r.status, 409, 'the dashboard measures the real, red main');
+    assert.match(r.body.error ?? '', new RegExp(`tip ${tip.slice(0, 8)} are not all green`));
+  } finally {
+    await d.close();
+  }
+  // The coordinator too: a hand deletion is written back.
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'written back');
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test('resume (#776): reading main never blocks: a hung remote times out as not green, and the dashboard answers other requests meanwhile', async () => {
+  const w = world();
+  await w.watch(2);
+  redMainStop(w);
+  hangRemote(w, 4);
+  // The read itself: the event loop runs while it waits, and a timeout is no tip.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 50);
+  const started = Date.now();
+  const read = await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 } as never);
+  clearInterval(timer);
+  assert.equal(read, null, 'timed out: unreadable');
+  assert.ok(ticks >= 5, `the event loop ran while git waited (${ticks} ticks)`);
+  assert.ok(Date.now() - started < 3500, 'bounded by the timeout, not the remote');
+  // The dashboard: a resume waits on the hung remote; another request is served at once.
+  const { d, resume, get } = await resumeDashboard(w, w.f.cfg, { mainTipTimeoutMs: 1500 });
+  try {
+    const pending = resume();
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    const s = await get('/api/state');
+    const took = Date.now() - t0;
+    assert.equal(s.status, 200);
+    assert.ok(took < 1000, `another request answered while main was read (${took} ms)`);
+    const r = await pending;
+    assert.equal(r.status, 409);
+    assert.match(r.body.error ?? '', /tip can't be read from the remote/);
+    assert.ok(existsSync(stopFile(w.f)));
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): characters that print as blanks (Hangul fillers, the braille blank, other default-ignorables) never count toward the minimum', () => {
+  for (const [what, ch] of [['U+3164', 'ㅤ'], ['U+115F', 'ᅟ'], ['U+1160', 'ᅠ'], ['U+FFA0', 'ﾠ'], ['U+2800', '⠀']] as const) {
+    assert.ok('error' in acknowledgement({ acknowledge: { reason: ch.repeat(12) } }), `${what} alone is refused`);
+    assert.ok('error' in acknowledgement({ acknowledge: { reason: `abc${ch.repeat(9)}` } }), `${what} padding 3 letters is refused`);
+  }
+  assert.deepEqual(acknowledgement({ acknowledge: { reason: '한국어로 된 이유를 적습니다' } }), { reason: '한국어로 된 이유를 적습니다' }, 'real Hangul counts');
+});
 
 test('resume (#776): a red-main stop with main still red refuses on the dashboard, and is recorded; once main is green on its tip it resumes', async () => {
   const w = world();

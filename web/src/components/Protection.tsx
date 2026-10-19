@@ -182,8 +182,11 @@ export function opensAckForm(e: unknown): boolean {
   return !!x && x.status === 409 && x.body?.needsAck === true;
 }
 
-/** What counts toward the reason's minimum, as the server counts it (src/auto-merge-resume.ts): letters, digits, punctuation, symbols. */
-const visibleChars = (s: string) => s.match(/[\p{L}\p{N}\p{P}\p{S}]/gu)?.length ?? 0;
+/**
+ * What counts toward the reason's minimum, as the server counts it (src/auto-merge-resume.ts): letters, digits,
+ * punctuation and symbols that print (no default-ignorables such as the Hangul fillers, no braille blank).
+ */
+export const visibleChars = (s: string) => s.match(/(?![\p{Default_Ignorable_Code_Point}⠀])[\p{L}\p{N}\p{P}\p{S}]/gu)?.length ?? 0;
 const ACK_MIN = 10;
 
 /**

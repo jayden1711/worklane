@@ -259,6 +259,8 @@ export interface DashboardOptions {
   machine?: { changesPath?: string; updatesConfigPath?: string; updatesLogPath?: string; updatesStatePath?: string; enginePath?: string; signersPath?: string; pendingSignersPath?: string; helperRulesPath?: string };
   /** The git the main watch's accept reads (tests); the instance's clone, as the watch reads it, when unset. */
   acceptGit?: AcceptGit;
+  /** How long a resume may wait on reading main's tip before it counts as unreadable (tests); MAIN_TIP_TIMEOUT_MS when unset. */
+  mainTipTimeoutMs?: number;
   /** Where pasted secrets go: the coordinator user's home (src/console/secrets.ts); this process's home when unset. */
   secretsHome?: string;
   /** The machine owners file (src/machine-owners.ts); the system's when unset (tests). */
@@ -2815,6 +2817,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               remote: 'origin',
               branch: opts.cfg.project.project.default_branch,
               required: requiredFor(opts.cfg.project, opts.cfg.tests),
+              ...(opts.mainTipTimeoutMs !== undefined ? { timeoutMs: opts.mainTipTimeoutMs } : {}),
               checks: async (sha) => {
                 if (!opts.backlog) throw new Error('this dashboard has no backlog to read checks from');
                 return headChecks({ project: opts.cfg.project, tests: opts.cfg.tests, github: await opts.backlog().checks(sha), events: () => eventCache.all(), sha });

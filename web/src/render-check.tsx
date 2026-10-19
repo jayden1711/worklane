@@ -75,7 +75,7 @@ import { RunDetail, RunList, RunResearchView, RunsRefused, RunWhy, type RunResea
 import { SettingsPage } from './pages/Settings';
 import { BoardCardView, BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
-import { MainWatchAlert, opensAckForm as opensAck, ProtectionStatus } from './components/Protection';
+import { MainWatchAlert, opensAckForm as opensAck, ProtectionStatus, visibleChars } from './components/Protection';
 import { AddProjectView, SetupConsoleView } from './pages/Setup';
 import { ClaudeAccountSet, ClaudeAccountView } from './components/ClaudeAccount';
 import { TailscaleSetupView } from './components/TailscaleSetup';
@@ -149,6 +149,7 @@ export const renderDeployGate = (gate: DeployGate) => renderToStaticMarkup(<Depl
 export const renderProtection = (protection: Protection, brand: string) => renderToStaticMarkup(<ProtectionStatus protection={protection} brand={brand} />);
 export const renderMainWatchAlert = (protection: Protection) => renderToStaticMarkup(<MainWatchAlert protection={protection} />);
 export const opensAckForm = (error: unknown) => opensAck(error);
+export const ackVisibleChars = (text: string) => visibleChars(text);
 export const renderAttachmentList = (items: Pending[]) => renderToStaticMarkup(<AttachmentList items={items} onRemove={() => {}} onAnyway={() => {}} />);
 export const renderAttachButton = (role: string | undefined, disabled = false) => renderToStaticMarkup(<AttachButton role={role} disabled={disabled} accept={['png', 'pdf']} onFiles={() => {}} />);
 export const renderDropHint = (active: boolean) => renderToStaticMarkup(<DropHint active={active} />);

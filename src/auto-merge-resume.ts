@@ -8,7 +8,7 @@
 // hand is written back by the coordinator (coordinator/merge-flow.ts stopGoneByHand) while main isn't measured green.
 // Fail closed: a stop with no `by`, an unknown one, or an unreadable stop file waits for green main; main with no
 // required checks configured, a tip that can't be read, or checks that can't be read is not green.
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import type { CommitCheck } from './backlog/types.js';
 import { requiredOutcomes } from './pr-watch.js';
 
@@ -50,20 +50,34 @@ export async function measureMain(o: { branch: string; required: string[]; tip: 
   return { green: true, tip };
 }
 
+/** How long reading main's tip may take before it counts as unreadable (not green). */
+export const MAIN_TIP_TIMEOUT_MS = 10_000;
+
 /**
  * The default branch's tip on the remote now (`git ls-remote`), or null when it can't be read: never a clone's
- * last-fetched ref, which a failed fetch leaves behind and which may be an older, green commit.
+ * last-fetched ref, which a failed fetch leaves behind and which may be an older, green commit. Only the line whose ref
+ * is exactly `refs/heads/<branch>` counts (git's pattern also lists `refs/heads/a/refs/heads/main` and
+ * `refs/tags/refs/heads/main`, which anyone who can push may plant); none, or more than one, is unreadable. Run
+ * asynchronously with a timeout, so neither the dashboard's event loop nor the coordinator's waits on a hung remote.
  */
-export function remoteTip(repo: string, remote: string, branch: string): string | null {
-  const r = spawnSync('git', ['ls-remote', remote, `refs/heads/${branch}`], { cwd: repo, encoding: 'utf8', timeout: 60_000 });
-  if (r.status !== 0) return null;
-  const sha = (r.stdout ?? '').split(/\s/)[0] ?? '';
-  return SHA.test(sha) ? sha : null;
+export function remoteTip(repo: string, remote: string, branch: string, o: { timeoutMs?: number } = {}): Promise<string | null> {
+  const ref = `refs/heads/${branch}`;
+  return new Promise((done) => {
+    execFile('git', ['ls-remote', remote, ref], { cwd: repo, encoding: 'utf8', timeout: o.timeoutMs ?? MAIN_TIP_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return done(null);
+      const exact = String(stdout)
+        .split('\n')
+        .map((l) => l.split('\t'))
+        .filter((p) => p.length === 2 && p[1] === ref);
+      const sha = exact.length === 1 ? exact[0]![0]! : '';
+      done(SHA.test(sha) ? sha : null);
+    });
+  });
 }
 
 /** Main now, the one way every surface measures it: the remote's tip (remoteTip) and the required checks on it. */
-export function mainNow(o: { repo: string; remote: string; branch: string; required: string[]; checks: (sha: string) => Promise<CommitCheck[]> }): Promise<MainState> {
-  return measureMain({ branch: o.branch, required: o.required, tip: () => remoteTip(o.repo, o.remote, o.branch), checks: o.checks });
+export function mainNow(o: { repo: string; remote: string; branch: string; required: string[]; checks: (sha: string) => Promise<CommitCheck[]>; timeoutMs?: number }): Promise<MainState> {
+  return measureMain({ branch: o.branch, required: o.required, tip: () => remoteTip(o.repo, o.remote, o.branch, o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}), checks: o.checks });
 }
 
 export const ACK_MIN = 10;
@@ -71,8 +85,12 @@ export const ACK_MAX = 500;
 
 /** Characters that print nothing or change how text around them reads: control, format (zero-width, bidi), private-use, unassigned. */
 const UNREADABLE = /\p{C}/u;
-/** What counts toward the minimum: letters, digits, punctuation and symbols (not spaces, not combining marks alone). */
-const VISIBLE = /[\p{L}\p{N}\p{P}\p{S}]/gu;
+/**
+ * What counts toward the minimum: letters, digits, punctuation and symbols that print (not spaces, not combining marks
+ * alone, not default-ignorables such as the Hangul fillers U+115F, U+1160, U+3164, U+FFA0, nor the braille blank U+2800).
+ * web/src/components/Protection.tsx counts the same way.
+ */
+const VISIBLE = /(?![\p{Default_Ignorable_Code_Point}⠀])[\p{L}\p{N}\p{P}\p{S}]/gu;
 
 /**
  * The acknowledgement a resume request carries (`{ acknowledge: { reason } }`): none, a typed reason, or why it is

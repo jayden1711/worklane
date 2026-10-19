@@ -99,6 +99,7 @@ interface Render {
   renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
   opensAckForm(error: unknown): boolean;
+  ackVisibleChars(text: string): number;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -1170,6 +1171,12 @@ test('a stop in force that is not the main watch\'s (a red main after an auto-me
   assert.equal(r.opensAckForm({ status: 409, body: { error: 'the stop changed while the default branch was being measured; look again before resuming' } }), false);
   assert.equal(r.opensAckForm({ status: 400, body: { needsAck: true } }), false);
   assert.equal(r.opensAckForm(new Error('network')), false);
+});
+
+test("the acknowledgement form counts visible characters as the server does: blanks that print nothing don't count (#776)", () => {
+  assert.equal(r.ackVisibleChars('the fix PR is ready'), 15);
+  for (const ch of ['ㅤ', 'ᅟ', 'ᅠ', 'ﾠ', '⠀', '​', '️']) assert.equal(r.ackVisibleChars(ch.repeat(12)), 0, `U+${ch.codePointAt(0)!.toString(16).toUpperCase()}`);
+  assert.equal(r.ackVisibleChars('한국어'), 3);
 });
 
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
