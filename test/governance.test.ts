@@ -112,7 +112,7 @@ test('a PR into another repo is refused on its own, even from a branch of this o
 });
 
 test('an empty or invalid branch name, on either side, is refused: never equal by being blank', () => {
-  for (const b of ['', ' ', 'main ', '-main', 'a..b', 'a b', 'a~1', 'a^', 'a:b', 'a?', 'a*', 'a[b', 'a\\b', 'a/', '/a', 'a//b', 'a.lock', 'a.', 'a@{b', '@', 'maİn', 'main\n']) {
+  for (const b of ['', ' ', 'main ', '-main', 'a..b', 'a b', 'a~1', 'a^', 'a:b', 'a?', 'a*', 'a[b', 'a\\b', 'a/', '/a', 'a//b', 'a.lock', 'a.lock/b', 'x/a.lock/b', 'a.', 'a@{b', '@', 'maİn', 'main\n']) {
     assert.equal(governedPr(all, { repo: 'acme/app', defaultBranch: b }, pr({ base: b })).token, null, `both ${JSON.stringify(b)}`);
     assert.equal(tokenOf(all, pr({ base: b })), null, `base ${JSON.stringify(b)}`);
   }

@@ -112,7 +112,7 @@ const LOGIN = /^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}(?:\[bot\])?$/i;
 // WHY: a full SHA-1 or SHA-256 commit id, as GitHub sends it (lowercase): the head the token is pinned to.
 const SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 // WHY: git's branch-name rules (check-ref-format), ASCII printable only: never empty, so two blanks never match.
-const BRANCH = /^(?![-/.])(?!@$)(?!.*(?:\/\/|\.\.|@\{|\/\.))(?!.*(?:\.lock|[./])$)[!-~]+$/;
+const BRANCH = /^(?![-/.])(?!@$)(?!.*(?:\/\/|\.\.|@\{|\/\.))(?!.*\.lock(?:\/|$))(?!.*[./]$)[!-~]+$/;
 const validBranch = (b: unknown): b is string => typeof b === 'string' && BRANCH.test(b) && !/[~^:?*[\\]/.test(b);
 // WHY: `ghost` is the login GitHub shows for a deleted account: not someone.
 const resolved = (login: string) => LOGIN.test(login) && !same(login, 'ghost');
