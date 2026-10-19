@@ -736,6 +736,9 @@ import { readManagedApps } from '../src/managed-apps.js';
 import { slotsConfigPath, which } from '../src/os/index.js';
 import { etcPath, SYSTEM_ROOTS, varLibPath } from '../src/os/system-paths.js';
 import { heldOutAllowed } from '../src/spend-gate.js';
+import { verifyWithScript } from '../src/setup/app-manifest.js';
+import { currentUser } from '../src/os/index.js';
+import { EventEmitter } from 'node:events';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
 function polluted<T>(vars: Record<string, string>, f: () => T): T {
@@ -838,4 +841,22 @@ test("regression (#786): a forged system root on Object.prototype, with a mark f
     }),
   );
   assert.equal(readManagedApps(apps).problem, null, "the preload's own root back: as before");
+});
+
+test("regression (#786): a NODE_OPTIONS on Object.prototype is not handed to the App check's node (it runs as the coordinator user)", async () => {
+  const canary = `--require ${join(mkdtempSync(join(tmpdir(), 'canary-786-')), 'never.cjs')}`;
+  const script = join(mkdtempSync(join(tmpdir(), 'script-')), 'check.mjs');
+  writeFileSync(script, '');
+  const seen: NodeJS.ProcessEnv[] = [];
+  // A stand-in spawn: records the environment it is given, and ends at once. Nothing runs.
+  const standIn = ((_file: string, _args: string[], o: { env: NodeJS.ProcessEnv }) => {
+    seen.push(o.env);
+    const p = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end: () => setImmediate(() => p.emit('close', 0)) } });
+    return p;
+  }) as unknown as typeof spawn;
+  const own = Object.hasOwn(process.env, 'NODE_OPTIONS') ? process.env.NODE_OPTIONS : undefined;
+  const verify = polluted({ NODE_OPTIONS: canary }, () => verifyWithScript({ script, spawn: standIn }));
+  await verify({ user: currentUser(), key: '/k', appId: 1, installationId: 2, repo: 'acme/shop' } as Parameters<typeof verify>[0]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.NODE_OPTIONS, own, "only this process's own NODE_OPTIONS, if it has one");
 });

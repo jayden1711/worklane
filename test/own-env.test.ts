@@ -147,6 +147,7 @@ export const OWN_ENV_MODULES: readonly string[] = [
   'src/os/own-env.ts',
   'src/os/system-paths.ts',
   'src/plugins/cli.ts',
+  'src/setup/app-manifest.ts',
   'src/spend-gate.ts',
   'src/tool-path.ts',
 ];
