@@ -14,7 +14,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instance.js';
 import { processIdentity } from '../src/os/index.js';
-import { autoMergeKilled, killAutoMerge, killSwitchPath } from '../src/policy-kill.js';
+import { armedSwitches, autoMergeKilled, killAutoMerge, killSwitchPath, spareSwitchPath } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
 import { decodePolicyValue, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
@@ -610,7 +610,10 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   assert.ok(touched.length > 0);
   assert.deepEqual(touched.filter((p) => /policy\.yaml$|\.lock$/.test(p) || p === m.dir || p.startsWith(`${m.dir}/`)), [], 'no policy.yaml, no lock, nothing in the instance home');
   // The switch: root's (the stand-in), 0644, in root's 0755 directory: the coordinator user can't write there.
-  const flag = killSwitchPath('kill');
+  const switches = armedSwitches('kill');
+  assert.equal(switches.length, 1, 'one switch, of its own');
+  const flag = join(POLICY_ROOT_DIR, switches[0]!);
+  assert.ok(flag.startsWith(`${killSwitchPath('kill')}.`));
   assert.equal(statSync(flag).mode & 0o777, 0o644);
   assert.equal(statSync(flag).uid, me);
   assert.equal(statSync(POLICY_ROOT_DIR).mode & 0o777, 0o755);
@@ -626,10 +629,16 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   for (const bad of ['../kill', 'kill/x', '.', 'Kill', 'nouser']) assert.throws(() => setPolicy(bad, 'auto_merge', 'off', 'wl-kill', users), /not an instance name|no instance/, bad);
   assert.equal(existsSync(join(POLICY_ROOT_DIR, '..', 'kill.auto-merge-off')), false);
   assert.throws(() => killAutoMerge('../kill'), /not an instance name/);
-  // Anything at its name counts as off (fail closed): a link, a directory.
+  // Anything at an armed name counts as off (fail closed): a link, a directory, a name that says "disarmed". Only the
+  // spare's own name is never counted, and a spare beside a switch hides nothing.
+  assert.equal(existsSync(spareSwitchPath('kill')), true, 'a disarmed spare is there for the next OFF');
+  assert.equal(autoMergeKilled('kill'), false);
   symlinkSync('/nonexistent', flag);
   assert.equal(autoMergeKilled('kill'), true);
   renameSync(flag, join(m.T, 'gone-link'));
   mkdirSync(flag);
   assert.equal(autoMergeKilled('kill'), true);
+  renameSync(flag, join(m.T, 'gone-dir'));
+  writeFileSync(`${killSwitchPath('kill')}.disarmed`, '');
+  assert.equal(autoMergeKilled('kill'), true, 'an armed name, whatever follows');
 });

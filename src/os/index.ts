@@ -540,10 +540,14 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
+export const UNKNOWN_IDENTITY = 'unknown';
+
 /**
  * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
  * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
- * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs.
+ * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs. A running process whose /proc
+ * entry can't be read is UNKNOWN_IDENTITY (never "gone").
  */
 export function processIdentity(pid: number): string | null {
   if (!pidAlive(pid)) return null;
@@ -556,9 +560,10 @@ export function processIdentity(pid: number): string | null {
     if (fields[0] === 'Z' || fields[0] === 'X') return null;
     const start = fields[19];
     const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
-    return start && /^\d+$/.test(start) ? `${boot}:${start}` : null;
-  } catch {
-    return null;
+    return start && /^\d+$/.test(start) ? `${boot}:${start}` : UNKNOWN_IDENTITY;
+  } catch (e) {
+    // Gone between the signal and the read: no such process. Anything else: it runs, unread.
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH' ? null : UNKNOWN_IDENTITY;
   }
 }
 

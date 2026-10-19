@@ -452,6 +452,18 @@ test("the policy step is done only when the engine's gate would read the policy:
   assert.ok(m.calls().includes('app policy check alpha'), "the engine's gate was asked");
 });
 
+test("the policy step's text says auto_merge off while root's kill switch is armed, whatever policy.yaml says (#726 round 5)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  assert.equal(m.run().status, 0);
+  const file = join(m.instDir('alpha'), 'policy.yaml');
+  writeFileSync(file, readFileSync(file, 'utf8').replace('auto_merge: false', 'auto_merge: true'));
+  const detail = () => m.run().events.find((e) => e.step === 'policy' && e.state === 'done')!.detail;
+  assert.match(detail(), /^auto_merge on, /, 'no switch: as policy.yaml says');
+  mkdirSync(join(m.T, 'policy-root'), { recursive: true });
+  writeFileSync(join(m.T, 'policy-root', 'alpha.auto-merge-off.1700000000000-42-abcd'), '');
+  assert.match(detail(), /^auto_merge off \(root's kill switch\), /);
+});
+
 test("P6: a rerun through the machine helper on a policy the engine won't take over (loose, or changed since root wrote it) stops at the policy step, naming the admin's command; no flag is ever passed (#726)", { skip: !posix && 'bash' }, () => {
   const m = machine();
   assert.equal(m.run().status, 0);

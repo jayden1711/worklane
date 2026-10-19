@@ -568,6 +568,23 @@ ensure_instance_home() {
 # without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
 # merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
 POLICY_ROOT_DIR=/etc/worklane/policy-root
+# Whether root's kill switch turns instance $1's auto_merge off: any file named <name>.auto-merge-off* (src/policy-kill.ts).
+auto_merge_killed() {
+  local f
+  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then return 0; fi
+  done
+  return 1
+}
+# Every kill switch of instance $1 copied to instance $2 (a rename): an OFF given to the old name is the new name's too.
+# instance-rename.sh runs it at its home step, again right before the new name's service starts, and again right before
+# the old name's records go, so an OFF given to the old name at any point of the rename is carried.
+carry_auto_merge_off() {
+  local f
+  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
+  done
+}
 # Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
 # coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of
 # policy own's flags, which no script here passes. test/policy-edit.test.ts holds this line, and that, as they are.
@@ -575,10 +592,10 @@ own_policy() { "$ENGINE_CLI" policy own "$1"; }
 # A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
 # carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
 # wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
-# Root's auto_merge kill switch (<name>.auto-merge-off: auto_merge off whatever policy.yaml says) goes with it, first,
+# Root's auto_merge kill switches (<name>.auto-merge-off*: auto_merge off whatever policy.yaml says) go with it, first,
 # recorded or not: a rename never turns auto_merge back on.
 carry_policy_root() {
-  if [ -e "$POLICY_ROOT_DIR/$1.auto-merge-off" ]; then install -m 0644 "$POLICY_ROOT_DIR/$1.auto-merge-off" "$POLICY_ROOT_DIR/$2.auto-merge-off"; fi
+  carry_auto_merge_off "$1" "$2"
   [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
   install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
   own_policy "$2"

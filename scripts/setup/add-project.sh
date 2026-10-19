@@ -213,6 +213,8 @@ policy_text() {
   usd="$(sed -n 's/.*daily_usd: *\([0-9.]*\).*/\1/p' "$f" | head -1)"
   w="$(sed -n 's/.*max_workers: *\([0-9]*\).*/\1/p' "$f" | head -1)"
   [ "$am" = true ] && am=on || am=off
+  # Root's kill switch says off, whatever policy.yaml says (src/policy-kill.ts).
+  if auto_merge_killed "$name"; then am="off (root's kill switch)"; fi
   echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them as root with $ENGINE_CLI policy set $name <key> <value>"
 }
 # Done only once the policy is root's (issue #726): an earlier install's, which its coordinator user could rewrite, is
