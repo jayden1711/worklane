@@ -1565,7 +1565,7 @@ test("the first-run page, a Fix the dashboard does itself: its plan shown first,
   assert.doesNotMatch(unavailable, /first-run-action-button/);
 });
 
-test("the first-run page, Sign in to Claude: local relays claude auth login (the link for owners, nothing pasted); a server pastes a setup token; a cached account is labelled cached", () => {
+test("the first-run page, Sign in to Claude: local relays claude auth login (the link for owners, nothing pasted); a server names root's commands, with no paste box; a cached account is labelled cached", () => {
   const local = { mode: 'local', canAct: true, state: 'idle', url: null, detail: 'not started', startedAt: null, endedAt: null, status: null };
   const idle = r.renderClaudeSignin(local);
   assert.match(idle, /data-testid="claude-signin" data-mode="local" data-state="idle"[\s\S]*?claude auth login[\s\S]*?Nothing is pasted[\s\S]*?never sees, logs or stores a token/);
@@ -2440,7 +2440,9 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
   assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
   // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
-  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-profile-add-howto', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
+  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
+  // Adding an account is root's for every instance's agent user at once, so its how-to shows under All too.
+  assert.match(shown.account, /data-testid="claude-profile-add-howto"[\s\S]*?data-testid="claude-profile-add-command">sudo bash claude-account\.sh profile-add &lt;name&gt;<[\s\S]*?for every instance(&#x27;|')s agent user at once/, 'Add an account: under All');
   assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
   assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
   assert.match(shown.account, /data-testid="claude-account-switch-command">sudo bash claude-account\.sh switch/, 'switching every instance: the root command');

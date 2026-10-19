@@ -92,7 +92,7 @@ function Failover({ table, self, confirmScript, disabled, onDone }: { table: Pro
  * Adding an account, as a root admin does it on the machine: never through this page, which takes no Claude credential
  * (issue #711): a token from `claude setup-token`, at the hidden prompt of `claude-account.sh profile-add`.
  */
-function AddHowTo({ self, confirmScript }: { self: string; confirmScript: string }) {
+function AddHowTo({ self, confirmScript }: { self: string | null; confirmScript: string }) {
   return (
     <div className="space-y-1.5 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-profile-add-howto">
       <div className="text-[13px] font-medium text-ink">Add an account</div>
@@ -100,7 +100,11 @@ function AddHowTo({ self, confirmScript }: { self: string; confirmScript: string
         A root admin adds it on the machine; this page never takes a Claude credential. On a machine signed in to the account, run <code>claude setup-token</code>, then on this machine paste what it prints at the hidden prompt of:
       </p>
       <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-profile-add-command">sudo bash {confirmScript} profile-add &lt;name&gt;</pre>
-      <p className="text-[12px] text-ink-3">It is checked with a real call as each agent user ({self}'s included); then choose it here with Use here.</p>
+      {self !== null ? (
+        <p className="text-[12px] text-ink-3">It is checked with a real call as each agent user ({self}'s included); then choose it here with Use here.</p>
+      ) : (
+        <p className="text-[12px] text-ink-3">It is added for every instance's agent user at once, each checked with a real call; then choose it for an instance by picking that instance in the sidebar, or for every one at a root shell.</p>
+      )}
     </div>
   );
 }
@@ -232,12 +236,9 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, canAct, onChan
           </tbody>
         </table>
       </div>
-      {self !== null && (
-        <>
-          <AddHowTo self={self} confirmScript={confirmScript} />
-          {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
-        </>
-      )}
+      {/* profile-add covers every instance's agent user, so its how-to shows under All instances too. */}
+      <AddHowTo self={self} confirmScript={confirmScript} />
+      {self !== null && table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
       {err && (
         <p className="text-[12.5px] text-red" data-testid="claude-profile-error">
           {err}
