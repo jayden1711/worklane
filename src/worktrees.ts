@@ -41,20 +41,10 @@ function setOwned(o: WorktreeOptions, list: string[]) {
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
- * What Claude Code's sandbox leaves in a worktree. It protects some paths
- * from writes inside the working directory; on Linux it does that by
- * mounting over them, so a protected path that doesn't exist yet is first
- * created, empty, as the mount point, and stays after the run.
- *
- * Two kinds:
- * - Files and folders at the worktree root, from the sandbox's own list
- *   (in Claude Code 2.1.282: .gitconfig, .gitmodules, shell startup files,
- *   .ripgreprc, .mcp.json, .vscode, .idea), plus the other shell files.
- * - Anything under .claude/. Claude Code protects more of it with each
- *   version (commands, agents, launch.json, loop.md, output-styles,
- *   routines, scheduled_tasks.json, ...), so it is covered as a whole
- *   rather than by name. .claude/ is harness config: agents edit tracked
- *   files there through review, and never add new ones.
+ * What Claude Code's sandbox leaves in a worktree: on Linux it protects paths by mounting over them, so a missing one
+ * is created empty as the mount point and stays. Root files from its list (.gitconfig, .gitmodules, shell startup
+ * files, .ripgreprc, .mcp.json, .vscode, .idea), and anything under .claude/ as a whole (harness config: agents edit
+ * tracked files there through review and never add new ones).
  */
 export const SANDBOX_ROOT_PLACEHOLDERS = [
   '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile', '.ripgreprc', '.mcp.json', '.vscode', '.idea',
@@ -64,12 +54,7 @@ const PROTECTED_DIR = '.claude';
 const EXCLUDE_MARKER = `# ${BRAND.cli}: empty mount points Claude Code's sandbox leaves in worktrees; never commit them`;
 const EXCLUDE_END = `# ${BRAND.cli}: end`;
 
-/**
- * Keep the sandbox's placeholders out of anything an agent can commit: an
- * exclude block in the repo's shared info/exclude (it covers every
- * worktree), rewritten each time so it follows this list. Exclusion only
- * affects untracked files: changes to tracked ones still show.
- */
+/** Keep the sandbox's placeholders out of commits: a block in the shared info/exclude (untracked files only). */
 export function excludeSandboxPlaceholders(repo: string): void {
   const file = join(resolve(repo, git(repo, 'rev-parse', '--git-common-dir')), 'info', 'exclude');
   const lines = (existsSync(file) ? readFileSync(file, 'utf8') : '').split('\n');

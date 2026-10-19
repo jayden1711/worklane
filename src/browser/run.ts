@@ -1,10 +1,7 @@
-// Run one of a project's browser flows (Track B): start the app in a worktree, wait until it answers on
-// localhost, drive headless Chromium through the flow's steps, and collect what a reviewer needs: console
-// errors, failed and slow requests, a performance-trace summary, and screenshots of where the flow ended (at
-// desktop width, in dark mode and at phone width). The browser only ever
-// reaches the app on localhost: every other request is refused before it leaves, and recorded. The app and
-// the browser are always stopped, whatever happens. With no Chrome or Chromium on the machine, the run is
-// skipped and says so, rather than failing.
+// Run one of a project's browser flows (Track B) against its app in a worktree, in headless Chromium, collecting
+// console errors, failed and slow requests, a trace summary and screenshots. The browser only reaches the app on
+// localhost: every other request is refused before it leaves, and recorded. The app and the browser are always
+// stopped. With no Chrome or Chromium, the run is skipped and says so.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -103,15 +100,11 @@ class BudgetSpent extends Error {}
 export const shotName = (flow: string, view?: ShotView) => (view ? `${flow}.${view}.png` : `${flow}.png`);
 
 /**
- * Shoot where the flow ended: at the run's desktop view, then in dark mode (prefers-color-scheme: dark, still at
- * desktop width), then at phone width (light again). The desktop shot failing fails the run, as it always has; a
- * dark or phone shot that fails says why in its place and is never a reason the run fails. `onView` is told each
- * view before it is set up, so what the page does from then on is attributed to it (drive() records it unjudged).
- * INVARIANT: three shots at most per run, each of the viewport only (never the whole page), so a run's evidence
- * stays bounded however long the app's page is. The dark and phone views together get `budgetMs` (10 s, scaled
- * like every browser timeout) and each of their commands `commandMs` (5 s, scaled) or what is left of the budget,
- * whichever is less: a page or Chrome that stalls them costs `budgetMs` at most, a view the budget cuts off is
- * listed as skipped, and one not reached as not tried.
+ * Shoot where the flow ended: desktop, then dark mode, then phone width. Only the desktop shot failing fails the run;
+ * a failed dark or phone shot says why in its place. `onView` is told each view before it is set up, so what the page
+ * does then is attributed to it (unjudged). INVARIANT: at most three viewport-only shots per run, so evidence stays
+ * bounded. The dark and phone views share `budgetMs`, each command `commandMs` or what is left: a stall costs
+ * `budgetMs` at most; a view cut off is listed as skipped, one not reached as not tried.
  */
 export async function captureShots(
   cdp: Pick<Cdp, 'send'>,
@@ -185,10 +178,9 @@ function stopApp(p: ChildProcess, runAs?: ProjectRunAs): Promise<boolean> {
 }
 
 /**
- * Run `flow` from `app` against the app started in `cwd`. Evidence lands in `outDir` (the screenshots). Throws when
- * the app can't be started or never becomes ready (its output tail in the message), or the browser fails; a failing
- * step is evidence. However it ends, Chrome and the app's whole process tree are stopped first. Chrome's temporary
- * profile goes under `chromeProfileRoot` when given (the system temp folder otherwise).
+ * Run `flow` against the app started in `cwd`; screenshots land in `outDir`. Throws when the app won't start or get
+ * ready, or the browser fails; a failing step is evidence. Chrome and the app's whole process tree are always
+ * stopped. Chrome's profile goes under `chromeProfileRoot` when given.
  */
 export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; outDir: string; chrome?: string | null; noSandbox?: boolean; runAs?: ProjectRunAs; chromeProfileRoot?: string }): Promise<FlowRun> {
   const steps = o.app.flows[o.flow];

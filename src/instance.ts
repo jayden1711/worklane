@@ -1,10 +1,5 @@
-// Instances: one per project, each with its own home outside any repo.
-//   <instances dir>/<name>/instance.yaml     which repo(s) this instance works
-//   <instances dir>/<name>/policy.yaml       operator policy: budget, limits, allowlists
-//   <instances dir>/<name>/credentials.yaml  references to credentials, never values
-//   <instances dir>/<name>/state/            event log, locks, worktree records
-// The repo's own config folder keeps project behavior (tests, review levels,
-// skills) and is reviewed like code; it may only tighten the instance policy.
+// Instances: one per project, each with a home outside any repo: instance.yaml (its repo), policy.yaml (operator
+// policy), credentials.yaml (references, never values), state/. The repo's config folder may only tighten the policy.
 import { AutomationsPolicy } from './automations/schema.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -34,10 +29,9 @@ const name = z.string().superRefine((s, ctx) => {
   if (why) ctx.addIssue({ code: 'custom', message: why });
 });
 
-// A configured path (credentials.yaml, instance.yaml run_as): absolute, and in normal form (normalAbsolute, the same
-// check projectCommand makes), refused at load and never rewritten (#713). A relative one would depend on the
-// coordinator's working directory; a `..` resolved lexically can name a different file than the kernel reaches
-// through a symlink; and a project command's sandbox hides each by this exact path.
+// A configured path: normalAbsolute (as projectCommand checks), refused at load, never rewritten (#713). A relative
+// one depends on the coordinator's cwd, a lexical `..` can name another file than the kernel reaches, and the sandbox
+// hides each by this exact path.
 const path = z
   .string()
   .min(1)
@@ -510,15 +504,13 @@ export function loadInstanceSetup(instanceName: string, dir = instancesDir()): {
 }
 
 /**
- * The paths a project command run as the agent user never sees, beyond the agent's own ~/.claude* (src/os
- * projectCommand hides those itself): the instance home (the coordinator's), a Claude config dir set elsewhere, and
- * every credential file credentials.yaml names. Never a directory that holds the checkout: its commands run there.
+ * What a project command never sees beyond ~/.claude*: the instance home, a Claude config dir set elsewhere, every
+ * file credentials.yaml names. Never a directory holding the checkout, where commands run.
  */
 export function projectCommandHides(instanceHome: string, repoPath: string, c: CredentialsFile, claudeConfigDir?: string): string[] {
   const named = [instanceHome, claudeConfigDir, c.github.kind === 'app' ? c.github.key_path : c.github.path, c.claude?.config_dir, c.eval_key, c.agent_api_key, ...Object.values(c.provider_keys ?? {}), ...Object.values(c.intake ?? {})];
   const holdsRepo = (p: string) => repoPath === p || repoPath.startsWith(p.endsWith('/') ? p : `${p}/`);
-  // Every one as written (the schemas hold them to normalAbsolute): never dropped or rewritten. projectCommand refuses
-  // one that isn't in normal form (the instance home, which no schema checks, included).
+  // As written, never dropped or rewritten: projectCommand refuses one not in normal form.
   return [...new Set(named.filter((p): p is string => typeof p === 'string'))].filter((p) => !holdsRepo(p));
 }
 
@@ -536,9 +528,8 @@ export function readAppOrigin(keyPath: string): AppOrigin | null {
 }
 
 /**
- * Point an instance's credentials.yaml at its GitHub App, keeping its other settings, validated against the schema
- * before anything is written (0600, renamed into place), and record how the App was made beside its key. The one
- * writer of the App entry: credentials.sh github-app (`instance set-github-app`) and the manifest flow both come here.
+ * Point credentials.yaml at its GitHub App, validated before it is written (0600, renamed into place), recording how
+ * the App was made beside its key; the App entry's one writer (credentials.sh github-app, the manifest flow).
  */
 export function setGithubApp(file: string, app: { appId: number; installationId: number; keyPath: string }, origin: AppOrigin): void {
   const doc = parseDocument(existsSync(file) ? readFileSync(file, 'utf8') : 'version: 1\n');
@@ -553,11 +544,9 @@ export function setGithubApp(file: string, app: { appId: number; installationId:
 }
 
 /**
- * Point an instance's credentials.yaml at its chat bot's token file (intake.discord_token), keeping its other
- * settings, validated against the schema before anything is written (0600, renamed into place). The one writer of
- * that entry: credentials.sh intake-discord (`instance set-discord-token`) and the dashboard's pasted token both come
- * here. Only the file's path: the token is never read here. Refused: a path that isn't absolute, isn't a plain file,
- * or that its group or others can read (the token is the coordinator user's alone).
+ * Point credentials.yaml at the chat bot's token file (intake.discord_token), validated before it is written (0600,
+ * renamed into place); its one writer. Only the path: the token is never read. Refused: a path that isn't absolute,
+ * isn't a plain file, or that its group or others can read (the token is the coordinator user's alone).
  */
 export function setDiscordToken(file: string, tokenFile: string): void {
   setIntakeCredential(file, 'discord_token', tokenFile);
@@ -568,11 +557,9 @@ export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slac
 export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];
 
 /**
- * Point an instance's credentials.yaml at one intake credential's file (intake.<key>), keeping its other settings,
- * validated before anything is written (0600, renamed into place). The one writer of those entries: credentials.sh
- * (`instance set-discord-token`, `instance set-intake-credential`) and the dashboard's paste box both come here. Only
- * the file's path: the secret is never read here. Refused: a path that isn't absolute, isn't a plain file, or that
- * its group or others can read (the secret is the coordinator user's alone).
+ * Point credentials.yaml at one intake credential's file (intake.<key>), validated before it is written (0600, renamed
+ * into place); their one writer. Only the path: the secret is never read. Refused: a path that isn't absolute, isn't
+ * a plain file, or that its group or others can read (the secret is the coordinator user's alone).
  */
 export function setIntakeCredential(file: string, key: IntakeCredentialKey, tokenFile: string): void {
   if (!INTAKE_CREDENTIAL_KEYS.includes(key)) throw new Error(`not an intake credential: ${String(key)}`);

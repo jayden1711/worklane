@@ -1,15 +1,8 @@
-// The coordinator's browser checks (Track B), for verify(): which flows run (src/browser/gate.ts), each run and
-// judged (src/browser/check.ts), recorded as checks with kind 'browser', and the PR's BROWSER CHECKS section.
-//
-// A flow the issue asks for is a check like any other: unavailable (no app, no browser) fails the attempt, as
-// verify() fails anything that isn't a pass. A flow run only because the change touched ui_paths is held to its
-// result too, except that with no browser on the machine it is listed and skipped: a project's UI changes don't
-// all stop because one machine lacks Chrome, and the PR says so.
-//
-// Each flow is first run at the base commit the change is measured against (a worktree of its own, the app
-// started there), so only console errors and failed requests the change adds count against it. A baseline that
-// can't be had (the app won't start at base) is said in the evidence, and the flow is judged with none: every
-// error counts, never a silent pass. Baselines are cached per (base, flow), so a retry doesn't rerun them.
+// The coordinator's browser checks (Track B) for verify(): which flows run, each run and judged, recorded as checks
+// of kind 'browser', and the PR's BROWSER CHECKS section. An asked-for flow that is unavailable fails the attempt; one
+// run because the change touched ui_paths is listed and skipped when the machine has no browser. Each flow first runs
+// at the base commit, so only errors the change adds count; with no baseline every error counts, never a silent pass.
+// Baselines are cached per (base, flow).
 import { join } from 'node:path';
 import type { DoneWhenList } from '../backlog/types.js';
 import type { AppConfig } from '../config/schema.js';

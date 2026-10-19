@@ -1,9 +1,6 @@
-// `tune`: profile a project's test suite once, on this machine, and propose the settings as a reviewed PR.
-// It sets up a fresh worktree on main the way a task would (the project's own setup, as the agent user),
-// runs the suite at 1, 2, 4 and all cores' worth of workers, records each run's time and its largest test
-// worker's peak memory, and writes the recommendation into the project's tests.yaml: `cores.max`, and a
-// fixed worker count turned into `{cores}` so the core budget sets it from then on. The PR goes through the
-// same push limits and backlog as every other harness PR; nothing changes until it is reviewed and merged.
+// `tune`: profile a project's test suite on this machine (a fresh worktree on main, set up as the agent user; the
+// suite at 1, 2, 4 and all cores' workers; time and peak worker memory) and propose tests.yaml's `cores.max` and
+// `{cores}` as a PR, under the usual push limits. Nothing changes until it is reviewed and merged.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { freemem } from 'node:os';

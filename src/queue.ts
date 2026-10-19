@@ -1,8 +1,5 @@
-// Queued exclusive runs (e.g. a project's full test suite). `queue` spawns a
-// detached runner in its own session, so it outlives the shell and Claude
-// session that started it, then returns. The runner waits for the
-// machine-wide full-run lock AND for the project's idle probe (e.g. "no
-// other full run is live") before starting, and records the result.
+// Queued exclusive runs (e.g. a full test suite): `queue` spawns a detached runner that outlives its caller,
+// waits for the machine-wide full-run lock AND the project's idle probe, then runs and records the result.
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';

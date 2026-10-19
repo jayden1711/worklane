@@ -608,7 +608,6 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
   return platform === 'darwin' ? '/Users' : '/home';
 }
 
-/** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
 /**
  * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
  * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
@@ -648,15 +647,12 @@ export const PROJECT_SANDBOX_TOOL = '/usr/bin/bwrap';
 /** The exit code of a project command whose sandbox couldn't start: nothing of the command ran. */
 export const SANDBOX_UNAVAILABLE = 125;
 export const SANDBOX_FIX = 'install bubblewrap and its AppArmor rule with scripts/setup/machine.sh, then check with scripts/setup/check.sh <name>';
-/** The sandbox's own flags, the one source for the command's sandbox and for its probe (scripts/setup/check.sh runs it). */
+/** The sandbox's flags: one source for it and its probe (check.sh). */
 export const PROJECT_SANDBOX_ARGS = ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--die-with-parent', '--proc', '/proc'] as const;
-/** Whether this user can start that sandbox: what check.sh runs as the agent user, and the wrapper runs first. */
+/** Whether this user can start it: check.sh's probe, and the wrapper's first step. */
 export const PROJECT_SANDBOX_PROBE: readonly string[] = [PROJECT_SANDBOX_TOOL, ...PROJECT_SANDBOX_ARGS, '--', '/bin/sh', '-c', ':'];
 
-/**
- * Who a project command runs as: the instance's agent user, and what its sandbox hides besides the agent's own
- * ~/.claude* (projectCommandHides, src/instance.ts). `hide` is required, so no caller can pass the user without it.
- */
+/** A project command's agent user and what its sandbox hides beyond ~/.claude*; `hide` required, never dropped. */
 export interface ProjectRunAs {
   user: string;
   home: string;
@@ -664,52 +660,44 @@ export interface ProjectRunAs {
   hide: readonly string[];
 }
 
-// Run as the agent user, before any project code: hides each path given (after `--` comes the command) and every
-// ~/.claude* login, profile and settings file and ~/.config/*-claude-key (credentials.sh's API key), each resolved
-// through its symlinks: an empty tmpfs over a directory, /dev/null over a file. Its own PID namespace and /proc, so no
-// process outside it (a `claude` holding a login) can be read through /proc/<pid>. The devices and network stay
-// (GPU checks, installs). A tool that can't start is refused with SANDBOX_UNAVAILABLE, before the command runs.
-// INVARIANT: this bash starts with an empty environment (projectCommand), so nothing a project sets (SHELLOPTS,
-// BASHOPTS, GLOBIGNORE, IFS, ...) reaches it; the project's variables are the inner `env -i` after `--`, which it
-// passes on as words. Its glob and shell options are reset all the same. It is started with --norc --noprofile and
-// stdin from /dev/null (projectCommand), so it reads no startup file: not the agent's ~/.bashrc, which a sandboxed
-// command can write, and which bash's rshd check sources for `bash -c` with a socket on stdin.
-// Every directory above a hidden path is bound onto itself first (shallowest first, before any mask), so it is a
-// mount point in the sandbox: renaming it fails (EBUSY), and the secret can't be moved out from under its mask.
-// (bwrap's --bind adds nosuid,nodev to it and below: harmless for homes, /srv, /tmp; a hidden path under /dev would
-// cost the sandbox its devices.)
+// Run as the agent user before any project code: hides each path given (the command follows `--`), every ~/.claude*
+// and ~/.config/*-claude-key (credentials.sh's API key): a tmpfs over a directory, /dev/null over a file. Its own PID
+// namespace and /proc: no outside process (a `claude` holding a login) is readable through /proc/<pid>. Devices and
+// network stay. A tool that can't start is refused (SANDBOX_UNAVAILABLE) before the command runs.
+// INVARIANT: this bash gets an empty environment, so nothing a project sets (SHELLOPTS, BASHOPTS, IFS, ...) reaches
+// it; the project's variables are the inner `env -i` after `--`, passed on as words. Glob and shell options are reset
+// anyway. --norc --noprofile: it reads no startup file, such as the agent's ~/.bashrc (writable by a sandboxed
+// command; sourced by bash's rshd check for `bash -c` with a socket on stdin).
+// Every directory above a hidden path is bound onto itself first (shallowest first, before any mask): renaming it
+// fails (EBUSY), so the secret can't be moved out from under its mask. (--bind adds nosuid,nodev: a hidden path
+// under /dev would cost the sandbox its devices.)
 const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
-  // readlink, stat and find by their paths (no function or PATH entry can stand in for them); a missing one: refused,
-  // never nothing hidden.
+  // Tools by fixed path (no function or PATH entry stands in); a missing one refuses.
   `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
   `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}`,
   'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
-  // Every refusal is collected first (each once), so one message names every path to fix. Paths and link targets are
-  // shown quoted: they are the agent's to name, and a newline in one can't start a line of its own.
+  // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
   'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
   `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
   `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
-  // INVARIANT (#787 rounds 7, 8): every decision about a component rests on ONE observation of it, one lstat (stat
-  // without -L) giving its type and owner, or its error, never two tests the agent could change in between. What the
-  // agent can't change is what makes a decision stable: who owns a directory, and whether one it doesn't own is
-  // writable to it. Each hidden path is resolved one component and one symlink at a time, so every symlink at any hop
-  // is checked:
-  // - a symlink is followed only from a directory the agent neither owns nor can write (it can't swap it), and every
-  //   directory above it is bound onto itself (it can't be renamed); any other symlink, or over 40, is refused;
-  // - a component that isn't there (ENOENT, ENOTDIR): nothing to hide;
-  // - EACCES: nothing to hide only when no directory walked so far is the agent's (owned or writable): it is then the
-  //   coordinator's, which the agent can't open by that name at all. Under one of the agent's own, it could make the
-  //   directory searchable again after the masks were set: refused, whatever the mode now;
+  // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
+  // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
+  // directory, or whether one it doesn't own is writable to it. Resolved one component and symlink at a time:
+  // - a symlink is followed only from a directory the agent neither owns nor can write, and the directories above it
+  //   are bound onto themselves; any other symlink, or over 40, is refused;
+  // - ENOENT, ENOTDIR: nothing to hide;
+  // - EACCES: nothing to hide only if no directory walked so far is the agent's (owned or writable): then it is the
+  //   coordinator's, unopenable by that name. Under the agent's own, it could make it searchable again: refused;
   // - any other error, or a name too long to check: refused.
   `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
   'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0',
   '  if [ -w / ]; then cw=1 own=1; fi',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
-  // A `..` (only from a root-made link's target: projectCommand refuses one in a hide path) leaves a directory: bound
-  // onto itself first, so no command can remove or rename it to make the path resolve elsewhere for the next.
+  // A `..` (only in a root link's target; hide paths with one are refused) binds the directory it leaves first: no
+  // command can remove or rename it.
   '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
   '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
   '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; continue ;; esac',
@@ -732,10 +720,9 @@ const LINUX_SANDBOX = [
   '  walk "$1"; case $? in 1|2) return ;; esac; r=$R',
   '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "resolves under /proc, /sys or /dev"; return ;; esac',
   '  if [ "$RT" = directory ]; then hide+=(--tmpfs "$r"); else hide+=(--ro-bind /dev/null "$r"); fi; above "$r"; }',
-  // The default masks: listed by find, whose failure shows. A glob that can't read its directory says nothing, and a
-  // home or ~/.config made searchable but unreadable would hide nothing (#787 round 7). Any failure: refused.
+  // Default masks listed by find, whose failure refuses (a glob in an unreadable directory hid nothing, #787 r7).
   'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
-  // (A home or ~/.config that isn't a directory holds nothing to list: nothing is hidden there, and nothing could be.)
+  // (A home or ~/.config that isn't a directory holds nothing to hide.)
   'walk "$h"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi; fi',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
   `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
@@ -746,10 +733,9 @@ const LINUX_SANDBOX = [
 ].join('\n');
 
 /**
- * An absolute path in normal form, and not `/` itself: what a project command's sandbox may hide, and what a configured
- * path (credentials.yaml, instance.yaml run_as) must be. No `..`, `//`, `/./` or trailing `/`; no NUL or newline; under
- * PATH_MAX (4096 bytes) with no component over NAME_MAX (255 bytes), so a check of it can't fail with "name too long"
- * and be taken for "absent". Such a path is refused, never rewritten.
+ * What a sandbox may hide and a configured path must be: absolute, normal form (no `..`, `//`, `/./`, trailing `/`),
+ * not `/`, no NUL or newline, under PATH_MAX and NAME_MAX (else "name too long" reads as absent). Refused, never
+ * rewritten.
  */
 export const normalAbsolute = (p: string): boolean =>
   p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/') && !/[\0\n]/.test(p) && Buffer.byteLength(p) < 4096 && p.split('/').every((c) => Buffer.byteLength(c) <= 255);
@@ -768,10 +754,9 @@ export function seatbeltProfile(home: string, hide: readonly string[]): string {
 }
 
 /**
- * How to spawn a project command (a check, a test suite, a setup step, a full run, an app): under bash with pipefail,
- * with a clean environment. With `runAs`, as the instance's agent user and always inside a sandbox that hides the
- * agent's Claude logins and profiles, its API key and every path in `runAs.hide` (issue #713): Linux's bubblewrap,
- * macOS's sandbox-exec. There is no way to run one as the agent user without it; `sandboxTool` is for tests.
+ * How to spawn a project command: bash with pipefail and a clean environment. With `runAs`, as the agent user and
+ * always in a sandbox hiding its Claude logins, its API key and `runAs.hide` (#713): bubblewrap, or macOS's
+ * sandbox-exec. No way to run one as the agent user without it; `sandboxTool` is for tests.
  */
 export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
@@ -888,12 +873,7 @@ export function shellCommand(command: string): [file: string, args: string[]] {
   return [commandBash(), ['-o', 'pipefail', '-c', command]];
 }
 
-/**
- * Environment for project commands the engine runs (checks, tests). Drops
- * variables that change how a nested runner behaves when the engine itself
- * runs under a test runner (node --test sets NODE_TEST_CONTEXT, which makes a
- * nested `node --test` report to the parent instead of exiting non-zero).
- */
+/** Environment for project commands, without NODE_TEST_CONTEXT (a nested `node --test` would report to the parent). */
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
@@ -907,14 +887,8 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
 }
 
 /**
- * Machine-wide slot directory shared by every agent harness on the box (not
- * just this one), so the name is deliberately unbranded. Override with
- * AGENT_SLOTS_DIR. See docs/slots.md.
- */
-/**
- * Durable system locations for the slots and their config. /var/tmp is
- * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
- * days), which would drop the cap and lock files of a long-running machine.
+ * The machine-wide slot directory every agent harness shares (so unbranded; AGENT_SLOTS_DIR overrides; docs/slots.md),
+ * in durable locations: /var/tmp's cleaners would drop a long-running machine's cap and lock files.
  */
 // Frozen: a module that set SYSTEM_SLOTS.dir to a guess would have slotsDir mark the slot dir by it (#806 round 4).
 export const SYSTEM_SLOTS = Object.freeze({ dir: varLibPath('agent-slots'), config: etcPath('slots.json') });

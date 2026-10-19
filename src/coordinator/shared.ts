@@ -121,11 +121,9 @@ export interface CoordinatorDeps {
   /** How the machine helper is run for the dashboard's machine requests (sudo -n; tests inject it). */
   machineExec?: (file: string, args: string[]) => string;
   /**
-   * Work intake (docs/intake.md): the instance's intake config, read on every pass (null: intake is off), and its
-   * sources. `pullMs`: how often the sources are pulled (default 30 s). `roleOf`: a person's role on the instance's
-   * repo, read as the dashboard reads it (dashboard-auth.ts), for what a mapped chat sender may do (absent: nothing).
-   * `typingMs`: how often the typing indicator is sent again while a reply is on its way (default 8 s; tests).
-   * `name`: the instance's name, as the dashboard hub knows it (a setup step's one-time link names it).
+   * Work intake (docs/intake.md): its config, read every pass (null: off), and its sources, pulled every `pullMs`.
+   * `roleOf`: a person's repo role, as the dashboard reads it, for what a mapped chat sender may do (absent: nothing).
+   * `typingMs`: the typing indicator's repeat. `name`: the instance's name as the hub knows it.
    */
   intake?: { config: () => IntakeConfig | null; sources: IntakeSource[]; pullMs?: number; roleOf?: RoleOf; typingMs?: number; name?: string };
   /**
@@ -202,11 +200,7 @@ export function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { k
 /** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
 export const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
-/**
- * Run a project command without blocking the event loop: with several agents
- * in flight, a blocking test run would starve their output streams and trip
- * their stall timers. Output is capped; the tail is kept for reports.
- */
+/** Run a project command without blocking the event loop (agents' streams and stall timers). Output capped. */
 export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
     // Aborted (the coordinator shutting down): never started, or killed like a timed-out command.
@@ -276,20 +270,14 @@ export class Halted extends Error {
   }
 }
 
-/**
- * The coordinator is shutting down (SIGTERM or SIGINT: a restart, an update, a stop): its runs are aborted and their
- * tasks requeued to start again after the restart. A kind of halt, so every caller that requeues on a halt does here too.
- */
+/** The coordinator is shutting down (SIGTERM/SIGINT): runs aborted, tasks requeued. A kind of halt. */
 export class ShuttingDown extends Halted {
   constructor() {
     super('the coordinator is shutting down');
   }
 }
 
-/**
- * The instance is paused on the Claude usage limit (src/usage-limit.ts): a run that hit it, or one asked for while
- * the pause holds, which never starts. A kind of halt, so every caller that requeues on a halt requeues on this too.
- */
+/** Paused on the Claude usage limit (src/usage-limit.ts); a run asked for meanwhile never starts. A kind of halt. */
 export class UsagePaused extends Halted {
   constructor(readonly resetAt: string) {
     super(`paused on the Claude usage limit until ${resetAt}`);
@@ -297,9 +285,8 @@ export class UsagePaused extends Halted {
 }
 
 /**
- * The run's Claude login is held (src/claude-auth-failure.ts): the API refused it, on this run or an earlier one, and
- * no call on it has succeeded since. A run asked for while it holds never starts. A kind of halt, so every caller that
- * requeues on a halt requeues on this too; it never counts as an attempt.
+ * The run's Claude login is held (src/claude-auth-failure.ts): refused, no success since. A run asked for meanwhile
+ * never starts. A kind of halt; never counts as an attempt.
  */
 export class AuthPaused extends Halted {
   constructor(readonly login: string, readonly detail: string) {
