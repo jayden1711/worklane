@@ -25,6 +25,13 @@ export function sandboxVerdict(events: StoredEvent[]): { ok: boolean; detail: st
   return last;
 }
 
+/**
+ * What doctor and the Machine page say, in red, on a machine that can't give a test run a user namespace of its own
+ * (the helper check's `unsupported`). Test runs go on: this never turns them off.
+ */
+export const usernsUnsupportedProblem = (why: string): string =>
+  `Test runs share the host's user namespace, so a run can join the namespaces of the test user's rootless Docker (docs/test-runs.md, "Known gap"): ${why}. Test runs go on meanwhile; this doesn't turn them off.`;
+
 export interface TestRunRow {
   id: string;
   sha: string;
@@ -53,7 +60,12 @@ export interface TierStats {
 }
 
 export interface TestRunStatus {
-  sandbox: { ok: boolean; detail: string; at: string } | null;
+  /**
+   * The newest sandbox check. `unsupported`: this machine can't give a run a user namespace of its own, with the fix
+   * (src/testrun/host.ts SandboxCheck), null when it can or the helper didn't say. Shown only: sandboxVerdict, which
+   * the updater reads, and a run's own gate (./sandbox-watch.ts) never look at it.
+   */
+  sandbox: { ok: boolean; detail: string; at: string; unsupported: string | null } | null;
   checksPermission: { level: 'write' | 'read' | 'none' | 'unknown'; detail: string; at: string } | null;
   /** The last attempt to post checks failed for want of the permission, and none posted since. */
   checksBlocked: { detail: string; at: string } | null;
@@ -116,7 +128,7 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
       }
       case 'testrun.sandbox': {
         const p = e.payload as EventPayload<'testrun.sandbox'>;
-        st.sandbox = { ok: p.ok, detail: p.detail, at: e.ts };
+        st.sandbox = { ok: p.ok, detail: p.detail, at: e.ts, unsupported: p.unsupported ?? null };
         break;
       }
       case 'testrun.helper': {
@@ -147,6 +159,7 @@ export function testRunStatus(events: readonly StoredEvent[], recentN = 30): Tes
   st.wipeFailures = st.wipeFailures.slice(-10);
   if (helperProblem) st.problems.push(`Test runs are off: ${helperProblem}`);
   if (st.sandbox && !st.sandbox.ok) st.problems.push(`Test runs are off: the sandbox failed its check (${st.sandbox.detail.split('\n')[0]}). It is checked again by itself (every 5 minutes at most), and test runs go on when it passes. If it keeps failing, an admin runs scripts/setup/test-user.sh check and fixes the FAIL lines; no restart needed.`);
+  if (st.sandbox?.unsupported) st.problems.push(usernsUnsupportedProblem(st.sandbox.unsupported));
   const cannotPost = st.checksBlocked ?? (st.checksPermission && st.checksPermission.level !== 'write' && st.checksPermission.level !== 'unknown' ? st.checksPermission : null);
   if (cannotPost) st.problems.push(`Test runs can't post their checks: the App has no Checks: write permission${st.checksPermission ? ` (it has ${st.checksPermission.level})` : ''}. The owner adds Checks: read & write in the App's settings and accepts it on the installation; until then results are only on the dashboard.`);
   if (st.wipeFailures.length) st.problems.push(`A test run was not wiped completely (${st.wipeFailures.at(-1)!.id}: ${st.wipeFailures.at(-1)!.left.slice(0, 3).join(', ')}).`);
