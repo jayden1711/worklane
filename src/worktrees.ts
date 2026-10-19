@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
 import { redactString } from './events/redact.js';
-import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
+import { groupOnlyDir, projectCommand, writeGroupOnly, type ProjectRunAs } from './os/index.js';
 
 export interface WorktreeOptions {
   repo: string;
@@ -15,7 +15,7 @@ export interface WorktreeOptions {
   stateDir: string;
   setup: string[];
   /** Setup steps (e.g. npm ci) run the project's own scripts, so they run as the agent user when there is one. */
-  runAs?: { user: string; home: string };
+  runAs?: ProjectRunAs;
   /** The project's own variables (tests.yaml env). */
   env?: Record<string, string>;
   /** The instance's dependency-cache variables (dep-cache.ts), set for setup steps after the project's own. */

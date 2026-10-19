@@ -2915,6 +2915,9 @@ jobs:
       - name: "a project command (#713), as the coordinator through sudo to the agent user, reads neither the agent's Claude login nor its API key: bubblewrap from machine.sh, the real sandbox"
         run: |
           sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          # check.sh probes the exact sandbox project commands start in (its other lines need more setup than this job has).
+          sudo bash scripts/setup/check.sh probe | tee "$RUNNER_TEMP/check.log" || true
+          grep -qx "PASS wl-probe-agent can start a project command's sandbox" "$RUNNER_TEMP/check.log"
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
           # A stand-in API key where credentials.sh <name> api-key puts one (never a real key).
           k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"

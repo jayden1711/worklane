@@ -663,6 +663,21 @@ export const PROJECT_SANDBOX_TOOL = '/usr/bin/bwrap';
 /** The exit code of a project command whose sandbox couldn't start: nothing of the command ran. */
 export const SANDBOX_UNAVAILABLE = 125;
 export const SANDBOX_FIX = 'install bubblewrap and its AppArmor rule with scripts/setup/machine.sh, then check with scripts/setup/check.sh <name>';
+/** The sandbox's own flags, the one source for the command's sandbox and for its probe (scripts/setup/check.sh runs it). */
+export const PROJECT_SANDBOX_ARGS = ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--die-with-parent', '--proc', '/proc'] as const;
+/** Whether this user can start that sandbox: what check.sh runs as the agent user, and the wrapper runs first. */
+export const PROJECT_SANDBOX_PROBE: readonly string[] = [PROJECT_SANDBOX_TOOL, ...PROJECT_SANDBOX_ARGS, '--', '/bin/sh', '-c', ':'];
+
+/**
+ * Who a project command runs as: the instance's agent user, and what its sandbox hides besides the agent's own
+ * ~/.claude* (projectCommandHides, src/instance.ts). `hide` is required, so no caller can pass the user without it.
+ */
+export interface ProjectRunAs {
+  user: string;
+  home: string;
+  path?: string;
+  hide: readonly string[];
+}
 
 // Run as the agent user, before any project code: hides each path given (after `--` comes the command) and every
 // ~/.claude* login, profile and settings file and ~/.config/*-claude-key (credentials.sh's API key), each resolved
@@ -675,7 +690,7 @@ const LINUX_SANDBOX = [
   '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); fi; }',
   'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
-  'box=(--dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc)',
+  `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'exec "$b" "${box[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
@@ -696,7 +711,7 @@ export function seatbeltProfile(home: string, hide: readonly string[]): string {
  * agent's Claude logins and profiles, its API key and every path in `runAs.hide` (issue #713): Linux's bubblewrap,
  * macOS's sandbox-exec. There is no way to run one as the agent user without it; `sandboxTool` is for tests.
  */
-export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string; hide?: readonly string[] }, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };

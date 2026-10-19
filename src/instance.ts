@@ -14,7 +14,7 @@ import { BRAND } from './brand.js';
 import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -174,7 +174,9 @@ export const PolicyFile = z.strictObject({
   pre_approved: z.array(z.string()).optional(),
 });
 
-const path = z.string().min(1);
+// Absolute only: a relative one would depend on the coordinator's working directory, and a project command's sandbox
+// (projectCommandHides) hides each by its absolute path (#713).
+const path = z.string().min(1).refine((p) => isAbsolute(p), { message: 'must be an absolute path' });
 export const CredentialsFile = z.strictObject({
   version: z.literal(1),
   // A dedicated gh config dir (its own login) or a GitHub App key. Never the operator's personal login.
@@ -222,7 +224,8 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 
 export interface Instance {
   name: string;
-  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string; hide?: readonly string[] } | null;
+  /** `hide`: what its project commands' sandbox hides (projectCommandHides). */
+  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string; hide: readonly string[] } | null;
   /** Set in instance.yaml; otherwise resolved at start (the App's bot identity). */
   commitIdentity?: { name: string; email: string };
   evalAs: { user: string; home: string; path?: string } | null;
@@ -479,7 +482,7 @@ export const instanceFilesProblem = (e: unknown): string => (e instanceof Config
  * credential references and policy. Server auto-config needs it (src/server-auto-config.ts); loadInstance needs the
  * repo config too.
  */
-export function loadInstanceSetup(instanceName: string, dir = instancesDir()): { home: string; stateDir: string; repo: { path: string; repo: string }; credentials: CredentialsFile; policy: PolicyFile; runAs: RunAs | null } {
+export function loadInstanceSetup(instanceName: string, dir = instancesDir()): { home: string; stateDir: string; repo: { path: string; repo: string }; credentials: CredentialsFile; policy: PolicyFile; runAs: (RunAs & ProjectRunAs) | null } {
   const home = join(dir, instanceName);
   const errors: ConfigError[] = [];
   const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);

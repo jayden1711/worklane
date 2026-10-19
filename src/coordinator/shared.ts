@@ -10,8 +10,8 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
 import { redactString } from '../events/redact.js';
 import type { SuiteOptions } from '../harness-evals/replay.js';
-import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
-import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } from '../runner.js';
+import { killTree, killTreeAs, projectCommand, spawnDetached, type ProjectRunAs } from '../os/index.js';
+import { type AgentRunner, type CommitIdentity, type RunControl } from '../runner.js';
 import { type PendingMessage } from '../console.js';
 import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
@@ -50,7 +50,8 @@ export interface CoordinatorDeps {
    */
   depCacheRoot?: { dir: string; gid: number };
   /** The OS user project commands run as (checks, gates, setup, full runs): the agent user, never the coordinator's. */
-  commandsAs?: RunAs;
+  /** Project commands' agent user, with what their sandbox hides (src/os projectCommand). */
+  commandsAs?: ProjectRunAs;
   /** The instance's GitHub token expiry, from the start-up scope check (null: never expires). */
   tokenExpiresAt?: string | null;
   /** The identity on every commit; agents' commits with any other are rejected. */
@@ -104,7 +105,7 @@ export interface CoordinatorDeps {
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */
-  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: RunAs) => { id: string }[];
+  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: ProjectRunAs) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number; freeGb?: number } };
   /**
@@ -199,7 +200,7 @@ export const CLAIM_HELD_GIVE_UP_MS = 3600_000;
  * in flight, a blocking test run would starve their output streams and trip
  * their stall timers. Output is capped; the tail is kept for reports.
  */
-export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: RunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
+export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
     // Aborted (the coordinator shutting down): never started, or killed like a timed-out command.
     if (signal?.aborted) return resolveRun({ code: null, tail: 'not run: the coordinator is shutting down', out: '' });

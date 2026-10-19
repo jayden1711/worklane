@@ -35,7 +35,7 @@ import { projectStateDir } from './guardrails/context.js';
 import { tryLock } from './locks.js';
 import { slotStatus } from './slots.js';
 import { guardrailSettings } from './agent-settings.js';
-import { CliRunner, type AgentRunner, type CommitIdentity, type RunAs } from './runner.js';
+import { CliRunner, type AgentRunner, type CommitIdentity } from './runner.js';
 import { CliAgentRunner, withCliAgents } from './cli-agents.js';
 import type { CliAgentName } from './providers.js';
 import { latestBaseline } from './baseline.js';
@@ -49,7 +49,7 @@ import { setupPreviews } from './preview/wire.js';
 import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
-import { stableNodePath, type ServiceSpec } from './os/index.js';
+import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -322,7 +322,7 @@ function wakeableSleep() {
   };
 }
 
-export async function runSite(site: Site, opts: { /** The instance's name (its incidents' `instance`); absent: a local site, which raises none. */ instance?: string; once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan']; experiments?: CoordinatorDeps['experiments']; lockScope?: CoordinatorDeps['lockScope']; /** Automations: the instance's file and policy (GitHub's GET is built here, from `tokens`). */ automations?: { file: string; policy: () => AutomationsPolicy } }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: RunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
+export async function runSite(site: Site, opts: { /** The instance's name (its incidents' `instance`); absent: a local site, which raises none. */ instance?: string; once?: boolean; intervalMs?: number; backupDir?: string; offsiteConfig?: string; shutdownMs?: number; providerKeys?: Record<string, string>; testRun?: TestRunSetup; intake?: () => IntakeWiring | null; roleOf?: RoleOf; mainWatch?: CoordinatorDeps['mainWatch']; mergePosts?: CoordinatorDeps['mergePosts']; ciMetrics?: CoordinatorDeps['ciMetrics']; protection?: Protection; liveConfig?: CoordinatorDeps['liveConfig']; label?: string; watchdog?: (log: EventLog, intake: () => IntakeConfig | null) => { stop: () => void }; incidents?: IncidentSink; accountSwitched?: () => string | null; superfan?: CoordinatorDeps['superfan']; experiments?: CoordinatorDeps['experiments']; lockScope?: CoordinatorDeps['lockScope']; /** Automations: the instance's file and policy (GitHub's GET is built here, from `tokens`). */ automations?: { file: string; policy: () => AutomationsPolicy } }, runner?: AgentRunner, tokenExpiresAt?: string | null, tokens?: () => Promise<string>, commandsAs?: ProjectRunAs, appKeyPath?: string, commitIdentity?: CommitIdentity, autoMerge?: () => boolean, settings?: () => { settings: InstanceSettings; error: string | null }): Promise<number> {
   const { cfg, root, stateDir: state } = site;
   const lock = tryLock(join(state, 'coordinator.lock'), `coordinator ${instanceId()}`);
   if (!('lock' in lock)) {

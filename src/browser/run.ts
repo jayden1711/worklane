@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';
 import { redactString } from '../events/redact.js';
-import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
+import { killTree, killTreeAs, projectCommand, spawnDetached, type ProjectRunAs } from '../os/index.js';
 import { browserTimeouts, findChrome, launchChrome, portInUse, sleep, stopTree, track, until, type Cdp } from './cdp.js';
 import { targetExpr } from './targets.js';
 import { summarizeTrace, TRACE_CATEGORIES, type TraceEvent, type TraceSummary } from './trace.js';
@@ -180,7 +180,7 @@ export async function captureShots(
 }
 
 /** Stop the app and everything it started (a dev server's own children too), through the OS adapter. */
-function stopApp(p: ChildProcess, runAs?: { user: string; home: string }): Promise<boolean> {
+function stopApp(p: ChildProcess, runAs?: ProjectRunAs): Promise<boolean> {
   return stopTree(p, () => (runAs ? killTreeAs(runAs.user, p.pid) : killTree(p.pid, () => p.kill('SIGKILL'))));
 }
 
@@ -190,7 +190,7 @@ function stopApp(p: ChildProcess, runAs?: { user: string; home: string }): Promi
  * step is evidence. However it ends, Chrome and the app's whole process tree are stopped first. Chrome's temporary
  * profile goes under `chromeProfileRoot` when given (the system temp folder otherwise).
  */
-export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; outDir: string; chrome?: string | null; noSandbox?: boolean; runAs?: { user: string; home: string }; chromeProfileRoot?: string }): Promise<FlowRun> {
+export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; outDir: string; chrome?: string | null; noSandbox?: boolean; runAs?: ProjectRunAs; chromeProfileRoot?: string }): Promise<FlowRun> {
   const steps = o.app.flows[o.flow];
   if (!steps) throw new Error(`no flow "${o.flow}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   // undefined: look for one; null: there is none (what a machine without a browser, or a test, says).

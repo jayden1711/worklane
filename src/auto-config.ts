@@ -18,7 +18,7 @@ import { loadConfig } from './config/load.js';
 import { TestsConfig } from './config/schema.js';
 import { sh } from './coordinator/shared.js';
 import type { Config } from './config/load.js';
-import type { RunAs } from './runner.js';
+import type { ProjectRunAs } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { scaffoldConfig } from './install.js';
 import { defaultBranchRefusal } from './push-guard.js';
@@ -544,7 +544,7 @@ export interface AutoConfigOptions {
   /** Keep the state (each answer and result is saved as it comes). */
   save(): void;
   /** Server mode: the drafted commands run as the instance's agent user, never as the user holding the credentials. */
-  runAs?: RunAs;
+  runAs?: ProjectRunAs;
   /** Where the scratch worktree goes (default: under the project's state dir), and where its ownership record is kept. */
   worktreeRoot?: string;
   worktreeStateDir?: string;

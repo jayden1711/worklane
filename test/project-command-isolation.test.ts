@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -17,6 +17,12 @@ import { sh } from '../src/coordinator/shared.js';
 import { createWorktree, createWorktreeAsync } from '../src/worktrees.js';
 import * as instance from '../src/instance.js';
 import type { CredentialsFile } from '../src/instance.js';
+import type { ProjectRunAs } from '../src/os/index.js';
+import { AppConfig } from '../src/config/schema.js';
+import { judgeFlow, type runBrowserCheck } from '../src/browser/check.js';
+import type { FlowEvidence, runFlow } from '../src/browser/run.js';
+import { baselineSource, browserChecks } from '../src/coordinator/browser.js';
+import { repoRoot } from './helpers.js';
 
 const { projectCommand } = osAdapter;
 const posix = process.platform === 'linux';
@@ -27,8 +33,8 @@ const sandboxRuns = posix && spawnSync(PROJECT_SANDBOX_TOOL,['--dev-bind', '/', 
 const realSkip = process.env.PROJECT_SANDBOX_REQUIRED === '1' ? false : !posix ? 'bubblewrap is Linux only' : !sandboxRuns && `no usable ${PROJECT_SANDBOX_TOOL} here (ci-slow's real-users job runs this with it)`;
 
 /** Run a project command as projectCommand builds it for the agent user, as this user: its argv after `sudo -n -u <agent> --`. */
-function asStandIn(command: string, runAs: { user: string; home: string; hide?: string[] }, cwd: string, o: { sandboxTool?: string } = {}) {
-  const pc = projectCommand(command, runAs, {}, o);
+function asStandIn(command: string, runAs: { user: string; home: string; hide?: readonly string[] }, cwd: string, o: { sandboxTool?: string } = {}) {
+  const pc = projectCommand(command, { ...runAs, hide: runAs.hide ?? [] }, {}, o);
   assert.equal(pc.file, 'sudo');
   assert.deepEqual(pc.args.slice(0, 5), ['-n', '-u', runAs.user, '--', '/usr/bin/env']);
   return spawnSync(pc.args[4]!, pc.args.slice(5), { cwd, env: {}, encoding: 'utf8', timeout: 60_000 });
@@ -131,4 +137,68 @@ test('a key a worktree setup step prints is not in its setup error', { skip: !po
     assert.match(e, /auth failed for sk-\[REDACTED\]/);
   }
   assert.equal(sync.length + async.length, 2);
+});
+
+test('a browser flow\'s app gets the agent user\'s whole runAs, at base and at head: a provider key credentials.yaml names stays unread', { skip: !posix && 'POSIX users' }, async () => {
+  const p = plantedHome();
+  // Where credentials.sh <name> provider-key puts one: not a ~/.claude* path, so only runAs.hide covers it.
+  const providerKey = join(p.home, '.config', 'shop-provider-keys', 'open');
+  mkdirSync(join(providerKey, '..'), { recursive: true });
+  const value = `PLANTED-${randomBytes(12).toString('hex')}`;
+  writeFileSync(providerKey, `${value}\n`, { mode: 0o600 });
+  const runAs: ProjectRunAs = { user: 'shop-agent', home: p.home, hide: [providerKey] };
+  const app = AppConfig.parse({ version: 1, start: { command: `cat ${JSON.stringify(providerKey)}`, port: 5173 }, ui_paths: ['web/**'], flows: { home: [{ goto: '/' }] } });
+  const given: (ProjectRunAs | undefined)[] = [];
+  const outs: string[] = [];
+  // Each stand-in starts the app as runFlow does (projectCommand with the runAs it is given), as this user.
+  const start = (ra: ProjectRunAs | undefined) => {
+    given.push(ra);
+    if (ra && !realSkip) outs.push(asStandIn(app.start.command, ra, p.work).stdout);
+  };
+  const runCheck = (async (o) => (start(o.runAs), { check: 'browser home', status: 'pass', kind: 'browser', exitCode: null, tail: 'passed', evidence: null, verdict: null })) as typeof runBrowserCheck;
+  const runBase = (async (o) => (start(o.runAs), { flow: o.flow, skipped: 'stand-in' })) as typeof runFlow;
+  const source = baselineSource({ base: 'b0b0b0b0b0b0', app, cache: new Map(), open: async () => ({ path: p.work, setupErrors: [] }), remove: () => {}, outDir: p.work, chrome: 'chrome', runAs, run: runBase });
+  await browserChecks({ app, doneWhen: [{ browser: 'home' }], changed: [], cwd: p.work, outDir: p.work, chrome: 'chrome', runAs, run: runCheck, baseline: () => source });
+  for (const out of outs) assert.ok(!out.includes(value), `the app read the provider key: ${out}`);
+  assert.deepEqual(given, [runAs, runAs], 'the base run and the check each get the hide list');
+});
+
+test('a browser check\'s reasons (the page\'s console errors, a step\'s error) carry no credential into its tail or a prompt', () => {
+  const t = token();
+  const app = AppConfig.parse({ version: 1, start: { command: 'true', port: 5173 }, ui_paths: ['web/**'], flows: { home: [{ goto: '/' }] } });
+  const ev: FlowEvidence = {
+    flow: 'home',
+    ok: false,
+    steps: [{ step: 'goto /', ok: false, ms: 1, error: `401 for Bearer ${t}` }],
+    consoleErrors: [{ kind: 'error', text: `fetch failed with key ${t}` }],
+    failedRequests: [],
+    slowRequests: [],
+    blockedRequests: [],
+    trace: null,
+    screenshot: null,
+    views: [],
+    viewErrors: [],
+    durationMs: 1,
+  };
+  const v = judgeFlow(ev, app.thresholds);
+  assert.equal(v.pass, false);
+  const text = [...v.reasons, ...v.notes].join('\n');
+  assert.ok(!text.includes(t), text);
+  assert.match(text, /new console error: fetch failed with key sk-\[REDACTED\]/);
+});
+
+test('check.sh probes the exact sandbox a project command starts in, and the command\'s sandbox uses the same flags', { skip: !posix && 'bubblewrap is Linux only' }, () => {
+  const probe = osAdapter.PROJECT_SANDBOX_PROBE;
+  assert.ok(probe, 'one shared probe argv (src/os/index.ts)');
+  const check = readFileSync(join(repoRoot, 'scripts', 'setup', 'check.sh'), 'utf8');
+  assert.ok(check.split('\n').some((l) => l.endsWith(`check sudo -u "$agent" ${probe.join(' ')}`)), 'check.sh runs PROJECT_SANDBOX_PROBE as the agent user');
+  const pc = projectCommand('true', { user: 'shop-agent', home: '/var/agent', hide: [] });
+  assert.ok(pc.args.some((a) => a.includes(`box=(${osAdapter.PROJECT_SANDBOX_ARGS.join(' ')})`)), 'the wrapper starts bubblewrap with those flags');
+});
+
+test('credentials.yaml refuses a relative path: the sandbox hides each by its absolute path', () => {
+  const r = instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: 'gh' }, agent_api_key: 'keys/api_key' });
+  assert.equal(r.success, false);
+  assert.deepEqual(r.error!.issues.map((i) => [i.path.join('.'), i.message]), [['github.path', 'must be an absolute path'], ['agent_api_key', 'must be an absolute path']]);
+  assert.equal(instance.CredentialsFile.safeParse({ version: 1, github: { kind: 'gh-config-dir', path: '/srv/i/gh' } }).success, true);
 });

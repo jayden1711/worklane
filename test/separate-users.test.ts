@@ -168,7 +168,7 @@ test('acceptance: an agent running `python -c "open(<token path>)"` fails; the c
     assert.match(r.stderr, /Permission denied|PermissionError/, r.stderr);
   }
   // A project command (a check or test suite, which runs agent-written code) is just as unable to read it.
-  const pc = projectCommand(`cat ${JSON.stringify(secret)}`, { user: agentUser!, home: `/home/${agentUser}` });
+  const pc = projectCommand(`cat ${JSON.stringify(secret)}`, { user: agentUser!, home: `/home/${agentUser}`, hide: [] });
   const pr = spawnSync(pc.file, pc.args, { encoding: 'utf8', env: pc.env, timeout: 30_000 });
   assert.notEqual(pr.status, 0, 'a project command read the secret');
   // And the agent user really runs: it can read a world-readable file.
@@ -248,10 +248,10 @@ test('the coordinator\'s git runs no hooks and no fsmonitor command, whatever a 
 
 test('project commands (checks, gates, setup, full runs) run as the agent user with a clean environment', () => {
   if (process.platform === 'win32') {
-    assert.throws(() => projectCommand('npm test', { user: 'shop-agent', home: '/home/shop-agent' }), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
+    assert.throws(() => projectCommand('npm test', { user: 'shop-agent', home: '/home/shop-agent', hide: [] }), /needs macOS or Linux/, 'refused, never run as the coordinator instead');
     return;
   }
-  const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent' });
+  const { file, args, env } = projectCommand('npm test | tail -5', { user: 'shop-agent', home: '/home/shop-agent', hide: [] });
   assert.equal(file, 'sudo');
   assert.deepEqual(args.slice(0, 6), ['-n', '-u', 'shop-agent', '--', '/usr/bin/env', '-i']);
   assert.ok(args.includes('HOME=/home/shop-agent') && args.includes('USER=shop-agent'));
@@ -280,7 +280,7 @@ test('regression: a check that runs git, run as the agent user in the coordinato
   g('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'a');
   spawnSync('chmod', ['-R', 'a+rX', repo]);
   try {
-    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/' });
+    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/', hide: [] });
     const r = spawnSync(file, args, { cwd: repo, env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
   } finally {

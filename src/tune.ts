@@ -13,7 +13,7 @@ import type { Backlog } from './backlog/types.js';
 import { BRAND } from './brand.js';
 import type { TestsConfig } from './config/schema.js';
 import { CORES_PLACEHOLDER, envWithCores, withCores } from './cores.js';
-import { cpuCount, peakMemoryMb, projectCommand, withPeakMemory, writeGroupOnly } from './os/index.js';
+import { cpuCount, peakMemoryMb, projectCommand, withPeakMemory, writeGroupOnly, type ProjectRunAs } from './os/index.js';
 import { machineStats } from './os/stats.js';
 import { checkedPush, type PushLimits } from './push-check.js';
 import { recommendWorkers, WORKER_VAR, type ProfileRun, type TuneProfile } from './tuning.js';
@@ -43,7 +43,7 @@ export function settingsFor(setting: WorkerSetting, env: Record<string, string>,
 export type SuiteRunner = (command: string, env: Record<string, string>, cwd: string) => { seconds: number; ok: boolean; peakWorkerMb: number | null };
 
 /** The suite as a task would run it: through the project's command path, as the agent user, timed. */
-export function suiteRunner(runAs?: { user: string; home: string }, timeoutMs = 3_600_000): SuiteRunner {
+export function suiteRunner(runAs?: ProjectRunAs, timeoutMs = 3_600_000): SuiteRunner {
   return (command, env, cwd) => {
     const out = join(cwd, `.${BRAND.cli}-tune-peak`);
     rmSync(out, { force: true });
