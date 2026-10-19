@@ -492,10 +492,10 @@ test('slow-jobs.sh on a PR: the jobs whose paths it touches, all of them for a w
   assert.deepEqual(pr('docs/a.md', 'true'), all, 'the full-ci label');
   assert.deepEqual(pr('.github/workflows/ci.yml'), all);
   // The wizard's end-to-end job walks the install and the machine scripts, so it runs with either.
-  assert.deepEqual(pr('scripts/bootstrap.sh'), ['bootstrap', 'bootstrap-windows', 'testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users', 'wizard-e2e-real-systemd'], "the server install's ending is proven on real systemd (add-project's job, and the wizard's)");
+  assert.deepEqual(pr('scripts/bootstrap.sh'), ['bootstrap', 'bootstrap-windows', 'testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users', 'egress-real-systemd', 'wizard-e2e-real-systemd'], "the server install's ending is proven on real systemd (add-project's job, and the wizard's)");
   assert.deepEqual(pr('src/dashboard-detach.ts'), ['bootstrap', 'bootstrap-windows', 'wizard-e2e-real-systemd'], "the install's last step, the wizard URL");
   assert.deepEqual(pr('web/src/components/DashboardKey.tsx'), ['bootstrap', 'bootstrap-windows', 'wizard-e2e-real-systemd'], 'the page that URL opens asks for the key');
-  assert.deepEqual(pr('src/os/linux.ts'), ['testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users', 'wizard-e2e-real-systemd']);
+  assert.deepEqual(pr('src/os/linux.ts'), ['testrun-real-systemd', 'add-project-real-systemd', 'auth-probe-real-users', 'egress-real-systemd', 'wizard-e2e-real-systemd']);
   // The wizard's own pages and server code: that job alone.
   assert.deepEqual(pr('web/src/pages/FirstRun.tsx'), ['wizard-e2e-real-systemd']);
   assert.deepEqual(pr('src/setup-steps.ts'), ['wizard-e2e-real-systemd']);

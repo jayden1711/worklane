@@ -47,7 +47,7 @@ This document describes the architecture. Each section notes the precedent it fo
 - **Config folder:** `.worklane/`, named after the tool following the `.github/`, `.claude/`, `.husky/` and `.pitboss/` precedent. `.harness/` was rejected because Harness.io already uses it, and projects often already call their test framework a "harness".
 - **Language:** TypeScript on Node ≥ 22.13 (`engines` in package.json), so it works in projects whose CI still pins Node 22. The event log uses the built-in `node:sqlite`, which needs no flag from 22.13. CI runs everything on Node 22 and 24. `doctor` fails below 22.13.
 - **Dependencies:** few and permissive.
-  - Runtime: the four in package.json's `dependencies`, nothing else: `yaml` (ISC) and `zod` (MIT) for config and validation, `ws` (MIT) for the dashboard hub's owner terminal over a WebSocket (`src/console/terminal-server.ts`), and `@anthropic-ai/sandbox-runtime` (Apache-2.0) to run each approved MCP server in its own sandbox (`src/mcp/sandboxed.ts`). Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`.
+  - Runtime: the three in package.json's `dependencies`, nothing else: `yaml` (ISC) and `zod` (MIT) for config and validation, and `@anthropic-ai/sandbox-runtime` (Apache-2.0) to run each approved MCP server in its own sandbox (`src/mcp/sandboxed.ts`). Built-ins cover SQLite, HTTP, SSE, file locks and `statfs`. (`ws`, the owner terminal's WebSocket, went with the terminal, #742.)
   - Agents run through the locally installed Claude Code CLI (`claude -p`), which is not a dependency of the package and is never vendored.
 - **OS adapter layer** (`src/os/`). This is the only place OS-specific code may live, and a lint enforces that. The adapter is chosen by `os: auto | macos | linux | windows-wsl` (default `auto`).
 
@@ -271,7 +271,7 @@ roles:
   - A run with no event or tool call for `stall_minutes` is killed and requeued.
   - Per-run, per-role and daily budgets. When the daily budget is hit, nothing new starts; running work finishes or is checkpointed. Spend is visible on the Agents page.
   - `max_attempts` per issue, after which it becomes `blocked` with a decision for its owner.
-- **Auth.** There is no sign-in flow for agents; the harness never handles their credentials. (People sign in to the dashboard hub with GitHub; their role per instance is their permission on its repo: docs/dashboard.md. Every action, the owner terminal and machine changes included, needs a live session (it ends after 12 hours idle or 7 days), never a recent sign-in; the terminal and machine changes also need an allowed console device.)
+- **Auth.** There is no sign-in flow for agents; the harness never handles their credentials. (People sign in to the dashboard hub with GitHub; their role per instance is their permission on its repo: docs/dashboard.md. Every action, machine changes included, needs a live session (it ends after 12 hours idle or 7 days), never a recent sign-in; machine changes also need one of the machine devices, `dashboards.sh --machine-devices`.)
   - The `cli` runner uses whatever auth the user configured for Claude Code.
   - The `sdk` runner uses `ANTHROPIC_API_KEY`.
   - Budgets track estimated cost either way, from `total_cost_usd`.

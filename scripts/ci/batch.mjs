@@ -36,6 +36,7 @@ export const SLOW_JOBS = {
   'testrun-real-systemd': ['test-run sandbox (real systemd)'],
   'add-project-real-systemd': ['add-project (real systemd)'],
   'auth-probe-real-users': ['Claude sign-in probe (real users)'],
+  'egress-real-systemd': ['egress firewall (real systemd)'],
   'wizard-e2e-real-systemd': ['wizard end to end (real systemd)'],
 };
 export const SLOW_WORKFLOW = 'ci-slow.yml';

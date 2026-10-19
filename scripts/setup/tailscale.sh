@@ -39,7 +39,7 @@
 #             else. Its own port, so the tailnet policy can let only the callers reach it. Refused under the same
 #             conditions as serve-siri (and when 8444 already goes elsewhere). Never Funnel.
 # public-url  the hub's URL becomes https://<this machine's tailnet name>, through dashboards.sh with the hub's other
-#             settings as its unit has them (the sign-in App's client id, the instances, the owner terminal). Only once
+#             settings as its unit has them (the sign-in App's client id, the instances, the machine devices). Only once
 #             serve forwards to the hub, and never while Funnel is on. The name is read here, from tailscale status,
 #             and must be a *.ts.net name: no caller gives it, and no other host can be set. It writes the hub's and
 #             the instance dashboards' units and restarts them; the hub still listens on 127.0.0.1 only, so this makes
@@ -356,7 +356,7 @@ do_serve_hooks() {
 # --- public-url: the hub's URL, through dashboards.sh
 
 do_public_url() {
-  local id old user devices siri_port hooks_port names new args
+  local id old devices siri_port hooks_port names new args
   need_installed
   read_facts
   [ "$f_state" = Running ] && [ "$f_name" != - ] || fail "this machine isn't on a tailnet yet: run the up step first; the hub keeps its URL"
@@ -364,7 +364,8 @@ do_public_url() {
   [ "$f_serve" = yes ] || fail "tailscale serve doesn't forward to the hub yet, so the new URL would reach nothing: run the serve step first; the hub keeps its URL"
   new="https://$f_name"
   [ -f "$HUB_UNIT" ] || fail "no dashboard hub on this machine yet: set it up first (credentials.sh dashboard-signin, then dashboards.sh --client-id <id> --public-url $new <instance>...)"
-  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"; siri_port="$(hub_option --siri-port)"; hooks_port="$(hub_option --hooks-port)"
+  # The machine devices: an older unit's --console-devices is the same list (#742); its --console-user is dropped.
+  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; devices="$(hub_machine_devices)"; siri_port="$(hub_option --siri-port)"; hooks_port="$(hub_option --hooks-port)"
   names="$(hub_instances | tr '\n' ' ' | sed 's/ $//')"
   [ -n "$id" ] && [ -n "$names" ] || fail "the hub's unit ($HUB_UNIT) doesn't name its sign-in App or its instances: run dashboards.sh yourself with --public-url $new"
   if [ "$old" = "$new" ]; then
@@ -372,8 +373,7 @@ do_public_url() {
     return 0
   fi
   args=(--client-id "$id" --public-url "$new")
-  [ -z "$user" ] || args+=(--console-user "$user")
-  [ -z "$devices" ] || args+=(--console-devices "$devices")
+  [ -z "$devices" ] || args+=(--machine-devices "$devices")
   [ -z "$siri_port" ] || args+=(--siri)
   [ -z "$hooks_port" ] || args+=(--hooks)
   emit running "dashboards.sh ${args[*]} $names"

@@ -1,5 +1,6 @@
 // The setup console's API on an instance's dashboard:
-//   GET  /api/asks                 every ask, with its status and whether this person may answer it
+//   GET  /api/asks                 every ask, with its status and whether this person may answer it; for an owner,
+//                                  notices: what the machine still needs from root that no ask covers
 //   POST /api/asks/<id>/answer     {answer}: an approve_link (approved|declined), a question, or declining a root step
 //   POST /api/asks/<id>/secret     {value}: a pasted secret, to the credential store; owner only
 //   POST /api/asks/<id>/run        a root step: recorded for the coordinator, which runs the machine helper; owner only
@@ -14,6 +15,7 @@ import { requestRootStep } from './root-steps.js';
 import { MACHINE_EVENTS, machineRequests } from '../machine-requests.js';
 import { readSecretBody, secretsDir, storeSecret, type SecretRule } from './secrets.js';
 import { useSetupLink } from './links.js';
+import { ownerTerminalNotice } from './owner-terminal-removed.js';
 import type { SessionOf } from './session.js';
 
 export interface AskRouteContext {
@@ -69,7 +71,9 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
       const all = asksFrom(log.read(0, [...ASK_EVENTS]));
       // A root step waiting on the coordinator shows its machine request (pending, running, or how it ended).
       const reqs = machineRequests(log.read(0, [...MACHINE_EVENTS]));
-      send(res, 200, { role: who.role, login: who.login, asks: all.map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, who.role), request: reqs.filter((r) => r.ask === a.id).at(-1) ?? null })) });
+      // What the owner must do on the machine that no ask covers: today, removing what's left of the owner terminal.
+      const notice = who.role === 'owner' ? ownerTerminalNotice() : null;
+      send(res, 200, { role: who.role, login: who.login, asks: all.map((a) => ({ ...a, canAnswer: a.status === 'open' && mayAnswerAsk(a, who.role), request: reqs.filter((r) => r.ask === a.id).at(-1) ?? null })), notices: notice ? [notice] : [] });
     } finally {
       log.close();
     }
