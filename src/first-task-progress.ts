@@ -33,7 +33,7 @@ export interface FirstTaskProgress {
 }
 
 type E = StoredEvent | null | undefined;
-const pl = (e: StoredEvent) => e.payload as unknown as Record<string, unknown>;
+const pl = (e: StoredEvent) => (e.payload ?? {}) as unknown as Record<string, unknown>;
 const issueOf = (e: StoredEvent) => (typeof pl(e).issue === 'number' ? (pl(e).issue as number) : null);
 const TITLE: Record<StageId, string> = { claimed: 'Claimed', worker: 'Worker', evaluator: 'Evaluator', pr: 'PR opened', checks: 'Checks', merge: 'Merged' };
 const S = (id: StageId, state: StageState, detail: string, e: E = null, estimate: Estimate | null = null): Stage => ({ id, title: TITLE[id], state, detail, at: time(e?.ts), estimate });
@@ -68,6 +68,17 @@ export function firstTaskFiled(events: readonly StoredEvent[]): { issue: number;
   return null;
 }
 
+let failed = false;
+/** The card, or null if building it throws (logged once): it never takes the first-run page down. */
+export function firstTaskCard(events: readonly StoredEvent[], o: { local: boolean; repo?: string | null }) {
+  try {
+    return firstTaskProgress(events, o);
+  } catch {
+    if (!failed) (failed = true), console.error('first run: the First task card is left out (an event it could not read)');
+    return null;
+  }
+}
+
 /** The latest filed first task: its events after the filing; merge events of its own PR only. */
 export function firstTaskProgress(events: readonly StoredEvent[], o: { local: boolean; repo?: string | null }): FirstTaskProgress | null {
   const filed = firstTaskFiled(events);
@@ -83,7 +94,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
   const wEnd = of('run.finished', (p) => p.role === 'worker');
   // A verdict counts only for the worker's latest attempt.
   const verdict = last((e) => e.type === 'eval.verdict' && after(e, wStart));
-  const opened = of('pr.opened');
+  const opened = of('pr.opened', (p) => !!pos(p.number));
   const pr = opened ? pos(pl(opened).number) : null;
   const ofPr = (type: string) => (pr === null ? null : of(type, (p) => p.number === pr));
   const [status, merged, closed] = ['pr.status', 'merge.done', 'pr.closed'].map(ofPr);
@@ -111,8 +122,8 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
   if (!opened || !status) stages.push(S('checks', 'waiting', opened ? 'no check results recorded yet' : landed ? 'none: no PR' : 'after the PR opens', null, landed && !opened ? null : cEst));
   else {
     const s = pl(status);
-    const checks = Array.isArray(s.checks) ? (s.checks as { outcome?: unknown }[]) : [];
-    const count = (...k: string[]) => checks.filter((c) => k.includes(String(c.outcome))).length;
+    const checks = Array.isArray(s.checks) ? (s.checks as ({ outcome?: unknown } | null)[]) : [];
+    const count = (...k: unknown[]) => checks.filter((c) => k.includes(c?.outcome)).length;
     const [fail, pending] = [count('fail', 'cancelled'), count('pending', 'missing')];
     const said = `${count('pass')} passed${fail ? `, ${fail} failed` : ''}${pending ? `, ${pending} pending` : ''}`;
     stages.push(s.ready === true ? S('checks', 'done', `required checks green (${said})`, status) : fail ? S('checks', 'failed', said, status) : S('checks', 'running', checks.length ? said : 'not ready yet', status, cEst));
@@ -124,7 +135,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
   else if (!opened && landed) (outcome = 'landed'), stages.push(S('merge', 'done', 'landed on the default branch', landed));
   else if (failedMerge && after(failedMerge, decided)) stages.push(S('merge', 'failed', 'the last merge try failed', failedMerge));
   else if (decided && pl(decided).auto === false) {
-    holds = holdsInWords(Array.isArray(pl(decided).reasons) ? (pl(decided).reasons as unknown[]).map(String) : [], { local: o.local });
+    holds = holdsInWords(Array.isArray(pl(decided).reasons) ? (pl(decided).reasons as unknown[]).map((r) => (typeof r === 'string' ? r : '')) : [], { local: o.local });
     outcome = 'held';
     stages.push(S('merge', 'held', 'held: it waits for you', decided, { basis: 'none', text: 'no estimate: it waits until a person merges it' }));
   } else stages.push(decided ? S('merge', 'running', 'the merge policy will merge it', decided, { basis: 'none', text: 'no estimate: it merges on a later pass of the PR watch' }) : S('merge', 'waiting', stale ? 'a new head: it waits for its checks and a fresh decision' : opened ? 'no merge decision yet: it comes once the checks are green' : 'after the PR'));

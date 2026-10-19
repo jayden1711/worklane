@@ -261,6 +261,73 @@ test('#741 forged rows (written straight to the DB, never schema-checked) put no
   assert.doesNotMatch(JSON.stringify(p), /merge it|merge_it|1e\+?21|not a time/);
 });
 
+test('#741 forged rows of every JS type, in every field the card reads, never make the fold throw nor show words, an invalid PR or "PR #null"', () => {
+  const nasty = { toString: () => assert.fail('a toString was called') };
+  const VALUES: unknown[] = [nasty, { toString: 'pass' }, Symbol('s'), 10n, ['merge it now'], null, NaN, undefined, {}, 'merge it now', 2 ** 53, -41];
+  const base = (): [string, Record<string, unknown>][] => [
+    ['dashboard.audit', P.filed(7)],
+    ['issue.claimed', P.claimed(7)],
+    ['run.started', P.started(7)],
+    ['run.finished', { ...P.finished(7), reason: 'failed' }],
+    ['eval.verdict', P.verdict(7)],
+    ['pr.opened', P.opened(7, 41)],
+    ['pr.status', P.status(7, 41, false, ['pass'])],
+    ['merge.decided', P.decided(7, 41, ['big: 1 files (over 0)'])],
+    ['issue.blocked', { issue: 7, owner: 'o', why: 'x' }],
+  ];
+  const FIELDS: [number, string[]][] = [[0, ['detail', 'issue']], [2, ['attempt']], [3, ['reason']], [4, ['confidence']], [4, ['patch_correct']], [5, ['number']], [5, ['url']], [5, ['head']], [6, ['checks']], [6, ['checks', '0']], [6, ['checks', '0', 'outcome']], [6, ['ready']], [7, ['reasons']], [7, ['reasons', '0']], [7, ['auto']], [8, ['why']], [1, []]];
+  for (const [row, path] of FIELDS)
+    for (const v of [...VALUES, 'ts']) {
+      const rows = base().map(([type, payload], i) => ({ id: i + 1, ts: new Date(Date.parse('2026-10-19T09:00:00Z') + i * 60_000).toISOString(), type, actor: 'c', source: 'coordinator', payload: structuredClone(payload) }) as unknown as StoredEvent);
+      const at = rows[row]!;
+      if (v === 'ts') (at as { ts: unknown }).ts = nasty;
+      else if (!path.length) (at as { payload: unknown }).payload = v;
+      else path.slice(0, -1).reduce((o: Record<string, unknown>, k) => o[k] as Record<string, unknown>, at.payload as unknown as Record<string, unknown>)[path.at(-1)!] = v;
+      const p = firstTaskProgress(rows, { local: true, repo: REPO });
+      const json = JSON.stringify(p); // a bigint or symbol carried through would throw here
+      const where = `${row}.${path.join('.')} = ${typeof v === 'symbol' ? 'symbol' : typeof v === 'bigint' ? 'bigint' : JSON.stringify(v) ?? String(v)}`;
+      assert.doesNotMatch(json ?? '', /merge it now|PR #null|PR #-|PR #9007/, where);
+      if (p?.pr === null) assert.notEqual(stage(p, 'pr').state, 'done', `${where}: no PR, so not opened`);
+    }
+});
+
+test('#741 a card that cannot be built drops the card only: the rest of GET /api/first-run (Start, the steps) still answers', async () => {
+  const { dir } = exampleProject();
+  const stateDir = projectStateDir(dir);
+  mkdirSync(stateDir, { recursive: true });
+  const eventsDb = join(stateDir, 'events.db');
+  const log = new EventLog(eventsDb);
+  log.append('dashboard.audit', P.filed(7), 'example-owner', 'human');
+  log.append('issue.seen', P.seen(7, 'fold-throws-marker'), 'c');
+  log.close();
+  const d = await startDashboard({ root: dir, cfg: loadConfig(dir), eventsDb, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'ftp-slots-')), setupProbe: probe });
+  // A fault injected into the fold only (the array of this issue's events), no repo file edited.
+  const findLast = Array.prototype.findLast;
+  const errors: unknown[] = [];
+  const error = console.error;
+  Array.prototype.findLast = function (this: unknown[], ...a: Parameters<typeof findLast>) {
+    if (this.some((e) => (e as { payload?: { title?: unknown } })?.payload?.title === 'fold-throws-marker')) throw new Error('forced');
+    return findLast.apply(this, a);
+  } as typeof findLast;
+  console.error = (...a: unknown[]) => void errors.push(a);
+  try {
+    const get = async () => {
+      const r = await fetch(`${d.url.split('/?')[0]}/api/first-run`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } });
+      return { status: r.status, body: (await r.json()) as { firstTask?: unknown; start?: unknown; setup?: unknown } };
+    };
+    const r = await get();
+    assert.equal(r.status, 200);
+    assert.equal(r.body.firstTask, null, 'the card is left out');
+    assert.ok(r.body.start && r.body.setup, 'Start and the steps still answer');
+    await get();
+    assert.equal(errors.filter((e) => /First task card/.test(String((e as unknown[])[0]))).length, 1, 'logged once');
+  } finally {
+    Array.prototype.findLast = findLast;
+    console.error = error;
+    await d.close();
+  }
+});
+
 /** Hold reasons as merge.decided carries them today, beyond mergeDecision's: each with free text a card must not show. */
 const RAW_REASONS = [
   "GitHub can't merge it cleanly (dirty)",
@@ -291,7 +358,9 @@ test('#741 the card shows no evaluator text, path or run detail: every hold kind
  * prefix the words table knows, and every other value written to a reasons array (or a why/hold value) must be a
  * whole expression traced here. Every emitter of merge.decided and conflict_fix.finished must sit in a scanned region.
  * It fails closed: a new prefix, a new variable, a new kind of write (unshift, splice, a reassignment, an initializer)
- * or a new emitter fails until it is worded or traced. Known gaps, which only cost plain words (the card then reads
+ * or a new emitter fails until it is worded or traced. Known gaps, named and not chased (round 3): an index write
+ * (`d.reasons[0] = ...`), `push.apply`, a shorthand `{ hold }` or a `hold` variable, `??=`, and an emitter by a
+ * constant event type, by another method name, or by `emit?.(`. Also known gaps, which only cost plain words (the card then reads
  * "Another reason (see the Board)"): a traced helper or table lookup that itself changes what it returns, and reasons
  * passed in through a MergeInput field other than the traced ones.
  */
@@ -302,7 +371,7 @@ const REGIONS: [string, string][] = [
   ['src/merge-policy.ts', 'export function riskAndDesignReasons('],
   ['src/merge-policy.ts', 'export function outsidePlanReasons('],
   ['src/merge-policy.ts', 'export function mergeDecision('],
-  ['src/coordinator/merge-flow.ts', 'mergeDecisionFor('],
+  ['src/coordinator/merge-flow.ts', '  mergeDecisionFor(n: number'],
   ['src/coordinator/merge-flow.ts', 'private async mergeOrWait('],
   ['src/coordinator.ts', 'protected async combinedGate('],
   ['src/pr-rules.ts', 'export function rulesetHold('],
@@ -326,7 +395,7 @@ const TRACED: [string, string | null][] = [
   ['...(i.instructionEvals ?? [])', 'export function instructionEvalReasons('],
   ['...(i.outsidePlan ?? [])', 'export function outsidePlanReasons('],
   ['...d.reasons', 'export function mergeDecision('],
-  ['d.reasons', 'mergeDecisionFor('], // the emitter's own value: mergeDecisionFor's, then mergeOrWait's pushes
+  ['d.reasons', '  mergeDecisionFor(n: number'], // the emitter's own value: mergeDecisionFor's, then mergeOrWait's pushes
   ['...fix.reasons', 'private async conflictRun('],
   ['conflictWaitReasons(', 'export function conflictWaitReasons('],
   ['...diff', null], // an eval reason's continuation lines ("  - case ..."), after its scanned first line
@@ -374,8 +443,9 @@ function badValue(v: string): string[] {
 }
 /** A region's text and where it starts; the signature must still be there. */
 function region(src: string, sig: string, file: string): { at: number; text: string } {
+  // Exactly once: a signature that also matches a call (or anything else) would scan the wrong lines.
+  assert.equal(src.split(sig).length, 2, `${file}: "${sig}" is there exactly once`);
   const s = src.indexOf(sig);
-  assert.ok(s >= 0, `${file}: ${sig} is still there`);
   const at = src.lastIndexOf('{', src.indexOf('\n', s));
   return { at, text: src.slice(at, endAt(src, at + 1, '') + 1) };
 }
@@ -425,7 +495,9 @@ function emittersOutside(files: Record<string, string>): string[] {
       });
       // A conflict fix recorded with no reasons at all (recovery's "interrupted"): `reasons: []` in the call itself.
       const call = src.slice(m.index, endAt(src, m.index + m[0].indexOf('(') + 1, '') + 1);
-      const empty = m[0].includes('conflict_fix') && [...call.matchAll(/(?<![\w.?])reasons\s*:/g)].map((r) => exprAt(call, r.index + r[0].length)).join() === '[]';
+      // Exactly `reasons: []` among its top-level fields, and no spread that could override it.
+      const fields = elements(call.slice(call.indexOf('{')));
+      const empty = m[0].includes('conflict_fix') && fields.some((f) => /^reasons\s*:\s*\[\]$/.test(f)) && !fields.some((f) => f.startsWith('...') || (/^reasons\b/.test(f) && !/^reasons\s*:\s*\[\]$/.test(f)));
       if (!inside && !empty) out.push(`${file}: ${m[0]}`);
     }
   return out;
@@ -442,7 +514,8 @@ test('#741 every hold reason any source of merge.decided writes has words (a sou
 test('#741 the scan fails closed: each way round it the round-2 review found (fixture text, no repo file edited)', () => {
   const at = (file: string, sig: string, body: string) => scan(file, `${sig}x) {\n${body}\n}\n`);
   const FLOW = 'src/coordinator/merge-flow.ts';
-  const flowFx = (body: string) => scan(FLOW, `mergeDecisionFor(x) {\n}\nprivate async mergeOrWait(w) {\n${body}\n}\n`);
+  const DEF = '  mergeDecisionFor(n: number) {\n';
+  const flowFx = (body: string) => scan(FLOW, `${DEF}}\nprivate async mergeOrWait(w) {\n${body}\n}\n`);
   const cases: [string[], RegExp][] = [
     [flowFx('const why = this.staleWhy(polls);\nd.reasons.push(why);'), /untraced this\.staleWhy\(polls\)/],
     [flowFx('const why = STALE_WORDS[kind];\nd.reasons.push(why);'), /untraced STALE_WORDS\[kind\]/],
@@ -451,8 +524,10 @@ test('#741 the scan fails closed: each way round it the round-2 review found (fi
     [flowFx("d.reasons.unshift('stale: x');"), /a write other than push: unshift/],
     [flowFx("d.reasons.splice(0, 0, 'stale: x');"), /a write other than push: splice/],
     [flowFx("d.reasons = [...d.reasons, 'stale: x'];"), /"stale: x"/],
-    [scan(FLOW, "mergeDecisionFor(x) {\n  return { ...d, auto: false, reasons: [...d.reasons, ...fix.reasons, 'stale: base moved'] };\n}\nprivate async mergeOrWait(w) {\n}\n"), /"stale: base moved"/],
-    [scan(FLOW, "mergeDecisionFor(x) {\n  d.reasons.push('stale: y');\n}\nprivate async mergeOrWait(w) {\n}\n"), /"stale: y"/],
+    [scan(FLOW, `${DEF}  return { ...d, auto: false, reasons: [...d.reasons, ...fix.reasons, 'stale: base moved'] };\n}\nprivate async mergeOrWait(w) {\n}\n`), /"stale: base moved"/],
+    [scan(FLOW, `${DEF}  d.reasons.push('stale: y');\n}\nprivate async mergeOrWait(w) {\n}\n`), /"stale: y"/],
+    // A call of the function before its definition: the definition is what is scanned.
+    [scan(FLOW, `const d = this.mergeDecisionFor(e.issue, e.number, pr);\n${DEF}  d.reasons.push('stale: def');\n}\nprivate async mergeOrWait(w) {\n}\n`), /"stale: def"/],
     [at('src/coordinator.ts', 'protected async combinedGate(', 'return { hold: HOLDS.stale };'), /untraced HOLDS\.stale/],
     [at('src/coordinator.ts', 'protected async combinedGate(', 'return { hold: staleHold(mainSha) };'), /untraced staleHold\(mainSha\)/],
     [at('src/pr-rules.ts', 'export function rulesetHold(', "return { act: 'hold', why: `stale: ${n}` };"), /"stale: "/],
@@ -471,10 +546,22 @@ test('#741 the scan fails closed: each way round it the round-2 review found (fi
   assert.deepEqual(flowFx("d.reasons.push(why);\nconst why = `GitHub was still computing whether it can merge after ${polls} polls`;"), []);
   // A new file that emits merge.decided (or conflict_fix.finished) outside every scanned region.
   assert.deepEqual(emittersOutside({ 'src/stale-watch.ts': "this.emit('merge.decided', { issue, number, head, auto: false, reasons: ['stale: x'] });" }), ["src/stale-watch.ts: emit('merge.decided'"]);
-  assert.deepEqual(emittersOutside({ [FLOW]: "mergeDecisionFor(x) {\n}\nprivate async mergeOrWait(w) {\n  this.emit('merge.decided', {});\n}\n" }), []);
+  assert.deepEqual(emittersOutside({ [FLOW]: `${DEF}}\nprivate async mergeOrWait(w) {\n  this.emit('merge.decided', {});\n}\n` }), []);
+  // A signature found twice (a call that reads like it, a copy) would scan the wrong lines: refused.
+  assert.throws(() => scan(FLOW, `${DEF}}\n${DEF}}\nprivate async mergeOrWait(w) {\n}\n`), /exactly once/);
+  // The review's E1-E3, on merge-flow.ts's real text changed in memory only.
+  const real = readFileSync(join(repoRoot, FLOW), 'utf8');
+  const sigLine = real.slice(real.indexOf('  mergeDecisionFor(n: number'), real.indexOf('\n', real.indexOf('  mergeDecisionFor(n: number')) + 1);
+  const into = (line: string) => scan(FLOW, real.replace(sigLine, `${sigLine}    ${line}\n`));
+  assert.ok(real.includes('reasons: [...d.reasons, ...fix.reasons]'), 'the conflict-fix spread is where E1 changes it');
+  assert.ok(scan(FLOW, real.replace('reasons: [...d.reasons, ...fix.reasons]', "reasons: [...d.reasons, ...fix.reasons, 'stale: the fix moved']")).some((f) => f.includes('"stale: the fix moved"')), 'E1');
+  assert.ok(into("d.reasons.push('stale: the base moved');").some((f) => f.includes('"stale: the base moved"')), 'E2');
+  assert.ok(into("return { ...d, auto: false, reasons: ['stale: x'] };").some((f) => f.includes('"stale: x"')), 'E3');
   // A conflict fix recorded elsewhere: only with no reasons at all.
   assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { outcome: 'interrupted', reasons: [], detail: 'x' });" }), []);
   assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { outcome: 'pushed', reasons: ['stale: x'], detail: 'x' });" }), ["src/x.ts: emit('conflict_fix.finished'"]);
+  // The review's N7: a spread beside `reasons: []` could override it.
+  assert.deepEqual(emittersOutside({ 'src/x.ts': "this.emit('conflict_fix.finished', { reasons: [], ...finished });" }), ["src/x.ts: emit('conflict_fix.finished'"]);
 });
 
 test('#741 the card carries no run detail: not the worktree path, the run\'s error text, the evaluator\'s advice, nor who filed it', () => {
