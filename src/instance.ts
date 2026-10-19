@@ -6,6 +6,7 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
+import { ownEnv } from './os/own-env.js';
 import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
@@ -255,7 +256,7 @@ export interface Instance {
 }
 
 export function instancesDir(): string {
-  return process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ?? join(stateDir(), 'instances');
+  return ownEnv().get(`${BRAND.envPrefix}_INSTANCES_DIR`) ?? join(stateDir(), 'instances');
 }
 
 function readYaml<S extends z.ZodType>(schema: S, file: string, errors: ConfigError[]): z.infer<S> | undefined {
@@ -431,7 +432,7 @@ export function laneRuns(i: Instance): Record<string, { runAs?: RunAs; settings?
   for (const [name, lane] of Object.entries(i.policy.lanes)) {
     const who = lane.run_as === 'eval' ? i.evalAs : i.runAs;
     const runAs: RunAs | undefined = who ? { ...who } : undefined;
-    const home = runAs?.home ?? process.env.HOME ?? '';
+    const home = runAs?.home ?? ownEnv().get('HOME') ?? '';
     const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude!.config_dir);
     const denyRead = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(lane.run_as === 'eval' || !i.credentials.eval_key ? [] : [i.credentials.eval_key]), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : []), ...Object.values(i.credentials.provider_keys ?? {})];
     out[name] = { ...(runAs ? { runAs } : {}), ...(i.policy.sandbox ? { settings: sandboxSettings({ lane: { allowedDomains: lane.allowed_domains }, denyRead }) } : {}) };
@@ -459,7 +460,7 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
   const root = dirname(i.repo.path);
   const researchRoot = join(root, RESEARCH_DIR);
   const runAs = base?.runAs;
-  const home = runAs?.home ?? process.env.HOME ?? '';
+  const home = runAs?.home ?? ownEnv().get('HOME') ?? '';
   const claudeDir = runAs?.claudeConfigDir ?? (runAs ? join(home, '.claude') : i.credentials.claude?.config_dir ?? join(home, '.claude'));
   const always = [i.home, ...homeCredentialStores(home), join(claudeDir, '.credentials.json'), ...(i.credentials.eval_key ? [i.credentials.eval_key] : []), ...(i.credentials.agent_api_key ? [i.credentials.agent_api_key] : []), ...Object.values(i.credentials.provider_keys ?? {})];
   const noRepo = [...always, i.repo.path, join(root, 'tasks'), join(root, 'chat')];

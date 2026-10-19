@@ -6,12 +6,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 import { executableName } from './os/index.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 
 const ENGINE = fileURLToPath(new URL('../../', import.meta.url));
 
 /** The shell binary: an explicit path from the environment, else the engine's own release build. */
-export function desktopBinary(env: NodeJS.ProcessEnv = process.env, engineDir = ENGINE): string | null {
-  const explicit = env[`${BRAND.envPrefix}_DESKTOP`];
+export function desktopBinary(env: EnvSource = process.env, engineDir = ENGINE): string | null {
+  const explicit = ownEnv(env).get(`${BRAND.envPrefix}_DESKTOP`);
   if (explicit) return existsSync(explicit) ? explicit : null;
   const built = join(engineDir, 'desktop', 'target', 'release', executableName(`${BRAND.cli}-desktop`));
   return existsSync(built) ? built : null;

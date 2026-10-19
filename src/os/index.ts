@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
+import { ownEnv } from './own-env.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
@@ -404,8 +405,8 @@ export function userExists(user: string): boolean {
 }
 
 /** Full path of an executable on `path` (PATH by default), or null. */
-export function which(cmd: string, path: string = process.env.PATH ?? ''): string | null {
-  const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
+export function which(cmd: string, path: string = ownEnv().get('PATH') ?? ''): string | null {
+  const exts = process.platform === 'win32' ? (ownEnv().get('PATHEXT') ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const dir of path.split(delimiter)) {
     for (const ext of exts) {
       const p = join(dir, cmd + ext.toLowerCase());
@@ -556,10 +557,11 @@ export function npmGlobalPackageDir(prefix: string, pkg: string, platform: NodeJ
 export function chromeCandidates(): string[] {
   if (process.platform === 'darwin') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];
   if (process.platform === 'win32') {
+    const env = ownEnv();
     return [
-      join(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('PROGRAMFILES') ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('PROGRAMFILES(X86)') ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('LOCALAPPDATA') ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
     ];
   }
   return [];
@@ -804,7 +806,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   const full = outboundEnv(env);
   if (process.platform === 'darwin') {
     const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
-    return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+    return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
   }
   // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
   const vars = Object.entries(full)
@@ -812,7 +814,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     .map(([k, v]) => `${k}=${v}`);
   const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
   const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, runAs.user, ...hide, '--', ...inner], {});
-  return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+  return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
 }
 
 /**
@@ -955,7 +957,7 @@ let current: { dir: string; p: SlotPath } | undefined;
 /** The slot dir for `system`, refused in a test run unless it is inside the test machine (#669). */
 function resolvedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   const dir = unguardedSlotsDir(system);
-  const refusal = testSlotsRefusal(dir);
+  const refusal = testSlotsRefusal(dir, ownEnv().asProcessEnv());
   if (refusal) throw new TestSlotsRefused(refusal);
   return dir;
 }
@@ -971,8 +973,10 @@ export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
 }
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
-  if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
-  if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
+  const env = ownEnv();
+  const given = env.get('AGENT_SLOTS_DIR');
+  if (given) return given;
+  if (process.platform === 'win32') return join(env.get('ProgramData') ?? 'C:\\ProgramData', 'agent-slots');
   if (existsSync(system.dir)) return system.dir;
   return devSlotsPath(); // single-user and development machines
 }
@@ -986,7 +990,8 @@ export function slotsConfigPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): S
 export function slotsConfigPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
 export function slotsConfigPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
 export function slotsConfigPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
-  if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
+  const given = ownEnv().get('AGENT_SLOTS_CONFIG');
+  if (given) return given;
   if (isSystemSlots(dir, system) && existsSync(system.config)) return system.config;
   return slotFile(dir, 'config.json');
 }
@@ -1010,7 +1015,7 @@ export function serviceChange(label: string): { path: string; manager: string; c
     return { path, manager: 'launchd (a per-user agent: KeepAlive, starts at login)', commands: [`launchctl bootout gui/${uid}/${label}`, `launchctl bootstrap gui/${uid} ${path}`] };
   }
   if (process.platform === 'linux') {
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
     return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };
   }
   return null;
@@ -1115,7 +1120,7 @@ export function installService(spec: ServiceSpec): { path: string; started: bool
     return { path, ...launch(['bootstrap', `gui/${uid}`, path]) };
   }
   if (process.platform === 'linux') {
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
     const unit = systemdUserUnit(spec);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -1185,7 +1190,7 @@ export function uninstallService(label: string): string {
     } catch {
       // not enabled
     }
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
     rmSync(path, { force: true });
     return path;
   }
@@ -1211,7 +1216,7 @@ export const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
  * there's no clipboard tool (then the path alone is shown). macOS: pbcopy. Linux: wl-copy, else xclip, else WSL's
  * clip.exe. Windows (cmd): clip. WHY: a key file's path can have a space (~/Library/Application Support) (#467).
  */
-export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = process.env.PATH ?? ''): string | null {
+export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = ownEnv().get('PATH') ?? ''): string | null {
   if (platform === 'win32') return /["%^&|<>]/.test(file) ? null : `clip < "${file}"`;
   const q = shellQuote(file);
   if (platform === 'darwin') return `pbcopy < ${q}`;

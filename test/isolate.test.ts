@@ -725,3 +725,117 @@ test(
     assert.deepEqual(filesUnder(live), before, "nothing written to the machine's home, state, slots or system files, and its helper never ran");
   },
 );
+
+// ---------------------------------------------------------------------------------------------------------------
+// #786: a variable that isn't set reads as unset, whatever is on Object.prototype (src/os/own-env.ts).
+
+import { desktopBinary } from '../src/desktop.js';
+import { heldOutDir } from '../src/held-out.js';
+import { HELD_OUT_ENV } from '../src/held-out-paths.js';
+import { readManagedApps } from '../src/managed-apps.js';
+import { slotsConfigPath, which } from '../src/os/index.js';
+import { etcPath, SYSTEM_ROOTS, varLibPath } from '../src/os/system-paths.js';
+import { heldOutAllowed } from '../src/spend-gate.js';
+
+/** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
+function polluted<T>(vars: Record<string, string>, f: () => T): T {
+  const proto = Object.prototype as Record<string, unknown>;
+  for (const k of Object.keys(vars)) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  try {
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return f();
+  } finally {
+    for (const k of Object.keys(vars)) delete proto[k];
+  }
+}
+
+/** Runs `f` with `keys` unset in this process's environment, then puts each back (an isolated one with restoreIsolated). */
+function unsetWhile<T>(keys: string[], f: () => T): T {
+  const saved = new Map(keys.map((k) => [k, Object.hasOwn(process.env, k) ? process.env[k] : undefined] as const));
+  try {
+    for (const k of keys) delete process.env[k];
+    return f();
+  } finally {
+    for (const [k, v] of saved) {
+      if (Object.hasOwn(isolatedEnv, k)) restoreIsolated(k);
+      else if (v !== undefined) process.env[k] = v;
+    }
+  }
+}
+
+test('regression (#786): with Object.prototype polluted, an unset variable reads as unset: the system root, the test-run marks, the service modes, the held-out store, the tool prefix, the desktop binary', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const uid = process.getuid!();
+  const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] as string[] };
+  const clean: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/example' };
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const desktop = join(canary, 'desktop');
+  writeFileSync(desktop, '');
+  const vars = {
+    [SYSTEM_ROOT_VAR]: join(canary, 'root'),
+    NODE_TEST_CONTEXT: 'child-v8',
+    [TEST_RUN_VAR]: '1',
+    [HELD_OUT_ENV]: join(canary, 'held-out'),
+    [`${BRAND.envPrefix}_PREFIX`]: join(canary, 'prefix'),
+    [`${BRAND.envPrefix}_DESKTOP`]: desktop,
+  };
+  polluted(vars, () => {
+    // The pollution reaches a plain read (measured on Node 22, #786): what these read before.
+    assert.equal({ ...clean }[SYSTEM_ROOT_VAR], vars[SYSTEM_ROOT_VAR], 'a plain object inherits it');
+    assert.equal(systemRootRefusal({ ...clean }, uid), null, 'the system root: unset, nothing to refuse');
+    assert.equal(testRunSign({ ...clean }, engine), null, 'the test-run marks: the engine is no test run');
+    assert.equal(serviceModeRefusal(['coordinator', 'run'], { ...clean }), null, 'a service mode: no system root to refuse');
+    assert.equal(heldOutDir('/state', { ...clean }), join('/state', 'evals', 'held-out'), "the held-out store: the state's");
+    assert.equal(heldOutAllowed([], { ...clean }), false, 'held-out cases: not asked for');
+    assert.equal(toolPrefix({ ...clean }), join(homedir(), '.local'), 'the tool prefix: the default');
+    assert.equal(desktopBinary({ ...clean }, canary), null, 'the desktop binary: none given, none built');
+  });
+});
+
+test("regression (#786): with Object.prototype polluted, the process's own locations ignore it: the slot dir and its config, the instances and init dirs, the tool prefix and PATH", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const bin = join(canary, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'wl786-canary-tool'), '#!/bin/sh\n', { mode: 0o755 });
+  const vars: Record<string, string> = {
+    // Inside the test machine, so the slot dir's own guard (testSlotsRefusal) would take it: only the read decides.
+    AGENT_SLOTS_DIR: join(canary, 'slots'),
+    AGENT_SLOTS_CONFIG: join(canary, 'slots-config.json'),
+    [`${BRAND.envPrefix}_INSTANCES_DIR`]: join(canary, 'instances'),
+    [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(canary, 'machine-init'),
+    [`${BRAND.envPrefix}_PREFIX`]: join(canary, 'prefix'),
+    PATH: bin,
+  };
+  unsetWhile(Object.keys(vars), () =>
+    polluted(vars, () => {
+      assert.equal(process.env.AGENT_SLOTS_DIR, vars.AGENT_SLOTS_DIR, 'process.env inherits it (measured on Node 22, #786)');
+      assert.equal(names(slotsDir(), vars.AGENT_SLOTS_DIR!), false, 'the slot dir is not the canary');
+      assert.equal(slotsConfigPath('/nowhere'), join('/nowhere', 'config.json'), "the slot config: the slot dir's");
+      assert.equal(instancesDir(), join(stateDir(), 'instances'), "the instances dir: the state dir's");
+      assert.equal(machineInitDir(), varLibPath('init'), "the machine's init dir: its own");
+      assert.equal(toolPrefix(), join(homedir(), '.local'), 'the tool prefix: the default');
+      assert.equal(which('wl786-canary-tool'), null, 'PATH: unset, nothing on it');
+    }),
+  );
+});
+
+test("regression (#786): a forged system root on Object.prototype, with a mark for this run's token, moves no machine path, and makes no file of this user's root's", { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const uid = process.getuid!();
+  const token = process.env[TEST_TOKEN_VAR]!;
+  // What a polluter would make: a root of this user's alone, holding a mark for this run's token.
+  const forged = mkdtempSync(join(tmpdir(), 'forged-root-'));
+  chmodSync(forged, 0o700);
+  writeFileSync(join(forged, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+  assert.equal(systemRootRefusal({ [SYSTEM_ROOT_VAR]: forged, [TEST_TOKEN_VAR]: token }, uid), null, 'given as a real variable, the forgery is honoured: the test means something');
+  // A managed-apps file of this user's: in a marked test process this user stands in for root (src/managed-apps.ts rootUid).
+  const apps = join(mkdtempSync(join(tmpdir(), 'apps-')), 'managed-apps.json');
+  writeFileSync(apps, JSON.stringify({ version: 1, apps: { shop: 'acme/shop' } }), { mode: 0o644 });
+  assert.deepEqual(readManagedApps(apps), { apps: { shop: 'acme/shop' }, problem: null }, "with the preload's own root, this user's file is root's");
+  unsetWhile([SYSTEM_ROOT_VAR], () =>
+    polluted({ [SYSTEM_ROOT_VAR]: forged }, () => {
+      assert.equal(process.env[SYSTEM_ROOT_VAR], forged, 'process.env inherits it (measured on Node 22, #786)');
+      assert.equal(etcPath('x'), `${SYSTEM_ROOTS.etc}/x`, 'no machine path moves into the forged root');
+      assert.match(readManagedApps(apps).problem ?? '', /isn't root's alone/, "unset, root's files are uid 0's again: this user's file is refused");
+    }),
+  );
+  assert.equal(readManagedApps(apps).problem, null, "the preload's own root back: as before");
+});

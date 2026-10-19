@@ -48,6 +48,7 @@ import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
 import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
+import { ownEnv } from './os/own-env.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -438,8 +439,8 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
-  const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
-  const offsiteConfig = opts.offsiteConfig ?? process.env[`${BRAND.envPrefix}_OFFSITE_BACKUP`];
+  const backupDir = opts.backupDir ?? ownEnv().get(`${BRAND.envPrefix}_BACKUP_DIR`) ?? join(state, 'backups');
+  const offsiteConfig = opts.offsiteConfig ?? ownEnv().get(`${BRAND.envPrefix}_OFFSITE_BACKUP`);
   // An emergency stop takes effect within seconds, not at the next tick.
   // The console's requests (message, stop), chat questions and intake (which pulls its sources on its own, slower
   // clock) are taken on the same short timer. Discord chat and decision-thread messages don't wait for it: each wakes
