@@ -14,6 +14,7 @@ import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from '.
 import { BRAND } from './brand.js';
 import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
+import { githubRepoOf } from './managed-apps.js';
 import { stableNodePath, writeOwnerOnly } from './os/index.js';
 import { toolBin } from './tool-path.js';
 import { installPrePushHook } from './push-guard.js';
@@ -99,14 +100,12 @@ function readJson(path: string): Settings {
 
 export function gitRemoteRepo(root: string): string | null {
   try {
-    return githubRepoOf(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }));
+    // WHY trim: git ends its answer with a newline; the shared parser (src/managed-apps.ts) takes a URL as given.
+    return githubRepoOf(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim());
   } catch {
     return null;
   }
 }
-
-/** owner/name from a GitHub remote URL (https or ssh); null for anything else. */
-export const githubRepoOf = (url: string): string | null => url.trim().match(/github\.com[:/]([^/]+\/[^/.]+?)(?:\.git)?$/)?.[1] ?? null;
 
 /**
  * The engine as installed in the project's node_modules, if present. Preferred

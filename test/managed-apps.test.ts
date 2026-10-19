@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -32,6 +32,8 @@ function withUpdates<T>(body: string, fn: () => T): T {
   const updates = etcPath('updates.json');
   mkdirSync(dirname(updates), { recursive: true });
   writeFileSync(updates, body);
+  // As updates.sh leaves it: 0644 (this user stands in for root), whatever the umask.
+  chmodSync(updates, 0o644);
   try {
     return fn();
   } finally {
@@ -109,7 +111,7 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
     assert.match(s.why, /is the engine's own repo/, repo);
   }
   // No updates.json: which repo the engine updates from can't be told, so no repo is an app (every lock applies).
-  assert.match(engineRepos().problem ?? '', /updates\.json doesn't exist/);
+  assert.match(engineRepos(me).problem ?? '', /updates\.json doesn't exist/);
   const noUpdates = scope(naming('shop', 'example-org/shop'));
   assert.equal(noUpdates.scope, 'engine');
   assert.match(noUpdates.why, /which repo is the engine can't be told: .*updates\.json doesn't exist/);
@@ -118,7 +120,8 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
   try {
     // The repo root's updater follows, in an ssh URL with another case.
     writeFileSync(updates, `${JSON.stringify({ enabled: true, repo_url: 'ssh://github.com/Example-Org/Engine.git' })}\n`);
-    assert.deepEqual(engineRepos(), { repos: [own, 'Example-Org/Engine'], problem: null });
+    chmodSync(updates, 0o644);
+    assert.deepEqual(engineRepos(me), { repos: [own, 'Example-Org/Engine'], problem: null });
     const e = readLockScope('engine', 'example-org/engine', { file: naming('engine', 'example-org/engine'), rootUid: me });
     assert.equal(e.scope, 'engine');
     assert.match(e.why, /example-org\/engine is the engine's own repo/);
@@ -150,6 +153,84 @@ test("no updates.json: the engine's code under another repo name is never a mana
   assert.match(s.why, /^every self-modification lock applies: which repo is the engine can't be told: .*updates\.json doesn't exist/);
   // The same root file, once root's updates.json names the engine's repo: an app. Only the missing file held the locks.
   withUpdates(ENGINE_UPDATES, () => assert.equal(readLockScope('fork', 'someone/engine-fork', { file: fork, rootUid: me }).scope, 'managed-app'));
+});
+
+// WHY (#747): updates.json's presence decides whether any managed app can exist, but it was read with existsSync and
+// readFileSync: a symlink was followed, and a file anyone could write was believed. Now it is read as root's other
+// files are, and one root can't vouch for is "can't tell": no app, every lock applies.
+test("an updates.json root can't vouch for (a symlink, not a regular file, too big, not root's alone) names no engine repo: no app, every lock applies", { skip: !posix && 'owners and modes' }, () => {
+  const updates = etcPath('updates.json');
+  mkdirSync(dirname(updates), { recursive: true });
+  const app = rootFile(`${JSON.stringify({ version: 1, apps: { shop: 'example-org/shop' } })}\n`);
+  const good = join(dir(), 'updates.json');
+  writeFileSync(good, ENGINE_UPDATES, { mode: 0o644 });
+  chmodSync(good, 0o644);
+  const cases: [string, () => void, RegExp][] = [
+    ['a symlink to a good one', () => symlinkSync(good, updates), /symlink/],
+    ['a directory', () => mkdirSync(updates), /not-file/],
+    ['group-writable', () => (writeFileSync(updates, ENGINE_UPDATES), chmodSync(updates, 0o664)), /isn't root's alone/],
+    ['world-writable', () => (writeFileSync(updates, ENGINE_UPDATES), chmodSync(updates, 0o666)), /isn't root's alone/],
+    ['too big', () => (writeFileSync(updates, `${ENGINE_UPDATES}${' '.repeat(70 * 1024)}`), chmodSync(updates, 0o644)), /too-big/],
+  ];
+  for (const [what, make, why] of cases) {
+    make();
+    try {
+      const e = engineRepos(me);
+      assert.match(e.problem ?? '', why, what);
+      assert.match(e.problem ?? '', /so the repo the engine updates from can't be told/, what);
+      const s = readLockScope('shop', 'example-org/shop', { file: app, rootUid: me });
+      assert.equal(s.scope, 'engine', what);
+      assert.match(s.why, /which repo is the engine can't be told/, what);
+    } finally {
+      rmSync(updates, { recursive: true, force: true });
+    }
+  }
+  // Another owner's: as root's, it names nothing (this user stands in for someone other than root).
+  if (me !== 0) {
+    withUpdates(ENGINE_UPDATES, () => {
+      assert.match(engineRepos(0).problem ?? '', /isn't root's alone \(owner uid \d+, mode 0644\)/);
+      assert.equal(readLockScope('shop', 'example-org/shop', { file: rootFile(readFileSync(app, 'utf8')), rootUid: 0 }).scope, 'engine');
+    });
+  }
+  // The same root file with root's own updates.json: an app. Only the file root couldn't vouch for held the locks.
+  withUpdates(ENGINE_UPDATES, () => assert.equal(readLockScope('shop', 'example-org/shop', { file: app, rootUid: me }).scope, 'managed-app'));
+});
+
+// WHY (#747): install.ts and managed-apps.ts each had a githubRepoOf, and they disagreed: install's refused a dot in
+// a repo name (`owner/site.github.io`), a trailing slash and `GitHub.com`, and took an owner GitHub doesn't allow
+// (`bad_owner`). There is one now, and install's origin (gitRemoteRepo) and setup's origin step take exactly what it does.
+test('one githubRepoOf: install\'s origin, setup\'s origin step and the engine\'s repos take exactly the same URLs', async () => {
+  const { gitRemoteRepo } = await import('../src/install.js');
+  const { SETUP_STEPS } = await import('../src/setup-steps.js');
+  const origin = SETUP_STEPS.find((s) => s.id === 'origin')!;
+  const table: [string, string | null][] = [
+    ['https://github.com/example-org/shop.git', 'example-org/shop'],
+    ['https://github.com/example-org/shop', 'example-org/shop'],
+    // An scp-like ssh remote (its user left out here: the denylist reads user@host as an email address).
+    ['github.com:example-org/shop.git', 'example-org/shop'],
+    ['ssh://git@github.com/example-org/shop.git', 'example-org/shop'],
+    ['https://github.com/example-org/site.github.io.git', 'example-org/site.github.io'],
+    ['https://github.com/example-org/shop/', 'example-org/shop'],
+    ['https://GitHub.com/Example-Org/Shop.git', 'Example-Org/Shop'],
+    ['https://github.com/bad_owner/shop.git', null],
+    ['https://github.com/example-org/shop/tree', null],
+    ['https://git.example.org/example-org/shop.git', null],
+    ['/srv/git/shop.git', null],
+  ];
+  const repo = dir();
+  spawnSync('git', ['init', '-q', repo]);
+  for (const [url, want] of table) {
+    assert.equal(githubRepoOf(url), want, `githubRepoOf ${url}`);
+    // install: git's answer, newline and all.
+    spawnSync('git', ['remote', 'remove', 'origin'], { cwd: repo });
+    assert.equal(spawnSync('git', ['remote', 'add', 'origin', url], { cwd: repo }).status, 0, url);
+    assert.equal(gitRemoteRepo(repo), want, `gitRemoteRepo ${url}`);
+    // setup's origin step, with the same answer from git.
+    const run = () => ({ status: 0, stdout: `${url}\n`, stderr: '' });
+    const d = origin.detect({ c: { root: repo }, p: { run } } as unknown as Parameters<typeof origin.detect>[0])!;
+    assert.equal(d.done, want !== null, `origin step ${url}: ${d.detail}`);
+    if (want) assert.equal(d.detail, `origin is github.com/${want}`);
+  }
 });
 
 test("readLockScope never throws: a read that fails is the engine's scope, so the coordinator's start-up line can't crash", { skip: process.platform !== 'linux' && '/proc/self/mem' }, () => {
