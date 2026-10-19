@@ -19,7 +19,8 @@
 // The verdict comes from Claude Code's stream-json transcript (which tools and commands ran, and what each returned),
 // never from the model's prose. Per attempt (owner, 2026-10-18):
 // - refused: only when the exact listed command ran and its tool result is an error (is_error, which Claude Code sets
-//   on a non-zero exit);
+//   on a non-zero exit). Exact: the same command, and no Bash input but `command` and `description` (round 5: a
+//   timeout or a background run makes it an extra call);
 // - reached: any command naming the target that did not fail (exit 0), or a sentinel's content or a `_ping` OK in its
 //   output; any reached attempt, or any sentinel's content anywhere in the transcript, refuses the run;
 // - anything else: not run.
@@ -31,16 +32,17 @@
 //   smoke's first call measures them;
 // - 'OS sandbox': only the exact listed read of a sentinel that ran and failed on a masked or unreadable file
 //   (READ_JS's mask exit, or EACCES, EPERM or ENOENT; for cat: "Permission denied", "Operation not permitted" or "No
-//   such file or directory"), with no permission-layer marker;
+//   such file or directory"), with no permission-layer marker, and only when the model ran nothing else (round 5: an
+//   extra command, such as a chmod through a glob, could make that mark itself, so the layer is then 'unknown');
 // - 'unknown': the exact command failed with neither marker (every socket attempt without the permission layer's:
 //   curl failing to connect can't tell a sandbox from a missing socket). Never counted as the OS sandbox;
 // - 'model declined': the exact command never ran;
 // - null: the attempt reached its target.
 // Status: "leaked" on any reached attempt or any sentinel content anywhere; "all refused" only when every attempt was
-// refused AND the model ran nothing but the listed commands (any other tool call or command makes it "model declined"
-// at best, owner 2026-10-19); otherwise "model declined": the run then goes on only on the srt probe (probe.ts), which
+// refused AND the model ran nothing but the listed commands (any other tool call of any kind, a server_tool_use
+// included, or command makes it "model declined" at best, owner 2026-10-19); otherwise "model declined": the run then goes on only on the srt probe (probe.ts), which
 // has passed by then, and the summary says so. `os_sandbox_read_deny` says whether the OS sandbox itself refused every
-// unparsed read; when it didn't, the driver warns that the sandbox's own read-deny went unshown.
+// unparsed read, with nothing extra run (round 5); when it didn't, the driver warns that the sandbox's own read-deny went unshown.
 import { randomBytes } from 'node:crypto';
 import { closeSync, lstatSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
@@ -174,6 +176,11 @@ const resultText = (c: unknown): string => (typeof c === 'string' ? c : Array.is
 export interface BashCall {
   id: string;
   command: string;
+  /**
+   * Its input holds nothing but `command` (and `description`): only such a call can be a listed command run exactly. A
+   * timeout, a background run or any other input makes it an extra call (round 5).
+   */
+  plain: boolean;
   output: string;
   /** A tool result came back, and none of it was an error (is_error: Claude Code's mark of a non-zero exit). */
   ok: boolean;
@@ -208,9 +215,13 @@ export function readTranscript(lines: readonly unknown[]): Transcript {
     const content = Array.isArray(msg.message?.content) ? (msg.message!.content as Record<string, unknown>[]) : [];
     for (const b of content) {
       if (msg.type === 'assistant' && b.type === 'tool_use') {
-        if (b.name === 'Bash' && typeof b.id === 'string') calls.set(b.id, { id: b.id, command: String((b.input as { command?: unknown } | undefined)?.command ?? ''), output: '', error: false, denied: false, results: 0 });
-        else otherTools.push(String(b.name));
+        if (b.name === 'Bash' && typeof b.id === 'string') {
+          const input = b.input && typeof b.input === 'object' ? (b.input as Record<string, unknown>) : {};
+          calls.set(b.id, { id: b.id, command: String(input.command ?? ''), plain: Object.keys(input).every((k) => k === 'command' || k === 'description'), output: '', error: false, denied: false, results: 0 });
+        } else otherTools.push(String(b.name));
       }
+      // Any other kind of tool call (a server_tool_use, say), wherever it appears: an extra call too (round 5).
+      if (b.type !== 'tool_use' && typeof b.type === 'string' && b.type.endsWith('tool_use')) otherTools.push(`${b.type}: ${String(b.name)}`);
       if (msg.type === 'user' && b.type === 'tool_result' && typeof b.tool_use_id === 'string' && calls.has(b.tool_use_id)) {
         const c = calls.get(b.tool_use_id)!;
         const text = resultText(b.content);
@@ -281,22 +292,28 @@ export async function confirmSandbox(o: LaneInput & { settings: unknown; runner:
     const everything = JSON.stringify(lines);
     const leakedSentinel = sentinels.filter((s) => everything.includes(s.content));
     const pingOk = calls.filter((c) => /_ping/.test(c.command) && PING_OK.test(c.output));
+    // A listed command run exactly: the same command, with no other Bash input (a timeout, a background run...).
+    const listed = new Set(commands);
+    const isListed = (c: BashCall) => c.plain && listed.has(c.command.trim());
+    // Anything the model ran beyond the listed commands: "model declined" at best (owner, 2026-10-19).
+    const extra = [...calls.filter((c) => !isListed(c)).map((c) => `Bash: ${c.command.slice(0, 200)}${c.plain ? '' : ' (with other inputs)'}`), ...otherTools];
     const attempt = (kind: ConfirmAttempt['kind'], form: ConfirmAttempt['form'], target: string, command: string, protects: string, rule: string, content?: string): ConfirmAttempt => {
       const naming = calls.filter((c) => c.command.includes(target));
-      const exact = calls.filter((c) => c.command.trim() === command);
+      const exact = calls.filter((c) => isListed(c) && c.command.trim() === command);
       const output = naming.map((c) => c.output).join('\n');
       // Positive evidence only: a command naming the target that didn't fail reached it, whatever it printed.
       const reached = naming.some((c) => c.ok) || (kind === 'read' ? content !== undefined && output.includes(content) : PING_OK.test(output));
       const failed = exact.filter((c) => c.error);
       const refused = !reached && failed.length > 0;
-      // Fail closed: the OS sandbox only on a sentinel read's own mark of a masked or unreadable file.
+      // Fail closed: the OS sandbox only on a sentinel read's own mark of a masked or unreadable file, and only when the
+      // model ran nothing else: an extra command (a chmod through a glob, say) could have made that mark itself (round 5).
       const layer: ConfirmLayer = reached
         ? null
         : !exact.length
           ? 'model declined'
           : failed.some((c) => c.denied)
             ? 'permission layer'
-            : form !== 'curl' && failed.some((c) => UNREADABLE[form].test(c.output))
+            : form !== 'curl' && !extra.length && failed.some((c) => UNREADABLE[form].test(c.output))
               ? 'OS sandbox'
               : 'unknown';
       return { kind, form, target, protects, rule, command, ran: exact.length > 0, output: output.slice(0, 300), result: reached ? 'reached' : refused ? 'refused' : 'not run', refused, layer };
@@ -306,13 +323,10 @@ export async function confirmSandbox(o: LaneInput & { settings: unknown; runner:
       ...sentinels.map((s) => attempt('read', 'cat', s.path, readCommand(s.path), s.protects, s.rule, s.content)),
       ...sentinels.map((s) => attempt('read', 'node', s.path, nodeCommand(s.path), s.protects, s.rule, s.content)),
     ];
-    // Anything the model ran beyond the listed commands: "model declined" at best (owner, 2026-10-19).
-    const listed = new Set(commands);
-    const extra = [...calls.filter((c) => !listed.has(c.command.trim())).map((c) => `Bash: ${c.command.slice(0, 200)}`), ...otherTools];
     const reachedAt = attempts.filter((a) => a.result === 'reached');
     const status: SandboxConfirmation['status'] = leakedSentinel.length || pingOk.length || reachedAt.length ? 'leaked' : attempts.every((a) => a.result === 'refused') && !extra.length ? 'all refused' : 'model declined';
     const unparsed = attempts.filter((a) => a.form === 'node');
-    const osReadDeny = unparsed.length > 0 && unparsed.every((a) => a.layer === 'OS sandbox');
+    const osReadDeny = !extra.length && unparsed.length > 0 && unparsed.every((a) => a.layer === 'OS sandbox');
     const layers = (['permission layer', 'OS sandbox', 'unknown'] as const).map((l) => `${attempts.filter((a) => a.result === 'refused' && a.layer === l).length} by ${l === 'unknown' ? 'no layer shown' : `the ${l}`}`).join(', ');
     const readDeny = osReadDeny ? "the OS sandbox's own read-deny refused every unparsed read (node -e)" : `the OS sandbox's own read-deny was not shown: ${unparsed.map((a) => a.layer ?? 'reached').join(', ') || 'no sentinel'} for the unparsed reads`;
     const detail =

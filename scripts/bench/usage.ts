@@ -13,6 +13,9 @@
 // .claude/ and .git/ hooks and config only in and above the working folder. Any other grant of them, or a cwd outside
 // the task's folder, refuses the run. A path put into a rule must hold no glob or rule-syntax character
 // (RULE_UNSAFE): refused, never escaped, since the escaping rules of Claude Code's rule globs aren't documented.
+// The working folder is checked where it really is too (round 5): its realpath must be inside the task folder's, so a
+// link in the task folder (or a task folder that is a link) can't take a run's sandboxed Bash writes elsewhere.
+import { realpathSync } from 'node:fs';
 import { isAbsolute, posix } from 'node:path';
 import { classifyTransient, type AgentRunner, type RunRequest, type RunResult, type TerminalReason } from '../../src/runner.js';
 
@@ -33,9 +36,10 @@ function toolNames(entry: string): string[] {
 
 /**
  * Characters a path put into a permission rule may not hold: glob syntax (`*`, `?`, `[`, `]`, `{`, `}`, `!`), the rule's
- * own parentheses, a backslash, and the separators an allowed-tools list splits on (a comma, whitespace).
+ * own parentheses, a backslash, the separators an allowed-tools list splits on (a comma, whitespace), and every control
+ * character (NUL to US, and DEL).
  */
-export const RULE_UNSAFE = /[*?[\]{}!()\\,\s]/;
+export const RULE_UNSAFE = /[*?[\]{}!()\\,\s\x00-\x1f\x7f]/;
 
 /** Refuses (throws) unless `p` is a plain path a rule can hold: absolute, normalized, no trailing slash, not `/`. */
 function rulePath(p: string, what: string): string {
@@ -56,7 +60,7 @@ const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
  * a relative, home-relative or globbed path, a qualified Write, MultiEdit or NotebookEdit, or one in an entry that
  * names several tools.
  */
-export function scopeEditTools(allowed: readonly string[], workDir: string, cwd: string = workDir): string[] {
+export function scopeEditTools(allowed: readonly string[], workDir: string, cwd: string): string[] {
   rulePath(workDir, "the task's folder");
   rulePath(cwd, "the run's working folder");
   if (!within(cwd, workDir)) throw new Error(`not started: the run's working folder ${cwd} is outside the task's folder ${workDir}`);
@@ -164,14 +168,28 @@ export class TaskMeter implements AgentRunner {
     readonly workDir: string,
     private stop?: AbortSignal,
   ) {
-    scopeEditTools([], workDir);
+    rulePath(workDir, "the task's folder");
   }
   /**
-   * Throws (refuses the run, unstarted) when its working folder is outside the task's folder, or its allowed tools
-   * grant a file-writing tool outside that working folder.
+   * Throws (refuses the run, unstarted) when its working folder is missing, outside the task's folder by path or where
+   * it really is (realpath: a link can't lead out), or its allowed tools grant a file-writing tool outside that
+   * working folder.
    */
   async run(req: RunRequest): Promise<RunResult> {
+    // The cwd as given, never a default: a missing one is refused by rulePath.
     const allowedTools = scopeEditTools(req.allowedTools, this.workDir, req.cwd);
+    const real = (p: string, what: string) => {
+      try {
+        return realpathSync(p);
+      } catch (e) {
+        throw new Error(`not started: ${what} ${p} can't be resolved (${(e as NodeJS.ErrnoException).code ?? 'error'})`);
+      }
+    };
+    const realCwd = real(req.cwd, "the run's working folder");
+    const realWork = real(this.workDir, "the task's folder");
+    // The driver builds the task folder on the bench root's real path (paths.ts benchRoot), so it is never a link.
+    if (realWork !== this.workDir) throw new Error(`not started: the task's folder ${this.workDir} is really ${realWork}: a task folder through a link is refused`);
+    if (!within(realCwd, realWork)) throw new Error(`not started: the run's working folder ${req.cwd} is really ${realCwd}, outside the task's folder ${this.workDir} (really ${realWork})`);
     req = { ...req, allowedTools };
     const refused = (reason: TerminalReason, detail: string): RunResult => ({ reason, detail, costUsd: 0, turns: 0, model: req.model });
     if (this.m.limited) return refused('rate_limited', `not started: the bench stopped at a usage limit (${this.m.limited.detail})`);

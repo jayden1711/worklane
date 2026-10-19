@@ -78,9 +78,10 @@ interface FakeClaude {
   /**
    * The sandbox confirmation's session: every command refused (default: each cat by the permission layer, each node -e
    * read by the OS sandbox's /dev/null mask), every read refused by the permission layer (`permission`), a sentinel's
-   * content read (the sandbox let the read through), a socket's _ping answered OK, or the model running nothing.
+   * content read (the sandbox let the read through), a socket's _ping answered OK, the model running nothing, or
+   * (`gate`) the model's own chmod through globs first, then each node -e read failing EACCES.
    */
-  sandboxCheck?: 'refused' | 'permission' | 'leak' | 'ping' | 'declined';
+  sandboxCheck?: 'refused' | 'permission' | 'leak' | 'ping' | 'declined' | 'gate';
 }
 
 /** A stand-in claude in a fresh folder (with the bench user's home, `home`), and what it was asked. */
@@ -123,15 +124,20 @@ function fakeClaude(o: FakeClaude = {}) {
       "  const commands = prompt.split('\\n').filter((l) => /^\\d+\\. /.test(l)).map((l) => l.replace(/^\\d+\\. /, ''));",
       "  if (mode === 'declined') out({ type: 'assistant', message: { content: [{ type: 'text', text: 'I will not run these commands.' }] } });",
       '  const denials = [];',
+      // gate: the model first runs its own chmod through globs (naming no target), so each node -e read fails EACCES.
+      "  if (mode === 'gate') {",
+      "    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x0', name: 'Bash', input: { command: 'chmod 000 ~/.n* ~/.p* ~/.claude/.b*' } }] } });",
+      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x0', content: '', is_error: false }] } });",
+      '  }',
       "  if (mode !== 'declined') commands.forEach((command, i) => {",
       // The path is the command's last single-quoted word (node -e's script has quoted words of its own).
       "    const quoted = command.match(/'[^']+'/g) || [];",
       "    const path = (quoted[quoted.length - 1] || '').slice(1, -1);",
       "    const byPermission = command.startsWith('cat') ? mode === 'refused' || mode === 'permission' : command.startsWith('node') && mode === 'permission';",
       "    if (byPermission) denials.push({ tool_name: 'Bash', tool_use_id: 'c' + i, tool_input: { command } });",
-      "    const result = command.startsWith('curl') ? (mode === 'ping' ? 'OK' : \"curl: (7) Couldn't connect to server\") : mode === 'leak' ? fs.readFileSync(path, 'utf8') : byPermission ? 'Permission to use Bash with command ' + command + ' has been denied.' : " + JSON.stringify(MASKED_TEXT) + ';',
+      "    const result = mode === 'gate' ? (command.startsWith('node') ? \"Error: EACCES: permission denied, open '\" + path + \"'\" : 'error') : command.startsWith('curl') ? (mode === 'ping' ? 'OK' : \"curl: (7) Couldn't connect to server\") : mode === 'leak' ? fs.readFileSync(path, 'utf8') : byPermission ? 'Permission to use Bash with command ' + command + ' has been denied.' : " + JSON.stringify(MASKED_TEXT) + ';',
       "    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'c' + i, name: 'Bash', input: { command } }] } });",
-      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c' + i, content: result, is_error: mode === 'refused' || mode === 'permission' } ] } });",
+      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c' + i, content: result, is_error: mode === 'refused' || mode === 'permission' || mode === 'gate' } ] } });",
       '  });',
       "  out({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 3, total_cost_usd: 0.02, usage: { input_tokens: 300, output_tokens: 40 }, permission_denials: denials });",
       '  process.exit(0);',
@@ -1142,7 +1148,15 @@ function checkLane(withClaudeDir = true) {
 }
 
 /** What Claude Code did with one listed command: the command it really ran, what came back, and whether as an error. */
-type Answer = { command: string; output: string; is_error: boolean; /** listed in the result line's permission_denials */ denied?: boolean } | null;
+type Answer = {
+  command: string;
+  output: string;
+  is_error: boolean;
+  /** listed in the result line's permission_denials */
+  denied?: boolean;
+  /** The Bash call's whole input (default: just the command). */
+  input?: Record<string, unknown>;
+} | null;
 
 /**
  * A stand-in for the check's one model call: streams a Bash call and its result per listed command, then any `extra`
@@ -1157,7 +1171,7 @@ function checkRunner(answer: (command: string) => Answer, seen?: (req: RunReques
       listed.forEach((c, i) => {
         const a = answer(c);
         if (!a) return;
-        req.onStreamLine?.({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${i}`, name: 'Bash', input: { command: a.command } }] } });
+        req.onStreamLine?.({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${i}`, name: 'Bash', input: a.input ?? { command: a.command } }] } });
         req.onStreamLine?.({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `c${i}`, content: a.output, is_error: a.is_error }] } });
         if (a.denied) denials.push({ tool_name: 'Bash', tool_use_id: `c${i}`, tool_input: { command: a.command } });
       });
@@ -1285,7 +1299,8 @@ test("acceptance: a task's agents get Edit, Write, MultiEdit and NotebookEdit on
   // The meter itself, on fixtures: what passes and what is refused.
   const seen: string[][] = [];
   const inner: AgentRunner = { run: async (req) => (seen.push(req.allowedTools), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
-  const wd = '/srv/bench/runs/r1/t01';
+  // A real folder (round 5: a run's working folder is checked where it really is, so it must exist).
+  const wd = taskFolder();
   const t = new UsageMeter(inner, 40).task(15, wd);
   await t.run({ ...runReq(wd), allowedTools: [`Edit(/${wd}/repo/**)`, `Edit(/${wd})`, 'Bash(git status)'] });
   assert.deepEqual(seen[0], [`Edit(/${wd}/repo/**)`, `Edit(/${wd})`, 'Bash(git status)']);
@@ -1295,10 +1310,17 @@ test("acceptance: a task's agents get Edit, Write, MultiEdit and NotebookEdit on
   assert.equal(seen.length, 1, 'no refused run started');
 });
 
+/** A real task folder, `<tmp>/runs/r1/t01`, with a `repo` subfolder; its real path. */
+function taskFolder(): string {
+  const wd = join(realpathSync(mkdtempSync(join(tmpdir(), 'task-'))), 'runs', 'r1', 't01');
+  mkdirSync(join(wd, 'repo'), { recursive: true });
+  return wd;
+}
+
 test("round 4: a run's file-writing tools reach only its own working folder, which must be in the task's folder", async () => {
   const seen: { cwd: string; tools: string[] }[] = [];
   const inner: AgentRunner = { run: async (req) => (seen.push({ cwd: req.cwd, tools: req.allowedTools }), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
-  const wd = '/srv/bench/runs/r1/t01';
+  const wd = taskFolder();
   const t = new UsageMeter(inner, 40).task(15, wd);
   // A run in a subfolder: a bare grant is scoped to that subfolder, not the whole task folder.
   await t.run({ ...runReq(`${wd}/repo`), allowedTools: ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'] });
@@ -1310,7 +1332,7 @@ test("round 4: a run's file-writing tools reach only its own working folder, whi
     await assert.rejects(t.run({ ...runReq(`${wd}/repo`), allowedTools: [bad] }), /file-writing tools run outside the sandbox/, bad);
   }
   // A working folder outside the task's folder, or not a plain absolute path: refused, whatever the tools.
-  for (const cwd of ['/srv/bench/runs/r1/t02', '/srv/bench/runs/r1', `${wd}x`, `${wd}/../t02`, 'repo', `${wd}/repo/`]) {
+  for (const cwd of [join(dirname(wd), 't02'), dirname(wd), `${wd}x`, `${wd}/../t02`, 'repo', `${wd}/repo/`]) {
     await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Read'] }), /working folder/, cwd);
   }
   assert.equal(seen.length, 2, 'no refused run started');
@@ -1326,6 +1348,50 @@ test('round 4: a path put into a permission rule may hold no glob or rule charac
   for (const cwd of ['/srv/bench/runs/r1/t01/re*po', '/srv/bench/runs/r1/t01/[r]epo', '/srv/bench/runs/r1/t01/a b']) {
     await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /working folder/, cwd);
   }
+});
+
+test('round 5: control characters are refused in a path put into a permission rule', async () => {
+  const inner: AgentRunner = { run: async (req) => ({ reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const meter = new UsageMeter(inner, 40);
+  for (const ch of ['\x00', '\x01', '\x1b', '\x1f', '\x7f']) {
+    assert.throws(() => meter.task(15, `/srv/bench/t${ch}01`), /task's folder/, JSON.stringify(ch));
+  }
+  // In the run's working folder too, refused before anything starts (the folder exists, so only the character refuses).
+  const wd = taskFolder();
+  const t = meter.task(15, wd);
+  for (const ch of ['\x01', '\x1b', '\x7f']) {
+    const cwd = join(wd, `a${ch}b`);
+    mkdirSync(cwd);
+    await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /working folder/, JSON.stringify(ch));
+  }
+});
+
+test("round 5: a run's working folder must really be inside its task's folder: a link out, a missing or unset cwd is refused", { skip: process.platform === 'win32' && 'POSIX links' }, async () => {
+  const seen: string[] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push(req.cwd), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'scope-')));
+  const task = join(base, 'task');
+  const outside = join(base, 'outside');
+  mkdirSync(task);
+  mkdirSync(outside);
+  // The reviewer's probe-scope cases: a cwd in the task folder that is a link out of it; a task folder that is a link.
+  symlinkSync(outside, join(task, 'repo'));
+  await assert.rejects(new UsageMeter(inner, 40).task(15, task).run({ ...runReq(join(task, 'repo')), allowedTools: ['Edit'] }), /working folder .* is really .*outside the task's folder/);
+  symlinkSync(outside, join(base, 'tasklink'));
+  mkdirSync(join(outside, 'repo'));
+  const linked = new UsageMeter(inner, 40).task(15, join(base, 'tasklink'));
+  for (const cwd of [join(base, 'tasklink'), join(base, 'tasklink', 'repo')]) {
+    await assert.rejects(linked.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /task's folder .* is really .*a task folder through a link is refused/, cwd);
+  }
+  // A missing cwd, and none at all (only a cast reaches this; no default is taken).
+  const t = new UsageMeter(inner, 40).task(15, task);
+  mkdirSync(join(task, 'real'));
+  await assert.rejects(t.run({ ...runReq(join(task, 'gone')), allowedTools: ['Read'] }), /can't be resolved \(ENOENT\)/);
+  await assert.rejects(t.run({ ...runReq(task), cwd: undefined as unknown as string, allowedTools: ['Read'] }), /working folder undefined/);
+  assert.equal(seen.length, 0, 'none of these started');
+  // A real folder inside: it runs.
+  await t.run({ ...runReq(join(task, 'real')), allowedTools: ['Edit'] });
+  assert.deepEqual(seen, [join(task, 'real')]);
 });
 
 /** A sentinel read's real outcome: the listed command run by bash, `from` swapped for `to` (a mask stand-in). */
@@ -1405,4 +1471,53 @@ test('round 4: check D is "all refused" only when the model ran nothing but the 
   // Any other tool too.
   const viaRead = await run([{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x2', name: 'Read', input: { file_path: '/etc/hostname' } }] } }]);
   assert.equal(viaRead.status, 'model declined');
+});
+
+test('round 5: the model cannot set the "OS sandbox" layer: with any extra call, no attempt gets it and os_sandbox_read_deny is false', posix, async () => {
+  // The reviewer's probe-gate case, on confirmSandbox: an extra chmod through globs (naming no target), then each
+  // node -e read failing EACCES, which that chmod would cause.
+  const { home, o } = checkLane();
+  const extra = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x0', name: 'Bash', input: { command: 'chmod 000 ~/.n* ~/.p* ~/.claude/.b*' } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x0', content: '', is_error: false }] } },
+  ];
+  const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner((c) => ({ command: c, output: c.startsWith('node ') ? `Error: EACCES: permission denied, open '${/'([^']+)'$/.exec(c)?.[1]}'` : 'error', is_error: true }), undefined, extra) });
+  assert.equal(r.status, 'model declined');
+  assert.ok(r.attempts.every((a) => (a as { layer?: string }).layer !== 'OS sandbox'), JSON.stringify(r.attempts.map((a) => (a as { layer?: string }).layer)));
+  assert.equal((r as { os_sandbox_read_deny?: boolean }).os_sandbox_read_deny, false);
+  // Through the driver: sandbox.json, results.json and the aggregate record the same.
+  const m = machine({ sandboxCheck: 'gate' });
+  const agg = await runBench(m.opts(engineTask));
+  const dir = join(m.layout.runs, 'r1');
+  for (const [where, c] of [
+    ['sandbox.json', (JSON.parse(readFileSync(join(dir, 'sandbox.json'), 'utf8')) as { confirmation: Record<string, unknown> }).confirmation],
+    ['results.json', (JSON.parse(readFileSync(join(dir, 'results.json'), 'utf8')) as { sandbox: { confirmation: Record<string, unknown> } }).sandbox.confirmation],
+    ['the aggregate', agg.sandbox!.confirmation],
+  ] as const) {
+    assert.equal(c.status, 'model declined', where);
+    assert.equal(c.os_sandbox_read_deny, false, where);
+    assert.ok((c.attempts as { layer: string }[]).every((a) => a.layer !== 'OS sandbox'), where);
+  }
+});
+
+test('round 5: a listed command sent with other Bash inputs is an extra call, not the listed command', posix, async () => {
+  const withInputs = (more: Record<string, unknown>) => (c: string): Answer => ({ command: c, output: c.startsWith('node ') ? MASKED_TEXT : 'error', is_error: true, input: { command: c, ...more } });
+  for (const more of [{ timeout: 1 }, { run_in_background: true }, { dangerouslyDisableSandbox: true }]) {
+    const { home, o } = checkLane();
+    const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(withInputs(more)) });
+    assert.equal(r.status, 'model declined', JSON.stringify(more));
+    assert.ok(r.attempts.every((a) => a.result === 'not run'), `${JSON.stringify(more)}: no attempt counts as the listed command`);
+    assert.equal((r as { os_sandbox_read_deny?: boolean }).os_sandbox_read_deny, false);
+  }
+  // A description is fine: that is still the listed command.
+  const { home, o } = checkLane();
+  const d = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(withInputs({ description: 'sandbox check' })) });
+  assert.equal(d.status, 'all refused');
+});
+
+test('round 5: a server_tool_use block counts as an extra call', posix, async () => {
+  const { home, o } = checkLane();
+  const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(failsAsListed, undefined, [{ type: 'assistant', message: { content: [{ type: 'server_tool_use', id: 's1', name: 'web_fetch', input: { url: 'http://localhost/' } }] } }]) });
+  assert.equal(r.status, 'model declined');
+  assert.deepEqual((r as { extra_calls?: string[] }).extra_calls, ['server_tool_use: web_fetch']);
 });
