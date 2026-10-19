@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +12,9 @@ import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { processIdentity } from '../src/os/index.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
+import * as osAdapter from '../src/os/index.js';
 import { autoMergeKilled, POLICY_ROOT_DIR, renameForwardPath } from '../src/policy-kill.js';
+import * as kill from '../src/policy-kill.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { repoRoot } from './helpers.js';
 
@@ -301,7 +303,8 @@ test("while a rename runs, an OFF given to the old name at any step (before or a
   }
   // instance-rename.sh writes it before its first step, and removes it after the last (the old name's removal) and on --abort.
   const rename = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh')], { encoding: 'utf8' }).stdout;
-  assert.match(rename, /\nrename_forward "\$old" "\$new"\n[\s\S]*?\nfor s in "\$\{STEPS\[@\]\}"; do run_step "\$s"; done\n[^\n]*\nrename_forward_done "\$old"\n/);
+  // (Round 8: a rerun once the old name's removal is done doesn't write it again.)
+  assert.match(rename, /\ndone_step remove \|\| rename_forward "\$old" "\$new"\n[\s\S]*?\nfor s in "\$\{STEPS\[@\]\}"; do run_step "\$s"; done\n[^\n]*\nrename_forward_done "\$old"\n/);
   // Round 7: --abort ends the forward FIRST, then moves the new name's switches back (no new space), then the new name
   // goes. (Through ae00a348 it carried back first and ended the forward last: an OFF in between said done while the
   // old name came back on.)
@@ -576,4 +579,115 @@ test("doctor reports root's forward record of an instance (a rename stopped, or 
   const c = policyRootChecks(instances, { machine: true }).find((x) => x.name === `rename record ${name}`);
   assert.equal(c?.level, 'warn');
   assert.match(c!.detail, /fwddoc is being renamed to fwdnew, so auto_merge off for fwddoc turns fwdnew's off too.*--abort/);
+});
+
+test('--abort changes nothing while anything of the new name can run: its units are read from systemd, and a systemctl or registry that can\'t answer counts as "can run" (#726 round 8)', { skip }, () => {
+  const { run } = renameDir('canrun');
+  // systemd stand-ins: which of zed's units it knows, and the template instance's state.
+  const sd = (load: string, mcp: string) => `systemctl() { case "$*" in *LoadState*" worklane-zed.service") echo ${load} ;; *LoadState*) echo not-found ;; *ActiveState*) echo ${mcp} ;; esac; }; instance_in_flight() { :; };`;
+  const lines = (script: string) => {
+    const r = run(script);
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim();
+  };
+  assert.equal(lines(`${sd('not-found', 'inactive')} instance_can_run zed`), '', 'nothing installed, nothing running: nothing');
+  assert.match(lines(`${sd('loaded', 'inactive')} instance_can_run zed`), /^unit worklane-zed\.service is installed \(loaded\)$/, "service.sh's coordinator unit (a services step that failed after it): can run");
+  assert.match(lines(`${sd('not-found', 'active')} instance_can_run zed`), /^unit worklane-mcp@zed\.service: active$/);
+  assert.equal(lines(`${sd('not-found', 'failed')} instance_can_run zed`), '');
+  assert.equal(lines('systemctl() { return 1; }; instance_in_flight() { :; }; instance_can_run zed').split('\n').length, 4, 'a systemctl that fails: every unit counts');
+  assert.match(lines('node() { return 1; }; instance_in_flight() { :; }; instance_can_run zed'), /registry of zed's units can't be read/);
+  assert.match(lines(`${sd('not-found', 'inactive')} instance_in_flight() { echo "process 42 (node) as wl-zed"; }; instance_can_run zed`), /process 42/, 'anything of it in flight');
+  // instance-rename.sh: --abort refuses on it before anything changes (before the forward ends), and a failed step
+  // offers --abort only when nothing of the new name can run. (Through b9d89224 it ran, and took a running new
+  // name's switches.)
+  const rename = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh')], { encoding: 'utf8' }).stdout;
+  const abortAt = rename.indexOf('if [ -n "$abort" ]; then');
+  const abortBlock = rename.slice(abortAt, rename.indexOf('\nfi\n', abortAt));
+  const gate = abortBlock.indexOf('running="$(instance_can_run "$new")"');
+  assert.ok(gate > 0 && gate < abortBlock.indexOf('rename_forward_done') && gate < abortBlock.indexOf('move_auto_merge_off'), 'the gate comes before the forward ends and the switches move');
+  assert.match(abortBlock.slice(gate), /^running="\$\(instance_can_run "\$new"\)"\n {2}if \[ -n "\$running" \]; then\n[\s\S]*?\n {4}exit 1\n {2}fi\n/);
+  assert.match(rename, /if ! done_step services && \[ -z "\$\(instance_can_run "\$new"\)" \]; then echo "Or undo it all/);
+});
+
+test('"can still start" counts only a definite "no such user" as absent: a lookup that fails or times out is "can start", so a failed arm there is a visible failure (#726 round 8)', { skip }, () => {
+  const os = osAdapter as Record<string, unknown>;
+  const presence = os.userPresence as ((u: string, t?: number) => string) | undefined;
+  assert.equal(typeof presence, 'function', 'userPresence (through b9d89224 only userUid, which reads any error as no user)');
+  const bin = realpathSync(mkdtempSync(join(tmpdir(), 'getent-')));
+  const stub = (body: string) => {
+    writeFileSync(join(bin, 'getent'), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(bin, 'getent'), 0o755);
+  };
+  const path = process.env.PATH;
+  try {
+    process.env.PATH = bin;
+    stub('echo "wl-x:x:1001:1001::/srv/example:/bin/sh"');
+    assert.equal(presence!('wl-x'), 'exists');
+    stub('exit 2');
+    assert.equal(presence!('wl-x'), 'absent', 'getent: not found');
+    stub('exit 1');
+    assert.equal(presence!('wl-x'), 'unknown', 'a lookup error');
+    stub('exec sleep 5');
+    assert.equal(presence!('wl-x', 200), 'unknown', 'a timeout');
+    stub('echo "someone-else:x:1:1::/:/bin/sh"');
+    assert.equal(presence!('wl-x'), 'unknown');
+    process.env.PATH = join(bin, 'none');
+    assert.equal(presence!('wl-x'), 'unknown', 'no getent at all');
+  } finally {
+    process.env.PATH = path;
+  }
+  // setPolicy: a name whose lookup can't tell, no spare, a full filesystem: a visible failure, never done.
+  const { T } = renameDir('presence');
+  const unknown: PolicyRootDeps = { presence: () => 'unknown', markerDir: T };
+  const r = offOnFullDisk('pres', unknown);
+  assert.ok(r instanceof Error && /pres's auto_merge switch couldn't be armed/.test(r.message), `got ${String(r)}`);
+  // During a rename, the new name's spare gone and its lookup failing: fails naming it (the old name is armed).
+  const { T: T2, run: run2 } = renameDir('presence-fwd');
+  assert.equal(run2('rename_forward presa presb').status, 0);
+  run2('rm -f "$POLICY_ROOT_DIR/presb".auto-merge-*');
+  const r2 = offOnFullDisk('presa', { presence: (u) => (u === 'wl-presb' ? 'unknown' : 'exists'), markerDir: T2 });
+  assert.ok(r2 instanceof Error && /presb's auto_merge switch couldn't be armed/.test(r2.message), `got ${String(r2)}`);
+  assert.equal(autoMergeKilled('presa', T2), true);
+  // Only a definite "absent" lets it say done there (the new name gone).
+  assert.equal(offOnFullDisk('presa', { presence: (u) => (u === 'wl-presb' ? 'absent' : 'exists'), markerDir: T2 }), 'done');
+});
+
+test("a forward record that can't be read, or names no other instance, is never read as \"no rename\": OFF arms the name given and fails visibly, and doctor fails (#726 round 8)", { skip }, () => {
+  for (const [what, make] of [
+    ['garbled', (p: string) => writeFileSync(p, '../x\n')],
+    ['its own name', (p: string) => writeFileSync(p, 'recg\n')],
+    ['unreadable (a directory)', (p: string) => mkdirSync(p)],
+  ] as const) {
+    const { T } = renameDir('badrec');
+    writeFileSync(join(T, 'recg.auto-merge-spare'), '');
+    make(join(T, 'recg.rename-to'));
+    const r = offOnFullDisk('recg', { presence: () => 'exists', markerDir: T });
+    assert.ok(r instanceof Error && /recg\.rename-to can't be used/.test(r.message), `${what}: got ${String(r)}`);
+    assert.equal(autoMergeKilled('recg', T), true, `${what}: the name given is armed all the same`);
+  }
+  const k = kill as Record<string, unknown>;
+  assert.equal(typeof k.forwardRecord, 'function');
+  // doctor: a failure, not "no record".
+  const name = 'baddoc';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  writeFileSync(join(m.dir, 'instance.yaml'), `version: 1\nname: ${name}\nrepos:\n  - path: "x"\n    repo: example/${name}\n`);
+  writeFileSync(renameForwardPath(name), 'BAD NAME\n');
+  const c = policyRootChecks(join(m.home, '.local', 'state', BRAND.cli, 'instances'), { machine: true }).find((x) => x.name === `rename record ${name}`);
+  assert.equal(c?.level, 'fail');
+  assert.match(c!.detail, /can't be used .*auto_merge off for baddoc reports a failure/);
+});
+
+test("a carry or move of root's switches fails, stopping its step, when root's directory is there but can't be listed (#726 round 8)", { skip: (skip || me === 0) && 'needs a non-root user (mode 000 binds root nothing)' }, () => {
+  const { T, run } = renameDir('unlistable');
+  writeFileSync(join(T, 'cara.auto-merge-off.1'), '');
+  chmodSync(T, 0o000);
+  try {
+    assert.notEqual(run('carry_auto_merge_off cara carb').status, 0, 'carry: never "nothing to carry"');
+    assert.notEqual(run('move_auto_merge_off cara carb').status, 0, 'move: the same');
+  } finally {
+    chmodSync(T, 0o755);
+  }
+  assert.equal(run('carry_auto_merge_off cara carb').status, 0);
+  assert.equal(autoMergeKilled('carb', T), true);
 });

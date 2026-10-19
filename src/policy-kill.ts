@@ -137,17 +137,19 @@ export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR): void {
   }
 }
 
-/** Where a rename in progress forwards an instance's auto_merge off (instance-rename.sh writes it first, removes it last). */
+/** Root's forward record of a rename: written first; gone on --abort, with either name's removal, and at the end. */
 export const renameForwardPath = (instance: string, dir = POLICY_ROOT_DIR) => join(dir, `${instance}.rename-to`);
 
-/** The name root's forward record of `instance` gives (a rename, or one left behind), or null: no lock, no parse. */
-export function renamingTo(instance: string, dir = POLICY_ROOT_DIR): string | null {
+/** Root's forward record of `instance`: null only when there is none (ENOENT), else the name it gives or its problem. */
+export function forwardRecord(instance: string, dir = POLICY_ROOT_DIR): null | { to: string } | { problem: string } {
+  let text: string;
   try {
-    const to = readFileSync(renameForwardPath(instance, dir), 'utf8').trim();
-    return /^[a-z][a-z0-9-]{0,40}$/.test(to) && to !== instance ? to : null;
-  } catch {
-    return null;
+    text = readFileSync(renameForwardPath(instance, dir), 'utf8');
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : { problem: (e as Error).message };
   }
+  const to = text.trim();
+  return /^[a-z][a-z0-9-]{0,40}$/.test(to) && to !== instance ? { to } : { problem: `it names no other instance (${JSON.stringify(to.slice(0, 40))})` };
 }
 
 /**
@@ -188,10 +190,10 @@ function armOne(instance: string, dir: string, at: Date): void {
   fsyncPath(dir);
 }
 
-/** An OFF that couldn't arm a name that can still start: each such name, with why, so nothing reports it done. */
+/** An OFF that couldn't arm a name that can still start (or tell where a rename forwards it): never reported done. */
 export class KillSwitchError extends Error {
-  constructor(readonly stillOn: readonly { name: string; why: string }[]) {
-    super(stillOn.map(({ name, why }) => `${name}'s auto_merge switch couldn't be armed (${why}), so ${name} can still merge on its own: free space in ${POLICY_ROOT_DIR}, then run \`policy set ${name} auto_merge off\` as root again`).join('; '));
+  constructor(readonly stillOn: readonly { name: string; why: string }[], notes: readonly string[] = []) {
+    super([...stillOn.map(({ name, why }) => `${name}'s auto_merge switch couldn't be armed (${why}), so ${name} can still merge on its own: free space in ${POLICY_ROOT_DIR}, then run \`policy set ${name} auto_merge off\` as root again`), ...notes].join('; '));
   }
 }
 
@@ -210,7 +212,8 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
   } catch (e) {
     dirWhy = (e as Error).message; // every arm still tried
   }
-  const forward = renamingTo(instance, dir);
+  const rec = forwardRecord(instance, dir);
+  const forward = rec && 'to' in rec ? rec.to : null;
   const names = forward ? [instance, forward] : [instance];
   for (const name of names) {
     try {
@@ -233,7 +236,8 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
       return true; // can't tell: it can start
     }
   });
-  if (stillOn.length) throw new KillSwitchError(stillOn);
+  const notes = rec && 'problem' in rec ? [`root's ${renameForwardPath(instance, dir)} can't be used (${rec.problem}): if a rename of ${instance} is under way, run \`policy set <its new name> auto_merge off\` as root too, then fix or remove that file`] : [];
+  if (stillOn.length || notes.length) throw new KillSwitchError(stillOn, notes);
 }
 
 /**

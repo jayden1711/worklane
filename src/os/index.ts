@@ -354,6 +354,18 @@ export function userUid(user: string): number | null {
   }
 }
 
+/** Whether an OS user exists: 'absent' only on `getent passwd`'s "not found" (exit 2); any other failure 'unknown'. */
+export function userPresence(user: string, timeoutMs = 5_000): 'exists' | 'absent' | 'unknown' {
+  if (process.platform === 'win32') return 'unknown';
+  try {
+    const out = execFileSync('getent', ['passwd', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: timeoutMs });
+    return out.split(':')[0] === user ? 'exists' : 'unknown';
+  } catch (e) {
+    const x = e as { status?: number | null; signal?: string | null };
+    return x.status === 2 && !x.signal ? 'absent' : 'unknown';
+  }
+}
+
 /**
  * Who owns a file and who besides the owner may touch it (POSIX): 'missing', 'hidden' when this user can't even
  * stat it (a directory it may not enter), or its owner uid and whether group or others have any permission. Never
