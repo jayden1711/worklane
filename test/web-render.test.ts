@@ -75,6 +75,8 @@ interface Render {
   renderIgnored(data: unknown): string;
   renderUpdaterSetup(data: unknown, review?: unknown): string;
   renderSetup(data: unknown): string;
+  CLAUDE_CREDENTIAL_NAMES?: readonly string[];
+  isClaudeCredential?(name: string): boolean;
   renderAddProject(data: unknown, picker?: unknown): string;
   renderClaudeAccount(data: unknown, now?: number, scope?: { current: string | null; all: boolean; instances: (string | null)[] } | null): string;
   renderClaudeAccountSet(state: unknown): string;
@@ -2148,20 +2150,42 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
-test("#711: an open Claude credential ask an earlier version left (add-project's claude-token, any of the server's former names) draws no box in the Setup console, even to an owner who may answer it; root's commands instead", () => {
-  const base = { id: 'ask-000000000009', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-12T10:00:00Z', createdBy: 'add-project', cancelled: null, kind: 'paste_secret', where: "wl-demo-agent's Claude login", status: 'open', answer: null, canAnswer: true, request: null };
-  assert.ok(CLAUDE_CREDENTIAL_NAMES.has('claude-token'));
-  for (const credential of [...CLAUDE_CREDENTIAL_NAMES, 'claude_other-token']) {
-    const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...base, credential }] });
-    assert.match(html, /data-testid="ask-card"/, credential);
-    assert.doesNotMatch(html, /<input|<textarea|type="password"|data-testid="ask-secret"/, `${credential}: no field a Claude credential could be typed into`);
-    assert.doesNotMatch(html, /credential store|Waiting on the owner/, `${credential}: not offered as a paste, nor as the owner's to answer`);
-    assert.match(html, /data-testid="ask-claude-root"[\s\S]*?never takes a Claude credential[\s\S]*?data-testid="ask-claude-login-command"[^>]*>sudo -u wl-demo-agent -i claude auth login<[\s\S]*?claude setup-token[\s\S]*?data-testid="ask-claude-credentials-command"[^>]*>sudo bash scripts\/setup\/credentials\.sh demo claude</, credential);
+const CLAUDE_ASK = { id: 'ask-000000000009', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-12T10:00:00Z', createdBy: 'add-project', cancelled: null, kind: 'paste_secret', where: "wl-demo-agent's Claude login", status: 'open', answer: null, canAnswer: true, request: null };
+/** An open ask for `credential` that the owner may answer draws no box in the Setup console, and root's commands instead. */
+function drawsNoClaudeBox(credential: string) {
+  const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...CLAUDE_ASK, credential }] });
+  assert.match(html, /data-testid="ask-card"/, credential);
+  assert.doesNotMatch(html, /<input|<textarea|type="password"|data-testid="ask-secret"/, `${credential}: no field a Claude credential could be typed into`);
+  assert.doesNotMatch(html, /credential store|Waiting on the owner/, `${credential}: not offered as a paste, nor as the owner's to answer`);
+  assert.match(html, /data-testid="ask-claude-root"[\s\S]*?never takes a Claude credential[\s\S]*?data-testid="ask-claude-login-command"[^>]*>sudo -u wl-demo-agent -i claude auth login<[\s\S]*?claude setup-token[\s\S]*?data-testid="ask-claude-credentials-command"[^>]*>sudo bash scripts\/setup\/credentials\.sh demo claude</, credential);
+}
+
+for (const credential of ['claude-token', 'claude-account-token', 'claude-profile-token', 'claude-login-code']) {
+  test(`#711: an open ${credential} ask an earlier version left draws no box in the Setup console, even to an owner who may answer it; root's commands instead`, () => {
+    assert.ok(CLAUDE_CREDENTIAL_NAMES.has(credential), `${credential} is one of the server's names`);
+    drawsNoClaudeBox(credential);
+  });
+}
+
+test("#711: every name in the server's CLAUDE_CREDENTIAL_NAMES draws no box (a name added there is covered)", () => {
+  for (const credential of CLAUDE_CREDENTIAL_NAMES) drawsNoClaudeBox(credential);
+});
+
+test("#711: the page's Claude credential names are exactly the server's CLAUDE_CREDENTIAL_NAMES, so the two can't drift", () => {
+  assert.ok(Array.isArray(r.CLAUDE_CREDENTIAL_NAMES), 'web/src/api.ts exports CLAUDE_CREDENTIAL_NAMES');
+  const page = [...r.CLAUDE_CREDENTIAL_NAMES!];
+  assert.equal(new Set(page).size, page.length, 'no name twice');
+  assert.deepEqual([...page].sort(), [...CLAUDE_CREDENTIAL_NAMES].sort());
+  for (const name of CLAUDE_CREDENTIAL_NAMES) assert.equal(r.isClaudeCredential!(name), true, name);
+});
+
+test("#711: a secret whose name only looks like a Claude credential (claude_mcp_key, claude-mcp-key, claude_other-token) still draws its password field; any other secret too", () => {
+  for (const credential of ['claude_mcp_key', 'claude-mcp-key', 'claude_other-token', 'Claude-Token', 'intake-discord']) {
+    const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...CLAUDE_ASK, credential }] });
+    const secret = html.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
+    assert.match(secret, /type="password"/, `${credential}: its password field`);
+    assert.doesNotMatch(html, /ask-claude-root/, `${credential}: not root's Claude login commands`);
   }
-  // Any other secret is still a password field.
-  const other = r.renderSetup({ role: 'owner', login: 'olive', asks: [{ ...base, credential: 'intake-discord' }] });
-  assert.match(other.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '', /type="password"/);
-  assert.doesNotMatch(other, /ask-claude-root/);
 });
 
 test("Add project: enabled for a machine owner on an allowed device; otherwise disabled, saying why", () => {

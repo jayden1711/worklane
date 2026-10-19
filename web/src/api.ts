@@ -1000,11 +1000,18 @@ export type Ask = {
   | { kind: 'root_step'; command: string; args: string[]; allowed: boolean; refusal: string | null }
 );
 /**
- * A Claude credential's name, as an earlier version's ask named it (src/claude-credential-guard.ts' CLAUDE_CREDENTIAL_NAMES:
- * add-project's claude-token, a switch's, a new profile's, a relayed sign-in's code), or any name of that family. No
- * page draws a box for one (issue #711): such an ask, left open by an earlier version, shows root's commands instead.
+ * The Claude credentials' names, as an earlier version's asks named them: add-project's claude-token, a switch's, a new
+ * profile's, a relayed sign-in's code. Exactly the server's CLAUDE_CREDENTIAL_NAMES (src/claude-credential-guard.ts),
+ * the asks the server refuses a paste to; a test checks the two lists are equal.
  */
-export const isClaudeCredential = (name: string) => /^claude[-_]/i.test(name);
+export const CLAUDE_CREDENTIAL_NAMES: readonly string[] = ['claude-token', 'claude-account-token', 'claude-profile-token', 'claude-login-code'];
+/**
+ * Whether a credential is one of those four exact names. No page draws a box for one (issue #711): such an ask, left
+ * open by an earlier version, shows root's commands instead. Any other name keeps its password field, a similar one
+ * (`claude_mcp_key`, `claude-mcp-key`) included: the server still takes a paste to it, and root's Claude login
+ * commands would be the wrong instructions for it.
+ */
+export const isClaudeCredential = (name: string) => CLAUDE_CREDENTIAL_NAMES.includes(name);
 export interface AsksView {
   role: 'owner' | 'writer' | 'viewer';
   login: string;
