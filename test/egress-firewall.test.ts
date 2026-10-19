@@ -385,3 +385,102 @@ test('egress-firewall.sh refuses bad arguments', { skip: !posix && 'bash' }, () 
     m.done();
   }
 });
+
+const ciScript = join(repoRoot, 'scripts', 'ci', 'egress-real-systemd.sh');
+
+/** Runs the CI job's await_netns_thread (with its threads_line) in bash, the job's other helpers as stubs: the Nth look
+ * at the threads (netns_threads) finds looks[N-1] ('' for none); sudo and docker_up log to one file, summary to another. */
+function awaitThread(looks: string[]) {
+  const dir = mkdtempSync(join(tmpdir(), 'egress-ci-'));
+  try {
+    const sh = readFileSync(ciScript, 'utf8');
+    const def = (f: string) => {
+      const from = sh.indexOf(`\n${f}() {`);
+      assert.ok(from >= 0, `${f} is defined in egress-real-systemd.sh`);
+      const line = sh.slice(from, sh.indexOf('\n', from + 1));
+      return line.trimEnd().endsWith('}') ? line : sh.slice(from, sh.indexOf('\n}\n', from) + 3);
+    };
+    writeFileSync(join(dir, 'looks'), looks.map((l) => l || '-').join('\n') + '\n');
+    const prog = `set -euo pipefail
+t='${dir}' U=wl-test-ci DU=worklane-test-ci-docker.service
+fail() { echo "FAIL: $*" >&2; exit 1; }
+summary() { echo "$*" >> "$t/summary"; }
+sudo() { echo "$*" >> "$t/log"; }
+docker_up() { echo up >> "$t/log"; }
+netns_threads() {
+  local n l
+  n=$(( $(cat "$t/n" 2> /dev/null || echo 0) + 1 ))
+  echo "$n" > "$t/n"
+  l="$(sed -n "$n"p "$t/looks")"
+  : > "$t/threads-$1"
+  if [ -n "$l" ] && [ "$l" != - ]; then echo "$l" > "$t/threads-$1"; fi
+}
+${def('threads_line')}
+DOCKER_RESTARTS=0
+${def('await_netns_thread')}
+await_netns_thread new
+echo "restarts=$DOCKER_RESTARTS"`;
+    const r = spawnSync('bash', ['-c', prog], { encoding: 'utf8' });
+    const read = (f: string) => {
+      try {
+        return readFileSync(join(dir, f), 'utf8');
+      } catch {
+        return '';
+      }
+    };
+    return { ...r, log: read('log').split('\n').filter(Boolean), summary: read('summary').split('\n').filter(Boolean), looked: Number(read('n')) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('egress-real-systemd.sh: while no test-user thread is in a non-host netns, Docker is restarted, at most 3 times, and each look goes in the summary', { skip: !posix && 'bash' }, () => {
+  const restart = 'systemctl restart worklane-test-ci-docker.service';
+  // A thread there at the first look: no restart.
+  let r = awaitThread(['12447:12447:4026532268']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^restarts=0$/m);
+  assert.deepEqual(r.log, []);
+  assert.equal(r.looked, 1);
+  assert.equal(r.summary.length, 1);
+  assert.match(r.summary[0] ?? '',/^- look 1 \(no restart\): test-user threads in a non-host netns \(pid:tid:netns\): 12447:12447:4026532268/);
+  // None at the first two looks: two restarts, each followed by docker_up, and it stops at the first look with one.
+  r = awaitThread(['', '', '12447:12447:4026532268', '1:1:1']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^restarts=2$/m);
+  assert.deepEqual(r.log, [restart, 'up', restart, 'up']);
+  assert.equal(r.looked, 3);
+  assert.deepEqual(
+    r.summary.map((l) => l.replace(/: .*/, '')),
+    ['- look 1 (no restart)', '- look 2 (after Docker restart 1 of 3)', '- look 3 (after Docker restart 2 of 3)'],
+  );
+  assert.match(r.summary[0] ?? '',/: no thread of any wl-test-ci process in a non-host netns$/);
+  assert.match(r.summary[2] ?? '',/: test-user threads in a non-host netns \(pid:tid:netns\): 12447:12447:4026532268/);
+  // None ever: exactly 3 restarts, it says so, and it passes nothing itself (the job's own no-thread check fails later).
+  r = awaitThread(['', '', '', '', '', '']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^restarts=3$/m);
+  assert.equal(r.log.filter((l) => l === restart).length, 3);
+  assert.equal(r.looked, 4);
+  assert.equal(r.summary.length, 5);
+  assert.match(r.summary[3] ?? '',/^- look 4 \(after Docker restart 3 of 3\): no thread/);
+  assert.match(r.summary[4] ?? '',/^- still none after 3 restarts: .*the job fails at its no-thread check$/);
+});
+
+test('egress-real-systemd.sh: the restarts come right before the after-upgrade probe; its no-thread and no-join checks stay, and after a restart the dropped state is asserted again', () => {
+  const sh = readFileSync(ciScript, 'utf8');
+  const at = sh.indexOf('\nawait_netns_thread new\njoin_probe new\n');
+  assert.ok(at >= 0, 'await_netns_thread new, then join_probe new');
+  assert.ok(sh.indexOf('\nassert_dropped "after the upgrade"\n') >= 0 && sh.indexOf('\nassert_dropped "after the upgrade"\n') < at, 'the dropped state asserted before the restarts');
+  assert.match(sh.slice(at), /\nif \[ "\$DOCKER_RESTARTS" -gt 0 \]; then\n(?: {2}#.*\n)* {2}assert_dropped "after the upgrade and /);
+  assert.match(sh, /\n\[ -s "\$t\/threads-new" \] \|\| fail "after the upgrade /);
+  assert.match(sh, /\ngrep -q "\^the containers' netns \(pid \[0-9\]\*, tid \[0-9\]\*, net:\\\[\[0-9\]\*\\\]\): joined; " "\$t\/join-new-run\.out" \|\| fail /);
+  // Every join, through every thread, before and after, still reaches nothing.
+  assert.match(sh, /if grep -q -- "-> \$PUB: OK\\\$" "\$t\/join-old-\$w\.out"; then fail /);
+  assert.match(sh, /if grep -q -- "-> \$PUB: OK\\\$" "\$t\/join-new-\$w\.out"; then fail /);
+  // assert_dropped checks the unit and the rule.
+  const fn = sh.slice(sh.indexOf('\nassert_dropped() {'), sh.indexOf('\n}\n', sh.indexOf('\nassert_dropped() {')));
+  assert.match(fn, /systemctl cat "\$DU" \| grep '\^NFTSet='; then fail/);
+  assert.match(fn, /grep -Eq 'socket cgroupv2\|egress_ok' "\$t\/new-table"; then fail/);
+  assert.match(fn, /if pull 90 2> \/dev\/null; then fail/);
+});

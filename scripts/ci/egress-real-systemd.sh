@@ -25,7 +25,9 @@
 #              and a Docker unit with no NFTSet=) keeps dropping their Docker after the new test-user.sh install and
 #              apply: no NFTSet=, no cgroup accept, the pull dropped, and the join probe, run before and after, reaches
 #              the stand-in from nowhere it didn't before (asserted: the job fails if any blocked attempt opens, or if
-#              any join, through any thread, reaches it after).
+#              any join, through any thread, reaches it after). Before the after-upgrade probe, Docker is restarted
+#              (at most 3 times) while no test-user thread is in a non-host netns; each look goes in the job summary,
+#              and if it restarted, no NFTSet=, no cgroup exception and the dropped pull are asserted again after.
 # Usage: bash scripts/ci/egress-real-systemd.sh   (as the runner user, with sudo)
 set -euo pipefail
 : "${DB_IMAGE:?the pinned database image}"
@@ -228,8 +230,10 @@ as_() { sudo -u wl-ci sudo -n "$H" ci "$@"; }
 # any thread of any process of the test user's in a network namespace other than the host's.
 # Every thread of every test-user process in a network namespace other than the host's, as <pid>:<tid>:<netns inode>,
 # one a line, in $t/threads-<tag>. Each thread, not each pid: rootlesskit's detach-netns puts only some threads of its
-# child in the containers' netns (measured: its main one, 1 of 10 or 11, on 21 of 22 starts in two runs; on the 22nd
-# no thread at all), so a pid's /proc/<pid>/ns/net (its main thread's) alone could miss one that is; this misses none.
+# child in the containers' netns (measured, the three runs that read every thread: its main one (1 of its 9 to 11 threads
+# where the total was logged) on 32 of 33 starts; on the 33rd no thread at all), so a pid's /proc/<pid>/ns/net (its main thread's) alone could miss
+# one that is; this misses none. Over all nine runs of this job before the restarts below, 3 of 47 probed starts had
+# no thread (or, in the six runs that read main threads only, no pid) there (measured: their job logs).
 netns_threads() {
   local tag="$1" hostnet p tid n
   hostnet="$(sudo readlink /proc/1/ns/net)"
@@ -243,6 +247,29 @@ netns_threads() {
 }
 # Whether threads file $1 has a thread in a non-host netns and no process's main thread (tid = pid) among them.
 no_main_thread() { [ -s "$1" ] && ! grep -q '^\([0-9]*\):\1:' "$1"; }
+# What threads file $t/threads-<tag> holds, for the summary.
+threads_line() { if [ -s "$t/threads-$1" ]; then echo "test-user threads in a non-host netns (pid:tid:netns): $(tr '\n' ' ' < "$t/threads-$1")"; else echo "no thread of any $U process in a non-host netns"; fi; }
+# A start can leave no thread of any test-user process in a non-host netns (measured: 3 of 47 probed starts, comment
+# above netns_threads), and the join probe then has nothing to join. Before a probe that fails on that, look at
+# $t/threads-<tag>, and while it's empty restart Docker, at most 3 times, and look again. Each look goes in the job
+# summary; DOCKER_RESTARTS says how many restarts it took. Nothing here passes or fails anything: the probe after it
+# reads the threads again, and the job's own check on them (no thread: fail) is unchanged.
+DOCKER_RESTARTS=0
+await_netns_thread() {
+  local tag="$1" i
+  DOCKER_RESTARTS=0
+  netns_threads "$tag"
+  summary "- look 1 (no restart): $(threads_line "$tag")"
+  for i in 1 2 3; do
+    [ ! -s "$t/threads-$tag" ] || return 0
+    sudo systemctl restart "$DU"
+    docker_up
+    DOCKER_RESTARTS="$i"
+    netns_threads "$tag"
+    summary "- look $((i + 1)) (after Docker restart $i of 3): $(threads_line "$tag")"
+  done
+  [ -s "$t/threads-$tag" ] || summary "- still none after 3 restarts: the probe below runs anyway, and the job fails at its no-thread check"
+}
 join_probe() {
   local tag="$1" id="egress-join-$1" dpid hostnet nsfile npids="" p tid n main r probe64 join64 cmd
   local id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
@@ -373,14 +400,27 @@ cat "$t/upgrade-apply.log"
 grep -qx "PASS $U ($(id -u "$U")) is covered" "$t/upgrade-apply.log" || fail "after the upgrade $U isn't covered"
 grep -q '^PASS no exception: ' "$t/upgrade-apply.log" || fail "after the upgrade apply's check didn't say there's no exception"
 grep -qx '# docker: dropped' /etc/worklane/egress.users || fail "after the upgrade the record doesn't say '# docker: dropped'"
-# No grep -q here: an early exit could fail systemctl with SIGPIPE, and pipefail would hide the match.
-if systemctl cat "$DU" | grep '^NFTSet='; then fail "after the upgrade $DU has NFTSet= again"; fi
-grep -q '^# No NFTSet=: the host egress rule' "/etc/systemd/system/$DU" || fail "test-user.sh install didn't say why $DU has no NFTSet="
-sudo nft list table inet worklane_egress | tee "$t/new-table"
-if grep -Eq 'socket cgroupv2|egress_ok' "$t/new-table"; then fail "after the upgrade the rule has a cgroup exception"; fi
-if pull 90 2> /dev/null; then fail "after the upgrade Docker pulled: the route the pre-#543 opt-in had closed is open"; fi
-echo "  after: Docker's pull was dropped"
+# The upgraded install's Docker stays dropped: no NFTSet= on its unit, no cgroup exception in the loaded rule, and its
+# pull dropped. <when> names the point in the job, in the failure.
+assert_dropped() {
+  local when="$1"
+  # No grep -q here: an early exit could fail systemctl with SIGPIPE, and pipefail would hide the match.
+  if systemctl cat "$DU" | grep '^NFTSet='; then fail "$when $DU has NFTSet= again"; fi
+  grep -q '^# No NFTSet=: the host egress rule' "/etc/systemd/system/$DU" || fail "$when test-user.sh install's note on why $DU has no NFTSet= isn't there"
+  sudo nft list table inet worklane_egress | tee "$t/new-table"
+  if grep -Eq 'socket cgroupv2|egress_ok' "$t/new-table"; then fail "$when the rule has a cgroup exception"; fi
+  if pull 90 2> /dev/null; then fail "$when Docker pulled: the route the pre-#543 opt-in had closed is open"; fi
+  echo "  $when: Docker's pull was dropped"
+}
+assert_dropped "after the upgrade"
+summary "### #543 upgrade: a thread to join before the after-upgrade probe (Docker restarted, at most 3 times, while none is in a non-host netns)"
+await_netns_thread new
 join_probe new
+if [ "$DOCKER_RESTARTS" -gt 0 ]; then
+  # A restart changes neither the unit's NFTSet= nor the rule (inferred); this shows it on the start the probe used.
+  assert_dropped "after the upgrade and $DOCKER_RESTARTS Docker restart(s)"
+  summary "- after $DOCKER_RESTARTS restart(s), asserted again: no NFTSet= on $DU, no cgroup exception in the rule, Docker's pull dropped"
+fi
 summary "### #543 upgrade: an install that covered test users before #543 keeps dropping their Docker (asserted)"
 summary "Before: $PRE543's apply --with-test-users, Docker's unit without NFTSet=. After: the new test-user.sh install and apply. Both: no cgroup exception, Docker's pull dropped."
 summary "Before: $JOIN_INFO_OLD"
@@ -395,8 +435,9 @@ for w in run plain; do
   if grep -q -- "-> $PUB: OK\$" "$t/join-new-$w.out"; then fail "upgrade: from a $w, a join still reaches $PUB: $(opened "$t/join-new-$w.out")"; fi
 done
 # The probe has to have something to measure: some thread of a test-user process in a non-host netns (any thread, not
-# only a main one: which threads are there depends on the start), and the run joining it.
-[ -s "$t/threads-new" ] || fail "after the upgrade no thread of any $U process is in a non-host netns: this probe can't tell whether the containers' netns route is dropped"
+# only a main one: which threads are there depends on the start), and the run joining it. Docker's restarts above
+# (await_netns_thread) only give it more starts to find one on; this check is the same with or without them.
+[ -s "$t/threads-new" ] || fail "after the upgrade (and $DOCKER_RESTARTS Docker restart(s)) no thread of any $U process is in a non-host netns: this probe can't tell whether the containers' netns route is dropped"
 grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; " "$t/join-new-run.out" || fail "after the upgrade the run couldn't join any $U thread's non-host netns: this probe can't tell whether that route is dropped"
 sudo bash "$EF" check > "$t/check-upgrade.log" || { cat "$t/check-upgrade.log"; fail "check fails after the upgrade"; }
 cat "$t/check-upgrade.log"
