@@ -575,3 +575,48 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
     sudo(['rm', '-rf', src, opt, bin, `/var/lib/private/${state}`, `/var/lib/${state}`]);
   }
 });
+
+// #760: the updater replaces itself only after a healthy install from a release tag the run verified; never on main,
+// never on a rollback; a refusal is in the installed line and the journal. (syncSelf itself: test/updater-self.test.ts)
+test('run: the updater takes the release\'s updater only after a healthy install from a verified release tag, never on main or a rollback', async () => {
+  type Self = { state: string; reason?: string };
+  const onRelease = (selfResult: Self, verified: { ok: boolean; base?: string; reason?: string } = { ok: true, base: 'c'.repeat(40) }) => {
+    const m = machine();
+    const self: string[][] = [];
+    const warned: string[] = [];
+    const base = m.deps.exec;
+    Object.assign(m.deps, {
+      config: () => ({ enabled: true, channel: 'release', allowed_signers: '/etc/worklane/allowed_signers', repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test'] }),
+      installedVersion: () => '0.4.1',
+      verifyRelease: () => verified,
+      exec: (file: string, args: string[]) => (file === 'git' ? `${'3'.repeat(40)}\trefs/tags/v0.5.0\n${NEW}\trefs/tags/v0.5.0^{}\n` : base(file, args)),
+      selfUpdate: (signers: string, tag: string, sha: string) => (m.calls.push('selfUpdate'), self.push([signers, tag, sha]), selfResult),
+      warn: (line: string) => warned.push(line),
+    });
+    return { ...m, self, warned };
+  };
+  const ok = onRelease({ state: 'updated' });
+  assert.equal(await u.run(ok.deps), 'installed');
+  assert.deepEqual(ok.self, [['/etc/worklane/allowed_signers', 'v0.5.0', NEW]], 'the verified tag, the engine just installed');
+  const order = ok.calls.filter((c) => /^(switchTo|selfUpdate)/.test(c));
+  assert.deepEqual(order, ['switchTo bbbb', 'selfUpdate'], 'after the switch and the health check');
+  assert.deepEqual(ok.logs.find((l) => l.event === 'installed')!.updater, { state: 'updated' });
+  // A refused one leaves it as it is (syncSelf), and says why in the installed line and the journal.
+  const no = onRelease({ state: 'refused', reason: 'not newer' });
+  assert.equal(await u.run(no.deps), 'installed');
+  assert.deepEqual(no.logs.find((l) => l.event === 'installed')!.updater, { state: 'refused', reason: 'not newer' });
+  assert.deepEqual(no.warned, ["the updater wasn't replaced: not newer"]);
+  // A release whose services don't come up: rolled back, the updater never asked.
+  const bad = onRelease({ state: 'updated' });
+  bad.states[NEW] = ['failed'];
+  assert.equal(await u.run(bad.deps), 'rolled_back');
+  assert.deepEqual(bad.self, []);
+  // An unverified tag: refused before anything is built, the updater never asked.
+  const unsigned = onRelease({ state: 'updated' }, { ok: false, reason: "v0.5.0's signature doesn't verify" });
+  assert.equal(await u.run(unsigned.deps), 'refused');
+  assert.deepEqual(unsigned.self, []);
+  // Main has no signature to check: never.
+  const main = machine({ selfUpdate: () => assert.fail('selfUpdate on the main channel') });
+  assert.equal(await u.run(main.deps), 'installed');
+  assert.equal(main.logs.find((l) => l.event === 'installed')!.updater, undefined);
+});

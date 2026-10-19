@@ -1,9 +1,10 @@
 // The agents' Claude account profiles (src/claude-profiles.ts, issue #464), inside the Machine page's Claude account
 // panel, for the machine's owners: an accounts × instances table (which profile each instance's runs use, and whether
-// each agent user's last real call on each profile was answered), adding an account from a setup token, choosing one
-// for every instance or one instance (each checked by a real call first: refused, nothing changes), and removing one.
-import { useRef, useState } from 'react';
-import { addClaudeProfile, claudeProfileAction, pasteLoginCode, setClaudeFailover, type ClaudeAccountData, type ProfileCell, type ProfileOp, type ProfilesTable } from '../api';
+// each agent user's last real call on each profile was answered), choosing one for this instance (checked by a real
+// call first: refused, nothing changes), and removing one. Adding an account, or signing one in, takes a Claude
+// credential, which this page never takes (issue #711): it names the root command instead.
+import { useState } from 'react';
+import { claudeProfileAction, setClaudeFailover, type ProfileCell, type ProfileOp, type ProfilesTable } from '../api';
 import { ago, Badge, Button, cx } from './ui';
 
 const OP_LABEL: Record<ProfileOp['op'], string> = { 'profile-add': 'Add', use: 'Switch to', remove: 'Remove', login: 'Sign in' };
@@ -34,45 +35,6 @@ function Cell({ c, profile, canAct, busy, onUse }: { c: ProfileCell; profile: st
         </Button>
       )}
     </td>
-  );
-}
-
-/** The add form: the token field is uncontrolled, sent straight to the server and cleared; never in state or shown. */
-function AddForm({ disabled, onDone }: { disabled: boolean; onDone: (err: string | null) => void }) {
-  const name = useRef<HTMLInputElement>(null);
-  const token = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const send = async () => {
-    const n = name.current?.value.trim() ?? '';
-    const t = token.current;
-    if (!n || !t || !t.value) return;
-    setBusy(true);
-    try {
-      await addClaudeProfile(n, t.value);
-      if (name.current) name.current.value = '';
-      onDone(null);
-    } catch (e) {
-      onDone((e as Error).message);
-    } finally {
-      t.value = '';
-      setBusy(false);
-    }
-  };
-  return (
-    <form
-      className="flex flex-wrap items-center gap-2"
-      data-testid="claude-profile-add"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void send();
-      }}
-    >
-      <input ref={name} name="claude-profile-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-name" />
-      <input ref={token} type="password" autoComplete="off" spellCheck={false} name="claude-profile-token" aria-label="The token claude setup-token printed for that account" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-profile-token" />
-      <Button type="submit" size="sm" disabled={disabled || busy} data-testid="claude-profile-add-send">
-        {busy ? 'Adding…' : 'Add account'}
-      </Button>
-    </form>
   );
 }
 
@@ -127,71 +89,21 @@ function Failover({ table, self, confirmScript, disabled, onDone }: { table: Pro
 }
 
 /**
- * The relayed sign-in (the owner's approved exception): a name starts `claude auth login` as this instance's agent
- * user; its link shows here while it waits; the code Anthropic's page then shows is pasted back once (a password
- * field, uncontrolled, cleared after). The account is staged until an admin confirms it on the machine.
+ * Adding an account, as a root admin does it on the machine: never through this page, which takes no Claude credential
+ * (issue #711): a token from `claude setup-token`, at the hidden prompt of `claude-account.sh profile-add`.
  */
-function SignIn({ self, signin, disabled, onDone }: { self: string; signin: NonNullable<ClaudeAccountData['signin']> | null; disabled: boolean; onDone: (err: string | null) => void }) {
-  const name = useRef<HTMLInputElement>(null);
-  const code = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const run = async (f: () => Promise<unknown>) => {
-    setBusy(true);
-    try {
-      await f();
-      onDone(null);
-    } catch (e) {
-      onDone((e as Error).message);
-    } finally {
-      if (code.current) code.current.value = '';
-      setBusy(false);
-    }
-  };
-  const waiting = signin?.status === 'running';
+function AddHowTo({ self, confirmScript }: { self: string | null; confirmScript: string }) {
   return (
-    <div className="space-y-2 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-signin" data-state={signin?.status ?? 'none'}>
-      <div className="text-[13px] font-medium text-ink">Sign in an account for {self}</div>
-      {!waiting ? (
-        <form
-          className="flex flex-wrap items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const n = name.current?.value.trim() ?? '';
-            if (n) void run(() => claudeProfileAction('login', n));
-          }}
-        >
-          <input ref={name} name="claude-signin-name" aria-label="A name for the account" placeholder="name (e.g. work)" pattern="[a-z][a-z0-9-]{0,20}" className="w-36 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-name" />
-          <Button type="submit" size="sm" disabled={disabled || busy} data-testid="claude-signin-start">
-            {busy ? 'Starting…' : 'Sign in'}
-          </Button>
-          {signin && <span className={cx('text-[12px]', signin.status === 'done' ? 'text-ink-3' : 'text-red')}>{signin.detail}</span>}
-        </form>
-      ) : signin?.waitingForCode && signin.url ? (
-        <div className="space-y-2">
-          <p className="text-[12px] text-ink-3">
-            Open Anthropic's sign-in, sign in to the account {signin.profile} should be, then paste the code it shows here. The code works once.
-          </p>
-          <a href={signin.url} target="_blank" rel="noreferrer noopener" className="text-[12.5px] text-blue-ink underline" data-testid="claude-signin-link">
-            Open Anthropic's sign-in
-          </a>
-          <form
-            className="flex flex-wrap items-center gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              const v = code.current?.value ?? '';
-              if (v) void run(() => pasteLoginCode(v));
-            }}
-          >
-            <input ref={code} type="password" autoComplete="off" spellCheck={false} name="claude-signin-code" aria-label="The code Anthropic's sign-in page showed" placeholder="the code (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-signin-code" />
-            <Button type="submit" size="sm" disabled={busy} data-testid="claude-signin-code-send">
-              {busy ? 'Sending…' : 'Finish sign-in'}
-            </Button>
-          </form>
-        </div>
+    <div className="space-y-1.5 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-profile-add-howto">
+      <div className="text-[13px] font-medium text-ink">Add an account</div>
+      <p className="text-[12px] text-ink-3">
+        A root admin adds it on the machine; this page never takes a Claude credential. On a machine signed in to the account, run <code>claude setup-token</code>, then on this machine paste what it prints at the hidden prompt of:
+      </p>
+      <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-profile-add-command">sudo bash {confirmScript} profile-add &lt;name&gt;</pre>
+      {self !== null ? (
+        <p className="text-[12px] text-ink-3">It is checked with a real call as each agent user ({self}'s included); then choose it here with Use here.</p>
       ) : (
-        <p className="text-[12px] text-ink-3" data-testid="claude-signin-progress">
-          {signin?.detail}
-        </p>
+        <p className="text-[12px] text-ink-3">It is added for every instance's agent user at once, each checked with a real call; then choose it for an instance by picking that instance in the sidebar, or for every one at a root shell.</p>
       )}
     </div>
   );
@@ -225,7 +137,7 @@ function LastOp({ op }: { op: ProfileOp }) {
  * that): another instance, or every one, is a root admin's on the machine, with `confirmScript`. null: "All instances"
  * is chosen on a hub, so the table is shown for every instance and no step for one instance is offered (#562).
  */
-export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string | null; confirmScript: string; signin?: ClaudeAccountData['signin']; canAct: boolean; onChanged?: () => void }) {
+export function ClaudeProfiles({ table, ops, self, confirmScript, canAct, onChanged }: { table: ProfilesTable; ops: ProfileOp[]; self: string | null; confirmScript: string; canAct: boolean; onChanged?: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -251,7 +163,7 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null,
         <p className="text-[12px] text-ink-3">
           {self === null ? (
             <>
-              Accounts sit side by side for each agent user, every instance's here. To choose, add or remove one for an instance from here, pick that instance in the sidebar. Every instance at once is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt;</code>.
+              Accounts sit side by side for each agent user, every instance's here. To choose or remove one for an instance from here, pick that instance in the sidebar. Every instance at once is chosen at a root shell on the machine: <code>sudo bash {confirmScript} use &lt;name&gt;</code>.
             </>
           ) : (
             <>
@@ -324,16 +236,9 @@ export function ClaudeProfiles({ table, ops, self, confirmScript, signin = null,
           </tbody>
         </table>
       </div>
-      {self !== null && (
-        <>
-          <p className="text-[12px] text-ink-3">
-            Add an account for {self}: on a machine signed in to it, run <code>claude setup-token</code>, then give it a name and paste what it prints. It is stored in {self}'s agent user's own profile and checked with a real call (refused: nothing is kept), then staged: nothing uses it until an admin confirms it on the machine.
-          </p>
-          <AddForm disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-          <SignIn self={self} signin={signin ?? null} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-          {table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
-        </>
-      )}
+      {/* profile-add covers every instance's agent user, so its how-to shows under All instances too. */}
+      <AddHowTo self={self} confirmScript={confirmScript} />
+      {self !== null && table.profiles.filter((p) => !p.staged).length > 1 && <Failover table={table} self={self} confirmScript={confirmScript} disabled={!may} onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />}
       {err && (
         <p className="text-[12.5px] text-red" data-testid="claude-profile-error">
           {err}
