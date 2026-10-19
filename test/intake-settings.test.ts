@@ -35,8 +35,10 @@ test('changing an intake cap: owner only, bounded by the machine limits, recorde
   assert.throws(() => changeSetting({ ...base, key: 'intake.drafts_per_day', value: 30, by: 'someone-else' }), /only the owner/);
   assert.throws(() => changeSetting({ ...base, key: 'intake.drafts_per_day', value: 500, by: owner }), /intake\.drafts_per_day 500 is over 200/);
   assert.throws(() => changeSetting({ ...base, key: 'intake.reports_per_sender_per_day', value: 0, by: owner }), /refused/);
-  assert.deepEqual(changeSetting({ ...base, key: 'intake.drafts_per_day', value: 30, by: owner }), { from: INTAKE_DEFAULT_CAPS.drafts_per_day, to: 30 });
-  assert.match(readFileSync(i.policyPath, 'utf8'), /drafts_per_day: 30/);
+  // The dashboard only tightens (#726 round 11, the owner's decision of 2026-10-19); until then it raised this to 30.
+  assert.throws(() => changeSetting({ ...base, key: 'intake.drafts_per_day', value: 30, by: owner }), /intake\.drafts_per_day 30 would loosen it \(now 20\)/);
+  assert.deepEqual(changeSetting({ ...base, key: 'intake.drafts_per_day', value: 10, by: owner }), { from: INTAKE_DEFAULT_CAPS.drafts_per_day, to: 10 });
+  assert.match(readFileSync(i.policyPath, 'utf8'), /drafts_per_day: 10/);
   writeFileSync(i.limitsPath, JSON.stringify({ intake: { max_usd_per_day: 1 } }));
   assert.deepEqual(settingsProblems({ intake: { max_usd_per_day: 5 } }, loadLimits(i.limitsPath)), ['intake.max_usd_per_day 5 is over 1 (machine limits)']);
 });

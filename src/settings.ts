@@ -18,7 +18,8 @@ import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
-import { ceilingProblem, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { adminRoute, encodePolicyValue, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
+import { MACHINE_HELPER } from './machine.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -238,7 +239,7 @@ export function researchCaps(s: InstanceSettings): ResearchCaps {
  * never written here: the checked change is handed to `request` (root's helper's arguments), and its id returned;
  * without one, refused, naming the root command.
  */
-export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date; request?: (args: string[]) => string; helperRulesFile?: string }): { from: unknown; to: unknown; requested?: string } {
+export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date; request?: (args: string[]) => string; helperRulesFile?: string; machine?: boolean }): { from: unknown; to: unknown; requested?: string } {
   const owner = o.cfg.project.owners.default;
   const isOwner = o.owner ?? (!!o.by && o.by.toLowerCase() === owner.toLowerCase());
   if (!o.by || !isOwner) throw new SettingsError(`only the owner (@${owner}) may change settings; @${o.by || 'unknown'} may not`);
@@ -256,6 +257,10 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   const problems = settingsProblems(parsed.data.settings, loadLimits(o.limitsPath), parsed.data);
   if (problems.length) throw new SettingsError(`refused: ${problems.join('; ')}`);
   const to = currentValue(o.cfg, parsed.data.settings, key);
+  // Only tightening, on every install (the owner's decision of 2026-10-19): the value in effect now is the ceiling;
+  // loosening is the admin's route (root's command, own then set before a machine's takeover, or an edit of the file).
+  const tight = tightenProblem(`settings.${key}`, to, from, adminRoute(o.policyPath, `settings.${key}`, encodePolicyValue(`settings.${key}`, o.value) ?? '<value>', !!checked, o.machine ?? existsSync(MACHINE_HELPER)));
+  if (tight) throw new SettingsError(`refused: ${tight}`);
   // A root policy.yaml (src/policy-gate.ts) is never written here: the checked change goes to root's helper, which
   // checks it again and writes it; the coordinator records settings.changed once it has run.
   if (checked) {
@@ -263,10 +268,6 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     if (arg === null) throw new SettingsError(`refused: ${key} ${JSON.stringify(o.value)} can't be passed to root's helper`);
     const root = policySetCommand(policyInstance(o.policyPath), `settings.${key}`, arg);
     if (!policySetOk([`settings.${key}`, arg])) throw new SettingsError(`refused: settings.${key} ${arg} is root's to set, at a root shell (${root})`);
-    // Never past what root set (#726 round 10): root's helper refuses it too; up front, nothing is asked.
-    const rec = policyRecord(policyInstance(o.policyPath));
-    const past = rec && !('problem' in rec) ? ceilingProblem(policyInstance(o.policyPath), `settings.${key}`, decodePolicyValue(`settings.${key}`, arg), rec, undefined) : null;
-    if (past) throw new SettingsError(`refused: ${past}`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
     const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);
     if (missing) throw new SettingsError(`${o.policyPath} is root's, and ${missing}: an admin changes it at a root shell (${root})`);

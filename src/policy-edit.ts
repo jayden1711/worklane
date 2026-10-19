@@ -10,7 +10,7 @@ import { policyViolations, PolicyFile } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { ceilingProblem, DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { adminRoute, DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { autoMergeKilled } from './policy-kill.js';
 
 /**
@@ -23,12 +23,6 @@ const offOnly = (values: Record<string, unknown>) => Object.keys(values).length 
 /** Root's record covers this instance (or can't be read: either way root's): its auto_merge off is the kill switch's. */
 const rootRecorded = (path: string) => policyRecord(policyInstance(path)) !== null;
 
-function adminRoute(path: string, key: string, arg: string, root: boolean, machine: boolean): string {
-  const instance = policyInstance(path);
-  if (root) return policySetCommand(instance, key, arg);
-  if (machine) return `${ownCommand(instance)}, then ${policySetCommand(instance, key, arg)}`;
-  return `edit ${path} (${key}: ${String(decodePolicyValue(key, arg))}), or its Helm value`;
-}
 
 export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
@@ -152,18 +146,20 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
       if (DASHBOARD_TIGHTEN_ONLY.includes(c.key) && arg !== HELPER_ONLY[c.key]) problems.push(`${c.key} ${String(c.to)}: that is an admin's alone, never this form's (${adminRoute(o.path, c.key, arg ?? '<value>', false, machine)}); here it may only be ${String(decodePolicyValue(c.key, HELPER_ONLY[c.key]!))}`);
     }
   }
+  // And every other key only tightens, on every install (the owner's decision of 2026-10-19, round 11): the value in
+  // effect now is its ceiling; loosening is the admin's route (root's command, or an edit of the file elsewhere).
+  for (const c of changes) {
+    const why = tightenProblem(c.key, c.to, c.from, adminRoute(o.path, c.key, encodePolicyValue(c.key, c.to) ?? '<value>', root, machine));
+    if (why) problems.push(why);
+  }
   // A root policy.yaml (src/policy-gate.ts): only what root's helper takes, so a loosening is refused before anything is
   // asked; and, on a sudo whose rule leaves set-policy's pattern out, nothing but the tightenings listed whole there
   // (each other change named as its root command).
   if (root) {
     const instance = policyInstance(o.path);
-    const rec = policyRecord(instance);
     for (const c of changes) {
       const arg = encodePolicyValue(c.key, c.to);
       if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) && arg !== null ? `loosening it is an admin's, at a root shell (${policySetCommand(instance, c.key, arg)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
-      // Never past what root set (#726 round 10): root's helper refuses it too; up front, nothing is asked.
-      const past = rec && !('problem' in rec) ? ceilingProblem(instance, c.key, c.to, rec, c.from) : null;
-      if (past) problems.push(past);
     }
     const blocked = problems.length ? [] : changes.map((c) => ({ c, arg: encodePolicyValue(c.key, c.to)! })).map((x) => ({ ...x, why: policyHelperMissing(o.helperRulesFile, [x.c.key, x.arg]) })).filter((x) => x.why);
     if (blocked.length) problems.push(`${o.path} is root's, and ${blocked[0]!.why}: an admin changes it at a root shell (${blocked.map((x) => policySetCommand(instance, x.c.key, x.arg)).join('; ')})`);

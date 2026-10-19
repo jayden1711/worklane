@@ -22,8 +22,11 @@ import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
-import { CEILING_KEYS, ceilingProblem, decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
-import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
+import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
+import { intakeCaps, type Limits, LIMITS_PATH, loadLimits, researchCaps, researchRepoAccess, settingsProblems, stuckMode } from './settings.js';
+import { attachmentCaps } from './chat-attachments.js';
+import type { IntakeCaps } from './intake/report.js';
+import type { ResearchCaps } from './research.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
@@ -74,12 +77,24 @@ function setIn(o: Record<string, unknown>, path: string[], v: unknown): void {
   }
   at[path[path.length - 1]!] = v;
 }
-/** Root's ceilings from a policy's text: each CEILING_KEYS value in effect there (none for a setting it leaves unset). */
-function ceilingsOf(text: string): Record<string, unknown> {
-  const raw = parseDocument(text).toJS() as unknown;
-  const r = PolicyFile.safeParse(raw);
-  const from = r.success ? r.data : raw;
-  return Object.fromEntries(CEILING_KEYS.map((k) => [k, getIn(from, pathOf(k))]).filter(([, v]) => v !== undefined));
+/**
+ * The value of a CEILING_KEYS key in effect, as root can tell it from policy.yaml alone (#726 round 11): the file's
+ * value; else the engine's default where it doesn't depend on the repo's config; else, for workers and the daily
+ * budget, the policy's own cap on them (the repo can only stay under it); else undefined (the repo's config decides:
+ * ci_repair, run_windows), which tightenProblem refuses but for turning a switch off.
+ */
+function inEffect(key: string, p: PolicyFile): unknown {
+  const set = getIn(p, pathOf(key));
+  if (set !== undefined) return set;
+  const s = p.settings ?? {};
+  const sub = key.split('.').slice(2).join('.');
+  if (key === 'settings.workers') return p.agents.max_workers;
+  if (key === 'settings.daily_budget_usd') return p.budget.daily_usd;
+  if (key.startsWith('settings.research.')) return sub === 'repo_access' ? researchRepoAccess(s) : researchCaps(s)[sub as keyof ResearchCaps];
+  if (key.startsWith('settings.intake.')) return intakeCaps(s)[sub as keyof IntakeCaps];
+  if (key.startsWith('settings.chat_attachments.')) return attachmentCaps(s)[sub as keyof ReturnType<typeof attachmentCaps>];
+  if (key === 'settings.stuck_guard') return stuckMode(s);
+  return undefined;
 }
 const shown = (v: unknown) => (v === undefined ? '(none)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
 /** Every place `b` differs from `a`, as `path: b's value`. */
@@ -251,9 +266,7 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     else ensureSpare(instance, markers, rec === null ? 'spare' : false);
     sweepOrphanIds(markers);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
-    // Root's ceilings (#726 round 10): kept on a rerun of content root wrote; else the values taken over now.
-    const keep = written && !flags.retake && !flags.acceptLoose && rec !== null && !('problem' in rec) && rec.ceilings;
-    writeRecord(markers, instance, { file, sha256: sha256(text), ceilings: keep || ceilingsOf(text) });
+    writeRecord(markers, instance, { file, sha256: sha256(text) });
     return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
   });
 }
@@ -296,12 +309,12 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
     const doc = parseDocument(text);
     const from = getIn(doc.toJS(), pathOf(key)) ?? null;
-    // The coordinator's route (the helper, for a dashboard) never past what root set (#726 round 10, principle 3);
-    // an admin's change moves root's ceiling for the key, either way.
-    const coordinator = !!by && /^wl-/.test(by);
-    const past = coordinator ? ceilingProblem(instance, key, value, rec, from ?? undefined) : null;
-    if (past) throw new Error(`refused: ${past}`);
-    const ceilings = { ...(rec.ceilings ?? ceilingsOf(text)), ...(coordinator || !CEILING_KEYS.includes(key) ? {} : { [key]: value }) };
+    // The coordinator's route (the helper, for a dashboard) only tightens, every key (the owner's decision of
+    // 2026-10-19; round 11): the value in effect now is the ceiling. Loosening is an admin's, here at a root shell.
+    if (by && /^wl-/.test(by)) {
+      const past = tightenProblem(key, value, inEffect(key, parsePolicy(text, file)), policySetCommand(instance, key, arg));
+      if (past) throw new Error(`refused: ${past}`);
+    }
     doc.setIn(pathOf(key), value);
     const out = doc.toString();
     const next = parsePolicy(out, file);
@@ -323,7 +336,7 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
       }
     }
     replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
-    writeRecord(markers, instance, { file, sha256: sha256(out), ceilings });
+    writeRecord(markers, instance, { file, sha256: sha256(out) });
     // auto_merge on (root's alone; a coordinator's was refused above): the switches it saw go, last, each by its own
     // name, so auto_merge reads off until policy.yaml says on, and any an OFF armed since stays.
     if (on) clearKillSwitches(seen);

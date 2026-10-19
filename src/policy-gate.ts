@@ -31,11 +31,6 @@ export { POLICY_ROOT_DIR };
 export interface PolicyRecord {
   file: string;
   sha256: string;
-  /**
-   * The values root set (at takeover, or an admin's `policy set`) of each CEILING_KEYS key: the coordinator's route
-   * (the helper, the dashboard) may keep one there or tighten it, never loosen it past (#726 round 10, principle 3).
-   */
-  ceilings?: Record<string, unknown>;
 }
 
 export const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -60,10 +55,7 @@ export function policyRecord(instance: string, dir = POLICY_ROOT_DIR): PolicyRec
   }
   try {
     const r = JSON.parse(text) as Partial<PolicyRecord>;
-    if (typeof r.file === 'string' && r.file.startsWith('/') && typeof r.sha256 === 'string' && /^[0-9a-f]{64}$/.test(r.sha256)) {
-      const c = r.ceilings;
-      return { file: r.file, sha256: r.sha256, ...(c && typeof c === 'object' && !Array.isArray(c) ? { ceilings: c } : {}) };
-    }
+    if (typeof r.file === 'string' && r.file.startsWith('/') && typeof r.sha256 === 'string' && /^[0-9a-f]{64}$/.test(r.sha256)) return { file: r.file, sha256: r.sha256 };
   } catch {
     // below
   }
@@ -71,7 +63,7 @@ export function policyRecord(instance: string, dir = POLICY_ROOT_DIR): PolicyRec
 }
 
 /** The record's text, as root writes it. */
-export const recordText = (r: PolicyRecord) => `${JSON.stringify({ file: r.file, sha256: r.sha256, ...(r.ceilings ? { ceilings: r.ceilings } : {}) })}\n`;
+export const recordText = (r: PolicyRecord) => `${JSON.stringify({ file: r.file, sha256: r.sha256 })}\n`;
 
 /** The uid that owns a root policy: root. Tests stand another in (no test runs as root). */
 let rootUid = 0;
@@ -216,11 +208,12 @@ export function decodePolicyValue(key: string, arg: string): unknown {
 }
 
 /**
- * The keys whose value root last set is a ceiling for the coordinator's route on a root policy (#726 round 10,
- * principles 3 and 6): every key `policy set` takes but the HELPER_ONLY ones (those only ever tighten). How each
- * loosens: a number up (budget, workers, every cap, attachment size and retention), a switch on (automations,
- * ci_repair, research.repo_access), `stuck_guard` toward off (on, dry-run, off), `run_windows` to any time root's
- * windows don't cover (none means any time).
+ * The keys the dashboard and the coordinator's route only ever tighten, on every install (the owner's decision of
+ * 2026-10-19, principles 3 and 6): every key `policy set` takes but the HELPER_ONLY ones (tighten-only already). The
+ * value in effect now is the ceiling; loosening past it is root's or the admin's. How each loosens: a number up
+ * (budget, workers, every cap, attachment size and retention), a switch on (automations, ci_repair,
+ * research.repo_access), `stuck_guard` toward off (on, dry-run, off), `run_windows` to any time the current windows
+ * don't cover (none means any time).
  */
 export const CEILING_KEYS: readonly string[] = Object.keys(POLICY_SET_KEYS).filter((k) => !Object.hasOwn(HELPER_ONLY, k));
 const STUCK_RANK: Readonly<Record<string, number>> = { off: 0, 'dry-run': 1, on: 2 };
@@ -250,16 +243,24 @@ export function looserThan(key: string, value: unknown, ceiling: unknown): boole
   return true;
 }
 /**
- * Why the coordinator's route (the helper, the dashboard) may not set `key` to `value` on a root policy: past the
- * value root set (its record's ceiling), or null. A record from before ceilings has none: then the file's value now
- * is the ceiling (fail closed: it can only go down).
+ * Why the dashboard or the coordinator's route may not set `key` to `value`: it loosens the value in effect now
+ * (`current`), or null. `current` undefined means the caller can't tell it (root, for a setting the repo's config
+ * decides): then only turning a switch off is provably tighter, and anything else is refused (fail closed). `route`
+ * is what the admin runs instead.
  */
-export function ceilingProblem(instance: string, key: string, value: unknown, rec: PolicyRecord, current: unknown): string | null {
+export function tightenProblem(key: string, value: unknown, current: unknown, route: string): string | null {
   if (!CEILING_KEYS.includes(key)) return null;
-  const ceiling = rec.ceilings ? rec.ceilings[key] : current;
-  if (ceiling === undefined || !looserThan(key, value, ceiling)) return null;
   const shown = (v: unknown) => (typeof v === 'object' ? JSON.stringify(v) : String(v));
-  return `${key} ${shown(value)} is past what root set (${shown(ceiling)}): the dashboard may keep it there or tighten it; an admin loosens it at a root shell (${policySetCommand(instance, key, encodePolicyValue(key, value) ?? '<value>')})`;
+  if (current === undefined) return POLICY_SET_KEYS[key] === 'bool' && value === false ? null : `${key} ${shown(value)}: the value in effect isn't in policy.yaml (the repo's config sets it), so this route can't tell it would only tighten; an admin sets it (${route})`;
+  return looserThan(key, value, current) ? `${key} ${shown(value)} would loosen it (now ${shown(current)}): the dashboard only tightens; an admin does that (${route})` : null;
+}
+
+/** The admin's route for a value the dashboard may not set: root's command, or, before a takeover, own then set on a machine, or an edit of the file (or its Helm value) elsewhere. */
+export function adminRoute(path: string, key: string, arg: string, root: boolean, machine: boolean): string {
+  const instance = policyInstance(path);
+  if (root) return policySetCommand(instance, key, arg);
+  if (machine) return `${ownCommand(instance)}, then ${policySetCommand(instance, key, arg)}`;
+  return `edit ${path} (${key}: ${String(decodePolicyValue(key, arg))}), or its Helm value`;
 }
 
 /**

@@ -475,11 +475,11 @@ async function server() {
     await click(`${p} ${tid('policy-review')}`);
     const no = await waitText(`${p} ${tid('policy-result')}`, /exceeds the policy budget 15; a repo can only tighten/);
     assert.equal(sudoOk('cat', file), before, 'a refused review wrote nothing');
-    // What root set is a ceiling for the dashboard (#726 round 10): taken over at the repo's $20, a raise is refused at
-    // review; an admin raises root's value at a root shell, and then the form may change it up to that.
+    // The dashboard only tightens (#726 rounds 10 and 11): at the repo's $20, a raise is refused at review; an admin
+    // raises it at a root shell, and then the form may lower it.
     await type(budget, '30');
     await click(`${p} ${tid('policy-review')}`);
-    await waitText(`${p} ${tid('policy-result')}`, /budget\.daily_usd 30 is past what root set \(20\)/);
+    await waitText(`${p} ${tid('policy-result')}`, /budget\.daily_usd 30 would loosen it \(now 20\)/);
     assert.equal(sudoOk('cat', file), before, 'a raise past root\'s value wrote nothing');
     sudoOk('/usr/local/bin/worklane', 'policy', 'set', instance, 'budget.daily_usd', '40');
     await type(budget, '30');

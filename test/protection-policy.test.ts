@@ -164,10 +164,12 @@ test('the Policy form: each key with its bounds; Review shows the change and wri
     assert.equal(p.fields[0]!.max, 100, "the machine's limit");
     assert.deepEqual(p.fixed.map((f) => f.key), ['sandbox', 'allow_same_user', 'lanes', 'network_allow', 'pre_approved']);
     const before = readFileSync(policyFile, 'utf8');
-    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true, land_mode: 'pr' } });
+    // Round 11 (the owner's decision of 2026-10-19): the form only tightens, on this unrecorded install too; until
+    // then this test raised the budget to 60 and turned automations on. A lowering is reviewed and written as before.
+    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45, land_mode: 'pr' } });
     assert.equal(preview.status, 200);
     assert.equal(preview.body.confirmed, false);
-    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 60 }, { key: 'automations.enabled', from: false, to: true }]);
+    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 45 }]);
     assert.equal(readFileSync(policyFile, 'utf8'), before, 'Review writes nothing');
     assert.equal((await s.post('/api/first-run/policy', 'example-collaborator', { values: { auto_merge: true }, confirm: true })).status, 403);
     // auto_merge on is an admin's alone on every install, this unrecorded one too (#770): refused, nothing written.
@@ -175,15 +177,18 @@ test('the Policy form: each key with its bounds; Review shows the change and wri
     assert.equal(on.status, 400);
     assert.match(on.body.error!, /auto_merge true: that is an admin's alone, never this form's/);
     assert.equal(readFileSync(policyFile, 'utf8'), before);
-    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true }, confirm: true });
+    const raise = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true }, confirm: true });
+    assert.equal(raise.status, 400);
+    assert.match(raise.body.error!, /budget\.daily_usd 60 would loosen it \(now 50\).*automations\.enabled true would loosen it \(now false\)/);
+    assert.equal(readFileSync(policyFile, 'utf8'), before);
+    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45 }, confirm: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     const after = readFileSync(policyFile, 'utf8');
-    assert.match(after, /daily_usd: 60/);
-    assert.match(after, /enabled: true/);
+    assert.match(after, /daily_usd: 45/);
     assert.match(after, /auto_merge: false/);
     assert.match(after, /# kept: a person wrote this/);
-    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 60, 'example-owner'], ['policy.automations.enabled', true, 'example-owner']]);
-    assert.deepEqual(s.events(['dashboard.audit']).map((a) => a.action), ['first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy']);
+    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 45, 'example-owner']]);
+    assert.deepEqual(s.events(['dashboard.audit']).map((a) => a.action), ['first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy']);
   } finally {
     await s.d.close();
   }
@@ -253,19 +258,21 @@ test("a root policy.yaml (#726): the Policy form and Settings only queue a chang
     const form = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 40 }, confirm: true });
     assert.equal(form.status, 200, JSON.stringify(form.body));
     assert.equal(form.body.queued, true);
-    const set = await s.post('/api/instance-settings', 'example-owner', { key: 'workers', value: 3 });
+    // (A lowering: round 11 refuses a raise from the dashboard, workers 1 → 3 here until then.)
+    const set = await s.post('/api/instance-settings', 'example-owner', { key: 'chat_attachments.retention_days', value: 7 });
     assert.equal(set.status, 200, JSON.stringify(set.body));
     assert.equal(set.body.queued, true);
     assert.equal(readFileSync(policyFile, 'utf8'), before);
-    assert.deepEqual(s.events(['machine.requested']).map((e) => e.args), [['set-policy', 'budget.daily_usd', '40'], ['set-policy', 'settings.workers', '3']]);
+    assert.deepEqual(s.events(['machine.requested']).map((e) => e.args), [['set-policy', 'budget.daily_usd', '40'], ['set-policy', 'settings.chat_attachments.retention_days', '7']]);
     assert.equal(s.events(['settings.changed']).length, 0, 'changed only once the helper ran it (the coordinator logs that)');
     const audits = s.events(['dashboard.audit']).map((a) => [a.action, (a.detail as { note?: string }).note]);
     assert.deepEqual(audits.filter(([a]) => a === 'first_run.policy' || a === 'settings.queued' || a === 'settings.changed'), [['first_run.policy', 'queued for the coordinator'], ['settings.queued', 'queued for the coordinator']]);
     // A sudo older than 1.9.10: refused up front, naming the root command, and nothing more asked.
     writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'] }));
-    const old = await s.post('/api/instance-settings', 'example-owner', { key: 'workers', value: 2 });
+    // (A lowering, as above: a raise is refused before the sudo is looked at.)
+    const old = await s.post('/api/instance-settings', 'example-owner', { key: 'chat_attachments.retention_days', value: 6 });
     assert.equal(old.status, 400);
-    assert.match(old.body.error!, new RegExp(`older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set shop settings\\.workers 2`));
+    assert.match(old.body.error!, new RegExp(`older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set shop settings\\.chat_attachments\\.retention_days 6`));
     assert.equal(s.events(['machine.requested']).length, 2);
   } finally {
     setPolicyRootUid(0);
