@@ -176,15 +176,25 @@ export function AcceptedMerges({ protection }: { protection: Protection }) {
   );
 }
 
-/** An unaccounted commit stopped auto-merge: shown on every page until an admin clears it. */
-export function MainWatchAlert({ protection, onCleared }: { protection: Protection | undefined; onCleared?: () => void }) {
+/** Whether a refused resume opens the acknowledgement form: a 409 whose body asks for one (`needsAck`), never another refusal (#776). */
+export function opensAckForm(e: unknown): boolean {
+  const x = e as { status?: unknown; body?: { needsAck?: unknown } } | null;
+  return !!x && x.status === 409 && x.body?.needsAck === true;
+}
+
+/** What counts toward the reason's minimum, as the server counts it (src/auto-merge-resume.ts): letters, digits, punctuation, symbols. */
+const visibleChars = (s: string) => s.match(/[\p{L}\p{N}\p{P}\p{S}]/gu)?.length ?? 0;
+const ACK_MIN = 10;
+
+/**
+ * An admin's resume of a stop in force. A stop the default branch caused resumes only once it is green; refused so
+ * (409 with needsAck), a separate confirm with a typed reason resumes anyway, recorded (#776).
+ */
+function ResumeControls({ onCleared }: { onCleared?: (() => void) | undefined }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Refused because the default branch isn't green (409): a separate confirm with a typed reason, recorded (#776).
   const [needsAck, setNeedsAck] = useState(false);
   const [ack, setAck] = useState('');
-  const a = protection?.alert;
-  if (!a) return null;
   const clear = async (acknowledge?: { reason: string }) => {
     setBusy(true);
     setError(null);
@@ -195,11 +205,62 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
       onCleared?.();
     } catch (e) {
       setError((e as Error).message);
-      if ((e as { status?: number }).status === 409) setNeedsAck(true);
+      setNeedsAck(opensAckForm(e));
     } finally {
       setBusy(false);
     }
   };
+  const short = visibleChars(ack) < ACK_MIN ? `type a reason of at least ${ACK_MIN} visible characters` : null;
+  return (
+    <>
+      <div className="mt-2 flex items-center gap-2">
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void clear()} data-testid="main-watch-clear">
+          Clear and resume auto-merge
+        </Button>
+        {error && <span className="text-[12px] text-red">{error}</span>}
+      </div>
+      {needsAck && (
+        <form
+          className="mt-2 flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!short) void clear({ reason: ack });
+          }}
+          data-testid="main-watch-ack"
+        >
+          <input
+            value={ack}
+            onChange={(e) => setAck(e.target.value)}
+            placeholder="why resume while the default branch isn't green (recorded)"
+            aria-label="reason to resume while the default branch isn't green"
+            className="h-7 min-w-0 flex-1 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]"
+            data-testid="main-watch-ack-reason"
+          />
+          <Button size="sm" variant="outline" type="submit" disabled={busy} why={short} data-testid="main-watch-ack-submit">
+            Acknowledge and resume anyway
+          </Button>
+        </form>
+      )}
+    </>
+  );
+}
+
+/**
+ * Auto-merge stopped, shown on every page until an admin resumes it: an unaccounted commit's alert (the main watch),
+ * or, for any other stop in force (a red default branch after an auto-merge), its reason (#776).
+ */
+export function MainWatchAlert({ protection, onCleared }: { protection: Protection | undefined; onCleared?: () => void }) {
+  const a = protection?.alert;
+  if (!a) {
+    if (!protection?.stopped) return null;
+    return (
+      <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="auto-merge-stopped">
+        <span className="font-semibold text-red">Auto-merge is stopped</span>
+        <span className="text-ink-2"> {protection.stopped}. Every PR waits for you until an admin resumes it.</span>
+        {protection.canClear && <ResumeControls onCleared={onCleared} />}
+      </div>
+    );
+  }
   return (
     <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="main-watch-alert">
       <span className="font-semibold text-red">Unaccounted commit on the default branch</span>
@@ -224,36 +285,7 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
           'No revert PR was opened.'
         )}
       </span>
-      {protection?.canClear && (
-        <div className="mt-2 flex items-center gap-2">
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void clear()} data-testid="main-watch-clear">
-            Clear and resume auto-merge
-          </Button>
-          {error && <span className="text-[12px] text-red">{error}</span>}
-        </div>
-      )}
-      {protection?.canClear && needsAck && (
-        <form
-          className="mt-2 flex flex-wrap items-center gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            void clear({ reason: ack });
-          }}
-          data-testid="main-watch-ack"
-        >
-          <input
-            value={ack}
-            onChange={(e) => setAck(e.target.value)}
-            placeholder="why resume while the default branch isn't green (recorded)"
-            aria-label="reason to resume while the default branch isn't green"
-            className="h-7 min-w-0 flex-1 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]"
-            data-testid="main-watch-ack-reason"
-          />
-          <Button size="sm" variant="outline" type="submit" disabled={busy || ack.trim().length < 10} data-testid="main-watch-ack-submit">
-            Acknowledge and resume anyway
-          </Button>
-        </form>
-      )}
+      {protection?.canClear && <ResumeControls onCleared={onCleared} />}
     </div>
   );
 }

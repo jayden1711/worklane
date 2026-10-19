@@ -892,6 +892,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The refusal's JSON body, when it had one (e.g. `needsAck` on a resume, #776). */
+    readonly body: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -905,7 +907,7 @@ async function answer<T>(res: Response): Promise<T> {
   if (!res.ok) {
     // A proxy's 502 page is no JSON: its status still says what it was.
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
+    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status, body);
   }
   return (await res.json()) as T;
 }

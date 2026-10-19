@@ -98,6 +98,7 @@ interface Render {
   renderProtection(protection: unknown, brand: string): string;
   renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
+  opensAckForm(error: unknown): boolean;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -1153,6 +1154,22 @@ test('the protection mode on the Machine page, the last commit checked for write
   const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
   assert.match(none, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
   assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
+});
+
+test('a stop in force that is not the main watch\'s (a red main after an auto-merge) shows its banner, and an admin its resume; the acknowledgement form opens only on a refusal that asks for one (#776)', () => {
+  const red = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: "main's required checks failed (ci) on `cccccccc` after auto-merging #12", canClear: false };
+  const banner = r.renderMainWatchAlert(red);
+  assert.match(banner, /data-testid="auto-merge-stopped"[\s\S]*Auto-merge is stopped[\s\S]*required checks failed \(ci\) on `cccccccc` after auto-merging #12/);
+  assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the resume');
+  assert.doesNotMatch(banner, /Unaccounted commit/, 'not the main watch alert');
+  assert.match(r.renderMainWatchAlert({ ...red, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  assert.equal(r.renderMainWatchAlert({ mode: 'main_watch' }), '', "a viewer's: nothing");
+  // The form opens on a 409 whose body asks for an acknowledgement, never on another refusal.
+  assert.equal(r.opensAckForm({ status: 409, body: { error: 'not green', needsAck: true } }), true);
+  assert.equal(r.opensAckForm({ status: 409, body: { error: 'auto-merge is not stopped' } }), false);
+  assert.equal(r.opensAckForm({ status: 409, body: { error: 'the stop changed while the default branch was being measured; look again before resuming' } }), false);
+  assert.equal(r.opensAckForm({ status: 400, body: { needsAck: true } }), false);
+  assert.equal(r.opensAckForm(new Error('network')), false);
 });
 
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
