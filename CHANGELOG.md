@@ -2,6 +2,23 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## v0.5.4 (unreleased)
+
+### Guardrail changes: what each one does
+
+- **The engine's security reads of the environment ignore `Object.prototype` (#786).** A variable that isn't set reads as unset, even when code in the process has put a value under that name on `Object.prototype`. This covers:
+  - the system root and the test-run marks;
+  - the slot dir and its config, and the instances, init and held-out dirs;
+  - the tool prefix, PATH lookups, and the PATH handed to sudo, git, tar, npm and docker;
+  - the desktop, Chrome and Git Bash binaries, and the backup dirs;
+  - the agent users' homes and `SUDO_USER`;
+  - the variables an agent user's run is given across the user switch (`TZ`, `LC_ALL`, `XDG_RUNTIME_DIR` and the rest of its pass-through list), the Claude login a run is serialized on, and the `NODE_OPTIONS` handed to the App check's node;
+  - the `HOME` and instances dir written into an instance's service unit.
+
+  Before, such a value was read as if it were set. These reads now go through one own-variable snapshot (`src/os/own-env.ts`). Nothing changes when the environment is clean. Not covered yet: a child process the engine spawns still inherits `Object.prototype`'s keys through Node's `child_process` (#846).
+
+### Guardrail changes
+
 ## v0.5.3 (2026-10-19)
 
 ### Upgrading (from v0.5.2)
@@ -131,7 +148,6 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - It fails closed on git older than 2.40, on a rule in `info/attributes`, and on data it can't read.
   - The evaluator is told to read the diff the same way, and the push gate's per-commit scan reads as text too.
 - **Removed: a sudoers rule and a root helper (#752).** The owner terminal's rule (the hub's viewer user may run the console shell as the admin user) and the root-owned console shell are gone; `dashboards.sh` removes both from an older install on its next run, and nothing installs them. The console shell in the engine is now a stub that refuses every command, so the engine updater (old or new) replaces a live one with it on the first update; the updater still never installs it where it is absent and never touches sudoers. The hub's unit always keeps its full sandbox. The device allowlist for machine changes is unchanged, under its new name `--machine-devices`.
-- **The engine's security reads of the environment ignore `Object.prototype` (#786).** A variable that isn't set reads as unset, even when code in the process has put a value under that name on `Object.prototype`. This covers the system root and the test-run marks, the slot dir and its config, the instances, init and held-out dirs, the tool prefix, PATH lookups, the desktop and Chrome binaries, the backup dirs, the agent users' homes, `SUDO_USER`, and the `NODE_OPTIONS` handed to the App check's node. Before, such a value was read as if it were set. They read through one own-variable snapshot (`src/os/own-env.ts`). No change when the environment is clean.
 - **The engine updater no longer waits for the retired `desktop` check when a commit has no run of it (#755).** It is the only name in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`). A `desktop` run that exists is judged as before: failed, skipped or cancelled refuses, and queued or running waits. A list of retired names alone, none of which ran on the commit, is refused, as an empty list is. Nothing changes while CI still runs the job. The window it tested was never built or installed by the updater.
 - **The root updater replaces itself, on the release channel only (#761).** After a healthy install from a signed release tag, it takes that release's `scripts/machine/worklane-update.cjs`. It reads the file from the tag's commit in its root-owned verification clone after checking the tag's signature again, and only when the signed tag names itself and points at the engine just installed. Never from main, never from the build, and never an older or equal release than the running updater's recorded version, so an engine rollback doesn't take it back. The swap is atomic: a temp file, `node --check`, `root:root 0755`, read back as a regular file with the release's bytes, then renamed. Any failure leaves the running updater as it is and logs why. The previous one is kept as `/usr/local/libexec/worklane-update.prev` for a manual rollback (`sudo install -o root -g root -m 0755 /usr/local/libexec/worklane-update.prev /usr/local/libexec/worklane-update`). On by default; root turns it off with `sudo touch /etc/worklane/updater-no-self-update`. `updates.sh` no longer puts its updater over a newer one the updater took from a release.
 - **The release channel installs a release only under its own signed name, and builds exactly the tag object it verified (#773).** It only refuses more:
