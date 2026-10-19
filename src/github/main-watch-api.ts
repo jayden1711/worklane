@@ -1,8 +1,9 @@
 // The GitHub calls the main watch makes (src/main-watch.ts), one REST request each, with the instance's own token.
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
-import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt, WorkflowAt } from '../main-watch.js';
+import { TooManyPages, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type StatusAt, type WorkflowAt } from '../main-watch.js';
 import type { WorkflowSource } from '../check-source.js';
+import { classifyGitHubError } from './errors.js';
 
 /** Pages of 100 check runs or statuses read for one commit (#727); past them the merge isn't judged yet. */
 const PAGES_MAX = 10;
@@ -54,14 +55,14 @@ export class GitHubMainWatchApi implements MainWatchApi {
 
   /**
    * The check runs on `sha`: the first page of 100 as main read it, then (#727) every later page while a page is full,
-   * whatever total_count says, marked `extra` (only a pinned name is judged with them). Past PAGES_MAX pages it throws:
-   * a run unread could be a pinned check's failure, so the merge isn't judged yet (the watch asks again).
+   * whatever total_count says, marked `extra` (only a pinned name is judged with them). Still full past PAGES_MAX pages:
+   * TooManyPages, carrying what was read, so the watch judges a pinned merge unaccounted (src/main-watch.ts judge).
    */
   async checkRuns(sha: string): Promise<CheckRunAt[]> {
     type Run = { id?: number; html_url?: string | null; name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null };
     const out: CheckRunAt[] = [];
     for (let page = 1; ; page++) {
-      if (page > PAGES_MAX) throw new Error(`more than ${PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}: not judged`);
+      if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}`, out);
       const r = await this.json<{ check_runs: Run[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100${page > 1 ? `&page=${page}` : ''}`, `the check runs on ${sha.slice(0, 8)}`);
       out.push(
         ...r.check_runs.map((c) => ({
@@ -93,15 +94,22 @@ export class GitHubMainWatchApi implements MainWatchApi {
     return out;
   }
 
-  /** The statuses on `sha`, newest first: the first page of 100 as main read it, then (#727) later pages as checkRuns reads them. */
+  /**
+   * The statuses on `sha`, newest first: the first page of 100 as main read it, then (#727) later pages as checkRuns
+   * reads them (TooManyPages past PAGES_MAX). Statuses need their own permission: a first page refused as a token that
+   * may not read them (a 403 that isn't a rate limit) or none (404) means no statuses, as on main. Any other refusal, a
+   * rate-limited 403 or a refusal of a later page, throws (the watch asks again): never a partial list.
+   */
   async statuses(sha: string): Promise<StatusAt[]> {
     const out: StatusAt[] = [];
     for (let page = 1; ; page++) {
-      if (page > PAGES_MAX) throw new Error(`more than ${PAGES_MAX} pages of statuses on ${sha.slice(0, 8)}: not judged`);
+      if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of statuses on ${sha.slice(0, 8)}`, out);
       const res = await this.get(`/repos/${this.repo}/commits/${sha}/statuses?per_page=100${page > 1 ? `&page=${page}` : ''}`);
-      // Statuses need their own permission; without it, there are just none to count.
-      if (res.status === 403 || res.status === 404) return out;
-      if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}`);
+      if (!res.ok && page === 1 && (res.status === 403 || res.status === 404)) {
+        const kind = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), await res.json().catch(() => ({}))).kind;
+        if (kind !== 'rate_limited' && kind !== 'secondary_rate_limited') return out;
+      }
+      if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}${page > 1 ? ` (page ${page})` : ''}`);
       const list = (await res.json()) as { context: string; state: string; created_at: string }[];
       out.push(...list.map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at, ...(page > 1 ? { extra: true as const } : {}) })));
       if (list.length < 100) return out;

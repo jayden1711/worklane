@@ -13,6 +13,8 @@ import { ACTIONS_APP_ID, githubCheckApps, type GithubCheckApps, type WorkflowSou
 const STATUS_PAGE_DEFAULT = 30;
 /** Pages of the combined status read for one commit (#727); past them it isn't judged. */
 const STATUS_PAGES_MAX = 10;
+/** Pages of 100 check runs read for one commit (#727), as the main watch reads them; past them it isn't judged. */
+const CHECK_PAGES_MAX = 10;
 
 export class GitHubError extends Error {
   constructor(
@@ -228,11 +230,15 @@ export class GitHubBacklog implements Backlog {
   async checks(sha: string): Promise<CommitCheck[]> {
     const out: CommitCheck[] = [];
     const suites = new Map<CommitCheck, number>();
-    for (let page = 1; page < 10; page++) {
+    // Main read 9 pages and judged them; #727 reads a 10th (marked `extra`: only a pinned name is judged with it) and
+    // throws past it, as the main watch does: a failing run on an unread page could be another source's, which blocks a
+    // pinned check, so a truncated list is never judged (the PR waits).
+    for (let page = 1; ; page++) {
+      if (page > CHECK_PAGES_MAX) throw new Error(`more than ${CHECK_PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}: not judged`);
       const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string; app?: { id?: number; slug?: string } | null; check_suite?: { id?: number } | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
       for (const c of r.check_runs) {
         const app = c.app?.id;
-        const check: CommitCheck = { name: c.name, source: 'check_run', status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}), ...(typeof app === 'number' ? { app } : {}) };
+        const check: CommitCheck = { name: c.name, source: 'check_run', status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}), ...(typeof app === 'number' ? { app } : {}), ...(page >= CHECK_PAGES_MAX ? { extra: true as const } : {}) };
         // An Actions run is told by its App's id, as the main watch tells it (src/check-source.ts ACTIONS_APP_ID).
         if (app === ACTIONS_APP_ID && typeof c.check_suite?.id === 'number') suites.set(check, c.check_suite.id);
         out.push(check);
@@ -244,13 +250,7 @@ export class GitHubBacklog implements Backlog {
       if (![...suites.values()].every((s) => this.suiteRuns.has(s))) await this.workflowRuns(sha);
       for (const [check, suite] of suites) check.workflow = this.suiteRuns.get(suite) ?? null;
     }
-    // Commit statuses need their own permission; without it (403) or with none (404), there are just no statuses.
-    let statuses: { context: string; state: string; target_url?: string | null; extra?: true }[] = [];
-    try {
-      statuses = await this.statusPages(sha);
-    } catch (e) {
-      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
-    }
+    const statuses = await this.statusPages(sha);
     for (const s of statuses) {
       out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}), ...(s.extra ? { extra: true as const } : {}) });
     }
@@ -259,16 +259,25 @@ export class GitHubBacklog implements Backlog {
 
   /**
    * The combined status's contexts on `sha`: the first page as main read it (GitHub's default page size), then, #727,
-   * every later page while a page is full and total_count doesn't say it was the last (a page with no total_count is
-   * never taken as the last), marked `extra` (only a pinned name is judged with them). Past STATUS_PAGES_MAX pages it
-   * throws: a status unread could be a pinned check's failure, so the commit isn't judged (it waits).
+   * every later page while a page is full, whatever total_count says, marked `extra` (only a pinned name is judged with
+   * them). Past STATUS_PAGES_MAX pages it throws: a status unread could be a pinned check's failure, so the commit isn't
+   * judged (it waits).
+   * Commit statuses need their own permission: a first page GitHub refuses as a token that may not read them (a 403
+   * that isn't a rate limit) or has none (404) means no statuses, as on main. Any other refusal, a rate-limited 403 or
+   * a refusal of a later page, throws (#727): a status read refused part-way never reads as "no statuses".
    */
   private async statusPages(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
     type Page = { total_count?: number; statuses: { context: string; state: string; target_url?: string | null }[] };
-    const first = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status`);
+    let first: Page;
+    try {
+      first = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status`);
+    } catch (e) {
+      if (e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited'))) return [];
+      throw e;
+    }
     const all: { context: string; state: string; target_url?: string | null; extra?: true }[] = [...first.statuses];
     let page = first;
-    for (let n = 2; page.statuses.length >= STATUS_PAGE_DEFAULT && !(typeof page.total_count === 'number' && page.total_count <= all.length); n++) {
+    for (let n = 2; page.statuses.length >= STATUS_PAGE_DEFAULT; n++) {
       if (n > STATUS_PAGES_MAX) throw new Error(`more than ${STATUS_PAGES_MAX} pages of commit statuses on ${sha.slice(0, 8)}: not judged`);
       page = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status?page=${n}`);
       all.push(...page.statuses.map((s) => ({ ...s, extra: true as const })));

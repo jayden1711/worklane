@@ -171,7 +171,9 @@ export const MAKERS_ALLOWED: Record<string, string[]> = {
 
 /**
  * Each way in `files` to reach a JudgedChecks maker outside the files MAKERS_ALLOWED names, found through the
- * compiler's own symbols and module resolution, never by text:
+ * compiler's own symbols and module resolution, never by text (what it doesn't flag, by design: createRequire reached by
+ * a computed key, process.getBuiltinModule, an import inside new Function, and `this.pinned.constructor` in a subclass:
+ * m11 to m14, named as the residual with e7 in src/check-source.ts):
  * - a name that resolves (through any alias, re-export or barrel) to a maker, or to check-source.ts's module itself
  *   (an `export * as cs` re-exported and imported by name);
  * - a namespace import, `export *`, `export * as`, or dynamic import of any module that exposes a maker (check-source.ts,
