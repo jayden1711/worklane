@@ -25,20 +25,40 @@ let token = 0;
  * Readiness of `ci`, pinned to App 1111, whose own run passes on page 1: the check-run pages `runs(page)` (filter=latest),
  * and the combined status's pages `status(page)`. Rejects when the read throws.
  */
-async function ready(o: { runs: (page: number) => unknown[]; status?: (page: number) => Response }) {
+async function ready(o: { runs: (page: number) => unknown[]; status?: (page: number) => Response; bare?: boolean; calls?: string[] }) {
   const f = (async (url: string) => {
     const u = new URL(url);
     const page = Number(u.searchParams.get('page') ?? '1');
+    if (u.pathname.includes('/commits/')) o.calls?.push(`${u.pathname.split('/').at(-1)} ${page}`);
     if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: o.runs(page) });
     if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return o.status ? o.status(page) : json({ statuses: [] });
+    if (u.pathname === '/repos/o/r/branches/main') return json({ name: 'main', protection: { enabled: false } });
+    if (u.pathname === '/repos/o/r/rules/branches/main') return json([]);
     return json({ message: 'Not Found' }, 404);
   }) as typeof fetch;
   // A fresh token each time, so no rate limit here is shared with another test's budget.
   const t = `tok-${++token}`;
-  const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({ ci: { app_id: PINNED_APP } }) });
+  // `bare`: nothing pinned (round 8: main's reads and main's verdict). Else `ci` is pinned to App 1111.
+  const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => (o.bare ? {} : { ci: { app_id: PINNED_APP } }), required: () => ['ci'] });
   const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
   return r.ready ? 'ready' : r.reasons.join('; ');
 }
+
+test("round 8: with no required check pinned, readiness makes main's reads and gets main's verdict past every cap and refusal", async () => {
+  const bareCi = run(1, 'ci', OTHER_APP);
+  const first = [bareCi, ...filler(1).slice(1)];
+  // 1,001+ check runs: main read 9 pages and said READY (9c1c8bd5 threw: waited for good).
+  const calls: string[] = [];
+  assert.equal(await ready({ bare: true, calls, runs: (p) => (p === 1 ? first : p <= 10 ? filler(p) : [run(99_999, 'x', OTHER_APP)]) }), 'ready');
+  assert.deepEqual(calls.filter((c) => c.startsWith('check-runs')), Array.from({ length: 9 }, (_, i) => `check-runs ${i + 1}`), 'nine pages, as main');
+  assert.deepEqual(calls.filter((c) => c.startsWith('status')), ['status 1'], 'one status page, as main');
+  // 301 combined-status contexts: main read page 1 and said READY (9c1c8bd5 threw).
+  const fullStatus = () => json({ total_count: 301, statuses: Array.from({ length: 30 }, (_, i) => ({ context: `s${i}`, state: 'success' })) });
+  assert.equal(await ready({ bare: true, runs: (p) => (p === 1 ? [bareCi] : []), status: () => fullStatus() }), 'ready');
+  // A refused page 2 is never read; a rate-limited page 1 is none, as on main (9c1c8bd5 waited on both).
+  assert.equal(await ready({ bare: true, runs: (p) => (p === 1 ? [bareCi] : []), status: (p) => (p === 1 ? fullStatus() : RATE_LIMITED()) }), 'ready');
+  assert.equal(await ready({ bare: true, runs: (p) => (p === 1 ? [bareCi] : []), status: () => RATE_LIMITED() }), 'ready');
+});
 
 test('readiness reads 10 pages of check runs, a failing run of another source on page 10 blocks, and past page 10 nothing is judged', async () => {
   const pinnedPass = run(1, 'ci', PINNED_APP);
@@ -79,21 +99,27 @@ function watchApi(o: { runs?: (page: number) => unknown[]; statuses?: (page: num
   return new GitHubMainWatchApi('o/r', async () => 't', f);
 }
 
-test("the main watch's statuses: refused part-way or rate-limited throws; a first page refused as the token's permission, or 404, is none", async () => {
+test("the main watch's statuses, a required check pinned: refused part-way or rate-limited throws; a first page refused as the token's permission, or 404, is none", async () => {
   const full = () => json(Array.from({ length: 100 }, (_, i) => ({ context: `s${i}`, state: 'success', created_at: '2026-10-12T09:00:00Z' })));
+  const pinned = { pinned: true };
   // Page 2 refused: throws (961ecbad returned the 100 read so far).
-  await assert.rejects(watchApi({ statuses: (p) => (p === 1 ? full() : NO_ACCESS()) }).statuses(HEAD), /403 reading the statuses .*page 2/);
-  await assert.rejects(watchApi({ statuses: (p) => (p === 1 ? full() : json({ message: 'Not Found' }, 404)) }).statuses(HEAD), /404/);
+  await assert.rejects(watchApi({ statuses: (p) => (p === 1 ? full() : NO_ACCESS()) }).statuses(HEAD, pinned), /403 reading the statuses .*page 2/);
+  await assert.rejects(watchApi({ statuses: (p) => (p === 1 ? full() : json({ message: 'Not Found' }, 404)) }).statuses(HEAD, pinned), /404/);
   // Page 1 rate-limited: throws (961ecbad returned none).
-  await assert.rejects(watchApi({ statuses: () => RATE_LIMITED() }).statuses(HEAD), /403/);
+  await assert.rejects(watchApi({ statuses: () => RATE_LIMITED() }).statuses(HEAD, pinned), /403/);
   // Page 1 refused as the token's permission, or 404: none, as on main.
-  assert.deepEqual(await watchApi({ statuses: () => NO_ACCESS() }).statuses(HEAD), []);
-  assert.deepEqual(await watchApi({ statuses: () => json({ message: 'Not Found' }, 404) }).statuses(HEAD), []);
+  assert.deepEqual(await watchApi({ statuses: () => NO_ACCESS() }).statuses(HEAD, pinned), []);
+  assert.deepEqual(await watchApi({ statuses: () => json({ message: 'Not Found' }, 404) }).statuses(HEAD, pinned), []);
+  // Round 8: nothing pinned: main's read (page 1 only; any 403 or 404 is none).
+  assert.equal((await watchApi({ statuses: (p) => (p === 1 ? full() : NO_ACCESS()) }).statuses(HEAD)).length, 100);
+  assert.deepEqual(await watchApi({ statuses: () => RATE_LIMITED() }).statuses(HEAD), []);
 });
 
-test("the main watch's check runs past 10 full pages: TooManyPages, carrying the 1000 read (the watch then judges a pinned merge unaccounted)", async () => {
+test("the main watch's check runs: nothing pinned, the first page only, as main; a required check pinned, TooManyPages past 10 full pages", async () => {
+  const bare = await watchApi({ runs: (p) => (p === 1 ? filler(p) : [run(99_999, 'ci', OTHER_APP, 'failure')]) }).checkRuns(HEAD);
+  assert.equal(bare.length, 100, 'one page read, as main (9c1c8bd5 read every page)');
   const api = watchApi({ runs: (p) => filler(p) });
-  const e = await api.checkRuns(HEAD).then(
+  const e = await api.checkRuns(HEAD, { pinned: true }).then(
     () => null,
     (x: unknown) => x,
   );

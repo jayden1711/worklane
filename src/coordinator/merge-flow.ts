@@ -60,6 +60,9 @@ export abstract class MergeFlow extends FixRuns {
       repo: () => this.d.cfg.project.project.repo,
       configured: () => this.d.cfg.project.required_check_sources,
       local: { project: () => this.d.cfg.project, tests: () => this.d.cfg.tests, log: this.d.log },
+      // Every name a judgement here can require (the PR's, the batch's fast and full checks) and every name config.yaml
+      // pins: with none of them pinned, checks are read exactly as before pins.
+      required: () => [...this.requiredChecks(), ...this.d.cfg.tests.land.pr_batch.fast_checks, ...this.d.cfg.tests.land.pr_batch.full_checks, ...(this.d.cfg.review ?? DEFAULT_REVIEW).docs_only_checks, ...Object.keys(this.d.cfg.project.required_check_sources)],
     });
     return this.pinnedInst;
   }

@@ -58,10 +58,12 @@ export class GitHubMainWatchApi implements MainWatchApi {
    * whatever total_count says, marked `extra` (only a pinned name is judged with them). Still full past PAGES_MAX pages:
    * TooManyPages, carrying what was read, so the watch judges a pinned merge unaccounted (src/main-watch.ts judge).
    */
-  async checkRuns(sha: string): Promise<CheckRunAt[]> {
+  async checkRuns(sha: string, opts: { pinned?: boolean } = {}): Promise<CheckRunAt[]> {
     type Run = { id?: number; html_url?: string | null; name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null };
     const out: CheckRunAt[] = [];
     for (let page = 1; ; page++) {
+      // No required check pinned: the first page only, as main read it.
+      if (page > 1 && !opts.pinned) return out;
       if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}`, out);
       const r = await this.json<{ check_runs: Run[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100${page > 1 ? `&page=${page}` : ''}`, `the check runs on ${sha.slice(0, 8)}`);
       out.push(
@@ -100,11 +102,17 @@ export class GitHubMainWatchApi implements MainWatchApi {
    * may not read them (a 403 that isn't a rate limit) or none (404) means no statuses, as on main. Any other refusal, a
    * rate-limited 403 or a refusal of a later page, throws (the watch asks again): never a partial list.
    */
-  async statuses(sha: string): Promise<StatusAt[]> {
+  async statuses(sha: string, opts: { pinned?: boolean } = {}): Promise<StatusAt[]> {
     const out: StatusAt[] = [];
     for (let page = 1; ; page++) {
       if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of statuses on ${sha.slice(0, 8)}`, out);
       const res = await this.get(`/repos/${this.repo}/commits/${sha}/statuses?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+      // No required check pinned: main's read, unchanged (the first page; a 403 or 404 is none).
+      if (!opts.pinned) {
+        if (res.status === 403 || res.status === 404) return [];
+        if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}`);
+        return ((await res.json()) as { context: string; state: string; created_at: string }[]).map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at }));
+      }
       if (!res.ok && page === 1 && (res.status === 403 || res.status === 404)) {
         const kind = classifyGitHubError(res.status, Object.fromEntries(res.headers.entries()), await res.json().catch(() => ({}))).kind;
         if (kind !== 'rate_limited' && kind !== 'secondary_rate_limited') return out;
