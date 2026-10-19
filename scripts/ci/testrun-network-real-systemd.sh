@@ -41,6 +41,7 @@ cleanup() {
   if [ -f "$t/pids" ]; then while read -r p; do sudo kill "$p" 2>/dev/null || true; done < "$t/pids"; fi
   sudo pkill -f "$t/listen.py" 2>/dev/null || true
   sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+  sudo setfacl -m o::--- /usr/local/libexec/worklane-testrun-userns 2>/dev/null || true
   sudo rm -f /etc/worklane/testrun-network.json
   [ "$etc_was" = 1 ] || sudo rmdir /etc/worklane 2>/dev/null || true
   sudo ip netns del wlpub 2>/dev/null || true
@@ -247,6 +248,61 @@ for x in "uid_map 0 0 4294967295" "slirp_unit_user " "slirp_proc_user root" "run
   grep -qx "$x" "$t/net-own-old.out" || fail "the helper before #545: no line \"$x\": this probe can't tell"
 done
 : > "$t/seen"
+
+echo "== #545: only the test users may run the wrapper, and a run's own command doesn't keep its user-namespace allowance"
+# This runner restricts unprivileged user namespaces (Ubuntu 24.04): the wrapper's AppArmor profile is what lets it make
+# one. A capability use in a fresh user+net namespace (ip link add, a dummy device: its module loaded first) tells
+# whether a process got that allowance.
+W=/usr/local/libexec/worklane-testrun-userns
+[ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1 ] || fail "this runner doesn't restrict user namespaces: these checks can't tell"
+sudo modprobe dummy
+IPB="$(command -v ip)"
+SPB="$(command -v setpriv)"
+echo "  the wrapper: $(sudo stat -c '%U:%G %a' "$W"), ACL: $(sudo getfacl -cp "$W" | tr '\n' ' ')"
+# <label> <systemd-run options...>: the wrapper, in a NoNewPrivileges unit, making a namespace and using a capability in it.
+wtry() {
+  local label="$1" out rc=0; shift
+  out="$(sudo systemd-run --wait --pipe --quiet --collect -p NoNewPrivileges=yes "$@" "$W" --user --map-root-user --net "$IPB" link add d0 type dummy < /dev/null 2>&1)" || rc=$?
+  echo "  $label: exit $rc: ${out:-(no output)}"
+  return "$rc"
+}
+wtry "the test user (may)" --uid=wl-test-ci --gid=wl-test-ci || fail "the test user can't use the wrapper"
+if wtry "the coordinator wl-ci (may not)" --uid=wl-ci --gid=wl-ci; then fail "wl-ci ran the wrapper"; fi
+if wtry "a DynamicUser unit (may not)" -p DynamicUser=yes; then fail "a DynamicUser unit ran the wrapper"; fi
+echo "  fail-without: the wrapper world-executable (o::r-x), a DynamicUser unit uses it"
+sudo setfacl -m o::r-x "$W"
+wrc=0; wtry "a DynamicUser unit, the wrapper world-executable" -p DynamicUser=yes || wrc=$?
+sudo setfacl -m o::--- "$W"
+[ "$wrc" = 0 ] || fail "with the wrapper world-executable a DynamicUser unit still couldn't use it: this check can't tell"
+# A run's own command, making a namespace of its own and using a capability in it: refused, as before #545.
+nested="unshare --user --map-root-user --net $IPB link add d0 type dummy 2>&1; echo \"nested rc \$?\""
+nest() { # <id> <helper label>: a run doing that; its output in $t/<id>.out
+  mkrun ci "$1"
+  as_ ci exec "$1" 60 -- "$nested" < /dev/null > "$t/$1.out" 2> "$t/$1.err" || { cat "$t/$1.err" >&2; fail "$1 exited non-zero"; }
+  sed "s/^/  $2: /" "$t/$1.out"
+  as_ ci wipe "$1" > /dev/null
+}
+nest net-nested "this helper"
+grep -qx 'nested rc 0' "$t/net-nested.out" && fail "a run made a user namespace and used a capability in it (#545: the wrapper's allowance leaked into the run)"
+grep -q 'Operation not permitted' "$t/net-nested.out" || fail "the run's nested namespace wasn't refused with EPERM: $(cat "$t/net-nested.out")"
+echo "  main's helper before #545 ($PRE545), the same: refused there too (the restriction, as it was)"
+sudo install -o root -g root -m 0755 "$t/helper-pre545.sh" "$H"
+nest net-nested-old "main's helper"
+sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+grep -qx 'nested rc 0' "$t/net-nested-old.out" && fail "main's helper's run used a capability in a namespace of its own: the restriction isn't what this checks"
+# Fail-without for the switch: the run's prelude exactly, as the test user in a NoNewPrivileges unit, with and without
+# setpriv's --apparmor-profile=unconfined: without it the command keeps the wrapper's allowance.
+prelude() { # [<setpriv option>]: the prelude, then the nested namespace's capability use
+  sudo systemd-run --wait --pipe --quiet --collect --expand-environment=no --uid=wl-test-ci --gid=wl-test-ci -p NoNewPrivileges=yes \
+    "$W" --user --map-current-user --net --keep-caps -- /bin/sh -c "$IPB link set lo up && exec $SPB --inh-caps=-all --ambient-caps=-all --bounding-set=-all $* -- \"\$@\"" sh \
+    /bin/sh -c "$nested" < /dev/null 2>&1 || true
+}
+without="$(prelude)"; with="$(prelude --apparmor-profile=unconfined)"
+echo "  the prelude without --apparmor-profile=unconfined: $without"
+echo "  the prelude with it: $with"
+grep -qx 'nested rc 0' <<<"$without" || fail "without --apparmor-profile=unconfined the nested namespace was refused anyway: this check can't tell"
+if grep -qx 'nested rc 0' <<<"$with"; then fail "with --apparmor-profile=unconfined the nested namespace still worked"; fi
+grep -q 'Operation not permitted' <<<"$with" || fail "with --apparmor-profile=unconfined: not refused with EPERM: $with"
 
 echo "== slirp4netns's sandbox: no Unix socket at all, so no host abstract socket (owner's RestrictAddressFamilies)"
 # A stand-in for a host service on an abstract Unix socket (not a file: an empty /etc and /run don't hide it).
