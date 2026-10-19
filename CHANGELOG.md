@@ -13,6 +13,8 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   4. Ideas spoken before the upgrade and not yet taken stay in an instance's `state/voice/inbox/`, and nothing takes them now (doctor names them): read them, file any you want as issues, then delete `state/voice/`.
   5. In the Tailscale admin console, delete the ACL rule for port 8443. Remove the two Shortcuts from your phone.
 
+### Guardrail changes
+
 ## v0.5.3 (2026-10-19)
 
 ### Upgrading (from v0.5.2)
