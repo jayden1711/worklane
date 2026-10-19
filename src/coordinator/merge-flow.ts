@@ -446,6 +446,10 @@ export abstract class MergeFlow extends FixRuns {
       await this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       return null;
     }
+    // WHY (#715): the last thing before the merge call, on every path through this one door (the autonomous merge after
+    // its combined gate, mergeTested, mergeApproved): an emergency stop or an auto-merge stop raised during anything
+    // awaited above, or before it, holds the merge, an owner's approval included. Not merged this pass, nothing recorded.
+    if (this.emergencyInForce() || this.autoMergeStopped()) return null;
     let m: Awaited<ReturnType<typeof this.mergeOurs>>;
     try {
       m = await this.mergeOurs(pr);

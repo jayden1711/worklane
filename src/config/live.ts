@@ -165,22 +165,23 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
   // WHY (#715): whenever main's config can't run (none there, or invalid), the checkout's config as committed (the
   // default branch as the clone last saw it) runs, never its working tree, where a hand edit could loosen the policy the
   // merges are judged by. The working tree only when HEAD has no valid config either (a first run before any commit).
-  const checkout = (why: string) => {
+  // The note names which one ran: the committed config (HEAD), or the working tree.
+  const checkout = (why: string, detail = '') => {
     try {
       const committed = loadConfigAt(o.repo, 'HEAD');
-      if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), note: why };
+      if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's committed config (HEAD)${detail}` };
     } catch {
       // none valid at HEAD either
     }
-    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: why };
+    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: `${why}, started with the checkout's working tree (no valid config committed at HEAD)${detail}` };
   };
-  if (tree === null) return checkout(`no ${BRAND.configDir}/ at ${o.remote}/${branch}: started with the checkout's`);
+  if (tree === null) return checkout(`no ${BRAND.configDir}/ at ${o.remote}/${branch}`);
   try {
     const cfg = loadConfigAt(o.repo, ref);
     const extra = o.check?.(cfg) ?? [];
     if (extra.length) throw new ConfigInvalid(extra);
     return { cfg, tree, note: null };
   } catch (e) {
-    return checkout(`${BRAND.configDir}/ at ${o.remote}/${branch} is invalid, started with the checkout's: ${(e as Error).message.slice(0, 1000)}`);
+    return checkout(`${BRAND.configDir}/ at ${o.remote}/${branch} is invalid`, `: ${(e as Error).message.slice(0, 1000)}`);
   }
 }

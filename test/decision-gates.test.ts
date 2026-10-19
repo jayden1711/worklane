@@ -1,6 +1,6 @@
 // Who may approve, the same on every surface, and the money paths read from main (#715): a writer's GitHub comment
 // doesn't approve a high-risk merge unless review.yaml on main lets writers, `decide` from the CLI is refused to
-// anyone but root and the coordinator user, and a change is judged by main's money-path list, never the checkout's.
+// anyone but root and the coordinator user (on a local site, the user whose event log it is), and a change is judged by main's money-path list, never the checkout's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -22,7 +22,7 @@ import { isRoot } from '../src/os/index.js';
 import { FakeRunner } from '../src/runner.js';
 import { logPath } from '../src/service.js';
 import { engineCli, exampleProject, exampleRoles } from './helpers.js';
-import { coordinator, fixture, git, skip, type Fixture } from './repro-state-graph/harness.js';
+import { approve, coordinator, fixture, git, openPr, passing, skip, type Fixture } from './repro-state-graph/harness.js';
 
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 const WRITER = 'example-collaborator';
@@ -129,7 +129,7 @@ test("who may approve is read from main's review.yaml, never the checkout's work
   p.push({ [review]: `${readFileSync(join(p.dir, review), 'utf8')}approvals: { land: writers }\n` });
   git(f.repo, 'fetch', '-q', 'origin');
   assert.deepEqual(decide.approvalsAt(f.repo, 'origin/main', true), { land: 'writers' });
-  assert.equal(decide.approvalsAt(f.repo, 'origin/main', false), undefined, "an instance whose root policy doesn't let writers: the owners alone");
+  assert.equal(decide.approvalsAt(f.repo, 'origin/main', false), undefined, "an instance whose policy.yaml doesn't let writers: the owners alone");
   p.push({ [review]: `${readFileSync(join(p.dir, review), 'utf8')}not_a_setting: 1\n` });
   git(f.repo, 'fetch', '-q', 'origin');
   assert.equal(decide.approvalsAt(f.repo, 'origin/main', true), undefined, 'an invalid config on main: the owners alone');
@@ -140,7 +140,7 @@ test("letting writers approve a high-risk merge needs the instance's policy.yaml
   cfg.project.land_mode = 'pr';
   cfg.review = { ...(cfg.review ?? DEFAULT_REVIEW), approvals: { land: 'writers' } } as ReviewConfig;
   const policy = PolicyFile.parse({ version: 1, budget: { daily_usd: 1_000_000 }, agents: { max_workers: 32 } });
-  assert.equal(policy.writers_approve_land, false, 'off unless root turns it on');
+  assert.equal(policy.writers_approve_land, false, "off unless the instance's policy.yaml turns it on");
   assert.deepEqual(policyViolations(cfg, policy), [], 'the instance still starts: the setting is ignored, not refused');
   // The coordinator reads the policy's switch on every approval: off, a writer's comment approves nothing.
   const f = fixture();
@@ -266,7 +266,7 @@ test("config at start: main's config invalid, the checkout's committed one runs,
   const local = join(f.repo, file);
   writeFileSync(local, `${readFileSync(local, 'utf8').replace(/^required_checks:.*\n/m, '')}required_checks: [hand-edited]\n`);
   const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
-  assert.match(start.note ?? '', /is invalid, started with the checkout's/);
+  assert.match(start.note ?? '', /is invalid, started with the checkout's committed config \(HEAD\): /);
   assert.deepEqual(start.cfg.project.required_checks, committed);
 });
 
@@ -282,6 +282,37 @@ test("config at start: no config on main at all, the checkout's committed one ru
   const local = join(f.repo, file);
   writeFileSync(local, `${readFileSync(local, 'utf8').replace(/^required_checks:.*\n/m, '')}required_checks: [hand-edited]\n`);
   const start = startConfig({ repo: f.repo, remote: 'origin', fallback: loadConfig(f.repo) });
-  assert.match(start.note ?? '', /no \S+ at origin\/main: started with the checkout's/);
+  assert.match(start.note ?? '', /^no \S+ at origin\/main, started with the checkout's committed config \(HEAD\)$/);
   assert.deepEqual(start.cfg.project.required_checks, committed);
+});
+
+test('auto-merge, not batched: a stop raised while the combined gate runs holds the merge, at the one door before the merge call', { skip }, async () => {
+  const settle = async (t: Awaited<ReturnType<typeof openPr>>) => {
+    for (let i = 0; i < 4; i++) {
+      await t.c.tick();
+      await t.c.idle();
+    }
+  };
+  for (const raise of [true, false]) {
+    const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+    const c = t.c as unknown as { combinedGate(w: unknown, pr: unknown): Promise<unknown> };
+    const gate = c.combinedGate.bind(c);
+    let raised = false;
+    // The main watch stops auto-merge while the combined check of main into the PR runs ("can take minutes").
+    c.combinedGate = async (w, pr) => {
+      const r = await gate(w, pr);
+      if (raise && r === 'merge' && !raised) {
+        writeFileSync(join(t.f.stateDir, 'auto-merge-stopped.json'), JSON.stringify({ reason: 'unaccounted commit on main' }));
+        raised = true;
+      }
+      return r;
+    };
+    t.f.backlog.setChecks(t.pr().headSha, passing);
+    await settle(t);
+    if (raise) {
+      assert.ok(raised, 'the stop was raised during the gate');
+      assert.ok(!t.pr().merged, 'not merged: the stop came in before the merge call');
+      assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
+    } else assert.ok(t.pr().merged, 'control: with no stop it merges');
+  }
 });
