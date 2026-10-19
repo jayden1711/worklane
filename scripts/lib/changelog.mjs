@@ -119,7 +119,8 @@ const EXACT_VERSION = /(?<![\w.])v?(\d+\.\d+\.\d+)(?![\w.])/gi;
  * `## Unreleased`); null when it is unclear (`## v0.6 (unreleased)`, `## Unreleased (0.6.x)`, two versions).
  */
 const unreleasedVersion = (h) => {
-  if (/\d/.test(h.replace(EXACT_VERSION, ''))) return null;
+  // Any numeric character, not only ASCII 0-9: `v０.６`, `v٠.٦`, `v²` and `Ⅵ` name a version too (#829 round 2).
+  if (/\p{N}/u.test(h.replace(EXACT_VERSION, ''))) return null;
   const named = [...new Set([...h.matchAll(EXACT_VERSION)].map((m) => m[1]))];
   return named.length === 0 ? '' : named.length === 1 ? named[0] : null;
 };
@@ -183,6 +184,9 @@ export function notesOf(section) {
  * (unreleased)`), is never taken as this one's; it stays where it is.
  * Every line of the input that isn't the fixed intro or the replaced section's heading and generated lists must
  * be in the result (counted): otherwise (text it can't place in a section, say) it throws, and nothing is written.
+ * The boundary: in a dated section the tool wrote lists for, every line after the notes shaped like a generated
+ * line (isListLine: a generated heading, `- text (#N)` with or without `: files`, the "none" lines) is taken as
+ * the tool's and replaced, as main always did, even one written there by hand. Any other line there is refused.
  */
 export function withSection(existing, version, section) {
   const head = '# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n';
