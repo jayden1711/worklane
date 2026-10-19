@@ -157,10 +157,6 @@ export function testStateRefusal(dir: string, env: NodeJS.ProcessEnv = process.e
  * TEST_TOKEN_VAR), or null when it does.
  */
 function machineMarkRefusal(machine: string, env: NodeJS.ProcessEnv, uid: number | null): string | null {
-  // As the root's mark is never honoured (systemRootRefusal): not as root, not in a process systemd started.
-  if (uid === 0) return `${SYSTEM_ROOT_VAR} is unset, and this process runs as root`;
-  const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);
-  if (sd) return `${SYSTEM_ROOT_VAR} is unset, and systemd started this process (${sd} is set)`;
   const token = env[TEST_TOKEN_VAR];
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return `${SYSTEM_ROOT_VAR} is unset, and ${TEST_TOKEN_VAR} doesn't carry the test preload's token`;
   const mark = join(machine, TEST_MARK_FILE);
@@ -182,13 +178,20 @@ function outsideTestMachine(o: { what: string; unset: string; fix: string; rootl
   const no = (why: string) => `this is a test run (${sign}), and the ${o.what} isn't the test machine's: ${why}. Run tests with the isolation preloaded (node --import ./dist/test/isolate.js --test <file>, or npm test), or ${o.fix}.`;
   if (!machine) return no(`${TEST_MACHINE_VAR} is unset, so the test isolation isn't loaded`);
   if (!isAbsolute(machine)) return no(`${TEST_MACHINE_VAR} (${machine}) is not an absolute path`);
+  const root = env[SYSTEM_ROOT_VAR];
+  // Before anything is looked at: the machine's own mark is never honoured as root, nor in a process systemd started,
+  // as the root's mark isn't (systemRootRefusal). Native Windows has no uid: there, as on the root's route, no root check.
+  if (!root && o.rootless) {
+    const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);
+    if (uid === 0) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${SYSTEM_ROOT_VAR} is unset, and this process runs as root`);
+    if (sd) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${SYSTEM_ROOT_VAR} is unset, and systemd started this process (${sd} is set)`);
+  }
   try {
     const d = lstatSync(machine);
     if (!d.isDirectory() || (process.platform !== 'win32' && ((uid !== null && d.uid !== uid) || (d.mode & 0o022) !== 0))) return no(`${TEST_MACHINE_VAR} (${machine}) isn't a directory of this user's alone`);
   } catch {
     return no(`${TEST_MACHINE_VAR} (${machine}) doesn't exist`);
   }
-  const root = env[SYSTEM_ROOT_VAR];
   if (!root && o.rootless) {
     const unmarked = machineMarkRefusal(machine, env, uid);
     if (unmarked) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${unmarked}`);
@@ -198,6 +201,8 @@ function outsideTestMachine(o: { what: string; unset: string; fix: string; rootl
     if (unmarked) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${unmarked}`);
   }
   if (!dir) return no(o.unset);
+  // A `..` after a link goes up from where the link points, not where it is written; resolve() would hide that.
+  if (dir.split(/[\\/]/).includes('..')) return no(`${dir} has a '..' part: written with one, a link before it could lead out of the machine`);
   if (!inside(machine, dir)) return no(`${dir} is outside ${machine}`);
   const link = linkInside(machine, dir);
   if (link) return no(link);

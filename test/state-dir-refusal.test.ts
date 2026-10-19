@@ -219,6 +219,12 @@ test('a symlink inside the test machine never leads the state or slot dir out of
     assert.match(testStateRefusal(dir, marked, engine, uid) ?? '', /is a symlink: no path inside the test machine may lead out of it/, what);
     assert.match(testSlotsRefusal(dir, marked, engine, uid) ?? '', /is a symlink: no path inside the test machine may lead out of it/, `slots: ${what}`);
   }
+  // A `..` after a link goes up from the link's target: written with one, the dir is refused, whatever follows (#818
+  // round 3). Built as raw strings: join() would fold the `..` away.
+  for (const dir of [`${join(base, 'out')}/../state`, `${join(base, 'in')}/../slots`, `${join(base, 'real')}/../real`]) {
+    assert.match(testStateRefusal(dir, marked, engine, uid) ?? '', /has a '\.\.' part/, dir);
+    assert.match(testSlotsRefusal(dir, marked, engine, uid) ?? '', /has a '\.\.' part/, `slots: ${dir}`);
+  }
   // No link on the way: as before, whether the dir exists or not.
   assert.equal(testStateRefusal(join(base, 'real', 'state'), marked, engine, uid), null);
   assert.equal(testSlotsRefusal(join(base, 'real'), marked, engine, uid), null);
@@ -253,7 +259,8 @@ test('testStateRefusal: never outside a test run, whatever the directory; in one
   for (const k of ['INVOCATION_ID', 'JOURNAL_STREAM']) {
     assert.match(testStateRefusal(join(testMachine, 'u', 'state'), { ...rootless, [k]: 'c'.repeat(32) }, engine, uid) ?? '', new RegExp(`systemd started this process \\(${k} is set\\)`), k);
   }
-  assert.notEqual(testStateRefusal(join(testMachine, 'u', 'state'), rootless, engine, 0), null, 'as root');
+  // Checked before the machine is looked at, so it is this refusal, not the machine's owner, that says no (#818 round 3).
+  assert.match(testStateRefusal(join(testMachine, 'u', 'state'), rootless, engine, 0) ?? '', new RegExp(`isn't this run's test machine: ${SYSTEM_ROOT_VAR} is unset, and this process runs as root`), 'as root');
   // A stray value naming a directory of this user's alone (as a home is), with no mark of its own, is no machine.
   const stray = mkdtempSync(join(tmpdir(), 'stray-machine-'));
   chmodSync(stray, 0o700);
