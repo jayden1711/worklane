@@ -224,7 +224,7 @@ test('scripts: slow-jobs.sh reads a PR\'s paths with -z, so scripts/setup/naïve
   const head = commit(dir, 'add a setup script');
   const r = spawnSync('bash', [join(repoRoot, 'scripts', 'ci', 'slow-jobs.sh')], { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', EVENT: 'pull_request', FULL: 'false', PR_BASE: base, PR_HEAD: head } });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /^run= testrun-real-systemd add-project-real-systemd auth-probe-real-users wizard-e2e-real-systemd $/m);
+  assert.match(r.stdout, /^run= testrun-real-systemd add-project-real-systemd auth-probe-real-users egress-real-systemd wizard-e2e-real-systemd $/m);
 });
 
 test('scripts: the updater\'s release check reads the release commit with -z, so dist/naïve.js is inside dist/', () => {
@@ -240,7 +240,7 @@ test('scripts: the updater\'s release check reads the release commit with -z, so
   // The signature check is the release channel's own test's (release-channel.test.ts); here only the paths matter.
   const exec = (file: string, args: string[]) => (args.includes('verify-tag') ? '' : execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   const v = update.verifyRelease(dir, 'v1.0.1', join(dir, 'package.json'), exec, join(mkdtempSync(join(tmpdir(), 'verify-')), 'v.git'));
-  assert.deepEqual(v, { ok: true, base: git(dir, 'rev-parse', 'v1.0.1~1') });
+  assert.deepEqual(v, { ok: true, base: git(dir, 'rev-parse', 'v1.0.1~1'), object: git(dir, 'rev-parse', 'v1.0.1'), commit: git(dir, 'rev-parse', 'v1.0.1^{commit}') });
 });
 
 test('changedNames: each path as itself (non-ASCII, tab, quote, backslash, newline, leading space), a rename as both', () => {

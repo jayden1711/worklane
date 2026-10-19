@@ -1207,7 +1207,7 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
   // --no-renames: a file moved into dist/ still names the path it left. -z, untrimmed: a valid UTF-8 name as itself,
   // never C-quoted, and ` dist/x` is not `dist/x`; any other name has its bad bytes read as U+FFFD, so it starts with
   // `dist/` only if its bytes do (#683).
-  const outside = exec('git', ['--git-dir', gitDir, 'diff', '--name-only', '--no-renames', '-z', parents[0], commit]).split('\0').filter((f) => f && !f.startsWith('dist/'));
+  const outside = exec('git', [...VERIFY_GIT_ARGS, '--git-dir', gitDir, 'diff', '--name-only', '--no-renames', '-z', parents[0], commit]).split('\0').filter((f) => f && !f.startsWith('dist/'));
   if (outside.length) return { ok: false, reason: `${tag}'s release commit changes more than dist/: ${outside.slice(0, 5).join(', ')}` };
   let still = null;
   try {
