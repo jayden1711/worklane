@@ -27,8 +27,9 @@
 // declaration (aliases and namespace imports are the same name) and its property (`MACHINE_PATHS.hubUnitFile`).
 //
 // A guard is an `onRealMachine(x)` call whose `x` surely is the same name, whatever value it has then (every branch,
-// every value a local or a for-of `let` is given; a `yield`, an index or a parameter is surely nothing), that always
-// runs before the write: it runs whenever its
+// every value a local or a for-of `let` is given; a `yield`, an index or a parameter is surely nothing; within the
+// shapes the lint follows: the "surely" gaps below are taken as may), that always runs before the write: it runs
+// whenever its
 // statement does (the statement itself, a const's initialiser, or inside one's arguments, as
 // `assert.equal(onRealMachine(x), …)`; never behind a condition, a short-circuit or logical assignment, an optional
 // call or in another function), and that statement comes first in a list of statements holding the write, directly
@@ -41,8 +42,14 @@
 // its own (the test names no path); a path passed through a property of an object the lint doesn't trace (`this.f`,
 // a parameter's field), a Map or Set, an iterator other than a generator's yields, a closure's captured `let`
 // assigned in another function, `.call`/`.apply`/`Reflect.apply`, or fs reached through `createRequire` or
-// `import()`; a guard on a different value that mentions the same name (`onRealMachine(join(tmp, MACHINE_PATHS.x))`),
-// or on another call of the same function (`etcPath('a')` covers `etcPath('b')`).
+// `import()`; a write through a getter (an object's or a class's); a guard on a different value that mentions the
+// same name (`onRealMachine(join(tmp, MACHINE_PATHS.x))`), or on another call of the same function (`etcPath('a')`
+// covers `etcPath('b')`). And these "surely" gaps (#818 round 3 review; deliberate shapes, so outside the accident
+// threat model), where a guard on another value counts for the location: array destructuring of a branch or of
+// another index (`const [x] = c ? [X] : [Y]`, `const [x] = [Y, X]`); a guard on a for-of variable covering a write to
+// another element in the same body; a property reassigned before the guard (`o.p = Y`, also through an alias,
+// Object.assign or Object.defineProperty); a src object's property mutated (MACHINE_PATHS isn't frozen); and
+// resolve(X, <absolute>) or join(X, '..', …) as the guard. Each is a GAP fixture below, missed today.
 import assert from 'node:assert/strict';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -479,7 +486,9 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       const d = calleeDecl(e);
       const first = e.arguments[0];
       if (d && inSrc(d) && families(d).size) out = [{ key: keyOf(d), families: families(d), decl: d }];
-      // A path built on it (`dirname(X)`, `join(X, …)`) is inside the root only if X is.
+      // A path built on it is taken as X. True for dirname(X) and normalize(X); NOT for resolve(X, <absolute>) or
+      // join(X, '..', …), which leave X (a known gap, below; this comment said "inside the root only if X is":
+      // false through 5a20d359).
       else if (d && first && ((PATH_TYPES.test(d.getSourceFile().fileName) && ['join', 'resolve', 'dirname', 'normalize'].includes(nameOf(d))) || (d.getSourceFile().isDeclarationFile && nameOf(d) === 'String'))) out = surely(first);
     } else if (ts.isTemplateExpression(e) && e.head.text === '' && e.templateSpans.length === 1 && e.templateSpans[0]!.literal.text === '') out = surely(e.templateSpans[0]!.expression);
     surelyMemo.set(e, out);
@@ -662,7 +671,10 @@ test('lint: an unguarded write, move or removal of a machine location is reporte
   assert.equal(lines.length, 9, found);
 });
 
-/** Fixture lines: each write marked `// R` must be reported, each marked `// OK` must not; returns the found text. */
+/**
+ * Fixture lines: each write marked `// R` must be reported; each marked `// OK` must not; each marked `// GAP` is a
+ * known gap, missed today (a fix that reports it fails here: mark it R then). Returns the found text.
+ */
 function marked(name: string, body: string[]): string {
   const text = [...head, ...body, ''].join('\n');
   const found = lintFixtures({ [name]: text });
@@ -717,6 +729,25 @@ test('lint (#818 round 2): a guard that looks valid but may not run before the w
     'export function v9() { const x = CONSOLE_SHELL; onRealMachine(x); rmSync(CONSOLE_SHELL); } // OK: a const that surely is it',
     'export function v10() { onRealMachine(dirname(CONSOLE_SHELL)); rmSync(CONSOLE_SHELL); } // OK: its directory',
     'export function v11(n: number) { onRealMachine(n ? CONSOLE_SHELL : `${CONSOLE_SHELL}`); rmSync(CONSOLE_SHELL); } // OK: both branches are it',
+  ]);
+});
+
+test('lint (#818 round 4): the known gaps stay named: each GAP line is missed today, so a fix that reports one fails here until it moves to R', () => {
+  marked('test/fixture-h.test.ts', [
+    "import { resolve } from 'node:path';",
+    "export function g1(c: boolean) { const [x] = c ? [CONSOLE_SHELL] : [unitPath('y')]; onRealMachine(x); rmSync(CONSOLE_SHELL); } // GAP: array destructuring of a branch",
+    "export function g2() { const [x] = [unitPath('y'), CONSOLE_SHELL]; onRealMachine(x); rmSync(CONSOLE_SHELL); } // GAP: array destructuring of another index",
+    "export function g3() { for (const p of [unitPath('y'), CONSOLE_SHELL]) { onRealMachine(p); rmSync(CONSOLE_SHELL); } } // GAP: a for-of guard, a write to another element in the same body",
+    "export function g4() { const o = { p: CONSOLE_SHELL }; o.p = unitPath('y'); onRealMachine(o.p); rmSync(CONSOLE_SHELL); } // GAP: a property reassigned before the guard",
+    "export function g5() { const s = MACHINE_PATHS.hubUnitFile; (MACHINE_PATHS as { hubUnitFile: string }).hubUnitFile = unitPath('y'); onRealMachine(MACHINE_PATHS.hubUnitFile); rmSync(s); } // GAP: a src object's property mutated",
+    "export function g6() { onRealMachine(resolve(CONSOLE_SHELL, unitPath('y'))); rmSync(CONSOLE_SHELL); } // GAP: resolve() with an absolute second part",
+    "export function g7() { onRealMachine(join(CONSOLE_SHELL, '..', '..', unitPath('y'))); rmSync(CONSOLE_SHELL); } // GAP: join() climbing out with '..'",
+    'export function g8() { const o = { get p() { return CONSOLE_SHELL; } }; rmSync(o.p); } // GAP: a write through an object getter',
+    'class K { get p() { return CONSOLE_SHELL; } }',
+    'export function g9() { rmSync(new K().p); } // GAP: a write through a class getter',
+    'export function g10() { rmSync.call(null, CONSOLE_SHELL); } // GAP: .call',
+    'export function g11() { Reflect.apply(rmSync, null, [CONSOLE_SHELL]); } // GAP: Reflect.apply',
+    "export function g12() { onRealMachine(unitPath('a')); rmSync(unitPath('b')); } // GAP: another call of the same function",
   ]);
 });
 
