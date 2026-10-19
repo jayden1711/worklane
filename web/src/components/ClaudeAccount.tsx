@@ -1,11 +1,13 @@
 // The agents' Claude account, on the Machine page, for the machine's owners only (src/claude-account.ts): which
-// account and expiry each agent user has, and switching every agent on the machine to another account, step by step
-// (pause, paste the token, each instance's check, resume), each instance's result as it happens. Everyone else gets
-// only whether an account is set (issue #567): the server refuses them the accounts, and sends that in the state.
-import { useEffect, useId, useRef, useState } from 'react';
-import { claudeAccountAction, getClaudeAccount, isRefusal, pasteClaudeToken, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
+// account and expiry each agent user has, and a switch of every agent on the machine to another account that a root
+// admin runs on the machine, followed step by step (pause, the token at that root shell, each instance's check,
+// resume). The page never takes a Claude credential (issue #711): no token box, no switch button; it names the root
+// command. Everyone else gets only whether an account is set (issue #567): the server refuses them the accounts, and
+// sends that in the state.
+import { useEffect, useId, useState } from 'react';
+import { claudeAccountAction, getClaudeAccount, isRefusal, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
-import { ago, Badge, Button, Card, cx, firstWhy, Why } from './ui';
+import { ago, Badge, Button, Card, cx, firstWhy } from './ui';
 import { ClaudeProfiles } from './ClaudeProfiles';
 
 type Phase = 'pending' | 'running' | 'done' | 'failed';
@@ -44,40 +46,6 @@ function Line({ l, label }: { l: SwitchLine | null; label?: string }) {
   );
 }
 
-/** The paste box: uncontrolled, sent straight to the server, cleared after; never in state, shown or logged. */
-function TokenForm({ onDone }: { onDone: (err: string | null) => void }) {
-  const field = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const send = async () => {
-    const el = field.current;
-    if (!el || !el.value) return;
-    setBusy(true);
-    try {
-      await pasteClaudeToken(el.value);
-      onDone(null);
-    } catch (e) {
-      onDone((e as Error).message);
-    } finally {
-      el.value = '';
-      setBusy(false);
-    }
-  };
-  return (
-    <form
-      className="mt-2 flex flex-wrap items-center gap-2"
-      onSubmit={(e) => {
-        e.preventDefault();
-        void send();
-      }}
-    >
-      <input ref={field} type="password" autoComplete="off" spellCheck={false} name="claude-setup-token" aria-label="The token claude setup-token printed" placeholder="sk-ant-oat01-… (not shown)" className="min-w-0 flex-1 basis-56 rounded-control border border-line-strong dark:border-line bg-surface px-2.5 py-1.5 font-mono text-[13px]" data-testid="claude-switch-token" />
-      <Button type="submit" size="sm" why={busy && 'Sending…'} data-testid="claude-switch-token-send">
-        Use this token
-      </Button>
-    </form>
-  );
-}
-
 function Step({ n, title, phase, children }: { n: number; title: string; phase: Phase; children?: React.ReactNode }) {
   return (
     <li className="space-y-1.5 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-switch-step" data-phase={phase}>
@@ -91,10 +59,9 @@ function Step({ n, title, phase, children }: { n: number; title: string; phase: 
   );
 }
 
-/** The switch, step by step, with each instance's result as it comes. */
-export function SwitchSteps({ s, canPasteToken, onChanged }: { s: SwitchView; canPasteToken: boolean; onChanged?: () => void }) {
+/** A switch a root admin runs on the machine, step by step, with each instance's result as it comes. Read-only. */
+export function SwitchSteps({ s }: { s: SwitchView }) {
   const p = switchPhases(s);
-  const [err, setErr] = useState<string | null>(null);
   return (
     <div className="space-y-2" data-testid="claude-switch" data-status={s.status}>
       <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
@@ -112,20 +79,13 @@ export function SwitchSteps({ s, canPasteToken, onChanged }: { s: SwitchView; ca
             </div>
           ))}
         </Step>
-        <Step n={2} title="Paste the new token" phase={p.token}>
+        <Step n={2} title="The new token, at the root shell" phase={p.token}>
           <Line l={s.token} />
-          {s.waitingForToken &&
-            (canPasteToken ? (
-              <>
-                <p className="text-[12px] text-ink-3">On a machine signed in to the new Claude account, run <code>claude setup-token</code> and paste what it prints. It goes to each agent user's own login and is never shown.</p>
-                <TokenForm onDone={(e) => (setErr(e), e ? undefined : onChanged?.())} />
-              </>
-            ) : (
-              <p className="text-[12px] text-ink-3" data-testid="claude-switch-token-elsewhere">
-                {s.tokenFrom ? `Paste it in ${s.tokenFrom}'s dashboard, where the switch was started.` : 'Paste it in the terminal where the switch was started.'}
-              </p>
-            ))}
-          {err && <p className="text-[12.5px] text-red" data-testid="claude-switch-token-error">{err}</p>}
+          {s.waitingForToken && (
+            <p className="text-[12px] text-ink-3" data-testid="claude-switch-token-elsewhere">
+              It is pasted in the terminal where the switch was started. This page never takes it.
+            </p>
+          )}
         </Step>
         <Step n={3} title="Check each agent user" phase={p.check}>
           {s.instances.map((i) => (
@@ -166,17 +126,16 @@ const expiry = (at: string | null, now: number) => {
  * #562); with one instance picked, its steps are for that one.
  */
 export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.now() }: { data: ClaudeAccountData; scope?: InstanceScope | null; onChanged?: () => void; now?: number }) {
-  const [confirm, setConfirm] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [refusedId, busyId, askingId] = [useId(), useId(), useId()];
+  const [refusedId, busyId] = [useId(), useId()];
   if (!data.machineOwner) return null;
-  const act = async (action: 'status' | 'switch') => {
+  const script = data.confirmScript ?? 'claude-account.sh';
+  const act = async (action: 'status') => {
     setBusy(action);
     setErr(null);
     try {
       await claudeAccountAction(action);
-      setConfirm(false);
       onChanged?.();
     } catch (e) {
       setErr((e as Error).message);
@@ -196,11 +155,11 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
           <p className="mt-1 text-[12px] text-ink-2" data-testid="claude-account-scope" data-scope={all ? 'all' : data.instance}>
             {all ? (
               <>
-                For every instance on this machine ({all.join(', ')}): Refresh and Switch account cover them all. To choose, add or sign in an account for one instance from here, pick it in the sidebar.
+                For every instance on this machine ({all.join(', ')}): Refresh covers them all. To choose or remove an account for one instance from here, pick it in the sidebar.
               </>
             ) : (
               <>
-                For {data.instance}: the account steps below are for it alone; Refresh and Switch account cover every instance.
+                For {data.instance}: the account steps below are for it alone; Refresh covers every instance.
               </>
             )}
           </p>
@@ -231,42 +190,28 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
         </p>
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
-      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={all ? null : data.instance} confirmScript={data.confirmScript ?? 'claude-account.sh'} signin={data.signin ?? null} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
+      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={all ? null : data.instance} confirmScript={script} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
       {/* A person no device would help (their role here) gets no buttons, only the read-only line below. */}
       {data.everAllowed !== false && (
         <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="outline" why={firstWhy(!data.allowed && (data.why ?? 'not allowed'), !!busy && 'Asking…', open.some((r) => r.args[1] === 'status') && 'A refresh is waiting for the coordinator')} {...(!data.allowed && data.why ? { whyAt: refusedId } : {})} onClick={() => void act('status')} data-testid="claude-account-refresh">
             {busy === 'status' || open.some((r) => r.args[1] === 'status') ? 'Refreshing…' : 'Refresh'}
           </Button>
-          {!confirm ? (
-            <Button size="sm" why={firstWhy(!data.allowed && (data.why ?? 'not allowed'), data.busy, !!busy && 'Asking…')} {...(!data.allowed && data.why ? { whyAt: refusedId } : data.busy && !data.switch?.waitingForToken ? { whyAt: busyId } : {})} onClick={() => setConfirm(true)} data-testid="claude-account-switch">
-              Switch account…
-            </Button>
-          ) : null}
         </div>
       )}
-      {confirm && (
-        <div className="space-y-2 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-confirm">
-          <p className="text-[12.5px] text-ink-2">
-            Every instance on this machine stops starting runs; the runs going now finish first (30 minutes at most). Then you paste the token <code>claude setup-token</code> prints for the new account, it goes to every agent user, each is checked, and each instance resumes. An instance whose check fails stays paused until it passes.
-          </p>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <Button size="sm" why={!!busy && 'Asking…'} whyAt={askingId} onClick={() => void act('switch')} data-testid="claude-account-switch-confirm">
-              Pause and switch
-            </Button>
-            <Button size="sm" variant="ghost" why={!!busy && 'Asking…'} whyAt={askingId} onClick={() => setConfirm(false)}>
-              Cancel
-            </Button>
-            {busy && <Why id={askingId}>Asking…</Why>}
-          </div>
-        </div>
-      )}
+      {/* Issue #711: switching takes a Claude credential, which this page never takes: the root command, never a button. */}
+      <div className="space-y-1 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-switch-howto">
+        <p className="text-[12.5px] text-ink-2">
+          To switch every agent on this machine to another account, a root admin runs this on the machine and pastes the token <code>claude setup-token</code> prints there. This page never takes a Claude credential.
+        </p>
+        <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-account-switch-command">sudo bash {script} switch</pre>
+      </div>
       {!data.allowed && data.why && (
         <p id={refusedId} className="text-[12.5px] text-ink-2" data-testid="claude-account-disabled">
           Read-only: {data.why}.
         </p>
       )}
-      {data.allowed && data.busy && !data.switch?.waitingForToken && <p id={busyId} className="text-[12.5px] text-ink-3">{data.busy[0]!.toUpperCase() + data.busy.slice(1)}.</p>}
+      {data.allowed && data.busy && <p id={busyId} className="text-[12.5px] text-ink-3">{data.busy[0]!.toUpperCase() + data.busy.slice(1)}.</p>}
       {open.map((r) => (
         <p key={r.id} className="text-[12.5px] text-ink-3" data-testid="claude-account-request">
           {r.args.join(' ')}: {r.status === 'pending' ? 'waiting for the coordinator' : 'running'} (asked {ago(r.at)} by @{r.by})
@@ -277,30 +222,24 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
           {err}
         </p>
       )}
-      {data.switch && <SwitchSteps s={data.switch} canPasteToken={data.canPasteToken} {...(onChanged ? { onChanged } : {})} />}
+      {data.switch && <SwitchSteps s={data.switch} />}
     </Card>
   );
 }
 
 /**
- * Whether the panel looks again every few seconds: a switch is running, a request waits for the coordinator, or the
- * newest request was handed to the switch's own unit and the unit hasn't written its first line yet (switch.jsonl still
- * shows an earlier switch, or none). Without that last case the panel stopped looking the moment the request finished,
- * before the switch had started, and never showed it.
+ * Whether the panel looks again every few seconds: a switch (a root admin's) is running, a request waits for the
+ * coordinator, or the newest request was a profile step handed to its own unit, which hasn't written its first line
+ * yet. Without that last case the panel stopped looking the moment the request finished, before the step had started.
  */
-export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | 'profileOps' | 'signin'>, now = Date.now()): boolean {
+export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | 'profileOps'>, now = Date.now()): boolean {
   if (d.switch?.status === 'running') return true;
   if (d.profileOps?.[0]?.status === 'running') return true;
-  if (d.signin?.status === 'running') return true;
   if (d.requests.some((r) => r.status === 'pending' || r.status === 'running')) return true;
   const last = d.requests[0];
-  // A profile step handed to its unit, which hasn't written its first line yet: the same wait as the switch's below.
-  if (last && last.status === 'done' && ['profile-add', 'use', 'remove', 'login'].includes(last.args[1] ?? '') && now - Date.parse(last.finishedAt ?? last.at) <= 60_000) {
-    const op = d.profileOps?.[0];
-    return !op || Date.parse(op.startedAt) < Date.parse(last.at) - 1_000;
-  }
-  if (!last || last.status !== 'done' || last.args[1] !== 'switch' || now - Date.parse(last.finishedAt ?? last.at) > 60_000) return false;
-  return !d.switch || Date.parse(d.switch.startedAt) < Date.parse(last.at) - 1_000;
+  if (!last || last.status !== 'done' || !['use', 'remove'].includes(last.args[1] ?? '') || now - Date.parse(last.finishedAt ?? last.at) > 60_000) return false;
+  const op = d.profileOps?.[0];
+  return !op || Date.parse(op.startedAt) < Date.parse(last.at) - 1_000;
 }
 
 /**

@@ -19,6 +19,7 @@ import { askChat, chatAnswer } from '../src/chat.js';
 import { ATTACHMENT_DEFAULT_CAPS } from '../src/chat-attachments.js';
 import { askInConversation, conversationTurns, createConversation } from '../src/chat-conversations.js';
 import { EventLog } from '../src/events/log.js';
+import { asks } from '../src/console/asks.js';
 import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { boardView } from '../src/board.js';
 import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
@@ -1890,6 +1891,23 @@ test('a CI fix run cut off by a restart is recorded as interrupted and its claim
   assert.equal(git(f.repo, 'ls-remote', 'origin', claimRef(7)), '', 'claim released');
   await c.recover();
   assert.equal(f.log.read(0, ['ci_fix.finished']).length, 1, 'once');
+});
+
+test("issue #711: at startup, the coordinator withdraws a Claude token's paste box an earlier add-project left open, saying why, and nothing else", async () => {
+  const f = fixture();
+  const a = asks(f.log);
+  // As an earlier coordinator opened it for add-project's claude-token step, then stopped mid-run (an upgrade).
+  const left = a.create({ kind: 'paste_secret', instance: 'beta', title: "The Claude login for beta's agents", detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: "wl-beta-agent's Claude login" }, 'add-project').id;
+  const other = a.create({ kind: 'paste_secret', instance: 'alice', title: 'The chat bot token', detail: 'For intake.', credential: 'intake-discord', where: 'credentials.yaml intake.discord_token' }).id;
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.recover();
+  const w = a.get(left)!;
+  assert.equal(w.status, 'cancelled', 'withdrawn at startup');
+  assert.equal(w.cancelled!.by, 'coordinator');
+  assert.match(w.cancelled!.why, /#711.*never takes a Claude credential/);
+  assert.equal(a.get(other)!.status, 'open', 'any other secret is still asked for');
+  await c.recover();
+  assert.equal(f.log.read(0, ['ask.cancelled']).length, 1, 'once');
 });
 
 test('logTail: the last lines of a job log, runner timestamps stripped, bounded', () => {

@@ -91,7 +91,7 @@ export abstract class SuperfanWatch extends Learnings {
         scope === 'instance'
           ? async () => {
               const events = this.d.log.read();
-              return { events, incidents: readIncidents(dir).incidents.filter((x) => x.instance === name), health: healthView(events, null, { updates: [] }).suggestions, journal: (await this.d.superfan?.journal?.()) ?? null };
+              return { events, incidents: readIncidents(dir).incidents.filter((x) => x.instance === name), health: healthView(events, null, { updates: [], githubRate: null }).suggestions, journal: (await this.d.superfan?.journal?.()) ?? null };
             }
           : () => ({ incidents: readIncidents(dir).incidents.filter((x) => x.instance === null), updates: updateLog() }),
       judge: async (prompt, maxUsd) => {

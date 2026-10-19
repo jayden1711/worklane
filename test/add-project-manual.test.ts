@@ -81,7 +81,7 @@ test('a run sudo refuses (a machine set up before the record) fails saying what 
   const r = requestAddProject(log, { name: 'alpha', repo: 'example/alpha', requester: ownerRequester('olive'), ownersFile: owners });
   // sudo -n with no rule for these arguments: one line on stderr, exit 1.
   const refusing = () => spawn(process.execPath, ['-e', "process.stderr.write('sudo: a password is required\\n'); process.exit(1)"], { stdio: ['pipe', 'pipe', 'pipe'] });
-  assert.equal(runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: refusing, home: mkdtempSync(join(tmpdir(), 'home-')), pollMs: 20 }), 1);
+  assert.equal(runMachineRequests({ log, ownersFile: owners, instance: 'site', spawn: refusing }), 1);
   let done = machineRequests(log.read(0)).find((x) => x.id === r.id)!;
   for (let i = 0; i < 300 && done.status === 'running'; i++) {
     await new Promise((res) => setTimeout(res, 10));

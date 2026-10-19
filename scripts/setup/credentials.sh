@@ -16,8 +16,8 @@
 #       The agent user's Claude login: the token `claude setup-token` prints (run it on a machine signed in to the
 #       Claude account the agents should use), pasted at a hidden prompt, or on stdin when there is no terminal
 #       (automation). Installed as wl-<name>-agent's own Claude login (~/.claude/.credentials.json, 0600), never
-#       echoed, never an argument; then checked with `claude auth status` as that user. The dashboard's equivalent is
-#       Add project's paste box (the first-run page's Sign in to Claude).
+#       echoed, never an argument; then checked with `claude auth status` as that user. There is no dashboard
+#       equivalent: a dashboard never takes a Claude credential (issue #711, docs/auth.md).
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on

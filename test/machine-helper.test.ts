@@ -214,15 +214,28 @@ test('the change log reader skips torn lines and keeps the newest', () => {
   assert.deepEqual(machineChanges(join(tmpdir(), 'no-such-log.jsonl')), []);
 });
 
-test('the helper takes claude-account status|switch and nothing more; a switch only for a coordinator, its instance from sudo', () => {
-  const { parseClaudeAccount, coordinatorInstance } = createRequire(import.meta.url)(helperSrc) as { parseClaudeAccount: (a: string[]) => string | null; coordinatorInstance: (u: string | undefined) => string | null };
+test('the helper takes claude-account status and nothing more (issue #711: never switch, profile-add or login, which take a Claude credential); the instance from sudo', () => {
+  const { parseClaudeAccount, parseClaudeProfile, coordinatorInstance } = createRequire(import.meta.url)(helperSrc) as { parseClaudeAccount: (a: string[]) => string | null; parseClaudeProfile: (a: string[]) => unknown; coordinatorInstance: (u: string | undefined) => string | null };
   assert.equal(parseClaudeAccount(['claude-account', 'status']), 'status');
-  assert.equal(parseClaudeAccount(['claude-account', 'switch']), 'switch');
-  for (const a of [['claude-account'], ['claude-account', 'switch', '--token-from', 'x'], ['claude-account', 'Switch'], ['claude-account', 'status', 'x'], ['claude-accounts', 'status']]) assert.equal(parseClaudeAccount(a), null, JSON.stringify(a));
+  for (const a of [['claude-account'], ['claude-account', 'switch'], ['claude-account', 'switch', '--token-from', 'x'], ['claude-account', 'Switch'], ['claude-account', 'status', 'x'], ['claude-accounts', 'status']]) assert.equal(parseClaudeAccount(a), null, JSON.stringify(a));
+  for (const a of [['claude-account', 'profile-add', 'work'], ['claude-account', 'login', 'work']]) assert.equal(parseClaudeProfile(a), null, JSON.stringify(a));
   assert.equal(coordinatorInstance('wl-alpha'), 'alpha');
   for (const u of [undefined, '', 'root', 'admin', 'wl-dash', 'wl-alpha-agent', 'wl-Alpha', 'wl-', 'wl-a;b']) assert.equal(coordinatorInstance(u), null, String(u));
   // The script it runs is a fixed path in the helper's own source, like add-project's.
   assert.match(readFileSync(helperSrc, 'utf8'), /^const CLAUDE_ACCOUNT = '\/opt\/worklane\/current\/scripts\/setup\/claude-account\.sh';$/m);
+  // Run as a coordinator would: refused before anything is read or started, and logged nowhere.
+  const h = helperIn(mkdtempSync(join(tmpdir(), 'machine-')));
+  for (const a of [['claude-account', 'switch'], ['claude-account', 'profile-add', 'work'], ['claude-account', 'login', 'work']]) {
+    const r = h.run(...a);
+    assert.equal(r.status, 2, `${a.join(' ')}: ${r.stderr}`);
+  }
+  assert.ok(!existsSync(h.log), 'nothing logged: nothing ran');
+});
+
+test("issue #711: add-project.sh never gets the helper's stdin, so nothing a coordinator writes reaches it as a Claude token", () => {
+  const src = readFileSync(helperSrc, 'utf8');
+  const call = src.split('\n').find((l) => l.includes("spawnSync('bash', [real, p.name, p.repo]")) ?? '';
+  assert.match(call, /stdio: \['ignore', 'inherit', 'inherit'\]/, call);
 });
 
 test('the updater through the helper: exactly install-updater, set-update-channel release, and staging or discarding one signer; never main, never the signers file', () => {
@@ -549,7 +562,7 @@ test('a step is recorded only once it has run: as done when it exited 0, as fail
   const src = readFileSync(helperSrc, 'utf8');
   for (const s of ["runLogged('install-updater', 'updates.sh',", "runLogged('add-project', `${p.name} ${p.repo}`,", "runLogged('claude-account', 'status',"]) assert.ok(src.includes(s), s);
   const units: [string, string, string][] = [
-    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", "logLine('claude-account', null, `switch (token", "logLine('claude-account', null, `failed: switch"],
+    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", 'logLine(\'claude-account\', null, what);', "logLine('claude-account', null, `failed: ${what}: not started`);"],
     ["spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT", "logLine('tailscale', null, action);", "logLine('tailscale', null, `failed: ${action}: not started`);"],
   ];
   for (const [start, ok, failed] of units) {
