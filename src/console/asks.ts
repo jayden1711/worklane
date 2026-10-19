@@ -16,8 +16,10 @@
 // - root_step: one command of the machine helper with its arguments (root-steps.ts); one off its allowlist is
 //   recorded, shown as needing the helper extended, and never run.
 //
-// Only the owner answers, except a question that allows writers. Viewers never answer.
+// Only the owner answers, except a question that allows writers. Viewers never answer. Nobody answers a paste_secret
+// an earlier version opened for a Claude credential (issue #711); the coordinator withdraws one at startup.
 import { randomBytes } from 'node:crypto';
+import { CLAUDE_CREDENTIAL_NAMES, CREDENTIAL_REFUSED } from '../claude-credential-guard.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { checkRootStep } from './root-steps.js';
@@ -118,8 +120,20 @@ export function asksFrom(events: readonly StoredEvent[]): Ask[] {
   return [...byId.values()];
 }
 
-/** Whether someone in this role may answer this ask: the owner any; a writer only a question that allows it; a viewer none. */
-export function mayAnswerAsk(ask: Pick<Ask, 'kind'> & { writersMayAnswer?: boolean }, role: Role | null): boolean {
+/**
+ * Whether this is a paste_secret ask for a Claude credential, as an earlier version opened one (add-project's
+ * claude-token). Issue #711: nobody may answer one, so no page offers its paste box.
+ */
+export function isClaudeCredentialAsk(ask: Pick<Ask, 'kind'> & { credential?: string }): boolean {
+  return ask.kind === 'paste_secret' && typeof ask.credential === 'string' && CLAUDE_CREDENTIAL_NAMES.has(ask.credential);
+}
+
+/**
+ * Whether someone in this role may answer this ask: the owner any but a Claude credential's (nobody answers that one,
+ * issue #711); a writer only a question that allows it; a viewer none.
+ */
+export function mayAnswerAsk(ask: Pick<Ask, 'kind'> & { writersMayAnswer?: boolean; credential?: string }, role: Role | null): boolean {
+  if (isClaudeCredentialAsk(ask)) return false;
   if (role === 'owner') return true;
   return role === 'writer' && ask.kind === 'question' && ask.writersMayAnswer === true;
 }
@@ -179,6 +193,8 @@ export function recordAnswer(log: EventLog, id: string, a: { by: string; role: R
   try {
     const ask = asksFrom(log.read(0, [...ASK_EVENTS])).find((x) => x.id === id);
     if (!ask) throw new AskError(`no ask ${id}`, 404);
+    // INVARIANT (issue #711): an ask an earlier version opened for a Claude credential is never answered.
+    if (isClaudeCredentialAsk(ask)) throw new AskError(CREDENTIAL_REFUSED);
     if (!mayAnswerAsk(ask, a.role)) throw new AskError(ask.kind === 'question' && ask.writersMayAnswer ? `@${a.by} (${a.role ?? 'no role'}) may not answer this; the owner or a writer may` : `only the owner may answer this ask; @${a.by} (${a.role ?? 'no role'}) may not`, 403);
     if (ask.status !== 'open') throw new AskError(`ask ${id} is already ${ask.status}`, 409);
     const detail = check(ask) ?? a.detail ?? '';

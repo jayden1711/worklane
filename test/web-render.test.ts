@@ -2285,6 +2285,7 @@ test("Add project: the steps show in the script order as they arrive, and its as
   a.create({ kind: 'paste_secret', instance: 'shop', title: "The agent's Claude token", detail: 'x', credential: 'claude-token', where: 'the agent user only' }, 'setup');
   v = render();
   assert.equal((v.run.match(/data-testid="ask-card"/g) ?? []).length, 3, 'both GitHub links and the token ask');
+  // Nobody may answer it (the server, #749), and the page draws no box for it either way (AskCard, #711).
   assert.doesNotMatch(v.run, /<input|type="password"|data-testid="ask-secret"/, 'Add project: no box for the Claude token (#711)');
   assert.match(v.run, /data-testid="ask-claude-login-command"[^>]*>sudo -u wl-shop-agent -i claude auth login</);
   assert.match(v.run, /data-testid="ask-claude-credentials-command"[^>]*>sudo bash scripts\/setup\/credentials\.sh shop claude</);

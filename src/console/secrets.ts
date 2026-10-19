@@ -9,18 +9,31 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { IncomingMessage } from 'node:http';
 import type { EventLog } from '../events/log.js';
-import { CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
+import { CLAUDE_ASK_WITHDRAWN, CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { installOwnerOnlySecret } from '../os/index.js';
-import { AskError, recordAnswer, type Ask, type Role } from './asks.js';
+import { AskError, asks, isClaudeCredentialAsk, recordAnswer, type Ask, type Role } from './asks.js';
 
 export const MAX_SECRET = 16_384;
 
 /**
- * The files earlier versions had the dashboard store a Claude credential in (issue #711): add-project's token, a
- * switch's token, a new profile's token, a relayed sign-in's code. No paste box writes one any more; claude-account.sh
- * removes any left behind.
+ * At coordinator startup (issue #711): withdraw every open ask an earlier version opened for a Claude credential
+ * (add-project's claude-token, left open when the coordinator stopped mid-run), so no page offers its paste box.
+ * The withdrawal's event says why, in a fixed text. Returns the ids withdrawn.
  */
-export const CLAUDE_CREDENTIAL_NAMES: ReadonlySet<string> = new Set(['claude-token', 'claude-account-token', 'claude-profile-token', 'claude-login-code']);
+export function withdrawClaudeCredentialAsks(log: EventLog): string[] {
+  const a = asks(log);
+  const out: string[] = [];
+  for (const ask of a.list({ status: 'open' })) {
+    if (!isClaudeCredentialAsk(ask)) continue;
+    try {
+      a.cancel(ask.id, 'coordinator', CLAUDE_ASK_WITHDRAWN);
+      out.push(ask.id);
+    } catch {
+      // answered or withdrawn meanwhile: either way it is no longer open
+    }
+  }
+  return out;
+}
 
 /** Where an instance's pasted credentials go: in the coordinator user's home, beside the intake secrets. */
 export const secretsDir = (instance: string, home = homedir()) => join(home, '.config', `${instance}-secrets`);
@@ -75,8 +88,8 @@ export function storeSecret(log: EventLog, id: string, a: { by: string; role: Ro
   if (holdsClaudeCredential(value)) throw new AskError(CREDENTIAL_REFUSED);
   return recordAnswer(log, id, { by: a.by, role: a.role, answer: 'stored' }, (ask) => {
     if (ask.kind !== 'paste_secret') throw new AskError(`ask ${id} isn't a paste_secret ask`);
-    // An ask an earlier version opened for a Claude credential (add-project's claude-token) is never answered here.
-    if (CLAUDE_CREDENTIAL_NAMES.has(ask.credential)) throw new AskError(CREDENTIAL_REFUSED);
+    // An ask an earlier version opened for a Claude credential (add-project's claude-token) never gets here:
+    // recordAnswer refuses it first (isClaudeCredentialAsk).
     const rule = a.rules && Object.hasOwn(a.rules, ask.credential) ? a.rules[ask.credential] : undefined;
     // INVARIANT: a refusal is the rule's fixed text, never the value.
     if (rule?.shape && !rule.shape.re.test(value)) throw new AskError(rule.shape.what);

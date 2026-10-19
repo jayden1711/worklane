@@ -508,28 +508,46 @@ test('issue #711: a switch never takes its token from a dashboard: --token-from 
   for (const u of ['wl-alpha-agent', 'wl-alpha-eval', 'wl-beta-agent']) assert.equal((JSON.parse(readFileSync(m.cred(u), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, OLD, u);
 });
 
-test('issue #711: any run removes, unread and as the coordinator user, what an earlier dashboard stored for this script; a link is removed, never followed', { skip: !posix }, () => {
+test("issue #711: any run removes, unread and as the coordinator user, what an earlier dashboard stored for this script, from every *-secrets dir in that user's ~/.config (add-project's token went to the asker's <new>-secrets); regular files only, no link followed", { skip: !posix }, () => {
   const m = machine();
-  const dir = join(m.T, 'homes', 'wl-alpha', '.config', 'alpha-secrets');
-  const beta = join(m.T, 'homes', 'wl-beta', '.config', 'beta-secrets');
-  mkdirSync(dir, { recursive: true });
-  mkdirSync(beta, { recursive: true });
+  const cfgA = join(m.T, 'homes', 'wl-alpha', '.config');
+  const cfgB = join(m.T, 'homes', 'wl-beta', '.config');
+  const dir = join(cfgA, 'alpha-secrets');
+  const beta = join(cfgB, 'beta-secrets');
+  // Add project "gamma" asked from alpha's dashboard: the dashboard stored the token in alpha's home, under gamma's
+  // name (secretsDir(<new instance>, <asking coordinator's home>)), where it stays if add-project stopped first.
+  const gamma = join(cfgA, 'gamma-secrets');
+  for (const d of [dir, beta, gamma, join(gamma, 'deeper'), join(cfgA, 'notes')]) mkdirSync(d, { recursive: true });
   for (const f of ['claude-account-token', 'claude-profile-token', 'claude-token']) writeFileSync(join(dir, f), TOKEN, { mode: 0o400 });
+  writeFileSync(join(gamma, 'claude-token'), TOKEN, { mode: 0o400 });
   writeFileSync(join(beta, 'claude-login-code'), 'abcdefghij0123456789#klmnopqrstuv9876543210', { mode: 0o400 });
-  // A link in one's place, to a file elsewhere: the link goes, its target stays as it was.
+  // Kept: another secret; the same name outside a *-secrets dir, or deeper in one.
+  writeFileSync(join(beta, 'intake-discord'), 'another secret, kept');
+  writeFileSync(join(gamma, 'intake-discord'), 'another secret, kept');
+  writeFileSync(join(cfgA, 'notes', 'claude-token'), 'not a secrets dir, kept');
+  writeFileSync(join(gamma, 'deeper', 'claude-token'), 'deeper, kept');
+  // Links are never followed: a link in one's place, and a *-secrets dir that is a link to a dir elsewhere.
   writeFileSync(join(m.T, 'elsewhere'), 'not ours');
   symlinkSync(join(m.T, 'elsewhere'), join(beta, 'claude-account-token'));
-  writeFileSync(join(beta, 'intake-discord'), 'another secret, kept');
+  const outside = join(m.T, 'outside');
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'claude-token'), 'not ours either');
+  symlinkSync(outside, join(cfgB, 'linked-secrets'));
   writeFileSync(join(m.T, 'var', 'login-url'), 'https://claude.ai/oauth/authorize?x=1\n');
   const r = m.run(['status', '--json'], '');
   assert.ok(r.status === 0 || r.status === 1, r.stderr);
   for (const f of ['claude-account-token', 'claude-profile-token', 'claude-token']) assert.ok(!existsSync(join(dir, f)), f);
-  assert.ok(!existsSync(join(beta, 'claude-login-code')) && !existsSync(join(beta, 'claude-account-token')));
-  assert.equal(readFileSync(join(m.T, 'elsewhere'), 'utf8'), 'not ours', "the link's target is untouched");
-  assert.equal(readFileSync(join(beta, 'intake-discord'), 'utf8'), 'another secret, kept', 'only those four names');
+  assert.ok(!existsSync(join(gamma, 'claude-token')), "add-project's token, in the asker's <new>-secrets: removed");
+  assert.ok(!existsSync(join(beta, 'claude-login-code')));
+  assert.equal(readFileSync(join(beta, 'claude-account-token'), 'utf8'), 'not ours', 'a link is not a regular file: left, and its target untouched');
+  assert.equal(readFileSync(join(outside, 'claude-token'), 'utf8'), 'not ours either', 'a linked *-secrets dir is never entered');
+  for (const f of [join(beta, 'intake-discord'), join(gamma, 'intake-discord')]) assert.equal(readFileSync(f, 'utf8'), 'another secret, kept', 'only those four names');
+  assert.equal(readFileSync(join(cfgA, 'notes', 'claude-token'), 'utf8'), 'not a secrets dir, kept');
+  assert.equal(readFileSync(join(gamma, 'deeper', 'claude-token'), 'utf8'), 'deeper, kept');
   assert.ok(!existsSync(join(m.T, 'var', 'login-url')));
-  assert.ok(m.calls().includes(`sudo -H -u wl-alpha rm -f -- ${join(dir, 'claude-account-token')}`), 'as that coordinator user, never as root');
-  assert.ok(m.calls().includes(`sudo -H -u wl-beta rm -f -- ${join(beta, 'claude-account-token')}`));
+  assert.ok(m.calls().some((c) => c.startsWith(`sudo -H -u wl-alpha find -P ${cfgA} `)), 'as that coordinator user, never as root');
+  assert.ok(m.calls().some((c) => c.startsWith(`sudo -H -u wl-beta find -P ${cfgB} `)));
+  assert.match(r.stderr, new RegExp(`removed ${join(gamma, 'claude-token').replace(/[.*+?^$()|[\]\\]/g, '\\$&')}, unread`));
   // None of them was read into a login.
   for (const u of ['wl-alpha-agent', 'wl-beta-agent']) assert.equal((JSON.parse(readFileSync(m.cred(u), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, OLD, u);
   assert.ok(!leaked(m.outputs(r)));

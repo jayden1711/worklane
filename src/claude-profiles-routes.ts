@@ -4,7 +4,7 @@
 //   POST /api/machine/claude-profile   body {"action": "use"|"remove"|"failover", "profile" | "order", "back"}
 //
 // Each is a machine owner's who is an owner of this instance, on one of the console's allowed devices (the same gate as
-// the owner terminal and any machine change), or the owner's break-glass. Every refusal is audited, a request with no
+// any machine change), or the owner's break-glass. Every refusal is audited, a request with no
 // session's too, and a refused request starts nothing: no machine request recorded.
 //
 // No route here takes a Claude credential (issue #711): adding a profile, or signing one in, is a root admin's on the

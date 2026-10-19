@@ -8,7 +8,7 @@ Anthropic's [Legal and compliance](https://code.claude.com/docs/en/legal-and-com
 
 > "Anthropic does not permit third-party developers to offer Claude.ai login into their own applications, or to route requests through Free, Pro, or Max plan credentials on behalf of their users. Moreover, developers may not collect, store, or intermediate Claude.ai credentials or session tokens — sign-in to a Claude account must complete through Anthropic's own flow."
 
-The same section, two paragraphs on:
+The same section, the next paragraph (right after its list):
 
 > "Nor does it prevent an end user from signing in to the unmodified Claude Code binary with their own Claude subscription, including where a platform hosts Claude Code as described under *Can customers offer Claude Code in their products?* above."
 
@@ -30,7 +30,11 @@ Every method the unmodified `claude` has works for the agent users, run on the m
 | Bedrock, Vertex, Foundry | `claude` supports them as the agent user (its own settings). The engine's runs refuse a run on them today: the runner's auth check accepts only `claude.ai`/`oauth_token` for `cli` and `api_key`/`api_key_helper` for `api_key` (`src/runner.ts`, "no silent billing switch"). That check is #700's to change, not this page's | the same |
 | Account profiles | as root: `sudo bash scripts/setup/claude-account.sh profile-add <profile>` (hidden prompt, or stdin) puts a token in each agent user's own profile dir; which profile an instance uses is chosen at a root shell or from its dashboard (no credential) | not used |
 
-**Existing installs.** Nothing reopens. A file an earlier dashboard stored for the root script to read once (a switch's token, a profile's token, a sign-in code, Add project's token) is removed, unread, by the next run of `claude-account.sh` of any kind (the Machine page's Refresh is one), as that instance's coordinator user. A profile an earlier version staged from a dashboard stays unusable until a root admin confirms it: `sudo bash scripts/setup/claude-account.sh confirm-profile <profile>`.
+**Existing installs.** Nothing reopens.
+- **Files.** An earlier dashboard stored each of these, as the coordinator user, for a root script to read once: a switch's token, a profile's token, a sign-in code, and Add project's token. They went in a `*-secrets` dir in the coordinator user's own `~/.config`. Add project's token went in the *asking* instance's coordinator user's home, under the *new* project's name: `~wl-<asker>/.config/<new>-secrets/claude-token`. The others went in `~wl-<name>/.config/<name>-secrets/`. The next run of `claude-account.sh` of any kind (the Machine page's Refresh is one) removes them, unread: in every `~wl-<name>/.config/*-secrets/` dir, as that coordinator user, only those four names (`claude-token`, `claude-account-token`, `claude-profile-token`, `claude-login-code`), and only regular files. It follows no link.
+- **Asks.** Add project's ask for the token (a `paste_secret` ask for `claude-token`), left open when the coordinator stopped mid-run, is withdrawn when the coordinator next starts. The withdrawal's event gives the reason, citing #711. Until then the ask is listed as not answerable, so no page offers its paste box, and the server refuses any answer to it.
+
+A profile an earlier version staged from a dashboard stays unusable until a root admin confirms it: `sudo bash scripts/setup/claude-account.sh confirm-profile <profile>`.
 
 ## How agents are billed
 
@@ -49,7 +53,7 @@ There is one runtime: the locally installed, unmodified `claude` binary, headles
 **Why `apiKeyHelper` and not an environment variable.** A key in `ANTHROPIC_API_KEY` would be in the environment of `claude` and of every command an agent runs, and the coordinator would have to hold it to pass it on. With `apiKeyHelper`:
 - the coordinator passes only the file's path;
 - `claude`, running as the agent user, reads the file itself;
-- agent commands are denied the file by the sandbox's read rules, like every profile's `.credentials.json` (`src/runner.ts`, `withDeniedReads`);
+- agent commands are denied the file by the sandbox's read rules while the sandbox is on (the lane's `denyRead`, `src/instance.ts`, `laneRuns`), as they are every profile's `.credentials.json` (`src/runner.ts`, `withDeniedReads`);
 - `instanceEnv` still strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` for every instance.
 
 The coordinator never reads the file. It **can**, though: see the next section.
