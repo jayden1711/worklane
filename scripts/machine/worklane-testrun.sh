@@ -1054,6 +1054,7 @@ USERNS_WHY=
 USERNS_AA=0
 IP_BIN=
 SETPRIV_BIN=
+MOUNT_BIN=
 userns_ok() {
   local got acl
   USERNS_AA=0
@@ -1064,27 +1065,41 @@ userns_ok() {
   got="$(wrapper_acl_problem "$acl")"
   [ -z "$got" ] || { USERNS_WHY="$USERNS: $got (scripts/setup/test-user.sh install sets it)"; return 1; }
   if ! grep -qaF 'map-current-user' "$USERNS" || ! grep -qaF 'keep-caps' "$USERNS"; then USERNS_WHY="$USERNS takes no --map-current-user or --keep-caps (util-linux 2.38 or later has both)"; return 1; fi
-  IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"
-  [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] || { USERNS_WHY="no ip or setpriv on this machine (iproute2, util-linux)"; return 1; }
+  IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"; MOUNT_BIN="$(command -v mount || true)"
+  [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] && [ -n "$MOUNT_BIN" ] || { USERNS_WHY="no ip, setpriv or mount on this machine (iproute2, util-linux)"; return 1; }
   if grep -q "^$USERNS_PROFILE " "$AA_PROFILES" 2>/dev/null; then USERNS_AA=1
   elif [ "$(cat "$USERNS_RESTRICT" 2>/dev/null || true)" = 1 ]; then
     USERNS_WHY="user namespaces are restricted here ($USERNS_RESTRICT is 1) and the AppArmor profile $USERNS_PROFILE isn't loaded (scripts/setup/test-user.sh install loads it)"; return 1
   fi
 }
 
-# Why the wrapper's ACL (getfacl -cp, given) lets anyone but the test users run it; empty when it doesn't. WHY: where the
-# kernel restricts user namespaces, its AppArmor profile lets whoever runs it make one, so every other user, and every
-# NoNewPrivileges unit (DynamicUser and the like), must not be able to run it at all: the owner (root), this instance's
-# test user (who must be able to), other instances' test users (test-user.sh install lists each), no group, nobody else.
+# Whether user <u> is the test user of an instance on this machine: wl-test-<name>, <name> a valid instance name
+# (instance_name_problem: so never instance test's wl-test-agent, wl-test-eval or wl-test-mcp, which the bare pattern
+# wl-test-* would take), and test-user.sh install has made that instance's $BASE/<name>. test-user.sh's is_test_user is
+# the same rule (a test keeps them alike).
+is_test_user() {
+  local n
+  [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
+  n="${BASH_REMATCH[1]}"
+  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+}
+
+# Why the wrapper's ACL (getfacl -cp, given) lets anyone but the test users run it, or anyone but root write it; empty
+# when it doesn't. WHY: where the kernel restricts user namespaces, its AppArmor profile lets whoever runs it make one,
+# so every other user, and every NoNewPrivileges unit (DynamicUser and the like), must not be able to run it at all:
+# the owner (root), this instance's test user (who must be able to), other instances' test users (is_test_user; test-user.sh
+# install lists each), no group, nobody else; and nobody but root may write it (no w on a named entry or the mask).
 wrapper_acl_problem() {
   local l who perm mine=0
   while IFS= read -r l; do
     l="${l%%[[:space:]]*}"
     case "$l" in
-      '' | user::* | mask::*) ;;
+      '' | user::*) ;;
+      mask::*) [[ "${l#mask::}" != *w* ]] || { echo "its ACL mask lets a named entry write it ($l)"; return 0; } ;;
       user:*:*) who="${l#user:}"; perm="${who##*:}"; who="${who%:*}"
+        [[ "$perm" != *w* ]] || { echo "$who may write it"; return 0; }
         if [ "$who" = "$user" ]; then [[ "$perm" == *x ]] && mine=1
-        elif [[ ! "$who" =~ ^wl-test-[a-z][a-z0-9-]*$ ]]; then echo "$who, not a test user, may run it"; return 0; fi ;;
+        elif ! is_test_user "$who"; then echo "$who, not the test user of an instance here, may run it"; return 0; fi ;;
       group::---) ;;
       group:*) echo "a group may run it ($l)"; return 0 ;;
       other::---) ;;
@@ -1107,12 +1122,16 @@ wrapper_acl_problem() {
 # kernel restricts user namespaces could make more with capabilities in them; with it, such a namespace gets the
 # kernel's restricted treatment, as before (the test-run CI job asserts both ways). <systemd version>: the script's "$@"
 # goes to systemd as the command does (systemd_command), so it is never expanded.
+# The run also gets a mount namespace of its own (--mount: the unit's mounts, copied and locked), where the wrapper
+# binds /dev/null over the wrapper itself while it still has its capabilities, so the run's command can't run the wrapper
+# and get its profile's allowance back by path. With no capability in its own user namespace it can't unmount that, and
+# the mounts it was copied from are locked to it (round 3). The test-run CI job asserts a run running the wrapper is refused.
 USERNS_ARGV=()
 userns_argv() {
   local v="$1" s aa=""
   [ "$USERNS_AA" != 1 ] || aa=" --apparmor-profile=unconfined"
-  s="$(systemd_command "$v" "$IP_BIN link set lo up && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
-  USERNS_ARGV=("$USERNS" --user --map-current-user --net --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
+  s="$(systemd_command "$v" "$IP_BIN link set lo up && $MOUNT_BIN --bind /dev/null $USERNS && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
+  USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
 }
 
 # Whether test users' Docker may be exempt from the host's egress rule: lib.sh's egress_docker_mode, word for word (a

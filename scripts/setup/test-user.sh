@@ -199,15 +199,49 @@ profile $userns_profile $userns_bin flags=(unconfined) {
 EOF
 }
 
-# Whether only the test users (this one among them) may run the wrapper: its ACL has no group or other permission and
-# names no user but wl-test-* ones (the helper's wrapper_acl_problem checks the same before every run).
+# Where test-user.sh install keeps each instance's state (the helper's BASE): an instance has a test user here only once
+# its directory is there.
+BASE=/var/lib/worklane-test
+
+# Whether user <u> is the test user of an instance on this machine: the helper's is_test_user, word for word (a test
+# keeps them equal). WHY not the pattern wl-test-*: instance test's agent, eval and MCP users are wl-test-agent,
+# wl-test-eval and wl-test-mcp.
+is_test_user() {
+  local n
+  [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
+  n="${BASH_REMATCH[1]}"
+  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+}
+
+# Why the wrapper's ACL lets anyone but the test users run it, or anyone but root write it: the helper's
+# wrapper_acl_problem, word for word (a test keeps them equal); it checks the same before every run.
+wrapper_acl_problem() {
+  local l who perm mine=0
+  while IFS= read -r l; do
+    l="${l%%[[:space:]]*}"
+    case "$l" in
+      '' | user::*) ;;
+      mask::*) [[ "${l#mask::}" != *w* ]] || { echo "its ACL mask lets a named entry write it ($l)"; return 0; } ;;
+      user:*:*) who="${l#user:}"; perm="${who##*:}"; who="${who%:*}"
+        [[ "$perm" != *w* ]] || { echo "$who may write it"; return 0; }
+        if [ "$who" = "$user" ]; then [[ "$perm" == *x ]] && mine=1
+        elif ! is_test_user "$who"; then echo "$who, not the test user of an instance here, may run it"; return 0; fi ;;
+      group::---) ;;
+      group:*) echo "a group may run it ($l)"; return 0 ;;
+      other::---) ;;
+      other:*) echo "every user may run it ($l)"; return 0 ;;
+      *) echo "an ACL entry this helper doesn't know: $l"; return 0 ;;
+    esac
+  done <<<"$1"
+  [ "$mine" -eq 1 ] || echo "$user may not run it"
+  return 0
+}
+
+# Whether only the test users (this one among them) may run the wrapper, and only root write it (wrapper_acl_problem).
 userns_acl_ok() {
-  local acl others
-  acl="$(getfacl -cp "$userns_bin" 2>/dev/null | sed 's/[[:space:]].*//')" || return 1
-  grep -qx 'group::---' <<<"$acl" && grep -qx 'other::---' <<<"$acl" || return 1
-  ! grep -q '^group:[^:]' <<<"$acl" || return 1
-  others="$(grep '^user:[^:]' <<<"$acl" | grep -vE '^user:wl-test-[a-z][a-z0-9-]*:' || true)"
-  [ -z "$others" ] && grep -qE "^user:$user:..x\$" <<<"$acl"
+  local acl
+  acl="$(getfacl -cp "$userns_bin" 2>/dev/null)" || return 1
+  [ -z "$(wrapper_acl_problem "$acl")" ]
 }
 
 # Whether this machine's unshare can be the wrapper: the helper's prelude needs --map-current-user and --keep-caps
@@ -218,8 +252,12 @@ userns_supported() {
   grep -q -- '--map-current-user' <<<"$help" && grep -q -- '--keep-caps' <<<"$help" && command -v setpriv >/dev/null 2>&1
 }
 
-# The test users on this machine (wl-test-<name>), one a line: the only users the wrapper's ACL lets run it.
-test_users() { getent passwd | awk -F: '$1 ~ /^wl-test-[a-z][a-z0-9-]*$/ { print $1 }'; }
+# The test users on this machine, one a line: this instance's (its directory may not be there yet on a first install),
+# and each other user is_test_user takes. The only users the wrapper's ACL lets run it.
+test_users() {
+  local u
+  { echo "$user"; getent passwd | cut -d: -f1 | while IFS= read -r u; do if is_test_user "$u"; then echo "$u"; fi; done; } | sort -u
+}
 
 # The wrapper (a copy of this machine's unshare), atomically: root:root 0700, and an ACL entry letting each test user
 # (and nobody else) run it. WHY: where user namespaces are restricted its AppArmor profile lets whoever runs it make one,
@@ -257,7 +295,7 @@ if [ -n "$print" ]; then
   echo "# sudoers rule worklane-test-$name"; sudoers_rule; echo
   echo "# $helper (scripts/machine/worklane-testrun.sh)"; cat "$machine_dir/worklane-testrun.sh"; echo
   echo "# /etc/apparmor.d/worklane-test-rootlesskit (only where user namespaces are restricted)"; apparmor_profile; echo
-  echo "# $userns_bin: a copy of this machine's unshare (util-linux 2.38 or later), root:root 0755"
+  echo "# $userns_bin: a copy of this machine's unshare (util-linux 2.38 or later), root:root 0700, an ACL entry r-x for each test user"
   echo "# /etc/apparmor.d/$userns_profile (only where user namespaces are restricted)"; userns_apparmor_profile
   exit 0
 fi

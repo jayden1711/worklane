@@ -215,6 +215,9 @@ echo ran`);
     noMe: `user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n`,
   } as const;
   stub('getfacl', `[ -e '${usernsBin}' ] || exit 1; cat '${aclFile}'`);
+  stub('mount', 'exit 0');
+  // Another instance's test user, wl-test-other: test-user.sh install made its directory.
+  mkdirSync(join(base, 'other'), { recursive: true });
   const userns = (kind: 'ok' | 'old' | 'link' | Exclude<keyof typeof acls, 'ok'>) => {
     rmSync(usernsBin, { force: true });
     writeFileSync(aclFile, kind in acls ? acls[kind as keyof typeof acls] : acls.ok);
@@ -464,9 +467,12 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
 
 /** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
 const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) => [
-  h.usernsBin, '--user', '--map-current-user', '--net', '--keep-caps', '--', '/bin/sh', '-c',
-  `${join(h.bin, 'ip')} link set lo up && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
+  h.usernsBin, '--user', '--map-current-user', '--net', '--mount', '--keep-caps', '--', '/bin/sh', '-c',
+  `${join(h.bin, 'ip')} link set lo up && ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
 ];
+
+/** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
+const prelude = (h: ReturnType<typeof netHelper>) => h.lastProps().argv.slice(-(usernsArgv(h).length + 5), -5);
 
 test('#545: with the wrapper, a run\'s unit makes the run a user and network namespace of its own (its uid mapped to itself, lo up, every capability dropped) before its command; without a usable one, the command alone, as before', { skip: !posix && 'bash' }, () => {
   const h = netHelper();
@@ -481,7 +487,7 @@ test('#545: with the wrapper, a run\'s unit makes the run a user and network nam
     const r = h.exec('fast-u-1', [], 'echo hi');
     assert.equal(r.status, 0, r.stderr);
     const { argv, props } = h.lastProps();
-    assert.deepEqual(argv.slice(-15), [...usernsArgv(h), '/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
+    assert.deepEqual(argv.slice(-(usernsArgv(h).length + 5)), [...usernsArgv(h), '/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
     assert.ok(argv.includes('--expand-environment=no'), 'systemd 254 or later expands nothing of it');
     const norm = (ps: string[]) => ps.map((p) => p.replace(/fast-u-\d/g, 'ID').replace(/\/t\/[0-9a-f]{8}/g, '/t/HASH'));
     h.exec('fast-u-2', [], 'echo hi');
@@ -491,7 +497,7 @@ test('#545: with the wrapper, a run\'s unit makes the run a user and network nam
     // An older systemd expands $ in a command line: the wrapper's "$@" goes as "$$@", systemd's escape for a literal $.
     h.sysd(253);
     h.exec('fast-u-3', [], 'echo hi');
-    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$$'));
+    assert.deepEqual(prelude(h), usernsArgv(h, '$$'));
     h.sysd(255);
     // A symlink, an unshare without --map-current-user and --keep-caps, or one others than the test users may run: the
     // command alone (the wrapper is never used where its userns allowance would reach anyone else).
@@ -510,11 +516,11 @@ test('#545: with the wrapper, a run\'s unit makes the run a user and network nam
     assert.ok(!h.lastProps().argv.includes(h.usernsBin), 'restricted, no profile: the command alone');
     h.restrict(true, true);
     h.exec('fast-u-5', [], 'echo hi');
-    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$', true), 'restricted, the profile loaded: the command leaves it');
+    assert.deepEqual(prelude(h), usernsArgv(h, '$', true), 'restricted, the profile loaded: the command leaves it');
     // The profile loaded where the restriction is off: it is left all the same.
     h.restrict(false, true);
     h.exec('fast-u-6', [], 'echo hi');
-    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$', true));
+    assert.deepEqual(prelude(h), usernsArgv(h, '$', true));
     // The helper reads the wrapper; it never runs it (as root, on a real machine).
     assert.equal(h.usernsRan(), false, 'the helper ran the wrapper');
   } finally {
@@ -531,7 +537,7 @@ test('#545: a granted run\'s slirp4netns runs as the test user, with no capabili
     const r = h.exec('fast-s-1', ['--network', 'e2e'], 'echo hi');
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stderr, /^worklane-testrun: network granted \(e2e; public addresses and the machine's DNS only\)\n/);
-    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), 'the run makes its own namespaces');
+    assert.deepEqual(prelude(h), usernsArgv(h), 'the run makes its own namespaces');
     assert.match(h.lastProps().argv.at(-1)!, /^n=0; until grep -qs "\^tap0" \/proc\/net\/route; do .*; done; echo hi$/, 'and waits for its network in them');
     let [net] = h.netCalls();
     assert.ok(net, 'a network unit');
@@ -561,7 +567,7 @@ test('#545: a granted run\'s slirp4netns runs as the test user, with no capabili
       assert.deepEqual(net.argv.slice(-8), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-sandbox', '--enable-seccomp', '4242', 'tap0'], rec);
       assert.ok(!net.argv.some((a) => a.startsWith('--uid=')) && !net.props.some((p) => p.startsWith('NFTSet=')), rec);
       assert.ok(net.props.includes('CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE'), rec);
-      assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), `${rec}: the run's own namespaces still`);
+      assert.deepEqual(prelude(h), usernsArgv(h), `${rec}: the run's own namespaces still`);
     }
     h.record('# docker: exempt\n1003\n');
     h.exec('fast-s-4', ['--network', 'e2e']);
@@ -590,8 +596,9 @@ test('#545: the fetch gets its own namespaces and a test-user slirp4netns too; s
     const { argv } = h.lastProps();
     const at = argv.indexOf(h.usernsBin);
     assert.ok(at > 0, argv.join(' '));
-    assert.deepEqual(argv.slice(at, at + 10), usernsArgv(h));
-    assert.deepEqual(argv.slice(at + 10, at + 14), ['/bin/bash', '-o', 'pipefail', '-c']);
+    const n = usernsArgv(h).length;
+    assert.deepEqual(argv.slice(at, at + n), usernsArgv(h));
+    assert.deepEqual(argv.slice(at + n, at + n + 4), ['/bin/bash', '-o', 'pipefail', '-c']);
     assert.deepEqual(argv.slice(-2), ['fetch', join(h.base, 'shop', 'runs', 'fast-w-1', 'work')]);
     const [net] = h.netCalls();
     assert.ok(net && net.argv.includes(`--uid=${userInfo().username}`) && net.argv.includes('--netns-type=path'), net?.argv.join(' '));
@@ -635,30 +642,69 @@ test('#545: test-user.sh installs the wrapper (a copy of unshare, root:root 0700
   const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
   assert.match(install, /install -o root -g root -m 0700 "\$\(command -v unshare\)" "\$userns_bin\.tmp"\n\s+for u in \$\(test_users\); do setfacl -m "u:\$u:r-x" "\$userns_bin\.tmp"; done\n\s+mv -f "\$userns_bin\.tmp" "\$userns_bin"/);
   assert.doesNotMatch(tu, /-m 0755 "\$\(command -v unshare\)"/, 'never world-executable');
-  assert.match(tu, /test_users\(\) \{ getent passwd \| awk -F: '\$1 ~ \/\^wl-test-\[a-z\]\[a-z0-9-\]\*\$\/ \{ print \$1 \}'; \}/);
   // remove drops the user's entry before its uid goes.
   assert.match(tu, /setfacl -x "u:\$user" "\$userns_bin"/);
-  // check: test-user.sh's userns_acl_ok, run on getfacl's output for each case (the helper checks the same, below).
-  const fn = tu.slice(tu.indexOf('userns_acl_ok() {'), tu.indexOf('\n}\n', tu.indexOf('userns_acl_ok() {')) + 3);
-  const ok = (acl: string) => spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\nuserns_bin=/x\ngetfacl() { printf '%s' "$ACL"; }\n${fn}userns_acl_ok`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl } }).status === 0;
-  assert.equal(ok('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n'), true);
-  for (const bad of [
-    'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n',
-    'user::rwx\nuser:wl-test-shop:r-x\ngroup::r-x\nmask::r-x\nother::---\n',
-    'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\ngroup:staff:r-x\nmask::r-x\nother::---\n',
-    'user::rwx\nuser:wl-test-shop:r-x\nuser:wl-ci:r-x\ngroup::---\nmask::r-x\nother::---\n',
-    'user::rwx\nuser:wl-test-shop:r-x\nuser:1234:r-x\ngroup::---\nmask::r-x\nother::---\n',
-    'user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n',
-    'user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n',
-  ]) assert.equal(ok(bad), false, bad);
-  // The helper's own check of the same (wrapper_acl_problem), on the same cases.
+  assert.doesNotMatch(r.stdout, /worklane-testrun-userns[^\n]*0755/, '--print never says 0755 (round 3)');
+  assert.match(r.stdout, /worklane-testrun-userns: a copy of this machine's unshare \(util-linux 2\.38 or later\), root:root 0700, an ACL entry r-x for each test user/);
+});
+
+test('#545 round 3: who counts as a test user, and who may run or write the wrapper, is exact and the same in the helper and test-user.sh (install, check): never instance test\'s wl-test-agent, wl-test-eval or wl-test-mcp; nobody but root writes it', { skip: !posix && 'bash' }, () => {
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
   const src = readFileSync(helperSrc, 'utf8');
-  const hf = src.slice(src.indexOf('wrapper_acl_problem() {'), src.indexOf('\n}\n', src.indexOf('wrapper_acl_problem() {')) + 3);
-  const problem = (acl: string) => spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\n${hf}wrapper_acl_problem "$ACL"`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl } }).stdout.trim();
-  assert.equal(problem('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n'), '');
-  assert.match(problem('user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n'), /every user may run it/);
-  assert.match(problem('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-ci:r-x\ngroup::---\nmask::r-x\nother::---\n'), /wl-ci, not a test user, may run it/);
-  assert.match(problem('user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n'), /wl-test-shop may not run it/);
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const fnOf = (s: string, name: string) => {
+    const at = s.indexOf(`\n${name}() {`);
+    assert.ok(at >= 0, `${name} is defined`);
+    return s.slice(at + 1, s.indexOf('\n}\n', at) + 3);
+  };
+  // The same rule, word for word.
+  for (const name of ['is_test_user', 'wrapper_acl_problem']) assert.equal(fnOf(tu, name), fnOf(src, name), name);
+  // Instances here: shop (this one), other, test; each a directory test-user.sh install made. agent has one too, so
+  // only the name rule keeps wl-test-agent out.
+  const base = tmp('acl-base-');
+  for (const n of ['shop', 'other', 'test', 'agent']) mkdirSync(join(base, n));
+  const pw = ['wl-test', 'wl-test-agent', 'wl-test-eval', 'wl-test-mcp', 'wl-test-test', 'wl-test-other', 'wl-test-gone', 'wl-ci'].map((u, i) => `${u}:x:${1001 + i}:${1001 + i}::/nonexistent:/usr/sbin/nologin`).join('\n');
+  const sh = (script: string, fns: string, call: string, acl = '') =>
+    spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\nuserns_bin=/x\nBASE=${base}\ngetfacl() { printf '%s' "$ACL"; }\ngetent() { printf '%s\\n' "$PW"; }\n${fnOf(script === 'helper' ? src : lib, 'instance_name_problem')}${fns}${call}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl, PW: pw } });
+  try {
+    // test-user.sh install's list: this instance's test user and each other instance's, never instance test's other users.
+    const tuFns = ['is_test_user', 'wrapper_acl_problem', 'userns_acl_ok', 'test_users'].map((n) => fnOf(tu, n)).join('');
+    assert.deepEqual(sh('tu', tuFns, 'test_users').stdout.trim().split('\n'), ['wl-test-other', 'wl-test-shop', 'wl-test-test']);
+    const good = 'user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\nuser:wl-test-test:r-x\ngroup::---\nmask::r-x\nother::---\n';
+    const base4 = 'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::---\n';
+    const bad: [string, RegExp][] = [
+      // The reviewer's fixtures (round 2): instance test's agent, MCP and eval users.
+      [`${base4}user:wl-test-agent:r-x\n`, /wl-test-agent, not the test user of an instance here, may run it/],
+      [`${base4}user:wl-test-mcp:r-x\n`, /wl-test-mcp, not the test user/],
+      [`${base4}user:wl-test-eval:r-x\n`, /wl-test-eval, not the test user/],
+      ['user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:rwx\ngroup::---\nmask::rwx\nother::---\n', /wl-test-other may write it/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::rwx\nother::---\n', /mask lets a named entry write it/],
+      ['user::rwx\nuser:wl-test-shop:rwx\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may write it/],
+      [`${base4}group:docker:---\n`, /a group may run it/],
+      [`${base4}user:4242:r-x\n`, /4242, not the test user/],
+      [`${base4}default:user::rwx\n`, /an ACL entry this helper doesn't know/],
+      [`${base4}user:wl-test-gone:r-x\n`, /wl-test-gone, not the test user/],
+      [`${base4}user:wl-ci:r-x\n`, /wl-ci, not the test user/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n', /every user may run it/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::r-x\nmask::r-x\nother::---\n', /a group may run it/],
+      ['user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may not run it/],
+      ['user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may not run it/],
+    ];
+    const hFns = ['is_test_user', 'wrapper_acl_problem'].map((n) => fnOf(src, n)).join('');
+    assert.equal(sh('helper', hFns, 'wrapper_acl_problem "$ACL"', good).stdout.trim(), '', 'the helper takes the good ACL');
+    assert.equal(sh('tu', tuFns, 'userns_acl_ok', good).status, 0, 'test-user.sh check takes it');
+    for (const [acl, why] of bad) {
+      assert.match(sh('helper', hFns, 'wrapper_acl_problem "$ACL"', acl).stdout, why, `helper: ${acl}`);
+      assert.notEqual(sh('tu', tuFns, 'userns_acl_ok', acl).status, 0, `test-user.sh check: ${acl}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('#545: test-user.sh\'s install, remove and profile (continued)', { skip: !posix && 'bash' }, () => {
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
   assert.match(install, /kernel\.apparmor_restrict_unprivileged_userns[\s\S]*apparmor_parser -r "\/etc\/apparmor\.d\/\$userns_profile"/);
   assert.match(tu, /\n {2}install_userns\n/, 'install calls it');
   assert.match(tu, /rm -f \/etc\/systemd\/system\/worklane-test\.slice "\$helper" "\$userns_bin"/);
