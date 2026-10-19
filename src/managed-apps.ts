@@ -26,7 +26,7 @@ export const MANAGED_APPS_FILE = () => etcPath('managed-apps.json');
 /** The root script that changes it, as a root shell runs it. */
 export const MANAGED_APPS_SCRIPT = 'scripts/setup/managed-apps.sh';
 
-/** The test preload's mark (test/isolate.ts ISOLATED): an own property of globalThis that only the preload's code sets. */
+/** The test preload's mark (test/isolate.ts ISOLATED): an own property of globalThis, set by code in the process (rootUid). */
 const TEST_PRELOAD = Symbol.for('test-isolation');
 
 /**
@@ -35,10 +35,14 @@ const TEST_PRELOAD = Symbol.for('test-isolation');
  * test's own system root (etcPath), all of them this user's.
  * WHY (#747, owner decision 2026-10-18): the tests passed readLockScope another root uid and another file, through a
  * parameter that any src/ caller could pass too, and that a polluted Object.prototype filled in. There is no such
- * parameter now, and no variable for it: neither the environment nor Object.prototype can set an own property of
- * globalThis, and the engine's package ships no test code (package.json files: dist/src, not dist/test).
- * INVARIANT: 0 in every process the preload didn't run in, whatever its environment; 0 as root, under systemd, or with
- * a system root the preload didn't mark, preloaded or not.
+ * parameter now, and no variable for it: a polluted Object.prototype can't set an own property of globalThis, and the
+ * engine's package ships no test code (package.json files: dist/src, not dist/test). Only code running in the process
+ * can set the mark: planted src/ code, a dependency, or a preload that NODE_OPTIONS (--import/--require) or node's
+ * own --import names; no other environment variable can. Such code also needs a system root of this user's alone
+ * with a mark matching its token, both variables, and, under systemd, to delete the systemd markers. It could as well
+ * patch this check or the scope itself, so the mark gives it nothing new.
+ * INVARIANT: 0 in every process where no code set the mark; 0 as root, while a systemd marker is set, or with a system
+ * root that isn't marked (systemRootRefusal), mark or not.
  */
 function rootUid(): number {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0;

@@ -253,10 +253,12 @@ test("readLockScope takes the instance and its repo, nothing else: Object.protot
   });
 });
 
-// The other side of rootUid (#747): outside a test process, root is uid 0, whatever the environment says. A node
-// process the test preload didn't run in gets every variable the preload sets, a system root with this run's mark,
-// and a polluted Object.prototype (the preload's own mark among it), and still holds this user's files as not root's.
-test("outside a test process, root's files must be uid 0's, whatever the environment: this user's are refused", { skip: (!posix && 'owners and modes') || (me === 0 && 'runs as root') }, () => {
+// The other side of rootUid (#747): outside a test process, root is uid 0, whatever variables the environment sets
+// short of one that makes node load code (NODE_OPTIONS --import/--require: code in the process, which could set the
+// mark). A node process the test preload didn't run in gets every variable the preload sets, a system root with this
+// run's mark, and a polluted Object.prototype (the preload's own mark among it), and still holds this user's files as
+// not root's.
+test("outside a test process, root's files must be uid 0's, whatever the preload's variables say: this user's are refused", { skip: (!posix && 'owners and modes') || (me === 0 && 'runs as root') }, () => {
   const machine = dir();
   const root = join(machine, 'root');
   mkdirSync(root, { mode: 0o700 });
