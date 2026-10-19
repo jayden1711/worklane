@@ -636,7 +636,18 @@ export const EventSchemas = {
    * auto-merge isn't stopped. The first approval at a head stands.
    */
   'merge.approved': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string(), via: z.enum(['discord']) }),
-  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
+  /**
+   * The engine is about to call GitHub's merge API for PR `number` at `head` (#733): recorded before the call, so a
+   * crash between GitHub's merge and `merge.done` leaves a trace. Never a merge on its own: the PR watch's next pass
+   * reconciles it (src/merge-policy-reconcile.ts), and nothing else reads it as one (the main watch reads only `merge.done`).
+   */
+  'merge.attempted': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * `reconciled`: recorded after the fact, for an attempt whose record a crash cut off, once GitHub showed the PR merged
+   * at exactly the attempted head as a merge commit of it carrying the engine's own merge message (#733).
+   * `attempted_at`: then, when the attempt was recorded: the main watch judges the checks as of that time.
+   */
+  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string(), reconciled: z.literal(true).optional(), attempted_at: z.string().optional() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /**
    * The merge train (src/merge-policy-train.ts) put off merging PR `number` at `head` until `retry_at`: GitHub requires

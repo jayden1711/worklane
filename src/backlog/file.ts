@@ -18,6 +18,8 @@ interface FilePr {
   mergeableState?: string;
   /** The merge commit, once merged. */
   mergeSha?: string;
+  /** Who merged it (a login; `[bot]` at the end for a bot, as GitHub names an App's account). */
+  mergedBy?: string;
   mergeTitle?: string;
   mergeBody?: string;
   /** Submitted reviews (tests set them). */
@@ -154,12 +156,14 @@ export class FileBacklog implements Backlog {
     if (!i) throw new Error(`pull request #${n} not found`);
     const state = i.pr!.mergeableState ?? 'clean';
     const stats = i.pr!.stats ? { stats: { ...i.pr!.stats, comments: i.comments.length } } : {};
-    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, body: i.body, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...stats };
+    const by = i.pr!.mergedBy;
+    const merged = i.pr!.merged ? { ...(i.pr!.mergeSha ? { mergeCommit: i.pr!.mergeSha } : {}), ...(by ? { mergedBy: { login: by, bot: by.endsWith('[bot]') } } : {}) } : {};
+    return { number: n, url: i.pr!.url, head: i.pr!.head, headSha: i.pr!.headSha, base: i.pr!.base, draft: i.pr!.draft, state: i.pr!.merged ? 'merged' : i.state, title: i.title, body: i.body, mergeable: state === 'unknown' ? null : state !== 'dirty', mergeableState: state, ...merged, ...stats };
   }
   /** Test hook: re-running a check run's failed Actions jobs (a file backlog has no Actions: absent, nothing re-runs). */
   rerunFailedJobs?: (checkRunIds: number[]) => Promise<Map<number, RerunJobs>>;
-  /** Test hook: how a merge happens (e.g. a real merge commit on a test remote); returns the merge commit. */
-  mergeWith?: (pr: { number: number; head: string; headSha: string; base: string }) => string;
+  /** Test hook: how a merge happens (e.g. a real merge commit on a test remote, with the merge message asked for); returns the merge commit. */
+  mergeWith?: (pr: { number: number; head: string; headSha: string; base: string; title?: string; body?: string }) => string;
   async mergePr(n: number, sha: string, title: string, body?: string): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
     const i = this.load().issues.find((x) => x.number === n && x.pr);
     if (!i || i.state !== 'open') return { ok: false, why: 'not open' };
@@ -167,9 +171,10 @@ export class FileBacklog implements Backlog {
     if ((i.pr!.mergeableState ?? 'clean') === 'dirty') return { ok: false, why: 'merge conflict' };
     // Strict branch protection: GitHub's 405 for a branch behind its base.
     if (i.pr!.mergeableState === 'behind') return { ok: false, why: 'Head branch is not up to date with the base branch' };
-    const mergeSha = this.mergeWith ? this.mergeWith({ number: n, head: i.pr!.head, headSha: sha, base: i.pr!.base }) : sha.replace(/^./, 'f');
+    const mergeSha = this.mergeWith ? this.mergeWith({ number: n, head: i.pr!.head, headSha: sha, base: i.pr!.base, title, ...(body !== undefined ? { body } : {}) }) : sha.replace(/^./, 'f');
     this.edit(n, (x) => {
-      Object.assign(x.pr!, { merged: true, mergeSha, mergeTitle: title, ...(body !== undefined ? { mergeBody: body } : {}) });
+      // As on GitHub, where the engine merges as its App: a bot.
+      Object.assign(x.pr!, { merged: true, mergeSha, mergedBy: `${this.actor}[bot]`, mergeTitle: title, ...(body !== undefined ? { mergeBody: body } : {}) });
       x.state = 'closed';
     });
     return { ok: true, sha: mergeSha };
@@ -206,7 +211,7 @@ export class FileBacklog implements Backlog {
       .map((i) => ({ number: i.number, title: i.title, body: i.body, labels: i.labels, state: i.state, comments: i.comments, ...i.pr! }));
   }
   /** Test helper: change a pull request as GitHub would (a push moves headSha; a merge or close ends it). */
-  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged' | 'mergeableState' | 'closedBy' | 'stats'>> & { state?: 'open' | 'closed' }) {
+  setPr(n: number, patch: Partial<Pick<FilePr, 'headSha' | 'draft' | 'merged' | 'mergeSha' | 'mergedBy' | 'mergeableState' | 'closedBy' | 'stats'>> & { state?: 'open' | 'closed' }) {
     this.edit(n, (i) => {
       const { state, ...rest } = patch;
       Object.assign(i.pr!, rest);

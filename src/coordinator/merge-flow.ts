@@ -37,6 +37,7 @@ import { FixForward } from './fix-forward.js';
 import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
+import { ATTEMPT_EVENTS, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -276,6 +277,8 @@ export abstract class MergeFlow extends FixRuns {
     const pr = await this.d.backlog.pullRequest(number);
     // A head that moved, or a PR that closed, drops it from a running batch: that batch's run is cancelled.
     if (this.prBatching()) this.batcher?.observe(number, pr.headSha, pr.state);
+    // A merge call of ours that a crash cut off: settled from GitHub's answer before anything else (#733).
+    await this.reconcileAttempt(w, pr);
     if (pr.state !== 'open') {
       this.emit('pr.closed', { issue: n, number, merged: pr.state === 'merged' });
       return;
@@ -358,10 +361,43 @@ export abstract class MergeFlow extends FixRuns {
    * revert it opened (neverAutoMerge), whatever led here.
    */
   private async mergeOurs(pr: PullRequest): Promise<{ ok: true; sha: string } | { ok: false; why: string }> {
-    const never = neverAutoMerge({ branch: pr.head, openedByHarness: this.openedByUs(pr.number) });
-    if (never.length) return { ok: false, why: never.join('; ') };
+    const opened = this.d.log.read(0, ['pr.opened']).filter((e) => (e.payload as EventPayload<'pr.opened'>).number === pr.number).at(-1);
+    const never = neverAutoMerge({ branch: pr.head, openedByHarness: !!opened });
+    if (never.length || !opened) return { ok: false, why: never.join('; ') };
     const msg = mergeMessage({ title: pr.title, number: pr.number, head: pr.headSha, product: BRAND.name });
-    return this.d.backlog.mergePr(pr.number, pr.headSha, msg.subject, msg.body);
+    // #733: the intent first, so a crash between GitHub's merge and its merge.done is settled on the next pass.
+    this.emit('merge.attempted', { issue: (opened.payload as EventPayload<'pr.opened'>).issue, number: pr.number, head: pr.headSha });
+    try {
+      return await this.d.backlog.mergePr(pr.number, pr.headSha, msg.subject, msg.body);
+    } catch (e) {
+      this.prPolled.delete(pr.number); // no answer: first in line on the next pass, where its attempt is settled
+      throw e;
+    }
+  }
+
+  /**
+   * #733: PR `w`'s merge attempt with no outcome (merge.attempted, then a crash or a call that threw), settled from
+   * GitHub's PR as read now (src/merge-policy-reconcile.ts): merged at exactly the attempted head by a bot, as a merge
+   * commit of it carrying the engine's merge message, is recorded as merge.done (reconciled); still open or closed unmerged, as
+   * merge.failed; anything else, not at all. A fetch that fails throws: the PR stays watched and is tried again.
+   */
+  private async reconcileAttempt(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    const attempt = openAttempt(this.d.log.read(0, [...ATTEMPT_EVENTS]), w.number);
+    if (!attempt) return;
+    if (pr.state === 'merged' && pr.mergeCommit) this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+    const commit = (sha: string) => {
+      if (spawnSync('git', ['merge-base', '--is-ancestor', sha, `${this.remote}/${this.branch}`], { cwd: this.d.repo }).status !== 0) return null;
+      const out = this.gitOrNull(this.d.repo, 'log', '-1', '--format=%P%n%B', sha, '--');
+      if (out === null) return null;
+      const [parents = '', ...message] = out.split('\n');
+      return { parents: parents.trim().split(' ').filter(Boolean), message: message.join('\n') };
+    };
+    const r = reconcileMerge({ attempt, pr, branch: this.branch, product: BRAND.name, commit });
+    if (r.act === 'failed') this.emit('merge.failed', { issue: w.issue, number: w.number, head: attempt.head, why: r.why.slice(0, 500) });
+    if (r.act !== 'done') return;
+    this.emit('merge.done', { issue: w.issue, number: w.number, head: attempt.head, sha: r.sha, url: pr.url, title: pr.title, reconciled: true, attempted_at: attempt.at });
+    this.prPolled.clear(); // the other open PRs may conflict now: look at them on the next pass
+    await this.d.backlog.comment(w.number, `[${BRAND.cli}] Merged as \`${r.sha.slice(0, 8)}\` (a merge commit of \`${attempt.head.slice(0, 8)}\`); recorded on a later pass, since the merge call's answer was lost.`);
   }
 
   // ---------------------------------------------------------------- merge train
@@ -952,7 +988,8 @@ export abstract class MergeFlow extends FixRuns {
         const e = this.d.log.read(0, ['merge.done']).find((x) => (x.payload as EventPayload<'merge.done'>).sha === sha);
         if (!e) return null;
         const m = e.payload as EventPayload<'merge.done'>;
-        return { number: m.number, head: m.head, at: e.ts };
+        // A reconciled merge (#733) is judged as of its attempt, never later than the merge itself.
+        return { number: m.number, head: m.head, at: m.attempted_at ?? e.ts };
       },
       ...(w.now ? { now: w.now } : {}),
       mode: (mode, detail) => this.emit('main_watch.mode', { mode, detail }),
