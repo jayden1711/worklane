@@ -250,6 +250,70 @@ test("only root's file reader and the review levels name the managed-app scope",
   assert.deepEqual(naming.sort(), ['src/managed-apps.ts', 'src/review.ts']);
 });
 
+/**
+ * Every use of root's reader in one source file that could hand it something but the instance and its repo: a call
+ * without exactly two plain arguments, or the reader used as a value (an alias, a reference, a string key).
+ */
+function lockScopeMisuses(file: string, text: string): string[] {
+  const NAME = 'readLockScope';
+  const kind = /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
+  const out: string[] = [];
+  const at = (n: ts.Node, why: string) => out.push(`${file}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}: ${why}: ${n.getText(sf).slice(0, 120)}`);
+  const visit = (n: ts.Node): void => {
+    if (ts.isStringLiteralLike(n) && n.text === NAME) at(n, `${NAME} by name`);
+    const named = ts.isIdentifier(n) && n.text === NAME;
+    if (named) {
+      const p = n.parent;
+      if (ts.isImportSpecifier(p)) {
+        if (p.propertyName) at(p, `${NAME} imported under another name`);
+      } else if (ts.isExportSpecifier(p)) {
+        at(p, `${NAME} passed on`);
+      } else {
+        // The callee, alone or as `ns.readLockScope`: the call must name exactly the instance and its repo.
+        const callee = ts.isPropertyAccessExpression(p) && p.name === n ? p : n;
+        const call = callee.parent;
+        if (!(ts.isCallExpression(call) && call.expression === callee)) at(n, `${NAME} used as a value, not called`);
+        else if (call.arguments.length !== 2 || call.arguments.some((a) => ts.isSpreadElement(a))) at(call, `${NAME} called with ${call.arguments.length} argument(s), not exactly (instance, repo)`);
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return out;
+}
+
+// WHY (#747): readLockScope's third argument (another file, another root uid) is for tests. A src/ caller that passed
+// one could point the reader at a file root doesn't own, or count another user as root, and turn the engine-source
+// locks off where root never said so. The literal lint above doesn't see that, so every src/ caller but the reader's
+// own module calls it with exactly the instance and its repo.
+test("src/ calls root's reader (readLockScope) with exactly the instance and its repo, never more, and never as a value", () => {
+  const src = join(repoDir, 'src');
+  const files = (readdirSync(src, { recursive: true }) as string[]).filter((p) => /\.([cm]?ts|tsx|[cm]?js)$/.test(p)).map((p) => `src/${p.split(sep).join('/')}`);
+  assert.ok(files.length > 100, `${files.length} files`);
+  const callers = files.filter((p) => p !== 'src/managed-apps.ts' && readFileSync(join(repoDir, p), 'utf8').includes('readLockScope'));
+  assert.ok(callers.includes('src/service.ts'), `the coordinator's start-up reads it: ${callers.join(', ')}`);
+  assert.deepEqual(callers.flatMap((p) => lockScopeMisuses(p, readFileSync(join(repoDir, p), 'utf8'))), []);
+  // The lint itself: what it refuses, and what it lets through.
+  const misuse = (code: string) => lockScopeMisuses('src/x.ts', code);
+  assert.deepEqual(misuse("import { readLockScope } from './managed-apps.js';\nreadLockScope(i.name, i.repo.repo);\nconst f = () => readLockScope(a, b).scope;"), []);
+  for (const bad of [
+    "readLockScope(i.name, i.repo.repo, { rootUid: 1000 });",
+    "readLockScope(i.name, i.repo.repo, { file: '/tmp/apps.json' });",
+    'readLockScope(i.name);',
+    'readLockScope(...args);',
+    'm.readLockScope(a, b, o);',
+    "import { readLockScope as r } from './managed-apps.js';",
+    'const r = readLockScope;',
+    'call(readLockScope);',
+    'readLockScope.call(null, a, b, o);',
+    "m['readLockScope'](a, b, o);",
+    "export { readLockScope } from './managed-apps.js';",
+    "import { 'readLockScope' as r } from './managed-apps.js';",
+    'const { readLockScope: r } = m;',
+  ]) assert.notDeepEqual(misuse(bad), [], bad);
+});
+
 test('a failed or low-confidence verdict bumps one level; an agent can raise but not lower', () => {
   const ok = { patch_correct: true, test_correct: true, confidence: 'high' as const };
   assert.equal(level([f('web/a.jsx')], { verdict: ok }).level, 'L1');
