@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -554,6 +554,24 @@ test('every step that writes system paths runs in a transient unit of its own, s
   // As root it goes to systemd-run before anything is written: main checks root and needsUnit first.
   const src = readFileSync(helperSrc, 'utf8');
   assert.match(src, /if \(!inner && process\.getuid && process\.getuid\(\) === 0 && needsUnit\(args\)\) return inUnit\(args\);\n  const add = parseAddProject\(args\);/);
+});
+
+test("set-policy that went through is never reported failed because the change log can't be written (a full /var/lib, stood in by an unwritable directory); other steps keep failing on it (#726 round 6)", { skip: (!posix || process.getuid?.() === 0) && 'POSIX, not root' }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'machine-'));
+  const h = helperIn(root);
+  const { runLogged } = createRequire(import.meta.url)(h.copy) as { runLogged: (what: string, to: string, run: () => number, opts?: { statusOverLog?: boolean }) => number };
+  mkdirSync(join(root, 'var'), { recursive: true });
+  chmodSync(join(root, 'var'), 0o500);
+  try {
+    assert.equal(runLogged('policy.alpha', 'auto_merge off', () => 0, { statusOverLog: true }), 0, 'done stays done');
+    assert.equal(runLogged('policy.alpha', 'budget.daily_usd 30', () => 1, { statusOverLog: true }), 1, 'failed stays failed');
+    assert.throws(() => runLogged('install-updater', 'updates.sh', () => 0), /EACCES/, 'other steps: as before');
+  } finally {
+    chmodSync(join(root, 'var'), 0o700);
+  }
+  // The helper's set-policy runs with it.
+  const src = readFileSync(helperSrc, 'utf8');
+  assert.match(src, /return runLogged\(`policy\.\$\{instance\}`[\s\S]*?\}, \{ statusOverLog: true \}\);\n\}/);
 });
 
 test('a step is recorded only once it has run: as done when it exited 0, as failed when it failed or never started; never as a change before it happened', () => {

@@ -203,7 +203,7 @@ function logLine(what, from, to) {
  * recorded only once it has run, as done (`to`) when it exited 0 and as `failed: <to>: exit <n>` otherwise, never as
  * a change before it happened. Returns the step's status.
  */
-function runLogged(what, to, run) {
+function runLogged(what, to, run, opts = {}) {
   let status;
   try {
     status = run();
@@ -211,7 +211,15 @@ function runLogged(what, to, run) {
     process.stderr.write(`${what}: ${(e && e.message) || e}\n`);
     status = 1;
   }
-  logLine(what, null, status === 0 ? to : `failed: ${to}: exit ${status}`);
+  try {
+    logLine(what, null, status === 0 ? to : `failed: ${to}: exit ${status}`);
+  } catch (e) {
+    // opts.statusOverLog (set-policy): a change that went through is never reported as failed because its log line
+    // couldn't be written (a full /var/lib): said on stderr, and the step's own status kept (#726: OFF is never
+    // reported failed once done).
+    if (!opts.statusOverLog) throw e;
+    process.stderr.write(`${what}: ${status === 0 ? 'done' : 'failed'}, but the change log (${LOG}) couldn't be written: ${(e && e.message) || e}\n`);
+  }
   return status;
 }
 
@@ -660,7 +668,7 @@ function policySet(p) {
     const r = spawnSync(process.execPath, [cli, 'policy', 'set', instance, p.key, p.value], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8', SUDO_USER: process.env.SUDO_USER }, stdio: ['ignore', 'inherit', 'inherit'] });
     if (r.error) throw r.error;
     return r.status === null ? 1 : r.status;
-  });
+  }, { statusOverLog: true });
 }
 
 // ---------- where a step runs ----------
