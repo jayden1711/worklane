@@ -209,11 +209,37 @@ function fsWrites(call: ts.CallExpression, name: string): boolean {
 /** Which argument an fs write call writes: the destination for a copy, else the first. */
 const baseTarget = (name: string) => (/^(copyFile|cp)(Sync)?$/.test(name) ? 1 : 0);
 
-/** Why a write in the helper is not a new temp file of its own, created exclusively, or null. */
-function helperWrite(call: ts.CallExpression, name: string): string | null {
+/**
+ * Why a write in the helper is not a new temp file of its own, created exclusively, or null. A whole-file write to
+ * a descriptor (`writeFileSync(fd, …)`) is one when `fd` only ever holds what an exclusive open returned (`fds`).
+ */
+function helperWrite(call: ts.CallExpression, name: string, fds: ReadonlySet<string>): string | null {
   const a = call.arguments;
+  if (/^writeFile(Sync)?$/.test(name) && a[0] && ts.isIdentifier(a[0]) && fds.has(a[0].text)) return null;
   const flag = /^writeFile(Sync)?$/.test(name) ? flagOf(a[2]) : /^(open(Sync)?|createWriteStream)$/.test(name) ? flagOf(a[1]) : undefined;
   return exclusive(flag) ? null : `${name}(${a[baseTarget(name)]?.getText()}) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')`;
+}
+
+/** Calls that set a file's mode by its name: they follow a symlink. */
+const CHMOD_BY_NAME = new Set(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
+
+/**
+ * The names in the helper that only ever hold a descriptor from an exclusive open (`fd = openSync(tmp, 'wx', mode)`):
+ * a write to one is a write to the helper's own new temp file. A name ever given anything else is not one.
+ */
+function exclusiveFds(m: Mod, writers: Writers): Set<string> {
+  const good = new Set<string>();
+  const bad = new Set<string>();
+  const visit = (n: ts.Node) => {
+    const [name, value] = ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) ? [n.name.text, n.initializer] : ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(n.left) ? [n.left.text, n.right] : [null, undefined];
+    if (name !== null && value) {
+      const w = ts.isCallExpression(value) ? writeOf(m, value, writers) : null;
+      (w && !w.via && /^open(Sync)?$/.test(w.name) && exclusive(flagOf((value as ts.CallExpression).arguments[1])) ? good : bad).add(name);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(m.src);
+  return new Set([...good].filter((x) => !bad.has(x)));
 }
 
 /** The src/ module a relative import names, as a REVIEWED key. */
@@ -432,6 +458,7 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
     const review = REVIEWED[file];
     const at = (n: ts.Node, what: string) => out.push({ file, line: src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1, what });
     const seen = new Set<string>();
+    const fds = file === HELPER ? exclusiveFds(m, writers) : new Set<string>();
     let slot = false;
     const visit = (n: ts.Node) => {
       if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && SLOT_NAMES.has(n.text.replace(/^#/, ''))) slot = true;
@@ -439,12 +466,17 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
         const args = n.arguments ?? [];
         const hands = args.some((a) => mentionsSlot(a, m.pathCalls));
         const w = ts.isCallExpression(n) ? writeOf(m, n, writers) : null;
+        if (file === HELPER && ts.isCallExpression(n)) {
+          const name = calleeName(n.expression) ?? '';
+          const fsName = ts.isIdentifier(n.expression) ? m.fsAlias.get(name) : name;
+          if (fsName && CHMOD_BY_NAME.has(fsName)) at(n, `${fsName}(${n.arguments[0]?.getText() ?? ''}) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name`);
+        }
         if (w && ts.isCallExpression(n)) {
           const t = targetOf(n, w);
           const what = `${w.name}(${t?.getText() ?? ''})`;
           const key = `${ownerName(n)}: ${what}`;
           if (file === HELPER) {
-            const why = w.via ? `${what} in the helper: it writes only through fs, a new temp file of its own` : helperWrite(n, w.name);
+            const why = w.via ? `${what} in the helper: it writes only through fs, a new temp file of its own` : helperWrite(n, w.name, fds);
             if (why) at(n, why);
           } else if (t && mentionsSlot(t, m.pathCalls)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
           else if (review?.kind === 'mixed') {
@@ -610,6 +642,31 @@ test('lint: a writer of a writer, a local helper, a computed fs key, destructure
   assert.match(found[1]!, /put\(qjoin\(slotsDir, 'b'\)\) on a path built from a slot-dir name/);
   assert.match(found[2]!, /writeFileSync\(qjoin\(slotsDir, 'c'\)\) on a path built from a slot-dir name/);
   assert.match(found[3]!, /writeFileSync\(qjoin\(slotsDir, 'd'\)\) on a path built from a slot-dir name/, 'a destructured fs function is still a write');
+});
+
+test('lint: in the helper, a write to the descriptor of its own exclusive open is allowed; a chmod by name, and a write to any other descriptor, are reported', () => {
+  const files = srcFiles();
+  const body = [
+    "import { chmodSync as cm, fchmodSync, openSync as op, writeFileSync as wf } from 'node:fs';",
+    'export function v(file: string, other: number) {',
+    "  const fd = op(file, 'wx', 0o600);",
+    '  fchmodSync(fd, 0o600);',
+    "  wf(fd, 'x');",
+    "  let g = op(file, 'wx');",
+    '  g = other;',
+    "  wf(g, 'x');",
+    "  wf(other, 'x');",
+    '  cm(file, 0o660);',
+    '}',
+    '',
+  ].join('\n');
+  files.set(HELPER, `${files.get(HELPER)!}\n${body}`);
+  const found = lines(lintSlotWrites(files), HELPER).map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(found, [
+    "writeFileSync(g) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
+    "writeFileSync(other) in the helper: it writes only a new temp file of its own, created exclusively (flag 'wx')",
+    'chmodSync(file) in the helper: it sets a mode only through the descriptor of its own exclusive open (fchmodSync), never by name',
+  ]);
 });
 
 // ---------------------------------------------------------------------------------------------------------------
