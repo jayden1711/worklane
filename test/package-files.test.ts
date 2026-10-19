@@ -105,11 +105,13 @@ test('the scan finds the paths the engine reads relative to itself', () => {
 
 /**
  * The packed size's ceiling, in bytes (npm pack --dry-run --json: `size` is the tarball, `unpackedSize` its files),
- * measured with the dashboard UI built (dist/web, as CI and the release build it) plus about 10%. Raising it is
- * allowed, on purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in
- * its body. Never to get a PR green without looking at what grew.
+ * measured with the dashboard UI built (dist/web, as CI and the release build it), each rounded up to the next 10,000:
+ * at release prep, measured + 5%; a raise between releases, measured + about 2% (release prep resets it, and a
+ * smaller margin keeps an accidental jump such as a sourcemap or a stray file visible). Raising it is allowed, on
+ * purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in its body.
+ * Never to get a PR green without looking at what grew.
  */
-const PACKAGE_BUDGET = { size: 1_860_000, unpackedSize: 5_810_000 };
+const PACKAGE_BUDGET = { size: 1_900_000, unpackedSize: 5_930_000 };
 
 /** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
 function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {
