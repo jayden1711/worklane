@@ -6,6 +6,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { checkSourceDoctor } from './check-source.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
@@ -72,6 +73,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     // WHY (#468): a model the engine doesn't list is a warning, never a refusal (the config still loads).
     const models = modelWarnings(cfg.agents);
     add('config models', models.length ? 'warn' : 'ok', models.length ? models.join('\n') : 'every model named is one the engine lists');
+    // #727: a required check with no recorded source is accepted only from the App GitHub names for it, else refused.
+    const pins = checkSourceDoctor(cfg.project);
+    add('required check sources', pins.level, pins.detail);
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
   }

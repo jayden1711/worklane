@@ -7,6 +7,7 @@ import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
+import { githubCheckApps, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
 
 export class GitHubError extends Error {
   constructor(
@@ -221,10 +222,21 @@ export class GitHubBacklog implements Backlog {
 
   async checks(sha: string): Promise<CommitCheck[]> {
     const out: CommitCheck[] = [];
+    const suites = new Map<CommitCheck, number>();
     for (let page = 1; page < 10; page++) {
-      const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
-      out.push(...r.check_runs.map((c) => ({ name: c.name, source: 'check_run' as const, status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}) })));
+      const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string; app?: { id?: number; slug?: string } | null; check_suite?: { id?: number } | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
+      for (const c of r.check_runs) {
+        const app = c.app?.id;
+        const check: CommitCheck = { name: c.name, source: 'check_run', status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}), ...(typeof app === 'number' ? { app } : {}) };
+        if (c.app?.slug === 'github-actions' && typeof c.check_suite?.id === 'number') suites.set(check, c.check_suite.id);
+        out.push(check);
+      }
       if (r.check_runs.length < 100) break;
+    }
+    // #727: which workflow run, in which repo and for which commit, posted each Actions check (its suite's run).
+    if (suites.size) {
+      if (![...suites.values()].every((s) => this.suiteRuns.has(s))) await this.workflowRuns(sha);
+      for (const [check, suite] of suites) check.workflow = this.suiteRuns.get(suite) ?? null;
     }
     // Commit statuses need their own permission; without it (403) or with none (404), there are just no statuses.
     let statuses: { context: string; state: string; target_url?: string | null }[] = [];
@@ -237,6 +249,41 @@ export class GitHubBacklog implements Backlog {
       out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}) });
     }
     return out;
+  }
+
+  /** A check suite's workflow run never changes: kept, so a commit's runs are listed once per new suite. */
+  private readonly suiteRuns = new Map<number, WorkflowSource>();
+
+  /** Keeps each Actions workflow run for `sha` by its check suite (one page of 100); none when Actions can't be read. */
+  private async workflowRuns(sha: string): Promise<void> {
+    let r: { workflow_runs: { check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] };
+    try {
+      r = await this.req('GET', `/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
+    } catch (e) {
+      // No Actions: read (403) or none (404): a workflow-pinned check then has no source, so it counts as missing.
+      if (e instanceof GitHubError && (e.status === 403 || e.status === 404)) return;
+      throw e;
+    }
+    if (this.suiteRuns.size > 5000) this.suiteRuns.clear();
+    for (const w of r.workflow_runs) {
+      if (typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') {
+        this.suiteRuns.set(w.check_suite_id, { path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+      }
+    }
+  }
+
+  /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */
+  async checkApps(branch: string): Promise<GithubCheckApps> {
+    const b = encodeURIComponent(branch);
+    const protection = await this.req<unknown>('GET', `/repos/${this.repo}/branches/${b}`);
+    let rules: unknown = [];
+    try {
+      rules = await this.req<unknown>('GET', `/repos/${this.repo}/rules/branches/${b}?per_page=100`);
+    } catch (e) {
+      // No rulesets on this plan (403), or none to read (404): classic protection alone names the Apps.
+      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+    }
+    return githubCheckApps(protection, rules);
   }
 
   async requestReview(n: number, logins: string[]) {

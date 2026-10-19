@@ -65,6 +65,7 @@ function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max
     },
     config: () => ({ max_attempts: 2, revert_first_paths: [], ...o.cfg }),
     required: () => ['ci'],
+    checks: (sha) => backlog.checks(sha),
     probeTimeoutMin: () => 90,
     testRuns: o.testRuns ?? null,
     tiers: () => [{ name: 'unit', kind: 'fast' }],

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { DoneWhen } from '../contract.js';
+import type { GithubCheckApps, WorkflowSource } from '../check-source.js';
 import type { z } from 'zod';
 
 export interface Issue {
@@ -43,6 +44,11 @@ export interface Backlog {
   pullRequest(n: number): Promise<PullRequest>;
   /** Every check on a commit: check runs (latest per name) and commit statuses. */
   checks(sha: string): Promise<CommitCheck[]>;
+  /**
+   * #727: the App GitHub's branch protection or ruleset requires for each required check on `branch`. Present only
+   * where checks come from GitHub, and then every check judged must come from its pinned source (src/check-source.ts).
+   */
+  checkApps?(branch: string): Promise<GithubCheckApps>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
   /**
@@ -128,6 +134,10 @@ export interface CommitCheck {
   /** The check run's id (its job, for a run from Actions), when there is one. */
   id?: number;
   url?: string;
+  /** A check run's GitHub App id: who posted it (#727, src/check-source.ts). A status has none. */
+  app?: number;
+  /** The Actions workflow run behind a check run's suite; null: Actions couldn't be read for it. Absent: not Actions. */
+  workflow?: WorkflowSource | null;
 }
 
 export const LABELS = [

@@ -2,6 +2,7 @@
 // main's checks after a merge (revert on red).
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
+import { PinnedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -46,6 +47,13 @@ export abstract class MergeFlow extends FixRuns {
   private batcher: PrBatcher | null = null;
   private flakyGateInst: FlakyGate | null = null;
   private fixForwardInst: FixForward | null = null;
+  private pinnedInst: PinnedChecks | null = null;
+
+  /** GitHub's checks on a commit, only those from their pinned source (#727, src/check-source.ts): every judgement reads these. */
+  protected get pinned(): PinnedChecks {
+    this.pinnedInst ??= new PinnedChecks({ backlog: this.d.backlog, branch: () => this.branch, repo: () => this.d.cfg.project.project.repo, configured: () => this.d.cfg.project.required_check_sources });
+    return this.pinnedInst;
+  }
 
   /** The flaky-test gate in front of a red default branch (coordinator/flaky.ts): re-run first, quarantine what passes. */
   protected get flakyGate(): FlakyGate {
@@ -288,7 +296,7 @@ export abstract class MergeFlow extends FixRuns {
     const plan = this.checksPlan(n, pr.headSha);
     const batching = this.prBatching() && !plan.fast;
     const except = plan.fast ? this.requiredChecks().filter((c) => !plan.checks.includes(c)) : batching ? this.d.cfg.tests.land.pr_batch.full_checks : [];
-    const r = this.prReadiness(n, pr.headSha, await this.d.backlog.checks(pr.headSha), except);
+    const r = this.prReadiness(n, pr.headSha, await this.pinned.of(pr.headSha), except);
     const returned = batching && r.ready ? this.prBatch.returnedFor(number, pr.headSha) : null;
     if (returned) {
       r.ready = false;
@@ -615,7 +623,7 @@ export abstract class MergeFlow extends FixRuns {
     if (pr.state !== 'open') return { ok: false, error: `PR #${number} is ${pr.state}` };
     if (pr.headSha !== head || decided.head !== head) return { ok: false, error: `the head of PR #${number} moved since the decision (${head.slice(0, 8)}, now ${pr.headSha.slice(0, 8)}); nothing is approved: the new head is decided afresh` };
     const batching = this.prBatching();
-    const r = this.prReadiness(w.issue, head, await this.d.backlog.checks(head), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
+    const r = this.prReadiness(w.issue, head, await this.pinned.of(head), batching ? this.d.cfg.tests.land.pr_batch.full_checks : []);
     if (!r.ready) return { ok: false, error: `PR #${number} isn't ready at ${head.slice(0, 8)}: ${r.reasons.join('; ').slice(0, 300) || 'its required checks are not all green'}` };
     const got = approveMerge(this.d.log, { issue: w.issue, number, head, who: { login: who.login, role: who.role!, via: 'discord' }, instance: this.d.instance, repo: this.d.cfg.project.project.repo });
     if (!got.ok) return got.status === 409 ? { ok: false, already: { answer: 'approve', by: got.by! } } : { ok: false, error: got.error };
@@ -944,6 +952,8 @@ export abstract class MergeFlow extends FixRuns {
       stateFile: this.mainWatchFile,
       branch: this.branch,
       required: () => this.d.cfg.project.required_checks,
+      // #727: checks from GitHub count only from their pinned source, as for a PR's readiness (src/check-source.ts).
+      ...(this.pinned.enforced || w.api.runSources ? { pins: { sources: () => this.d.cfg.project.required_check_sources, github: () => this.pinned.githubApps(), repo: this.d.cfg.project.project.repo } } : {}),
       // No CI: the watch is off, and says what that means (src/ci-none.ts).
       offWhy: () => (ciIsNone(this.d.cfg.project) ? CI_NONE_MAIN_WATCH : null),
       api: w.api,
@@ -1207,7 +1217,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
   protected async headChecksOf(sha: string): Promise<CommitCheck[]> {
-    return headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: await this.d.backlog.checks(sha), events: () => this.testRunEvents(), sha });
+    return headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: await this.pinned.of(sha), events: () => this.testRunEvents(), sha });
   }
 
   /** The test runs' own records in this instance's event log: what No CI judges by. */

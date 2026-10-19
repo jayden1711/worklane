@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { ProjectConfig } from './config/schema.js';
+import { fromPinnedSource, pinOf, type CheckPin, type GithubCheckApps, type WorkflowSource } from './check-source.js';
 import { writeGroupOnly } from './os/index.js';
 import type { Role } from './dashboard-auth.js';
 
@@ -60,6 +61,9 @@ export interface CheckRunAt {
   conclusion: string | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** The GitHub App that posted it, and its check suite (#727: what its source is judged by). */
+  app?: number;
+  suite?: number;
 }
 export interface StatusAt {
   context: string;
@@ -112,6 +116,8 @@ export interface MainWatchApi {
   pusher?(branch: string, sha: string): Promise<{ login: string; from: 'activity' | 'commit' } | null>;
   /** The repo's Actions workflows; null when the token may not read them (403) or there are none to read (404). */
   workflows?(): Promise<WorkflowAt[] | null>;
+  /** #727: the Actions workflow run behind each check suite on `sha`, by suite id; null when Actions can't be read. */
+  runSources?(sha: string): Promise<Record<string, WorkflowSource> | null>;
 }
 
 /** What is known about the commit being checked; each field is one API call's answer (harness: the log's). */
@@ -129,9 +135,18 @@ export interface Facts {
   role?: Role | null;
   runs?: CheckRunAt[];
   statuses?: StatusAt[];
+  /** runSources(head): each check suite's workflow run, for a workflow-pinned check (#727). */
+  sources?: Record<string, WorkflowSource> | null;
 }
 
-export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string };
+export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string };
+
+/** Required checks pinned to their source (#727, src/check-source.ts): config.yaml's at the commit, GitHub's, the repo. */
+export interface WatchPins {
+  configured: Record<string, CheckPin>;
+  github: GithubCheckApps;
+  repo: string;
+}
 export type Verdict =
   | { done: true; accounted: true; how: 'harness' | 'person'; number: number }
   | { done: true; accounted: true; how: 'accepted'; number: number | null; acceptance: Acceptance }
@@ -188,7 +203,7 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
  * Is commit `sha` accounted for, given what is known? Or which one call would tell. Pure: the watch and the tests
  * share it. An empty commit-to-PR link is asked again until an answer LINK_LAG_MS after its first one (pullsAt).
  */
-export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[] }): Verdict {
+export function judge(sha: string, f: Facts, o: { branch: string; required: string[]; accepted?: Acceptance[]; pins?: WatchPins }): Verdict {
   const short = sha.slice(0, 8);
   const bySha = o.accepted?.find((a) => a.sha === sha);
   if (bySha) return { done: true, accounted: true, how: 'accepted', number: null, acceptance: bySha };
@@ -253,10 +268,24 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   }
   if (!o.required.length) return { done: true, accounted: false, number, reason: `${who}, but no required_checks are configured to judge it by` };
   if (!f.runs) return { done: false, need: { call: 'runs', sha: head } };
-  let out = outcomesAt(o.required, f.runs, f.statuses ?? null, at);
+  let runs = f.runs;
+  let statuses = f.statuses ?? null;
+  const pins = o.pins;
+  if (pins) {
+    // #727: only a run from its name's pinned source counts, and a status never does (src/check-source.ts).
+    const pinned = (n: string) => pinOf(n, pins.configured, pins.github);
+    if (f.sources === undefined && o.required.some((n) => 'workflow' in (pinned(n) ?? {}))) return { done: false, need: { call: 'sources', sha: head } };
+    runs = f.runs.filter((r) => {
+      const pin = pinned(r.name);
+      const workflow = r.suite === undefined ? undefined : (f.sources?.[String(r.suite)] ?? null);
+      return pin !== null && fromPinnedSource({ source: 'check_run', ...(r.app !== undefined ? { app: r.app } : {}), ...(workflow !== undefined ? { workflow } : {}) }, pin, { repo: pins.repo, sha: head });
+    });
+    statuses = [];
+  }
+  let out = outcomesAt(o.required, runs, statuses, at);
   if (out.some((c) => c.outcome === 'unknown')) {
     if (!f.statuses) return { done: false, need: { call: 'statuses', sha: head } };
-    out = outcomesAt(o.required, f.runs, f.statuses, at);
+    out = outcomesAt(o.required, runs, f.statuses, at);
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
   if (bad.length) return { done: true, accounted: false, number, reason: `${who} into ${o.branch} with required checks not green on ${head.slice(0, 8)} at merge time: ${bad.map((c) => `${c.name} ${c.outcome}`).join(', ')}` };
@@ -362,7 +391,7 @@ export const CONFIG_PATH = `${BRAND.configDir}/config.yaml`;
  * The required_checks in force when commit `sha` landed: config.yaml as committed at its first parent (the default
  * branch just before it). An error when that can't be read or isn't valid; the caller falls back, and says so.
  */
-export function requiredAt(git: WatchGit, sha: string): { required: string[] } | { error: string } {
+export function requiredAt(git: WatchGit, sha: string): { required: string[]; sources: Record<string, CheckPin> } | { error: string } {
   const at = `${sha.slice(0, 8)}^1`;
   const text = git.show(`${sha}^1`, CONFIG_PATH);
   if (text === null) return { error: `${CONFIG_PATH} could not be read at ${at}` };
@@ -371,7 +400,10 @@ export function requiredAt(git: WatchGit, sha: string): { required: string[] } |
   const raw: unknown = doc.toJS();
   const r = ProjectConfig.shape.required_checks.safeParse(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).required_checks : undefined);
   if (!r.success) return { error: `${CONFIG_PATH} at ${at} has an invalid required_checks` };
-  return { required: r.data };
+  // #727: the sources they are pinned to, as committed with them.
+  const s = ProjectConfig.shape.required_check_sources.safeParse(raw && typeof raw === 'object' ? (raw as Record<string, unknown>).required_check_sources : undefined);
+  if (!s.success) return { error: `${CONFIG_PATH} at ${at} has an invalid required_check_sources` };
+  return { required: r.data, sources: s.data };
 }
 
 /**
@@ -517,6 +549,11 @@ export interface MainWatchDeps {
   branch: string;
   /** The loaded config's required_checks: whether to watch at all, and the fallback when a commit's own can't be read. */
   required: () => string[];
+  /**
+   * #727: where checks come from GitHub, each must come from its pinned source: the loaded config's pins (the fallback,
+   * as for `required`), the Apps GitHub's protection or ruleset requires, and the repo. Absent: no GitHub, names match.
+   */
+  pins?: { sources: () => Record<string, CheckPin>; github: () => Promise<GithubCheckApps>; repo: string };
   /** Why there is nothing to judge commits by, when the config says (No CI, src/ci-none.ts); null: the plain reason. */
   offWhy?: () => string | null;
   api: MainWatchApi;
@@ -554,7 +591,7 @@ export const DEAD_CHECK_MS = 7 * 24 * 3600_000;
 export class MainWatch {
   private listedAt = -Infinity;
   /** The required_checks the pending commit is judged by: read with git once per commit. */
-  private judgedBy: { sha: string; required: string[]; note: string } | null = null;
+  private judgedBy: { sha: string; required: string[]; sources: Record<string, CheckPin>; note: string } | null = null;
   constructor(private readonly d: MainWatchDeps) {}
 
   private get now() {
@@ -715,12 +752,13 @@ export class MainWatch {
     const p = s.pending;
     if (this.judgedBy?.sha !== p.sha) {
       const at = requiredAt(this.d.git, p.sha);
-      this.judgedBy = 'required' in at ? { sha: p.sha, required: at.required, note: '' } : { sha: p.sha, required, note: ` (judged by the required_checks loaded at startup: ${at.error})` };
+      this.judgedBy = 'required' in at ? { sha: p.sha, required: at.required, sources: at.sources, note: '' } : { sha: p.sha, required, sources: this.d.pins?.sources() ?? {}, note: ` (judged by the required_checks loaded at startup: ${at.error})` };
     }
-    const { required: judgedBy, note } = this.judgedBy;
+    const { required: judgedBy, sources, note } = this.judgedBy;
     // What admins accepted, as long as it descends from the commit checked when they did (a rewrite voids it).
     const accepted = readAccepted(acceptedFileFor(this.d.stateFile)).filter((a) => a.base !== p.sha && this.d.git.isAncestor(a.base, p.sha));
-    const ctx = { branch: this.d.branch, required: judgedBy, accepted };
+    const pins = this.d.pins ? { pins: { configured: sources, github: await this.d.pins.github(), repo: this.d.pins.repo } } : {};
+    const ctx = { branch: this.d.branch, required: judgedBy, accepted, ...pins };
     let v = judge(p.sha, p.facts, ctx);
     if (!v.done) {
       if (!this.take(s)) return;
@@ -733,6 +771,7 @@ export class MainWatch {
       else if (n.call === 'pull') p.facts.pr = await this.d.api.pull(n.number);
       else if (n.call === 'role') p.facts.role = await this.d.api.role(n.login);
       else if (n.call === 'runs') p.facts.runs = await this.d.api.checkRuns(n.sha);
+      else if (n.call === 'sources') p.facts.sources = (await this.d.api.runSources?.(n.sha)) ?? null;
       else p.facts.statuses = await this.d.api.statuses(n.sha);
       writeWatchState(this.d.stateFile, s);
       v = judge(p.sha, p.facts, ctx);

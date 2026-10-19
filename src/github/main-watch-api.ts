@@ -2,6 +2,7 @@
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
 import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt, WorkflowAt } from '../main-watch.js';
+import type { WorkflowSource } from '../check-source.js';
 
 type Fetch = typeof fetch;
 
@@ -49,8 +50,28 @@ export class GitHubMainWatchApi implements MainWatchApi {
   }
 
   async checkRuns(sha: string): Promise<CheckRunAt[]> {
-    const r = await this.json<{ check_runs: { name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null }[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100`, `the check runs on ${sha.slice(0, 8)}`);
-    return r.check_runs.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion, startedAt: c.started_at ?? null, completedAt: c.completed_at ?? null }));
+    const r = await this.json<{ check_runs: { name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null }[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100`, `the check runs on ${sha.slice(0, 8)}`);
+    return r.check_runs.map((c) => ({
+      name: c.name,
+      status: c.status,
+      conclusion: c.conclusion,
+      startedAt: c.started_at ?? null,
+      completedAt: c.completed_at ?? null,
+      ...(typeof c.app?.id === 'number' ? { app: c.app.id } : {}),
+      ...(typeof c.check_suite?.id === 'number' ? { suite: c.check_suite.id } : {}),
+    }));
+  }
+
+  /** #727: the Actions workflow runs for `sha` (one page of 100) by check suite id; null when Actions can't be read. */
+  async runSources(sha: string): Promise<Record<string, WorkflowSource> | null> {
+    const res = await this.get(`/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
+    if (res.status === 403 || res.status === 404) return null;
+    if (!res.ok) throw new Error(`GitHub ${res.status} reading the workflow runs on ${sha.slice(0, 8)}`);
+    const out: Record<string, WorkflowSource> = {};
+    for (const w of ((await res.json()) as { workflow_runs?: { check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
+      if (typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { path: w.path, repo: w.repository.full_name, sha: w.head_sha };
+    }
+    return out;
   }
 
   async statuses(sha: string): Promise<StatusAt[]> {

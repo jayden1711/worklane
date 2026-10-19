@@ -118,6 +118,15 @@ export const ProjectConfig = z.strictObject({
    */
   required_checks: z.array(z.string().min(1)).default([]),
   /**
+   * #727: where each required check (by name) must come from: the GitHub App that posts it (`app_id`), or the Actions
+   * workflow file that runs it (`workflow`, under .github/workflows/, run in this repo for the commit judged). A check
+   * of that name from anything else, or a commit status, counts as missing. A check not listed takes the App GitHub's
+   * branch protection or ruleset requires for it, and is refused (missing) when neither names one: src/check-source.ts.
+   */
+  required_check_sources: z
+    .record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]))
+    .default({}),
+  /**
    * WHY (#469): which CI judges a PR. `github` (absent: the same): the required_checks above, as GitHub reports them.
    * `none`: GitHub runs nothing a PR waits on; a PR is ready when this machine's own test runs (tests.yaml test_run,
    * every tier, in the test-run sandbox) passed on its exact head, read only from this instance's event log, and the

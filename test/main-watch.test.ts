@@ -6,9 +6,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { WorkflowSource } from '../src/check-source.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -67,6 +68,8 @@ function fakeGitHub() {
   const roles = new Map<string, Role | null>();
   /** GitHub's compare, by `base...head`; not set: head is behind base (not in that merge). */
   const compares = new Map<string, Compared>();
+  /** The workflow run behind each check suite on a commit, by suite id (#727). */
+  const sources = new Map<string, Record<string, WorkflowSource>>();
   /** `workflows`: the Actions workflows' list; null: GitHub answered 403 or 404; 'throw': any other error. */
   const g = { protection: 'none' as 'enforced' | 'none', now: 0, workflows: null as WorkflowAt[] | null | 'throw' };
   const call = (what: string) => calls.push({ at: g.now, what });
@@ -76,6 +79,7 @@ function fakeGitHub() {
     pull: async (n) => (call(`pull #${n}`), prs.get(n)!),
     checkRuns: async (sha) => (call(`runs ${sha.slice(0, 7)}`), runs.get(sha) ?? []),
     statuses: async (sha) => (call(`statuses ${sha.slice(0, 7)}`), statuses.get(sha) ?? []),
+    runSources: async (sha) => (call(`sources ${sha.slice(0, 7)}`), sources.get(sha) ?? {}),
     role: async (login) => (call(`role ${login}`), roles.get(login) ?? null),
     compare: async (base, head) => (call(`compare ${base.slice(0, 7)}...${head.slice(0, 7)}`), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
     workflows: async () => {
@@ -91,19 +95,20 @@ function fakeGitHub() {
     prs.set(number, p);
     return p;
   };
-  return { api, calls, pulls, prs, runs, statuses, roles, compares, g, pr };
+  return { api, calls, pulls, prs, runs, statuses, roles, compares, sources, g, pr };
 }
 
 const T = Date.parse('2026-10-12T10:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
-function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] } = {}) {
+function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; pins?: MainWatchDeps['pins'] } = {}) {
   const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string; workflow?: WorkflowAt }[] };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
     required: () => o.required ?? ['ci'],
+    ...(o.pins ? { pins: o.pins } : {}),
     deadCheck: (d) => void out.dead.push(d),
     api: gh.api,
     git: repoGit(w.coord, 'origin', 'main'),
@@ -126,7 +131,7 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string> } = {}) {
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string>; pins?: MainWatchDeps['pins'] } = {}) {
   const w = world({ ...(o.config === undefined ? {} : { config: o.config }), ...(o.files ? { files: o.files } : {}) });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
@@ -171,6 +176,43 @@ test("main watch: a merge is judged by the required_checks committed at its firs
   assert.equal(a.unaccounted.length, 1);
   assert.match(a.unaccounted[0]!.reason, /lint missing/);
   assert.doesNotMatch(a.unaccounted[0]!.reason, /loaded at startup/);
+});
+
+test('main watch (#727): a merge whose required checks came from another App or workflow than their pins, or a status, is unaccounted', async () => {
+  const repo = 'example-org/example-shop';
+  const pins = { sources: () => ({}), github: async () => ({}), repo };
+  const config = 'required_checks: [ci, lint, deploy]\nrequired_check_sources:\n  ci: { app_id: 1111 }\n  lint: { workflow: .github/workflows/ci.yml }\n  deploy: { app_id: 1111 }\n';
+  const s = await started({ pins, config });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70 })]);
+  s.gh.statuses.set(m.head, [{ context: 'deploy', state: 'success', createdAt: iso(T - 60_000) }]);
+  s.gh.sources.set(m.head, { '70': { path: '.github/workflows/evil.yml', repo, sha: m.head } });
+  await run(s.gh, s.watch, 8);
+  assert.equal(s.unaccounted.length, 1);
+  assert.match(s.unaccounted[0]!.reason, /ci missing, lint missing, deploy missing/);
+
+  // From their pinned sources, the same merge is accounted for.
+  const a = await started({ pins, config });
+  const n = a.w.mergedPr();
+  a.gh.pr(8, n.merge, n.head, iso(T), 'example-collaborator');
+  a.gh.roles.set('example-collaborator', 'writer');
+  a.gh.runs.set(n.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70 }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
+  a.gh.sources.set(n.head, { '70': { path: '.github/workflows/ci.yml', repo, sha: n.head } });
+  await run(a.gh, a.watch, 8);
+  assert.deepEqual(a.unaccounted, []);
+  assert.deepEqual(a.checked, [{ sha: n.merge, how: 'person', number: 8 }]);
+  assert.ok(a.gh.calls.some((c) => c.what === `sources ${n.head.slice(0, 7)}`), 'the workflow runs were read for the workflow pin');
+
+  // No source recorded and none named by GitHub: refused, so the merge is unaccounted.
+  const b = await started({ pins, config: 'required_checks: [ci]\n' });
+  const o = b.w.mergedPr();
+  b.gh.pr(9, o.merge, o.head, iso(T), 'example-collaborator');
+  b.gh.roles.set('example-collaborator', 'writer');
+  b.gh.runs.set(o.head, [ci({ app: 1111, suite: 1 })]);
+  await run(b.gh, b.watch, 8);
+  assert.match(b.unaccounted[0]?.reason ?? '', /ci missing/);
 });
 
 test('main watch: with no config.yaml readable at the first parent, the startup config judges, and the reason says so', async () => {

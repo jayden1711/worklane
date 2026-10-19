@@ -45,8 +45,11 @@ export interface FixForwardDeps {
   config: () => { max_attempts: number; revert_first_paths: string[] };
   /** The project's required_checks (under No CI, every test-run tier's check: src/ci-none.ts). */
   required: () => string[];
-  /** The checks on a commit as the harness judges them (under No CI, the event log's test runs); absent: GitHub's. */
-  checks?: (sha: string) => Promise<CommitCheck[]>;
+  /**
+   * The checks on a commit as the harness judges them: GitHub's only from their pinned sources (#727,
+   * src/check-source.ts), and under No CI the event log's test runs. Required, so nothing here reads GitHub's raw.
+   */
+  checks: (sha: string) => Promise<CommitCheck[]>;
   /** A probe not done in this many minutes counts as untestable (config.yaml flaky.rerun_timeout_min). */
   probeTimeoutMin: () => number;
   testRuns: TestRuns | null;
@@ -83,7 +86,7 @@ export class FixForward {
 
   /** A commit's checks, as the harness judges them. */
   private checksOf(sha: string): Promise<CommitCheck[]> {
-    return this.d.checks ? this.d.checks(sha) : this.d.backlog.checks(sha);
+    return this.d.checks(sha);
   }
 
   private get now() {
