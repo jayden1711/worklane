@@ -12,7 +12,8 @@ import { dirname, join, relative } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
-import { ReviewConfig } from '../src/config/schema.js';
+import { DEFAULT_GENERATED, ReviewConfig } from '../src/config/schema.js';
+import { DEFAULT_PUSH_LIMITS, pushProblems } from '../src/push-check.js';
 import { Coordinator } from '../src/coordinator.js';
 import * as changeFilesModule from '../src/coordinator/change-files.js';
 import { loosenedProblems } from '../src/delegation.js';
@@ -795,8 +796,8 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
     why: "`ls-files --error-unmatch`: is one file tracked. The comment lint over added lines wants renames paired (a moved file's lines aren't new); it is in the agents' tool guard's import tree, which can't take a new import while #691 lists that tree",
   },
   'src/push-check.ts': {
-    words: { 'name-only': 1, numstat: 1 },
-    why: '`log --name-only --no-renames` (refuse_paths, workflows, the SKILL.md lint) still splits on newlines: a follow-up moves it here (-z); `--numstat` only sums line counts, no path is read',
+    words: { 'name-only': 1 },
+    why: '`log --name-only --no-renames` (refuse_paths, workflows, the SKILL.md lint) still splits on newlines: a follow-up moves it here (-z); its line count is sizeFiles (#693)',
   },
   // scripts/: their own -z parsing, in their own language.
   'scripts/ci/slow-jobs.sh': { words: { 'name-only': 1 }, why: 'CI slow-job selection', must: [/--name-only --no-renames -z/] },
@@ -840,4 +841,142 @@ test('one helper is the only way src/ lists changed names or counts; scripts/ on
   }
   for (const rel of Object.keys(OUTSIDE_THE_HELPER)) if (!seen.has(rel)) bad.push(`${rel}: listed, but holds none of the words any more (take it off the list)`);
   assert.deepEqual(bad, [], `list changed names or counts through ${HELPER} (changedNames, changedStatuses, changeFiles, ...)`);
+});
+
+// ---- A .gitattributes mark can't hide a change's lines or content (#693)
+// A file marked `-diff` or `binary` shows as `-` in --numstat and "Binary files differ" in a patch: the old reader
+// counted it as no lines and saw no content, so a file holding DROP TABLE and 900 added lines came out L1.
+
+/** `n` lines of a job file; line 3 is `special` when given. */
+const jobLines = (n: number, special?: string) => `${Array.from({ length: n }, (_, i) => (i === 2 && special !== undefined ? special : `step ${i};`)).join('\n')}\n`;
+const engineReview = () => ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+const counts = (files: ChangeFile[]) => files.map((f) => [f.path, f.added, f.removed]);
+
+for (const mark of ['-diff', 'binary']) {
+  test(`a file marked ${mark} in .gitattributes that holds DROP TABLE comes out L3 deletes-data, under the engine's review.yaml too`, () => {
+    // The mark is already on main, so the reader alone decides (a change that adds the mark is flagged, below).
+    const { dir, base } = repo({ '.gitattributes': `*.job ${mark}\n`, 'README.md': '# x\n' });
+    write(dir, { 'src/jobs/purge.job': jobLines(20, 'DROP TABLE users;') });
+    const head = commit(dir, 'add a job');
+    // What git prints for it: no counts, and no lines in the patch.
+    assert.equal(git(dir, 'diff', '--numstat', `${base}..${head}`), '-\t-\tsrc/jobs/purge.job');
+    assert.match(git(dir, 'diff', `${base}..${head}`), /Binary files \/dev\/null and b\/src\/jobs\/purge\.job differ/);
+    const files = changeFiles(dir, base, head);
+    assert.deepEqual(counts(files), [['src/jobs/purge.job', 20, 0]]);
+    assert.ok(files[0]!.addedLines?.includes('DROP TABLE users;'), JSON.stringify(files));
+    const lvl = level(files);
+    assert.equal(lvl.level, 'L3', lvl.reasons.join('; '));
+    assert.deepEqual(lvl.categories['deletes-data'], ['src/jobs/purge.job']);
+    assert.ok(lvl.reasons.includes('deletes-data: src/jobs/purge.job'), lvl.reasons.join('; '));
+    const engine = engineReview();
+    const atEngine = level(files, engine);
+    assert.equal(atEngine.level, 'L3');
+    assert.deepEqual(atEngine.categories['deletes-data'], ['src/jobs/purge.job']);
+    assert.ok(whyHighRisk({ level: atEngine, waitCategories: engine.levels.L3_human.when }).some((w) => w.text === 'deletes data: src/jobs/purge.job'));
+  });
+}
+
+test('a replace ref (refs/replace/*, which every worktree of a repo shares) can\'t swap the blob the levels and the size limit read', () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { 'src/jobs/purge.job': jobLines(20, 'DROP TABLE users;') });
+  const head = commit(dir, 'add a job');
+  const decoy = execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: dir, input: jobLines(20), encoding: 'utf8' }).trim();
+  git(dir, 'replace', git(dir, 'rev-parse', `${head}:src/jobs/purge.job`), decoy);
+  // git itself now reads the decoy.
+  assert.doesNotMatch(git(dir, 'diff', `${base}..${head}`), /DROP TABLE/);
+  const files = changeFiles(dir, base, head);
+  assert.ok(files[0]!.addedLines?.includes('DROP TABLE users;'), JSON.stringify(files));
+  assert.deepEqual(level(files).categories['deletes-data'], ['src/jobs/purge.job']);
+  assert.ok(sizeFiles(dir, base, head)[0]!.added.includes('DROP TABLE users;'));
+});
+
+test('a file marked -diff or binary counts its lines toward the size limits: the level\'s over_lines, max_pr_lines and the push limit', () => {
+  for (const mark of ['-diff', 'binary']) {
+    // linguist-generated too: GitHub's mark is not the size limit's generated exemption (review.yaml's globs are).
+    const { dir, base } = repo({ '.gitattributes': `*.job ${mark} linguist-generated\n`, 'README.md': '# x\n', 'src/jobs/old.job': jobLines(50) });
+    write(dir, { 'src/jobs/big.job': jobLines(900), 'src/jobs/old.job': jobLines(50).replace('step 7;', 'step seven;') });
+    const head = commit(dir, 'add a big job');
+    assert.equal(git(dir, 'diff', '--numstat', `${base}..${head}`), '-\t-\tsrc/jobs/big.job\n-\t-\tsrc/jobs/old.job');
+    const files = changeFiles(dir, base, head);
+    assert.deepEqual(counts(files), [['src/jobs/big.job', 900, 0], ['src/jobs/old.job', 1, 1]], mark);
+    const lvl = level(files);
+    assert.equal(lvl.level, 'L3', mark);
+    assert.ok(lvl.reasons.includes('902 lines (> 800)'), lvl.reasons.join('; '));
+    const size = sizeVerdict(sizeFiles(dir, base, head), { maxLines: 600, generated: DEFAULT_GENERATED });
+    assert.deepEqual([size.ok, size.lines], [false, 902], size.why);
+    const push = pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 600 });
+    assert.deepEqual(push.filter((p) => p.startsWith('changes ')), ['changes 902 lines, over the 600-line limit (push.max_changed_lines); split it into smaller changes'], mark);
+  }
+});
+
+test('a file git calls binary for a NUL byte counts its lines, not 0', () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { 'src/data/table.bin': `\0${'row\n'.repeat(700)}` });
+  const head = commit(dir, 'add a table');
+  assert.equal(git(dir, 'diff', '--numstat', `${base}..${head}`), '-\t-\tsrc/data/table.bin');
+  assert.deepEqual(counts(changeFiles(dir, base, head)), [['src/data/table.bin', 700, 0]]);
+  assert.equal(sizeVerdict(sizeFiles(dir, base, head), { maxLines: 600, generated: DEFAULT_GENERATED }).lines, 700);
+  assert.equal(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 600 }).filter((p) => p.startsWith('changes 700 lines')).length, 1);
+});
+
+test('a -diff file whose name isn\'t valid UTF-8 counts its lines from its blobs', () => {
+  const { dir, base } = repo({ '.gitattributes': '*.job -diff\n', 'README.md': '# x\n' });
+  stageBytes(dir, ff('src/jobs/bad', '.job'), jobLines(30));
+  git(dir, 'commit', '-q', '-m', 'add');
+  const head = git(dir, 'rev-parse', 'HEAD');
+  assert.deepEqual(counts(changeFiles(dir, base, head)), [['src/jobs/bad�.job', 30, 0]]);
+  stageBytes(dir, ff('src/jobs/bad', '.job'), jobLines(12));
+  git(dir, 'commit', '-q', '-m', 'shorten');
+  // Every line of the old blob removed, every line of the new one added: never fewer than changed.
+  assert.deepEqual(counts(changeFiles(dir, head, git(dir, 'rev-parse', 'HEAD'))), [['src/jobs/bad�.job', 12, 30]]);
+});
+
+test('the push limit still counts a file whose name git quotes (a tab), and a pure rename still counts 0', { skip: process.platform === 'win32' && 'a tab in a file name' }, () => {
+  const { dir, base } = repo({ 'README.md': '# x\n', 'src/long.ts': testFile(40) });
+  write(dir, { 'a\tb.ts': jobLines(5) });
+  renameSync(join(dir, 'src/long.ts'), join(dir, 'src/longer.ts'));
+  const head = commit(dir, 'add and move');
+  assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 5 }), []);
+  assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 4 }), ['changes 5 lines, over the 4-line limit (push.max_changed_lines); split it into smaller changes']);
+});
+
+test('a change that marks a path -diff, binary or linguist-generated in a .gitattributes is L3 and never merges itself, whatever review.yaml lists', () => {
+  // A review.yaml with no L3 category a .gitattributes falls in: only the mark can make it L3.
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const, design_change: false };
+  /** A change that writes `after` to `at` (which holds `before` on main), as the levels and the merge gate judge it. */
+  const judge = (after: string, before?: string, at = '.gitattributes') => {
+    const { dir, base } = repo({ 'README.md': '# x\n', ...(before === undefined ? {} : { [at]: before }) });
+    write(dir, { [at]: after });
+    const lvl = level(changeFiles(dir, base, commit(dir, 'attributes')), plain);
+    const merge = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories: [], limits: { max_lines: 800, max_files: 20 }, lines: 1, files: 1, verdict, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
+    return { level: lvl.level, hiding: lvl.categories['diff-hiding-attributes'] ?? [], reason: lvl.reasons.find((r) => r.startsWith('.gitattributes')) ?? null, cls: riskClassOf({ paths: [at], level: lvl, waitCategories: [] }).cls, auto: merge.auto };
+  };
+  const flagged = (at: string) => ({ level: 'L3', hiding: [at], reason: `.gitattributes can hide what a review sees (-diff, binary, linguist-generated, a filter, a diff driver or a macro): ${at}`, cls: 'protected', auto: false });
+  const hiding = [
+    '*.sql -diff', '*.sql binary', '*.sql -binary', 'gen/** linguist-generated', 'gen/** linguist-generated=true', '*.sql text -diff', '*.sql\t-diff', '"db dumps/*.sql" -diff', '  *.sql -diff  ',
+    // A macro, defined here or used here (its definition may be on main already), and a name git doesn't know.
+    '[attr]quiet -diff', '*.sql quiet', '*.sql made-up',
+    // A filter (git-lfs: a review reads a pointer, a checkout gets the content), a diff driver git doesn't ship.
+    '*.sql filter=lfs diff=lfs merge=lfs -text', '*.sql filter=strip', '*.sql diff=sql',
+  ];
+  for (const line of hiding) assert.deepEqual(judge(`${line}\n`), flagged('.gitattributes'), JSON.stringify(line));
+  // In any directory, and added to a .gitattributes main already has.
+  assert.deepEqual(judge('*.sql -diff\n', undefined, 'db/.gitattributes'), flagged('db/.gitattributes'));
+  assert.deepEqual(judge('* text=auto eol=lf\n*.sql -diff\n', '* text=auto eol=lf\n'), flagged('.gitattributes'));
+  // Taking away a line that turned a filter off, or forced text, turns it back on.
+  assert.deepEqual(judge('* filter=lfs\n', '* filter=lfs\n*.sql -filter\n'), flagged('.gitattributes'));
+  assert.deepEqual(judge('*.sql binary\n', '*.sql binary\n*.sql diff\n'), flagged('.gitattributes'));
+  // Lines that hide nothing get the review they had: a comment, a path named "binary", line endings, a diff driver git
+  // ships, forcing text, GitHub's language marks, turning a fold or a filter off, the engine's own .gitattributes, and
+  // taking a mark away.
+  const plainReview = { level: 'L1', hiding: [], reason: null };
+  const harmless = [
+    '# *.sql -diff', 'binary/** text', '* text=auto eol=lf', '/dist/** -text', '*.py diff=python', '*.sql diff', '*.sql !diff', 'vendor/** linguist-vendored',
+    'gen/** -linguist-generated', 'gen/** linguist-generated=false', '*.sql -filter', '[attr]plain text eol=lf', readFileSync(join(repoRoot, '.gitattributes'), 'utf8'),
+  ];
+  for (const text of harmless) assert.deepEqual((({ level, hiding, reason }) => ({ level, hiding, reason }))(judge(`${text}\n`)), plainReview, JSON.stringify(text));
+  assert.deepEqual((({ level, hiding, reason }) => ({ level, hiding, reason }))(judge('* text=auto\n', '* text=auto\n*.sql -diff\n')), plainReview);
+  // And review.yaml can't loosen it.
+  assert.deepEqual(loosenedProblems({ levels: { L3_human: { when: [] } }, merge: { loosened: ['diff-hiding-attributes'] } }), ['merge.loosened: diff-hiding-attributes is high-risk or a safety floor and can never be loosened']);
 });

@@ -60,6 +60,63 @@ export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
 export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
 
 /**
+ * A change to a .gitattributes (any directory's) that can hide or change what a review of a file sees: `-diff` or
+ * `binary` ("Binary files differ", no lines), `linguist-generated` (GitHub folds the file away in a PR), a `filter`
+ * (git-lfs: the review sees a pointer, a checkout gets other content), a diff driver git doesn't ship (its textconv
+ * or binary setting lives in a config the review can't see), or any name not known to be harmless (a macro, defined
+ * here or earlier: `[attr]quiet -diff`). Taking away a line that turned one of those off (`*.sql -filter`) counts
+ * too. The harness's own readers ignore attributes (coordinator/change-files.ts), but the owner reviewing on GitHub
+ * and a checkout don't, so such a change is always L3 (".gitattributes can hide ...") and never auto-merges
+ * (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#693). Fails closed: only the names below pass.
+ */
+export const DIFF_HIDING_ATTRIBUTES = 'diff-hiding-attributes';
+
+const GITATTRIBUTES = /(?:^|\/)\.gitattributes$/;
+/** Attributes that change line endings, whitespace checks, archives, merges or GitHub's language stats: nothing a review reads. */
+const HARMLESS_ATTRIBUTES = new Set([
+  'text', 'eol', 'crlf', 'whitespace', 'export-ignore', 'ident', 'delta', 'encoding', 'working-tree-encoding', 'merge', 'conflict-marker-size',
+  'linguist-language', 'linguist-detectable', 'linguist-vendored', 'linguist-documentation',
+]);
+/** The diff drivers git ships (hunk headers and word splitting only): `diff=python` changes no line a review sees. */
+const BUILTIN_DIFF_DRIVERS = new Set([
+  'ada', 'bash', 'bibtex', 'cpp', 'csharp', 'css', 'dts', 'elixir', 'fortran', 'fountain', 'golang', 'html', 'java', 'kotlin', 'markdown', 'matlab',
+  'objc', 'pascal', 'perl', 'php', 'python', 'ruby', 'rust', 'scheme', 'tex',
+]);
+
+/** The attributes of a .gitattributes line: what follows its pattern (or `[attr]name`); none for a blank line or a comment. */
+function attributesOf(line: string): { sign: string; name: string; value: string | undefined }[] {
+  const t = line.trim();
+  if (!t || t.startsWith('#')) return [];
+  // A quoted pattern may hold spaces.
+  const rest = t.startsWith('"') ? t.replace(/^"(?:\\.|[^"\\])*"/, '') : t.replace(/^\S+/, '');
+  return rest.split(/\s+/).filter(Boolean).map((a) => {
+    const m = /^([-!]?)([^=]*)(?:=(.*))?$/.exec(a)!;
+    return { sign: m[1]!, name: m[2]!, value: m[3] };
+  });
+}
+
+/** Whether a line a change adds to a .gitattributes can hide or change what a review sees (fails closed). */
+export function hidesDiff(line: string): boolean {
+  return attributesOf(line).some(({ sign, name, value }) => {
+    if (HARMLESS_ATTRIBUTES.has(name)) return false;
+    // `diff` set (always text), unspecified, or a driver git ships; `-diff` and any other driver hide or change lines.
+    if (name === 'diff') return sign === '-' || (value !== undefined && !BUILTIN_DIFF_DRIVERS.has(value));
+    // Turning GitHub's fold off, or a filter off, shows more.
+    if ((name === 'linguist-generated' && (sign !== '' || value === 'false')) || (name === 'filter' && sign !== '')) return false;
+    return true;
+  });
+}
+
+/** Whether a line a change takes out of a .gitattributes had turned off something that hides (`*.sql -filter`, `*.sql diff`). */
+export function unhidLine(line: string): boolean {
+  return attributesOf(line).some(({ sign, name, value }) => {
+    if (HARMLESS_ATTRIBUTES.has(name)) return false;
+    if (name === 'diff') return sign === '!' || (sign === '' && value === undefined);
+    return sign !== '' || value === 'false';
+  });
+}
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
  * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
@@ -237,6 +294,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
     if (hasInvisibleCharacter(f.path)) add(INVISIBLE_CHARACTER_PATH, f.path);
     if (hasNonAsciiTopLevel(f.path)) add(NON_ASCII_TOP_LEVEL_PATH, f.path);
+    if (GITATTRIBUTES.test(f.path) && ((f.addedLines ?? []).some(hidesDiff) || (f.removedLines ?? []).some(unhidLine))) add(DIFF_HIDING_ATTRIBUTES, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -281,6 +339,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(shownPath).join(', ')}`);
   const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
   if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(shownPath).join(', ')}`);
+  const hiding = categories[DIFF_HIDING_ATTRIBUTES] ?? [];
+  if (hiding.length) raise('L3', `.gitattributes can hide what a review sees (-diff, binary, linguist-generated, a filter, a diff driver or a macro): ${shownPaths(hiding.slice(0, 3))}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

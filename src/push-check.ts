@@ -6,6 +6,7 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from 'node:child_process';
+import { sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
@@ -59,13 +60,9 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
     if (big.length) problems.push(`has files over the ${limits.max_file_mb} MB limit (${list(big)}) in its commits; remove them from every commit on the branch`);
   }
 
-  const lines = git(cwd, ['diff', '--numstat', range])
-    .split('\n')
-    .filter(Boolean)
-    .reduce((s, l) => {
-      const [a, r] = l.split('\t');
-      return s + (Number(a) || 0) + (Number(r) || 0);
-    }, 0);
+  // Through the one changed-files reader (#693): a file a `-diff` or `binary` attribute marks counts its lines. Its
+  // size read pairs renames like the plain `git diff` count it replaces, so a pure rename still counts 0.
+  const lines = sizeFiles(cwd, base, head).reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
 
   // Skills the change adds or edits must pass the skill lint as they stand at head.
