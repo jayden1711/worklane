@@ -644,10 +644,11 @@ export const EventSchemas = {
   'merge.attempted': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
   /**
    * `reconciled`: recorded after the fact, for an attempt whose record a crash cut off, once GitHub showed the PR merged
-   * at exactly the attempted head as a merge commit of it carrying the engine's own merge message (#733).
-   * `attempted_at`: then, when the attempt was recorded: the main watch judges the checks as of that time.
+   * at exactly the attempted head by the engine's own App, as a merge commit of it carrying the engine's own merge
+   * message (#733). `merged_at`: then, when GitHub merged it: the main watch judges the checks as of that time, as it
+   * does a person's merge.
    */
-  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string(), reconciled: z.literal(true).optional(), attempted_at: z.string().optional() }),
+  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string(), reconciled: z.literal(true).optional(), merged_at: z.string().optional() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /**
    * The merge train (src/merge-policy-train.ts) put off merging PR `number` at `head` until `retry_at`: GitHub requires

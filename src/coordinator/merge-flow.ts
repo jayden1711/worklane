@@ -377,9 +377,10 @@ export abstract class MergeFlow extends FixRuns {
 
   /**
    * #733: PR `w`'s merge attempt with no outcome (merge.attempted, then a crash or a call that threw), settled from
-   * GitHub's PR as read now (src/merge-policy-reconcile.ts): merged at exactly the attempted head by a bot, as a merge
-   * commit of it carrying the engine's merge message, is recorded as merge.done (reconciled); still open or closed unmerged, as
-   * merge.failed; anything else, not at all. A fetch that fails throws: the PR stays watched and is tried again.
+   * GitHub's PR as read now (src/merge-policy-reconcile.ts): merged at exactly the attempted head by the engine's own
+   * App (mainWatch.engineBot: its bot user's id and login), as a merge commit of it carrying the engine's merge message, is
+   * recorded as merge.done (reconciled, with GitHub's merged_at); still open or closed unmerged, as merge.failed; anything
+   * else, not at all. A fetch that fails throws: the PR stays watched and is tried again.
    */
   private async reconcileAttempt(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const attempt = openAttempt(this.d.log.read(0, [...ATTEMPT_EVENTS]), w.number);
@@ -392,10 +393,10 @@ export abstract class MergeFlow extends FixRuns {
       const [parents = '', ...message] = out.split('\n');
       return { parents: parents.trim().split(' ').filter(Boolean), message: message.join('\n') };
     };
-    const r = reconcileMerge({ attempt, pr, branch: this.branch, product: BRAND.name, commit });
+    const r = reconcileMerge({ attempt, pr, branch: this.branch, product: BRAND.name, engine: this.d.mainWatch?.engineBot ?? null, commit });
     if (r.act === 'failed') this.emit('merge.failed', { issue: w.issue, number: w.number, head: attempt.head, why: r.why.slice(0, 500) });
     if (r.act !== 'done') return;
-    this.emit('merge.done', { issue: w.issue, number: w.number, head: attempt.head, sha: r.sha, url: pr.url, title: pr.title, reconciled: true, attempted_at: attempt.at });
+    this.emit('merge.done', { issue: w.issue, number: w.number, head: attempt.head, sha: r.sha, url: pr.url, title: pr.title, reconciled: true, merged_at: r.mergedAt });
     this.prPolled.clear(); // the other open PRs may conflict now: look at them on the next pass
     await this.d.backlog.comment(w.number, `[${BRAND.cli}] Merged as \`${r.sha.slice(0, 8)}\` (a merge commit of \`${attempt.head.slice(0, 8)}\`); recorded on a later pass, since the merge call's answer was lost.`);
   }
@@ -427,7 +428,16 @@ export abstract class MergeFlow extends FixRuns {
       await this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       return null;
     }
-    const m = await this.mergeOurs(pr);
+    let m: Awaited<ReturnType<typeof this.mergeOurs>>;
+    try {
+      m = await this.mergeOurs(pr);
+    } catch (e) {
+      // #733: the call gave no answer (a dropped connection, or an error mergePr rethrows: a 403, a 5xx). Its attempt
+      // stays open and is settled on this PR's next look (merged: merge.done; still open: merge.failed, which the caps
+      // on repeated failures count). Recorded, and the pass goes on: one PR's error never holds up the others.
+      this.emit('coordinator.error', { instance: this.d.instance, where: `merge #${number}`, kind: (e as { kind?: string }).kind ?? 'error', message: String((e as Error)?.message ?? e).slice(0, 500) });
+      return null;
+    }
     if (m.ok) {
       this.mergePass.took();
       return m;
@@ -675,6 +685,10 @@ export abstract class MergeFlow extends FixRuns {
     if (this.emergencyInForce()) return;
     const stopped = this.autoMergeStopped();
     if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
+    // As the auto path's "merging failed 3 times" (mergeOrWait): no more tries at this head; it waits for the owner. The
+    // reason names the third failure, so it is recorded once, however many passes follow.
+    const failures = this.d.log.read(0, ['merge.failed']).map((e) => e.payload as EventPayload<'merge.failed'>).filter((p) => p.number === number && p.head === pr.headSha);
+    if (failures.length >= 3) return hold(`approved by @${by}, but merging failed 3 times at this head, so it isn't tried again: ${failures[2]!.why}`.slice(0, 500));
     if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
     if (this.mergeDeferred(number, pr.headSha)) return;
     if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `approved by @${by}, but GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
@@ -988,8 +1002,8 @@ export abstract class MergeFlow extends FixRuns {
         const e = this.d.log.read(0, ['merge.done']).find((x) => (x.payload as EventPayload<'merge.done'>).sha === sha);
         if (!e) return null;
         const m = e.payload as EventPayload<'merge.done'>;
-        // A reconciled merge (#733) is judged as of its attempt, never later than the merge itself.
-        return { number: m.number, head: m.head, at: m.attempted_at ?? e.ts };
+        // A reconciled merge (#733) is judged as of GitHub's merged_at, as a person's merge is.
+        return { number: m.number, head: m.head, at: m.merged_at ?? e.ts };
       },
       ...(w.now ? { now: w.now } : {}),
       mode: (mode, detail) => this.emit('main_watch.mode', { mode, detail }),

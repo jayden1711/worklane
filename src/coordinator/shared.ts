@@ -143,7 +143,13 @@ export interface CoordinatorDeps {
    * The main watch (src/main-watch.ts): its GitHub calls, and the instance policy's main_watch (auto: on when GitHub
    * doesn't protect the default branch; off). Absent: no watch (no GitHub, e.g. a file backlog).
    */
-  mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number };
+  /**
+   * `engineBot` (#733): the GitHub App's own bot user, which makes this instance's merges: its login (`<slug>[bot]`) and
+   * numeric id, read with the App's credentials (appBotIdentity), never from commit_identity. A merge whose record a
+   * crash cut off counts as the engine's (reconciled) only when GitHub's merged_by is exactly this user. Absent or null
+   * (a token install, the lookup failed, or no GitHub): never, so such a merge stays unaccounted.
+   */
+  mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number; engineBot?: { login: string; id: number } | null };
   /**
    * Merge posts (src/merge-posts.ts): every merge to the default branch posted in intake.yaml's discord.ops_channel
    * (discord.post_merges). Its GitHub calls. Absent: none (no GitHub, e.g. a file backlog).

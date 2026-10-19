@@ -240,6 +240,18 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     return 1;
   }
   console.error(`commits as: ${identity.name} <${identity.email}>`);
+  // #733: the App's own bot user, the one account a merge whose record a crash cut off is taken for: read with the App's
+  // credentials, never from commit_identity. A token install has none, and a failed lookup leaves none: such merges
+  // then stay unaccounted (the stop, and the owner's review).
+  let engineBot: { login: string; id: number } | null = null;
+  if (gh.kind === 'app') {
+    try {
+      const b = await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }, fetch, githubApi());
+      engineBot = { login: b.name, id: b.id };
+    } catch (e) {
+      console.error(`the App's bot user could not be read (${(e as Error).message}): a merge whose record a crash cut off stays unaccounted until a restart reads it`);
+    }
+  }
   // Whose repo this is, for the self-modification locks (#665): root's word only (src/managed-apps.ts), asked again for
   // every review level, so root's change applies without a restart. The repo is instance.yaml's, outside the repo.
   const lockScope = ((inst: string, repo: string) => () => readLockScope(inst, repo).scope)(i.name, i.repo.repo);
@@ -252,7 +264,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
   const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());
-  const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch } : undefined;
+  const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch, engineBot } : undefined;
   // Every merge to the default branch, posted in the ops channel (src/merge-posts.ts): GitHub only.
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
