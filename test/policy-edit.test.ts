@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/load.js';
 import { EventLog } from '../src/events/log.js';
 import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instance.js';
 import { processIdentity } from '../src/os/index.js';
-import { autoMergeKilled, killSwitchPath } from '../src/policy-kill.js';
+import { autoMergeKilled, killAutoMerge, killSwitchPath } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
 import { decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
@@ -693,9 +693,9 @@ test("root's lock on an instance's policy: one a live writer holds makes `own` a
     assert.throws(() => ownPolicy('locked', d), /in progress/);
     assert.equal(readFileSync(m.file, 'utf8'), text);
     // OFF: root's kill switch, no lock: at once, while it is held.
-    const t = Date.now();
+    const t = performance.now();
     assert.deepEqual(setPolicy('locked', 'auto_merge', 'off', 'wl-locked', d), { key: 'auto_merge', from: null, to: false });
-    assert.ok(Date.now() - t < 1000, 'never waited');
+    assert.ok(performance.now() - t < 1000, 'never waited');
     assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, 'the engine reads off');
     assert.equal(readFileSync(lock, 'utf8'), h.line, "the holder's lock untouched");
   } finally {
@@ -762,9 +762,9 @@ test("`own` refuses an oversized policy.yaml from fstat, before reading or parsi
   setPolicy('big', 'auto_merge', 'on', null, m.deps);
   // Oversized: 2 MB the coordinator planted.
   coordinatorWrites(m, `${POLICY}# ${'x'.repeat(2 * 1024 * 1024)}\n`);
-  let t = Date.now();
+  const t = performance.now();
   assert.throws(() => ownPolicy('big', m.deps), /is \d+ bytes, over 262144, so it isn't read/);
-  assert.ok(Date.now() - t < 2000, 'refused at once');
+  assert.ok(performance.now() - t < 2000, 'refused at once');
   assert.equal(existsSync(join(POLICY_ROOT_DIR, '.big.lock')), false, 'the lock released');
   assert.match(refusal(asRoot(() => readPolicyChecked(m.file))), /bytes, over 262144/, 'the gate refuses it, unread, too');
   setPolicy('big', 'auto_merge', 'off', 'wl-big', m.deps);
@@ -774,7 +774,6 @@ test("`own` refuses an oversized policy.yaml from fstat, before reading or parsi
   ownPolicy('corrupt', c.deps);
   setPolicy('corrupt', 'auto_merge', 'on', null, c.deps);
   coordinatorWrites(c, 'version: 1\nbudget: [ {{{ :\n');
-  t = Date.now();
   assert.throws(() => ownPolicy('corrupt', c.deps), /isn't what root last wrote there/);
   setPolicy('corrupt', 'auto_merge', 'off', 'wl-corrupt', c.deps);
   assert.equal(instanceAutoMerge('corrupt', c.instances), false, 'off: the corrupt policy is never read');
@@ -815,6 +814,11 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   setPolicy('kill', 'auto_merge', 'on', null, m.deps);
   assert.equal(existsSync(flag), false);
   assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, true);
+  // A name that isn't an instance's never names a file (a path outside root's directory, a user that doesn't exist).
+  const users = { ...m.deps, uid: (u: string) => (u === 'wl-kill' ? me : null) };
+  for (const bad of ['../kill', 'kill/x', '.', 'Kill', 'nouser']) assert.throws(() => setPolicy(bad, 'auto_merge', 'off', 'wl-kill', users), /not an instance name|no instance/, bad);
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, '..', 'kill.auto-merge-off')), false);
+  assert.throws(() => killAutoMerge('../kill'), /not an instance name/);
   // Anything at its name counts as off (fail closed): a link, a directory.
   symlinkSync('/nonexistent', flag);
   assert.equal(autoMergeKilled('kill'), true);
